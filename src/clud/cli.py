@@ -325,7 +325,7 @@ def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list
         cmd.extend(["-e", env_var])
 
     # Use default image if not specified
-    image = args.image or "icanhasjonas/claude-docker:latest"
+    image = args.image or "icanhasjonas/claude-code:latest"
     cmd.append(image)
 
     # Default entrypoint: launch claude in workspace
