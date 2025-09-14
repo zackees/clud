@@ -1,0 +1,298 @@
+{
+    "terminal.integrated.defaultProfile.windows": "Git Bash",
+    "terminal.integrated.shellIntegration.enabled": false,
+    "terminal.integrated.profiles.windows": {
+        "Command Prompt": {
+            "path": "C:\\Windows\\System32\\cmd.exe"
+        },
+        "Git Bash": {
+            "path": "C:\\Program Files\\Git\\bin\\bash.exe",
+            "args": ["--cd=."]
+        }
+    },
+    "files.eol": "\n", // Unix
+    "files.autoDetectEol": false, // Prevent VS Code from auto-detecting and changing EOL
+    "files.insertFinalNewline": true, // Ensure files end with a newline
+    "files.trimFinalNewlines": true, // Remove extra newlines at the end
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": true,
+    "editor.formatOnSave": false,
+    // Debugger defaults - ensure C++ debugger is used for C++ files
+    "debug.defaultDebuggerType": "cppdbg",
+    "debug.toolBarLocation": "docked",
+    "debug.console.fontSize": 14,
+    "debug.console.lineHeight": 19,
+    // Prevent Python debugger from interfering with C++ files
+    "python.defaultInterpreterPath": "uv",
+    "python.debugger": "debugpy",
+    // File associations for debugger
+    "[cpp]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
+        "debug.defaultDebuggerType": "cppdbg"
+    },
+    "[c]": {
+        "editor.defaultFormatter": "ms-vscode.cpptools", 
+        "debug.defaultDebuggerType": "cppdbg"
+    },
+    // clangd configuration
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}",
+        "--clang-tidy",
+        "--header-insertion=never",
+        "--completion-style=detailed",
+        "--function-arg-placeholders=false",
+        "--background-index",
+        "--pch-storage=memory"
+    ],
+    "clangd.fallbackFlags": [
+        "-std=c++17",
+        "-I${workspaceFolder}/src",
+        "-I${workspaceFolder}/tests",
+        "-Wno-global-constructors"
+    ],
+    // Disable conflicting IntelliSense to let clangd handle C++ analysis
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.autocomplete": "disabled",
+    "C_Cpp.errorSquiggles": "disabled",
+    "C_Cpp.suggestSnippets": false,
+    "C_Cpp.intelliSenseEngineFallback": "disabled",
+    "C_Cpp.autocompleteAddParentheses": false,
+    "C_Cpp.formatting": "disabled",
+    "C_Cpp.vcpkg.enabled": false,
+    "C_Cpp.configurationWarnings": "disabled",
+    "C_Cpp.intelliSenseCachePath": "",
+    "C_Cpp.intelliSenseCacheSize": 0,
+    "C_Cpp.intelliSenseUpdateDelay": 0,
+    "C_Cpp.workspaceParsingPriority": "lowest",
+    "files.associations": {
+        "*.embeddedhtml": "html",
+        "compare": "cpp",
+        "type_traits": "cpp",
+        "cmath": "cpp",
+        "limits": "cpp",
+        "iostream": "cpp",
+        "random": "cpp",
+        "functional": "cpp",
+        "bit": "cpp",
+        "*.tcc": "cpp",
+        "deque": "cpp",
+        "string": "cpp",
+        "unordered_map": "cpp",
+        "unordered_set": "cpp",
+        "vector": "cpp",
+        "optional": "cpp",
+        "iomanip": "cpp",
+        "ios": "cpp",
+        "istream": "cpp",
+        "ostream": "cpp",
+        "sstream": "cpp",
+        "streambuf": "cpp",
+        "system_error": "cpp",
+        "tuple": "cpp",
+        "initializer_list": "cpp",
+        "utility": "cpp",
+        "new": "cpp",
+        "numeric": "cpp",
+        "array": "cpp",
+        "atomic": "cpp",
+        "cctype": "cpp",
+        "chrono": "cpp",
+        "clocale": "cpp",
+        "concepts": "cpp",
+        "cstdarg": "cpp",
+        "cstddef": "cpp",
+        "cstdint": "cpp",
+        "cstdio": "cpp",
+        "cstdlib": "cpp",
+        "cstring": "cpp",
+        "ctime": "cpp",
+        "cwchar": "cpp",
+        "cwctype": "cpp",
+        "map": "cpp",
+        "set": "cpp",
+        "exception": "cpp",
+        "algorithm": "cpp",
+        "iterator": "cpp",
+        "memory": "cpp",
+        "memory_resource": "cpp",
+        "ratio": "cpp",
+        "string_view": "cpp",
+        "iosfwd": "cpp",
+        "numbers": "cpp",
+        "semaphore": "cpp",
+        "span": "cpp",
+        "stdexcept": "cpp",
+        "stop_token": "cpp",
+        "thread": "cpp",
+        "cinttypes": "cpp",
+        "typeinfo": "cpp",
+        "complex": "cpp",
+        "condition_variable": "cpp",
+        "csignal": "cpp",
+        "list": "cpp",
+        "fstream": "cpp",
+        "mutex": "cpp",
+        "bitset": "cpp",
+        "regex": "cpp",
+        "any": "cpp",
+        "strstream": "cpp",
+        "barrier": "cpp",
+        "cfenv": "cpp",
+        "charconv": "cpp",
+        "codecvt": "cpp",
+        "coroutine": "cpp",
+        "forward_list": "cpp",
+        "future": "cpp",
+        "shared_mutex": "cpp",
+        "valarray": "cpp",
+        "variant": "cpp",
+        "netfwd": "cpp",
+        "*.inc": "cpp",
+        "enabled.h": "c",
+        "esp_version.h": "c",
+        "esp_idf_version.h": "c",
+        "fastled_config.h": "c",
+        "rmt_tx.h": "c",
+        "__config": "c",
+        "espdefs.h": "c",
+        "esp_log.h": "c",
+        "stdarg.h": "c",
+        "led_strip_interface.h": "c",
+        "blah_enable.h": "c",
+        "sdkconfig.h": "c",
+        "rmt.h": "c",
+        "soc_caps.h": "c",
+        "format": "cpp",
+        "expected": "cpp",
+        "ranges": "cpp",
+        "math.h": "c",
+        "__locale": "cpp",
+        "version": "cpp",
+        "__split_buffer": "cpp",
+        "cassert": "cpp",
+        "cerrno": "cpp",
+        "cfloat": "cpp",
+        "climits": "cpp",
+        "locale": "cpp",
+        "queue": "cpp",
+        "cstdbool": "cpp",
+        "source_location": "cpp",
+        "text_encoding": "cpp",
+        "__node_handle": "cpp",
+        "xstring": "cpp",
+        "xutility": "cpp",
+        "xtree": "cpp",
+        "xhash": "cpp",
+        "*.ino": "cpp"
+    },
+    // Arduino/FastLED Integration
+    "[ino]": {
+        "editor.defaultFormatter": "ms-vscode.cpptools",
+        "debug.defaultDebuggerType": "cppdbg"
+    },
+    // Disable PlatformIO auto-detection for .ino files in FastLED project
+    "platformio.disableToolchainAutoInstaller": true,
+    
+    // Disable Java language support and popups
+    "java.enabled": false,
+    "java.jdt.ls.enabled": false,
+    "java.compile.nullAnalysis.mode": "disabled",
+    "java.configuration.checkProjectSettingsExclusions": false,
+    "java.import.gradle.enabled": false,
+    "java.import.maven.enabled": false,
+    "java.autobuild.enabled": false,
+    "java.maxConcurrentBuilds": 0,
+    "java.recommendations.enabled": false,
+    "java.help.showReleaseNotes": false,
+    "redhat.telemetry.enabled": false,
+    
+    // Exclude files from Java language server scanning
+    "java.project.sourcePaths": [],
+    "java.project.referencedLibraries": [],
+    "files.exclude": {
+        "**/.classpath": true,
+        "**/.project": true,
+        "**/.factorypath": true
+    },
+    
+    // Semantic token color customizations for better type vs variable distinction
+    "editor.semanticTokenColorCustomizations": {
+        "rules": {
+            // Types (classes, structs, enums) - Teal/Cyan
+            "class": "#4EC9B0",
+            "struct": "#4EC9B0", 
+            "type": "#4EC9B0",
+            "enum": "#4EC9B0",
+            "enumMember": "#B5CEA8",
+            "typedef": "#4EC9B0",
+            
+            // Variables - Almost pure white for maximum readability
+            "variable": "#FAFAFA",
+            "variable.local": "#FAFAFA",
+            
+            // Parameters - Orange for clear distinction
+            "parameter": "#FF8C42",
+            "variable.parameter": "#FF8C42",
+            
+            // Properties - Light purple/pink
+            "property": "#D197D9",
+            
+            // Functions and methods - Yellow
+            "function": "#DCDCAA",
+            "method": "#DCDCAA",
+            "function.declaration": "#DCDCAA",
+            "method.declaration": "#DCDCAA",
+            
+            // Namespaces - Soft blue (less aggressive)
+            "namespace": "#86C5F7",
+            
+            // Constants and readonly - Light green with italic
+            "variable.readonly": {
+                "foreground": "#B5CEA8",
+                "fontStyle": "italic"
+            },
+            "variable.defaultLibrary": "#B5CEA8",
+            
+            // Macros and defines - Muted red/salmon
+            "macro": "#E06C75",
+            
+            // String literals - Peach/salmon
+            "string": "#CE9178",
+            
+            // Numbers - Light green
+            "number": "#B5CEA8",
+            
+            // Keywords - Pink/magenta
+            "keyword": "#C586C0",
+            
+            // Storage specifiers - Bright magenta/pink for distinction
+            "keyword.storage": "#FF79C6",
+            "storageClass": "#FF79C6",
+            
+            // Built-in types - Different from user-defined types
+            "type.builtin": "#569CD6",
+            "keyword.type": "#569CD6",
+            
+            // Comments - Green (unchanged but specified)
+            "comment": "#6A9955",
+            "comment.documentation": "#6A9955"
+        }
+    },
+    
+    // Inlay hints (parameter names, type hints) - Brighter gray for better visibility
+    "editor.inlayHints.fontColor": "#808080",
+    "editor.inlayHints.background": "#3C3C3C20",
+    
+    // Disable Microsoft C++ extension to prevent conflicts with clangd
+    "extensions.ignoreRecommendations": true,
+    "C_Cpp.disabled": true,
+    
+    // Keep PlatformIO UI/icons but disable all automatic behaviors
+    "platformio-ide.autoRebuildAutocompleteIndex": false,
+    "platformio-ide.activateProjectOnTextEditorChange": false,
+    "platformio-ide.autoOpenPlatformIOIniFile": false,
+    "platformio-ide.autoPreloadEnvTasks": false,
+    "platformio-ide.autoCloseSerialMonitor": false,
+    "platformio-ide.disablePIOHomeStartup": true
+}

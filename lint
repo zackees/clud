@@ -1,15 +1,44 @@
 #!/bin/bash
+
 set -e
 
-echo Running ruff src
-uv run ruff check --fix src
-echo Running ruff tests
-uv run ruff check --fix tests
-echo Running black src tests
-uv run black src tests
-echo Running isort src tests
-uv run isort --profile black src tests
-echo Running pyright src tests
-uv run pyright src tests
-echo Linting complete!
-exit 0
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --help|-h)
+            echo "Usage: bash lint [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --help   Show this help message"
+            echo ""
+            echo "This script runs Python linting using ruff and pyright."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# Unset VIRTUAL_ENV to avoid warnings about mismatched paths
+unset VIRTUAL_ENV
+
+echo "🚀 Running Python Linting Suite"
+echo "================================"
+
+# Python linting
+echo ""
+echo "📝 PYTHON LINTING"
+echo "------------------"
+echo "Running ruff check (linting)"
+uv run ruff check --fix src/ tests/
+echo "Running ruff format (formatting + import sorting)"
+uv run ruff format src/ tests/
+echo "Running pyright (type checking)"
+uv run pyright
+
+echo ""
+echo "🎉 All linting completed!"
+echo "========================="

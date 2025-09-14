@@ -1,37 +1,47 @@
 #!/bin/bash
-set -e
-
-# Check if UV is not found
-if ! command -v uv &> /dev/null; then
-  # If Darwin (macOS), use brew to install UV
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    brew install uv
-  else
-    # If it's Windows, use pip to install UV, else use pip3
-    if [[ "$OSTYPE" == "msys" ]]; then
-      pip install uv
-    else
-      pip3 install uv
+# Ensure UTF-8 everywhere (console and Python), including on Windows msys/cygwin
+case "$OSTYPE" in
+  msys*|cygwin*)
+    if command -v chcp.com >/dev/null 2>&1; then
+      # Attempt to switch Windows code page to UTF-8 (65001)
+      chcp.com 65001 >NUL 2>NUL || chcp.com 65001 >/dev/null 2>&1
     fi
-  fi
-fi
+    ;;
+  *)
+    :
+    ;;
+esac
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export PYTHONUTF8=1
+export PYTHONIOENCODING=UTF-8
 
-uv venv --python 3.11 --seed
-uv pip install -e .
-
-# If requirements.testing.txt exists, then install it
-if [[ -f requirements.testing.txt ]]; then
-  uv run pip install -r requirements.testing.txt
-fi
-
-# If activate exists, delete it
-if [[ -f activate ]]; then
-  rm activate
-fi
-
-# If Windows, then symlink .venv/Scripts/activate to .venv/bin/activate
-if [[ "$OSTYPE" == "msys" ]]; then
-  ln -s .venv/Scripts/activate ./activate
+set -ex
+if [ ! -d ".venv" ]; then
+    echo "Creating Python 3.13 virtual environment..."
+    uv venv --python 3.13
 else
-  ln -s .venv/bin/activate ./activate
+    echo "Virtual environment already exists. Skipping."
 fi
+uv pip install -e ".[dev]"
+# This is needed to force the installation to finalize.
+uv run python -c "import os; _ = os.getcwd()"
+set +e
+
+# if ./activate exists, remove it
+if [ -f activate ]; then
+    rm activate
+fi
+# symlink activate to .venv/bin/activate on linux/mac and .venv/Scripts/activate on windows
+if [[ "$OSTYPE" == "linux-gnu"* || "$OSTYPE" == "darwin"* ]]; then
+    ln -s .venv/bin/activate activate
+else
+    ln -s .venv/Scripts/activate activate
+fi
+
+echo "🎉 Installation complete!"
+echo ""
+echo "To use:"
+echo "  - Run tests: bash test"
+echo "  - Run linting: bash lint (Python only)"
+echo "  - Activate environment: source activate"

@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "clud"
 readme = "README.md"
 description = "Claude in a Docker Box"
-requires-python = ">=3.10"
-keywords = ["template-python-cmd"]
+requires-python = ">=3.13"
+keywords = ["claude", "docker", "cli"]
 license = { text = "BSD 3-Clause License" }
 classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
@@ -16,32 +16,44 @@ dependencies = [
 # Change this with the version number bump.
 version = "0.0.1"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-xdist>=2.0.0",
+    "ruff>=0.1.0",
+    "pyright>=1.1.0",
+]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.ruff]
 line-length = 200
+target-version = "py313"
 
-[tool.pylint."MESSAGES CONTROL"]
-good-names = [
-    "c",
-    "i",
-    "ok",
-    "id",
-    "e",
-    "f"
-]
-disable = [
-    "missing-function-docstring",
-    "missing-module-docstring"
-]
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = []
+fixable = ["ALL"]
+unfixable = []
 
-[tool.isort]
-profile = "black"
+[tool.ruff.lint.isort]
+force-single-line = false
+split-on-trailing-comma = true
 
-[tool.mypy]
-ignore_missing_imports = true
-disable_error_code = ["import-untyped"]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["**/__pycache__"]
+reportMissingImports = true
+reportMissingTypeStubs = false
+pythonVersion = "3.13"
+pythonPlatform = "All"
 
 [project.scripts]
 clud = "clud.cli:main"
