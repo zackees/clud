@@ -14,59 +14,9 @@ if [ -n "${ANTHROPIC_API_KEY}" ]; then
     log "Anthropic API key configured"
 fi
 
-# Run install script if present in project directory
-# Set up Python environment in container-specific location
-export CONTAINER_VENV_PATH="/home/coder/.container-venv"
-
-if [ -f "/home/coder/project/install" ]; then
-    log "Found install script, executing..."
-    cd /home/coder/project
-    # Use container-specific venv path if Windows venv exists
-    if [ -d ".venv" ] && [ ! -f ".venv/bin/python" ]; then
-        log "Windows venv detected, using container-specific venv location..."
-        # Create venv in container-specific location
-        uv venv --python 3.13 "$CONTAINER_VENV_PATH"
-        # Install dependencies using uv
-        source "$CONTAINER_VENV_PATH/bin/activate"
-        uv pip install -e ".[dev]"
-    else
-        # Normal install
-        if [ -x "./install" ]; then
-            ./install
-        else
-            bash ./install
-        fi
-    fi
-    log "Install script completed"
-elif [ -f "/home/coder/project/bash" ] && [ -x "/home/coder/project/bash" ]; then
-    # Check if 'bash install' is a valid command
-    cd /home/coder/project
-    # Use container-specific venv path if Windows venv exists
-    if [ -d ".venv" ] && [ ! -f ".venv/bin/python" ]; then
-        log "Windows venv detected, using container-specific venv location..."
-        # Create venv in container-specific location
-        uv venv --python 3.13 "$CONTAINER_VENV_PATH"
-        # Install dependencies using uv
-        source "$CONTAINER_VENV_PATH/bin/activate"
-        uv pip install -e ".[dev]"
-    else
-        if ./bash install --help >/dev/null 2>&1 || ./bash install >/dev/null 2>&1; then
-            log "Running 'bash install' command..."
-            ./bash install
-            log "'bash install' completed"
-        fi
-    fi
-fi
-
-# Add container venv to PATH if it exists
-if [ -d "$CONTAINER_VENV_PATH" ]; then
-    export PATH="$CONTAINER_VENV_PATH/bin:$PATH"
-    log "Added container venv to PATH"
-fi
-
 # Configure code-server
 mkdir -p /home/coder/.config/code-server
-cat > /home/coder/.config/code-server/config.yaml << YAML_EOF
+cat > /home/coder/.config/code-server/config.yaml << 'YAML_EOF'
 bind-addr: 0.0.0.0:8080
 auth: none
 cert: false

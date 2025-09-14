@@ -1,5 +1,12 @@
 # clud
 
+Claude in a Docker Box - A development container with Claude CLI and code-server.
+
+## Docker Hub
+
+The Docker image is available on Docker Hub as: `niteris/clud`
+
+## Development
 
 To develop software, run `. ./activate.sh`
 

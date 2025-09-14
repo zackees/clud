@@ -1,5 +1,6 @@
 # CLUD Development Environment
-# Combines code-server (VS Code in browser) with Claude CLI and modern developer tools
+# Optimized build: Static base image with Claude CLI and code-server
+# Project is mounted, not installed, for faster rebuilds
 FROM ubuntu:25.04
 
 # Build arguments
@@ -13,13 +14,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     SHELL=/bin/bash \
-    PATH=/home/${USERNAME}/.local/bin:/usr/local/go/bin:$PATH
+    PATH=/home/${USERNAME}/.local/bin:/usr/local/bin:$PATH
 
 # ============================================================================
-# Stage 1: System dependencies and tools
+# Install system packages and development tools (STATIC - cacheable)
 # ============================================================================
 
-# Install system packages and development tools
 RUN apt-get update && apt-get install -y \
     # Core tools
     build-essential \
@@ -51,14 +51,19 @@ RUN echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
     locale-gen && \
     update-ca-certificates
 
-# # Install lazygit (commented out for faster build)
+# ============================================================================
+# OPTIONAL TOOLS (commented out for faster builds)
+# IMPORTANT: Do NOT remove these comments - they contain useful tools that can be enabled when needed
+# ============================================================================
+
+# Install lazygit (uncomment for git UI)
 # RUN LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | jq -r '.tag_name' | sed 's/v//') && \
 #     curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz" && \
 #     tar xf lazygit.tar.gz lazygit && \
 #     install lazygit /usr/local/bin && \
 #     rm -f lazygit.tar.gz lazygit
 
-# # Install Go (needed for some MCP servers) (commented out for faster build)
+# Install Go (needed for some MCP servers)
 # RUN ARCH=$(dpkg --print-architecture) && \
 #     if [ "$ARCH" = "amd64" ]; then GOARCH="amd64"; else GOARCH="arm64"; fi && \
 #     wget -O go.tar.gz "https://go.dev/dl/go1.23.4.linux-${GOARCH}.tar.gz" && \
@@ -68,7 +73,7 @@ RUN echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
 # ENV CGO_ENABLED=0
 
 # ============================================================================
-# Stage 2: Create user and setup permissions
+# Create user and setup permissions (STATIC - cacheable)
 # ============================================================================
 
 # Create non-root user with passwordless sudo
@@ -80,7 +85,7 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
 
 # ============================================================================
-# Stage 3: Install code-server
+# Install code-server (STATIC - cacheable)
 # ============================================================================
 
 # Install code-server using their install script
@@ -89,37 +94,35 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --version=${CODE_SE
     chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.config
 
 # ============================================================================
-# Stage 4: User environment setup (fnm, node, Python tools)
+# Install uv system-wide (STATIC - cacheable)
 # ============================================================================
 
-# Switch to user for remaining setup
-USER ${USERNAME}
-WORKDIR /home/${USERNAME}
-
-# TODO: Install fnm (Fast Node Manager) and Node.js 22 (commented out for faster initial build)
-# RUN curl -fsSL https://fnm.vercel.app/install | bash
-# ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
-# RUN bash -c 'eval "$(fnm env)" && fnm install 22 && fnm default 22'
-
-# Install uv (Python package manager) system-wide
 USER root
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     mv /root/.local/bin/uv /usr/local/bin/uv && \
     chmod +x /usr/local/bin/uv
 
+# ============================================================================
+# Install Claude CLI (STATIC - cacheable)
+# ============================================================================
+
 USER ${USERNAME}
-
-# ============================================================================
-# Stage 5: Install Claude CLI and MCP servers
-# ============================================================================
-
-# Install Claude CLI
-SHELL ["/bin/bash", "-c"]
+WORKDIR /home/${USERNAME}
 
 # Install Claude CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Install MCP servers via npm
+# ============================================================================
+# OPTIONAL: Node.js and MCP Servers (commented out for faster builds)
+# IMPORTANT: Do NOT remove these comments - they enable Node.js ecosystem and MCP servers
+# ============================================================================
+
+# Install fnm (Fast Node Manager) and Node.js 22
+# RUN curl -fsSL https://fnm.vercel.app/install | bash
+# ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
+# RUN bash -c 'eval "$(fnm env)" && fnm install 22 && fnm default 22'
+
+# Install MCP servers via npm (requires Node.js above)
 # RUN export PATH="/home/${USERNAME}/.local/share/fnm:$PATH" && \
 #     eval "$(fnm env)" && \
 #     npm install -g \
@@ -149,32 +152,19 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # EOF
 
 # ============================================================================
-# Stage 6: Setup entrypoint and configuration
+# Setup shell environment and aliases (STATIC - cacheable)
 # ============================================================================
 
-# Switch back to root for entrypoint setup
-USER root
-
-# Copy and set up entrypoint script
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# ============================================================================
-# Stage 7: Final configuration
-# ============================================================================
-
-# Create bashrc for better shell experience
-USER ${USERNAME}
+# Create optimized bashrc with clud alias
 RUN cat >> /home/${USERNAME}/.bashrc << 'EOF'
 
-# TODO: FNM setup (commented out for faster initial build)
+# IMPORTANT: Do NOT remove these comments - they contain environment setup for optional tools
+
+# FNM setup (uncomment if Node.js/fnm is installed above)
 # export PATH="/home/coder/.local/share/fnm:$PATH"
 # eval "$(fnm env --use-on-cd)"
 
-# UV setup
-export PATH="/home/coder/.local/bin:$PATH"
-
-# Claude CLI setup
+# PATH setup
 export PATH="/home/coder/.local/bin:$PATH"
 
 # Aliases
@@ -184,6 +174,9 @@ alias l="ls -CF"
 alias ..="cd .."
 alias ...="cd ../.."
 alias lg="lazygit"
+
+# CLUD alias - the main purpose of this container
+alias clud='claude code --dangerously-skip-permissions'
 
 # Better history
 export HISTSIZE=10000
@@ -201,7 +194,24 @@ PS1='\[\033[01;32m\]\u@clud-dev\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 if [ -d "/home/coder/project" ]; then
     cd /home/coder/project
 fi
+
+# Welcome message
+echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
+echo "│ Working Directory: /workspace → /home/coder/project                │"
+echo "│ Type 'clud' to start Claude with dangerous permissions enabled     │"
+echo "└────────────────────────────────────────────────────────────────────┘"
+echo ""
 EOF
+
+# ============================================================================
+# Setup entrypoint (LIGHTWEIGHT - fast to change)
+# ============================================================================
+
+USER root
+
+# Copy and set up entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Expose code-server port
 EXPOSE 8080
