@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 """Integration test for Docker build process."""
 
 import os
