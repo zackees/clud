@@ -12,6 +12,11 @@ license = { text = "BSD 3-Clause License" }
 classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
     "keyring>=24.0.0",
+    "docker>=6.0.0",
+    "fasteners>=0.17.0",
+    "appdirs>=1.4.4",
+    "disklru>=0.1.0",
+    "httpx>=0.24.0",
 ]
 # Change this with the version number bump.
 version = "0.0.1"

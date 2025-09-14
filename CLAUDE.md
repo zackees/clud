@@ -53,3 +53,19 @@ This is a Python CLI package with the following structure:
 
 ### Windows Compatibility
 The project is designed to work on Windows using git-bash, with UTF-8 encoding handling in all shell scripts.
+
+## Code Quality Standards
+
+### Exception Handling
+- **NEVER** use bare `except Exception: pass` or similar patterns that silently ignore exceptions
+- All caught exceptions MUST be logged at minimum with appropriate context
+- Use specific exception types when possible rather than catching broad `Exception`
+- If an exception truly needs to be suppressed, use `contextlib.suppress()` and document why
+- Example of proper exception handling:
+  ```python
+  try:
+      risky_operation()
+  except SpecificException as e:
+      logger.warning(f"Operation failed with expected error: {e}")
+      # Handle or re-raise as appropriate
+  ```
