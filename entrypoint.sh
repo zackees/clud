@@ -72,8 +72,8 @@ auth: none
 cert: false
 YAML_EOF
 
-# Fix permissions
-chown -R coder:coder /home/coder/.config
+# Fix permissions (ignore failures for mounted directories)
+chown -R coder:coder /home/coder/.config 2>/dev/null || true
 
 # Start code-server as the coder user
 log "Starting code-server on port 8080..."

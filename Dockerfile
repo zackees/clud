@@ -101,21 +101,23 @@ WORKDIR /home/${USERNAME}
 # ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
 # RUN bash -c 'eval "$(fnm env)" && fnm install 22 && fnm default 22'
 
-# Install uv (Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install uv (Python package manager) system-wide
+USER root
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    mv /root/.local/bin/uv /usr/local/bin/uv && \
+    chmod +x /usr/local/bin/uv
+
+USER ${USERNAME}
 
 # ============================================================================
 # Stage 5: Install Claude CLI and MCP servers
 # ============================================================================
 
-# TODO: Install Claude CLI and MCP servers (commented out for faster initial build)
-# Setup shell environment for fnm
-# SHELL ["/bin/bash", "-c"]
+# Install Claude CLI
+SHELL ["/bin/bash", "-c"]
 
 # Install Claude CLI
-# RUN export PATH="/home/${USERNAME}/.local/share/fnm:$PATH" && \
-#     eval "$(fnm env)" && \
-#     curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install MCP servers via npm
 # RUN export PATH="/home/${USERNAME}/.local/share/fnm:$PATH" && \
@@ -170,6 +172,9 @@ RUN cat >> /home/${USERNAME}/.bashrc << 'EOF'
 # eval "$(fnm env --use-on-cd)"
 
 # UV setup
+export PATH="/home/coder/.local/bin:$PATH"
+
+# Claude CLI setup
 export PATH="/home/coder/.local/bin:$PATH"
 
 # Aliases

@@ -313,8 +313,9 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
 
     # Prepare Docker command
     docker_path = normalize_path_for_docker(project_path)
+    # Note: Not mounting .local to preserve container's installed tools (Claude CLI, etc.)
+    # Only mount .config for user settings
     home_config_path = normalize_path_for_docker(Path.home() / ".config")
-    home_local_path = normalize_path_for_docker(Path.home() / ".local")
 
     cmd = [
         "docker",
@@ -332,8 +333,7 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         f"{docker_path}:/home/coder/project",
         "-v",
         f"{home_config_path}:/home/coder/.config",
-        "-v",
-        f"{home_local_path}:/home/coder/.local",
+        # Removed .local mount to preserve container's installed CLI tools
         "clud-dev:latest",
     ]
 
@@ -545,8 +545,191 @@ def run_container(args: argparse.Namespace) -> int:
         raise DockerError(f"Failed to run container: {e}") from e
 
 
+def detect_docker_context() -> bool:
+    """Detect if we're running inside a Docker container."""
+    # Check for common container indicators
+    if os.path.exists("/.dockerenv"):
+        return True
+
+    # Check for Docker-specific cgroup entries
+    try:
+        with open("/proc/1/cgroup") as f:
+            content = f.read()
+            if "docker" in content or "containerd" in content:
+                return True
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    # Check if we're in /workspace (common container mount point)
+    return os.getcwd() == "/workspace"
+
+
+def display_bbs_banner() -> None:
+    """Display 1990s BBS-style welcome banner."""
+    banner = """
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║   ░█████╗░██╗░░░░░██╗░░░██╗██████╗░                                  ║
+║   ██╔══██╗██║░░░░░██║░░░██║██╔══██╗                                 ║
+║   ██║░░╚═╝██║░░░░░██║░░░██║██║░░██║                                 ║
+║   ██║░░██╗██║░░░░░██║░░░██║██║░░██║                                 ║
+║   ╚█████╔╝███████╗╚██████╔╝██████╔╝                                 ║
+║   ░╚════╝░╚══════╝░╚═════╝░╚═════╝░                                  ║
+║                                                                       ║
+║                    ▄█     █▄     ▄████████  ▄█        ▄████████      ║
+║                   ███     ███   ███    ███ ███       ███    ███      ║
+║                   ███     ███   ███    █▀  ███       ███    █▀       ║
+║                  ▄███▄▄▄▄▄███▄▄ ▄███▄▄▄     ███       ███            ║
+║                 ▀▀███▀▀▀▀▀███▀  ▀▀███▀▀▀     ███     ▀███████████     ║
+║                   ███     ███     ███    █▄  ███              ███     ║
+║                   ███     ███     ███    ███ ███▌    ▄  ▄█    ███     ║
+║                   ███     █▀      ██████████ █████▄▄██  ▄████████▀     ║
+║                                              ▀                        ║
+║                  ╔══════════════════════════════════════════════════╗   ║
+║                  ║            WELCOME TO CLUD!                     ║   ║
+║                  ║          Claude Development Container           ║   ║
+║                  ╚══════════════════════════════════════════════════╝   ║
+║                                                                       ║
+║    ┌─────────────────────────────────────────────────────────────────┐ ║
+║    │  You are now connected to the CLUD development environment!    │ ║
+║    │                                                                 │ ║
+║    │  • Current directory: /workspace                               │ ║
+║    │  • Type 'clud' again to start the background agent             │ ║
+║    │  • All your project files are mounted and ready                │ ║
+║    │                                                                 │ ║
+║    │  [System Status: ██████████ ONLINE]                           │ ║
+║    └─────────────────────────────────────────────────────────────────┘ ║
+║                                                                       ║
+║                     Press ENTER to continue...                        ║
+╚═══════════════════════════════════════════════════════════════════════╝"""
+
+    print(banner)
+
+
+def start_background_agent() -> int:
+    """Start the background Claude agent."""
+    print("\n" + "=" * 80)
+    print("🤖 STARTING CLAUDE BACKGROUND AGENT...")
+    print("=" * 80)
+
+    try:
+        # Try to find and run claude command
+        claude_path = shutil.which("claude")
+        if claude_path:
+            # Run claude code with appropriate options
+            cmd = ["claude", "code", "--dangerously-skip-permissions"]
+            print(f"Executing: {' '.join(cmd)}")
+            result = subprocess.run(cmd, check=False)
+            return result.returncode
+        else:
+            print("ERROR: Claude CLI not found in container!")
+            print("This container should have Claude CLI installed.")
+            print("To fix this, uncomment the Claude CLI installation in the Dockerfile.")
+            print("")
+            print("For now, you can manually run:")
+            print("  curl -fsSL https://claude.ai/install.sh | bash")
+            print("  claude code --dangerously-skip-permissions")
+            return 1
+
+    except Exception as e:
+        print(f"ERROR: Failed to start Claude agent: {e}")
+        return 1
+
+
+def launch_container_shell(args: argparse.Namespace) -> int:
+    """Launch container and drop user into bash shell at /workspace."""
+    # Validate project path
+    project_path = validate_path(args.path)
+
+    # Get API key
+    api_key = get_api_key(args)
+
+    # Check Docker availability
+    if not check_docker_available():
+        raise DockerError("Docker is not available or not running")
+
+    # Build image if needed (reusing existing logic)
+    if not build_docker_image():
+        return 1
+
+    # Stop existing container
+    stop_existing_container()
+
+    # Prepare Docker command for interactive shell
+    docker_path = normalize_path_for_docker(project_path)
+
+    cmd = [
+        "docker",
+        "run",
+        "-it",
+        "--rm",
+        "--name",
+        "clud-dev",
+        "-e",
+        f"ANTHROPIC_API_KEY={api_key}",
+        "-v",
+        f"{docker_path}:/workspace",
+        "-w",
+        "/workspace",  # Set working directory to /workspace
+        "clud-dev:latest",
+        "/bin/bash",
+        "-c",
+        # Custom startup script that shows banner and starts bash
+        """
+        # Function to show banner
+        show_banner() {
+            clud --show-banner 2>/dev/null || true
+        }
+
+        # Show banner on first run
+        show_banner
+
+        # Wait for user to press enter
+        echo -n ""
+        read -p "" dummy 2>/dev/null || true
+
+        # Clear screen and show prompt
+        clear
+        echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
+        echo "│ Working Directory: /workspace                                      │"
+        echo "│ Type 'clud' to start the background agent                         │"
+        echo "└────────────────────────────────────────────────────────────────────┘"
+        echo ""
+
+        # Start interactive bash
+        exec /bin/bash
+        """,
+    ]
+
+    print("Starting CLUD development container...")
+
+    try:
+        # Set up environment with API key
+        env = os.environ.copy()
+        env["ANTHROPIC_API_KEY"] = api_key
+
+        # Execute the container
+        result = subprocess.run(cmd, env=env, check=False)
+        return result.returncode
+
+    except Exception as e:
+        raise DockerError(f"Failed to start container shell: {e}") from e
+
+
 def main() -> int:
     """Main entry point for clud."""
+    # Check if we're inside a Docker container first
+    if detect_docker_context():
+        # We're inside the container - this is the second role of clud
+        # Check for special banner flag
+        if len(sys.argv) > 1 and sys.argv[1] == "--show-banner":
+            display_bbs_banner()
+            return 0
+
+        # Normal container execution - start background agent
+        return start_background_agent()
+
+    # We're outside Docker - this is the first role of clud
     parser = create_parser()
     args = parser.parse_args()
 
@@ -555,22 +738,20 @@ def main() -> int:
         args.enable_firewall = False
 
     try:
-        # Route to UI mode or traditional container mode
+        # Route to different modes
         if args.ui:
-            # Validate project path
+            # UI mode - existing functionality
             project_path = validate_path(args.path)
-
-            # Get API key for UI mode
             api_key = get_api_key(args)
 
-            # Check Docker availability
             if not check_docker_available():
                 raise DockerError("Docker is not available or not running")
 
             return run_ui_container(args, project_path, api_key)
         else:
-            # Traditional container mode
-            return run_container(args)
+            # Default mode - launch container with interactive shell
+            return launch_container_shell(args)
+
     except ValidationError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
