@@ -118,38 +118,28 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 # ============================================================================
 
 # Install fnm (Fast Node Manager) and Node.js 22
-# RUN curl -fsSL https://fnm.vercel.app/install | bash
-# ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
-# RUN bash -c 'eval "$(fnm env)" && fnm install 22 && fnm default 22'
+RUN curl -fsSL https://fnm.vercel.app/install | bash
+ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
+RUN bash -c 'eval "$(fnm env)" && fnm install 22 && fnm default 22'
 
 # Install MCP servers via npm (requires Node.js above)
-# RUN export PATH="/home/${USERNAME}/.local/share/fnm:$PATH" && \
-#     eval "$(fnm env)" && \
-#     npm install -g \
-#         @modelcontextprotocol/server-filesystem \
-#         @modelcontextprotocol/server-git \
-#         @modelcontextprotocol/server-fetch
+RUN export PATH="/home/${USERNAME}/.local/share/fnm:$PATH" && \
+    eval "$(fnm env)" && \
+    npm install -g \
+        @modelcontextprotocol/server-filesystem
 
 # Setup default MCP server configurations
-# RUN mkdir -p /home/${USERNAME}/.config/claude && \
-#     cat > /home/${USERNAME}/.config/claude/mcp_config.json << 'EOF'
-# {
-#   "mcpServers": {
-#     "filesystem": {
-#       "command": "npx",
-#       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/coder/project"]
-#     },
-#     "git": {
-#       "command": "npx",
-#       "args": ["-y", "@modelcontextprotocol/server-git", "--repository", "/home/coder/project"]
-#     },
-#     "fetch": {
-#       "command": "npx",
-#       "args": ["-y", "@modelcontextprotocol/server-fetch"]
-#     }
-#   }
-# }
-# EOF
+RUN mkdir -p /home/${USERNAME}/.config/claude && \
+    cat > /home/${USERNAME}/.config/claude/mcp_config.json << 'EOF'
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/coder/project"]
+    }
+  }
+}
+EOF
 
 # ============================================================================
 # Setup shell environment and aliases (STATIC - cacheable)
@@ -160,9 +150,9 @@ RUN cat >> /home/${USERNAME}/.bashrc << 'EOF'
 
 # IMPORTANT: Do NOT remove these comments - they contain environment setup for optional tools
 
-# FNM setup (uncomment if Node.js/fnm is installed above)
-# export PATH="/home/coder/.local/share/fnm:$PATH"
-# eval "$(fnm env --use-on-cd)"
+# FNM setup (enabled - Node.js/fnm is installed above)
+export PATH="/home/coder/.local/share/fnm:$PATH"
+eval "$(fnm env --use-on-cd)"
 
 # PATH setup
 export PATH="/home/coder/.local/bin:$PATH"

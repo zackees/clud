@@ -22,6 +22,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `uv pip install -e ".[dev]"` - Install package in editable mode with dev dependencies
 - The package builds a wheel to `dist/clud-0.0.1-py3-none-any.whl`
 
+### Docker
+- `docker build -t clud-dev .` - Build the development container image with Node.js/npm support
+- `docker run --rm clud-dev node --version` - Verify Node.js installation in container
+- `docker run --rm clud-dev npm --version` - Verify npm installation in container
+
 ### Cleanup
 - `bash clean` - Remove all build artifacts, caches, and virtual environment
 
