@@ -58,11 +58,11 @@ RUN echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
 # ============================================================================
 
 # Install lazygit (uncomment for git UI)
-# RUN LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | jq -r '.tag_name' | sed 's/v//') && \
-#     curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz" && \
-#     tar xf lazygit.tar.gz lazygit && \
-#     install lazygit /usr/local/bin && \
-#     rm -f lazygit.tar.gz lazygit
+RUN LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | jq -r '.tag_name' | sed 's/v//') && \
+    curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz" && \
+    tar xf lazygit.tar.gz lazygit && \
+    install lazygit /usr/local/bin && \
+    rm -f lazygit.tar.gz lazygit
 
 # Install Go (needed for some MCP servers)
 # RUN ARCH=$(dpkg --print-architecture) && \
