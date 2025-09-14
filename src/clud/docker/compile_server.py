@@ -35,7 +35,7 @@ class CompileServer:
         )
 
     # May throw CompileServerError if server could not be started.
-    def start(self, wait_for_startup=True) -> None:
+    def start(self, wait_for_startup: bool = True) -> None:
         # from fastled.compile_server_impl import CompileServerImpl  # avoid circular import
         self.impl.start(wait_for_startup=wait_for_startup)
 

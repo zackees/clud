@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import docker
-from appdirs import user_data_dir
+from appdirs import user_data_dir  # type: ignore[import-untyped]
 from disklru import DiskLRUCache
 from docker.client import DockerClient
 from docker.errors import DockerException, ImageNotFound, NotFound
@@ -28,7 +28,7 @@ from fasteners import InterProcessLock
 from clud.print_filter import PrintFilter, PrintFilterDefault
 from clud.spinner import Spinner
 
-CONFIG_DIR = Path(user_data_dir("clud", "clud"))
+CONFIG_DIR = Path(user_data_dir("clud", "clud"))  # type: ignore[arg-type]
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 DB_FILE = CONFIG_DIR / "db.db"
 DISK_CACHE = DiskLRUCache(str(DB_FILE), 10)
@@ -123,7 +123,7 @@ class Volume:
     @classmethod
     def from_dict(cls, volume_dict: dict[str, dict[str, str]]) -> list["Volume"]:
         """Create Volume objects from a Docker volume dictionary."""
-        volumes = []
+        volumes: list[Volume] = []
         for host_path, config in volume_dict.items():
             volumes.append(
                 cls(
@@ -164,7 +164,7 @@ class RunningContainer:
             try:
                 for log in self.container.logs(follow=False, since=from_date, until=to_date, stream=True):
                     # print(log.decode("utf-8"), end="")
-                    self.filter.print(log)
+                    self.filter(log)
                 time.sleep(0.1)
                 from_date = to_date
                 to_date = _utc_now_no_tz()
@@ -327,7 +327,7 @@ class DockerManager:
         try:
             # self.client.ping()
             client = docker.from_env()
-            client.ping()
+            client.ping()  # type: ignore[misc]
             print("Docker is running.")
             return True, None
         except DockerException as e:
@@ -401,7 +401,7 @@ class DockerManager:
             assert local_image_id is not None
 
             # Get the remote image data
-            remote_image = self.client.images.get_registry_data(f"{image_name}:{tag}")
+            remote_image = self.client.images.get_registry_data(f"{image_name}:{tag}")  # type: ignore[misc]
             remote_image_hash = remote_image.id
 
             # Check if we have a cached remote hash for this local image
@@ -417,9 +417,9 @@ class DockerManager:
                 # Get the creation date of the remote image if possible
                 try:
                     # Try to get detailed image info including creation date
-                    remote_image_details = self.client.api.inspect_image(f"{image_name}:{tag}")
+                    remote_image_details = self.client.api.inspect_image(f"{image_name}:{tag}")  # type: ignore[misc]
                     if "Created" in remote_image_details:
-                        created_date = remote_image_details["Created"].split("T")[0]  # Extract just the date part
+                        created_date = remote_image_details["Created"].split("T")[0]  # type: ignore[misc]  # Extract just the date part
                         return (
                             True,
                             f"Newer version of {image_name}:{tag} is available (published on {created_date}).",
@@ -453,7 +453,7 @@ class DockerManager:
                 print(f"Image {image_name}:{tag} is already available.")
 
                 if upgrade:
-                    remote_image = self.client.images.get_registry_data(f"{image_name}:{tag}")
+                    remote_image = self.client.images.get_registry_data(f"{image_name}:{tag}")  # type: ignore[misc]
                     remote_image_hash = remote_image.id
 
                     try:
@@ -510,7 +510,7 @@ class DockerManager:
         Tag an image with a new tag.
         """
         image: Image = self.client.images.get(f"{image_name}:{old_tag}")
-        image.tag(image_name, new_tag)
+        image.tag(image_name, new_tag)  # type: ignore[misc]
         print(f"Image {image_name}:{old_tag} tagged as {new_tag}.")
 
     def _container_configs_match(
@@ -547,7 +547,7 @@ class DockerManager:
             if volumes_dict:
                 container_mounts = {m["Source"]: {"bind": m["Destination"], "mode": m["Mode"]} for m in container.attrs["Mounts"]} if container.attrs.get("Mounts") else {}
 
-                for host_dir, mount in volumes_dict.items():
+                for host_dir, mount in volumes_dict.items():  # type: ignore[misc]
                     if host_dir not in container_mounts:
                         print(f"Volume {host_dir} not found in container mounts.")
                         return False
@@ -557,15 +557,15 @@ class DockerManager:
 
             # Check ports if specified
             if ports:
-                container_ports = container.attrs["Config"]["ExposedPorts"] if container.attrs["Config"].get("ExposedPorts") else {}
-                container_port_bindings = container.attrs["HostConfig"]["PortBindings"] if container.attrs["HostConfig"].get("PortBindings") else {}
+                container_ports = container.attrs["Config"]["ExposedPorts"] if container.attrs["Config"].get("ExposedPorts") else {}  # type: ignore[misc]
+                container_port_bindings = container.attrs["HostConfig"]["PortBindings"] if container.attrs["HostConfig"].get("PortBindings") else {}  # type: ignore[misc]
 
                 for container_port, host_port in ports.items():
                     port_key = f"{container_port}/tcp"
                     if port_key not in container_ports:
                         print(f"Container port {port_key} not found.")
                         return False
-                    if container_port_bindings.get(port_key, [{"HostPort": None}])[0]["HostPort"] != str(host_port):
+                    if container_port_bindings.get(port_key, [{"HostPort": None}])[0]["HostPort"] != str(host_port):  # type: ignore[misc]
                         print(f"Port {host_port} is not bound to {port_key}.")
                         return False
         except KeyboardInterrupt:
@@ -613,7 +613,7 @@ class DockerManager:
         if volumes is not None:
             volumes_dict = {}
             for volume in volumes:
-                volumes_dict.update(volume.to_dict())
+                volumes_dict.update(volume.to_dict())  # type: ignore[misc]
 
         # Serialize the volumes to a json string
         if volumes_dict:
@@ -629,7 +629,7 @@ class DockerManager:
                 container.remove(force=True)
                 raise NotFound("Container removed due to remove_previous")
             # Check if configuration matches
-            elif not self._container_configs_match(container, command, volumes_dict, ports):
+            elif not self._container_configs_match(container, command, volumes_dict, ports):  # type: ignore[arg-type]
                 print(f"Container {container_name} exists but with different configuration. Removing and recreating...")
                 container.remove(force=True)
                 raise NotFound("Container removed due to config mismatch")
@@ -654,7 +654,7 @@ class DockerManager:
                     container.start()
             elif container.status == "paused":
                 print(f"Resuming existing container {container_name}.")
-                container.unpause()
+                container.unpause()  # type: ignore[misc]
             else:
                 print(f"Unknown container status: {container.status}")
                 print(f"Starting existing container {container_name}.")
@@ -671,7 +671,7 @@ class DockerManager:
             tmpfs: dict[str, str] | None = None
             if tmpfs_size:
                 tmpfs = {_DEFAULT_BUILD_DIR: f"size={tmpfs_size}"}
-            container = self.client.containers.run(
+            container = self.client.containers.run(  # type: ignore[misc]
                 image=image_name,
                 command=command,
                 name=container_name,
@@ -684,7 +684,7 @@ class DockerManager:
                 environment=environment,
                 remove=True,
             )
-        return container
+        return container  # type: ignore[return-value]
 
     def run_container_interactive(
         self,
@@ -702,7 +702,7 @@ class DockerManager:
         if volumes is not None:
             volumes_dict = {}
             for volume in volumes:
-                volumes_dict.update(volume.to_dict())
+                volumes_dict.update(volume.to_dict())  # type: ignore[misc]
         # Remove existing container
         try:
             container: Container = self.client.containers.get(container_name)
@@ -720,7 +720,7 @@ class DockerManager:
                 container_name,
             ]
             if volumes_dict:
-                for host_dir, mount in volumes_dict.items():
+                for host_dir, mount in volumes_dict.items():  # type: ignore[misc]
                     docker_volume_arg = [
                         "-v",
                         f"{host_dir}:{mount['bind']}:{mount['mode']}",
@@ -813,7 +813,7 @@ class DockerManager:
             return
         try:
             assert isinstance(container, Container)
-            container.unpause()
+            container.unpause()  # type: ignore[misc]
             print(f"Container {container.name} has been resumed.")
         except Exception as e:
             print(f"Failed to resume container {container_name}: {e}")
@@ -891,7 +891,7 @@ class DockerManager:
 
             # Run the build command
             # cp = subprocess.run(cmd_list, check=True, capture_output=True)
-            proc: subprocess.Popen = subprocess.Popen(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            proc: subprocess.Popen[bytes] = subprocess.Popen(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             stdout = proc.stdout
             assert stdout is not None, "stdout is None"
             for line in iter(stdout.readline, b""):
@@ -922,40 +922,40 @@ class DockerManager:
 
         # Remove all containers using this image
         try:
-            containers = self.client.containers.list(all=True)
-            for container in containers:
+            containers = self.client.containers.list(all=True)  # type: ignore[misc]
+            for container in containers:  # type: ignore[misc]
                 should_remove = False
 
                 # Check if container uses the specified image
-                if any(image_name in tag for tag in container.image.tags):
+                if any(image_name in tag for tag in container.image.tags):  # type: ignore[misc]
                     should_remove = True
-                    print(f"Removing container {container.name} (uses image {image_name})")
+                    print(f"Removing container {container.name} (uses image {image_name})")  # type: ignore[misc]
 
                 # Also check for FastLED container name patterns (including test containers)
                 elif any(
-                    pattern in container.name
+                    pattern in container.name  # type: ignore[misc]
                     for pattern in [
                         "clud-container",
                         "clud-container-test",
                     ]
                 ):
                     should_remove = True
-                    print(f"Removing clud container {container.name}")
+                    print(f"Removing clud container {container.name}")  # type: ignore[misc]
 
                 if should_remove:
-                    container.remove(force=True)
+                    container.remove(force=True)  # type: ignore[misc]
 
         except Exception as e:
             print(f"Error removing containers: {e}")
 
         # Remove all images with this name
         try:
-            self.client.images.prune(filters={"dangling": False})
+            self.client.images.prune(filters={"dangling": False})  # type: ignore[misc]
             images = self.client.images.list()
             for image in images:
                 if any(image_name in tag for tag in image.tags):
                     print(f"Removing image {image.tags}")
-                    self.client.images.remove(image.id, force=True)
+                    self.client.images.remove(image.id, force=True)  # type: ignore[misc]
         except Exception as e:
             print(f"Error removing images: {e}")
 

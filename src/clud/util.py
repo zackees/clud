@@ -1,6 +1,7 @@
 """General utilities for clud."""
 
 import socket
+from pathlib import Path
 
 
 def port_is_free(port: int, host: str = "localhost") -> bool:
@@ -23,7 +24,7 @@ def print_banner(message: str, char: str = "=") -> None:
     print(border)
 
 
-def download_emsdk_headers() -> str | None:
+def download_emsdk_headers(url: str, filepath: Path) -> str | None:
     """Placeholder for downloading EMSDK headers."""
     # This is a placeholder - implement as needed for clud
     return None

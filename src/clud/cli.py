@@ -8,6 +8,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -85,6 +86,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--just-build", action="store_true", help="Build Docker image and exit (don't launch container)")
 
     parser.add_argument("--version", action="version", version="clud 0.0.1")
+
+    parser.add_argument("--cmd", help="Command to execute in container instead of interactive shell")
 
     return parser
 
@@ -299,6 +302,52 @@ def stop_existing_container(container_name: str = "clud-dev") -> None:
         pass
 
 
+def stream_process_output(process: subprocess.Popen[str]) -> int:
+    """Stream output from a subprocess in real-time."""
+    try:
+        # Stream stdout and stderr in real-time
+        while True:
+            # Check if process has terminated
+            if process.poll() is not None:
+                break
+
+            # Read and print any available output
+            if process.stdout:
+                line = process.stdout.readline()
+                if line:
+                    print(line.rstrip(), flush=True)
+
+            if process.stderr:
+                line = process.stderr.readline()
+                if line:
+                    print(line.rstrip(), file=sys.stderr, flush=True)
+
+            # Small delay to prevent busy waiting
+            time.sleep(0.01)
+
+        # Get any remaining output
+        if process.stdout:
+            for line in process.stdout:
+                print(line.rstrip(), flush=True)
+
+        if process.stderr:
+            for line in process.stderr:
+                print(line.rstrip(), file=sys.stderr, flush=True)
+
+        # Wait for process to complete and return exit code
+        return process.wait()
+
+    except KeyboardInterrupt:
+        print("\nTerminating container...", file=sys.stderr)
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return 130  # Standard exit code for SIGINT
+
+
 def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str) -> int:
     """Run the code-server UI container."""
     # Find available port
@@ -315,7 +364,7 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
     # Stop existing container
     stop_existing_container()
 
-    # Prepare Docker command
+    # Prepare Docker command - use foreground mode for streaming
     docker_path = normalize_path_for_docker(project_path)
     # Note: Not mounting .local to preserve container's installed tools (Claude CLI, etc.)
     # Only mount .config for user settings
@@ -324,7 +373,7 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
     cmd = [
         "docker",
         "run",
-        "-d",
+        "--rm",  # Remove container when it stops
         "--name",
         "clud-dev",
         "-p",
@@ -341,51 +390,52 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         "clud-dev:latest",
     ]
 
-    print(f"Starting clud-dev container on port {port}...")
+    print("Starting CLUD development container...")
 
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        container_id = result.stdout.strip()
-        print(f"Container started with ID: {container_id[:12]}")
+        # Set up environment with API key
+        env = os.environ.copy()
+        env["ANTHROPIC_API_KEY"] = api_key
 
-        # Wait a moment for the server to start
-        print("Waiting for code-server to start...")
-        time.sleep(3)
+        # Start process with streaming output
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+            universal_newlines=True,
+        )
 
-        # Check if container is still running
-        check_result = subprocess.run(["docker", "ps", "-q", "-f", f"id={container_id}"], capture_output=True, text=True, check=True)
-
-        if not check_result.stdout.strip():
-            # Container stopped, get logs
-            logs_result = subprocess.run(["docker", "logs", container_id], capture_output=True, text=True)
-            print(f"Container failed to start. Logs:\n{logs_result.stdout}\n{logs_result.stderr}")
-            return 1
-
-        # Open browser
-        url = f"http://localhost:{port}"
-        print(f"Opening browser to {url}")
-        try:
-            webbrowser.open(url)
-        except Exception as e:
-            print(f"Could not open browser automatically: {e}")
-            print(f"Please open {url} in your browser")
-
-        print(f"""
+        # Schedule browser opening after a short delay
+        def open_browser_delayed():
+            time.sleep(3)  # Wait for server to start
+            url = f"http://localhost:{port}"
+            print(f"\nOpening browser to {url}")
+            try:
+                webbrowser.open(url)
+                print(f"""
 Code-server is now running!
 - URL: {url}
 - Container: clud-dev
 - Project: {project_path}
 
-To stop the container: docker stop clud-dev
-To view logs: docker logs clud-dev
+Press Ctrl+C to stop the container
 """)
+            except Exception as e:
+                print(f"Could not open browser automatically: {e}")
+                print(f"Please open {url} in your browser")
 
-        return 0
+        # Start browser opening in background thread
+        browser_thread = threading.Thread(target=open_browser_delayed, daemon=True)
+        browser_thread.start()
 
-    except subprocess.CalledProcessError as e:
+        # Stream output in real-time
+        return stream_process_output(process)
+
+    except Exception as e:
         print(f"Failed to start container: {e}")
-        if e.stderr:
-            print(f"Error: {e.stderr}")
         return 1
 
 
@@ -548,7 +598,7 @@ def run_container(args: argparse.Namespace) -> int:
 
 
 def launch_container_shell(args: argparse.Namespace) -> int:
-    """Launch container and drop user into bash shell at /workspace."""
+    """Launch container and drop user into bash shell at /workspace or execute specified command."""
     # Validate project path
     project_path = validate_path(args.path)
 
@@ -564,51 +614,74 @@ def launch_container_shell(args: argparse.Namespace) -> int:
     # Stop existing container
     stop_existing_container()
 
-    # Prepare Docker command for interactive shell
+    # Prepare Docker command
     docker_path = normalize_path_for_docker(project_path)
 
-    cmd = [
-        "docker",
-        "run",
-        "-it",
-        "--rm",
-        "--name",
-        "clud-dev",
-        "-e",
-        f"ANTHROPIC_API_KEY={api_key}",
-        "-v",
-        f"{docker_path}:/workspace",
-        "-w",
-        "/workspace",  # Set working directory to /workspace
-        "clud-dev:latest",
-        "/bin/bash",
-        "-c",
-        # Custom startup script that shows banner and starts bash
-        """
-        # Function to show banner
-        show_banner() {
-            clud --show-banner 2>/dev/null || true
-        }
+    # Determine if we're running a custom command or interactive shell
+    if args.cmd:
+        # Non-interactive mode for custom commands
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            "clud-dev",
+            "-e",
+            f"ANTHROPIC_API_KEY={api_key}",
+            "-v",
+            f"{docker_path}:/workspace",
+            "-w",
+            "/workspace",  # Set working directory to /workspace
+            "--entrypoint",
+            "/bin/bash",
+            "clud-dev:latest",
+            "-c",
+            args.cmd,
+        ]
+    else:
+        # Interactive shell mode
+        cmd = [
+            "docker",
+            "run",
+            "-it",
+            "--rm",
+            "--name",
+            "clud-dev",
+            "-e",
+            f"ANTHROPIC_API_KEY={api_key}",
+            "-v",
+            f"{docker_path}:/workspace",
+            "-w",
+            "/workspace",  # Set working directory to /workspace
+            "clud-dev:latest",
+            "/bin/bash",
+            "-c",
+            # Custom startup script that shows banner and starts bash
+            """
+            # Function to show banner
+            show_banner() {
+                clud --show-banner 2>/dev/null || true
+            }
 
-        # Show banner on first run
-        show_banner
+            # Show banner on first run
+            show_banner
 
-        # Wait for user to press enter
-        echo -n ""
-        read -p "" dummy 2>/dev/null || true
+            # Wait for user to press enter
+            echo -n ""
+            read -p "" dummy 2>/dev/null || true
 
-        # Clear screen and show prompt
-        clear
-        echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
-        echo "│ Working Directory: /workspace                                      │"
-        echo "│ Type 'clud' to start the background agent                         │"
-        echo "└────────────────────────────────────────────────────────────────────┘"
-        echo ""
+            # Clear screen and show prompt
+            clear
+            echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
+            echo "│ Working Directory: /workspace                                      │"
+            echo "│ Type 'clud' to start the background agent                         │"
+            echo "└────────────────────────────────────────────────────────────────────┘"
+            echo ""
 
-        # Start interactive bash
-        exec /bin/bash
-        """,
-    ]
+            # Start interactive bash
+            exec /bin/bash
+            """,
+        ]
 
     print("Starting CLUD development container...")
 
@@ -617,10 +690,21 @@ def launch_container_shell(args: argparse.Namespace) -> int:
         env = os.environ.copy()
         env["ANTHROPIC_API_KEY"] = api_key
 
-        # Execute the container
-        result = subprocess.run(cmd, env=env, check=False)
-        return result.returncode
+        if args.cmd:
+            # For command execution, use subprocess.run for better control
+            result = subprocess.run(cmd, env=env, check=False)
+            return result.returncode
+        else:
+            # For interactive shell, we need to connect stdin/stdout/stderr directly
+            # This allows for proper terminal interaction
+            process = subprocess.Popen(cmd, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
 
+            # Wait for the process to complete
+            return process.wait()
+
+    except KeyboardInterrupt:
+        print("\nContainer terminated.", file=sys.stderr)
+        return 130
     except Exception as e:
         raise DockerError(f"Failed to start container shell: {e}") from e
 

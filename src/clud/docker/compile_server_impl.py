@@ -79,7 +79,7 @@ class CompileServerImpl:
         if auto_start:
             self.start()
 
-    def start(self, wait_for_startup=True) -> None:
+    def start(self, wait_for_startup: bool = True) -> None:
         if not DockerManager.is_docker_installed():
             raise CompileServerError("Docker is not installed")
         if self._port != 0:
@@ -228,7 +228,7 @@ class CompileServerImpl:
             ports = {}
         else:
             ports = {INTERNAL_DOCKER_PORT: port}
-        volumes = []
+        volumes: list[Volume] = []
         if self.fastled_src_dir:
             msg = f"FastLED REPO updates enabled!!\n\nMounting FastLED source directory\n{self.fastled_src_dir} into container\n/host/fastled/src"
             print_banner(msg)
@@ -245,7 +245,7 @@ class CompileServerImpl:
             assert self.mapped_dir is not None
             dir_name = self.mapped_dir.name
             if not volumes:
-                volumes = []
+                volumes = []  # type: ignore[assignment]
             volumes.append(
                 Volume(
                     host_path=str(self.mapped_dir),

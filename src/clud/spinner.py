@@ -2,6 +2,7 @@
 
 import threading
 import time
+from types import TracebackType
 
 
 class Spinner:
@@ -47,6 +48,6 @@ class Spinner:
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         """Context manager exit."""
         self.stop()

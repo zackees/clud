@@ -3,6 +3,7 @@
 import subprocess
 import time
 import unittest
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from clud.docker.docker_manager import DockerManager, Volume
@@ -120,6 +121,8 @@ class TestDockerManager(unittest.TestCase):
         self.assertIsNotNone(container)
 
         # Check if container is running
+        self.assertIsNotNone(container.name)
+        assert container.name is not None  # Type narrowing for mypy/pyright
         is_running = self.docker_manager.is_container_running(container.name)
         self.assertTrue(is_running)
 
@@ -143,7 +146,7 @@ class TestDockerManager(unittest.TestCase):
         self.assertFalse(is_running)
 
     @patch("clud.docker.docker_manager.subprocess.run")
-    def test_is_docker_installed_mocked(self, mock_run):
+    def test_is_docker_installed_mocked(self, mock_run: Any):
         """Test Docker installation check with mocked subprocess."""
         # Test successful Docker installation
         mock_run.return_value = MagicMock(returncode=0)
