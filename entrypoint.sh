@@ -27,4 +27,4 @@ chown -R coder:coder /home/coder/.config 2>/dev/null || true
 
 # Start code-server as the coder user
 log "Starting code-server on port 8080..."
-exec sudo -u coder bash -c "cd /home/coder/project && code-server --bind-addr 0.0.0.0:8080 --auth none --disable-telemetry /home/coder/project"
+exec sudo -u coder bash -c "cd /workspace && code-server --bind-addr 0.0.0.0:8080 --auth none --disable-telemetry /workspace"

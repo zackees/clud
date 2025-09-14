@@ -25,7 +25,7 @@ def test_docker_container_exit():
 
     # Build the Docker image first
     print("Building Docker image...")
-    build_cmd = ["docker", "build", "-t", "clud-dev:latest", str(project_root)]
+    build_cmd = ["docker", "build", "-t", "clud-test:latest", str(project_root)]
 
     try:
         subprocess.run(build_cmd, check=True, timeout=600)
@@ -43,7 +43,7 @@ def test_docker_container_exit():
     with contextlib.suppress(BaseException):
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
-    run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", "clud-dev:latest"]
+    run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", "clud-test:latest"]
 
     try:
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)

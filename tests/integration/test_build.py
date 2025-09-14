@@ -22,7 +22,7 @@ def run_docker_build():
     print("=" * 60)
 
     # Run docker build with plain text output
-    cmd = ["docker", "build", "-t", "clud-dev:latest", "--progress=plain", "."]
+    cmd = ["docker", "build", "-t", "clud-test:latest", "--progress=plain", "."]
 
     try:
         subprocess.run(

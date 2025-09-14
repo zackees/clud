@@ -64,7 +64,7 @@ def test_code_server_ui():
 
     # Build the Docker image first
     print("Building Docker image...")
-    build_cmd = ["docker", "build", "-t", "clud-dev:latest", str(project_root)]
+    build_cmd = ["docker", "build", "-t", "clud-test:latest", str(project_root)]
 
     try:
         subprocess.run(build_cmd, check=True, timeout=600)
@@ -85,7 +85,7 @@ def test_code_server_ui():
     # Use a different port for testing to avoid conflicts
     test_port = 8081
 
-    run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:8080", "-v", f"{project_root}:/home/coder/project", "-e", "ENVIRONMENT=test", "clud-dev:latest"]
+    run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:8080", "-v", f"{project_root}:/home/coder/project", "-e", "ENVIRONMENT=test", "clud-test:latest"]
 
     try:
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)

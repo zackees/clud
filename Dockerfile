@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y \
     jq \
     htop \
     vim \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure locale
@@ -81,8 +82,9 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     useradd --uid ${USER_UID} --gid ${USER_GID} -m ${USERNAME} -s /bin/bash && \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME} && \
-    mkdir -p /home/${USERNAME}/project && \
-    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
+    mkdir -p /home/${USERNAME}/project /workspace && \
+    chown -R ${USERNAME}:${USERNAME} /home/${USERNAME} && \
+    chown ${USERNAME}:${USERNAME} /workspace
 
 # ============================================================================
 # Install code-server (STATIC - cacheable)
@@ -106,10 +108,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # Install Claude CLI (STATIC - cacheable)
 # ============================================================================
 
-USER ${USERNAME}
-WORKDIR /home/${USERNAME}
+USER root
+WORKDIR /root
 
-# Install Claude CLI
+# Install Claude CLI for root user
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # ============================================================================
@@ -145,8 +147,9 @@ EOF
 # Setup shell environment and aliases (STATIC - cacheable)
 # ============================================================================
 
-# Create optimized bashrc with clud alias
-RUN cat >> /home/${USERNAME}/.bashrc << 'EOF'
+# Create optimized bashrc with clud alias for root user
+# NOTE: Currently using root user's bashrc. The coder user might be removed in the future.
+RUN cat >> /root/.bashrc << 'EOF'
 
 # IMPORTANT: Do NOT remove these comments - they contain environment setup for optional tools
 
@@ -155,7 +158,7 @@ export PATH="/home/coder/.local/share/fnm:$PATH"
 eval "$(fnm env --use-on-cd)"
 
 # PATH setup
-export PATH="/home/coder/.local/bin:$PATH"
+export PATH="/root/.local/bin:$PATH"
 
 # Aliases
 alias ll="ls -la"
@@ -180,18 +183,21 @@ export EDITOR=vim
 # Prompt with color
 PS1='\[\033[01;32m\]\u@clud-dev\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 
-# Auto-cd to project directory if it exists
-if [ -d "/home/coder/project" ]; then
-    cd /home/coder/project
+# Auto-cd to workspace directory if it exists
+if [ -d "/workspace" ]; then
+    cd /workspace
 fi
 
 # Welcome message
 echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
-echo "│ Working Directory: /workspace → /home/coder/project                │"
+echo "│ Working Directory: /workspace                                      │"
 echo "│ Type 'clud' to start Claude with dangerous permissions enabled     │"
 echo "└────────────────────────────────────────────────────────────────────┘"
 echo ""
 EOF
+
+# Fix line endings for Windows compatibility
+RUN dos2unix /root/.bashrc
 
 # ============================================================================
 # Setup entrypoint (LIGHTWEIGHT - fast to change)
@@ -207,7 +213,7 @@ RUN chmod +x /entrypoint.sh
 EXPOSE 8080
 
 # Set working directory
-WORKDIR /home/${USERNAME}/project
+WORKDIR /workspace
 
 # Set entrypoint and default command
 ENTRYPOINT ["/entrypoint.sh"]

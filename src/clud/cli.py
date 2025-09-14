@@ -639,7 +639,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             args.cmd,
         ]
     else:
-        # Interactive shell mode - override entrypoint to start bash
+        # Interactive shell mode - override entrypoint to start bash with login shell
         base_cmd = [
             "docker",
             "run",
@@ -656,10 +656,13 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "-w",
             "/workspace",  # Set working directory to /workspace
             "clud-dev:latest",
+            "-i",  # Interactive shell to source bashrc and show banner
+            "-l",  # Login shell
         ]
 
         # On Windows with mintty/git-bash, prepend winpty for TTY support
-        cmd = ["winpty"] + base_cmd if platform.system() == "Windows" and "MSYS" in os.environ.get("MSYSTEM", "") else base_cmd
+        msystem = os.environ.get("MSYSTEM", "")
+        cmd = ["winpty"] + base_cmd if platform.system() == "Windows" and msystem.startswith(("MSYS", "MINGW")) else base_cmd
 
     print("Starting CLUD development container...")
 
