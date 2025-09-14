@@ -11,7 +11,7 @@ keywords = ["claude", "docker", "cli"]
 license = { text = "BSD 3-Clause License" }
 classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
-
+    "keyring>=24.0.0",
 ]
 # Change this with the version number bump.
 version = "0.0.1"
@@ -50,10 +50,82 @@ line-ending = "auto"
 [tool.pyright]
 include = ["src", "tests"]
 exclude = ["**/__pycache__"]
-reportMissingImports = true
-reportMissingTypeStubs = false
+
+# Type checking configuration
+typeCheckingMode = "strict"
 pythonVersion = "3.13"
 pythonPlatform = "All"
+useLibraryCodeForTypes = true
+analyzeUnannotatedFunctions = true
+strictParameterNoneValue = true
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true
+
+# Report settings
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnusedImport = false
+reportUnusedClass = false
+reportUnusedFunction = false
+reportUnusedVariable = false
+reportDuplicateImport = true
+reportWildcardImportFromLibrary = true
+reportOptionalSubscript = false
+reportOptionalMemberAccess = false
+reportOptionalCall = false
+reportOptionalIterable = false
+reportOptionalContextManager = false
+reportOptionalOperand = false
+reportGeneralTypeIssues = true
+reportPropertyTypeMismatch = true
+reportFunctionMemberAccess = true
+reportPrivateUsage = false
+reportConstantRedefinition = false
+reportIncompatibleMethodOverride = true
+reportIncompatibleVariableOverride = true
+reportInconsistentConstructor = true
+reportOverlappingOverload = true
+reportMissingSuperCall = false
+reportUninitializedInstanceVariable = false
+reportInvalidStringEscapeSequence = true
+reportUnknownParameterType = "error"
+reportUnknownArgumentType = "error"
+reportUnknownLambdaType = "error"
+reportUnknownVariableType = "error"
+reportUnknownMemberType = "error"
+reportMissingParameterType = "error"
+reportMissingTypeArgument = "error"
+reportMissingReturnType = "error"
+reportUntypedFunctionDecorator = "error"
+reportUntypedClassDecorator = "error"
+reportUntypedBaseClass = "error"
+reportUntypedNamedTuple = "error"
+reportInvalidTypeVarUse = true
+reportCallInDefaultInitializer = false
+reportUnnecessaryIsInstance = false
+reportUnnecessaryCast = false
+reportUnnecessaryComparison = false
+reportUnnecessaryContains = false
+reportAssertAlwaysTrue = false
+reportSelfClsParameterName = true
+reportImplicitStringConcatenation = false
+reportUndefinedVariable = true
+reportUnboundVariable = true
+reportInvalidStubStatement = true
+reportIncompleteStub = true
+reportUnsupportedDunderAll = true
+reportUnusedCallResult = false
+reportUnusedCoroutine = true
+reportUnusedExpression = false
+reportUnnecessaryTypeIgnoreComment = false
+reportMatchNotExhaustive = true
+
+# Display settings
+verboseOutput = false
+autoImportCompletions = false
+indexing = false
+functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
