@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run python
 """Simple Docker integration tests that don't depend on project setup."""
 
+import contextlib
 import subprocess
 import sys
 import time
@@ -10,6 +11,7 @@ import urllib.request
 
 class SimpleDockerError(Exception):
     """Exception raised when simple Docker test fails."""
+
     pass
 
 
@@ -22,18 +24,12 @@ def test_docker_container_basic():
     container_name = "clud-simple-test"
 
     # Remove existing container if it exists
-    try:
-        subprocess.run(["docker", "rm", "-f", container_name],
-                      capture_output=True, check=False)
-    except:
-        pass
+    with contextlib.suppress(BaseException):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
     try:
         # Start a simple container that will exit after running a command
-        run_cmd = [
-            "docker", "run", "--name", container_name,
-            "ubuntu:25.04", "echo", "Hello from Docker!"
-        ]
+        run_cmd = ["docker", "run", "--name", container_name, "ubuntu:25.04", "echo", "Hello from Docker!"]
 
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
         output = result.stdout.strip()
@@ -59,13 +55,11 @@ def test_docker_container_basic():
         subprocess.run(rm_cmd, check=True, capture_output=True)
         print("OK Container removed successfully")
 
-        return True
-
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {e}")
         if e.stderr:
             print(f"Error output: {e.stderr}")
-        raise SimpleDockerError(f"Docker command failed: {e}")
+        raise SimpleDockerError(f"Docker command failed: {e}") from e
 
 
 def test_docker_web_server_nginx():
@@ -77,20 +71,12 @@ def test_docker_web_server_nginx():
     test_port = 8082
 
     # Remove existing container if it exists
-    try:
-        subprocess.run(["docker", "rm", "-f", container_name],
-                      capture_output=True, check=False)
-    except:
-        pass
+    with contextlib.suppress(BaseException):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
     try:
         # Start nginx container
-        run_cmd = [
-            "docker", "run", "-d",
-            "--name", container_name,
-            "-p", f"{test_port}:80",
-            "nginx:alpine"
-        ]
+        run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:80", "nginx:alpine"]
 
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
         container_id = result.stdout.strip()
@@ -135,21 +121,18 @@ def test_docker_web_server_nginx():
         subprocess.run(stop_cmd, check=True, timeout=15)
         print("OK Container stopped gracefully")
 
-        return True
-
     except subprocess.CalledProcessError as e:
         print(f"Docker command failed: {e}")
         if e.stderr:
             print(f"Error output: {e.stderr}")
-        raise SimpleDockerError(f"Docker command failed: {e}")
+        raise SimpleDockerError(f"Docker command failed: {e}") from e
 
     finally:
         # Cleanup
         try:
-            subprocess.run(["docker", "rm", "-f", container_name],
-                          capture_output=True, check=False)
+            subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
             print("OK Container cleanup completed")
-        except:
+        except Exception:
             pass
 
 
@@ -161,19 +144,12 @@ def test_docker_exit_signals():
     container_name = "clud-signal-test"
 
     # Remove existing container if it exists
-    try:
-        subprocess.run(["docker", "rm", "-f", container_name],
-                      capture_output=True, check=False)
-    except:
-        pass
+    with contextlib.suppress(BaseException):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
     try:
         # Start a long-running container
-        run_cmd = [
-            "docker", "run", "-d",
-            "--name", container_name,
-            "ubuntu:25.04", "sleep", "300"
-        ]
+        run_cmd = ["docker", "run", "-d", "--name", container_name, "ubuntu:25.04", "sleep", "300"]
 
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
         container_id = result.stdout.strip()
@@ -204,21 +180,18 @@ def test_docker_exit_signals():
 
         print("OK Container exit verified")
 
-        return True
-
     except subprocess.CalledProcessError as e:
         print(f"Docker command failed: {e}")
         if e.stderr:
             print(f"Error output: {e.stderr}")
-        raise SimpleDockerError(f"Docker command failed: {e}")
+        raise SimpleDockerError(f"Docker command failed: {e}") from e
 
     finally:
         # Cleanup
         try:
-            subprocess.run(["docker", "rm", "-f", container_name],
-                          capture_output=True, check=False)
+            subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
             print("OK Container cleanup completed")
-        except:
+        except Exception:
             pass
 
 

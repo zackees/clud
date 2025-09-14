@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run python
 """Integration test for Claude Docker CLI exit functionality."""
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 
 class DockerCliExitError(Exception):
     """Exception raised when Docker CLI exit test fails."""
+
     pass
 
 
@@ -29,27 +31,19 @@ def test_docker_container_exit():
         subprocess.run(build_cmd, check=True, timeout=600)
         print("OK Docker image built successfully")
     except subprocess.CalledProcessError as e:
-        raise DockerCliExitError(f"Failed to build Docker image: {e}")
-    except subprocess.TimeoutExpired:
-        raise DockerCliExitError("Docker build timed out")
+        raise DockerCliExitError(f"Failed to build Docker image: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise DockerCliExitError("Docker build timed out") from e
 
     # Start container in detached mode
     print("\nStarting Docker container...")
     container_name = "clud-test-exit"
 
     # Remove existing container if it exists
-    try:
-        subprocess.run(["docker", "rm", "-f", container_name],
-                      capture_output=True, check=False)
-    except:
-        pass
+    with contextlib.suppress(BaseException):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
-    run_cmd = [
-        "docker", "run", "-d",
-        "--name", container_name,
-        "-v", f"{project_root}:/home/coder/project",
-        "clud-dev:latest"
-    ]
+    run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", "clud-dev:latest"]
 
     try:
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
@@ -75,7 +69,7 @@ def test_docker_container_exit():
         # Test graceful exit with docker stop
         print("\nTesting graceful exit with docker stop...")
         stop_cmd = ["docker", "stop", "-t", "10", container_name]
-        stop_result = subprocess.run(stop_cmd, check=True, capture_output=True, text=True, timeout=15)
+        subprocess.run(stop_cmd, check=True, capture_output=True, text=True, timeout=15)
         print("OK Container stopped gracefully")
 
         # Verify container is stopped
@@ -100,26 +94,21 @@ def test_docker_container_exit():
         print("OK Container restarted successfully")
 
         # Final cleanup - force stop and remove
-        subprocess.run(["docker", "stop", container_name],
-                      capture_output=True, check=False)
-        subprocess.run(["docker", "rm", container_name],
-                      capture_output=True, check=False)
+        subprocess.run(["docker", "stop", container_name], capture_output=True, check=False)
+        subprocess.run(["docker", "rm", container_name], capture_output=True, check=False)
 
         print("OK Container cleanup completed")
-
-        return True
 
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {e}")
         if e.stderr:
             print(f"Error output: {e.stderr}")
-        raise DockerCliExitError(f"Docker command failed: {e}")
+        raise DockerCliExitError(f"Docker command failed: {e}") from e
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         # Cleanup on timeout
-        subprocess.run(["docker", "rm", "-f", container_name],
-                      capture_output=True, check=False)
-        raise DockerCliExitError("Docker command timed out")
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
+        raise DockerCliExitError("Docker command timed out") from e
 
 
 def test_docker_compose_exit():
@@ -168,26 +157,18 @@ def test_docker_compose_exit():
 
         print("OK Docker Compose exit verified")
 
-        return True
-
     except subprocess.CalledProcessError as e:
         print(f"Docker Compose command failed: {e}")
         # Attempt cleanup
-        try:
-            subprocess.run(["docker-compose", "down", "-v"],
-                          capture_output=True, check=False, timeout=30)
-        except:
-            pass
-        raise DockerCliExitError(f"Docker Compose test failed: {e}")
+        with contextlib.suppress(BaseException):
+            subprocess.run(["docker-compose", "down", "-v"], capture_output=True, check=False, timeout=30)
+        raise DockerCliExitError(f"Docker Compose test failed: {e}") from e
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         # Cleanup on timeout
-        try:
-            subprocess.run(["docker-compose", "down", "-v"],
-                          capture_output=True, check=False, timeout=30)
-        except:
-            pass
-        raise DockerCliExitError("Docker Compose command timed out")
+        with contextlib.suppress(BaseException):
+            subprocess.run(["docker-compose", "down", "-v"], capture_output=True, check=False, timeout=30)
+        raise DockerCliExitError("Docker Compose command timed out") from e
 
     finally:
         os.chdir(original_dir)

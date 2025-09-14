@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run python
 """Integration test for dev container web server functionality."""
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -8,10 +9,12 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 
 class WebServerError(Exception):
     """Exception raised when web server test fails."""
+
     pass
 
 
@@ -34,7 +37,7 @@ def wait_for_server(url: str, timeout: int = 60, interval: float = 2.0) -> bool:
     return False
 
 
-def check_server_response(url: str) -> dict:
+def check_server_response(url: str) -> dict[str, Any]:
     """Check server response and return status information."""
     try:
         response = urllib.request.urlopen(url, timeout=10)
@@ -42,23 +45,13 @@ def check_server_response(url: str) -> dict:
         # Read response content
         content = response.read()
 
-        return {
-            "status_code": response.status,
-            "headers": dict(response.headers),
-            "content_length": len(content),
-            "content_preview": content[:500].decode('utf-8', errors='ignore')
-        }
+        return {"status_code": response.status, "headers": dict(response.headers), "content_length": len(content), "content_preview": content[:500].decode("utf-8", errors="ignore")}
 
     except urllib.error.HTTPError as e:
-        return {
-            "status_code": e.code,
-            "error": str(e),
-            "content_length": 0,
-            "content_preview": ""
-        }
+        return {"status_code": e.code, "error": str(e), "content_length": 0, "content_preview": ""}
 
     except Exception as e:
-        raise WebServerError(f"Failed to check server response: {e}")
+        raise WebServerError(f"Failed to check server response: {e}") from e
 
 
 def test_code_server_ui():
@@ -77,32 +70,22 @@ def test_code_server_ui():
         subprocess.run(build_cmd, check=True, timeout=600)
         print("OK Docker image built successfully")
     except subprocess.CalledProcessError as e:
-        raise WebServerError(f"Failed to build Docker image: {e}")
-    except subprocess.TimeoutExpired:
-        raise WebServerError("Docker build timed out")
+        raise WebServerError(f"Failed to build Docker image: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise WebServerError("Docker build timed out") from e
 
     # Start container with web server
     print("\nStarting Docker container with web server...")
     container_name = "clud-test-webserver"
 
     # Remove existing container if it exists
-    try:
-        subprocess.run(["docker", "rm", "-f", container_name],
-                      capture_output=True, check=False)
-    except:
-        pass
+    with contextlib.suppress(BaseException):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
     # Use a different port for testing to avoid conflicts
     test_port = 8081
 
-    run_cmd = [
-        "docker", "run", "-d",
-        "--name", container_name,
-        "-p", f"{test_port}:8080",
-        "-v", f"{project_root}:/home/coder/project",
-        "-e", "ENVIRONMENT=test",
-        "clud-dev:latest"
-    ]
+    run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:8080", "-v", f"{project_root}:/home/coder/project", "-e", "ENVIRONMENT=test", "clud-dev:latest"]
 
     try:
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
@@ -142,7 +125,7 @@ def test_code_server_ui():
         for i in range(3):
             response_info = check_server_response(server_url)
             if response_info["status_code"] != 200:
-                raise WebServerError(f"Request {i+1} failed with status {response_info['status_code']}")
+                raise WebServerError(f"Request {i + 1} failed with status {response_info['status_code']}")
 
         print("OK Multiple requests successful")
 
@@ -155,25 +138,22 @@ def test_code_server_ui():
 
         print("OK Container is still running")
 
-        return True
-
     except subprocess.CalledProcessError as e:
         print(f"Docker command failed: {e}")
         if e.stderr:
             print(f"Error output: {e.stderr}")
-        raise WebServerError(f"Docker command failed: {e}")
+        raise WebServerError(f"Docker command failed: {e}") from e
 
-    except subprocess.TimeoutExpired:
-        raise WebServerError("Docker command timed out")
+    except subprocess.TimeoutExpired as e:
+        raise WebServerError("Docker command timed out") from e
 
     finally:
         # Cleanup
         try:
             print("\nCleaning up container...")
-            subprocess.run(["docker", "rm", "-f", container_name],
-                          capture_output=True, check=False, timeout=30)
+            subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False, timeout=30)
             print("OK Container cleanup completed")
-        except:
+        except Exception:
             print("! Container cleanup may have failed")
 
 
@@ -184,7 +164,6 @@ def test_docker_compose_web_server():
 
     if not compose_file.exists():
         print("! docker-compose.yml not found, skipping compose web server test")
-        return True
 
     print("\nTesting Docker Compose web server...")
 
@@ -198,6 +177,7 @@ def test_docker_compose_web_server():
 
         # Extract port from compose file (looking for pattern like "8743:8080")
         import re
+
         port_match = re.search(r'"(\d+):8080"', compose_content)
         if port_match:
             external_port = int(port_match.group(1))
@@ -234,25 +214,22 @@ def test_docker_compose_web_server():
 
         # Test container health
         ps_cmd = ["docker-compose", "ps"]
-        ps_result = subprocess.run(ps_cmd, capture_output=True, text=True, check=True)
+        subprocess.run(ps_cmd, capture_output=True, text=True, check=True)
         print("OK Docker Compose services are healthy")
-
-        return True
 
     except subprocess.CalledProcessError as e:
         print(f"Docker Compose command failed: {e}")
-        raise WebServerError(f"Docker Compose test failed: {e}")
+        raise WebServerError(f"Docker Compose test failed: {e}") from e
 
-    except subprocess.TimeoutExpired:
-        raise WebServerError("Docker Compose command timed out")
+    except subprocess.TimeoutExpired as e:
+        raise WebServerError("Docker Compose command timed out") from e
 
     finally:
         try:
             print("Cleaning up Docker Compose services...")
-            subprocess.run(["docker-compose", "down", "-v"],
-                          capture_output=True, check=False, timeout=30)
+            subprocess.run(["docker-compose", "down", "-v"], capture_output=True, check=False, timeout=30)
             print("OK Docker Compose cleanup completed")
-        except:
+        except Exception:
             print("! Docker Compose cleanup may have failed")
         finally:
             os.chdir(original_dir)
@@ -269,11 +246,7 @@ def test_cli_ui_mode():
 
     try:
         # Test that CLI accepts --ui flag and doesn't error immediately
-        cli_cmd = [
-            sys.executable, "-m", "clud.cli",
-            "--ui", "--port", "8082",
-            str(project_root)
-        ]
+        cli_cmd = [sys.executable, "-m", "clud.cli", "--ui", "--port", "8082", str(project_root)]
 
         # Set a fake API key for testing
         test_env = os.environ.copy()
@@ -282,13 +255,7 @@ def test_cli_ui_mode():
         print("Testing CLI UI mode initialization...")
 
         # Run with timeout to prevent hanging
-        process = subprocess.Popen(
-            cli_cmd,
-            env=test_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        process = subprocess.Popen(cli_cmd, env=test_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         # Wait a bit to see if it starts properly
         try:
@@ -310,13 +277,10 @@ def test_cli_ui_mode():
             except subprocess.TimeoutExpired:
                 process.kill()
 
-        return True
-
     except Exception as e:
         print(f"CLI UI mode test error: {e}")
         # Don't fail the entire test suite for CLI issues
         print("! CLI UI mode test had issues, but continuing other tests")
-        return True
 
 
 def main():
