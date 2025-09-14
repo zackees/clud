@@ -5,8 +5,11 @@ import contextlib
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
+import time
+import webbrowser
 from pathlib import Path
 
 try:
@@ -70,6 +73,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-from", help="Retrieve ANTHROPIC_API_KEY from OS keyring entry NAME")
 
     parser.add_argument("--read-only-home", action="store_true", help="Mount home directory read-only as /host-home")
+
+    parser.add_argument("--ui", action="store_true", help="Launch code-server UI in browser")
+
+    parser.add_argument("--port", type=int, default=8743, help="Port for code-server UI (default: 8743)")
+
+    parser.add_argument("--api-key", help="Anthropic API key for Claude CLI")
 
     parser.add_argument("--version", action="version", version="clud 0.0.1")
 
@@ -221,12 +230,171 @@ def prompt_for_api_key() -> str:
             sys.exit(2)
 
 
+def is_port_available(port: int) -> bool:
+    """Check if a port is available for binding."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("localhost", port))
+            return True
+    except OSError:
+        return False
+
+
+def find_available_port(start_port: int = 8743) -> int:
+    """Find an available port starting from start_port."""
+    for port in range(start_port, start_port + 100):
+        if is_port_available(port):
+            return port
+    raise DockerError(f"No available ports found starting from {start_port}")
+
+
+def build_docker_image() -> bool:
+    """Build the clud-dev Docker image if it doesn't exist."""
+    try:
+        # Check if image already exists
+        result = subprocess.run(["docker", "images", "-q", "clud-dev:latest"], capture_output=True, text=True, check=True)
+
+        if result.stdout.strip():
+            print("Docker image clud-dev:latest already exists")
+            return True
+
+        print("Building clud-dev Docker image...")
+
+        # Build the image from the current directory's Dockerfile
+        result = subprocess.run(["docker", "build", "-t", "clud-dev:latest", "."], check=True)
+
+        print("Docker image built successfully")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to build Docker image: {e}")
+        return False
+    except FileNotFoundError as err:
+        raise DockerError("Docker command not found. Make sure Docker is installed.") from err
+
+
+def stop_existing_container(container_name: str = "clud-dev") -> None:
+    """Stop and remove existing container if it exists."""
+    try:
+        # Check if container exists and is running
+        result = subprocess.run(["docker", "ps", "-q", "-f", f"name={container_name}"], capture_output=True, text=True, check=True)
+
+        if result.stdout.strip():
+            print(f"Stopping existing container {container_name}...")
+            subprocess.run(["docker", "stop", container_name], check=True, capture_output=True)
+
+        # Check if container exists (stopped)
+        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name={container_name}"], capture_output=True, text=True, check=True)
+
+        if result.stdout.strip():
+            print(f"Removing existing container {container_name}...")
+            subprocess.run(["docker", "rm", container_name], check=True, capture_output=True)
+
+    except subprocess.CalledProcessError:
+        # Container might not exist, which is fine
+        pass
+
+
+def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str) -> int:
+    """Run the code-server UI container."""
+    # Find available port
+    port = args.port
+    if not is_port_available(port):
+        print(f"Port {port} is not available, finding alternative...")
+        port = find_available_port(port)
+        print(f"Using port {port}")
+
+    # Build image if needed
+    if not build_docker_image():
+        return 1
+
+    # Stop existing container
+    stop_existing_container()
+
+    # Prepare Docker command
+    docker_path = normalize_path_for_docker(project_path)
+    home_config_path = normalize_path_for_docker(Path.home() / ".config")
+    home_local_path = normalize_path_for_docker(Path.home() / ".local")
+
+    cmd = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        "clud-dev",
+        "-p",
+        f"{port}:8080",
+        "-e",
+        f"ANTHROPIC_API_KEY={api_key}",
+        "-e",
+        "PASSWORD=",  # No authentication
+        "-v",
+        f"{docker_path}:/home/coder/project",
+        "-v",
+        f"{home_config_path}:/home/coder/.config",
+        "-v",
+        f"{home_local_path}:/home/coder/.local",
+        "clud-dev:latest",
+    ]
+
+    print(f"Starting clud-dev container on port {port}...")
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        container_id = result.stdout.strip()
+        print(f"Container started with ID: {container_id[:12]}")
+
+        # Wait a moment for the server to start
+        print("Waiting for code-server to start...")
+        time.sleep(3)
+
+        # Check if container is still running
+        check_result = subprocess.run(["docker", "ps", "-q", "-f", f"id={container_id}"], capture_output=True, text=True, check=True)
+
+        if not check_result.stdout.strip():
+            # Container stopped, get logs
+            logs_result = subprocess.run(["docker", "logs", container_id], capture_output=True, text=True)
+            print(f"Container failed to start. Logs:\n{logs_result.stdout}\n{logs_result.stderr}")
+            return 1
+
+        # Open browser
+        url = f"http://localhost:{port}"
+        print(f"Opening browser to {url}")
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            print(f"Could not open browser automatically: {e}")
+            print(f"Please open {url} in your browser")
+
+        print(f"""
+Code-server is now running!
+- URL: {url}
+- Container: clud-dev
+- Project: {project_path}
+
+To stop the container: docker stop clud-dev
+To view logs: docker logs clud-dev
+""")
+
+        return 0
+
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to start container: {e}")
+        if e.stderr:
+            print(f"Error: {e.stderr}")
+        return 1
+
+
 def get_api_key(args: argparse.Namespace) -> str:
-    """Get API key following priority order: --api-key-from, env var, saved config, prompt."""
+    """Get API key following priority order: --api-key, --api-key-from, env var, saved config, prompt."""
     api_key = None
 
+    # Priority 0: --api-key command line argument
+    if hasattr(args, "api_key") and args.api_key:
+        api_key = args.api_key
+
     # Priority 1: --api-key-from keyring entry (if keyring is available)
-    if args.api_key_from:
+    if not api_key and args.api_key_from:
         with contextlib.suppress(ConfigError):
             api_key = get_api_key_from_keyring(args.api_key_from) if keyring is not None else load_api_key_from_config(args.api_key_from)
 
@@ -246,6 +414,8 @@ def get_api_key(args: argparse.Namespace) -> str:
     if not validate_api_key(api_key):
         raise ValidationError("Invalid API key format")
 
+    # Type checker note: validate_api_key ensures api_key is not None
+    assert api_key is not None
     return api_key
 
 
@@ -385,7 +555,22 @@ def main() -> int:
         args.enable_firewall = False
 
     try:
-        return run_container(args)
+        # Route to UI mode or traditional container mode
+        if args.ui:
+            # Validate project path
+            project_path = validate_path(args.path)
+
+            # Get API key for UI mode
+            api_key = get_api_key(args)
+
+            # Check Docker availability
+            if not check_docker_available():
+                raise DockerError("Docker is not available or not running")
+
+            return run_ui_container(args, project_path, api_key)
+        else:
+            # Traditional container mode
+            return run_container(args)
     except ValidationError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2

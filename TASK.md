@@ -6,8 +6,8 @@ Create a unified Docker-based development environment that combines code-server 
 ## Final Technology Stack Decision
 
 ### Primary Components
-- **Base Image:** `codercom/code-server:latest` (not Ubuntu from scratch)
-- **IDE:** code-server on port 8080 (internal), mapped to configurable external port
+- **Base Image:** Ubuntu 25.04 (matching CLAUD_DOCKER.dockerfile, not Debian 12 like upstream code-server)
+- **IDE:** code-server installed manually on port 8080 (internal), mapped to configurable external port
 - **AI Assistant:** Claude CLI with MCP server support
 - **Python:** 3.13+ with uv package manager pre-installed
 - **Node.js:** via fnm (Fast Node Manager)
@@ -24,7 +24,8 @@ Create a unified Docker-based development environment that combines code-server 
 
 ### Phase 1: Create Merged Dockerfile
 Build a single Dockerfile that:
-- Starts FROM `codercom/code-server:latest`
+- Starts FROM `ubuntu:25.04` (for consistency with existing CLAUD_DOCKER.dockerfile)
+- Installs code-server manually (not using their Docker image)
 - Installs Claude CLI and configures with Anthropic API key
 - Adds modern developer tools:
   - **Essential:** git, lazygit, ripgrep, fd, fzf, bat
@@ -113,3 +114,5 @@ clud --ui  # Uses env vars
 - Data persistence via volume mounts to host directories
 - No authentication by default (PASSWORD="") but keep capability for future
 - Focus on developer experience - everything should "just work"
+- **IMPORTANT:** code-server upstream uses Debian 12, but we'll use Ubuntu 25.04 for consistency with CLAUD_DOCKER.dockerfile
+- code-server will be installed via their install script or .deb package on Ubuntu

@@ -4,7 +4,16 @@
       "Bash(git init:*)",
       "Bash(git add:*)",
       "Bash(bash lint)",
-      "Bash(bash test)"
+      "Bash(bash test)",
+      "Bash(docker compose:*)",
+      "Bash(docker run:*)",
+      "Bash(winpty docker run --rm --entrypoint=\"\" clud-dev:latest ls -la /)",
+      "Bash(cat:*)",
+      "Bash(dos2unix:*)",
+      "Bash(echo $?)",
+      "Bash(chmod:*)",
+      "Bash(./bash help)",
+      "Bash(./bash test --help)"
     ],
     "deny": [],
     "ask": []
