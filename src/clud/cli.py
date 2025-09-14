@@ -639,14 +639,16 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             args.cmd,
         ]
     else:
-        # Interactive shell mode
-        cmd = [
+        # Interactive shell mode - override entrypoint to start bash
+        base_cmd = [
             "docker",
             "run",
             "-it",
             "--rm",
             "--name",
             "clud-dev",
+            "--entrypoint",
+            "/bin/bash",  # Override entrypoint to bash
             "-e",
             f"ANTHROPIC_API_KEY={api_key}",
             "-v",
@@ -654,34 +656,10 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "-w",
             "/workspace",  # Set working directory to /workspace
             "clud-dev:latest",
-            "/bin/bash",
-            "-c",
-            # Custom startup script that shows banner and starts bash
-            """
-            # Function to show banner
-            show_banner() {
-                clud --show-banner 2>/dev/null || true
-            }
-
-            # Show banner on first run
-            show_banner
-
-            # Wait for user to press enter
-            echo -n ""
-            read -p "" dummy 2>/dev/null || true
-
-            # Clear screen and show prompt
-            clear
-            echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
-            echo "│ Working Directory: /workspace                                      │"
-            echo "│ Type 'clud' to start the background agent                         │"
-            echo "└────────────────────────────────────────────────────────────────────┘"
-            echo ""
-
-            # Start interactive bash
-            exec /bin/bash
-            """,
         ]
+
+        # On Windows with mintty/git-bash, prepend winpty for TTY support
+        cmd = ["winpty"] + base_cmd if platform.system() == "Windows" and "MSYS" in os.environ.get("MSYSTEM", "") else base_cmd
 
     print("Starting CLUD development container...")
 
@@ -695,12 +673,10 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             result = subprocess.run(cmd, env=env, check=False)
             return result.returncode
         else:
-            # For interactive shell, we need to connect stdin/stdout/stderr directly
-            # This allows for proper terminal interaction
-            process = subprocess.Popen(cmd, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
-
-            # Wait for the process to complete
-            return process.wait()
+            # For interactive shell, use subprocess.run for direct terminal passthrough
+            # This works better on Windows and with various terminal emulators
+            result = subprocess.run(cmd, env=env, check=False)
+            return result.returncode
 
     except KeyboardInterrupt:
         print("\nContainer terminated.", file=sys.stderr)
