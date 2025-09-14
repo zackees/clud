@@ -1,5 +1,7 @@
 # clud
 
+[![Build and Push Multi Docker Image](https://github.com/zackees/clud/actions/workflows/build_multi_docker_image.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/build_multi_docker_image.yml)
+
 Claude in a Docker Box - A development container with Claude CLI and code-server.
 
 ## Docker Hub
