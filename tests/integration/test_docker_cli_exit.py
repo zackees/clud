@@ -5,6 +5,7 @@ import contextlib
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # Add tests directory to path for imports
@@ -33,7 +34,7 @@ def test_workspace_sync_verification():
 
     # Run container with command to check pyproject.toml contains 'clud'
     print("\nTesting workspace sync with container command...")
-    container_name = "clud-test-sync"
+    container_name = f"clud-test-sync-{uuid.uuid4().hex[:8]}"
 
     # Remove existing container if it exists
     with contextlib.suppress(BaseException):
@@ -104,7 +105,7 @@ def test_docker_container_exit():
 
     # Start container in detached mode
     print("\nStarting Docker container...")
-    container_name = "clud-test-exit"
+    container_name = f"clud-test-exit-{uuid.uuid4().hex[:8]}"
 
     # Remove existing container if it exists
     with contextlib.suppress(BaseException):

@@ -8,6 +8,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,7 @@ def test_code_server_ui():
 
     # Start container with web server
     print("\nStarting Docker container with web server...")
-    container_name = "clud-test-webserver"
+    container_name = f"clud-test-webserver-{uuid.uuid4().hex[:8]}"
 
     # Remove existing container if it exists
     with contextlib.suppress(BaseException):

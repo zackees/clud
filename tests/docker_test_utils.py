@@ -1,11 +1,20 @@
 """Docker test utilities for efficient image building and caching."""
 
+import contextlib
 import hashlib
 import json
+import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
+
+# Import fcntl only on Unix-like systems
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 
 class DockerTestImageManager:
@@ -18,6 +27,8 @@ class DockerTestImageManager:
         self.project_root = Path(__file__).parent.parent
         self.dockerfile_path = self.project_root / "Dockerfile"
         self.cache_file = self.project_root / ".docker_test_cache.json"
+        self.lock_file = self.project_root / ".docker_build.lock"
+        self._lock = threading.Lock()
 
     def _get_build_context_hash(self) -> str:
         """Calculate hash of Dockerfile and key build context files."""
@@ -150,23 +161,96 @@ class DockerTestImageManager:
             # Restore original working directory
             original_cwd and subprocess.run(["cd", str(original_cwd)], shell=True)
 
+    def _acquire_file_lock(self, timeout: int = 300) -> Any:
+        """Acquire a file-based lock for cross-process synchronization.
+
+        Returns the lock file descriptor that must be kept open during the critical section.
+        """
+        lock_fd = None
+        start_time = time.time()
+
+        # Create lock file if it doesn't exist
+        self.lock_file.touch(exist_ok=True)
+
+        while time.time() - start_time < timeout:
+            try:
+                # Open the lock file
+                if os.name == "nt":  # Windows
+                    # On Windows, we'll use a simple file-based approach
+                    # Try to create a temporary marker file atomically
+                    marker_file = self.lock_file.with_suffix(".marker")
+                    try:
+                        # Try to create the marker file exclusively
+                        fd = os.open(str(marker_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.close(fd)
+                        return marker_file  # Return the marker file path as the "lock"
+                    except FileExistsError:
+                        # Lock is held by another process, wait and retry
+                        time.sleep(0.5)
+                        continue
+                else:  # Unix-like systems
+                    with open(self.lock_file, "r+") as lock_fd:
+                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return lock_fd
+            except OSError:
+                # Lock is held by another process, wait and retry
+                if lock_fd:
+                    lock_fd.close()
+                time.sleep(0.5)
+
+        raise TimeoutError(f"Could not acquire Docker build lock after {timeout} seconds")
+
+    def _release_file_lock(self, lock: Any) -> None:
+        """Release the file-based lock."""
+        if lock:
+            if os.name == "nt" and isinstance(lock, Path):
+                # On Windows, remove the marker file
+                with contextlib.suppress(Exception):
+                    lock.unlink(missing_ok=True)
+            elif hasattr(lock, "close"):
+                # On Unix, close the file descriptor (releases flock)
+                with contextlib.suppress(Exception):
+                    lock.close()
+
     def ensure_image_ready(self) -> str:
-        """Ensure the test image is built and ready. Returns the full image name."""
-        print(f"Ensuring Docker test image is ready: {self.full_image_name}")
+        """Ensure the test image is built and ready. Returns the full image name.
 
-        if self._needs_rebuild():
-            # Build the image
-            image_id = self._build_image()
+        This method is thread-safe and process-safe, ensuring only one build
+        occurs even when multiple tests run in parallel.
+        """
+        # Use thread lock for intra-process synchronization
+        with self._lock:
+            print(f"Ensuring Docker test image is ready: {self.full_image_name}")
 
-            # Update cache
-            build_hash = self._get_build_context_hash()
-            self._save_cache_info(build_hash, image_id)
+            # First check without file lock (fast path)
+            if not self._needs_rebuild():
+                print(f"Using cached image: {self.full_image_name}")
+                return self.full_image_name
 
-            print(f"Image ready: {self.full_image_name} ({image_id[:12]})")
-        else:
-            print(f"Using cached image: {self.full_image_name}")
+            # Need to rebuild - acquire file lock for cross-process synchronization
+            file_lock = None
+            try:
+                print("Acquiring lock for Docker image build...")
+                file_lock = self._acquire_file_lock()
 
-        return self.full_image_name
+                # Double-check after acquiring lock (another process might have built it)
+                if not self._needs_rebuild():
+                    print(f"Image was built by another process, using cached image: {self.full_image_name}")
+                    return self.full_image_name
+
+                # Build the image
+                image_id = self._build_image()
+
+                # Update cache
+                build_hash = self._get_build_context_hash()
+                self._save_cache_info(build_hash, image_id)
+
+                print(f"Image ready: {self.full_image_name} ({image_id[:12]})")
+
+            finally:
+                self._release_file_lock(file_lock)
+
+            return self.full_image_name
 
 
 # Global instance for shared use

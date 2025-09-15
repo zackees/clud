@@ -2,11 +2,13 @@
 """Simple Docker integration tests that don't depend on project setup."""
 
 import contextlib
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 # Add tests directory to path for imports
@@ -19,13 +21,23 @@ class SimpleDockerError(Exception):
     pass
 
 
+def find_free_port():
+    """Find an available port by binding to port 0 and getting the assigned port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
+
+
 def test_docker_container_basic():
     """Test basic Docker container creation and exit."""
     print("Testing basic Docker container functionality...")
     print("=" * 60)
 
     # Use a simple Ubuntu container for testing
-    container_name = "clud-simple-test"
+    # Add unique suffix to prevent collisions when running tests in parallel
+    container_name = f"clud-simple-test-{uuid.uuid4().hex[:8]}"
 
     # Remove existing container if it exists
     with contextlib.suppress(BaseException):
@@ -76,8 +88,8 @@ def test_docker_web_server_nginx():
     print("\nTesting simple web server container...")
     print("=" * 60)
 
-    container_name = "clud-nginx-test"
-    test_port = 8082
+    container_name = f"clud-nginx-test-{uuid.uuid4().hex[:8]}"
+    test_port = find_free_port()
 
     # Remove existing container if it exists
     with contextlib.suppress(BaseException):
@@ -150,7 +162,7 @@ def test_docker_exit_signals():
     print("\nTesting Docker container exit signals...")
     print("=" * 60)
 
-    container_name = "clud-signal-test"
+    container_name = f"clud-signal-test-{uuid.uuid4().hex[:8]}"
 
     # Remove existing container if it exists
     with contextlib.suppress(BaseException):
