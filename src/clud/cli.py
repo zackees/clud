@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import json
 import os
 import platform
 import shutil
@@ -84,6 +85,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", help="Anthropic API key for Claude CLI")
 
     parser.add_argument("-b", "--build", action="store_true", help="Build Docker image before launching container")
+
+    parser.add_argument("--build-dockerfile", metavar="PATH", help="Build Docker image using custom dockerfile path")
 
     parser.add_argument("--just-build", action="store_true", help="Build Docker image and exit (don't launch container)")
 
@@ -331,7 +334,20 @@ def find_available_port(start_port: int = 8743) -> int:
     raise DockerError(f"No available ports found starting from {start_port}")
 
 
-def build_docker_image() -> bool:
+def load_clud_config() -> dict | None:
+    """Load .clud configuration file if it exists."""
+    clud_config_path = Path.cwd() / ".clud"
+    if clud_config_path.exists():
+        try:
+            with open(clud_config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                return config
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Failed to parse .clud config file: {e}")
+    return None
+
+
+def build_docker_image(dockerfile_path: str | None = None) -> bool:
     """Build the clud-dev Docker image if it doesn't exist."""
     try:
         # Check if image already exists
@@ -343,8 +359,39 @@ def build_docker_image() -> bool:
 
         print("Building clud-dev Docker image...")
 
-        # Build the image from the current directory's Dockerfile
-        result = subprocess.run(["docker", "build", "-t", "clud-dev:latest", "."], check=True)
+        # Determine dockerfile to use (priority order)
+        if dockerfile_path:
+            # Priority 1: Use custom dockerfile path from command line
+            dockerfile = Path(dockerfile_path)
+            if not dockerfile.exists():
+                raise DockerError(f"Custom dockerfile not found: {dockerfile_path}")
+            build_context = dockerfile.parent
+            cmd = ["docker", "build", "-t", "clud-dev:latest", "-f", str(dockerfile), str(build_context)]
+            print(f"Using custom dockerfile: {dockerfile_path}")
+        else:
+            # Priority 2: Check for .clud config file
+            config = load_clud_config()
+            if config and "dockerfile" in config:
+                # Use dockerfile path from .clud config
+                config_dockerfile_path = config["dockerfile"]
+                dockerfile = Path(config_dockerfile_path)
+                if not dockerfile.exists():
+                    raise DockerError(f"Dockerfile specified in .clud config not found: {config_dockerfile_path}")
+                build_context = dockerfile.parent
+                cmd = ["docker", "build", "-t", "clud-dev:latest", "-f", str(dockerfile), str(build_context)]
+                print(f"INFO: Using dockerfile from .clud config: {config_dockerfile_path}")
+            elif (Path.cwd() / "Dockerfile").exists():
+                # Priority 3: Use local Dockerfile in current directory
+                cmd = ["docker", "build", "-t", "clud-dev:latest", "."]
+                print("Using local Dockerfile from current directory")
+            else:
+                # Priority 4: Fallback to remote image - don't build locally
+                print("No local Dockerfile found")
+                print("Using remote image instead of building locally")
+                return True
+
+        # Build the image
+        result = subprocess.run(cmd, check=True)
 
         print("Docker image built successfully")
         return True
@@ -434,7 +481,7 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         print(f"Using port {port}")
 
     # Build image if not already built
-    if (not hasattr(args, "_image_built") or not args._image_built) and not build_docker_image():
+    if (not hasattr(args, "_image_built") or not args._image_built) and not build_docker_image(getattr(args, "build_dockerfile", None)):
         return 1
 
     # Stop existing container
@@ -693,7 +740,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
     # Docker availability already checked in main()
 
     # Build image if not already built
-    if (not hasattr(args, "_image_built") or not args._image_built) and not build_docker_image():
+    if (not hasattr(args, "_image_built") or not args._image_built) and not build_docker_image(getattr(args, "build_dockerfile", None)):
         return 1
 
     # Stop existing container
@@ -796,7 +843,7 @@ def main() -> int:
         # Handle build-only mode
         if args.just_build:
             print("Building Docker image...")
-            if build_docker_image():
+            if build_docker_image(getattr(args, "build_dockerfile", None)):
                 print("Docker image built successfully!")
                 return 0
             else:
@@ -806,7 +853,7 @@ def main() -> int:
         # Force build if requested
         if args.build:
             print("Building Docker image...")
-            if not build_docker_image():
+            if not build_docker_image(getattr(args, "build_dockerfile", None)):
                 print("Failed to build Docker image", file=sys.stderr)
                 return 1
             args._image_built = True

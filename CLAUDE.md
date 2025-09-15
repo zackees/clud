@@ -26,6 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docker build -t clud-dev .` - Build the development container image with Node.js/npm support
 - `docker run --rm clud-dev node --version` - Verify Node.js installation in container
 - `docker run --rm clud-dev npm --version` - Verify npm installation in container
+- **Testing Docker builds**: Use a 10-minute timeout when testing docker build operations due to the complexity of the container setup
 
 ### Cleanup
 - `bash clean` - Remove all build artifacts, caches, and virtual environment
