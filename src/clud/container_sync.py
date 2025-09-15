@@ -25,9 +25,8 @@ DEFAULT_LOG_FILE = "/var/log/clud-sync.log"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2
 
-# Rsync exclusions
-RSYNC_EXCLUSIONS = [
-    "/.git",
+# Rsync exclusions (shared by both directions)
+RSYNC_EXCLUSIONS_COMMON = [
     "/.docker_test_cache.json",
     "**/.DS_Store",
     "**/__pycache__",
@@ -38,6 +37,11 @@ RSYNC_EXCLUSIONS = [
     "**/build",
     "**/.venv",
     "**/.env",
+]
+
+# Additional exclusions for container->host sync (includes .git)
+RSYNC_EXCLUSIONS_TO_HOST = RSYNC_EXCLUSIONS_COMMON + [
+    "/.git",  # .git must NOT be synced back to host
 ]
 
 # Code-server configuration
@@ -87,8 +91,8 @@ class ContainerSync:
         except OSError:
             return True
 
-    def build_rsync_command(self, source: Path, dest: Path, dry_run: bool = False, use_gitignore: bool = True) -> list[str]:
-        """Build rsync command with appropriate options."""
+    def build_rsync_command(self, source: Path, dest: Path, dry_run: bool = False, use_gitignore: bool = True, sync_direction: str = "host_to_workspace") -> list[str]:
+        """Build rsync command with appropriate options and exclusions based on sync direction."""
         cmd = [
             "rsync",
             "-av",
@@ -97,8 +101,22 @@ class ContainerSync:
             "--delete",
         ]
 
-        # Add exclusions from constants
-        for exclusion in RSYNC_EXCLUSIONS:
+        # Choose exclusions based on sync direction
+        if sync_direction == "workspace_to_host":
+            # Container -> Host: exclude .git to prevent syncing back
+            exclusions = RSYNC_EXCLUSIONS_TO_HOST
+            logger.debug("Using container->host exclusions (includes .git)")
+        elif sync_direction == "host_to_workspace":
+            # Host -> Container: allow .git to be synced
+            exclusions = RSYNC_EXCLUSIONS_COMMON
+            logger.debug("Using host->container exclusions (allows .git)")
+        else:
+            # Default to host->container behavior for any other case
+            exclusions = RSYNC_EXCLUSIONS_COMMON
+            logger.debug(f"Unknown sync direction '{sync_direction}', defaulting to host->container exclusions")
+
+        # Add exclusions
+        for exclusion in exclusions:
             cmd.append(f"--exclude={exclusion}")
 
         if dry_run:
@@ -170,8 +188,8 @@ class ContainerSync:
         if not self.validate_permissions(self.workspace_dir, "write"):
             return PERMISSION_ERROR
 
-        # Build and run rsync command
-        cmd = self.build_rsync_command(self.host_dir, self.workspace_dir)
+        # Build and run rsync command (host->workspace allows .git)
+        cmd = self.build_rsync_command(self.host_dir, self.workspace_dir, sync_direction="host_to_workspace")
         success, file_count = self.run_rsync(cmd, "Host sync")
 
         return 0 if success else SYNC_ERROR
@@ -198,8 +216,8 @@ class ContainerSync:
             logger.error("Host filesystem appears to be read-only")
             return READONLY_ERROR
 
-        # Build and run rsync command
-        cmd = self.build_rsync_command(self.workspace_dir, self.host_dir, dry_run=dry_run)
+        # Build and run rsync command (workspace->host excludes .git)
+        cmd = self.build_rsync_command(self.workspace_dir, self.host_dir, dry_run=dry_run, sync_direction="workspace_to_host")
         operation = "Dry-run" if dry_run else "Workspace to host sync"
         success, file_count = self.run_rsync(cmd, operation)
 

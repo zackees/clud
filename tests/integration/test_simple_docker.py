@@ -2,9 +2,11 @@
 """Simple Docker integration tests that don't depend on project setup."""
 
 import contextlib
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -216,6 +218,125 @@ def test_docker_exit_signals():
             pass
 
 
+def test_git_sync_behavior():
+    """Test that .git directory syncs from host to container but not back to host."""
+    print("\nTesting .git directory sync behavior...")
+    print("=" * 60)
+
+    container_name = f"clud-git-sync-test-{uuid.uuid4().hex[:8]}"
+
+    # Create temporary test directory with .git structure
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+
+        # Create mock .git directory structure
+        git_dir = temp_path / ".git"
+        git_dir.mkdir()
+
+        # Create test files in .git directory
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+        (git_dir / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+
+        # Create test project file
+        (temp_path / "test_file.py").write_text("# Test file\nprint('hello')\n")
+
+        try:
+            # Start container with volume mount (host -> container) - let entrypoint handle initial sync
+            run_cmd = ["docker", "run", "-d", "--name", container_name, f"--volume={temp_path}:/host:rw", "clud-test:latest", "--cmd", "sleep 300"]
+
+            # Use MSYS_NO_PATHCONV to prevent Git Bash from converting paths
+            env = os.environ.copy()
+            env["MSYS_NO_PATHCONV"] = "1"
+            result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env)
+            container_id = result.stdout.strip()
+            print(f"OK Container started: {container_id[:12]}")
+
+            # Wait for container to be ready and initial sync to complete
+            time.sleep(5)
+
+            # Test 1: Verify initial sync from host to workspace includes .git
+            print("Testing host -> workspace sync includes .git...")
+
+            # Verify .git directory exists in workspace
+            check_git_cmd = ["docker", "exec", container_name, "test", "-d", "/workspace/.git"]
+            git_check = subprocess.run(check_git_cmd, capture_output=True)
+
+            if git_check.returncode != 0:
+                raise SimpleDockerError(".git directory was not synced to workspace")
+
+            print("OK .git directory synced from host to workspace")
+
+            # Test 2: Verify .git files are accessible in workspace
+            check_head_cmd = ["docker", "exec", container_name, "cat", "/workspace/.git/HEAD"]
+            head_result = subprocess.run(check_head_cmd, capture_output=True, text=True)
+
+            if "refs/heads/main" not in head_result.stdout:
+                raise SimpleDockerError("git files were not properly synced")
+
+            print("OK .git files are accessible in workspace")
+
+            # Test 3: Create breadcrumb file in workspace .git directory
+            print("Testing workspace -> host sync excludes .git...")
+
+            breadcrumb_cmd = ["docker", "exec", container_name, "sh", "-c", "echo 'test-breadcrumb' > /workspace/.git/breadcrumb.txt"]
+            subprocess.run(breadcrumb_cmd, check=True, capture_output=True)
+
+            # Verify breadcrumb exists in workspace
+            check_breadcrumb_cmd = ["docker", "exec", container_name, "cat", "/workspace/.git/breadcrumb.txt"]
+            breadcrumb_result = subprocess.run(check_breadcrumb_cmd, capture_output=True, text=True)
+
+            if "test-breadcrumb" not in breadcrumb_result.stdout:
+                raise SimpleDockerError("Failed to create breadcrumb in workspace .git")
+
+            print("OK Breadcrumb created in workspace .git directory")
+
+            # Test 4: Sync workspace back to host and verify .git exclusion
+            sync_back_cmd = ["docker", "exec", container_name, "python", "/usr/local/bin/container-sync", "sync"]
+            sync_back_result = subprocess.run(sync_back_cmd, capture_output=True, text=True)
+
+            if sync_back_result.returncode != 0:
+                raise SimpleDockerError(f"Workspace to host sync failed: {sync_back_result.stderr}")
+
+            # Verify breadcrumb did NOT sync back to host
+            host_breadcrumb_path = temp_path / ".git" / "breadcrumb.txt"
+            if host_breadcrumb_path.exists():
+                raise SimpleDockerError("SECURITY VIOLATION: .git breadcrumb synced back to host!")
+
+            print("OK .git directory properly excluded from workspace -> host sync")
+
+            # Test 5: Verify other files still sync normally
+            # Create a regular file in workspace
+            create_file_cmd = ["docker", "exec", container_name, "sh", "-c", "echo 'workspace change' > /workspace/workspace_file.txt"]
+            subprocess.run(create_file_cmd, check=True, capture_output=True)
+
+            # Sync again
+            subprocess.run(sync_back_cmd, check=True, capture_output=True)
+
+            # Verify regular file DID sync back
+            host_file_path = temp_path / "workspace_file.txt"
+            if not host_file_path.exists():
+                raise SimpleDockerError("Regular files failed to sync back to host")
+
+            if "workspace change" not in host_file_path.read_text():
+                raise SimpleDockerError("Regular file content not synced correctly")
+
+            print("OK Regular files sync correctly from workspace -> host")
+
+        except subprocess.CalledProcessError as e:
+            print(f"Docker command failed: {e}")
+            if e.stderr:
+                print(f"Error output: {e.stderr}")
+            raise SimpleDockerError(f"Docker command failed: {e}") from e
+
+        finally:
+            # Cleanup
+            try:
+                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
+                print("OK Container cleanup completed")
+            except Exception:
+                pass
+
+
 def main():
     """Main test function."""
     print("Starting simple Docker integration tests...")
@@ -241,6 +362,10 @@ def main():
         test_docker_exit_signals()
         print("OK Docker exit signals test passed")
 
+        # Test git sync behavior
+        test_git_sync_behavior()
+        print("OK Git sync behavior test passed")
+
         print("\n" + "=" * 60)
         print("SUCCESS: All simple Docker integration tests passed!")
         print("This proves that:")
@@ -248,6 +373,7 @@ def main():
         print("- Web servers can be run in containers and accessed")
         print("- Containers respond properly to exit signals")
         print("- Container lifecycle management works correctly")
+        print("- Git directories sync one-way from host to container correctly")
         return 0
 
     except SimpleDockerError as e:
