@@ -531,8 +531,12 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         f"ANTHROPIC_API_KEY={api_key}",
         "-e",
         "PASSWORD=",  # No authentication
+        "-e",
+        "CLUD_BACKGROUND_SYNC=true",  # Enable background sync
+        "-e",
+        "CLUD_SYNC_INTERVAL=10",  # 10 second sync interval
         "-v",
-        f"{docker_path}:/home/coder/project",
+        f"{docker_path}:/host:rw",  # Mount to /host for sync
         "-v",
         f"{home_config_path}:/home/coder/.config",
         # Removed .local mount to preserve container's installed CLI tools
@@ -778,6 +782,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
     # Determine if we're running a custom command or interactive shell
     if args.cmd:
         # Non-interactive mode for custom commands
+        # Use the entrypoint.sh but pass the command as arguments
         cmd = [
             "docker",
             "run",
@@ -786,15 +791,15 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "clud-dev",
             "-e",
             f"ANTHROPIC_API_KEY={api_key}",
+            "-e",
+            "CLUD_BACKGROUND_SYNC=false",  # Disable background sync for command execution
+            "-e",
+            f"CLUD_CUSTOM_CMD={args.cmd}",  # Pass command via environment variable
             "-v",
-            f"{docker_path}:/host",
-            "-w",
-            "/workspace",  # Set working directory to /workspace
-            "--entrypoint",
-            "/bin/bash",
+            f"{docker_path}:/host:rw",
             "niteris/clud:latest",
-            "-c",
-            args.cmd,
+            "--cmd",
+            args.cmd,  # Pass command as argument to entrypoint
         ]
     else:
         # Interactive shell mode - override entrypoint to start bash with login shell
@@ -809,8 +814,12 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "/bin/bash",
             "-e",
             f"ANTHROPIC_API_KEY={api_key}",
+            "-e",
+            "CLUD_BACKGROUND_SYNC=true",  # Enable background sync for interactive shell
+            "-e",
+            "CLUD_SYNC_INTERVAL=300",  # 5 minute sync interval
             "-v",
-            f"{docker_path}:/host",
+            f"{docker_path}:/host:rw",
             "-w",
             "/workspace",  # Set working directory to /workspace
             "niteris/clud:latest",

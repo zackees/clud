@@ -188,14 +188,9 @@ alias lg="lazygit"
 # CLUD alias - the main purpose of this container
 alias clud='claude code --dangerously-skip-permissions'
 
-# Sync command - bidirectional sync between workspace and host
+# Container sync commands (using container-sync script)
 alias sync='python3 /usr/local/bin/container-sync sync'
-
-# Dry-run sync to preview changes
 alias sync-preview='python3 /usr/local/bin/container-sync sync-preview'
-
-# Quick status command to see sync differences
-alias sync-status='python3 /usr/local/bin/container-sync sync-status'
 
 # Show sync logs
 alias sync-logs='tail -f /var/log/clud-sync.log 2>/dev/null || echo "No sync logs available"'
@@ -241,9 +236,10 @@ RUN dos2unix /root/.bashrc
 
 USER root
 
-# Copy Python sync script
+# Copy Python sync scripts
 COPY src/clud/container_sync.py /usr/local/bin/container-sync
-RUN chmod +x /usr/local/bin/container-sync
+COPY src/clud/bg.py /usr/local/bin/bg.py
+RUN chmod +x /usr/local/bin/container-sync /usr/local/bin/bg.py
 
 # Copy and set up entrypoint script
 COPY entrypoint.sh /entrypoint.sh

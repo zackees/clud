@@ -452,7 +452,7 @@ class TestFallbackCommand(unittest.TestCase):
 
         self.assertEqual(cmd[0:4], ["docker", "run", "-it", "--rm"])
         self.assertIn("--name=clud-project", cmd)
-        self.assertIn("--volume=/test/project:/workspace:rw", cmd)
+        self.assertIn("--volume=/test/project:/host:rw", cmd)
         self.assertIn("niteris/clud:latest", cmd)
         self.assertIn("claude", cmd)
         self.assertIn("code", cmd)

@@ -10,24 +10,56 @@ import sys
 import time
 from pathlib import Path
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [container-sync] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-logger = logging.getLogger(__name__)
-
+# ==================== CONSTANTS ====================
 # Exit codes
 READONLY_ERROR = 10
 SYNC_ERROR = 11
 PERMISSION_ERROR = 12
 
+# Default paths
+DEFAULT_HOST_DIR = "/host"
+DEFAULT_WORKSPACE_DIR = "/workspace"
+DEFAULT_LOG_FILE = "/var/log/clud-sync.log"
+
+# Sync configuration
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 2
+
+# Rsync exclusions
+RSYNC_EXCLUSIONS = [
+    "/.git",
+    "/.docker_test_cache.json",
+    "**/.DS_Store",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/.pytest_cache",
+    "**/node_modules",
+    "**/dist",
+    "**/build",
+    "**/.venv",
+    "**/.env",
+]
+
+# Code-server configuration
+CODE_SERVER_BIND_ADDR = "0.0.0.0:8080"
+CODE_SERVER_CONFIG = """bind-addr: 0.0.0.0:8080
+auth: none
+cert: false
+"""
+
+# ==================== LOGGING SETUP ====================
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [container-sync] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+logger = logging.getLogger(__name__)
+
 
 class ContainerSync:
     """Handles bidirectional sync between host and workspace directories."""
 
-    def __init__(self, host_dir: str = "/host", workspace_dir: str = "/workspace"):
+    def __init__(self, host_dir: str = DEFAULT_HOST_DIR, workspace_dir: str = DEFAULT_WORKSPACE_DIR):
         self.host_dir = Path(host_dir)
         self.workspace_dir = Path(workspace_dir)
-        self.log_file = Path("/var/log/clud-sync.log")
-        self.max_retries = 3
+        self.log_file = Path(DEFAULT_LOG_FILE)
+        self.max_retries = MAX_RETRIES
 
     def validate_permissions(self, directory: Path, operation: str) -> bool:
         """Validate directory permissions for read/write operations."""
@@ -63,18 +95,11 @@ class ContainerSync:
             "--stats",
             "--human-readable",
             "--delete",
-            "--exclude=/.git",
-            "--exclude=/.docker_test_cache.json",
-            "--exclude=**/.DS_Store",
-            "--exclude=**/__pycache__",
-            "--exclude=**/*.pyc",
-            "--exclude=**/.pytest_cache",
-            "--exclude=**/node_modules",
-            "--exclude=**/dist",
-            "--exclude=**/build",
-            "--exclude=**/.venv",
-            "--exclude=**/.env",
         ]
+
+        # Add exclusions from constants
+        for exclusion in RSYNC_EXCLUSIONS:
+            cmd.append(f"--exclude={exclusion}")
 
         if dry_run:
             cmd.append("--dry-run")
@@ -90,7 +115,7 @@ class ContainerSync:
 
         return cmd
 
-    def run_rsync(self, cmd: list[str], operation: str) -> tuple[bool, int | None]:
+    def run_rsync(self, cmd: list[str], operation: str) -> tuple[bool, int]:
         """Execute rsync command with retry logic."""
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -121,15 +146,15 @@ class ContainerSync:
                 else:
                     logger.warning(f"Rsync attempt {attempt} failed with code {result.returncode}")
                     if attempt < self.max_retries:
-                        time.sleep(2)
+                        time.sleep(RETRY_DELAY_SECONDS)
 
             except Exception as e:
                 logger.error(f"Error running rsync: {e}")
                 if attempt < self.max_retries:
-                    time.sleep(2)
+                    time.sleep(RETRY_DELAY_SECONDS)
 
         logger.error(f"Failed to sync after {self.max_retries} attempts")
-        return False, None
+        return False, -1
 
     def sync_host_to_workspace(self) -> int:
         """Sync from /host to /workspace (initial sync on container startup)."""
@@ -189,11 +214,7 @@ class ContainerSync:
         config_dir.mkdir(parents=True, exist_ok=True)
 
         config_file = config_dir / "config.yaml"
-        config_content = """bind-addr: 0.0.0.0:8080
-auth: none
-cert: false
-"""
-        config_file.write_text(config_content)
+        config_file.write_text(CODE_SERVER_CONFIG)
         logger.info("Code-server configuration created")
 
         # Fix permissions
@@ -213,8 +234,8 @@ def main():
     """Main entry point for container sync functionality."""
     parser = argparse.ArgumentParser(description="CLUD container sync utility")
     parser.add_argument("command", choices=["init", "sync", "sync-preview", "sync-status"], help="Command to execute")
-    parser.add_argument("--host-dir", default="/host", help="Host directory path (default: /host)")
-    parser.add_argument("--workspace-dir", default="/workspace", help="Workspace directory path (default: /workspace)")
+    parser.add_argument("--host-dir", default=DEFAULT_HOST_DIR, help=f"Host directory path (default: {DEFAULT_HOST_DIR})")
+    parser.add_argument("--workspace-dir", default=DEFAULT_WORKSPACE_DIR, help=f"Workspace directory path (default: {DEFAULT_WORKSPACE_DIR})")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
