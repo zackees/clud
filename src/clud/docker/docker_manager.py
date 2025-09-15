@@ -846,6 +846,9 @@ class DockerManager:
         build_context: Path,
         build_args: dict[str, str] | None = None,
         platform_tag: str = "",
+        no_cache: bool = False,
+        quiet: bool = False,
+        verbose: bool = False,
     ) -> None:
         """
         Build a Docker image from a Dockerfile.
@@ -878,6 +881,14 @@ class DockerManager:
                 "-t",
                 f"{image_name}:{tag}",
             ]
+
+            if no_cache:
+                cmd_list.append("--no-cache")
+
+            if quiet:
+                cmd_list.append("--quiet")
+            elif verbose:
+                cmd_list.append("--progress=plain")
 
             # Add build args
             for arg_name, arg_value in buildargs.items():

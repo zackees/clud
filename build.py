@@ -8,13 +8,14 @@ progress reporting, and build optimization features.
 
 import argparse
 import os
-import subprocess
 import sys
 import threading
 import time
 import traceback
 from pathlib import Path
 from typing import Optional
+
+from src.clud.docker.docker_manager import DockerManager, DockerException, ImageNotFound
 
 
 class DockerBuildError(Exception):
@@ -58,95 +59,36 @@ def timeout_monitor(start_time, timeout, stop_event):
         time.sleep(1)
 
 
-def check_docker_available() -> bool:
+def check_docker_available(docker_manager: DockerManager) -> bool:
     """Check if Docker is available and running."""
-    try:
-        cmd_str = subprocess.list2cmdline(["docker", "version"])
-        print(f"Running command: {cmd_str}")
-        process = subprocess.Popen(
-            ["docker", "version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors='replace'
-        )
-
-        # Read output
-        for line in process.stdout:
-            if line is None:
-                break
-            pass  # Just consume output, we only care about success
-
-        process.stdout.close()
-        process.wait(timeout=10)
-
-        return process.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+    is_running, _ = docker_manager.is_running()
+    return is_running
 
 
-def image_exists(image_name: str) -> bool:
+def image_exists(docker_manager: DockerManager, image_name: str) -> bool:
     """Check if Docker image already exists."""
     try:
-        cmd_str = subprocess.list2cmdline(["docker", "images", "-q", image_name])
-        print(f"Running command: {cmd_str}")
-        process = subprocess.Popen(
-            ["docker", "images", "-q", image_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors='replace'
-        )
-
-        output = []
-        for line in process.stdout:
-            if line is None:
-                break
-            output.append(line.strip())
-
-        process.stdout.close()
-        process.wait()
-
-        if process.returncode != 0:
-            return False
-
-        return bool(''.join(output))
-    except Exception:
+        docker_manager.client.images.get(image_name)
+        return True
+    except ImageNotFound:
+        return False
+    except DockerException:
         return False
 
 
-def get_image_id(image_name: str) -> Optional[str]:
+def get_image_id(docker_manager: DockerManager, image_name: str) -> Optional[str]:
     """Get the image ID of an existing image."""
     try:
-        cmd_str = subprocess.list2cmdline(["docker", "images", "-q", image_name])
-        print(f"Running command: {cmd_str}")
-        process = subprocess.Popen(
-            ["docker", "images", "-q", image_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors='replace'
-        )
-
-        output = []
-        for line in process.stdout:
-            if line is None:
-                break
-            output.append(line.strip())
-
-        process.stdout.close()
-        process.wait()
-
-        if process.returncode != 0:
-            return None
-
-        image_id = ''.join(output).strip()
-        return image_id if image_id else None
-    except Exception:
+        image = docker_manager.client.images.get(image_name)
+        return image.id
+    except ImageNotFound:
+        return None
+    except DockerException:
         return None
 
 
 def build_docker_image(
+    docker_manager: DockerManager,
     image_name: str = "clud-dev:latest",
     dockerfile_path: Optional[Path] = None,
     build_context: Optional[Path] = None,
@@ -185,23 +127,12 @@ def build_docker_image(
     if not build_context.exists():
         raise DockerBuildError(f"Build context directory not found at {build_context}")
 
-    # Construct build command
-    cmd = ["docker", "build", "-t", image_name]
-
-    if dockerfile_path != build_context / "Dockerfile":
-        cmd.extend(["-f", str(dockerfile_path)])
-
-    if no_cache:
-        cmd.append("--no-cache")
-
-    if quiet:
-        cmd.append("--quiet")
-    elif verbose:
-        cmd.append("--progress=plain")
-
-    cmd.append(str(build_context))
-    cmd_str = subprocess.list2cmdline(cmd)
-    print(f"Running command: {cmd_str}")
+    # Split image name and tag
+    if ":" in image_name:
+        name, tag = image_name.split(":", 1)
+    else:
+        name = image_name
+        tag = "latest"
 
     print(f"Building Docker image: {image_name}")
     print(f"Dockerfile: {dockerfile_path}")
@@ -221,39 +152,20 @@ def build_docker_image(
     monitor_thread.start()
 
     try:
-        # Use Popen for both quiet and normal mode
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors='replace'
+        docker_manager.build_image(
+            image_name=name,
+            tag=tag,
+            dockerfile_path=dockerfile_path,
+            build_context=build_context,
+            no_cache=no_cache,
+            quiet=quiet,
+            verbose=verbose,
         )
 
-        output_lines = []
-        for line in process.stdout:
-            if line is None:
-                break
-            if not quiet:
-                print(line.rstrip())
-            output_lines.append(line)
-
-        process.stdout.close()
-        process.wait(timeout=timeout)
-
-        if process.returncode != 0:
-            raise subprocess.CalledProcessError(process.returncode, cmd)
-
         # Extract image ID from output or use docker images
-        if quiet:
-            # For quiet mode, last line should be image ID
-            image_id = output_lines[-1].strip() if output_lines else None
-
-        # If we don't have image ID yet, query for it
-        if not quiet or not image_id:
-            image_id = get_image_id(image_name)
-            if not image_id:
-                raise DockerBuildError("Failed to determine image ID after build")
+        image_id = get_image_id(docker_manager, image_name)
+        if not image_id:
+            raise DockerBuildError("Failed to determine image ID after build")
 
         build_time = time.time() - start_time
 
@@ -268,52 +180,25 @@ def build_docker_image(
 
         return image_id
 
-    except subprocess.TimeoutExpired:
+    except DockerBuildError as e:
         stop_event.set()
-        raise DockerBuildError(f"Build timed out after {timeout} seconds")
-    except subprocess.CalledProcessError as e:
+        raise DockerBuildError(f"Build failed: {e}")
+    except Exception as e:
         stop_event.set()
-        raise DockerBuildError(f"Build failed with exit code {e.returncode}")
-    except Exception:
-        stop_event.set()
-        raise
+        raise DockerBuildError(f"Build failed: {e}")
 
 
-def remove_image(image_name: str, force: bool = False) -> bool:
+def remove_image(docker_manager: DockerManager, image_name: str, force: bool = False) -> bool:
     """Remove a Docker image."""
     try:
-        cmd = ["docker", "rmi"]
-        if force:
-            cmd.append("-f")
-        cmd.append(image_name)
-
-        cmd_str = subprocess.list2cmdline(cmd)
-        print(f"Running command: {cmd_str}")
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors='replace'
-        )
-
-        # Consume output
-        for line in process.stdout:
-            if line is None:
-                break
-            pass
-
-        process.stdout.close()
-        process.wait()
-
-        if process.returncode == 0:
-            print(f"Removed image: {image_name}")
-            return True
-        else:
-            print(f"Failed to remove image: {image_name}")
-            return False
-    except Exception:
-        print(f"Failed to remove image: {image_name}")
+        docker_manager.client.images.remove(image_name, force=force)
+        print(f"Removed image: {image_name}")
+        return True
+    except ImageNotFound:
+        print(f"Image {image_name} not found, skipping removal.")
+        return True  # Consider it removed if it doesn't exist
+    except DockerException as e:
+        print(f"Failed to remove image: {image_name} - {e}")
         return False
 
 
@@ -388,19 +273,21 @@ Examples:
 
     args = parser.parse_args()
 
+    docker_manager = DockerManager()
+
     # Note: timeout is handled within build_docker_image function
 
     # Check Docker availability
-    if not check_docker_available():
+    if not check_docker_available(docker_manager):
         print("ERROR: Docker is not available or not running")
         return 1
 
     print("OK Docker is available")
 
     # Check if image exists
-    exists = image_exists(args.image_name)
+    exists = image_exists(docker_manager, args.image_name)
     if exists:
-        image_id = get_image_id(args.image_name)
+        image_id = get_image_id(docker_manager, args.image_name)
         print(f"Image {args.image_name} already exists (ID: {image_id})")
 
         if args.check:
@@ -417,7 +304,7 @@ Examples:
 
         if args.force_rebuild:
             print("Force rebuild requested, removing existing image...")
-            if not remove_image(args.image_name, force=True):
+            if not remove_image(docker_manager, args.image_name, force=True):
                 print("Warning: Failed to remove existing image, continuing with build...")
     else:
         print(f"Image {args.image_name} does not exist")
@@ -428,6 +315,7 @@ Examples:
     # Build the image
     try:
         image_id = build_docker_image(
+            docker_manager,
             image_name=args.image_name,
             dockerfile_path=args.dockerfile,
             build_context=args.build_context,
