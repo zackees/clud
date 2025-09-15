@@ -2,7 +2,6 @@
 """Integration test for Claude Docker CLI exit functionality."""
 
 import contextlib
-import os
 import subprocess
 import sys
 import time
@@ -108,69 +107,6 @@ def test_docker_container_exit():
         raise DockerCliExitError("Docker command timed out") from e
 
 
-def test_docker_compose_exit():
-    """Test that Docker Compose services can be properly stopped."""
-    project_root = Path(__file__).parent.parent.parent
-    compose_file = project_root / "docker-compose.yml"
-
-    if not compose_file.exists():
-        print("! docker-compose.yml not found, skipping compose test")
-        return True
-
-    print("\nTesting Docker Compose exit functionality...")
-
-    original_dir = os.getcwd()
-    try:
-        os.chdir(project_root)
-
-        # Start services with docker-compose
-        print("Starting Docker Compose services...")
-        up_cmd = ["docker-compose", "up", "-d"]
-        subprocess.run(up_cmd, check=True, timeout=120)
-        print("OK Docker Compose services started")
-
-        # Wait for services to be ready
-        time.sleep(5)
-
-        # Check if services are running
-        ps_cmd = ["docker-compose", "ps", "-q"]
-        ps_result = subprocess.run(ps_cmd, capture_output=True, text=True, check=True)
-
-        if not ps_result.stdout.strip():
-            raise DockerCliExitError("No Docker Compose services are running")
-
-        print("OK Docker Compose services verified running")
-
-        # Test graceful shutdown
-        print("Testing graceful shutdown...")
-        down_cmd = ["docker-compose", "down"]
-        subprocess.run(down_cmd, check=True, timeout=30)
-        print("OK Docker Compose services stopped gracefully")
-
-        # Verify services are stopped
-        ps_result = subprocess.run(ps_cmd, capture_output=True, text=True, check=True)
-        if ps_result.stdout.strip():
-            raise DockerCliExitError("Services still running after docker-compose down")
-
-        print("OK Docker Compose exit verified")
-
-    except subprocess.CalledProcessError as e:
-        print(f"Docker Compose command failed: {e}")
-        # Attempt cleanup
-        with contextlib.suppress(BaseException):
-            subprocess.run(["docker-compose", "down", "-v"], capture_output=True, check=False, timeout=30)
-        raise DockerCliExitError(f"Docker Compose test failed: {e}") from e
-
-    except subprocess.TimeoutExpired as e:
-        # Cleanup on timeout
-        with contextlib.suppress(BaseException):
-            subprocess.run(["docker-compose", "down", "-v"], capture_output=True, check=False, timeout=30)
-        raise DockerCliExitError("Docker Compose command timed out") from e
-
-    finally:
-        os.chdir(original_dir)
-
-
 def main():
     """Main test function."""
     print("Starting Docker CLI exit integration tests...")
@@ -187,10 +123,6 @@ def main():
         # Test basic container exit
         test_docker_container_exit()
         print("\nOK Docker container exit test passed")
-
-        # Test Docker Compose exit
-        test_docker_compose_exit()
-        print("OK Docker Compose exit test passed")
 
         print("\n" + "=" * 60)
         print("SUCCESS: All Docker CLI exit tests passed!")

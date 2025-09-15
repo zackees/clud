@@ -1,9 +1,0 @@
-services:
-  app:
-    build:
-      context: .
-    ports:
-      - "8743:8080"
-    environment:
-      - ENVIRONMENT=dev
-    image: clud-dev:latest

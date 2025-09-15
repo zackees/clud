@@ -154,84 +154,6 @@ def test_code_server_ui():
             print("! Container cleanup may have failed")
 
 
-def test_docker_compose_web_server():
-    """Test web server using docker-compose configuration."""
-    project_root = Path(__file__).parent.parent.parent
-    compose_file = project_root / "docker-compose.yml"
-
-    if not compose_file.exists():
-        print("! docker-compose.yml not found, skipping compose web server test")
-
-    print("\nTesting Docker Compose web server...")
-
-    original_dir = os.getcwd()
-    try:
-        os.chdir(project_root)
-
-        # Read compose file to get the port mapping
-        with open(compose_file) as f:
-            compose_content = f.read()
-
-        # Extract port from compose file (looking for pattern like "8743:8080")
-        import re
-
-        port_match = re.search(r'"(\d+):8080"', compose_content)
-        if port_match:
-            external_port = int(port_match.group(1))
-            print(f"Found port mapping: {external_port}:8080")
-        else:
-            print("Could not detect port mapping from docker-compose.yml")
-            external_port = 8743  # Default
-
-        # Start services with docker-compose
-        print("Starting Docker Compose services...")
-        up_cmd = ["docker-compose", "up", "-d"]
-        subprocess.run(up_cmd, check=True, timeout=120)
-        print("OK Docker Compose services started")
-
-        # Wait for web server to be ready
-        server_url = f"http://localhost:{external_port}"
-
-        if not wait_for_server(server_url, timeout=120):
-            # Get compose logs
-            logs_cmd = ["docker-compose", "logs"]
-            logs_result = subprocess.run(logs_cmd, capture_output=True, text=True)
-            print(f"Compose logs:\n{logs_result.stdout}\n{logs_result.stderr}")
-            raise WebServerError(f"Web server did not start within timeout at {server_url}")
-
-        # Test server response
-        print("Testing server response...")
-        response_info = check_server_response(server_url)
-
-        if response_info["status_code"] != 200:
-            raise WebServerError(f"Server returned status code {response_info['status_code']}")
-
-        print(f"OK Server returned status code: {response_info['status_code']}")
-        print(f"OK Content length: {response_info['content_length']} bytes")
-
-        # Test container health
-        ps_cmd = ["docker-compose", "ps"]
-        subprocess.run(ps_cmd, capture_output=True, text=True, check=True)
-        print("OK Docker Compose services are healthy")
-
-    except subprocess.CalledProcessError as e:
-        print(f"Docker Compose command failed: {e}")
-        raise WebServerError(f"Docker Compose test failed: {e}") from e
-
-    except subprocess.TimeoutExpired as e:
-        raise WebServerError("Docker Compose command timed out") from e
-
-    finally:
-        try:
-            print("Cleaning up Docker Compose services...")
-            subprocess.run(["docker-compose", "down", "-v"], capture_output=True, check=False, timeout=30)
-            print("OK Docker Compose cleanup completed")
-        except Exception:
-            print("! Docker Compose cleanup may have failed")
-        finally:
-            os.chdir(original_dir)
-
-
 def test_cli_ui_mode():
     """Test the clud CLI --ui mode functionality."""
     print("\nTesting clud CLI --ui mode...")
@@ -296,10 +218,6 @@ def main():
         # Test direct container web server
         test_code_server_ui()
         print("\nOK Direct container web server test passed")
-
-        # Test Docker Compose web server
-        test_docker_compose_web_server()
-        print("OK Docker Compose web server test passed")
 
         # Test CLI UI mode
         test_cli_ui_mode()
