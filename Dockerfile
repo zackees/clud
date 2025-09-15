@@ -65,13 +65,14 @@ RUN LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygi
     rm -f lazygit.tar.gz lazygit
 
 # Install Go (needed for some MCP servers)
-# RUN ARCH=$(dpkg --print-architecture) && \
-#     if [ "$ARCH" = "amd64" ]; then GOARCH="amd64"; else GOARCH="arm64"; fi && \
-#     wget -O go.tar.gz "https://go.dev/dl/go1.23.4.linux-${GOARCH}.tar.gz" && \
-#     tar -C /usr/local -xzf go.tar.gz && \
-#     rm go.tar.gz
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "amd64" ]; then GOARCH="amd64"; else GOARCH="arm64"; fi && \
+    wget -O go.tar.gz "https://go.dev/dl/go1.23.4.linux-${GOARCH}.tar.gz" && \
+    tar -C /usr/local -xzf go.tar.gz && \
+    rm go.tar.gz
 
-# ENV CGO_ENABLED=0
+ENV CGO_ENABLED=0 \
+    PATH="/usr/local/go/bin:$PATH"
 
 # ============================================================================
 # Create user and setup permissions (STATIC - cacheable)
@@ -121,14 +122,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install fnm (Fast Node Manager) and Node.js 22
 RUN curl -fsSL https://fnm.vercel.app/install | bash
-ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
-RUN bash -c 'eval "$(fnm env)" && fnm install 22 && fnm default 22'
+ENV PATH="/root/.local/share/fnm:$PATH"
+RUN bash -c 'source /root/.bashrc && fnm install 22 && fnm default 22'
 
 # Install MCP servers via npm (requires Node.js above)
-RUN export PATH="/home/${USERNAME}/.local/share/fnm:$PATH" && \
-    eval "$(fnm env)" && \
-    npm install -g \
-        @modelcontextprotocol/server-filesystem
+RUN bash -c 'source /root/.bashrc && eval "$(fnm env)" && npm install -g @modelcontextprotocol/server-filesystem'
 
 # Setup default MCP server configurations
 RUN mkdir -p /home/${USERNAME}/.config/claude && \
