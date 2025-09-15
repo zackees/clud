@@ -1,0 +1,65 @@
+name: Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10  # As recommended in CLAUDE.md for Docker builds
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install project dependencies
+        run: |
+          uv pip install --system -e ".[dev]"
+
+      - name: Check Docker availability
+        run: |
+          docker version
+          docker info
+
+      - name: Build Docker image for testing
+        run: |
+          docker build -t niteris/clud:test .
+        timeout-minutes: 8  # Most of the 10-minute timeout for Docker build
+
+      - name: Verify Docker image
+        run: |
+          docker run --rm niteris/clud:test python --version
+          docker run --rm niteris/clud:test node --version
+          docker run --rm niteris/clud:test npm --version
+
+      - name: Run integration tests
+        run: |
+          # Run integration tests that require Docker
+          uv run pytest tests/integration/ -v --tb=short
+        timeout-minutes: 5
+
+      - name: Clean up Docker containers
+        if: always()
+        run: |
+          # Clean up any containers that might be left running
+          docker ps -q --filter "name=clud-*" | xargs -r docker rm -f
+          # Clean up test images
+          docker image prune -f --filter "label!=keep"
