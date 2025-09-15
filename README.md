@@ -19,9 +19,6 @@ pip install clud
 ## Quick Start
 
 ```bash
-# Configure your Anthropic API key (one-time setup)
-clud --login
-
 # Unleash Claude Code instantly (YOLO mode enabled by default)
 clud
 
@@ -77,26 +74,12 @@ clud -bg --ssh-keys                # Mount SSH keys for git operations
 
 ```bash
 # Interactive setup
-clud --login
 
 # Use environment variable
 export ANTHROPIC_API_KEY="sk-ant-..."
 
 # Use command line
 clud --api-key "sk-ant-..."
-
-# Load from OS keyring
-clud --api-key-from mykey
-```
-
-### Project Configuration
-
-Create a `.clud` file in your project root for custom settings:
-
-```json
-{
-  "dockerfile": "./custom.Dockerfile"
-}
 ```
 
 ## Docker Hub
@@ -110,7 +93,6 @@ To develop this package:
 ```bash
 # Setup development environment
 bash install
-source activate  # or . activate
 
 # Run tests
 bash test
