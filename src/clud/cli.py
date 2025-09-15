@@ -13,6 +13,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 from .secrets import get_credential_store
 
@@ -116,11 +117,9 @@ def validate_path(path_str: str | None) -> Path:
 def normalize_path_for_docker(path: Path) -> str:
     """Normalize path for Docker mounting, handling Windows paths."""
     if platform.system() == "Windows":
-        # Convert Windows path to Unix-style for Docker
+        # Convert Windows path to forward slash format for Docker Desktop
+        # Keep the drive letter format: C:\path -> C:/path
         path_str = str(path).replace("\\", "/")
-        # Handle drive letters: C: -> /c
-        if len(path_str) >= 2 and path_str[1] == ":":
-            path_str = f"/{path_str[0].lower()}{path_str[2:]}"
         return path_str
     return str(path)
 
@@ -333,7 +332,7 @@ def find_available_port(start_port: int = 8743) -> int:
     raise DockerError(f"No available ports found starting from {start_port}")
 
 
-def load_clud_config() -> dict[str, str] | None:
+def load_clud_config() -> dict[str, Any] | None:
     """Load .clud configuration file if it exists."""
     clud_config_path = Path.cwd() / ".clud"
     if clud_config_path.exists():
@@ -372,7 +371,7 @@ def build_docker_image(dockerfile_path: str | None = None) -> bool:
             config = load_clud_config()
             if config and "dockerfile" in config:
                 # Use dockerfile path from .clud config
-                config_dockerfile_path = config["dockerfile"]
+                config_dockerfile_path: str = config["dockerfile"]
                 dockerfile = Path(config_dockerfile_path)
                 if not dockerfile.exists():
                     raise DockerError(f"Dockerfile specified in .clud config not found: {config_dockerfile_path}")

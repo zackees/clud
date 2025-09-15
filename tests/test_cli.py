@@ -137,7 +137,7 @@ class TestDockerPathNormalization(unittest.TestCase):
         """Test Windows path conversion for Docker."""
         path = Path("C:\\Users\\test\\project")
         normalized = normalize_path_for_docker(path)
-        self.assertEqual(normalized, "/c/Users/test/project")
+        self.assertEqual(normalized, "C:/Users/test/project")
 
     @patch("platform.system", return_value="Linux")
     def test_linux_path_normalization(self, mock_system: MagicMock) -> None:
