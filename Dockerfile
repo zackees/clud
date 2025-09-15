@@ -1,7 +1,7 @@
 # CLUD Development Environment
 # Optimized build: Static base image with Claude CLI and code-server
 # Project is mounted, not installed, for faster rebuilds
-FROM ubuntu:25.04
+FROM ubuntu:24.04
 
 # Build arguments
 ARG USERNAME=coder
@@ -33,10 +33,6 @@ RUN apt-get update && apt-get install -y \
     sudo \
     locales \
     openssh-client \
-    # Python
-    python3 \
-    python3-pip \
-    python3-venv \
     # Essential CLI tools
     fzf \
     ripgrep \
@@ -97,10 +93,30 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh -s -- --version=${CODE_SE
     chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.config
 
 # ============================================================================
-# Install uv system-wide (STATIC - cacheable)
+# Install Python 3.13 via deadsnakes PPA (STATIC - cacheable)
 # ============================================================================
 
 USER root
+
+# Install Python 3.13 from deadsnakes PPA (much faster than building from source)
+RUN apt-get update && apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y \
+        python3.13 \
+        python3.13-venv \
+        python3.13-dev \
+        python3.13-distutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create symlinks for python and python3
+RUN ln -sf /usr/bin/python3.13 /usr/local/bin/python3 && \
+    ln -sf /usr/bin/python3.13 /usr/local/bin/python
+
+# Install pip for Python 3.13
+RUN python3.13 -m ensurepip --upgrade
+
+# Install uv system-wide
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     mv /root/.local/bin/uv /usr/local/bin/uv && \
     chmod +x /usr/local/bin/uv
