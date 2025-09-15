@@ -2,4 +2,13 @@
 set -e
 
 cd "$(dirname "$0")"
-uv run pytest tests/ "$@"
+
+# Check if running integration tests specifically
+if [[ "$*" == *"tests/integration"* ]] || [[ "$PWD" == *"/tests/integration" ]]; then
+    echo "Running integration tests sequentially (no parallel execution)"
+    # Force sequential execution for integration tests to avoid Docker conflicts
+    uv run pytest tests/integration/ -v --tb=short --maxfail=1 "$@"
+else
+    # Normal test execution (can use parallel for unit tests)
+    uv run pytest tests/ "$@"
+fi

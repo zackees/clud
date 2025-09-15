@@ -134,7 +134,7 @@ class TestDockerStaleBinding(unittest.TestCase):
                 errors.append(f"Thread {index}: {e}")
 
         # Run multiple threads concurrently
-        threads = []
+        threads: list[threading.Thread] = []
         for i in range(3):
             thread = threading.Thread(target=create_container, args=(i,))
             threads.append(thread)

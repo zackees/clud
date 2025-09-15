@@ -8,6 +8,11 @@ import sys
 import time
 from pathlib import Path
 
+# Add tests directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from docker_test_utils import ensure_test_image
+
 
 class DockerCliExitError(Exception):
     """Exception raised when Docker CLI exit test fails."""
@@ -23,17 +28,9 @@ def test_docker_container_exit():
     print(f"Project root: {project_root}")
     print("=" * 60)
 
-    # Build the Docker image first
-    print("Building Docker image...")
-    build_cmd = ["docker", "build", "-t", "clud-test:latest", str(project_root)]
-
-    try:
-        subprocess.run(build_cmd, check=True, timeout=600)
-        print("OK Docker image built successfully")
-    except subprocess.CalledProcessError as e:
-        raise DockerCliExitError(f"Failed to build Docker image: {e}") from e
-    except subprocess.TimeoutExpired as e:
-        raise DockerCliExitError("Docker build timed out") from e
+    # Use shared image building logic
+    image_name = ensure_test_image()
+    print(f"Using Docker image: {image_name}")
 
     # Start container in detached mode
     print("\nStarting Docker container...")
@@ -43,7 +40,7 @@ def test_docker_container_exit():
     with contextlib.suppress(BaseException):
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
-    run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", "clud-test:latest"]
+    run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", image_name]
 
     try:
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)

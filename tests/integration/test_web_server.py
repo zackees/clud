@@ -11,6 +11,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# Add tests directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from docker_test_utils import ensure_test_image
+
 
 class WebServerError(Exception):
     """Exception raised when web server test fails."""
@@ -62,17 +67,9 @@ def test_code_server_ui():
     print(f"Project root: {project_root}")
     print("=" * 60)
 
-    # Build the Docker image first
-    print("Building Docker image...")
-    build_cmd = ["docker", "build", "-t", "clud-test:latest", str(project_root)]
-
-    try:
-        subprocess.run(build_cmd, check=True, timeout=600)
-        print("OK Docker image built successfully")
-    except subprocess.CalledProcessError as e:
-        raise WebServerError(f"Failed to build Docker image: {e}") from e
-    except subprocess.TimeoutExpired as e:
-        raise WebServerError("Docker build timed out") from e
+    # Use shared image building logic
+    image_name = ensure_test_image()
+    print(f"Using Docker image: {image_name}")
 
     # Start container with web server
     print("\nStarting Docker container with web server...")
@@ -85,7 +82,7 @@ def test_code_server_ui():
     # Use a different port for testing to avoid conflicts
     test_port = 8081
 
-    run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:8080", "-v", f"{project_root}:/home/coder/project", "-e", "ENVIRONMENT=test", "clud-test:latest"]
+    run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:8080", "-v", f"{project_root}:/home/coder/project", "-e", "ENVIRONMENT=test", image_name]
 
     try:
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)

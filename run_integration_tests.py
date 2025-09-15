@@ -6,6 +6,11 @@ import sys
 import time
 from pathlib import Path
 
+# Add tests directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent / "tests"))
+
+from docker_test_utils import ensure_test_image, cleanup_test_containers
+
 
 def run_test_file(test_file: Path) -> tuple[bool, str, str]:
     """Run a single test file and return success status and output."""
@@ -32,13 +37,27 @@ def main():
     print("CLUD INTEGRATION TEST RUNNER")
     print("=" * 80)
 
+    # Build Docker image once upfront (build once, test many)
+    try:
+        print("Building shared Docker test image...")
+        image_name = ensure_test_image()
+        print(f"✓ Docker image ready: {image_name}")
+        print()
+    except Exception as e:
+        print(f"✗ Failed to build Docker image: {e}")
+        return 1
+
+    # Clean up any existing test containers
+    cleanup_test_containers()
+
     test_dir = Path(__file__).parent / "tests" / "integration"
 
-    # List of test files to run
+    # List of test files to run (sequentially)
     test_files = [
-        test_dir / "test_simple_docker.py",
-        test_dir / "test_docker_cli_exit.py",
-        test_dir / "test_web_server.py",
+        test_dir / "test_build.py",           # Test that image is ready
+        test_dir / "test_simple_docker.py",  # Basic Docker functionality
+        test_dir / "test_docker_cli_exit.py", # Container exit logic
+        test_dir / "test_web_server.py",     # Web server in container
     ]
 
     results = []

@@ -1,10 +1,13 @@
 #!/usr/bin/env -S uv run python
 """Integration test for Docker build process."""
 
-import os
-import subprocess
 import sys
 from pathlib import Path
+
+# Add tests directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from docker_test_utils import ensure_test_image
 
 
 class DockerBuildError(Exception):
@@ -13,43 +16,19 @@ class DockerBuildError(Exception):
     pass
 
 
-def run_docker_build():
-    """Build the Docker image and capture output."""
-    project_root = Path(__file__).parent.parent.parent
-    os.chdir(project_root)
-
-    print(f"Building Docker image from: {project_root}")
-    print("=" * 60)
-
-    # Run docker build with plain text output
-    cmd = ["docker", "build", "-t", "clud-test:latest", "--progress=plain", "."]
+def test_docker_build():
+    """Test that Docker image can be built successfully."""
+    print("Testing Docker build process...")
 
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            text=True,
-            capture_output=False,  # Let output go directly to console
-            timeout=1200,  # 20 minute timeout
-        )
-
-        print("=" * 60)
-        print("[SUCCESS] Docker build completed successfully!")
+        # Use shared image building logic
+        image_name = ensure_test_image()
+        print(f"[SUCCESS] Docker image ready: {image_name}")
         return True
 
-    except subprocess.CalledProcessError as e:
-        print("=" * 60)
-        print(f"[ERROR] Docker build failed with exit code: {e.returncode}")
-        raise DockerBuildError(f"Docker build failed with exit code {e.returncode}") from e
-
-    except subprocess.TimeoutExpired as e:
-        print("=" * 60)
-        print("[ERROR] Docker build timed out after 10 minutes")
-        raise DockerBuildError("Docker build timed out") from e
-
-    except FileNotFoundError as e:
-        print("[ERROR] Docker command not found. Is Docker installed?")
-        raise DockerBuildError("Docker command not found") from e
+    except Exception as e:
+        print(f"[ERROR] Docker build test failed: {e}")
+        raise DockerBuildError(f"Docker build failed: {e}") from e
 
 
 def main():
@@ -57,8 +36,8 @@ def main():
     print("Starting Docker build integration test...")
 
     try:
-        run_docker_build()
-        print("\n[SUCCESS] All tests passed! Docker image built successfully.")
+        test_docker_build()
+        print("\n[SUCCESS] Docker build test passed!")
         return 0
 
     except DockerBuildError as e:

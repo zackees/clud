@@ -334,15 +334,15 @@ def find_available_port(start_port: int = 8743) -> int:
     raise DockerError(f"No available ports found starting from {start_port}")
 
 
-def load_clud_config() -> dict | None:
+def load_clud_config() -> dict[str, str] | None:
     """Load .clud configuration file if it exists."""
     clud_config_path = Path.cwd() / ".clud"
     if clud_config_path.exists():
         try:
-            with open(clud_config_path, 'r', encoding='utf-8') as f:
+            with open(clud_config_path, encoding="utf-8") as f:
                 config = json.load(f)
                 return config
-        except (json.JSONDecodeError, IOError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             print(f"Warning: Failed to parse .clud config file: {e}")
     return None
 
