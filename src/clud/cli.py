@@ -14,72 +14,10 @@ import time
 import webbrowser
 from pathlib import Path
 
-try:
-    import keyring
-except ImportError:
-    try:
-        import keyring.core  # type: ignore[import-untyped]
-        from keyrings.cryptfile.cryptfile import CryptFileKeyring  # type: ignore[import-untyped]
+from .secrets import get_credential_store
 
-        keyring = keyring.core
-        keyring.set_keyring(CryptFileKeyring())  # type: ignore[arg-type]
-    except ImportError:
-        try:
-            import json
-            from pathlib import Path
-
-            from cryptography.fernet import Fernet  # type: ignore[import-untyped]
-
-            class SimpleCredentialStore:
-                """Simple Fernet-based credential storage as keyring fallback."""
-
-                def __init__(self):
-                    self.config_dir = Path.home() / ".clud"
-                    self.config_dir.mkdir(exist_ok=True)
-                    self.key_file = self.config_dir / "key.bin"
-                    self.creds_file = self.config_dir / "credentials.enc"
-                    self._ensure_key()
-
-                def _ensure_key(self) -> None:
-                    if not self.key_file.exists():
-                        key = Fernet.generate_key()  # type: ignore[name-defined]
-                        self.key_file.write_bytes(key)  # type: ignore[arg-type]
-                        self.key_file.chmod(0o600)
-
-                def _get_fernet(self) -> "Fernet":  # type: ignore[name-defined]
-                    key = self.key_file.read_bytes()
-                    return Fernet(key)  # type: ignore[name-defined]
-
-                def _load_credentials(self) -> dict[str, str]:
-                    if not self.creds_file.exists():
-                        return {}
-                    try:
-                        fernet = self._get_fernet()  # type: ignore[misc]
-                        encrypted_data = self.creds_file.read_bytes()
-                        decrypted_data = fernet.decrypt(encrypted_data)  # type: ignore[attr-defined]
-                        return json.loads(decrypted_data.decode())  # type: ignore[arg-type]
-                    except Exception:
-                        return {}
-
-                def _save_credentials(self, creds: dict[str, str]) -> None:
-                    fernet = self._get_fernet()  # type: ignore[misc]
-                    data = json.dumps(creds).encode()
-                    encrypted_data = fernet.encrypt(data)  # type: ignore[attr-defined]
-                    self.creds_file.write_bytes(encrypted_data)  # type: ignore[arg-type]
-                    self.creds_file.chmod(0o600)
-
-                def get_password(self, service: str, username: str) -> str | None:
-                    creds = self._load_credentials()
-                    return creds.get(f"{service}:{username}")
-
-                def set_password(self, service: str, username: str, password: str) -> None:
-                    creds = self._load_credentials()
-                    creds[f"{service}:{username}"] = password
-                    self._save_credentials(creds)
-
-            keyring = SimpleCredentialStore()
-        except ImportError:
-            keyring = None
+# Get credential store once at module level
+keyring = get_credential_store()
 
 
 class CludError(Exception):
@@ -233,7 +171,6 @@ def get_api_key_from_keyring(keyring_name: str) -> str | None:
         raise ConfigError("No credential storage available. Install with: pip install keyring, keyrings.cryptfile, or cryptography")
 
     try:
-        # Try to get the password from keyring (works with all fallback implementations)
         api_key = keyring.get_password("clud", keyring_name)
         if not api_key:
             raise ConfigError(f"No API key found in credential store for '{keyring_name}'")
