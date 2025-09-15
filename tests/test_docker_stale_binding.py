@@ -2,6 +2,7 @@
 
 import contextlib
 import subprocess
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -116,7 +117,6 @@ class TestDockerStaleBinding(unittest.TestCase):
     @unittest.skipUnless(DockerManager.is_docker_installed() and DockerManager.is_running()[0], "Docker is not available")
     def test_concurrent_container_operations(self):
         """Test concurrent container operations that might cause binding issues."""
-        import threading
 
         results: list[str] = []
         errors: list[str] = []
