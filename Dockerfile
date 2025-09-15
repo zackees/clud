@@ -41,6 +41,7 @@ RUN apt-get update && apt-get install -y \
     htop \
     vim \
     dos2unix \
+    rsync \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure locale
@@ -79,9 +80,12 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     useradd --uid ${USER_UID} --gid ${USER_GID} -m ${USERNAME} -s /bin/bash && \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME} && \
-    mkdir -p /home/${USERNAME}/project /workspace && \
+    mkdir -p /home/${USERNAME}/project /workspace /host /var/log && \
     chown -R ${USERNAME}:${USERNAME} /home/${USERNAME} && \
-    chown ${USERNAME}:${USERNAME} /workspace
+    chown ${USERNAME}:${USERNAME} /workspace /host && \
+    chmod 755 /workspace /host /var/log && \
+    touch /var/log/clud-sync.log && \
+    chown ${USERNAME}:${USERNAME} /var/log/clud-sync.log
 
 # ============================================================================
 # Install code-server (STATIC - cacheable)
@@ -185,6 +189,18 @@ alias lg="lazygit"
 # CLUD alias - the main purpose of this container
 alias clud='claude code --dangerously-skip-permissions'
 
+# Sync command - bidirectional sync between workspace and host
+alias sync='python3 /usr/local/bin/container-sync sync'
+
+# Dry-run sync to preview changes
+alias sync-preview='python3 /usr/local/bin/container-sync sync-preview'
+
+# Quick status command to see sync differences
+alias sync-status='python3 /usr/local/bin/container-sync sync-status'
+
+# Show sync logs
+alias sync-logs='tail -f /var/log/clud-sync.log 2>/dev/null || echo "No sync logs available"'
+
 # Better history
 export HISTSIZE=10000
 export HISTFILESIZE=20000
@@ -204,8 +220,15 @@ fi
 
 # Welcome message
 echo "┌─ CLUD Development Environment ─────────────────────────────────────┐"
-echo "│ Working Directory: /workspace                                      │"
+echo "│ Working Directory: /workspace (synced from /host)                  │"
 echo "│ Type 'clud' to start Claude with dangerous permissions enabled     │"
+echo "│                                                                     │"
+echo "│ Sync Commands:                                                      │"
+echo "│   sync        - Save workspace changes back to host                │"
+echo "│   sync-status - Preview what would be synced (dry-run)             │"
+echo "│                                                                     │"
+echo "│ Note: Your project files are isolated in /workspace until you run  │"
+echo "│       'sync' to save changes back to the host filesystem           │"
 echo "└────────────────────────────────────────────────────────────────────┘"
 echo ""
 EOF
@@ -218,6 +241,10 @@ RUN dos2unix /root/.bashrc
 # ============================================================================
 
 USER root
+
+# Copy Python sync script
+COPY src/clud/container_sync.py /usr/local/bin/container-sync
+RUN chmod +x /usr/local/bin/container-sync
 
 # Copy and set up entrypoint script
 COPY entrypoint.sh /entrypoint.sh

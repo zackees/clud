@@ -639,7 +639,7 @@ def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list
     project_name = project_path.name
     docker_path = normalize_path_for_docker(project_path)
 
-    cmd = ["docker", "run", "-it", "--rm", f"--name=clud-{project_name}", f"--volume={docker_path}:/workspace:rw"]
+    cmd = ["docker", "run", "-it", "--rm", f"--name=clud-{project_name}", f"--volume={docker_path}:/host:rw"]
 
     # Add SSH keys mount if requested
     if args.ssh_keys:
@@ -759,7 +759,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "-e",
             f"ANTHROPIC_API_KEY={api_key}",
             "-v",
-            f"{docker_path}:/workspace",
+            f"{docker_path}:/host",
             "-w",
             "/workspace",  # Set working directory to /workspace
             "--entrypoint",
@@ -782,7 +782,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "-e",
             f"ANTHROPIC_API_KEY={api_key}",
             "-v",
-            f"{docker_path}:/workspace",
+            f"{docker_path}:/host",
             "-w",
             "/workspace",  # Set working directory to /workspace
             "clud-dev:latest",
