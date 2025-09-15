@@ -110,7 +110,6 @@ RUN apt-get update && apt-get install -y software-properties-common && \
         python3.13 \
         python3.13-venv \
         python3.13-dev \
-        python3.13-distutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python and python3
