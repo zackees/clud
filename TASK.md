@@ -45,18 +45,18 @@ Modify `src/clud/cli.py` to:
 - Add `--port` flag (default: 8743, auto-detect if occupied)
 - Add `--api-key` flag for Anthropic API key
 - Remove any Docker image fetching logic
-- Build image locally if not exists: `docker build -t clud-dev:latest .`
+- Build image locally if not exists: `docker build -t niteris/clud:latest .`
 - Launch container with proper mounts and environment:
   ```bash
   docker run -d \
-    --name clud-dev \
+    --name niteris-clud \
     -p <port>:8080 \
     -e ANTHROPIC_API_KEY=<key> \
     -e PASSWORD="" \
     -v $(pwd):/home/coder/project \
     -v ~/.config:/home/coder/.config \
     -v ~/.local:/home/coder/.local \
-    clud-dev:latest
+    niteris/clud:latest
   ```
 - Auto-open browser to `http://localhost:<port>`
 
@@ -110,7 +110,7 @@ clud --ui  # Uses env vars
 5. Add multi-project support with named containers
 
 ## Notes
-- Container name: `clud-dev` (consider making configurable later)
+- Container name: `niteris-clud` (consider making configurable later)
 - Data persistence via volume mounts to host directories
 - No authentication by default (PASSWORD="") but keep capability for future
 - Focus on developer experience - everything should "just work"

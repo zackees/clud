@@ -2,7 +2,7 @@
 """
 Docker image builder for CLUD development environment.
 
-This script builds the clud-dev Docker image manually with proper error handling,
+This script builds the niteris/clud Docker image manually with proper error handling,
 progress reporting, and build optimization features.
 """
 
@@ -89,7 +89,7 @@ def get_image_id(docker_manager: DockerManager, image_name: str) -> Optional[str
 
 def build_docker_image(
     docker_manager: DockerManager,
-    image_name: str = "clud-dev:latest",
+    image_name: str = "niteris/clud:latest",
     dockerfile_path: Optional[Path] = None,
     build_context: Optional[Path] = None,
     no_cache: bool = False,
@@ -222,8 +222,8 @@ Examples:
 
     parser.add_argument(
         "--image-name",
-        default="clud-dev:latest",
-        help="Docker image name and tag (default: clud-dev:latest)"
+        default="niteris/clud:latest",
+        help="Docker image name and tag (default: niteris/clud:latest)"
     )
     parser.add_argument(
         "--dockerfile",

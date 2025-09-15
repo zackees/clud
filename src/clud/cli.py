@@ -91,6 +91,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--just-build", action="store_true", help="Build Docker image and exit (don't launch container)")
 
+    parser.add_argument("-u", "--update", action="store_true", help="Pull the latest Docker image and upgrade the runtime")
+
     parser.add_argument("--version", action="version", version="clud 0.0.1")
 
     parser.add_argument("--cmd", help="Command to execute in container instead of interactive shell")
@@ -345,17 +347,41 @@ def load_clud_config() -> dict[str, Any] | None:
     return None
 
 
-def build_docker_image(dockerfile_path: str | None = None) -> bool:
-    """Build the clud-dev Docker image if it doesn't exist."""
+def pull_latest_image(image_name: str = "niteris/clud:latest") -> bool:
+    """Pull the latest version of a Docker image."""
     try:
-        # Check if image already exists
-        result = subprocess.run(["docker", "images", "-q", "clud-dev:latest"], capture_output=True, text=True, check=True)
+        print(f"Pulling the latest version of {image_name}...")
 
-        if result.stdout.strip():
-            print("Docker image clud-dev:latest already exists")
+        # Use docker pull command to get the latest image
+        cmd = ["docker", "pull", image_name]
+        result = subprocess.run(cmd, capture_output=False, text=True)
+
+        if result.returncode == 0:
+            print(f"Successfully pulled the latest version of {image_name}")
             return True
+        else:
+            print(f"Failed to pull {image_name}", file=sys.stderr)
+            return False
 
-        print("Building clud-dev Docker image...")
+    except FileNotFoundError as err:
+        raise DockerError("Docker command not found. Make sure Docker is installed.") from err
+    except Exception as e:
+        print(f"Error pulling image: {e}", file=sys.stderr)
+        return False
+
+
+def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool = False) -> bool:
+    """Build the niteris/clud Docker image if it doesn't exist."""
+    try:
+        # Check if image already exists (skip this check if force_rebuild is True)
+        if not force_rebuild:
+            result = subprocess.run(["docker", "images", "-q", "niteris/clud:latest"], capture_output=True, text=True, check=True)
+
+            if result.stdout.strip():
+                print("Docker image niteris/clud:latest already exists")
+                return True
+
+        print("Building niteris/clud Docker image...")
 
         # Determine dockerfile to use (priority order)
         if dockerfile_path:
@@ -364,7 +390,7 @@ def build_docker_image(dockerfile_path: str | None = None) -> bool:
             if not dockerfile.exists():
                 raise DockerError(f"Custom dockerfile not found: {dockerfile_path}")
             build_context = dockerfile.parent
-            cmd = ["docker", "build", "-t", "clud-dev:latest", "-f", str(dockerfile), str(build_context)]
+            cmd = ["docker", "build", "-t", "niteris/clud:latest", "-f", str(dockerfile), str(build_context)]
             print(f"Using custom dockerfile: {dockerfile_path}")
         else:
             # Priority 2: Check for .clud config file
@@ -376,11 +402,11 @@ def build_docker_image(dockerfile_path: str | None = None) -> bool:
                 if not dockerfile.exists():
                     raise DockerError(f"Dockerfile specified in .clud config not found: {config_dockerfile_path}")
                 build_context = dockerfile.parent
-                cmd = ["docker", "build", "-t", "clud-dev:latest", "-f", str(dockerfile), str(build_context)]
+                cmd = ["docker", "build", "-t", "niteris/clud:latest", "-f", str(dockerfile), str(build_context)]
                 print(f"INFO: Using dockerfile from .clud config: {config_dockerfile_path}")
             elif (Path.cwd() / "Dockerfile").exists():
                 # Priority 3: Use local Dockerfile in current directory
-                cmd = ["docker", "build", "-t", "clud-dev:latest", "."]
+                cmd = ["docker", "build", "-t", "niteris/clud:latest", "."]
                 print("Using local Dockerfile from current directory")
             else:
                 # Priority 4: Fallback to remote image - don't build locally
@@ -508,7 +534,7 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         "-v",
         f"{home_config_path}:/home/coder/.config",
         # Removed .local mount to preserve container's installed CLI tools
-        "clud-dev:latest",
+        "niteris/clud:latest",
     ]
 
     print("Starting CLUD development container...")
@@ -679,7 +705,7 @@ def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list
         cmd.extend(["-e", env_var])
 
     # Use default image if not specified
-    image = args.image or "icanhasjonas/claude-code:latest"
+    image = args.image or "niteris/clud:latest"
     cmd.append(image)
 
     # Default entrypoint: launch claude in workspace
@@ -764,7 +790,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "/workspace",  # Set working directory to /workspace
             "--entrypoint",
             "/bin/bash",
-            "clud-dev:latest",
+            "niteris/clud:latest",
             "-c",
             args.cmd,
         ]
@@ -785,7 +811,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             f"{docker_path}:/host",
             "-w",
             "/workspace",  # Set working directory to /workspace
-            "clud-dev:latest",
+            "niteris/clud:latest",
             "--login",  # Login shell to source bashrc and show banner
         ]
 
@@ -837,6 +863,31 @@ def main() -> int:
         # Check Docker availability first for all modes that need Docker
         if not check_docker_available():
             raise DockerError("Docker is not available or not running")
+
+        # Handle update mode - always pull from remote registry
+        if args.update:
+            print("Updating clud runtime...")
+
+            # Determine which image to pull
+            # User specified a custom image, otherwise use the standard Claude Code image from Docker Hub
+            # This ensures we always pull from remote, not build locally
+            image_to_pull = args.image or "niteris/clud:latest"
+
+            print(f"Pulling the latest version of {image_to_pull}...")
+
+            if pull_latest_image(image_to_pull):
+                print(f"Successfully updated {image_to_pull}")
+                print("You can now run 'clud' to use the updated runtime.")
+
+                # If they pulled a non-default image, remind them to use --image flag
+                if image_to_pull != "niteris/clud:latest" and not args.image:
+                    print(f"Note: To use this image, run: clud --image {image_to_pull}")
+
+                return 0
+            else:
+                print(f"Failed to update {image_to_pull}", file=sys.stderr)
+                print("Please check your internet connection and Docker configuration.")
+                return 1
 
         # Handle build-only mode
         if args.just_build:

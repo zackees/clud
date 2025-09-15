@@ -42,7 +42,7 @@ clud /path/to/project --image custom:latest --profile nodejs
 ```
 
 **Purpose**
-Create `clud` — a simple, safe Python CLI that launches a Claude-powered development container using **icanhasjonas/run-claude-docker** (if available) or a direct `docker run` fallback. The user’s project directory is the **only** writable mount. **SSH keys are never mounted unless explicitly requested.**
+Create `clud` — a simple, safe Python CLI that launches a Claude-powered development container using **niteris/clud** or a direct `docker run` fallback. The user's project directory is the **only** writable mount. **SSH keys are never mounted unless explicitly requested.**
 
 ---
 

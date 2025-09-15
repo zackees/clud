@@ -23,9 +23,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - The package builds a wheel to `dist/clud-0.0.1-py3-none-any.whl`
 
 ### Docker
-- `docker build -t clud-dev .` - Build the development container image with Node.js/npm support
-- `docker run --rm clud-dev node --version` - Verify Node.js installation in container
-- `docker run --rm clud-dev npm --version` - Verify npm installation in container
+- `docker build -t niteris/clud .` - Build the development container image with Node.js/npm support
+- `docker run --rm niteris/clud node --version` - Verify Node.js installation in container
+- `docker run --rm niteris/clud npm --version` - Verify npm installation in container
 - **Testing Docker builds**: Use a 10-minute timeout when testing docker build operations due to the complexity of the container setup
 
 ### Cleanup

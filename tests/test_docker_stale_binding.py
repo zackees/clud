@@ -17,7 +17,7 @@ class TestDockerStaleBinding(unittest.TestCase):
     def setUp(self):
         """Set up each test."""
         self.docker_manager = DockerManager()
-        self.test_container_name = "clud-dev-test"
+        self.test_container_name = "niteris-clud-test"
 
     def tearDown(self):
         """Clean up after each test."""

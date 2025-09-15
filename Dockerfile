@@ -210,7 +210,7 @@ shopt -s histappend
 export EDITOR=vim
 
 # Prompt with color
-PS1='\[\033[01;32m\]\u@clud-dev\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+PS1='\[\033[01;32m\]\u@niteris-clud\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 
 # Auto-cd to workspace directory if it exists
 if [ -d "/workspace" ]; then
