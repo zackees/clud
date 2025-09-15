@@ -53,6 +53,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("path", nargs="?", help="Project directory to mount (default: current working directory)")
 
+    parser.add_argument("--login", action="store_true", help="Configure API key for Claude")
+
     parser.add_argument("--no-dangerous", action="store_true", help="Disable skip permission prompts inside container (dangerous mode is default)")
 
     parser.add_argument("--ssh-keys", action="store_true", help="Mount ~/.ssh read-only for git push or private repos")
@@ -145,12 +147,19 @@ def validate_api_key(api_key: str | None) -> bool:
     if not api_key:
         return False
 
+    # Clean the API key
+    api_key = api_key.strip()
+
+    # Remove any BOM characters that might be present
+    if api_key.startswith("\ufeff"):
+        api_key = api_key[1:]
+
     # Basic validation: should start with sk-ant- and have reasonable length
     if not api_key.startswith("sk-ant-"):
         return False
 
     # Should be at least 20 characters (conservative minimum)
-    return not len(api_key) < 20
+    return len(api_key) >= 20
 
 
 def get_api_key_from_keyring(keyring_name: str) -> str | None:
@@ -182,11 +191,21 @@ def save_api_key_to_config(api_key: str, key_name: str = "anthropic-api-key") ->
         key_file = config_dir / f"{key_name}.key"
 
         # Write API key to file with restrictive permissions
-        key_file.write_text(api_key, encoding="utf-8")
+        # Ensure no trailing newlines or spaces
+        key_file.write_text(api_key.strip(), encoding="utf-8")
 
         # Set restrictive permissions (owner read/write only)
         if platform.system() != "Windows":
             key_file.chmod(0o600)
+        else:
+            # On Windows, try to set file as hidden
+            try:
+                import ctypes
+
+                FILE_ATTRIBUTE_HIDDEN = 0x02
+                ctypes.windll.kernel32.SetFileAttributesW(str(key_file), FILE_ATTRIBUTE_HIDDEN)
+            except Exception:
+                pass  # Not critical if hiding fails
 
     except Exception as e:
         raise ConfigError(f"Failed to save API key to config: {e}") from e
@@ -199,11 +218,65 @@ def load_api_key_from_config(key_name: str = "anthropic-api-key") -> str | None:
         key_file = config_dir / f"{key_name}.key"
 
         if key_file.exists():
-            return key_file.read_text(encoding="utf-8").strip()
+            # Read and thoroughly clean the API key
+            api_key = key_file.read_text(encoding="utf-8").strip()
+            # Remove any BOM characters that might be present on Windows
+            if api_key.startswith("\ufeff"):
+                api_key = api_key[1:]
+            return api_key if api_key else None
         return None
 
-    except Exception:
+    except Exception as e:
+        # Log the error for debugging but don't crash
+        print(f"Warning: Could not load API key from config: {e}", file=sys.stderr)
         return None
+
+
+def handle_login() -> int:
+    """Handle the --login command to configure API key."""
+    print("Configure Claude API Key")
+    print("-" * 40)
+
+    # Check if we already have a saved key
+    existing_key = load_api_key_from_config()
+    if existing_key:
+        print("An API key is already configured.")
+        sys.stdout.flush()
+        overwrite = input("Do you want to replace it? (y/N): ").strip().lower()
+        if overwrite not in ["y", "yes"]:
+            print("Keeping existing API key.")
+            return 0
+
+    # Prompt for new key
+    while True:
+        try:
+            sys.stdout.flush()
+            api_key = input("Please enter your Anthropic API key: ").strip()
+            if not api_key:
+                print("API key cannot be empty. Please try again.")
+                continue
+
+            # Clean the API key
+            if api_key.startswith("\ufeff"):
+                api_key = api_key[1:]
+
+            if not validate_api_key(api_key):
+                print("Invalid API key format. API keys should start with 'sk-ant-' and be at least 20 characters.")
+                continue
+
+            # Save the key
+            try:
+                save_api_key_to_config(api_key)
+                print("\n✓ API key saved successfully to ~/.clud/anthropic-api-key.key")
+                print("You can now use 'clud' to launch Claude-powered development containers.")
+                return 0
+            except ConfigError as e:
+                print(f"\nError: Could not save API key: {e}", file=sys.stderr)
+                return 1
+
+        except (EOFError, KeyboardInterrupt):
+            print("\nOperation cancelled.")
+            return 2
 
 
 def prompt_for_api_key() -> str:
@@ -212,6 +285,8 @@ def prompt_for_api_key() -> str:
 
     while True:
         try:
+            # Flush output to ensure prompt is displayed before input
+            sys.stdout.flush()
             api_key = input("Please enter your Anthropic API key: ").strip()
             if not api_key:
                 print("API key cannot be empty. Please try again.")
@@ -222,6 +297,7 @@ def prompt_for_api_key() -> str:
                 continue
 
             # Ask if user wants to save to config
+            sys.stdout.flush()
             save_choice = input("Save this key to ~/.clud/ for future use? (y/N): ").strip().lower()
             if save_choice in ["y", "yes"]:
                 try:
@@ -445,16 +521,18 @@ def get_api_key(args: argparse.Namespace) -> str:
 
     # Priority 0: --api-key command line argument
     if hasattr(args, "api_key") and args.api_key:
-        api_key = args.api_key
+        api_key = args.api_key.strip()
 
     # Priority 1: --api-key-from keyring entry (if keyring is available)
-    if not api_key and args.api_key_from:
+    if not api_key and hasattr(args, "api_key_from") and args.api_key_from:
         with contextlib.suppress(ConfigError):
             api_key = get_api_key_from_keyring(args.api_key_from) if keyring is not None else load_api_key_from_config(args.api_key_from)
 
     # Priority 2: Environment variable
     if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        env_key = os.environ.get("ANTHROPIC_API_KEY")
+        if env_key:
+            api_key = env_key.strip()
 
     # Priority 3: Saved config file
     if not api_key:
@@ -463,6 +541,13 @@ def get_api_key(args: argparse.Namespace) -> str:
     # Priority 4: Interactive prompt
     if not api_key:
         api_key = prompt_for_api_key()
+
+    # Clean the API key before validation
+    if api_key:
+        api_key = api_key.strip()
+        # Remove any BOM characters
+        if api_key.startswith("\ufeff"):
+            api_key = api_key[1:]
 
     # Validate the final API key
     if not validate_api_key(api_key):
@@ -648,7 +733,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "--name",
             "clud-dev",
             "--entrypoint",
-            "/bin/bash",  # Override entrypoint to bash
+            "/bin/bash",
             "-e",
             f"ANTHROPIC_API_KEY={api_key}",
             "-v",
@@ -656,8 +741,7 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             "-w",
             "/workspace",  # Set working directory to /workspace
             "clud-dev:latest",
-            "-i",  # Interactive shell to source bashrc and show banner
-            "-l",  # Login shell
+            "--login",  # Login shell to source bashrc and show banner
         ]
 
         # On Windows with mintty/git-bash, prepend winpty for TTY support
@@ -701,6 +785,10 @@ def main() -> int:
         args.enable_firewall = False
 
     try:
+        # Handle login command first (doesn't need Docker)
+        if args.login:
+            return handle_login()
+
         # Check Docker availability first for all modes that need Docker
         if not check_docker_available():
             raise DockerError("Docker is not available or not running")
