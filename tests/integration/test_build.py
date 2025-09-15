@@ -24,7 +24,6 @@ def test_docker_build():
         # Use shared image building logic
         image_name = ensure_test_image()
         print(f"[SUCCESS] Docker image ready: {image_name}")
-        return True
 
     except Exception as e:
         print(f"[ERROR] Docker build test failed: {e}")

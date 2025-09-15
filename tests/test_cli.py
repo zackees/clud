@@ -330,7 +330,7 @@ class TestKeyringSupport(unittest.TestCase):
         """Test when keyring package is not available."""
         with self.assertRaises(ConfigError) as cm:
             get_api_key_from_keyring("test-entry")
-        self.assertIn("keyring package not available", str(cm.exception))
+        self.assertIn("No credential storage available", str(cm.exception))
 
 
 class TestAPIKeyRetrieval(unittest.TestCase):

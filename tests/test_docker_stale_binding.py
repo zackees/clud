@@ -100,7 +100,9 @@ class TestDockerStaleBinding(unittest.TestCase):
 
         # Perform CLI operations
         subprocess.run(["docker", "stop", self.test_container_name], check=True, capture_output=True)
-        subprocess.run(["docker", "rm", self.test_container_name], check=True, capture_output=True)
+        with contextlib.suppress(subprocess.CalledProcessError):
+            # Container might already be removed or not exist, continue the test
+            subprocess.run(["docker", "rm", self.test_container_name], check=True, capture_output=True)
 
         # Check API consistency
         container_after_cli = self.docker_manager.get_container(self.test_container_name)
