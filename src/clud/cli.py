@@ -847,8 +847,6 @@ def launch_container_shell(args: argparse.Namespace) -> int:
 
 def main() -> int:
     """Main entry point for clud."""
-    print(f"DEBUG: sys.argv = {sys.argv}")
-
     # Simple arg parser for key flags
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--bg", "-bg", action="store_true", help="Use background mode")
@@ -857,12 +855,10 @@ def main() -> int:
     known_args, unknown_args = parser.parse_known_args()
 
     if known_args.bg:
-        print("DEBUG: Calling bg.main()")
         from .bg import main as bg_main
 
         return bg_main(unknown_args)
     else:
-        print("DEBUG: Calling yolo.main()")
         from .yolo import main as yolo_main
 
         return yolo_main(unknown_args)
