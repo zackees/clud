@@ -56,8 +56,13 @@ def test_docker_container_basic():
 
         # Test container removal
         rm_cmd = ["docker", "rm", container_name]
-        subprocess.run(rm_cmd, check=True, capture_output=True)
-        print("OK Container removed successfully")
+        rm_result = subprocess.run(rm_cmd, capture_output=True)
+        if rm_result.returncode == 0:
+            print("OK Container removed successfully")
+        elif b"No such container" in rm_result.stderr:
+            print("OK Container was already removed (auto-removed)")
+        else:
+            raise SimpleDockerError(f"Failed to remove container: {rm_result.stderr.decode()}")
 
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {e}")
