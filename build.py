@@ -7,12 +7,12 @@ progress reporting, and build optimization features.
 """
 
 import argparse
+import os
 import subprocess
 import sys
-import time
 import threading
+import time
 import traceback
-import signal
 from pathlib import Path
 from typing import Optional
 
@@ -22,48 +22,40 @@ class DockerBuildError(Exception):
     pass
 
 
-def dump_all_threads():
-    """Dump all threads and their stack traces to stdout."""
-    print("\n" + "=" * 80)
-    print("THREAD DUMP - All active threads:")
-    print("=" * 80)
+def dump_thread_stacks():
+    """Dump stack traces of all threads."""
+    print("\n" + "=" * 60)
+    print("TIMEOUT: Dumping all thread stack traces:")
+    print("=" * 60)
 
     for thread_id, frame in sys._current_frames().items():
-        thread = None
-        for t in threading.enumerate():
-            if t.ident == thread_id:
-                thread = t
+        thread_name = None
+        for thread in threading.enumerate():
+            if thread.ident == thread_id:
+                thread_name = thread.name
                 break
 
-        thread_name = thread.name if thread else f"Thread-{thread_id}"
-        print(f"\nThread: {thread_name} (ID: {thread_id})")
+        print(f"\nThread {thread_id} ({thread_name or 'Unknown'}):")
         print("-" * 40)
+        traceback.print_stack(frame)
 
-        # Print stack trace for this thread
-        stack = traceback.format_stack(frame)
-        for line in stack:
-            print(line.rstrip())
-
-    print("=" * 80)
-    print("END THREAD DUMP")
-    print("=" * 80 + "\n")
+    print("=" * 60)
 
 
-def timeout_handler(timeout_seconds: int):
-    """Handle timeout by dumping threads and exiting."""
-    import os
+def timeout_monitor(start_time, timeout, stop_event):
+    """Monitor for timeout and dump stacks if exceeded."""
+    while not stop_event.is_set():
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            dump_thread_stacks()
+            print(f"\nBuild timed out after {timeout} seconds")
+            stop_event.set()
 
-    def handler():
-        print(f"\nTimeout triggered after {timeout_seconds} seconds!")
-        dump_all_threads()
-        print("Exiting due to timeout...")
-        os._exit(0)  # More forceful exit
-
-    timer = threading.Timer(timeout_seconds, handler)
-    timer.daemon = True
-    return timer
-
-
+            # Give the main process 5 seconds to exit gracefully
+            time.sleep(5)
+            print("Process did not exit gracefully, forcing exit")
+            os._exit(1)
+        time.sleep(1)
 
 
 def check_docker_available() -> bool:
@@ -219,6 +211,15 @@ def build_docker_image(
     # Execute build
     start_time = time.time()
 
+    # Start timeout monitor thread
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(
+        target=timeout_monitor,
+        args=(start_time, timeout, stop_event),
+        daemon=True
+    )
+    monitor_thread.start()
+
     try:
         # Use Popen for both quiet and normal mode
         process = subprocess.Popen(
@@ -256,6 +257,9 @@ def build_docker_image(
 
         build_time = time.time() - start_time
 
+        # Stop the timeout monitor
+        stop_event.set()
+
         print("=" * 60)
         print(f"OK Build completed successfully!")
         print(f"Image: {image_name}")
@@ -265,9 +269,14 @@ def build_docker_image(
         return image_id
 
     except subprocess.TimeoutExpired:
+        stop_event.set()
         raise DockerBuildError(f"Build timed out after {timeout} seconds")
     except subprocess.CalledProcessError as e:
+        stop_event.set()
         raise DockerBuildError(f"Build failed with exit code {e.returncode}")
+    except Exception:
+        stop_event.set()
+        raise
 
 
 def remove_image(image_name: str, force: bool = False) -> bool:
@@ -322,7 +331,7 @@ Examples:
   python build.py --force-rebuild          # Remove existing image and rebuild
   python build.py --check                  # Only check if image exists
   python build.py --timeout 1200           # Build with 20-minute timeout
-  python build.py --yes                    # Auto-answer yes to prompts
+  python build.py --yes                    # Auto-accept all prompts
         """
     )
 
@@ -374,17 +383,12 @@ Examples:
     parser.add_argument(
         "--yes", "-y",
         action="store_true",
-        help="Automatically answer yes to all prompts"
+        help="Auto-accept all prompts (non-interactive mode)"
     )
 
     args = parser.parse_args()
 
-    # Start timeout handler if specified
-    timeout_timer = None
-    if args.timeout:
-        print(f"Starting timeout handler: will dump threads and exit after {args.timeout} seconds")
-        timeout_timer = timeout_handler(args.timeout)
-        timeout_timer.start()
+    # Note: timeout is handled within build_docker_image function
 
     # Check Docker availability
     if not check_docker_available():
@@ -404,11 +408,9 @@ Examples:
 
         if not args.force_rebuild:
             if args.yes:
-                print("Do you want to rebuild it? [y/N]: y (auto-yes)")
+                print("Auto-accepting rebuild (--yes flag)")
             else:
                 response = input("Do you want to rebuild it? [y/N]: ").strip().lower()
-                if response == "":
-                    response = "y"
                 if response not in ('y', 'yes'):
                     print("Skipping build")
                     return 0
@@ -438,26 +440,16 @@ Examples:
         print("\nBuild process completed successfully!")
         print(f"You can now run: docker run --rm -it {args.image_name}")
 
-        # Cancel timeout timer if it was set
-        if timeout_timer:
-            timeout_timer.cancel()
-
         return 0
 
     except DockerBuildError as e:
         print(f"\nBuild failed: {e}")
-        if timeout_timer:
-            timeout_timer.cancel()
         return 1
     except KeyboardInterrupt:
         print("\nBuild interrupted by user")
-        if timeout_timer:
-            timeout_timer.cancel()
         return 1
     except Exception as e:
         print(f"\nUnexpected error: {e}")
-        if timeout_timer:
-            timeout_timer.cancel()
         return 1
 
 
