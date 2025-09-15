@@ -139,3 +139,4 @@ functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
+# yolo = "clud.yolo:main"

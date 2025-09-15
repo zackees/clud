@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from cryptography.fernet import Fernet
+    from cryptography.fernet import Fernet  # type: ignore[import-untyped] # pyright: ignore[reportMissingImports]
 
 
 class CredentialStore(Protocol):
@@ -60,7 +60,7 @@ class SimpleCredentialStore:
     """Simple Fernet-based credential storage as keyring fallback."""
 
     def __init__(self) -> None:
-        from cryptography.fernet import Fernet  # type: ignore[import-untyped]
+        from cryptography.fernet import Fernet  # type: ignore[import-untyped] # pyright: ignore[reportMissingImports]
 
         self._fernet_cls = Fernet
         self.config_dir = Path.home() / ".clud"
@@ -76,7 +76,7 @@ class SimpleCredentialStore:
             self.key_file.write_bytes(key)
             self.key_file.chmod(0o600)
 
-    def _get_fernet(self) -> "Fernet":
+    def _get_fernet(self) -> "Fernet":  # pyright: ignore[reportUnknownParameterType]
         """Get Fernet instance with stored key."""
         key = self.key_file.read_bytes()
         return self._fernet_cls(key)

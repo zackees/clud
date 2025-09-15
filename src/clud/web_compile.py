@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from clud.types import BuildMode, CompileResult
+from clud.type_defs import BuildMode, CompileResult
 
 
 def web_compile(directory: Path | str, host: str, build_mode: BuildMode = BuildMode.DEBUG, profile: bool = False, no_platformio: bool = False, allow_libcompile: bool = True) -> CompileResult:

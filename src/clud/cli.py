@@ -97,6 +97,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--cmd", help="Command to execute in container instead of interactive shell")
 
+    parser.add_argument("--yolo", action="store_true", help="Launch Claude Code with dangerous permissions (bypasses all safety prompts)")
+
     return parser
 
 
@@ -845,94 +847,25 @@ def launch_container_shell(args: argparse.Namespace) -> int:
 
 def main() -> int:
     """Main entry point for clud."""
-    # clud CLI is only used outside containers to launch development environments
-    # Inside containers, 'clud' is a bash alias to 'claude code --dangerously-skip-permissions'
+    print(f"DEBUG: sys.argv = {sys.argv}")
 
-    parser = create_parser()
-    args = parser.parse_args()
+    # Simple arg parser for key flags
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--bg", "-bg", action="store_true", help="Use background mode")
 
-    # Handle conflicting firewall options
-    if args.no_firewall:
-        args.enable_firewall = False
+    # Parse known args, keep unknown args
+    known_args, unknown_args = parser.parse_known_args()
 
-    try:
-        # Handle login command first (doesn't need Docker)
-        if args.login:
-            return handle_login()
+    if known_args.bg:
+        print("DEBUG: Calling bg.main()")
+        from .bg import main as bg_main
 
-        # Check Docker availability first for all modes that need Docker
-        if not check_docker_available():
-            raise DockerError("Docker is not available or not running")
+        return bg_main(unknown_args)
+    else:
+        print("DEBUG: Calling yolo.main()")
+        from .yolo import main as yolo_main
 
-        # Handle update mode - always pull from remote registry
-        if args.update:
-            print("Updating clud runtime...")
-
-            # Determine which image to pull
-            # User specified a custom image, otherwise use the standard Claude Code image from Docker Hub
-            # This ensures we always pull from remote, not build locally
-            image_to_pull = args.image or "niteris/clud:latest"
-
-            print(f"Pulling the latest version of {image_to_pull}...")
-
-            if pull_latest_image(image_to_pull):
-                print(f"Successfully updated {image_to_pull}")
-                print("You can now run 'clud' to use the updated runtime.")
-
-                # If they pulled a non-default image, remind them to use --image flag
-                if image_to_pull != "niteris/clud:latest" and not args.image:
-                    print(f"Note: To use this image, run: clud --image {image_to_pull}")
-
-                return 0
-            else:
-                print(f"Failed to update {image_to_pull}", file=sys.stderr)
-                print("Please check your internet connection and Docker configuration.")
-                return 1
-
-        # Handle build-only mode
-        if args.just_build:
-            print("Building Docker image...")
-            if build_docker_image(getattr(args, "build_dockerfile", None)):
-                print("Docker image built successfully!")
-                return 0
-            else:
-                print("Failed to build Docker image", file=sys.stderr)
-                return 1
-
-        # Force build if requested
-        if args.build:
-            print("Building Docker image...")
-            if not build_docker_image(getattr(args, "build_dockerfile", None)):
-                print("Failed to build Docker image", file=sys.stderr)
-                return 1
-            args._image_built = True
-
-        # Route to different modes
-        if args.ui:
-            # UI mode - launch code-server container
-            project_path = validate_path(args.path)
-            api_key = get_api_key(args)
-
-            return run_ui_container(args, project_path, api_key)
-        else:
-            # Default mode - launch container with interactive shell
-            return launch_container_shell(args)
-
-    except ValidationError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 2
-    except DockerError as e:
-        print(f"Docker error: {e}", file=sys.stderr)
-        return 3
-    except ConfigError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
-        return 4
-    except KeyboardInterrupt:
-        print("\nOperation cancelled.", file=sys.stderr)
-        return 2
-    except Exception as e:
-        print(f"Unexpected error: {e}", file=sys.stderr)
-        return 1
+        return yolo_main(unknown_args)
 
 
 if __name__ == "__main__":
