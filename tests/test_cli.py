@@ -8,25 +8,29 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
-from clud.cli import (
-    ConfigError,
+from clud.agent_background import (
     ValidationError,
     build_fallback_command,
     build_wrapper_command,
     check_docker_available,
-    create_parser,
     find_run_claude_docker,
+    get_claude_commands_mount,
+    get_ssh_dir,
+    normalize_path_for_docker,
+    validate_path,
+)
+from clud.agent_foreground import (
+    ConfigError,
     get_api_key,
     get_api_key_from_keyring,
-    get_claude_commands_mount,
     get_clud_config_dir,
-    get_ssh_dir,
     load_api_key_from_config,
-    main,
-    normalize_path_for_docker,
     save_api_key_to_config,
     validate_api_key,
-    validate_path,
+)
+from clud.cli import (
+    create_parser,
+    main,
 )
 
 

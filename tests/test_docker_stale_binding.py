@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from clud.cli import stop_existing_container
+from clud.agent_background import stop_existing_container
 from clud.docker.docker_manager import DockerManager
 
 
