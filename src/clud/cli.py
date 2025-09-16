@@ -104,6 +104,10 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("-t", "--task", metavar="PATH", help="Open task file in editor and process tasks")
 
+    parser.add_argument("-m", "--message", help="Send this message to Claude (strips the -m flag)")
+
+    parser.add_argument("--dry-run", action="store_true", help="Print what would be executed without actually running Claude")
+
     return parser
 
 
@@ -947,7 +951,22 @@ def main(args: list[str] | None = None) -> int:
         if parsed_args.task:
             return handle_task_command(parsed_args.task)
 
-        # Check Docker availability first for all modes that need Docker
+        # Handle yolo mode (doesn't need Docker)
+        # Check if this is the default yolo mode (no specific flags for Docker-based modes)
+        is_yolo_mode = not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build)
+        if is_yolo_mode:
+            from .yolo import main as yolo_main
+
+            # Construct arguments for yolo main
+            yolo_args = []
+            if parsed_args.message:
+                yolo_args.extend(["-m", parsed_args.message])
+            if parsed_args.dry_run:
+                yolo_args.append("--dry-run")
+
+            return yolo_main(yolo_args)
+
+        # Check Docker availability first for all Docker-based modes
         if not check_docker_available():
             raise DockerError("Docker is not available or not running")
 
@@ -994,7 +1013,7 @@ def main(args: list[str] | None = None) -> int:
                 return 1
             parsed_args._image_built = True
 
-        # Route to different modes
+        # Route to Docker-based modes
         if parsed_args.ui:
             # UI mode - launch code-server container
             project_path = validate_path(parsed_args.path)
@@ -1002,7 +1021,7 @@ def main(args: list[str] | None = None) -> int:
 
             return run_ui_container(parsed_args, project_path, api_key)
         else:
-            # Default mode - launch container with interactive shell
+            # Container shell mode - launch container with interactive shell
             return launch_container_shell(parsed_args)
 
     except ValidationError as e:

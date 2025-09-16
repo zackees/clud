@@ -13,6 +13,7 @@ class Args:
     prompt: str | None
     message: str | None
     continue_flag: bool
+    dry_run: bool
     claude_args: list[str]
 
 
@@ -47,6 +48,13 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Continue previous conversation (adds --continue flag to Claude)",
     )
 
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print what would be executed without actually running Claude",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
 
@@ -54,6 +62,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         prompt=known_args.prompt,
         message=known_args.message,
         continue_flag=known_args.continue_flag,
+        dry_run=known_args.dry_run,
         claude_args=unknown_args,
     )
 
@@ -66,6 +75,15 @@ def run(args: Args) -> int:
     WARNING: This mode removes all safety guardrails. Use with caution.
     """
     try:
+        # Handle dry-run mode
+        if args.dry_run:
+            if args.message:
+                print(args.message)
+                return 0
+            else:
+                print("Dry-run mode: No message provided")
+                return 0
+
         # Try to find claude in PATH, including common Windows locations
         claude_path = shutil.which("claude")
         if not claude_path:
