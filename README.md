@@ -1,6 +1,6 @@
 # clud
 
-*`claude` but god mode by default*
+*`claude` but with god-mode by default*
 
 
 [![Build and Push Multi Docker Image](https://github.com/zackees/clud/actions/workflows/build_multi_docker_image.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/build_multi_docker_image.yml)
