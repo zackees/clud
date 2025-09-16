@@ -878,7 +878,7 @@ class BackgroundAgent:
         }
 
 
-def main():
+def main(args: list[str] | None = None):
     """Main entry point for background agent."""
     parser = argparse.ArgumentParser(description="CLUD background sync agent")
     parser.add_argument("--host-dir", default="/host", help="Host directory path (default: /host)")
@@ -896,27 +896,27 @@ def main():
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
-    args = parser.parse_args()
+    parsed_args = parser.parse_args(args)
 
-    if args.verbose:
+    if parsed_args.verbose:
         logger.setLevel(logging.DEBUG)
         # Also set container_sync logger to debug
         logging.getLogger("clud.container_sync").setLevel(logging.DEBUG)
 
     # Validate sync interval
-    if args.sync_interval < 10:
+    if parsed_args.sync_interval < 10:
         logger.error("Sync interval must be at least 10 seconds")
         sys.exit(1)
 
-    if args.sync_interval > 3600:
+    if parsed_args.sync_interval > 3600:
         logger.warning("Large sync interval detected (> 1 hour), consider using a smaller interval")
 
     # Create and run agent
     agent = BackgroundAgent(
-        host_dir=args.host_dir,
-        workspace_dir=args.workspace_dir,
-        sync_interval=args.sync_interval,
-        watch_mode=args.watch,
+        host_dir=parsed_args.host_dir,
+        workspace_dir=parsed_args.workspace_dir,
+        sync_interval=parsed_args.sync_interval,
+        watch_mode=parsed_args.watch,
     )
 
     agent.run()

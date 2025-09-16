@@ -3,7 +3,6 @@
 import argparse
 import sys
 
-from .agent_completion import detect_agent_completion
 from .agent_background import (
     ConfigError,
     DockerError,
@@ -25,6 +24,7 @@ def create_parser() -> argparse.ArgumentParser:
         prog="clud",
         description="Launch a Claude-powered development container",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
     )
 
     parser.add_argument("path", nargs="?", help="Project directory to mount (default: current working directory)")
@@ -85,19 +85,28 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
 
+    parser.add_argument("--bg", action="store_true", help="Run background agent for workspace synchronization")
+
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
+
     return parser
 
 
 def main(args: list[str] | None = None) -> int:
     """Main entry point for clud."""
     parser = create_parser()
-    parsed_args = parser.parse_args(args)
+    parsed_args, unknown_args = parser.parse_known_args(args)
 
     # Handle conflicting firewall options
     if parsed_args.no_firewall:
         parsed_args.enable_firewall = False
 
     try:
+        # Handle help flag - only show main help if no agent-specific flags are given
+        if parsed_args.help and not (parsed_args.bg or parsed_args.task):
+            parser.print_help()
+            return 0
+
         # Handle login command first (doesn't need Docker)
         if parsed_args.login:
             return handle_login()
@@ -106,9 +115,31 @@ def main(args: list[str] | None = None) -> int:
         if parsed_args.task:
             return handle_task_command(parsed_args.task)
 
+        # Handle background agent mode
+        if parsed_args.bg:
+            # Background agent mode - run workspace synchronization
+            from .agent_background import main as bg_main
+
+            # Pass help flag through to background agent if present
+            bg_args = unknown_args.copy()
+            if parsed_args.help:
+                bg_args.append("--help")
+
+            try:
+                bg_main(bg_args)
+                return 0
+            except SystemExit as e:
+                # argparse calls sys.exit() for --help, --version, etc.
+                if e.code is None:
+                    return 0
+                elif isinstance(e.code, int):
+                    return e.code
+                else:
+                    return 1  # fallback for string codes
+
         # Handle yolo mode (doesn't need Docker)
         # Check if this is the default yolo mode (no specific flags for Docker-based modes)
-        is_yolo_mode = not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build)
+        is_yolo_mode = not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build or parsed_args.bg)
         if is_yolo_mode:
             from .agent_foreground import main as yolo_main
 
@@ -118,6 +149,9 @@ def main(args: list[str] | None = None) -> int:
                 yolo_args.extend(["-m", parsed_args.message])
             if parsed_args.dry_run:
                 yolo_args.append("--dry-run")
+
+            # Add unknown args to pass through to the foreground agent
+            yolo_args.extend(unknown_args)
 
             return yolo_main(yolo_args)
 
