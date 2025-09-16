@@ -245,7 +245,11 @@ RUN mkdir -p /root/.claude/commands && \
     chmod -R 755 /root/.claude/commands
 
 # Copy only the plugin files if they exist
-COPY docker/plugins/claude/commands/*.md /root/.claude/commands/ 2>/dev/null || echo "No default plugins found - plugins will be installed at runtime"
+RUN if [ -d "docker/plugins/claude/commands" ] && [ -n "$(ls -A docker/plugins/claude/commands/*.md 2>/dev/null)" ]; then \
+        cp docker/plugins/claude/commands/*.md /root/.claude/commands/; \
+    else \
+        echo "No default plugins found - plugins will be installed at runtime"; \
+    fi
 
 # Copy and set up entrypoint script
 COPY entrypoint.sh /entrypoint.sh
