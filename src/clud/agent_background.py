@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from clud.container_sync import ContainerSync
+# Container sync is now handled by standalone package in container
 
 
 # Exception classes
@@ -586,13 +586,7 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
             cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
             print(f"Mounting Claude commands: {host_path} -> {container_path}")
 
-        cmd.extend(
-            [
-                "niteris/clud:latest",
-                "--cmd",
-                args.cmd,  # Pass command as argument to entrypoint
-            ]
-        )
+        cmd.append("niteris/clud:latest")
     else:
         # Interactive shell mode - override entrypoint to start bash with login shell
         base_cmd = [
@@ -659,16 +653,15 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
 
 
 class BackgroundAgent:
-    """Background agent for managing workspace synchronization."""
+    """Background agent for managing workspace synchronization via containers."""
 
     def __init__(
         self,
-        host_dir: str = "/host",
-        workspace_dir: str = "/workspace",
+        host_dir: str,
+        workspace_dir: str,
         sync_interval: int = 300,
         watch_mode: bool = False,
     ):
-        self.sync_handler = ContainerSync(host_dir, workspace_dir)
         self.host_dir = Path(host_dir)
         self.workspace_dir = Path(workspace_dir)
         self.sync_interval = sync_interval  # seconds
@@ -678,11 +671,24 @@ class BackgroundAgent:
         self.sync_count = 0
         self.error_count = 0
         self.last_error: str | None = None
-        self.state_file = Path("/var/run/clud-bg-agent.state")
+        # Set state file path based on platform
+        if platform.system() == "Windows":
+            self.state_file = Path(os.environ.get("TEMP", "C:/temp")) / "clud-bg-agent.state"
+        else:
+            self.state_file = Path("/var/run/clud-bg-agent.state")
 
         # Set up signal handlers
         signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGINT, self._handle_signal)
+
+        # On Windows, be more careful with SIGINT handling to avoid spurious signals
+        if platform.system() == "Windows":
+            # Only handle SIGINT in specific Windows environments
+            if os.environ.get("MSYSTEM", "").startswith(("MSYS", "MINGW")):
+                signal.signal(signal.SIGINT, self._handle_signal)
+            else:
+                logger.debug("Skipping SIGINT handler on Windows (not in MSYS/MINGW environment)")
+        else:
+            signal.signal(signal.SIGINT, self._handle_signal)
 
     def install_claude_plugins(self) -> bool:
         """Install Claude plugins from workspace to system.
@@ -698,64 +704,79 @@ class BackgroundAgent:
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
 
-    def initial_sync(self) -> bool:
-        """Perform initial host → workspace sync."""
-        logger.info("Performing initial sync from host to workspace...")
+    def run_container_sync(self, command: str) -> bool:
+        """Run sync command in container."""
         try:
-            exit_code = self.sync_handler.sync_host_to_workspace()
-            if exit_code == 0:
-                self.last_sync_time = datetime.now()
-                self.sync_count += 1
-                logger.info("Initial sync completed successfully")
-                return True
-            else:
-                logger.error(f"Initial sync failed with code {exit_code}")
-                self.error_count += 1
-                self.last_error = f"Initial sync failed with code {exit_code}"
-                return False
+            docker_path = normalize_path_for_docker(self.host_dir)
+            cmd = [
+                "docker",
+                "run",
+                "--rm",
+                "-v",
+                f"{docker_path}:/host:rw",
+                "-v",
+                f"{docker_path}/workspace:/workspace:rw",
+                "niteris/clud:latest",
+                "python",
+                "/opt/container_sync/container_sync.py",
+                command,
+                "--host-dir",
+                "/host",
+                "--workspace-dir",
+                "/workspace",
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+            if result.stdout:
+                for line in result.stdout.strip().split("\n"):
+                    if line:
+                        logger.info(f"[container] {line}")
+
+            if result.stderr:
+                for line in result.stderr.strip().split("\n"):
+                    if line:
+                        logger.warning(f"[container] {line}")
+
+            return result.returncode == 0
+
         except Exception as e:
-            logger.error(f"Exception during initial sync: {e}")
+            logger.error(f"Container sync failed: {e}")
+            return False
+
+    def initial_sync(self) -> bool:
+        """Perform initial host → workspace sync via container."""
+        logger.info("Performing initial sync from host to workspace...")
+
+        # Create workspace directory if it doesn't exist
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        success = self.run_container_sync("init")
+        if success:
+            self.last_sync_time = datetime.now()
+            self.sync_count += 1
+            logger.info("Initial sync completed successfully")
+            return True
+        else:
+            logger.error("Initial sync failed")
             self.error_count += 1
-            self.last_error = str(e)
+            self.last_error = "Initial sync failed"
             return False
 
     def bidirectional_sync(self) -> bool:
-        """Perform bidirectional sync between host and workspace."""
+        """Perform bidirectional sync between host and workspace via container."""
         logger.info("Starting bidirectional sync...")
-        success = True
 
-        try:
-            # First sync workspace changes to host
-            logger.debug("Syncing workspace to host...")
-            exit_code = self.sync_handler.sync_workspace_to_host()
-            if exit_code != 0:
-                logger.warning(f"Workspace to host sync failed with code {exit_code}")
-                success = False
-                self.error_count += 1
-                self.last_error = f"Workspace to host sync failed with code {exit_code}"
-
-            # Then sync any host changes back to workspace
-            logger.debug("Syncing host to workspace...")
-            exit_code = self.sync_handler.sync_host_to_workspace()
-            if exit_code != 0:
-                logger.warning(f"Host to workspace sync failed with code {exit_code}")
-                success = False
-                self.error_count += 1
-                self.last_error = f"Host to workspace sync failed with code {exit_code}"
-
-            if success:
-                self.last_sync_time = datetime.now()
-                self.sync_count += 1
-                logger.info(f"Bidirectional sync completed (total syncs: {self.sync_count})")
-            else:
-                logger.warning("Bidirectional sync completed with errors")
-
-            return success
-
-        except Exception as e:
-            logger.error(f"Exception during bidirectional sync: {e}")
+        success = self.run_container_sync("sync")
+        if success:
+            self.last_sync_time = datetime.now()
+            self.sync_count += 1
+            logger.info(f"Bidirectional sync completed (total syncs: {self.sync_count})")
+            return True
+        else:
+            logger.warning("Bidirectional sync failed")
             self.error_count += 1
-            self.last_error = str(e)
+            self.last_error = "Bidirectional sync failed"
             return False
 
     def write_state(self):
@@ -881,8 +902,33 @@ class BackgroundAgent:
 def main(args: list[str] | None = None):
     """Main entry point for background agent."""
     parser = argparse.ArgumentParser(description="CLUD background sync agent")
-    parser.add_argument("--host-dir", default="/host", help="Host directory path (default: /host)")
-    parser.add_argument("--workspace-dir", default="/workspace", help="Workspace directory path (default: /workspace)")
+
+    # Set default directories based on platform and environment
+    default_host_dir = "/host"
+    default_workspace_dir = "/workspace"
+
+    # When running on Windows host (not in container), map container concepts to Windows paths
+    # But ONLY if we're running in background mode outside a container
+    # Check for container environment indicators
+    in_container = (
+        Path("/.dockerenv").exists()  # Docker creates this file
+        or os.environ.get("CLUD_BACKGROUND_SYNC") == "true"  # Set by container entrypoint
+        or Path("/host").exists()  # Container mount point should exist
+        or Path("/workspace").exists()  # Container mount point should exist
+    )
+
+    if platform.system() == "Windows" and not in_container:
+        # Map /host concept to current working directory by default
+        default_host_dir = str(Path.cwd())
+        # Map /workspace concept to a workspace subdirectory
+        default_workspace_dir = str(Path.cwd() / "workspace")
+        logger.info(f"Running on Windows host - mapping /host to {default_host_dir}")
+        logger.info(f"Running on Windows host - mapping /workspace to {default_workspace_dir}")
+    else:
+        logger.info("Running in container environment - using container paths")
+
+    parser.add_argument("--host-dir", default=default_host_dir, help=f"Host directory path (default: {default_host_dir})")
+    # Note: workspace-dir is fixed at /workspace and should not be configurable
     parser.add_argument(
         "--sync-interval",
         type=int,
@@ -911,10 +957,21 @@ def main(args: list[str] | None = None):
     if parsed_args.sync_interval > 3600:
         logger.warning("Large sync interval detected (> 1 hour), consider using a smaller interval")
 
+    # Validate that host and workspace directories are different
+    host_path = Path(parsed_args.host_dir).resolve()
+    workspace_path = Path(default_workspace_dir).resolve()
+
+    if host_path == workspace_path:
+        logger.error("Host directory and workspace directory cannot be the same")
+        logger.error(f"Host: {host_path}")
+        logger.error(f"Workspace: {workspace_path}")
+        logger.error("Background sync requires different source and destination directories")
+        sys.exit(1)
+
     # Create and run agent
     agent = BackgroundAgent(
         host_dir=parsed_args.host_dir,
-        workspace_dir=parsed_args.workspace_dir,
+        workspace_dir=default_workspace_dir,
         sync_interval=parsed_args.sync_interval,
         watch_mode=parsed_args.watch,
     )

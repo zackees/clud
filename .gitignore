@@ -143,3 +143,4 @@ uv.lock
 
 # Docker test cache
 .docker_test_cache.json
+**/.docker_build.lock

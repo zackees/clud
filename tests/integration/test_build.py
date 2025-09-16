@@ -3,7 +3,7 @@
 
 import sys
 
-from docker_test_utils import ensure_test_image
+from clud.testing.docker_test_utils import ensure_test_image
 
 
 class DockerBuildError(Exception):

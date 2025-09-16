@@ -24,7 +24,7 @@ class DockerTestImageManager:
         self.image_name = image_name
         self.tag = tag
         self.full_image_name = f"{image_name}:{tag}"
-        self.project_root = Path(__file__).parent.parent
+        self.project_root = Path(__file__).parent.parent.parent.parent
         self.dockerfile_path = self.project_root / "Dockerfile"
         self.cache_file = self.project_root / ".docker_test_cache.json"
         self.lock_file = self.project_root / ".docker_build.lock"

@@ -188,9 +188,9 @@ alias lg="lazygit"
 # CLUD alias - the main purpose of this container
 alias clud='claude code --dangerously-skip-permissions'
 
-# Container sync commands (using container-sync script)
-alias sync='python3 /usr/local/bin/container-sync sync'
-alias sync-preview='python3 /usr/local/bin/container-sync sync-preview'
+# Container sync commands (using standalone container-sync package)
+alias sync='python3 /opt/container_sync/container_sync.py sync'
+alias sync-preview='python3 /opt/container_sync/container_sync.py sync-preview'
 
 # Show sync logs
 alias sync-logs='tail -f /var/log/clud-sync.log 2>/dev/null || echo "No sync logs available"'
@@ -236,10 +236,9 @@ RUN dos2unix /root/.bashrc
 
 USER root
 
-# Copy Python sync scripts
-COPY src/clud/container_sync.py /usr/local/bin/container-sync
-COPY src/clud/bg.py /usr/local/bin/bg.py
-RUN chmod +x /usr/local/bin/container-sync /usr/local/bin/bg.py
+# Copy standalone container sync package
+COPY docker/container_sync/ /opt/container_sync/
+RUN chmod +x /opt/container_sync/container_sync.py
 
 # Create Claude commands directory
 RUN mkdir -p /root/.claude/commands && \

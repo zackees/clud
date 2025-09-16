@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from docker_test_utils import ensure_test_image
+from clud.testing.docker_test_utils import ensure_test_image
 
 
 class DockerCliExitError(Exception):

@@ -5,6 +5,8 @@ import argparse
 import contextlib
 import logging
 import os
+import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -54,6 +56,16 @@ cert: false
 # ==================== LOGGING SETUP ====================
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [container-sync] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
+
+
+def convert_path_for_rsync(path: Path) -> str:
+    """Convert Windows paths to rsync-compatible format."""
+    if platform.system() == "Windows":
+        # On Windows with Git Bash, use the native Windows path format
+        # rsync in Git Bash handles Windows paths better than Unix-style paths
+        return str(path).replace("\\", "/")
+    else:
+        return str(path)
 
 
 class ContainerSync:
@@ -129,9 +141,65 @@ class ContainerSync:
             logger.info("Using .gitignore filters")
 
         # Add source and destination (with trailing slashes for proper sync)
-        cmd.extend([f"{source}/", f"{dest}/"])
+        # Convert paths for rsync compatibility on Windows
+        source_path = convert_path_for_rsync(source)
+        dest_path = convert_path_for_rsync(dest)
+
+        # Log the directories being synced
+        logger.info(f"Syncing: {source_path}/ -> {dest_path}/")
+
+        cmd.extend([f"{source_path}/", f"{dest_path}/"])
 
         return cmd
+
+    def run_python_sync(self, source: Path, dest: Path, operation: str, sync_direction: str = "host_to_workspace") -> tuple[bool, int]:
+        """Fallback sync using Python file operations for Windows compatibility."""
+        try:
+            # Choose exclusions based on sync direction
+            if sync_direction == "workspace_to_host":
+                exclusions = RSYNC_EXCLUSIONS_TO_HOST
+            else:
+                exclusions = RSYNC_EXCLUSIONS_COMMON
+
+            # Create destination directory if it doesn't exist
+            dest.mkdir(parents=True, exist_ok=True)
+
+            file_count = 0
+
+            # Copy files
+            for src_file in source.rglob("*"):
+                if src_file.is_file():
+                    # Check if file should be excluded
+                    rel_path = src_file.relative_to(source)
+                    should_exclude = False
+
+                    for exclusion in exclusions:
+                        # Simple pattern matching - could be improved
+                        if exclusion.startswith("**/"):
+                            pattern = exclusion[3:]
+                            if pattern in str(rel_path) or str(rel_path).endswith(pattern):
+                                should_exclude = True
+                                break
+                        elif exclusion.startswith("/"):
+                            if str(rel_path).startswith(exclusion[1:]):
+                                should_exclude = True
+                                break
+
+                    if not should_exclude:
+                        dest_file = dest / rel_path
+                        dest_file.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Only copy if source is newer or dest doesn't exist
+                        if not dest_file.exists() or src_file.stat().st_mtime > dest_file.stat().st_mtime:
+                            shutil.copy2(src_file, dest_file)
+                            file_count += 1
+
+            logger.info(f"{operation} completed successfully. Transferred {file_count} files")
+            return True, file_count
+
+        except Exception as e:
+            logger.error(f"Python sync failed: {e}")
+            return False, -1
 
     def run_rsync(self, cmd: list[str], operation: str) -> tuple[bool, int]:
         """Execute rsync command with retry logic."""
@@ -180,6 +248,11 @@ class ContainerSync:
             logger.info("No host directory found or empty, skipping sync")
             return 0
 
+        # Check if source and destination are the same directory
+        if self.host_dir.resolve() == self.workspace_dir.resolve():
+            logger.info("Host and workspace directories are the same, skipping sync")
+            return 0
+
         logger.info("Starting host to workspace sync...")
 
         # Validate permissions
@@ -188,9 +261,14 @@ class ContainerSync:
         if not self.validate_permissions(self.workspace_dir, "write"):
             return PERMISSION_ERROR
 
-        # Build and run rsync command (host->workspace allows .git)
-        cmd = self.build_rsync_command(self.host_dir, self.workspace_dir, sync_direction="host_to_workspace")
-        success, file_count = self.run_rsync(cmd, "Host sync")
+        # On Windows host, skip rsync entirely and use Python sync
+        if platform.system() == "Windows":
+            logger.info("Running on Windows host - using Python sync instead of rsync")
+            success, file_count = self.run_python_sync(self.host_dir, self.workspace_dir, "Host sync", sync_direction="host_to_workspace")
+        else:
+            # Build and run rsync command (host->workspace allows .git) - container only
+            cmd = self.build_rsync_command(self.host_dir, self.workspace_dir, sync_direction="host_to_workspace")
+            success, file_count = self.run_rsync(cmd, "Host sync")
 
         return 0 if success else SYNC_ERROR
 
@@ -198,6 +276,11 @@ class ContainerSync:
         """Sync from /workspace to /host (manual sync back to host)."""
         if not self.workspace_dir.exists() or not any(self.workspace_dir.iterdir()):
             logger.info("No workspace directory found or empty, skipping reverse sync")
+            return 0
+
+        # Check if source and destination are the same directory
+        if self.workspace_dir.resolve() == self.host_dir.resolve():
+            logger.info("Workspace and host directories are the same, skipping sync")
             return 0
 
         if dry_run:
@@ -216,10 +299,16 @@ class ContainerSync:
             logger.error("Host filesystem appears to be read-only")
             return READONLY_ERROR
 
-        # Build and run rsync command (workspace->host excludes .git)
-        cmd = self.build_rsync_command(self.workspace_dir, self.host_dir, dry_run=dry_run, sync_direction="workspace_to_host")
-        operation = "Dry-run" if dry_run else "Workspace to host sync"
-        success, file_count = self.run_rsync(cmd, operation)
+        # On Windows host, skip rsync entirely and use Python sync (except for dry-run which needs rsync features)
+        if platform.system() == "Windows" and not dry_run:
+            logger.info("Running on Windows host - using Python sync instead of rsync")
+            operation = "Workspace to host sync"
+            success, file_count = self.run_python_sync(self.workspace_dir, self.host_dir, operation, sync_direction="workspace_to_host")
+        else:
+            # Build and run rsync command (workspace->host excludes .git) - container only or dry-run
+            cmd = self.build_rsync_command(self.workspace_dir, self.host_dir, dry_run=dry_run, sync_direction="workspace_to_host")
+            operation = "Dry-run" if dry_run else "Workspace to host sync"
+            success, file_count = self.run_rsync(cmd, operation)
 
         if dry_run and success:
             logger.info("Dry-run completed - no changes made")

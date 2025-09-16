@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from docker_test_utils import ensure_test_image
+from clud.testing.docker_test_utils import ensure_test_image
 
 
 class WebServerError(Exception):

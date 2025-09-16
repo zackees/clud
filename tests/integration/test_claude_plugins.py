@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from docker_test_utils import DockerTestImageManager
+from clud.testing.docker_test_utils import DockerTestImageManager
 
 
 class PluginTestError(Exception):
