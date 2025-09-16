@@ -4,9 +4,11 @@
 
 ![hero-clud](https://github.com/user-attachments/assets/4009dfee-e703-446d-b073-80d826708a10)
 
-**Unleash Claude Code without limits** - A Python CLI that runs Claude Code in "YOLO mode" by default, eliminating permission prompts for maximum development velocity. The name `clud` is simply a shorter, easier-to-type version of `claude`. Use `-bg` to launch the sandboxed background agent with full Docker server capabilities.
+**A Python CLI that runs Claude Code in "YOLO mode" by default, eliminating permission prompts for maximum development velocity**. In other words, it unlockes god mode for claude cli.
 
-## Why clud?
+The name `clud` is simply a shorter, easier-to-type version of `claude`. Use `-bg` to launch the sandboxed background agent with full Docker server capabilities.
+
+## Why is clud butter?
 
 Claude Code's safety prompts, while well-intentioned, slow down experienced developers. `clud` removes these friction points by running Claude Code with `--dangerously-skip-permissions` in both foreground and background modes, delivering the uninterrupted coding experience Claude Code was meant to provide.
 
