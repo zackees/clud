@@ -16,6 +16,13 @@ export LC_ALL=C.UTF-8
 export PYTHONUTF8=1
 export PYTHONIOENCODING=UTF-8
 
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo "Error: uv is not installed. Please install uv first." >&2
+    echo "Visit https://docs.astral.sh/uv/getting-started/installation/ for installation instructions." >&2
+    exit 1
+fi
+
 set -ex
 if [ ! -d ".venv" ]; then
     echo "Creating Python 3.13 virtual environment..."
