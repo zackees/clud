@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .secrets import get_credential_store
+from .task import handle_task_command
 
 # Get credential store once at module level
 keyring = get_credential_store()
@@ -98,6 +99,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cmd", help="Command to execute in container instead of interactive shell")
 
     parser.add_argument("--yolo", action="store_true", help="Launch Claude Code with dangerous permissions (bypasses all safety prompts)")
+
+    parser.add_argument("-t", "--task", metavar="PATH", help="Open task file in editor and process tasks")
 
     return parser
 
@@ -870,6 +873,10 @@ def main(args: list[str] | None = None) -> int:
         # Handle login command first (doesn't need Docker)
         if parsed_args.login:
             return handle_login()
+
+        # Handle task command (doesn't need Docker)
+        if parsed_args.task:
+            return handle_task_command(parsed_args.task)
 
         # Check Docker availability first for all modes that need Docker
         if not check_docker_available():

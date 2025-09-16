@@ -70,6 +70,14 @@ class TestCLIParser(unittest.TestCase):
         args = self.parser.parse_args(["/path", "--shell", "zsh"])
         self.assertEqual(args.shell, "zsh")
 
+    def test_task_option(self):
+        """Test -t/--task option."""
+        args = self.parser.parse_args(["-t", "task.md"])
+        self.assertEqual(args.task, "task.md")
+
+        args = self.parser.parse_args(["--task", "another_task.md"])
+        self.assertEqual(args.task, "another_task.md")
+
     def test_profile_override(self):
         """Test --profile option."""
         args = self.parser.parse_args(["/path", "--profile", "nodejs"])
