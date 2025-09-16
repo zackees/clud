@@ -15,6 +15,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
+from .agent_completion import detect_agent_completion
 from .secrets import get_credential_store
 from .task import handle_task_command
 
@@ -107,6 +108,10 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("-m", "--message", help="Send this message to Claude (strips the -m flag)")
 
     parser.add_argument("--dry-run", action="store_true", help="Print what would be executed without actually running Claude")
+
+    parser.add_argument("--detect-completion", action="store_true", help="Monitor terminal for agent completion (3-second idle detection)")
+
+    parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
 
     return parser
 
@@ -914,9 +919,26 @@ def launch_container_shell(args: argparse.Namespace) -> int:
         env["ANTHROPIC_API_KEY"] = api_key
 
         if args.cmd:
-            # For command execution, use subprocess.run for better control
-            result = subprocess.run(cmd, env=env, check=False)
-            return result.returncode
+            # For command execution, optionally use agent completion detection
+            if getattr(args, "detect_completion", False):
+                # Use agent completion detection for PTY-based monitoring
+                def output_callback(data: str) -> None:
+                    """Stream output to stdout."""
+                    print(data, end="", flush=True)
+
+                print(f"Monitoring command for completion (idle timeout: {getattr(args, 'idle_timeout', 3.0)}s)...")
+                completed_by_idle = detect_agent_completion(cmd, getattr(args, "idle_timeout", 3.0), output_callback)
+
+                if completed_by_idle:
+                    print(f"\n🤖 Agent appears to have completed (idle for {getattr(args, 'idle_timeout', 3.0)}s)")
+                    return 0
+                else:
+                    print("\n✅ Command finished normally")
+                    return 0
+            else:
+                # Standard command execution
+                result = subprocess.run(cmd, env=env, check=False)
+                return result.returncode
         else:
             # For interactive shell, use subprocess.run for direct terminal passthrough
             # This works better on Windows and with various terminal emulators
