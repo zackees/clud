@@ -98,6 +98,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--cmd", help="Command to execute in container instead of interactive shell")
 
+    parser.add_argument("--claude-commands", help="Path to directory or file containing Claude CLI plugins to mount into container")
+
     parser.add_argument("--yolo", action="store_true", help="Launch Claude Code with dangerous permissions (bypasses all safety prompts)")
 
     parser.add_argument("-t", "--task", metavar="PATH", help="Open task file in editor and process tasks")
@@ -149,6 +151,34 @@ def get_ssh_dir() -> Path | None:
     """Get SSH directory path if it exists."""
     ssh_dir = Path.home() / ".ssh"
     return ssh_dir if ssh_dir.exists() and ssh_dir.is_dir() else None
+
+
+def get_claude_commands_mount(claude_commands_path: str | None) -> tuple[str, str] | None:
+    """Get Claude commands mount info if path is provided and valid."""
+    if not claude_commands_path:
+        return None
+
+    try:
+        path = Path(claude_commands_path).resolve()
+        if not path.exists():
+            raise ValidationError(f"Claude commands path does not exist: {path}")
+
+        docker_path = normalize_path_for_docker(path)
+
+        if path.is_file():
+            # Single file - mount to appropriate filename in plugins directory
+            filename = path.name
+            if not filename.endswith(".md"):
+                raise ValidationError(f"Claude command file must be a .md file: {filename}")
+            return (docker_path, f"/plugins/{filename}")
+        elif path.is_dir():
+            # Directory - mount entire directory to plugins
+            return (docker_path, "/plugins")
+        else:
+            raise ValidationError(f"Claude commands path is neither file nor directory: {path}")
+
+    except OSError as e:
+        raise ValidationError(f"Invalid claude commands path '{claude_commands_path}': {e}") from e
 
 
 def validate_api_key(api_key: str | None) -> bool:
@@ -543,8 +573,16 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         "-v",
         f"{home_config_path}:/home/coder/.config",
         # Removed .local mount to preserve container's installed CLI tools
-        "niteris/clud:latest",
     ]
+
+    # Add Claude commands mount if specified
+    claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+    if claude_mount:
+        host_path, container_path = claude_mount
+        cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
+        print(f"Mounting Claude commands: {host_path} -> {container_path}")
+
+    cmd.append("niteris/clud:latest")
 
     print("Starting CLUD development container...")
 
@@ -689,6 +727,13 @@ def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list
         home_docker_path = normalize_path_for_docker(Path.home())
         cmd.append(f"--volume={home_docker_path}:/host-home:ro")
 
+    # Add Claude commands mount if specified
+    claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+    if claude_mount:
+        host_path, container_path = claude_mount
+        cmd.append(f"--volume={host_path}:{container_path}:ro")
+        print(f"Mounting Claude commands: {host_path} -> {container_path}")
+
     # Network settings
     if args.no_firewall:
         cmd.append("--network=none")
@@ -800,10 +845,22 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             f"CLUD_CUSTOM_CMD={args.cmd}",  # Pass command via environment variable
             "-v",
             f"{docker_path}:/host:rw",
-            "niteris/clud:latest",
-            "--cmd",
-            args.cmd,  # Pass command as argument to entrypoint
         ]
+
+        # Add Claude commands mount if specified
+        claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+        if claude_mount:
+            host_path, container_path = claude_mount
+            cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
+            print(f"Mounting Claude commands: {host_path} -> {container_path}")
+
+        cmd.extend(
+            [
+                "niteris/clud:latest",
+                "--cmd",
+                args.cmd,  # Pass command as argument to entrypoint
+            ]
+        )
     else:
         # Interactive shell mode - override entrypoint to start bash with login shell
         base_cmd = [
@@ -825,9 +882,21 @@ def launch_container_shell(args: argparse.Namespace) -> int:
             f"{docker_path}:/host:rw",
             "-w",
             "/workspace",  # Set working directory to /workspace
-            "niteris/clud:latest",
-            "--login",  # Login shell to source bashrc and show banner
         ]
+
+        # Add Claude commands mount if specified
+        claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+        if claude_mount:
+            host_path, container_path = claude_mount
+            base_cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
+            print(f"Mounting Claude commands: {host_path} -> {container_path}")
+
+        base_cmd.extend(
+            [
+                "niteris/clud:latest",
+                "--login",  # Login shell to source bashrc and show banner
+            ]
+        )
 
         # On Windows with mintty/git-bash, prepend winpty for TTY support
         msystem = os.environ.get("MSYSTEM", "")

@@ -2,10 +2,6 @@
 """Integration test for Docker build process."""
 
 import sys
-from pathlib import Path
-
-# Add tests directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from docker_test_utils import ensure_test_image
 

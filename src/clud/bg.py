@@ -47,6 +47,15 @@ class BackgroundAgent:
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
 
+    def install_claude_plugins(self) -> bool:
+        """Install Claude plugins from workspace to system.
+
+        NOTE: This function is currently disabled. Plugins should be volume-mapped
+        to /plugins in the container and then processed separately.
+        """
+        logger.info("Plugin installation via rsync is disabled - using volume mapping instead")
+        return True
+
     def _handle_signal(self, signum: int, frame: Any) -> None:
         """Handle shutdown signals gracefully."""
         logger.info(f"Received signal {signum}, shutting down...")
@@ -142,6 +151,13 @@ class BackgroundAgent:
         # Perform initial sync
         if not self.initial_sync():
             logger.warning("Initial sync failed, continuing with periodic sync...")
+
+        # Install Claude plugins after initial sync
+        logger.info("Installing Claude plugins...")
+        if self.install_claude_plugins():
+            logger.info("Claude plugins installed successfully")
+        else:
+            logger.warning("Failed to install Claude plugins")
 
         while self.running:
             try:

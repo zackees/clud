@@ -6,10 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-# Add tests directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent / "tests"))
-
-from docker_test_utils import ensure_test_image, cleanup_test_containers
+from tests.docker_test_utils import ensure_test_image, cleanup_test_containers
 
 
 def run_test_file(test_file: Path) -> tuple[bool, str, str]:

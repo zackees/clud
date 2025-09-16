@@ -18,6 +18,7 @@ from clud.cli import (
     find_run_claude_docker,
     get_api_key,
     get_api_key_from_keyring,
+    get_claude_commands_mount,
     get_clud_config_dir,
     get_ssh_dir,
     load_api_key_from_config,
@@ -542,6 +543,64 @@ class TestFallbackCommand(unittest.TestCase):
             with self.assertRaises(ValidationError) as cm:
                 build_fallback_command(args, self.project_path)
             self.assertIn("Invalid environment variable format", str(cm.exception))
+
+
+class TestClaudeCommandsMount(unittest.TestCase):
+    """Test get_claude_commands_mount function."""
+
+    def test_claude_commands_directory(self):
+        """Test --claude-commands with directory."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Create test plugin
+            test_plugin = temp_path / "test.md"
+            test_plugin.write_text("# Test Plugin\nThis is a test.")
+
+            result = get_claude_commands_mount(str(temp_path))
+            self.assertIsNotNone(result)
+            assert result is not None  # Type checker hint
+            host_path, container_path = result
+
+            self.assertEqual(container_path, "/plugins")
+
+    def test_claude_commands_file(self):
+        """Test --claude-commands with single file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Create test plugin
+            test_plugin = temp_path / "single.md"
+            test_plugin.write_text("# Single Plugin\nThis is a single test.")
+
+            result = get_claude_commands_mount(str(test_plugin))
+            self.assertIsNotNone(result)
+            assert result is not None  # Type checker hint
+            host_path, container_path = result
+
+            self.assertEqual(container_path, "/plugins/single.md")
+
+    def test_claude_commands_nonexistent(self):
+        """Test --claude-commands with non-existent path."""
+        with self.assertRaises(ValidationError):
+            get_claude_commands_mount("/nonexistent/path")
+
+    def test_claude_commands_non_md_file(self):
+        """Test --claude-commands with non-.md file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Create non-md file
+            non_md_file = temp_path / "test.txt"
+            non_md_file.write_text("Not a markdown file")
+
+            with self.assertRaises(ValidationError):
+                get_claude_commands_mount(str(non_md_file))
+
+    def test_claude_commands_none(self):
+        """Test --claude-commands with None."""
+        result = get_claude_commands_mount(None)
+        self.assertIsNone(result)
 
 
 class TestMainFunction(unittest.TestCase):

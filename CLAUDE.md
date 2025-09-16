@@ -80,3 +80,10 @@ The project is designed to work on Windows using git-bash, with UTF-8 encoding h
       logger.warning(f"Operation failed with expected error: {e}")
       # Handle or re-raise as appropriate
   ```
+
+### Python Path Management
+- **NEVER** use `sys.path.insert()` or any other `sys.path` manipulation
+- Path problems are typically caused by trying to directly execute package code instead of using proper tools
+- **ALWAYS** use `uv run` for running Python scripts that need access to package dependencies
+- If you encounter import errors, the solution is to use `uv run`, not to modify `sys.path`
+- `sys.path` imports before regular imports are strictly forbidden and should be flagged as code quality violations

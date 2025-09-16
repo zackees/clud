@@ -241,6 +241,13 @@ COPY src/clud/container_sync.py /usr/local/bin/container-sync
 COPY src/clud/bg.py /usr/local/bin/bg.py
 RUN chmod +x /usr/local/bin/container-sync /usr/local/bin/bg.py
 
+# Create Claude commands directory
+RUN mkdir -p /root/.claude/commands && \
+    chmod -R 755 /root/.claude/commands
+
+# Copy only the plugin files if they exist
+COPY docker/plugins/claude/commands/*.md /root/.claude/commands/ 2>/dev/null || echo "No default plugins found - plugins will be installed at runtime"
+
 # Copy and set up entrypoint script
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
