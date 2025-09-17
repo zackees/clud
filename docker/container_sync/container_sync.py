@@ -28,37 +28,10 @@ EXCLUDE_PATTERNS = [
 
 
 def sync_with_rsync(source, dest, exclude_git=False):
-    """Sync directories using rsync."""
-    # Change to a stable working directory to avoid getcwd issues
-    original_cwd = os.getcwd()
-    os.chdir("/")
-
-    try:
-        cmd = ["rsync", "-av", "--delete"]
-
-        # Add exclusions
-        for pattern in EXCLUDE_PATTERNS:
-            cmd.extend(["--exclude", pattern])
-
-        # Exclude .git when syncing back to host
-        if exclude_git:
-            cmd.extend(["--exclude", ".git"])
-
-        cmd.extend([f"{source}/", f"{dest}/"])
-
-        result = subprocess.run(cmd, check=True)
-        print(f"[DOCKER] Sync completed: {source} -> {dest}")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[DOCKER] Sync failed: {e}")
-        return False
-    finally:
-        # Restore original working directory
-        try:
-            os.chdir(original_cwd)
-        except OSError:
-            # If original directory is gone, stay in root
-            pass
+    """DISABLED: Sync directories using rsync - disabled per FEATURE.md directive."""
+    print(f"[DOCKER] RSYNC DISABLED: Skipping sync {source} -> {dest}")
+    print(f"[DOCKER] Using Git worktree for workspace setup instead")
+    return True
 
 
 def setup_git_workspace():
@@ -73,6 +46,16 @@ def setup_git_workspace():
         return False
 
     try:
+        # Prune stale worktree entries first
+        try:
+            subprocess.run([
+                "git", f"--git-dir={host_git_dir}",
+                "worktree", "prune"
+            ], capture_output=True, check=True)
+        except subprocess.CalledProcessError:
+            # Ignore pruning errors
+            pass
+
         # Clean workspace if it already exists and is a worktree
         if workspace_path.exists():
             git_file = workspace_path / ".git"
@@ -84,11 +67,13 @@ def setup_git_workspace():
                         "worktree", "remove", "--force", str(workspace_path)
                     ], check=True, capture_output=True)
                 except subprocess.CalledProcessError:
-                    # If worktree remove fails, just delete the directory
-                    subprocess.run(["rm", "-rf", str(workspace_path)], check=True)
+                    # If worktree remove fails, clean up contents instead of removing directory
+                    # (directory might be a mount point and cannot be removed)
+                    subprocess.run(["find", str(workspace_path), "-mindepth", "1", "-delete"], check=False)
             else:
-                # Regular directory, just remove it
-                subprocess.run(["rm", "-rf", str(workspace_path)], check=True)
+                # Regular directory, clean contents instead of removing directory
+                # (directory might be a mount point and cannot be removed)
+                subprocess.run(["find", str(workspace_path), "-mindepth", "1", "-delete"], check=False)
 
         # Create parent directory
         workspace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,20 +126,13 @@ def init_container():
     git_setup_success = setup_git_workspace()
 
     if git_setup_success:
-        # Git worktree setup successful, now sync non-git files
-        print("[DOCKER] Syncing non-Git files...")
-        # Sync everything except .git (it's handled by worktree)
-        if sync_with_rsync(HOST_DIR, WORKSPACE_DIR, exclude_git=True):
-            print("[DOCKER] Initial sync completed with Git worktree")
-        else:
-            print("[DOCKER] Warning: File sync failed, but Git worktree is set up")
+        print("[DOCKER] Git worktree setup successful - RSYNC DISABLED per FEATURE.md directive")
+        print("[DOCKER] Workspace is ready using Git worktree only")
     else:
-        # Fallback: sync all files including .git if worktree setup failed
-        print("[DOCKER] Falling back to full file sync including .git...")
-        if sync_with_rsync(HOST_DIR, WORKSPACE_DIR, exclude_git=False):
-            print("[DOCKER] Initial sync completed with .git fallback")
-        else:
-            return 1
+        print("[DOCKER] Git worktree setup failed - RSYNC DISABLED per FEATURE.md directive")
+        print("[DOCKER] Manual setup may be required for non-Git projects")
+        # Create workspace directory for consistency
+        workspace_path.mkdir(parents=True, exist_ok=True)
 
     # Configure Git safe directories to handle ownership issues
     if workspace_path.exists() and (workspace_path / ".git").exists():
@@ -212,19 +190,16 @@ def cleanup_git_workspace():
 
 
 def sync_back():
-    """Sync workspace back to host (excludes .git)."""
+    """DISABLED: Sync workspace back to host - disabled per FEATURE.md directive."""
     workspace_path = Path(WORKSPACE_DIR)
 
     if not workspace_path.exists():
         print("[DOCKER] No workspace directory found")
         return 1
 
-    # Sync workspace to host (excludes .git)
-    if sync_with_rsync(WORKSPACE_DIR, HOST_DIR, exclude_git=True):
-        print("[DOCKER] Sync back completed")
-        return 0
-    else:
-        return 1
+    print("[DOCKER] RSYNC DISABLED: Skipping sync back to host")
+    print("[DOCKER] Using Git worktree - changes are automatically reflected in host")
+    return 0
 
 
 def main():
