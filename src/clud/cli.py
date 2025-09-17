@@ -14,8 +14,14 @@ from .agent_background import (
     run_ui_container,
     validate_path,
 )
+from .agent_foreground import ConfigError as ForegroundConfigError
+from .agent_foreground import ValidationError as ForegroundValidationError
 from .agent_foreground import get_api_key, handle_login
+from .secrets import get_credential_store
 from .task import handle_task_command
+
+# Import keyring for tests to mock
+keyring = get_credential_store()
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -137,14 +143,16 @@ def main(args: list[str] | None = None) -> int:
                 else:
                     return 1  # fallback for string codes
 
-        # Handle yolo mode (doesn't need Docker)
-        # Check if this is the default yolo mode (no specific flags for Docker-based modes)
-        is_yolo_mode = not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build or parsed_args.bg)
+        # Check if this is yolo mode (only if no Docker flags AND no path provided)
+        # If a path is provided, default to Docker shell mode
+        is_yolo_mode = not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build or parsed_args.bg) and not parsed_args.path
+
         if is_yolo_mode:
+            # Handle yolo mode (doesn't need Docker)
             from .agent_foreground import main as yolo_main
 
             # Construct arguments for yolo main
-            yolo_args = []
+            yolo_args: list[str] = []
             if parsed_args.message:
                 yolo_args.extend(["-m", parsed_args.message])
             if parsed_args.dry_run:
@@ -155,6 +163,7 @@ def main(args: list[str] | None = None) -> int:
 
             return yolo_main(yolo_args)
 
+        # From here on, we're in Docker-based mode
         # Check Docker availability first for all Docker-based modes
         if not check_docker_available():
             raise DockerError("Docker is not available or not running")
@@ -214,13 +223,13 @@ def main(args: list[str] | None = None) -> int:
             api_key = get_api_key(parsed_args)
             return launch_container_shell(parsed_args, api_key)
 
-    except ValidationError as e:
+    except (ValidationError, ForegroundValidationError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
     except DockerError as e:
         print(f"Docker error: {e}", file=sys.stderr)
         return 3
-    except ConfigError as e:
+    except (ConfigError, ForegroundConfigError) as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         return 4
     except KeyboardInterrupt:

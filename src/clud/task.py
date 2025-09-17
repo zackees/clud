@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-def _exec(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+def _exec(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
     """Execute a subprocess command.
 
     Args:
@@ -23,7 +23,7 @@ def _exec(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     Returns:
         CompletedProcess instance with result.
     """
-    return subprocess.run(cmd, **kwargs)
+    return subprocess.run(cmd, **kwargs)  # type: ignore[misc]
 
 
 def find_editor() -> str | None:
@@ -394,7 +394,7 @@ def _prompt_for_task_description() -> str:
     print("(Press Ctrl+D or Ctrl+Z when done)")
     print("-" * 40)
 
-    lines = []
+    lines: list[str] = []
     try:
         while True:
             line = input()

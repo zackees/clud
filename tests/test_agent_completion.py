@@ -16,6 +16,8 @@ class TestAgentCompletionIntegration(unittest.TestCase):
         try:
             result = subprocess.run(
                 [
+                    "uv",
+                    "run",
                     "python",
                     "-m",
                     "clud.cli",
@@ -28,23 +30,23 @@ class TestAgentCompletionIntegration(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,  # Should complete well under 10 seconds
+                timeout=60,  # Allow time for Docker container startup
             )
 
             elapsed_time = time.time() - start_time
 
-            # Command should complete quickly (under 5 seconds for a simple echo)
-            self.assertLess(elapsed_time, 5.0)
+            # Command should complete reasonably quickly (under 30 seconds including Docker startup)
+            self.assertLess(elapsed_time, 30.0)
 
             # Should have some output
             self.assertTrue(result.stdout or result.stderr)
 
         except subprocess.TimeoutExpired:
-            self.fail("Command took longer than 10 seconds - agent completion detection may not be working")
+            self.fail("Command took longer than 60 seconds - agent completion detection may not be working")
 
     def test_simple_command_without_detection(self):
         """Test that regular commands work without detection flag."""
-        result = subprocess.run(["python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["uv", "run", "python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"], capture_output=True, text=True, timeout=60)
 
         # Should complete successfully
         self.assertEqual(result.returncode, 0)

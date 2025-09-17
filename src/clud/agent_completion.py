@@ -36,14 +36,14 @@ def detect_agent_completion(command: list[str], idle_timeout: float = 3.0, outpu
 def _detect_completion_windows(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> bool:
     """Windows PTY detection using pywinpty."""
     try:
-        from winpty import PtyProcess  # type: ignore
+        from winpty import PtyProcess  # type: ignore[import-untyped]
     except ImportError as e:
         logger.error(f"pywinpty not available: {e}")
         return _fallback_subprocess_detection(command, idle_timeout, output_callback)
 
     try:
         cmd_str = " ".join(command)
-        process = PtyProcess.spawn(cmd_str)
+        process = PtyProcess.spawn(cmd_str)  # type: ignore[misc]
         return _monitor_pty_process(process, idle_timeout, output_callback, "Windows")
     except Exception as e:
         logger.error(f"Windows PTY failed: {e}")

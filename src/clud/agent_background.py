@@ -726,19 +726,41 @@ class BackgroundAgent:
                 "/workspace",
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            # Use Popen with streaming output instead of capture_output=True
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
 
-            if result.stdout:
-                for line in result.stdout.strip().split("\n"):
+            # Stream stdout in real-time
+            while True:
+                stdout_line = process.stdout.readline()
+                stderr_line = process.stderr.readline()
+
+                if stdout_line:
+                    logger.info(f"[container] {stdout_line.rstrip()}")
+                if stderr_line:
+                    logger.warning(f"[container] {stderr_line.rstrip()}")
+
+                # Check if process is finished
+                if process.poll() is not None:
+                    break
+
+                # If no output from either stream, continue
+                if not stdout_line and not stderr_line:
+                    break
+
+            # Get any remaining output
+            remaining_stdout, remaining_stderr = process.communicate()
+
+            if remaining_stdout:
+                for line in remaining_stdout.strip().split("\n"):
                     if line:
                         logger.info(f"[container] {line}")
 
-            if result.stderr:
-                for line in result.stderr.strip().split("\n"):
+            if remaining_stderr:
+                for line in remaining_stderr.strip().split("\n"):
                     if line:
                         logger.warning(f"[container] {line}")
 
-            return result.returncode == 0
+            return process.returncode == 0
 
         except Exception as e:
             logger.error(f"Container sync failed: {e}")

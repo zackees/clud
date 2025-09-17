@@ -28,6 +28,9 @@ from clud.agent_foreground import (
     save_api_key_to_config,
     validate_api_key,
 )
+from clud.agent_foreground import (
+    ValidationError as ForegroundValidationError,
+)
 from clud.cli import (
     create_parser,
     main,
@@ -322,7 +325,7 @@ class TestConfigDirectory(unittest.TestCase):
 class TestKeyringSupport(unittest.TestCase):
     """Test keyring functionality."""
 
-    @patch("clud.cli.keyring")
+    @patch("clud.agent_foreground.keyring")
     def test_keyring_success(self, mock_keyring: MagicMock) -> None:
         """Test successful keyring retrieval."""
         mock_keyring.get_password.return_value = "test-api-key"
@@ -330,7 +333,7 @@ class TestKeyringSupport(unittest.TestCase):
         self.assertEqual(result, "test-api-key")
         mock_keyring.get_password.assert_called_once_with("clud", "test-entry")
 
-    @patch("clud.cli.keyring")
+    @patch("clud.agent_foreground.keyring")
     def test_keyring_not_found(self, mock_keyring: MagicMock) -> None:
         """Test when keyring entry is not found."""
         mock_keyring.get_password.return_value = None
@@ -338,7 +341,7 @@ class TestKeyringSupport(unittest.TestCase):
             get_api_key_from_keyring("missing-entry")
         self.assertIn("No API key found", str(cm.exception))
 
-    @patch("clud.cli.keyring", None)
+    @patch("clud.agent_foreground.keyring", None)
     def test_keyring_not_available(self) -> None:
         """Test when keyring package is not available."""
         with self.assertRaises(ConfigError) as cm:
@@ -359,7 +362,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
         """Test getting API key from environment variable."""
         args = self.parser.parse_args(["/test/path"])
 
-        with patch("clud.cli.load_api_key_from_config", return_value=None):
+        with patch("clud.agent_foreground.load_api_key_from_config", return_value=None):
             api_key = get_api_key(args)
             self.assertEqual(api_key, "sk-ant-env123456789012345")
 
@@ -368,7 +371,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
         """Test getting API key from config file."""
         args = self.parser.parse_args(["/test/path"])
 
-        with patch("clud.cli.load_api_key_from_config", return_value=self.valid_key):
+        with patch("clud.agent_foreground.load_api_key_from_config", return_value=self.valid_key):
             api_key = get_api_key(args)
             self.assertEqual(api_key, self.valid_key)
 
@@ -377,7 +380,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
         """Test getting API key from keyring via --api-key-from."""
         args = self.parser.parse_args(["/test/path", "--api-key-from", "test-entry"])
 
-        with patch("clud.cli.keyring") as mock_keyring, patch("clud.cli.load_api_key_from_config", return_value=None):
+        with patch("clud.agent_foreground.keyring") as mock_keyring, patch("clud.agent_foreground.load_api_key_from_config", return_value=None):
             mock_keyring.get_password.return_value = self.valid_key
             api_key = get_api_key(args)
             self.assertEqual(api_key, self.valid_key)
@@ -387,7 +390,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
         """Test getting API key from interactive prompt."""
         args = self.parser.parse_args(["/test/path"])
 
-        with patch("clud.cli.load_api_key_from_config", return_value=None), patch("clud.cli.prompt_for_api_key", return_value=self.valid_key):
+        with patch("clud.agent_foreground.load_api_key_from_config", return_value=None), patch("clud.agent_foreground.prompt_for_api_key", return_value=self.valid_key):
             api_key = get_api_key(args)
             self.assertEqual(api_key, self.valid_key)
 
@@ -395,8 +398,8 @@ class TestAPIKeyRetrieval(unittest.TestCase):
         """Test validation error with invalid API key."""
         args = self.parser.parse_args(["/test/path"])
 
-        with patch("clud.cli.load_api_key_from_config", return_value=None), patch("clud.cli.prompt_for_api_key", return_value="invalid-key"):
-            with self.assertRaises(ValidationError) as cm:
+        with patch("clud.agent_foreground.load_api_key_from_config", return_value=None), patch("clud.agent_foreground.prompt_for_api_key", return_value="invalid-key"):
+            with self.assertRaises(ForegroundValidationError) as cm:
                 get_api_key(args)
             self.assertIn("Invalid API key format", str(cm.exception))
 
@@ -460,7 +463,7 @@ class TestFallbackCommand(unittest.TestCase):
         """Test basic fallback command."""
         args = self.parser.parse_args([str(self.project_path)])
 
-        with patch("clud.cli.normalize_path_for_docker", return_value="/test/project"):
+        with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
             cmd = build_fallback_command(args, self.project_path)
 
         self.assertEqual(cmd[0:4], ["docker", "run", "-it", "--rm"])
@@ -475,7 +478,7 @@ class TestFallbackCommand(unittest.TestCase):
         """Test fallback command with API key."""
         args = self.parser.parse_args([str(self.project_path)])
 
-        with patch("clud.cli.normalize_path_for_docker", return_value="/test/project"):
+        with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
             cmd = build_fallback_command(args, self.project_path)
 
         self.assertIn("-e", cmd)
@@ -486,7 +489,7 @@ class TestFallbackCommand(unittest.TestCase):
         """Test fallback command with SSH keys."""
         args = self.parser.parse_args([str(self.project_path), "--ssh-keys"])
 
-        with patch("clud.cli.normalize_path_for_docker") as mock_normalize, patch("clud.cli.get_ssh_dir", return_value=Path("/home/user/.ssh")):
+        with patch("clud.agent_background.normalize_path_for_docker") as mock_normalize, patch("clud.agent_background.get_ssh_dir", return_value=Path("/home/user/.ssh")):
 
             def normalize_side_effect(x: Any) -> str:
                 return "/home/user/.ssh" if ".ssh" in str(x) else "/test/project"
@@ -501,7 +504,7 @@ class TestFallbackCommand(unittest.TestCase):
         """Test fallback command with SSH keys when SSH dir doesn't exist."""
         args = self.parser.parse_args([str(self.project_path), "--ssh-keys"])
 
-        with patch("clud.cli.get_ssh_dir", return_value=None):
+        with patch("clud.agent_background.get_ssh_dir", return_value=None):
             with self.assertRaises(ValidationError) as cm:
                 build_fallback_command(args, self.project_path)
             self.assertIn("SSH directory ~/.ssh not found", str(cm.exception))
@@ -519,7 +522,7 @@ class TestFallbackCommand(unittest.TestCase):
 
         # Use mock.patch.object on the os module to create the attributes
         with (
-            patch("clud.cli.normalize_path_for_docker", return_value="/test/project"),
+            patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"),
             patch.object(os, "getuid", create=True, return_value=1000),
             patch.object(os, "getgid", create=True, return_value=1000),
         ):
@@ -533,7 +536,7 @@ class TestFallbackCommand(unittest.TestCase):
         """Test fallback command with custom environment variables."""
         args = self.parser.parse_args([str(self.project_path), "--env", "VAR1=value1", "--env", "VAR2=value2"])
 
-        with patch("clud.cli.normalize_path_for_docker", return_value="/test/project"):
+        with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
             cmd = build_fallback_command(args, self.project_path)
 
         self.assertIn("VAR1=value1", cmd)
@@ -543,7 +546,7 @@ class TestFallbackCommand(unittest.TestCase):
         """Test fallback command with invalid environment variable."""
         args = self.parser.parse_args([str(self.project_path), "--env", "INVALID_FORMAT"])
 
-        with patch("clud.cli.normalize_path_for_docker", return_value="/test/project"):
+        with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
             with self.assertRaises(ValidationError) as cm:
                 build_fallback_command(args, self.project_path)
             self.assertIn("Invalid environment variable format", str(cm.exception))

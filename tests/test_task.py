@@ -39,7 +39,7 @@ class TestFindEditor(unittest.TestCase):
 
         result = find_editor()
         self.assertEqual(result, "notepad.exe")
-        mock_windows.assert_called_once()
+        mock_windows.assert_called_once()  # type: ignore[misc]
 
     @patch("platform.system")
     @patch("clud.task._find_macos_editor")
@@ -50,7 +50,7 @@ class TestFindEditor(unittest.TestCase):
 
         result = find_editor()
         self.assertEqual(result, "nano")
-        mock_macos.assert_called_once()
+        mock_macos.assert_called_once()  # type: ignore[misc]
 
     @patch("platform.system")
     @patch("clud.task._find_linux_editor")
@@ -61,7 +61,7 @@ class TestFindEditor(unittest.TestCase):
 
         result = find_editor()
         self.assertEqual(result, "vim")
-        mock_linux.assert_called_once()
+        mock_linux.assert_called_once()  # type: ignore[misc]
 
     @patch("pathlib.Path.exists")
     def test_find_windows_editor_sublime(self, mock_exists):
@@ -156,7 +156,7 @@ class TestOpenInEditor(unittest.TestCase):
 
         result = open_in_editor(Path("test.md"))
         self.assertTrue(result)
-        mock_exec.assert_called_once()
+        mock_exec.assert_called_once()  # type: ignore[misc]
 
     @patch("clud.task.find_editor")
     @patch("clud.task._exec")
@@ -221,7 +221,7 @@ class TestLintFunctionality(unittest.TestCase):
 
         result = run_lint()
         self.assertTrue(result)
-        mock_exec.assert_called_once()
+        mock_exec.assert_called_once()  # type: ignore[misc]
 
     @patch("clud.task.run_lint")
     def test_fix_lint_errors_immediate_success(self, mock_run_lint):
@@ -230,7 +230,7 @@ class TestLintFunctionality(unittest.TestCase):
 
         result = fix_lint_errors()
         self.assertTrue(result)
-        self.assertEqual(mock_run_lint.call_count, 1)
+        self.assertEqual(mock_run_lint.call_count, 1)  # type: ignore[misc]
 
     @patch("clud.task.run_lint")
     @patch("time.sleep")
@@ -240,7 +240,7 @@ class TestLintFunctionality(unittest.TestCase):
 
         result = fix_lint_errors()
         self.assertFalse(result)
-        self.assertEqual(mock_run_lint.call_count, 10)
+        self.assertEqual(mock_run_lint.call_count, 10)  # type: ignore[misc]
 
 
 class TestTaskFileHelpers(unittest.TestCase):
@@ -319,7 +319,7 @@ class TestProcessTaskFile(unittest.TestCase):
 
         result = process_task_file(Path("task.md"))
         self.assertEqual(result, 0)
-        mock_process_existing.assert_called_once()
+        mock_process_existing.assert_called_once()  # type: ignore[misc]
 
     @patch("clud.task._task_file_has_content")
     @patch("clud.task.process_new_task")
@@ -330,7 +330,7 @@ class TestProcessTaskFile(unittest.TestCase):
 
         result = process_task_file(Path("task.md"))
         self.assertEqual(result, 0)
-        mock_process_new.assert_called_once()
+        mock_process_new.assert_called_once()  # type: ignore[misc]
 
 
 class TestProcessExistingTask(unittest.TestCase):
@@ -345,7 +345,7 @@ class TestProcessExistingTask(unittest.TestCase):
 
         result = process_existing_task(Path("task.md"))
         self.assertEqual(result, 0)
-        mock_process_new.assert_called_once()
+        mock_process_new.assert_called_once()  # type: ignore[misc]
 
     @patch("clud.task._read_task_content")
     @patch("clud.task._display_task_content")
@@ -405,7 +405,7 @@ class TestHandleTaskCommand(unittest.TestCase):
 
         result = handle_task_command("task.md")
         self.assertEqual(result, 0)
-        mock_process.assert_called_once()
+        mock_process.assert_called_once()  # type: ignore[misc]
 
     @patch("clud.task.process_task_file")
     def test_handle_task_command_exception(self, mock_process):

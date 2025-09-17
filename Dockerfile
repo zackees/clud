@@ -238,7 +238,8 @@ USER root
 
 # Copy standalone container sync package
 COPY docker/container_sync/ /opt/container_sync/
-RUN chmod +x /opt/container_sync/container_sync.py
+RUN chmod +x /opt/container_sync/container_sync.py && \
+    ln -sf /opt/container_sync/container_sync.py /usr/local/bin/container-sync
 
 # Create Claude commands directory
 RUN mkdir -p /root/.claude/commands && \
