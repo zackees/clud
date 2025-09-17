@@ -24,6 +24,7 @@ EXCLUDE_PATTERNS = [
     ".venv",
     ".env",
     ".docker_test_cache.json",
+    ".git",
 ]
 
 
