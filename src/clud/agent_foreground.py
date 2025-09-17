@@ -318,12 +318,16 @@ def run(args: Args) -> int:
     try:
         # Handle dry-run mode
         if args.dry_run:
+            cmd_parts = ["claude", "--dangerously-skip-permissions"]
+            if args.continue_flag:
+                cmd_parts.append("--continue")
+            if args.prompt:
+                cmd_parts.extend(["-p", args.prompt])
             if args.message:
-                print(args.message)
-                return 0
-            else:
-                print("Dry-run mode: No message provided")
-                return 0
+                cmd_parts.append(args.message)
+            cmd_parts.extend(args.claude_args)
+            print("Would execute:", " ".join(cmd_parts))
+            return 0
 
         # Try to find claude in PATH, including common Windows locations
         claude_path = shutil.which("claude")

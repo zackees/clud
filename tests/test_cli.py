@@ -106,6 +106,14 @@ class TestCLIParser(unittest.TestCase):
         args = self.parser.parse_args(["/path", "--no-firewall"])
         self.assertTrue(args.no_firewall)
 
+    def test_prompt_flag(self):
+        """Test -p/--prompt option."""
+        args = self.parser.parse_args(["-p", "say hello and exit"])
+        self.assertEqual(args.prompt, "say hello and exit")
+
+        args = self.parser.parse_args(["--prompt", "say hello and exit"])
+        self.assertEqual(args.prompt, "say hello and exit")
+
 
 class TestPathValidation(unittest.TestCase):
     """Test path validation functionality."""

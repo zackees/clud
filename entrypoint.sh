@@ -3,6 +3,17 @@ set -e
 
 # Simple entrypoint that delegates to Python script for complex logic
 
+# Assert that required directories exist (guaranteed by Dockerfile)
+echo "Verifying container directory structure..."
+for dir in /workspace /host; do
+    if [ ! -d "$dir" ]; then
+        echo "ERROR: Required directory $dir does not exist!" >&2
+        echo "This indicates a problem with the Docker image build." >&2
+        exit 1
+    fi
+    echo "✓ $dir exists"
+done
+
 # Run initial sync and setup
 python3 /usr/local/bin/container-sync init
 

@@ -133,6 +133,27 @@ def get_claude_commands_mount(claude_commands_path: str | None) -> tuple[str, st
         raise ValidationError(f"Invalid claude commands path '{claude_commands_path}': {e}") from e
 
 
+def get_worktree_mount(project_path: Path, worktree_name: str = "worktree") -> tuple[str, str]:
+    """DEPRECATED: Get worktree mount info - now returns project path since worktrees are container-only.
+
+    Args:
+        project_path: The project root directory containing .git
+        worktree_name: Name of the worktree subdirectory - DEPRECATED, not used
+
+    Returns:
+        Tuple of (host_path, container_path) - returns project mount info
+
+    Raises:
+        ValidationError: If the project directory is invalid
+    """
+    # Validate that project_path exists
+    if not project_path.exists():
+        raise ValidationError(f"Project directory does not exist: {project_path}")
+
+    docker_path = normalize_path_for_docker(project_path)
+    return (docker_path, "/host")  # Return host mount point instead
+
+
 def is_port_available(port: int) -> bool:
     """Check if a port is available for binding."""
     try:
@@ -322,6 +343,12 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         host_path, container_path = claude_mount
         cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
         print(f"Mounting Claude commands: {host_path} -> {container_path}")
+
+    # Add worktree mount (always mount for potential worktree operations)
+    worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
+    host_path, container_path = worktree_mount
+    cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
+    print(f"Mounting Git worktree: {host_path} -> {container_path}")
 
     cmd.append("niteris/clud:latest")
 
@@ -539,6 +566,13 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
             cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
             print(f"Mounting Claude commands: {host_path} -> {container_path}")
 
+        # Add worktree mount if it exists
+        worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
+        if worktree_mount:
+            host_path, container_path = worktree_mount
+            cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
+            print(f"Mounting Git worktree: {host_path} -> {container_path}")
+
         cmd.append("niteris/clud:latest")
     else:
         # Interactive shell mode - override entrypoint to start bash with login shell
@@ -569,6 +603,13 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
             host_path, container_path = claude_mount
             base_cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
             print(f"Mounting Claude commands: {host_path} -> {container_path}")
+
+        # Add worktree mount if it exists
+        worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
+        if worktree_mount:
+            host_path, container_path = worktree_mount
+            base_cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
+            print(f"Mounting Git worktree: {host_path} -> {container_path}")
 
         base_cmd.extend(
             [

@@ -50,6 +50,12 @@ class DockerTestImageManager:
             if file_path.exists():
                 hasher.update(file_path.read_bytes())
 
+        # Hash container_sync directory since it affects the Docker build
+        container_sync_dir = self.project_root / "docker" / "container_sync"
+        if container_sync_dir.exists():
+            for py_file in container_sync_dir.glob("*.py"):
+                hasher.update(py_file.read_bytes())
+
         return hasher.hexdigest()
 
     def _load_cache_info(self) -> dict[str, Any]:

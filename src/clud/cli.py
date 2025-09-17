@@ -17,6 +17,13 @@ from .agent_background import (
 from .agent_foreground import ConfigError as ForegroundConfigError
 from .agent_foreground import ValidationError as ForegroundValidationError
 from .agent_foreground import get_api_key, handle_login
+from .git_worktree import (
+    cleanup_git_worktree,
+    create_git_worktree_in_container,
+    list_git_worktrees_in_container,
+    prune_git_worktrees_in_container,
+    remove_git_worktree_in_container,
+)
 from .secrets import get_credential_store
 from .task import handle_task_command
 
@@ -93,6 +100,23 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--bg", action="store_true", help="Run background agent for workspace synchronization")
 
+    parser.add_argument("-p", "--prompt", help="Run Claude with this prompt and exit when complete")
+
+    # Git worktree management
+    parser.add_argument("--worktree-create", metavar="BRANCH", help="Create a Git worktree for the specified branch inside Docker container")
+
+    parser.add_argument("--worktree-new", metavar="BRANCH", help="Create a Git worktree with a new branch inside Docker container")
+
+    parser.add_argument("--worktree-remove", action="store_true", help="Remove the Git worktree inside Docker container")
+
+    parser.add_argument("--worktree-list", action="store_true", help="List Git worktrees inside Docker container")
+
+    parser.add_argument("--worktree-prune", action="store_true", help="Prune stale Git worktree entries inside Docker container")
+
+    parser.add_argument("--worktree-cleanup", action="store_true", help="Clean up worktree: remove worktree, prune entries, and delete directory")
+
+    parser.add_argument("--worktree-name", default="worktree", help="Name of the worktree subdirectory (default: worktree)")
+
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
 
     return parser
@@ -121,6 +145,46 @@ def main(args: list[str] | None = None) -> int:
         if parsed_args.task:
             return handle_task_command(parsed_args.task)
 
+        # Handle Git worktree commands (need Docker)
+        worktree_commands = [parsed_args.worktree_create, parsed_args.worktree_new, parsed_args.worktree_remove, parsed_args.worktree_list, parsed_args.worktree_prune, parsed_args.worktree_cleanup]
+        if any(worktree_commands):
+            # Check Docker availability for worktree operations
+            if not check_docker_available():
+                raise DockerError("Docker is not available or not running")
+
+            # Validate project path
+            project_path = validate_path(parsed_args.path)
+
+            # Handle each worktree command
+            if parsed_args.worktree_create:
+                success = create_git_worktree_in_container(project_path, parsed_args.worktree_create, parsed_args.worktree_name)
+                return 0 if success else 1
+
+            elif parsed_args.worktree_new:
+                success = create_git_worktree_in_container(project_path, parsed_args.worktree_new, parsed_args.worktree_name, create_new_branch=True)
+                return 0 if success else 1
+
+            elif parsed_args.worktree_remove:
+                success = remove_git_worktree_in_container(project_path, parsed_args.worktree_name)
+                return 0 if success else 1
+
+            elif parsed_args.worktree_list:
+                result = list_git_worktrees_in_container(project_path)
+                if result is not None:
+                    print("Git worktrees:")
+                    print(result)
+                    return 0
+                else:
+                    return 1
+
+            elif parsed_args.worktree_prune:
+                success = prune_git_worktrees_in_container(project_path)
+                return 0 if success else 1
+
+            elif parsed_args.worktree_cleanup:
+                success = cleanup_git_worktree(project_path, parsed_args.worktree_name)
+                return 0 if success else 1
+
         # Handle background agent mode
         if parsed_args.bg:
             # Background agent mode - run workspace synchronization
@@ -143,9 +207,9 @@ def main(args: list[str] | None = None) -> int:
                 else:
                     return 1  # fallback for string codes
 
-        # Check if this is yolo mode (only if no Docker flags AND no path provided)
-        # If a path is provided, default to Docker shell mode
-        is_yolo_mode = not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build or parsed_args.bg) and not parsed_args.path
+        # Check if this is yolo mode (only if no Docker flags AND no path provided, OR if prompt is specified)
+        # If a path is provided, default to Docker shell mode unless prompt is specified
+        is_yolo_mode = (not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build or parsed_args.bg) and not parsed_args.path) or parsed_args.prompt
 
         if is_yolo_mode:
             # Handle yolo mode (doesn't need Docker)
@@ -153,6 +217,8 @@ def main(args: list[str] | None = None) -> int:
 
             # Construct arguments for yolo main
             yolo_args: list[str] = []
+            if parsed_args.prompt:
+                yolo_args.extend(["-p", parsed_args.prompt])
             if parsed_args.message:
                 yolo_args.extend(["-m", parsed_args.message])
             if parsed_args.dry_run:
