@@ -78,7 +78,7 @@ class DockerTestImageManager:
     def _image_exists(self) -> bool:
         """Check if the Docker image exists locally."""
         try:
-            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True)
+            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True, timeout=30)
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
             return False
@@ -86,7 +86,7 @@ class DockerTestImageManager:
     def _get_image_id(self) -> str | None:
         """Get the current image ID if it exists."""
         try:
-            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True)
+            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True, timeout=30)
             return result.stdout.strip() or None
         except subprocess.CalledProcessError:
             return None
@@ -182,8 +182,8 @@ class DockerTestImageManager:
             try:
                 # Open the lock file
                 if os.name == "nt":  # Windows
-                    # On Windows, we'll use a simple file-based approach
-                    # Try to create a temporary marker file atomically
+                    # On Windows, use a simpler approach with shorter retry intervals
+                    # to avoid deadlocks
                     marker_file = self.lock_file.with_suffix(".marker")
                     try:
                         # Try to create the marker file exclusively
@@ -191,8 +191,8 @@ class DockerTestImageManager:
                         os.close(fd)
                         return marker_file  # Return the marker file path as the "lock"
                     except FileExistsError:
-                        # Lock is held by another process, wait and retry
-                        time.sleep(0.5)
+                        # Lock is held by another process, wait and retry with shorter interval
+                        time.sleep(0.1)  # Reduced from 0.5 to 0.1 to reduce deadlock chance
                         continue
                 else:  # Unix-like systems
                     with open(self.lock_file, "r+") as lock_fd:
@@ -276,7 +276,7 @@ def cleanup_test_containers(container_prefix: str = "clud-test") -> None:
     """Clean up test containers with the given prefix."""
     try:
         # Get list of containers with the prefix
-        result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={container_prefix}", "--format", "{{.Names}}"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={container_prefix}", "--format", "{{.Names}}"], capture_output=True, text=True, check=True, timeout=30)
 
         container_names = [name.strip() for name in result.stdout.splitlines() if name.strip()]
 

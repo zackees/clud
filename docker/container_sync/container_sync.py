@@ -51,7 +51,7 @@ def setup_git_workspace():
             subprocess.run([
                 "git", f"--git-dir={host_git_dir}",
                 "worktree", "prune"
-            ], capture_output=True, check=True)
+            ], capture_output=True, check=True, timeout=60)
         except subprocess.CalledProcessError:
             # Ignore pruning errors
             pass
@@ -65,7 +65,7 @@ def setup_git_workspace():
                     subprocess.run([
                         "git", f"--git-dir={host_git_dir}",
                         "worktree", "remove", "--force", str(workspace_path)
-                    ], check=True, capture_output=True)
+                    ], check=True, capture_output=True, timeout=60)
                 except subprocess.CalledProcessError:
                     # If worktree remove fails, clean up contents instead of removing directory
                     # (directory might be a mount point and cannot be removed)
@@ -83,12 +83,12 @@ def setup_git_workspace():
 
         # Get the current branch name from the host repo
         branch_cmd = ["git", f"--git-dir={host_git_dir}", "rev-parse", "--abbrev-ref", "HEAD"]
-        branch_result = subprocess.run(branch_cmd, capture_output=True, text=True, check=True)
+        branch_result = subprocess.run(branch_cmd, capture_output=True, text=True, check=True, timeout=30)
         current_branch = branch_result.stdout.strip()
 
         # Create worktree pointing to the current commit (detached HEAD) to avoid branch conflicts
         commit_cmd = ["git", f"--git-dir={host_git_dir}", "rev-parse", "HEAD"]
-        commit_result = subprocess.run(commit_cmd, capture_output=True, text=True, check=True)
+        commit_result = subprocess.run(commit_cmd, capture_output=True, text=True, check=True, timeout=30)
         current_commit = commit_result.stdout.strip()
 
         # Create worktree pointing to the current commit (detached)
@@ -100,7 +100,7 @@ def setup_git_workspace():
             current_commit
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
         print(f"[DOCKER] Git worktree created successfully for branch: {current_branch}")
         return True
 
@@ -140,7 +140,7 @@ def init_container():
             # Configure Git to treat workspace as safe directory
             subprocess.run([
                 "git", "config", "--global", "--add", "safe.directory", WORKSPACE_DIR
-            ], capture_output=True, check=False)
+            ], capture_output=True, check=False, timeout=30)
             print("[DOCKER] Git safe directory configured")
         except Exception as e:
             print(f"[DOCKER] Warning: Failed to configure Git safe directory: {e}")
@@ -179,7 +179,7 @@ def cleanup_git_workspace():
                 "worktree", "remove", "--force",
                 str(workspace_path)
             ]
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
             print("[DOCKER] Git worktree cleaned up")
 
         return True

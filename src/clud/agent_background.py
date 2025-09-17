@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .agent_completion import detect_agent_completion
 from .running_process import RunningProcess
 
 # Container sync is now handled by standalone package in container
@@ -213,7 +214,7 @@ def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool =
     try:
         # Check if image already exists (skip this check if force_rebuild or skip_existing_check is True)
         if not force_rebuild and not skip_existing_check:
-            result = subprocess.run(["docker", "images", "-q", "niteris/clud:latest"], capture_output=True, text=True, check=True)
+            result = subprocess.run(["docker", "images", "-q", "niteris/clud:latest"], capture_output=True, text=True, check=True, timeout=30)
 
             if result.stdout.strip():
                 print("Docker image niteris/clud:latest already exists")
@@ -273,18 +274,18 @@ def stop_existing_container(container_name: str = "clud-dev") -> None:
     """Stop and remove existing container if it exists."""
     try:
         # Check if container exists and is running
-        result = subprocess.run(["docker", "ps", "-q", "-f", f"name={container_name}"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["docker", "ps", "-q", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30)
 
         if result.stdout.strip():
             print(f"Stopping existing container {container_name}...")
-            subprocess.run(["docker", "stop", container_name], check=True, capture_output=True)
+            subprocess.run(["docker", "stop", container_name], check=True, capture_output=True, timeout=60)
 
         # Check if container exists (stopped)
-        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name={container_name}"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30)
 
         if result.stdout.strip():
             print(f"Removing existing container {container_name}...")
-            subprocess.run(["docker", "rm", container_name], check=True, capture_output=True)
+            subprocess.run(["docker", "rm", container_name], check=True, capture_output=True, timeout=60)
 
     except subprocess.CalledProcessError:
         # Container might not exist, which is fine
@@ -542,7 +543,7 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
     # Determine if we're running a custom command or interactive shell
     if args.cmd:
         # Non-interactive mode for custom commands
-        # Use the entrypoint.sh but pass the command as arguments
+        # Use the default entrypoint and pass command as arguments
         cmd = [
             "docker",
             "run",
@@ -573,7 +574,8 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
             cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
             print(f"Mounting Git worktree: {host_path} -> {container_path}")
 
-        cmd.append("niteris/clud:latest")
+        # Add the image and exec into bash to execute the command
+        cmd.extend(["niteris/clud:latest", "exec", "bash", "-c", args.cmd])
     else:
         # Interactive shell mode - override entrypoint to start bash with login shell
         base_cmd = [
@@ -630,9 +632,16 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
         env["ANTHROPIC_API_KEY"] = api_key
 
         if args.cmd:
-            # For command execution, use subprocess.run for better control
-            result = subprocess.run(cmd, env=env, check=False)
-            return result.returncode
+            # For command execution, check if completion detection is enabled
+            if getattr(args, "detect_completion", False):
+                # Use agent completion detection
+                idle_timeout = getattr(args, "idle_timeout", 3.0)
+                detect_agent_completion(cmd, idle_timeout)
+                return 0
+            else:
+                # Use subprocess.run for better control
+                result = subprocess.run(cmd, env=env, check=False)
+                return result.returncode
         else:
             # For interactive shell, use subprocess.run for direct terminal passthrough
             # This works better on Windows and with various terminal emulators
