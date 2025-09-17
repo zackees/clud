@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .running_process import RunningProcess
+
 # Container sync is now handled by standalone package in container
 
 
@@ -264,52 +266,6 @@ def stop_existing_container(container_name: str = "clud-dev") -> None:
         pass
 
 
-def stream_process_output(process: subprocess.Popen[str]) -> int:
-    """Stream output from a subprocess in real-time."""
-    try:
-        # Stream stdout and stderr in real-time
-        while True:
-            # Check if process has terminated
-            if process.poll() is not None:
-                break
-
-            # Read and print any available output
-            if process.stdout:
-                line = process.stdout.readline()
-                if line:
-                    print(line.rstrip(), flush=True)
-
-            if process.stderr:
-                line = process.stderr.readline()
-                if line:
-                    print(line.rstrip(), file=sys.stderr, flush=True)
-
-            # Small delay to prevent busy waiting
-            time.sleep(0.01)
-
-        # Get any remaining output
-        if process.stdout:
-            for line in process.stdout:
-                print(line.rstrip(), flush=True)
-
-        if process.stderr:
-            for line in process.stderr:
-                print(line.rstrip(), file=sys.stderr, flush=True)
-
-        # Wait for process to complete and return exit code
-        return process.wait()
-
-    except KeyboardInterrupt:
-        print("\nTerminating container...", file=sys.stderr)
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        return 130  # Standard exit code for SIGINT
-
-
 # Container management functions
 def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str) -> int:
     """Run the code-server UI container."""
@@ -372,17 +328,6 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         env = os.environ.copy()
         env["ANTHROPIC_API_KEY"] = api_key
 
-        # Start process with streaming output
-        process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # Line buffered
-            universal_newlines=True,
-        )
-
         # Schedule browser opening after a short delay
         def open_browser_delayed():
             time.sleep(3)  # Wait for server to start
@@ -406,8 +351,12 @@ Press Ctrl+C to stop the container
         browser_thread = threading.Thread(target=open_browser_delayed, daemon=True)
         browser_thread.start()
 
-        # Stream output in real-time
-        return stream_process_output(process)
+        # Use RunningProcess for streaming output
+        try:
+            return RunningProcess.run_streaming(cmd, env=env)
+        except KeyboardInterrupt:
+            print("\nTerminating container...", file=sys.stderr)
+            return 130  # Standard exit code for SIGINT
 
     except Exception as e:
         print(f"Failed to start container: {e}")
@@ -726,41 +675,20 @@ class BackgroundAgent:
                 "/workspace",
             ]
 
-            # Use Popen with streaming output instead of capture_output=True
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, universal_newlines=True)
+            # Show banner message before entering Docker
+            logger.info("### ENTERING DOCKER ###")
 
-            # Stream stdout in real-time
-            while True:
-                stdout_line = process.stdout.readline()
-                stderr_line = process.stderr.readline()
+            # Custom callbacks for logging container output
+            def stdout_callback(line: str) -> None:
+                logger.info(f"[DOCKER] {line.rstrip()}")
 
-                if stdout_line:
-                    logger.info(f"[container] {stdout_line.rstrip()}")
-                if stderr_line:
-                    logger.warning(f"[container] {stderr_line.rstrip()}")
+            def stderr_callback(line: str) -> None:
+                logger.warning(f"[DOCKER] {line.rstrip()}")
 
-                # Check if process is finished
-                if process.poll() is not None:
-                    break
+            # Use RunningProcess for streaming output
+            returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback, stderr_callback=stderr_callback)
 
-                # If no output from either stream, continue
-                if not stdout_line and not stderr_line:
-                    break
-
-            # Get any remaining output
-            remaining_stdout, remaining_stderr = process.communicate()
-
-            if remaining_stdout:
-                for line in remaining_stdout.strip().split("\n"):
-                    if line:
-                        logger.info(f"[container] {line}")
-
-            if remaining_stderr:
-                for line in remaining_stderr.strip().split("\n"):
-                    if line:
-                        logger.warning(f"[container] {line}")
-
-            return process.returncode == 0
+            return returncode == 0
 
         except Exception as e:
             logger.error(f"Container sync failed: {e}")

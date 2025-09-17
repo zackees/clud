@@ -43,10 +43,10 @@ def sync_with_rsync(source, dest, exclude_git=False):
 
     try:
         result = subprocess.run(cmd, check=True)
-        print(f"Sync completed: {source} -> {dest}")
+        print(f"[DOCKER] Sync completed: {source} -> {dest}")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Sync failed: {e}")
+        print(f"[DOCKER] Sync failed: {e}")
         return False
 
 
@@ -56,7 +56,7 @@ def init_container():
     workspace_path = Path(WORKSPACE_DIR)
 
     if not host_path.exists():
-        print("No host directory found, skipping sync")
+        print("[DOCKER] No host directory found, skipping sync")
         return 0
 
     # Ensure workspace directory exists
@@ -64,7 +64,7 @@ def init_container():
 
     # Sync host to workspace (allows .git)
     if sync_with_rsync(HOST_DIR, WORKSPACE_DIR, exclude_git=False):
-        print("Initial sync completed")
+        print("[DOCKER] Initial sync completed")
 
         # Configure code-server
         config_dir = Path("/home/coder/.config/code-server")
@@ -87,12 +87,12 @@ def sync_back():
     workspace_path = Path(WORKSPACE_DIR)
 
     if not workspace_path.exists():
-        print("No workspace directory found")
+        print("[DOCKER] No workspace directory found")
         return 1
 
     # Sync workspace to host (excludes .git)
     if sync_with_rsync(WORKSPACE_DIR, HOST_DIR, exclude_git=True):
-        print("Sync back completed")
+        print("[DOCKER] Sync back completed")
         return 0
     else:
         return 1
