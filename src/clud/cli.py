@@ -65,7 +65,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--api-key", help="Anthropic API key for Claude CLI")
 
-    parser.add_argument("-b", "--build", action="store_true", help="Build Docker image before launching container")
+    parser.add_argument("-b", "--build", nargs="?", const=True, help="Build Docker image before launching container. Use --build=force to force rebuild without cache")
 
     parser.add_argument("--build-dockerfile", metavar="PATH", help="Build Docker image using custom dockerfile path")
 
@@ -195,8 +195,12 @@ def main(args: list[str] | None = None) -> int:
 
         # Handle build-only mode
         if parsed_args.just_build:
-            print("Building Docker image...")
-            if build_docker_image(getattr(parsed_args, "build_dockerfile", None)):
+            force_rebuild = parsed_args.build == "force"
+            if force_rebuild:
+                print("Force building Docker image (no cache)...")
+            else:
+                print("Building Docker image...")
+            if build_docker_image(getattr(parsed_args, "build_dockerfile", None), force_rebuild=force_rebuild, skip_existing_check=True):
                 print("Docker image built successfully!")
                 return 0
             else:
@@ -205,8 +209,12 @@ def main(args: list[str] | None = None) -> int:
 
         # Force build if requested
         if parsed_args.build:
-            print("Building Docker image...")
-            if not build_docker_image(getattr(parsed_args, "build_dockerfile", None)):
+            force_rebuild = parsed_args.build == "force"
+            if force_rebuild:
+                print("Force building Docker image (no cache)...")
+            else:
+                print("Building Docker image...")
+            if not build_docker_image(getattr(parsed_args, "build_dockerfile", None), force_rebuild=force_rebuild):
                 print("Failed to build Docker image", file=sys.stderr)
                 return 1
             parsed_args._image_built = True

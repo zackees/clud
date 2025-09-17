@@ -187,11 +187,11 @@ def pull_latest_image(image_name: str = "niteris/clud:latest") -> bool:
         return False
 
 
-def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool = False) -> bool:
+def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool = False, skip_existing_check: bool = False) -> bool:
     """Build the niteris/clud Docker image if it doesn't exist."""
     try:
-        # Check if image already exists (skip this check if force_rebuild is True)
-        if not force_rebuild:
+        # Check if image already exists (skip this check if force_rebuild or skip_existing_check is True)
+        if not force_rebuild and not skip_existing_check:
             result = subprocess.run(["docker", "images", "-q", "niteris/clud:latest"], capture_output=True, text=True, check=True)
 
             if result.stdout.strip():
@@ -230,6 +230,10 @@ def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool =
                 print("No local Dockerfile found")
                 print("Using remote image instead of building locally")
                 return True
+
+        # Add --no-cache flag if force_rebuild is True
+        if force_rebuild:
+            cmd.insert(-1, "--no-cache")
 
         # Build the image
         result = subprocess.run(cmd, check=True)
