@@ -280,7 +280,7 @@ def main(args: list[str] | None = None) -> int:
                 print("Force building Docker image (no cache)...")
             else:
                 print("Building Docker image...")
-            if not build_docker_image(getattr(parsed_args, "build_dockerfile", None), force_rebuild=force_rebuild):
+            if not build_docker_image(getattr(parsed_args, "build_dockerfile", None), force_rebuild=force_rebuild, skip_existing_check=True):
                 print("Failed to build Docker image", file=sys.stderr)
                 return 1
             parsed_args._image_built = True
