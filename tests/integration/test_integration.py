@@ -442,7 +442,32 @@ def test_docker_integration():
     finally:
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
-    # Test 3.12: Container with nginx web server
+    # Test 3.12: Background mode with echo command
+    print("  Testing background mode with echo command...")
+    container_name = f"clud-integration-bg-echo-{uuid.uuid4().hex[:8]}"
+
+    with contextlib.suppress(BaseException):
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
+
+    try:
+        # Test --bg --cmd "echo HI; exit 0" equivalent
+        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "echo HI; exit 0"]
+        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
+
+        # Verify "HI" appears in output
+        if "HI" in result.stdout:
+            print("    ✓ Background echo command working")
+            test_results.append(("Background echo command", True, None))
+        else:
+            raise IntegrationTestError("'HI' not found in command output")
+
+    except Exception as e:
+        print(f"    ✗ Background echo command test failed: {e}")
+        test_results.append(("Background echo command", False, str(e)))
+    finally:
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
+
+    # Test 3.13: Container with nginx web server
     print("  Testing nginx web server container...")
     container_name = f"clud-integration-nginx-{uuid.uuid4().hex[:8]}"
     test_port = find_free_port()

@@ -711,13 +711,13 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     # Add the command - this is the ONLY part that can be customized
     # Default to bash if no command specified, otherwise use the provided command
     if args.cmd:
-        # Split the command properly for exec format
+        # ALL commands must use --cmd format to go through entrypoint.sh properly
         if args.cmd == "/bin/bash":
             # Special case for interactive bash - use --cmd format for entrypoint.sh
             base_cmd.extend(["--cmd", "/bin/bash --login"])
         else:
-            # For other commands, execute them through bash
-            base_cmd.extend(["/bin/bash", "-c", args.cmd])
+            # For other commands, use --cmd format so entrypoint.sh handles them
+            base_cmd.extend(["--cmd", args.cmd])
     else:
         # Default interactive shell
         base_cmd.extend(["/bin/bash", "--login"])

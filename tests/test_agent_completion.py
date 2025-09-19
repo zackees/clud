@@ -46,17 +46,14 @@ class TestAgentCompletionIntegration(unittest.TestCase):
 
     def test_simple_command_without_detection(self):
         """Test that regular commands work without detection flag."""
-        # NOTE: Current Docker image design starts code-server regardless of --cmd flag
-        # This is a limitation of the current entrypoint script design
-
         try:
             result = subprocess.run(["uv", "run", "python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"], capture_output=True, text=True, timeout=10)
-            # Current behavior: may fail with returncode 1 due to Docker issues
-            # This test documents the current limitation
-            self.assertEqual(result.returncode, 1)  # Docker error exit code
+            # Command should now succeed with the fixed entrypoint behavior
+            self.assertEqual(result.returncode, 0)
+            # Should have some output including the echo command result
+            self.assertIn("hello world", result.stdout)
         except subprocess.TimeoutExpired:
-            # If it times out, that's also acceptable behavior given current limitations
-            pass
+            self.fail("Command took longer than 10 seconds - this should complete quickly now")
 
 
 if __name__ == "__main__":
