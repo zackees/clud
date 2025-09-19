@@ -137,11 +137,16 @@ def init_container():
     # Configure Git safe directories to handle ownership issues
     if workspace_path.exists() and (workspace_path / ".git").exists():
         try:
-            # Configure Git to treat workspace as safe directory
+            # Configure Git to treat workspace as safe directory for both root and coder users
             subprocess.run([
                 "git", "config", "--global", "--add", "safe.directory", WORKSPACE_DIR
             ], capture_output=True, check=False, timeout=30)
-            print("[DOCKER] Git safe directory configured")
+
+            # Also configure for the coder user specifically
+            subprocess.run([
+                "sudo", "-u", "coder", "git", "config", "--global", "--add", "safe.directory", WORKSPACE_DIR
+            ], capture_output=True, check=False, timeout=30)
+            print("[DOCKER] Git safe directory configured for both root and coder users")
         except Exception as e:
             print(f"[DOCKER] Warning: Failed to configure Git safe directory: {e}")
 
