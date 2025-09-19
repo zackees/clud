@@ -98,6 +98,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def is_tty_available() -> bool:
+    """Check if a TTY is available for interactive operations."""
+    try:
+        # Primary check: stdin must be a TTY
+        # Secondary check: On Windows MSYS/MINGW, if stdin is not a TTY,
+        # we still don't have proper TTY support even with winpty
+        # winpty only helps with Windows console apps, not with piped input
+        return hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
+def validate_tty_for_interactive_mode() -> None:
+    """Validate that a TTY is available for interactive Docker containers.
+
+    Raises:
+        ValidationError: If no TTY is available for interactive operations
+    """
+    if not is_tty_available():
+        raise ValidationError(
+            "Interactive container mode (--bg) requires a TTY but none is available.\n"
+            "This usually happens when:\n"
+            "  - Running in a non-interactive environment (CI/CD, scripts)\n"
+            "  - Output is redirected to a file or pipe\n"
+            "  - Running in an IDE or editor that doesn't provide TTY access\n"
+            "\n"
+            "Solutions:\n"
+            "  - Run from a proper terminal/shell\n"
+            "  - Use specific commands with --cmd flag for non-interactive execution\n"
+            "  - Remove --bg flag for non-interactive use cases"
+        )
+
+
 def dump_thread_stacks():
     """Dump stack traces of all running threads."""
     # Write to stderr to ensure it's visible even with subprocess redirects
@@ -621,30 +654,42 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
     # Always use the standard container entrypoint - NEVER override it
     # This ensures consistent behavior and security
-    # Use -it for interactive shells, -d for non-interactive commands
+    # Determine if we need TTY allocation based on command type and availability
     is_interactive = not args.cmd or args.cmd == "/bin/bash"
+    has_tty = is_tty_available()
 
-    base_cmd = [
-        "docker",
-        "run",
-        "-it" if is_interactive else "",
-        "--rm",
-        "--name",
-        "clud-dev",
-        "-e",
-        f"ANTHROPIC_API_KEY={api_key}",
-        "-e",
-        "CLUD_BACKGROUND_SYNC=true",  # Enable background sync
-        "-e",
-        "CLUD_SYNC_INTERVAL=300",  # 5 minute sync interval
-        "-v",
-        f"{docker_path}:/host:rw",
-        "-w",
-        "/workspace",  # Set working directory to /workspace
-    ]
+    base_cmd = ["docker", "run"]
 
-    # Remove empty string from non-interactive mode
-    base_cmd = [arg for arg in base_cmd if arg]
+    # Add TTY and interactive flags based on context
+    if is_interactive and has_tty:
+        # Interactive shell with TTY - use both -i and -t
+        base_cmd.extend(["-it"])
+    elif is_interactive and not has_tty:
+        # Interactive shell without TTY - use only -i for stdin
+        base_cmd.extend(["-i"])
+        logger.warning("Running in interactive mode without TTY - some features may not work properly")
+    elif not is_interactive and has_tty:
+        # Non-interactive command with TTY available - allocate TTY for better output formatting
+        base_cmd.extend(["-t"])
+    # else: Non-interactive command without TTY - no additional flags needed
+
+    base_cmd.extend(
+        [
+            "--rm",
+            "--name",
+            "clud-dev",
+            "-e",
+            f"ANTHROPIC_API_KEY={api_key}",
+            "-e",
+            "CLUD_BACKGROUND_SYNC=true",  # Enable background sync
+            "-e",
+            "CLUD_SYNC_INTERVAL=300",  # 5 minute sync interval
+            "-v",
+            f"{docker_path}:/host:rw",
+            "-w",
+            "/workspace",  # Set working directory to /workspace
+        ]
+    )
 
     # Add Claude commands mount if specified
     claude_mount = get_claude_commands_mount(args.claude_commands)
@@ -677,9 +722,25 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
         # Default interactive shell
         base_cmd.extend(["/bin/bash", "--login"])
 
-    # On Windows with mintty/git-bash, prepend winpty for TTY support
+    # On Windows with mintty/git-bash, prepend winpty for TTY support when needed
     msystem = os.environ.get("MSYSTEM", "")
-    cmd = ["winpty"] + base_cmd if platform.system() == "Windows" and msystem.startswith(("MSYS", "MINGW")) else base_cmd
+    needs_winpty = (
+        platform.system() == "Windows"
+        and msystem.startswith(("MSYS", "MINGW"))
+        and is_interactive  # Only use winpty for interactive sessions
+        and has_tty  # Only when TTY is available
+    )
+
+    if needs_winpty:
+        # Check if winpty is available
+        if shutil.which("winpty"):
+            cmd = ["winpty"] + base_cmd
+            logger.debug("Using winpty for Windows TTY support")
+        else:
+            cmd = base_cmd
+            logger.warning("winpty not found - terminal features may be limited on Windows")
+    else:
+        cmd = base_cmd
 
     print("Starting CLUD development container...")
 
@@ -731,9 +792,21 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
             return 0
         else:
             # Use subprocess.run for direct terminal passthrough
-            # This blocks the main thread, which tests our independent thread dump
-            result = subprocess.run(cmd, env=env, check=False)
-            return result.returncode
+            # Set up proper signal handling for PTY processes
+            try:
+                if is_interactive and has_tty:
+                    # For interactive TTY sessions, ensure proper signal propagation
+                    result = subprocess.run(cmd, env=env, check=False, preexec_fn=os.setsid) if platform.system() != "Windows" else subprocess.run(cmd, env=env, check=False)
+                else:
+                    # For non-interactive sessions, use standard subprocess
+                    result = subprocess.run(cmd, env=env, check=False)
+
+                return result.returncode
+            except OSError as e:
+                # Handle cases where process group creation fails
+                logger.warning(f"Failed to create process group: {e}, falling back to standard subprocess")
+                result = subprocess.run(cmd, env=env, check=False)
+                return result.returncode
 
     except KeyboardInterrupt:
         print("\nContainer terminated.", file=sys.stderr)

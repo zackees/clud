@@ -234,6 +234,13 @@ def main(args: list[str] | None = None) -> int:
             if not check_docker_available():
                 raise DockerError("Docker is not available or not running")
 
+            # Import TTY validation here to avoid circular imports
+            from .agent_background import validate_tty_for_interactive_mode
+
+            # Validate TTY availability for interactive mode (unless specific command is provided)
+            if not parsed_args.cmd or parsed_args.cmd == "/bin/bash":
+                validate_tty_for_interactive_mode()
+
             # Use provided cmd or default to /bin/bash for workspace interaction
             if not parsed_args.cmd:
                 parsed_args.cmd = "/bin/bash"
