@@ -76,29 +76,8 @@ def should_auto_build(parsed_args: argparse.Namespace) -> bool:
     project_path = Path(parsed_args.path) if parsed_args.path else Path.cwd()
     is_clud_repo = is_clud_repo_directory(project_path)
 
-    # Auto-build if launching clud in its own repo directory and not in specific modes
-    return (
-        is_clud_repo
-        and not parsed_args.login
-        and not getattr(parsed_args, "task", False)
-        and not getattr(parsed_args, "help", False)
-        and not getattr(parsed_args, "just_build", False)
-        and not getattr(parsed_args, "build", False)
-        and not getattr(parsed_args, "update", False)
-        and not getattr(parsed_args, "dry_run", False)
-        and not getattr(parsed_args, "message", False)
-        and not getattr(parsed_args, "prompt", False)
-        and not any(
-            [
-                getattr(parsed_args, "worktree_create", False),
-                getattr(parsed_args, "worktree_new", False),
-                getattr(parsed_args, "worktree_remove", False),
-                getattr(parsed_args, "worktree_list", False),
-                getattr(parsed_args, "worktree_prune", False),
-                getattr(parsed_args, "worktree_cleanup", False),
-            ]
-        )
-    )
+    # Auto-build only when --bg flag is present and in clud repo directory
+    return is_clud_repo and getattr(parsed_args, "bg", False)
 
 
 def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgentArgs:
