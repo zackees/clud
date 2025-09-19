@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,46 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def dump_thread_stacks():
+    """Dump stack traces of all running threads."""
+    # Write to stderr to ensure it's visible even with subprocess redirects
+    print("\n" + "=" * 50, file=sys.stderr, flush=True)
+    print("THREAD DUMP EXECUTED", file=sys.stderr, flush=True)
+    print("=" * 50, file=sys.stderr, flush=True)
+
+    # Get all thread frames
+    thread_frames = sys._current_frames()
+
+    for thread_id, frame in thread_frames.items():
+        # Get thread object by ID
+        thread_obj = None
+        for t in threading.enumerate():
+            if t.ident == thread_id:
+                thread_obj = t
+                break
+
+        thread_name = thread_obj.name if thread_obj else f"Thread-{thread_id}"
+        daemon_status = " (daemon)" if thread_obj and thread_obj.daemon else ""
+
+        print(f"\nThread: {thread_name} (ID: {thread_id}){daemon_status}", file=sys.stderr, flush=True)
+        print("-" * 40, file=sys.stderr, flush=True)
+
+        # Print the stack trace for this thread
+        traceback.print_stack(frame, file=sys.stderr)
+
+    print("\n" + "=" * 50, file=sys.stderr, flush=True)
+    print("END THREAD DUMP", file=sys.stderr, flush=True)
+    print("=" * 50 + "\n", file=sys.stderr, flush=True)
+
+    # Also write to a file for verification
+    try:
+        with open("thread_dump_debug.txt", "w") as f:
+            f.write(f"Thread dump executed at {time.time()}\n")
+            f.write(f"Active threads: {len(thread_frames)}\n")
+    except Exception:
+        pass  # Don't fail if we can't write file
 
 
 # Docker utility functions
@@ -524,7 +565,7 @@ def run_container(args: argparse.Namespace, api_key: str) -> int:
 
 
 def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
-    """Launch container and drop user into bash shell at /workspace or execute specified command."""
+    """Launch container with enforced entrypoint and user-specified command."""
     # Validate project path
     project_path = validate_path(args.path)
 
@@ -540,111 +581,113 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
     # Prepare Docker command
     docker_path = normalize_path_for_docker(project_path)
 
-    # Determine if we're running a custom command or interactive shell
-    if args.cmd:
-        # Non-interactive mode for custom commands
-        # Use the default entrypoint and pass command as arguments
-        cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "--name",
-            "clud-dev",
-            "-e",
-            f"ANTHROPIC_API_KEY={api_key}",
-            "-e",
-            "CLUD_BACKGROUND_SYNC=false",  # Disable background sync for command execution
-            "-e",
-            f"CLUD_CUSTOM_CMD={args.cmd}",  # Pass command via environment variable
-            "-v",
-            f"{docker_path}:/host:rw",
-        ]
+    # Always use the standard container entrypoint - NEVER override it
+    # This ensures consistent behavior and security
+    base_cmd = [
+        "docker",
+        "run",
+        "-it",
+        "--rm",
+        "--name",
+        "clud-dev",
+        "-e",
+        f"ANTHROPIC_API_KEY={api_key}",
+        "-e",
+        "CLUD_BACKGROUND_SYNC=true",  # Enable background sync
+        "-e",
+        "CLUD_SYNC_INTERVAL=300",  # 5 minute sync interval
+        "-v",
+        f"{docker_path}:/host:rw",
+        "-w",
+        "/workspace",  # Set working directory to /workspace
+    ]
 
-        # Add Claude commands mount if specified
-        claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
-        if claude_mount:
-            host_path, container_path = claude_mount
-            cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
-            print(f"Mounting Claude commands: {host_path} -> {container_path}")
+    # Add Claude commands mount if specified
+    claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+    if claude_mount:
+        host_path, container_path = claude_mount
+        base_cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
+        print(f"Mounting Claude commands: {host_path} -> {container_path}")
 
-        # Add worktree mount if it exists
-        worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
-        if worktree_mount:
-            host_path, container_path = worktree_mount
-            cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
-            print(f"Mounting Git worktree: {host_path} -> {container_path}")
+    # Add worktree mount if it exists
+    worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
+    if worktree_mount:
+        host_path, container_path = worktree_mount
+        base_cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
+        print(f"Mounting Git worktree: {host_path} -> {container_path}")
 
-        # Add the image and exec into bash to execute the command
-        cmd.extend(["niteris/clud:latest", "exec", "bash", "-c", args.cmd])
+    # Add the image
+    base_cmd.append("niteris/clud:latest")
+
+    # Add the command - this is the ONLY part that can be customized
+    # Default to bash if no command specified, otherwise use the provided command
+    if hasattr(args, "cmd") and args.cmd:
+        # Split the command properly for exec format
+        if args.cmd == "/bin/bash":
+            # Special case for interactive bash - use --cmd format for entrypoint.sh
+            base_cmd.extend(["--cmd", "/bin/bash --login"])
+        else:
+            # For other commands, execute them through bash
+            base_cmd.extend(["/bin/bash", "-c", args.cmd])
     else:
-        # Interactive shell mode - override entrypoint to start bash with login shell
-        base_cmd = [
-            "docker",
-            "run",
-            "-it",
-            "--rm",
-            "--name",
-            "clud-dev",
-            "--entrypoint",
-            "/bin/bash",
-            "-e",
-            f"ANTHROPIC_API_KEY={api_key}",
-            "-e",
-            "CLUD_BACKGROUND_SYNC=true",  # Enable background sync for interactive shell
-            "-e",
-            "CLUD_SYNC_INTERVAL=300",  # 5 minute sync interval
-            "-v",
-            f"{docker_path}:/host:rw",
-            "-w",
-            "/workspace",  # Set working directory to /workspace
-        ]
+        # Default interactive shell
+        base_cmd.extend(["/bin/bash", "--login"])
 
-        # Add Claude commands mount if specified
-        claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
-        if claude_mount:
-            host_path, container_path = claude_mount
-            base_cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
-            print(f"Mounting Claude commands: {host_path} -> {container_path}")
-
-        # Add worktree mount if it exists
-        worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
-        if worktree_mount:
-            host_path, container_path = worktree_mount
-            base_cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
-            print(f"Mounting Git worktree: {host_path} -> {container_path}")
-
-        base_cmd.extend(
-            [
-                "niteris/clud:latest",
-                "--login",  # Login shell to source bashrc and show banner
-            ]
-        )
-
-        # On Windows with mintty/git-bash, prepend winpty for TTY support
-        msystem = os.environ.get("MSYSTEM", "")
-        cmd = ["winpty"] + base_cmd if platform.system() == "Windows" and msystem.startswith(("MSYS", "MINGW")) else base_cmd
+    # On Windows with mintty/git-bash, prepend winpty for TTY support
+    msystem = os.environ.get("MSYSTEM", "")
+    cmd = ["winpty"] + base_cmd if platform.system() == "Windows" and msystem.startswith(("MSYS", "MINGW")) else base_cmd
 
     print("Starting CLUD development container...")
+
+    # Schedule thread dump if requested - run in independent thread
+    dump_thread = None
+    dump_seconds = getattr(args, "dump_threads_after", None)
+    if dump_seconds is not None:
+        print(f"Thread dump scheduled in {dump_seconds} seconds...")
+
+        def independent_dump_timer():
+            """Independent thread that waits and dumps, not affected by main thread blocking."""
+            try:
+                # Debug: write start message
+                with open("dump_timer_debug.txt", "w") as f:
+                    f.write(f"Timer thread started, sleeping for {dump_seconds} seconds\n")
+
+                time.sleep(dump_seconds)
+
+                # Debug: write execution message
+                with open("dump_timer_debug.txt", "a") as f:
+                    f.write(f"Timer fired, executing dump at {time.time()}\n")
+
+                dump_thread_stacks()
+
+                # Debug: write completion message
+                with open("dump_timer_debug.txt", "a") as f:
+                    f.write("Dump completed\n")
+            except Exception as e:
+                # Debug: write error message
+                with open("dump_timer_error.txt", "w") as f:
+                    f.write(f"Timer thread error: {e}\n")
+                    import traceback
+
+                    traceback.print_exc(file=f)
+
+        dump_thread = threading.Thread(target=independent_dump_timer, daemon=True)
+        dump_thread.start()
 
     try:
         # Set up environment with API key
         env = os.environ.copy()
         env["ANTHROPIC_API_KEY"] = api_key
 
-        if args.cmd:
-            # For command execution, check if completion detection is enabled
-            if getattr(args, "detect_completion", False):
-                # Use agent completion detection
-                idle_timeout = getattr(args, "idle_timeout", 3.0)
-                detect_agent_completion(cmd, idle_timeout)
-                return 0
-            else:
-                # Use subprocess.run for better control
-                result = subprocess.run(cmd, env=env, check=False)
-                return result.returncode
+        # Check if completion detection is enabled (for automated workflows)
+        if getattr(args, "detect_completion", False):
+            # Use agent completion detection
+            idle_timeout = getattr(args, "idle_timeout", 3.0)
+            detect_agent_completion(cmd, idle_timeout)
+            return 0
         else:
-            # For interactive shell, use subprocess.run for direct terminal passthrough
-            # This works better on Windows and with various terminal emulators
+            # Use subprocess.run for direct terminal passthrough
+            # This blocks the main thread, which tests our independent thread dump
             result = subprocess.run(cmd, env=env, check=False)
             return result.returncode
 
@@ -653,6 +696,10 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
         return 130
     except Exception as e:
         raise DockerError(f"Failed to start container shell: {e}") from e
+    finally:
+        # Note: dump_thread runs independently and will terminate naturally
+        # No need to cancel it since it's a daemon thread with time.sleep()
+        pass
 
 
 class BackgroundAgent:

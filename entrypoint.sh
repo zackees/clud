@@ -3,8 +3,12 @@ set -e
 
 # Simple entrypoint that delegates to Python script for complex logic
 
+echo "[ENTRYPOINT] Starting container entrypoint with args: $@"
+echo "[ENTRYPOINT] Current working directory: $(pwd)"
+echo "[ENTRYPOINT] Running as user: $(whoami)"
+
 # Assert that required directories exist (guaranteed by Dockerfile)
-echo "Verifying container directory structure..."
+echo "[ENTRYPOINT] Verifying container directory structure..."
 for dir in /workspace /host; do
     if [ ! -d "$dir" ]; then
         echo "ERROR: Required directory $dir does not exist!" >&2
@@ -15,14 +19,18 @@ for dir in /workspace /host; do
 done
 
 # Run initial sync and setup
+echo "[ENTRYPOINT] Running container-sync init..."
 python3 /usr/local/bin/container-sync init
+echo "[ENTRYPOINT] Container-sync init completed"
 
 # Check if a custom command was passed
 if [ "$1" = "--cmd" ] && [ -n "$2" ]; then
     # Execute the custom command in /workspace as coder user
-    echo "Executing custom command: $2"
+    echo "[ENTRYPOINT] Executing custom command: $2"
     exec sudo -u coder bash -c "cd /workspace && $2"
 else
     # Start code-server
+    echo "[ENTRYPOINT] Starting code-server..."
+    echo "[ENTRYPOINT] About to exec: sudo -u coder bash -c \"cd /workspace && code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace\""
     exec sudo -u coder bash -c "cd /workspace && code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace"
 fi

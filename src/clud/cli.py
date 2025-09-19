@@ -98,7 +98,9 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
 
-    parser.add_argument("--bg", action="store_true", help="Run background agent for workspace synchronization")
+    parser.add_argument("--bg", action="store_true", help="Launch interactive bash shell in workspace (enforces entrypoint)")
+
+    parser.add_argument("--dump-threads-after", type=int, metavar="SECONDS", help="Dump thread information after specified seconds (for --bg mode)")
 
     parser.add_argument("-p", "--prompt", help="Run Claude with this prompt and exit when complete")
 
@@ -185,27 +187,23 @@ def main(args: list[str] | None = None) -> int:
                 success = cleanup_git_worktree(project_path, parsed_args.worktree_name)
                 return 0 if success else 1
 
-        # Handle background agent mode
+        # Handle background shell mode
         if parsed_args.bg:
-            # Background agent mode - run workspace synchronization
-            from .agent_background import main as bg_main
+            # Background shell mode - launch interactive bash shell with enforced entrypoint
+            # Check Docker availability first
+            if not check_docker_available():
+                raise DockerError("Docker is not available or not running")
 
-            # Pass help flag through to background agent if present
-            bg_args = unknown_args.copy()
-            if parsed_args.help:
-                bg_args.append("--help")
+            # Override cmd to be /bin/bash for workspace interaction
+            parsed_args.cmd = "/bin/bash"
 
-            try:
-                bg_main(bg_args)
-                return 0
-            except SystemExit as e:
-                # argparse calls sys.exit() for --help, --version, etc.
-                if e.code is None:
-                    return 0
-                elif isinstance(e.code, int):
-                    return e.code
-                else:
-                    return 1  # fallback for string codes
+            # Build image if needed
+            if (not hasattr(parsed_args, "_image_built") or not parsed_args._image_built) and not build_docker_image(getattr(parsed_args, "build_dockerfile", None)):
+                return 1
+
+            # Get API key and launch container with enforced entrypoint
+            api_key = get_api_key(parsed_args)
+            return launch_container_shell(parsed_args, api_key)
 
         # Check if this is yolo mode (only if no Docker flags AND no path provided, OR if prompt is specified)
         # If a path is provided, default to Docker shell mode unless prompt is specified
