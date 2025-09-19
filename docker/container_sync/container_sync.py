@@ -86,18 +86,13 @@ def setup_git_workspace():
         branch_result = subprocess.run(branch_cmd, capture_output=True, text=True, check=True, timeout=30)
         current_branch = branch_result.stdout.strip()
 
-        # Create worktree pointing to the current commit (detached HEAD) to avoid branch conflicts
-        commit_cmd = ["git", f"--git-dir={host_git_dir}", "rev-parse", "HEAD"]
-        commit_result = subprocess.run(commit_cmd, capture_output=True, text=True, check=True, timeout=30)
-        current_commit = commit_result.stdout.strip()
-
-        # Create worktree pointing to the current commit (detached)
+        # Create worktree pointing to the current branch to maintain branch context
         cmd = [
             "git",
             f"--git-dir={host_git_dir}",
-            "worktree", "add", "--detach",
+            "worktree", "add",
             str(workspace_path),
-            current_commit
+            current_branch
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)

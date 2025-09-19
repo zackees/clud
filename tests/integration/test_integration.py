@@ -81,7 +81,7 @@ def test_docker_integration():
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
     try:
-        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "ls -al && exit 0"]
+        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "ls -al /host && exit 0"]
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
         output = result.stdout
 
@@ -110,7 +110,7 @@ def test_docker_integration():
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
     try:
-        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "cat pyproject.toml && exit 0"]
+        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "cat /host/pyproject.toml && exit 0"]
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
 
         if "clud" in result.stdout:
@@ -427,7 +427,7 @@ def test_docker_integration():
 
     try:
         # Test command chaining
-        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "echo 'First' && echo 'Second' && ls /workspace | head -5 && exit 0"]
+        run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "echo 'First' && echo 'Second' && ls /host | head -5 && exit 0"]
         result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
 
         if "First" in result.stdout and "Second" in result.stdout:
