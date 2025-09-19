@@ -93,20 +93,40 @@ def setup_git_workspace():
         # Change to a stable working directory to avoid rsync getcwd issues
         os.chdir("/")
 
+        # Configure Git safe directory before any worktree operations
+        try:
+            subprocess.run([
+                "git", "config", "--global", "--add", "safe.directory", WORKSPACE_DIR
+            ], capture_output=True, check=False, timeout=30)
+            print("[DOCKER] Git safe directory configured before worktree creation")
+        except Exception as e:
+            print(f"[DOCKER] Warning: Failed to configure Git safe directory: {e}")
+
         # Get the current branch name from the host repo
         branch_cmd = ["git", f"--git-dir={host_git_dir}", "rev-parse", "--abbrev-ref", "HEAD"]
         branch_result = subprocess.run(branch_cmd, capture_output=True, text=True, check=True, timeout=30)
         current_branch = branch_result.stdout.strip()
+        workspace_branch = f"workspace-{current_branch}"
 
-        # Create worktree pointing to the current commit, not branch (to avoid conflicts)
-        # We'll set up the branch checkout after creation
+        # Clean up any existing workspace branch
+        try:
+            subprocess.run([
+                "git", f"--git-dir={host_git_dir}",
+                "branch", "-D", workspace_branch
+            ], capture_output=True, check=False, timeout=30)
+            print(f"[DOCKER] Cleaned up existing workspace branch: {workspace_branch}")
+        except subprocess.CalledProcessError:
+            # Ignore cleanup errors
+            pass
+
+        # Create worktree pointing to HEAD but force it to track the current branch
         cmd = [
             "git",
             f"--git-dir={host_git_dir}",
             "worktree", "add",
-            "--detach",
+            "-b", workspace_branch,
             str(workspace_path),
-            "HEAD"
+            current_branch
         ]
 
         print(f"[DOCKER] Running command: {' '.join(cmd)}")
@@ -116,26 +136,6 @@ def setup_git_workspace():
             print(f"[DOCKER] stdout: {result.stdout}")
         if result.stderr:
             print(f"[DOCKER] stderr: {result.stderr}")
-
-        # Ensure we're on the proper branch, not detached HEAD
-        print(f"[DOCKER] Checking out branch {current_branch} in worktree...")
-        checkout_cmd = [
-            "git", "-C", str(workspace_path),
-            "checkout", "-B", current_branch,
-            f"origin/{current_branch}"
-        ]
-        checkout_result = subprocess.run(checkout_cmd, capture_output=True, text=True, check=False, timeout=60)
-        if checkout_result.returncode == 0:
-            print(f"[DOCKER] Successfully checked out branch {current_branch}")
-        else:
-            print(f"[DOCKER] Warning: Failed to checkout branch {current_branch}: {checkout_result.stderr}")
-            # Fallback: just switch to the branch if it already exists locally
-            fallback_cmd = ["git", "-C", str(workspace_path), "checkout", current_branch]
-            fallback_result = subprocess.run(fallback_cmd, capture_output=True, text=True, check=False, timeout=60)
-            if fallback_result.returncode == 0:
-                print(f"[DOCKER] Fallback checkout successful")
-            else:
-                print(f"[DOCKER] Fallback checkout failed: {fallback_result.stderr}")
 
         return True
 
