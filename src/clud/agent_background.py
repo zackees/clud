@@ -413,7 +413,7 @@ def run_ui_container(args: BackgroundAgentArgs, project_path: Path, api_key: str
         "-v",
         f"{docker_path}:/host:rw",  # Mount to /host for sync
         "-v",
-        f"{home_config_path}:/home/coder/.config",
+        f"{home_config_path}:/root/.config",
         # Removed .local mount to preserve container's installed CLI tools
     ]
 

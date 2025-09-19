@@ -137,29 +137,23 @@ def init_container():
     # Configure Git safe directories to handle ownership issues
     if workspace_path.exists() and (workspace_path / ".git").exists():
         try:
-            # Configure Git to treat workspace as safe directory for both root and coder users
+            # Configure Git to treat workspace as safe directory for root user
             subprocess.run([
                 "git", "config", "--global", "--add", "safe.directory", WORKSPACE_DIR
             ], capture_output=True, check=False, timeout=30)
-
-            # Also configure for the coder user specifically
-            subprocess.run([
-                "sudo", "-u", "coder", "git", "config", "--global", "--add", "safe.directory", WORKSPACE_DIR
-            ], capture_output=True, check=False, timeout=30)
-            print("[DOCKER] Git safe directory configured for both root and coder users")
+            print("[DOCKER] Git safe directory configured for root user")
         except Exception as e:
             print(f"[DOCKER] Warning: Failed to configure Git safe directory: {e}")
 
-    # Configure code-server
-    config_dir = Path("/home/coder/.config/code-server")
+    # Configure code-server for root user
+    config_dir = Path("/root/.config/code-server")
     config_dir.mkdir(parents=True, exist_ok=True)
 
     config_file = config_dir / "config.yaml"
     config_file.write_text("bind-addr: 0.0.0.0:8080\nauth: none\ncert: false\n")
 
-    # Fix permissions
-    subprocess.run(["chown", "-R", "coder:coder", "/home/coder/.config"], check=False)
-    subprocess.run(["chown", "-R", "coder:coder", WORKSPACE_DIR], check=False)
+    # Ensure root owns the workspace
+    subprocess.run(["chown", "-R", "root:root", WORKSPACE_DIR], check=False)
 
     return 0
 
