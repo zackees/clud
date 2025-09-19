@@ -21,7 +21,7 @@ dependencies = [
     "running-process>=1.0.1",
 ]
 # Change this with the version number bump.
-version = "1.0.2"
+version = "1.0.3"
 
 [project.optional-dependencies]
 dev = [
