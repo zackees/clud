@@ -174,6 +174,9 @@ def main(args: list[str] | None = None) -> int:
     if parsed_args.no_firewall:
         parsed_args.enable_firewall = False
 
+    # Track if build was explicitly requested by user
+    parsed_args._original_build = parsed_args.build
+
     # Auto-build detection for clud repo directory
     if should_auto_build(parsed_args):
         print("Detected clud repository - auto-building Docker image...")
@@ -263,7 +266,11 @@ def main(args: list[str] | None = None) -> int:
 
         # Check if this is yolo mode (only if no Docker flags AND no path provided, OR if prompt is specified)
         # If a path is provided, default to Docker shell mode unless prompt is specified
-        is_yolo_mode = (not (parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.build or parsed_args.bg) and not parsed_args.path) or parsed_args.prompt
+        # Special case: if auto-build was triggered but no explicit path was provided, prefer yolo mode
+        explicit_docker_mode = parsed_args.ui or parsed_args.update or parsed_args.just_build or parsed_args.bg
+        explicit_build_requested = getattr(parsed_args, "_original_build", False)  # Track if build was explicitly requested
+
+        is_yolo_mode = (not explicit_docker_mode and not explicit_build_requested and not parsed_args.path) or parsed_args.prompt
 
         if is_yolo_mode:
             # Handle yolo mode (doesn't need Docker)
