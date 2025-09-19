@@ -2,8 +2,10 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from .agent_background import (
+    BackgroundAgentArgs,
     ConfigError,
     DockerError,
     ValidationError,
@@ -29,6 +31,44 @@ from .task import handle_task_command
 
 # Import keyring for tests to mock
 keyring = get_credential_store()
+
+
+def convert_to_background_args(parsed_args: argparse.Namespace, validate_path_exists: bool = True) -> BackgroundAgentArgs:
+    """Convert argparse.Namespace to BackgroundAgentArgs."""
+    if validate_path_exists:
+        project_path = validate_path(parsed_args.path)
+        host_dir = str(project_path)
+    else:
+        # For testing - don't validate path existence
+        host_dir = parsed_args.path or str(Path.cwd())
+
+    return BackgroundAgentArgs(
+        host_dir=host_dir,
+        sync_interval=300,  # default
+        watch=False,  # default
+        verbose=False,  # default
+        path=parsed_args.path,
+        ssh_keys=parsed_args.ssh_keys,
+        image=parsed_args.image,
+        shell=parsed_args.shell,
+        profile=parsed_args.profile,
+        enable_firewall=parsed_args.enable_firewall,
+        no_firewall=parsed_args.no_firewall,
+        no_sudo=parsed_args.no_sudo,
+        env=parsed_args.env,
+        read_only_home=parsed_args.read_only_home,
+        port=parsed_args.port,
+        cmd=getattr(parsed_args, "cmd", None),
+        claude_commands=parsed_args.claude_commands,
+        dump_threads_after=parsed_args.dump_threads_after,
+        no_dangerous=parsed_args.no_dangerous,
+        yolo=parsed_args.yolo,
+        build_dockerfile=getattr(parsed_args, "build_dockerfile", None),
+        worktree_name=parsed_args.worktree_name,
+        detect_completion=parsed_args.detect_completion,
+        idle_timeout=parsed_args.idle_timeout,
+        _image_built=getattr(parsed_args, "_image_built", False),
+    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -203,7 +243,9 @@ def main(args: list[str] | None = None) -> int:
 
             # Get API key and launch container with enforced entrypoint
             api_key = get_api_key(parsed_args)
-            return launch_container_shell(parsed_args, api_key)
+            # Convert to BackgroundAgentArgs
+            bg_args = convert_to_background_args(parsed_args)
+            return launch_container_shell(bg_args, api_key)
 
         # Check if this is yolo mode (only if no Docker flags AND no path provided, OR if prompt is specified)
         # If a path is provided, default to Docker shell mode unless prompt is specified
@@ -289,11 +331,15 @@ def main(args: list[str] | None = None) -> int:
             project_path = validate_path(parsed_args.path)
             api_key = get_api_key(parsed_args)
 
-            return run_ui_container(parsed_args, project_path, api_key)
+            # Convert to BackgroundAgentArgs
+            bg_args = convert_to_background_args(parsed_args)
+            return run_ui_container(bg_args, project_path, api_key)
         else:
             # Container shell mode - launch container with interactive shell
             api_key = get_api_key(parsed_args)
-            return launch_container_shell(parsed_args, api_key)
+            # Convert to BackgroundAgentArgs
+            bg_args = convert_to_background_args(parsed_args)
+            return launch_container_shell(bg_args, api_key)
 
     except (ValidationError, ForegroundValidationError) as e:
         print(f"Error: {e}", file=sys.stderr)

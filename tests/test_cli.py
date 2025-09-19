@@ -32,6 +32,7 @@ from clud.agent_foreground import (
     ValidationError as ForegroundValidationError,
 )
 from clud.cli import (
+    convert_to_background_args,
     create_parser,
     main,
 )
@@ -423,7 +424,8 @@ class TestWrapperCommand(unittest.TestCase):
     def test_basic_wrapper_command(self):
         """Test basic wrapper command."""
         args = self.parser.parse_args([str(self.project_path)])
-        cmd = build_wrapper_command(args, self.project_path)
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
+        cmd = build_wrapper_command(bg_args, self.project_path)
 
         expected = ["run-claude-docker", "--workspace", str(self.project_path), "--dangerously-skip-permissions", "--enable-sudo"]
         self.assertEqual(cmd, expected)
@@ -431,14 +433,16 @@ class TestWrapperCommand(unittest.TestCase):
     def test_wrapper_with_no_dangerous(self):
         """Test wrapper command with --no-dangerous flag."""
         args = self.parser.parse_args([str(self.project_path), "--no-dangerous"])
-        cmd = build_wrapper_command(args, self.project_path)
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
+        cmd = build_wrapper_command(bg_args, self.project_path)
 
         self.assertNotIn("--dangerously-skip-permissions", cmd)
 
     def test_wrapper_with_custom_shell(self):
         """Test wrapper command with custom shell."""
         args = self.parser.parse_args([str(self.project_path), "--shell", "zsh"])
-        cmd = build_wrapper_command(args, self.project_path)
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
+        cmd = build_wrapper_command(bg_args, self.project_path)
 
         self.assertIn("--shell", cmd)
         self.assertIn("zsh", cmd)
@@ -446,14 +450,16 @@ class TestWrapperCommand(unittest.TestCase):
     def test_wrapper_with_no_firewall(self):
         """Test wrapper command with firewall disabled."""
         args = self.parser.parse_args([str(self.project_path), "--no-firewall"])
-        cmd = build_wrapper_command(args, self.project_path)
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
+        cmd = build_wrapper_command(bg_args, self.project_path)
 
         self.assertIn("--disable-firewall", cmd)
 
     def test_wrapper_with_no_sudo(self):
         """Test wrapper command without sudo."""
         args = self.parser.parse_args([str(self.project_path), "--no-sudo"])
-        cmd = build_wrapper_command(args, self.project_path)
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
+        cmd = build_wrapper_command(bg_args, self.project_path)
 
         self.assertNotIn("--enable-sudo", cmd)
 
@@ -470,9 +476,10 @@ class TestFallbackCommand(unittest.TestCase):
     def test_basic_fallback_command(self):
         """Test basic fallback command."""
         args = self.parser.parse_args([str(self.project_path)])
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
-            cmd = build_fallback_command(args, self.project_path)
+            cmd = build_fallback_command(bg_args, self.project_path)
 
         self.assertEqual(cmd[0:4], ["docker", "run", "-it", "--rm"])
         self.assertIn("--name=clud-project", cmd)
@@ -485,9 +492,10 @@ class TestFallbackCommand(unittest.TestCase):
     def test_fallback_with_api_key(self):
         """Test fallback command with API key."""
         args = self.parser.parse_args([str(self.project_path)])
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
-            cmd = build_fallback_command(args, self.project_path)
+            cmd = build_fallback_command(bg_args, self.project_path)
 
         self.assertIn("-e", cmd)
         api_key_index = cmd.index("-e")
@@ -496,6 +504,7 @@ class TestFallbackCommand(unittest.TestCase):
     def test_fallback_with_ssh_keys(self):
         """Test fallback command with SSH keys."""
         args = self.parser.parse_args([str(self.project_path), "--ssh-keys"])
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker") as mock_normalize, patch("clud.agent_background.get_ssh_dir", return_value=Path("/home/user/.ssh")):
 
@@ -503,7 +512,7 @@ class TestFallbackCommand(unittest.TestCase):
                 return "/home/user/.ssh" if ".ssh" in str(x) else "/test/project"
 
             mock_normalize.side_effect = normalize_side_effect
-            cmd = build_fallback_command(args, self.project_path)
+            cmd = build_fallback_command(bg_args, self.project_path)
 
         ssh_mount_found = any("--volume=/home/user/.ssh:/home/dev/.ssh:ro" in arg for arg in cmd)
         self.assertTrue(ssh_mount_found)
@@ -511,10 +520,11 @@ class TestFallbackCommand(unittest.TestCase):
     def test_fallback_with_missing_ssh_keys(self):
         """Test fallback command with SSH keys when SSH dir doesn't exist."""
         args = self.parser.parse_args([str(self.project_path), "--ssh-keys"])
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.get_ssh_dir", return_value=None):
             with self.assertRaises(ValidationError) as cm:
-                build_fallback_command(args, self.project_path)
+                build_fallback_command(bg_args, self.project_path)
             self.assertIn("SSH directory ~/.ssh not found", str(cm.exception))
 
     @patch("platform.system", return_value="Linux")
@@ -534,7 +544,8 @@ class TestFallbackCommand(unittest.TestCase):
             patch.object(os, "getuid", create=True, return_value=1000),
             patch.object(os, "getgid", create=True, return_value=1000),
         ):
-            cmd = build_fallback_command(args, self.project_path)
+            bg_args = convert_to_background_args(args, validate_path_exists=False)
+            cmd = build_fallback_command(bg_args, self.project_path)
 
         self.assertIn("--user", cmd)
         user_index = cmd.index("--user")
@@ -543,9 +554,10 @@ class TestFallbackCommand(unittest.TestCase):
     def test_fallback_with_env_vars(self):
         """Test fallback command with custom environment variables."""
         args = self.parser.parse_args([str(self.project_path), "--env", "VAR1=value1", "--env", "VAR2=value2"])
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
-            cmd = build_fallback_command(args, self.project_path)
+            cmd = build_fallback_command(bg_args, self.project_path)
 
         self.assertIn("VAR1=value1", cmd)
         self.assertIn("VAR2=value2", cmd)
@@ -553,10 +565,11 @@ class TestFallbackCommand(unittest.TestCase):
     def test_fallback_with_invalid_env_var(self):
         """Test fallback command with invalid environment variable."""
         args = self.parser.parse_args([str(self.project_path), "--env", "INVALID_FORMAT"])
+        bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
             with self.assertRaises(ValidationError) as cm:
-                build_fallback_command(args, self.project_path)
+                build_fallback_command(bg_args, self.project_path)
             self.assertIn("Invalid environment variable format", str(cm.exception))
 
 

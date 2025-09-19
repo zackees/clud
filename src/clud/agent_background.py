@@ -35,6 +35,33 @@ class BackgroundAgentArgs:
     sync_interval: int
     watch: bool
     verbose: bool
+    # Core arguments
+    path: str | None = None  # Project directory to mount
+    # Container configuration
+    ssh_keys: bool = False
+    image: str | None = None
+    shell: str = "bash"
+    profile: str = "python"
+    enable_firewall: bool = True
+    no_firewall: bool = False
+    no_sudo: bool = False
+    env: list[str] | None = None
+    read_only_home: bool = False
+    port: int = 8743
+    cmd: str | None = None
+    claude_commands: str | None = None
+    dump_threads_after: int | None = None
+    # Permission modes
+    no_dangerous: bool = False
+    yolo: bool = False
+    # Build control
+    _image_built: bool = False
+    build_dockerfile: str | None = None
+    # Git worktree
+    worktree_name: str = "worktree"
+    # Completion detection
+    detect_completion: bool = False
+    idle_timeout: float = 3.0
 
 
 # Exception classes
@@ -345,7 +372,7 @@ def stop_existing_container(container_name: str = "clud-dev") -> None:
 
 
 # Container management functions
-def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str) -> int:
+def run_ui_container(args: BackgroundAgentArgs, project_path: Path, api_key: str) -> int:
     """Run the code-server UI container."""
     # Find available port
     port = args.port
@@ -355,7 +382,7 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
         print(f"Using port {port}")
 
     # Build image if not already built
-    if (not hasattr(args, "_image_built") or not args._image_built) and not build_docker_image(getattr(args, "build_dockerfile", None)):
+    if not args._image_built and not build_docker_image(args.build_dockerfile):
         return 1
 
     # Stop existing container
@@ -391,14 +418,14 @@ def run_ui_container(args: argparse.Namespace, project_path: Path, api_key: str)
     ]
 
     # Add Claude commands mount if specified
-    claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+    claude_mount = get_claude_commands_mount(args.claude_commands)
     if claude_mount:
         host_path, container_path = claude_mount
         cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
         print(f"Mounting Claude commands: {host_path} -> {container_path}")
 
     # Add worktree mount (always mount for potential worktree operations)
-    worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
+    worktree_mount = get_worktree_mount(project_path, args.worktree_name)
     host_path, container_path = worktree_mount
     cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
     print(f"Mounting Git worktree: {host_path} -> {container_path}")
@@ -447,7 +474,7 @@ Press Ctrl+C to stop the container
         return 1
 
 
-def build_wrapper_command(args: argparse.Namespace, project_path: Path) -> list[str]:
+def build_wrapper_command(args: BackgroundAgentArgs, project_path: Path) -> list[str]:
     """Build command for run-claude-docker wrapper."""
     cmd = ["run-claude-docker"]
 
@@ -478,7 +505,7 @@ def build_wrapper_command(args: argparse.Namespace, project_path: Path) -> list[
     return cmd
 
 
-def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list[str]:
+def build_fallback_command(args: BackgroundAgentArgs, project_path: Path) -> list[str]:
     """Build direct docker run command as fallback."""
     project_name = project_path.name
     docker_path = normalize_path_for_docker(project_path)
@@ -499,7 +526,7 @@ def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list
         cmd.append(f"--volume={home_docker_path}:/host-home:ro")
 
     # Add Claude commands mount if specified
-    claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+    claude_mount = get_claude_commands_mount(args.claude_commands)
     if claude_mount:
         host_path, container_path = claude_mount
         cmd.append(f"--volume={host_path}:{container_path}:ro")
@@ -543,7 +570,7 @@ def build_fallback_command(args: argparse.Namespace, project_path: Path) -> list
     return cmd
 
 
-def run_container(args: argparse.Namespace, api_key: str) -> int:
+def run_container(args: BackgroundAgentArgs, api_key: str) -> int:
     """Main logic to run the container."""
     # Validate project path
     project_path = validate_path(args.path)
@@ -575,7 +602,7 @@ def run_container(args: argparse.Namespace, api_key: str) -> int:
         raise DockerError(f"Failed to run container: {e}") from e
 
 
-def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
+def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     """Launch container with enforced entrypoint and user-specified command."""
     # Validate project path
     project_path = validate_path(args.path)
@@ -583,7 +610,7 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
     # Docker availability already checked in main()
 
     # Build image if not already built
-    if (not hasattr(args, "_image_built") or not args._image_built) and not build_docker_image(getattr(args, "build_dockerfile", None)):
+    if not args._image_built and not build_docker_image(args.build_dockerfile):
         return 1
 
     # Stop existing container
@@ -614,14 +641,14 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
     ]
 
     # Add Claude commands mount if specified
-    claude_mount = get_claude_commands_mount(getattr(args, "claude_commands", None))
+    claude_mount = get_claude_commands_mount(args.claude_commands)
     if claude_mount:
         host_path, container_path = claude_mount
         base_cmd.extend(["-v", f"{host_path}:{container_path}:ro"])
         print(f"Mounting Claude commands: {host_path} -> {container_path}")
 
     # Add worktree mount if it exists
-    worktree_mount = get_worktree_mount(project_path, getattr(args, "worktree_name", "worktree"))
+    worktree_mount = get_worktree_mount(project_path, args.worktree_name)
     if worktree_mount:
         host_path, container_path = worktree_mount
         base_cmd.extend(["-v", f"{host_path}:{container_path}:rw"])
@@ -632,7 +659,7 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
 
     # Add the command - this is the ONLY part that can be customized
     # Default to bash if no command specified, otherwise use the provided command
-    if hasattr(args, "cmd") and args.cmd:
+    if args.cmd:
         # Split the command properly for exec format
         if args.cmd == "/bin/bash":
             # Special case for interactive bash - use --cmd format for entrypoint.sh
@@ -652,7 +679,7 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
 
     # Schedule thread dump if requested - run in independent thread
     dump_thread = None
-    dump_seconds = getattr(args, "dump_threads_after", None)
+    dump_seconds = args.dump_threads_after
     if dump_seconds is not None:
         print(f"Thread dump scheduled in {dump_seconds} seconds...")
 
@@ -691,9 +718,9 @@ def launch_container_shell(args: argparse.Namespace, api_key: str) -> int:
         env["ANTHROPIC_API_KEY"] = api_key
 
         # Check if completion detection is enabled (for automated workflows)
-        if getattr(args, "detect_completion", False):
+        if args.detect_completion:
             # Use agent completion detection
-            idle_timeout = getattr(args, "idle_timeout", 3.0)
+            idle_timeout = args.idle_timeout
             detect_agent_completion(cmd, idle_timeout)
             return 0
         else:
@@ -963,7 +990,7 @@ class BackgroundAgent:
 
 def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgentArgs:
     """Parse command line arguments into typed dataclass."""
-    parser = argparse.ArgumentParser(description="CLUD background sync agent")
+    parser = argparse.ArgumentParser(description="CLUD background sync agent", add_help=False)
 
     # Set default directories based on platform and environment
     default_host_dir = "/host"
@@ -989,6 +1016,7 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     else:
         logger.info("Running in container environment - using container paths")
 
+    parser.add_argument("path", nargs="?", help="Project directory to mount (default: current working directory)")
     parser.add_argument("--host-dir", default=default_host_dir, help=f"Host directory path (default: {default_host_dir})")
     # Note: workspace-dir is fixed at /workspace and should not be configurable
     parser.add_argument(
@@ -1004,13 +1032,74 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
+    # Container configuration arguments
+    parser.add_argument("--ssh-keys", action="store_true", help="Mount ~/.ssh read-only for git push or private repos")
+    parser.add_argument("--image", help="Override container image")
+    parser.add_argument("--shell", default="bash", help="Preferred shell inside container (default: bash)")
+    parser.add_argument("--profile", default="python", help="Toolchain profile (default: python)")
+    parser.add_argument("--enable-firewall", action="store_true", default=True, help="Enable container firewall (default: enabled)")
+    parser.add_argument("--no-firewall", action="store_true", help="Disable container firewall")
+    parser.add_argument("--no-sudo", action="store_true", help="Disable sudo privileges (enabled by default)")
+    parser.add_argument("--env", action="append", help="Forward environment variables (KEY=VALUE, repeatable)")
+    parser.add_argument("--read-only-home", action="store_true", help="Mount home directory read-only as /host-home")
+    parser.add_argument("--port", type=int, default=8743, help="Port for code-server UI (default: 8743)")
+    parser.add_argument("--cmd", help="Command to execute in container instead of interactive shell")
+    parser.add_argument("--claude-commands", help="Path to directory or file containing Claude CLI plugins to mount into container")
+    parser.add_argument("--dump-threads-after", type=int, metavar="SECONDS", help="Dump thread information after specified seconds (for --bg mode)")
+
+    # Permission modes
+    parser.add_argument("--no-dangerous", action="store_true", help="Disable skip permission prompts inside container (dangerous mode is default)")
+    parser.add_argument("--yolo", action="store_true", help="Launch Claude Code with dangerous permissions (bypasses all safety prompts)")
+
+    # Build control
+    parser.add_argument("--build-dockerfile", metavar="PATH", help="Build Docker image using custom dockerfile path")
+
+    # Git worktree
+    parser.add_argument("--worktree-name", default="worktree", help="Name of the worktree subdirectory (default: worktree)")
+
+    # Completion detection
+    parser.add_argument("--detect-completion", action="store_true", help="Monitor terminal for agent completion (3-second idle detection)")
+    parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
+
+    # Help
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
+
     parsed_args = parser.parse_args(args)
+
+    # Handle conflicting firewall options
+    if parsed_args.no_firewall:
+        parsed_args.enable_firewall = False
+
+    # Handle help
+    if parsed_args.help:
+        parser.print_help()
+        sys.exit(0)
 
     return BackgroundAgentArgs(
         host_dir=parsed_args.host_dir,
         sync_interval=parsed_args.sync_interval,
         watch=parsed_args.watch,
         verbose=parsed_args.verbose,
+        path=parsed_args.path,
+        ssh_keys=parsed_args.ssh_keys,
+        image=parsed_args.image,
+        shell=parsed_args.shell,
+        profile=parsed_args.profile,
+        enable_firewall=parsed_args.enable_firewall,
+        no_firewall=parsed_args.no_firewall,
+        no_sudo=parsed_args.no_sudo,
+        env=parsed_args.env,
+        read_only_home=parsed_args.read_only_home,
+        port=parsed_args.port,
+        cmd=parsed_args.cmd,
+        claude_commands=parsed_args.claude_commands,
+        dump_threads_after=parsed_args.dump_threads_after,
+        no_dangerous=parsed_args.no_dangerous,
+        yolo=parsed_args.yolo,
+        build_dockerfile=parsed_args.build_dockerfile,
+        worktree_name=parsed_args.worktree_name,
+        detect_completion=parsed_args.detect_completion,
+        idle_timeout=parsed_args.idle_timeout,
     )
 
 
