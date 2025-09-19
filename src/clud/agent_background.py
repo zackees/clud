@@ -621,10 +621,13 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
     # Always use the standard container entrypoint - NEVER override it
     # This ensures consistent behavior and security
+    # Use -it for interactive shells, -d for non-interactive commands
+    is_interactive = not args.cmd or args.cmd == "/bin/bash"
+
     base_cmd = [
         "docker",
         "run",
-        "-it",
+        "-it" if is_interactive else "",
         "--rm",
         "--name",
         "clud-dev",
@@ -639,6 +642,9 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
         "-w",
         "/workspace",  # Set working directory to /workspace
     ]
+
+    # Remove empty string from non-interactive mode
+    base_cmd = [arg for arg in base_cmd if arg]
 
     # Add Claude commands mount if specified
     claude_mount = get_claude_commands_mount(args.claude_commands)
