@@ -234,8 +234,9 @@ def main(args: list[str] | None = None) -> int:
             if not check_docker_available():
                 raise DockerError("Docker is not available or not running")
 
-            # Override cmd to be /bin/bash for workspace interaction
-            parsed_args.cmd = "/bin/bash"
+            # Use provided cmd or default to /bin/bash for workspace interaction
+            if not parsed_args.cmd:
+                parsed_args.cmd = "/bin/bash"
 
             # Build image if needed
             if (not hasattr(parsed_args, "_image_built") or not parsed_args._image_built) and not build_docker_image(getattr(parsed_args, "build_dockerfile", None)):
