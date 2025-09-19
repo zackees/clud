@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,16 @@ from .agent_completion import detect_agent_completion
 from .running_process import RunningProcess
 
 # Container sync is now handled by standalone package in container
+
+
+@dataclass
+class BackgroundAgentArgs:
+    """Typed arguments for the background agent."""
+
+    host_dir: str
+    sync_interval: int
+    watch: bool
+    verbose: bool
 
 
 # Exception classes
@@ -950,8 +961,8 @@ class BackgroundAgent:
         }
 
 
-def main(args: list[str] | None = None):
-    """Main entry point for background agent."""
+def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgentArgs:
+    """Parse command line arguments into typed dataclass."""
     parser = argparse.ArgumentParser(description="CLUD background sync agent")
 
     # Set default directories based on platform and environment
@@ -995,6 +1006,18 @@ def main(args: list[str] | None = None):
 
     parsed_args = parser.parse_args(args)
 
+    return BackgroundAgentArgs(
+        host_dir=parsed_args.host_dir,
+        sync_interval=parsed_args.sync_interval,
+        watch=parsed_args.watch,
+        verbose=parsed_args.verbose,
+    )
+
+
+def main(args: list[str] | None = None):
+    """Main entry point for background agent."""
+    parsed_args = parse_background_agent_args(args)
+
     if parsed_args.verbose:
         logger.setLevel(logging.DEBUG)
         # Also set container_sync logger to debug
@@ -1007,6 +1030,12 @@ def main(args: list[str] | None = None):
 
     if parsed_args.sync_interval > 3600:
         logger.warning("Large sync interval detected (> 1 hour), consider using a smaller interval")
+
+    # We need to get the default workspace dir for comparison
+    default_workspace_dir = "/workspace"
+    in_container = Path("/.dockerenv").exists() or os.environ.get("CLUD_BACKGROUND_SYNC") == "true" or Path("/host").exists() or Path("/workspace").exists()
+    if platform.system() == "Windows" and not in_container:
+        default_workspace_dir = str(Path.cwd() / "workspace")
 
     # Validate that host and workspace directories are different
     host_path = Path(parsed_args.host_dir).resolve()
