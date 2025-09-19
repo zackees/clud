@@ -18,7 +18,7 @@ class TestCliYoloIntegration(unittest.TestCase):
             result = main(["-m", "test message from CLI", "--dry-run"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(captured_output.getvalue().strip(), "test message from CLI")
+        self.assertEqual(captured_output.getvalue().strip(), "Would execute: claude --dangerously-skip-permissions test message from CLI")
 
     def test_cli_dry_run_without_message(self):
         """Test CLI with --dry-run but no message."""
@@ -28,7 +28,7 @@ class TestCliYoloIntegration(unittest.TestCase):
             result = main(["--dry-run"])
 
         self.assertEqual(result, 0)
-        self.assertEqual(captured_output.getvalue().strip(), "Dry-run mode: No message provided")
+        self.assertEqual(captured_output.getvalue().strip(), "Would execute: claude --dangerously-skip-permissions")
 
     def test_cli_message_without_dry_run_mocked(self):
         """Test CLI with -m but no --dry-run (should try to run Claude, but we mock it)."""
