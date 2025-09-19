@@ -16,6 +16,7 @@ from .agent_background import (
     run_ui_container,
     validate_path,
 )
+from .agent_background_args import should_auto_build
 from .agent_foreground import ConfigError as ForegroundConfigError
 from .agent_foreground import ValidationError as ForegroundValidationError
 from .agent_foreground import get_api_key, handle_login
@@ -172,6 +173,11 @@ def main(args: list[str] | None = None) -> int:
     # Handle conflicting firewall options
     if parsed_args.no_firewall:
         parsed_args.enable_firewall = False
+
+    # Auto-build detection for clud repo directory
+    if should_auto_build(parsed_args):
+        print("Detected clud repository - auto-building Docker image...")
+        parsed_args.build = True
 
     try:
         # Handle help flag - only show main help if no agent-specific flags are given

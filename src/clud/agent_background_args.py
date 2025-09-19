@@ -50,6 +50,57 @@ class BackgroundAgentArgs:
 logger = logging.getLogger(__name__)
 
 
+def is_clud_repo_directory(path: Path | None = None) -> bool:
+    """Check if the current or specified directory is the clud repository."""
+    path = Path.cwd() if path is None else Path(path)
+
+    # Check for key files that indicate this is the clud repo
+    pyproject_path = path / "pyproject.toml"
+    clud_init_path = path / "src" / "clud" / "__init__.py"
+
+    if not (pyproject_path.exists() and clud_init_path.exists()):
+        return False
+
+    # Verify pyproject.toml contains clud project
+    try:
+        with open(pyproject_path, encoding="utf-8") as f:
+            content = f.read()
+            return 'name = "clud"' in content and 'description = "Claude in a Docker Box"' in content
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def should_auto_build(parsed_args: argparse.Namespace) -> bool:
+    """Determine if auto-build should be triggered for clud repo directory."""
+    # Auto-build detection for clud repo directory
+    project_path = Path(parsed_args.path) if parsed_args.path else Path.cwd()
+    is_clud_repo = is_clud_repo_directory(project_path)
+
+    # Auto-build if launching clud in its own repo directory and not in specific modes
+    return (
+        is_clud_repo
+        and not parsed_args.login
+        and not getattr(parsed_args, "task", False)
+        and not getattr(parsed_args, "help", False)
+        and not getattr(parsed_args, "just_build", False)
+        and not getattr(parsed_args, "build", False)
+        and not getattr(parsed_args, "update", False)
+        and not getattr(parsed_args, "dry_run", False)
+        and not getattr(parsed_args, "message", False)
+        and not getattr(parsed_args, "prompt", False)
+        and not any(
+            [
+                getattr(parsed_args, "worktree_create", False),
+                getattr(parsed_args, "worktree_new", False),
+                getattr(parsed_args, "worktree_remove", False),
+                getattr(parsed_args, "worktree_list", False),
+                getattr(parsed_args, "worktree_prune", False),
+                getattr(parsed_args, "worktree_cleanup", False),
+            ]
+        )
+    )
+
+
 def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgentArgs:
     """Parse command line arguments into typed dataclass."""
     parser = argparse.ArgumentParser(description="CLUD background sync agent", add_help=False)
