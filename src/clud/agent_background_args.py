@@ -45,6 +45,8 @@ class BackgroundAgentArgs:
     # Completion detection
     detect_completion: bool = False
     idle_timeout: float = 3.0
+    # Browser opening for VS Code server
+    open: bool = False
 
 
 logger = logging.getLogger(__name__)

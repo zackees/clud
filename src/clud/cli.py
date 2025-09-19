@@ -68,6 +68,7 @@ def convert_to_background_args(parsed_args: argparse.Namespace, validate_path_ex
         worktree_name=parsed_args.worktree_name,
         detect_completion=parsed_args.detect_completion,
         idle_timeout=parsed_args.idle_timeout,
+        open=getattr(parsed_args, "open", False),
         _image_built=getattr(parsed_args, "_image_built", False),
     )
 
@@ -140,6 +141,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
 
     parser.add_argument("--bg", action="store_true", help="Launch interactive bash shell in workspace (enforces entrypoint)")
+
+    parser.add_argument("-o", "--open", action="store_true", help="Open browser pointing to VS Code server (for --bg mode)")
 
     parser.add_argument("--dump-threads-after", type=int, metavar="SECONDS", help="Dump thread information after specified seconds (for --bg mode)")
 

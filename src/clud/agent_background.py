@@ -653,6 +653,42 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
         ]
     )
 
+    # If --open flag is set, expose the code-server port and enable code-server
+    if args.open:
+        # Find available port
+        port = args.port
+        if not is_port_available(port):
+            print(f"Port {port} is not available, finding alternative...")
+            port = find_available_port(port)
+            print(f"Using port {port}")
+
+        # Add port mapping and environment variable to enable code-server
+        base_cmd.extend(
+            [
+                "-p",
+                f"{port}:8080",
+                "-e",
+                "PASSWORD=",  # No authentication for code-server
+            ]
+        )
+
+        # Schedule browser opening after container starts
+        def open_browser_delayed():
+            time.sleep(5)  # Wait for code-server to start (increased delay)
+            url = f"http://localhost:{port}"
+            print(f"\nOpening browser to VS Code server at {url}")
+            try:
+                webbrowser.open(url)
+                print(f"VS Code server is now accessible at {url}")
+                print("Note: If the page doesn't load, wait a few more seconds and refresh")
+            except Exception as e:
+                print(f"Could not open browser automatically: {e}")
+                print(f"Please open {url} in your browser")
+
+        # Start browser opening in background thread
+        browser_thread = threading.Thread(target=open_browser_delayed, daemon=True)
+        browser_thread.start()
+
     # Add Claude commands mount if specified
     claude_mount = get_claude_commands_mount(args.claude_commands)
     if claude_mount:
@@ -675,14 +711,25 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     if args.cmd:
         # ALL commands must use --cmd format to go through entrypoint.sh properly
         if args.cmd == "/bin/bash":
-            # Special case for interactive bash - use --cmd format for entrypoint.sh
-            base_cmd.extend(["--cmd", "/bin/bash --login"])
+            # Special case for interactive bash
+            if args.open:
+                # When --open is used, start code-server in background then run bash
+                cmd_string = "(code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace &) && /bin/bash --login"
+                base_cmd.extend(["--cmd", cmd_string])
+            else:
+                # Normal interactive bash without code-server
+                base_cmd.extend(["--cmd", "/bin/bash --login"])
         else:
             # For other commands, use --cmd format so entrypoint.sh handles them
             base_cmd.extend(["--cmd", args.cmd])
     else:
         # Default interactive shell
-        base_cmd.extend(["/bin/bash", "--login"])
+        if args.open:
+            # When --open is used, start code-server in background then run bash
+            cmd_string = "(code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace &) && /bin/bash --login"
+            base_cmd.extend(["--cmd", cmd_string])
+        else:
+            base_cmd.extend(["/bin/bash", "--login"])
 
     # On Windows with mintty/git-bash, prepend winpty for TTY support when needed
     msystem = os.environ.get("MSYSTEM", "")
