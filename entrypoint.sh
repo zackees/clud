@@ -25,12 +25,12 @@ echo "[ENTRYPOINT] Container-sync init completed"
 
 # Check if a custom command was passed
 if [ "$1" = "--cmd" ] && [ -n "$2" ]; then
-    # Execute the custom command in /workspace as root user
+    # Execute the custom command in /workspace
     echo "[ENTRYPOINT] Executing custom command: $2"
-    exec bash -c "cd /workspace && $2"
+    exec bash -l -c "cd /workspace && $2"
 else
-    # Start code-server as root
+    # Start code-server
     echo "[ENTRYPOINT] Starting code-server..."
-    echo "[ENTRYPOINT] About to exec: bash -c \"cd /workspace && code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace\""
-    exec bash -c "cd /workspace && code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace"
+    echo "[ENTRYPOINT] About to exec: code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace"
+    exec bash -l -c "cd /workspace && code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace"
 fi

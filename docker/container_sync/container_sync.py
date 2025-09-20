@@ -104,33 +104,49 @@ def setup_git_workspace():
 
         # Get the current branch name from the host repo
         branch_cmd = ["git", f"--git-dir={host_git_dir}", "rev-parse", "--abbrev-ref", "HEAD"]
-        branch_result = subprocess.run(branch_cmd, capture_output=True, text=True, check=True, timeout=30)
+        branch_result = subprocess.run(branch_cmd, capture_output=True, text=True, check=True, timeout=30, encoding='utf-8', errors='replace')
         current_branch = branch_result.stdout.strip()
         workspace_branch = f"workspace-{current_branch}"
 
-        # Clean up any existing workspace branch
-        try:
-            subprocess.run([
-                "git", f"--git-dir={host_git_dir}",
-                "branch", "-D", workspace_branch
-            ], capture_output=True, check=False, timeout=30)
-            print(f"[DOCKER] Cleaned up existing workspace branch: {workspace_branch}")
-        except subprocess.CalledProcessError:
-            # Ignore cleanup errors
-            pass
+        # Check if workspace branch exists
+        branch_check_cmd = ["git", f"--git-dir={host_git_dir}", "rev-parse", "--verify", f"refs/heads/{workspace_branch}"]
+        branch_exists = subprocess.run(branch_check_cmd, capture_output=True, check=False, timeout=30).returncode == 0
 
-        # Create worktree pointing to HEAD but force it to track the current branch
-        cmd = [
-            "git",
-            f"--git-dir={host_git_dir}",
-            "worktree", "add",
-            "-b", workspace_branch,
-            str(workspace_path),
-            current_branch
-        ]
+        if branch_exists:
+            # Try to delete the existing branch
+            try:
+                subprocess.run([
+                    "git", f"--git-dir={host_git_dir}",
+                    "branch", "-D", workspace_branch
+                ], capture_output=True, check=True, timeout=30)
+                print(f"[DOCKER] Cleaned up existing workspace branch: {workspace_branch}")
+                branch_exists = False  # Mark as deleted
+            except subprocess.CalledProcessError:
+                print(f"[DOCKER] Could not delete existing branch {workspace_branch}, will reuse it")
+
+        # Create worktree - use -b only if branch doesn't exist
+        if branch_exists:
+            # Branch exists but couldn't be deleted, use it without -b
+            cmd = [
+                "git",
+                f"--git-dir={host_git_dir}",
+                "worktree", "add",
+                str(workspace_path),
+                workspace_branch
+            ]
+        else:
+            # Branch doesn't exist or was deleted, create new one
+            cmd = [
+                "git",
+                f"--git-dir={host_git_dir}",
+                "worktree", "add",
+                "-b", workspace_branch,
+                str(workspace_path),
+                current_branch
+            ]
 
         print(f"[DOCKER] Running command: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300, encoding='utf-8', errors='replace')
         print(f"[DOCKER] Git worktree created successfully for branch: {current_branch}")
         if result.stdout:
             print(f"[DOCKER] stdout: {result.stdout}")
@@ -180,15 +196,23 @@ def init_container():
         except Exception as e:
             print(f"[DOCKER] Warning: Failed to configure Git safe directory: {e}")
 
-    # Configure code-server for root user
-    config_dir = Path("/root/.config/code-server")
+    # Configure code-server for current user
+    import os
+    current_user = os.getenv("USER", "root")
+    home_dir = os.path.expanduser("~")
+    config_dir = Path(f"{home_dir}/.config/code-server")
     config_dir.mkdir(parents=True, exist_ok=True)
 
     config_file = config_dir / "config.yaml"
     config_file.write_text("bind-addr: 0.0.0.0:8080\nauth: none\ncert: false\n")
 
-    # Ensure root owns the workspace
-    subprocess.run(["chown", "-R", "root:root", WORKSPACE_DIR], check=False)
+    # Ensure workspace ownership (only if running as root)
+    if current_user == "root":
+        subprocess.run(["chown", "-R", "root:root", WORKSPACE_DIR], check=False)
+    else:
+        # Non-root users typically don't need to change ownership
+        # The mounted files should already be accessible
+        print(f"[DOCKER] Running as non-root user '{current_user}' - skipping workspace ownership change")
 
     return 0
 
@@ -213,7 +237,7 @@ def cleanup_git_workspace():
                 "worktree", "remove", "--force",
                 str(workspace_path)
             ]
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60, encoding='utf-8', errors='replace')
             print("[DOCKER] Git worktree cleaned up")
 
         return True

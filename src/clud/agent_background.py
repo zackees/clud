@@ -288,7 +288,7 @@ def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool =
     try:
         # Check if image already exists (skip this check if force_rebuild or skip_existing_check is True)
         if not force_rebuild and not skip_existing_check:
-            result = subprocess.run(["docker", "images", "-q", "niteris/clud:latest"], capture_output=True, text=True, check=True, timeout=30)
+            result = subprocess.run(["docker", "images", "-q", "niteris/clud:latest"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
 
             if result.stdout.strip():
                 print("Docker image niteris/clud:latest already exists")
@@ -348,14 +348,14 @@ def stop_existing_container(container_name: str = "clud-dev") -> None:
     """Stop and remove existing container if it exists."""
     try:
         # Check if container exists and is running
-        result = subprocess.run(["docker", "ps", "-q", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30)
+        result = subprocess.run(["docker", "ps", "-q", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
 
         if result.stdout.strip():
             print(f"Stopping existing container {container_name}...")
             subprocess.run(["docker", "stop", container_name], check=True, capture_output=True, timeout=60)
 
         # Check if container exists (stopped)
-        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30)
+        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
 
         if result.stdout.strip():
             print(f"Removing existing container {container_name}...")

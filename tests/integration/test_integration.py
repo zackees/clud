@@ -82,15 +82,16 @@ def test_docker_integration():
 
     try:
         run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "ls -al /host && exit 0"]
-        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
-        output = result.stdout
+        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
+        output = result.stdout or ""
 
         # Verify pyproject.toml is visible (workspace sync worked)
         if "pyproject.toml" in output:
             print("    ✓ Basic execution and workspace sync working")
             test_results.append(("Basic execution", True, None))
         else:
-            raise IntegrationTestError("pyproject.toml not found in workspace")
+            error_msg = f"pyproject.toml not found in workspace. Output: {output[:1000]}, Error: {(result.stderr or '')[:1000]}"
+            raise IntegrationTestError(error_msg)
 
     except Exception as e:
         print(f"    ✗ Basic execution failed: {e}")
@@ -111,9 +112,9 @@ def test_docker_integration():
 
     try:
         run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "cat /host/pyproject.toml && exit 0"]
-        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
 
-        if "clud" in result.stdout:
+        if "clud" in (result.stdout or ""):
             print("    ✓ Workspace sync verification passed")
             test_results.append(("Workspace sync", True, None))
         else:
@@ -134,13 +135,13 @@ def test_docker_integration():
     try:
         # Start container in detached mode
         run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", image_name]
-        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         time.sleep(5)
 
         # Check if running
         check_cmd = ["docker", "ps", "-q", "-f", f"name={container_name}"]
-        check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+        check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         if check_result.stdout.strip():
             # Test graceful stop
@@ -148,14 +149,14 @@ def test_docker_integration():
             subprocess.run(stop_cmd, check=True, capture_output=True, timeout=15)
 
             # Verify stopped
-            check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+            check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if not check_result.stdout.strip():
                 # Test restart
                 restart_cmd = ["docker", "start", container_name]
                 subprocess.run(restart_cmd, check=True, capture_output=True)
                 time.sleep(3)
 
-                check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+                check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 if check_result.stdout.strip():
                     print("    ✓ Container exit and restart working")
                     test_results.append(("Container lifecycle", True, None))
@@ -190,19 +191,19 @@ def test_docker_integration():
 
         try:
             # Start container with plugin directory mounted
-            run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{plugins_dir}:/root/.claude/commands:ro", image_name, "--cmd", "sleep 300"]
+            run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{plugins_dir}:/home/code/.claude/commands:ro", image_name, "--cmd", "sleep 300"]
 
             env = os.environ.copy()
             env["MSYS_NO_PATHCONV"] = "1"
-            subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env)
+            subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env, encoding="utf-8", errors="replace")
 
             time.sleep(3)
 
             # Verify plugins are mounted
-            check_cmd = ["docker", "exec", container_name, "ls", "/root/.claude/commands"]
-            result = subprocess.run(check_cmd, capture_output=True, text=True)
+            check_cmd = ["docker", "exec", container_name, "ls", "/home/code/.claude/commands"]
+            result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-            if "test.md" in result.stdout and "deploy.md" in result.stdout:
+            if "test.md" in (result.stdout or "") and "deploy.md" in (result.stdout or ""):
                 print("    ✓ Plugin directory mounting working")
                 test_results.append(("Plugin directory mount", True, None))
             else:
@@ -227,17 +228,17 @@ def test_docker_integration():
             subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
         try:
-            run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{single_plugin}:/root/.claude/commands/single.md:ro", image_name, "--cmd", "sleep 300"]
+            run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{single_plugin}:/home/code/.claude/commands/single.md:ro", image_name, "--cmd", "sleep 300"]
 
             env = os.environ.copy()
             env["MSYS_NO_PATHCONV"] = "1"
-            subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env)
+            subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env, encoding="utf-8", errors="replace")
 
             time.sleep(3)
 
             # Verify single plugin is mounted
-            check_cmd = ["docker", "exec", container_name, "test", "-f", "/root/.claude/commands/single.md"]
-            result = subprocess.run(check_cmd, capture_output=True)
+            check_cmd = ["docker", "exec", container_name, "test", "-f", "/home/code/.claude/commands/single.md"]
+            result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
             if result.returncode == 0:
                 print("    ✓ Single plugin file mounting working")
@@ -261,7 +262,7 @@ def test_docker_integration():
 
     try:
         run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:8080", "-v", f"{project_root}:/home/coder/project", "-e", "ENVIRONMENT=test", image_name]
-        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         # Wait for server to be ready
         server_url = f"http://localhost:{test_port}"
@@ -294,13 +295,13 @@ def test_docker_integration():
     try:
         # Container should start in background with --bg flag (simulated by -d in run)
         run_cmd = ["docker", "run", "-d", "--name", container_name, "-v", f"{project_root}:/home/coder/project", image_name]
-        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         time.sleep(3)
 
         # Check if container is running in background
         check_cmd = ["docker", "ps", "-q", "-f", f"name={container_name}"]
-        check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+        check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         if check_result.stdout.strip():
             print("    ✓ Background mode working")
@@ -324,11 +325,11 @@ def test_docker_integration():
     try:
         # Run a command that should fail
         run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "exit 42"]
-        result = subprocess.run(run_cmd, capture_output=True, text=True)
+        result = subprocess.run(run_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         # Check exit code
         inspect_cmd = ["docker", "inspect", container_name, "--format", "{{.State.ExitCode}}"]
-        inspect_result = subprocess.run(inspect_cmd, capture_output=True, text=True)
+        inspect_result = subprocess.run(inspect_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         exit_code = inspect_result.stdout.strip()
         if exit_code == "42":
@@ -353,7 +354,7 @@ def test_docker_integration():
     try:
         # Start a long-running container
         run_cmd = ["docker", "run", "-d", "--name", container_name, "ubuntu:25.04", "sleep", "300"]
-        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         time.sleep(2)
 
@@ -363,7 +364,7 @@ def test_docker_integration():
 
         # Verify container stopped
         check_cmd = ["docker", "ps", "-q", "-f", f"name={container_name}"]
-        check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+        check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         if not check_result.stdout.strip():
             print("    ✓ Exit signals (SIGTERM) working")
@@ -404,9 +405,9 @@ def test_docker_integration():
 
             env = os.environ.copy()
             env["MSYS_NO_PATHCONV"] = "1"
-            result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env)
+            result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, env=env, encoding="utf-8", errors="replace")
 
-            if "File 1 content" in result.stdout and "subdir" in result.stdout:
+            if "File 1 content" in (result.stdout or "") and "subdir" in (result.stdout or ""):
                 print("    ✓ Volume mounting variations working")
                 test_results.append(("Volume mounting", True, None))
             else:
@@ -428,9 +429,9 @@ def test_docker_integration():
     try:
         # Test command chaining
         run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "echo 'First' && echo 'Second' && ls /host | head -5 && exit 0"]
-        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-        if "First" in result.stdout and "Second" in result.stdout:
+        if "First" in (result.stdout or "") and "Second" in (result.stdout or ""):
             print("    ✓ Command chaining working")
             test_results.append(("Command execution", True, None))
         else:
@@ -452,10 +453,10 @@ def test_docker_integration():
     try:
         # Test --bg --cmd "echo HI; exit 0" equivalent
         run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "echo HI; exit 0"]
-        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
 
         # Verify "HI" appears in output
-        if "HI" in result.stdout:
+        if "HI" in (result.stdout or ""):
             print("    ✓ Background echo command working")
             test_results.append(("Background echo command", True, None))
         else:
@@ -477,10 +478,10 @@ def test_docker_integration():
     try:
         # Run git status command and check for workspace-main branch
         run_cmd = ["docker", "run", "--name", container_name, "-v", f"{project_root}:/host:rw", image_name, "--cmd", "git status;"]
-        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(run_cmd, check=True, capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
 
         # Verify we're on the workspace-main branch
-        if "On branch workspace-main" in result.stdout:
+        if "On branch workspace-main" in (result.stdout or ""):
             print("    ✓ Git workspace branch (workspace-main) verified")
             test_results.append(("Git workspace branch", True, None))
         else:
@@ -503,7 +504,7 @@ def test_docker_integration():
     try:
         # Start nginx container
         run_cmd = ["docker", "run", "-d", "--name", container_name, "-p", f"{test_port}:80", "nginx:alpine"]
-        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         # Wait for nginx to be ready
         server_url = f"http://localhost:{test_port}"

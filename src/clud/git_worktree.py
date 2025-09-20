@@ -124,7 +124,7 @@ def create_git_worktree_in_container(project_path: Path, branch_name: str, workt
 
     try:
         # Execute the Docker command
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300)
+        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300, encoding="utf-8", errors="replace")
 
         if result.returncode == 0:
             print(f"✓ Git worktree created successfully for branch '{branch_name}'")
@@ -193,7 +193,7 @@ def remove_git_worktree_in_container(project_path: Path, worktree_name: str = "w
 
     try:
         # Execute the Docker command
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300)
+        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300, encoding="utf-8", errors="replace")
 
         if result.returncode == 0:
             print("✓ Git worktree removed successfully")
@@ -257,7 +257,7 @@ def prune_git_worktrees_in_container(project_path: Path, image_name: str = "nite
 
     try:
         # Execute the Docker command
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300)
+        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300, encoding="utf-8", errors="replace")
 
         if result.returncode == 0:
             print("✓ Git worktrees pruned successfully")
@@ -318,7 +318,7 @@ def list_git_worktrees_in_container(project_path: Path, image_name: str = "niter
 
     try:
         # Execute the Docker command
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300)
+        result = subprocess.run(docker_cmd, capture_output=True, text=True, check=False, timeout=300, encoding="utf-8", errors="replace")
 
         if result.returncode == 0:
             return result.stdout

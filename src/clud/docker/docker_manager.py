@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-import docker
 from appdirs import user_data_dir  # type: ignore[import-untyped]
 from disklru import DiskLRUCache
 from docker.client import DockerClient
@@ -25,6 +24,7 @@ from docker.models.containers import Container
 from docker.models.images import Image
 from fasteners import InterProcessLock
 
+import docker
 from clud.print_filter import PrintFilter, PrintFilterDefault
 from clud.spinner import Spinner
 
@@ -275,7 +275,7 @@ class DockerManager:
 
         try:
             # Check if we're already in Linux container mode
-            result = subprocess.run(["docker", "info"], capture_output=True, text=True, check=True)
+            result = subprocess.run(["docker", "info"], capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
 
             if "linux" in result.stdout.lower():
                 print("Already using Linux containers")
@@ -298,7 +298,7 @@ class DockerManager:
             )
 
             # Verify the switch worked
-            verify = subprocess.run(["docker", "info"], capture_output=True, text=True, check=True)
+            verify = subprocess.run(["docker", "info"], capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
             if "linux" in verify.stdout.lower():
                 print(f"Successfully switched to Linux containers using '{linux_context}' context")
                 return True
@@ -823,8 +823,15 @@ class DockerManager:
         Get a container by name.
         """
         try:
-            return self.client.containers.get(container_name)
+            # Force a fresh lookup to avoid stale cached data
+            container = self.client.containers.get(container_name)
+            # Reload to ensure we have the latest state
+            container.reload()
+            return container
         except NotFound:
+            return None
+        except Exception:
+            # Container might be in a bad state or removed
             return None
 
     def is_container_running(self, container_name: str) -> bool:

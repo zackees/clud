@@ -78,7 +78,7 @@ class DockerTestImageManager:
     def _image_exists(self) -> bool:
         """Check if the Docker image exists locally."""
         try:
-            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True, timeout=30)
+            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
             return False
@@ -86,7 +86,7 @@ class DockerTestImageManager:
     def _get_image_id(self) -> str | None:
         """Get the current image ID if it exists."""
         try:
-            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True, timeout=30)
+            result = subprocess.run(["docker", "images", "-q", self.full_image_name], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
             return result.stdout.strip() or None
         except subprocess.CalledProcessError:
             return None
@@ -276,7 +276,9 @@ def cleanup_test_containers(container_prefix: str = "clud-test") -> None:
     """Clean up test containers with the given prefix."""
     try:
         # Get list of containers with the prefix
-        result = subprocess.run(["docker", "ps", "-a", "--filter", f"name={container_prefix}", "--format", "{{.Names}}"], capture_output=True, text=True, check=True, timeout=30)
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name={container_prefix}", "--format", "{{.Names}}"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace"
+        )
 
         container_names = [name.strip() for name in result.stdout.splitlines() if name.strip()]
 

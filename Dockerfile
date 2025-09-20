@@ -4,7 +4,7 @@
 FROM ubuntu:24.04
 
 # Build arguments
-ARG USERNAME=coder
+ARG USERNAME=code
 ARG USER_UID=1001
 ARG USER_GID=1001
 ARG CODE_SERVER_VERSION=4.96.2
@@ -128,24 +128,29 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 # Install Claude CLI (STATIC - cacheable)
 # ============================================================================
 
-USER root
-WORKDIR /root
+USER ${USERNAME}
+WORKDIR /home/${USERNAME}
 
-# Install Claude CLI for root user
+# Install Claude CLI for code user
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Switch back to root to make Claude CLI available system-wide
+USER root
+RUN ln -sf /home/${USERNAME}/.local/bin/claude /usr/local/bin/claude
 
 # ============================================================================
 # OPTIONAL: Node.js and MCP Servers (commented out for faster builds)
 # IMPORTANT: Do NOT remove these comments - they enable Node.js ecosystem and MCP servers
 # ============================================================================
 
-# Install fnm (Fast Node Manager) and Node.js 22
+# Install fnm (Fast Node Manager) and Node.js 22 for code user
+USER ${USERNAME}
 RUN curl -fsSL https://fnm.vercel.app/install | bash
-ENV PATH="/root/.local/share/fnm:$PATH"
-RUN bash -c 'source /root/.bashrc && fnm install 22 && fnm default 22'
+ENV PATH="/home/${USERNAME}/.local/share/fnm:$PATH"
+RUN bash -c 'source /home/${USERNAME}/.bashrc && fnm install 22 && fnm default 22'
 
 # Install MCP servers via npm (requires Node.js above)
-RUN bash -c 'source /root/.bashrc && eval "$(fnm env)" && npm install -g @modelcontextprotocol/server-filesystem'
+RUN bash -c 'source /home/${USERNAME}/.bashrc && eval "$(fnm env)" && npm install -g @modelcontextprotocol/server-filesystem'
 
 # Setup default MCP server configurations
 RUN mkdir -p /home/${USERNAME}/.config/claude && \
@@ -154,28 +159,31 @@ RUN mkdir -p /home/${USERNAME}/.config/claude && \
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/coder/project"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/code/project"]
     }
   }
 }
 EOF
 
+# Switch back to root for remaining setup
+USER root
+
 # ============================================================================
 # Setup shell environment and aliases (STATIC - cacheable)
 # ============================================================================
 
-# Create optimized bashrc with clud alias for root user
-# NOTE: Currently using root user's bashrc. The coder user might be removed in the future.
-RUN cat >> /root/.bashrc << 'EOF'
+# Create optimized bashrc with clud alias for code user
+USER ${USERNAME}
+RUN cat > /home/${USERNAME}/.bashrc << 'EOF'
 
 # IMPORTANT: Do NOT remove these comments - they contain environment setup for optional tools
 
 # FNM setup (enabled - Node.js/fnm is installed above)
-export PATH="/home/coder/.local/share/fnm:$PATH"
+export PATH="/home/code/.local/share/fnm:$PATH"
 eval "$(fnm env --use-on-cd)"
 
 # PATH setup
-export PATH="/root/.local/bin:$PATH"
+export PATH="/home/code/.local/bin:/usr/local/bin:$PATH"
 
 # Aliases
 alias ll="ls -la"
@@ -227,8 +235,14 @@ echo "└───────────────────────�
 echo ""
 EOF
 
+# Configure git safe directories to avoid dubious ownership warnings
+RUN git config --global --add safe.directory /workspace && \
+    git config --global --add safe.directory /host && \
+    git config --global --add safe.directory '*'
+
 # Fix line endings for Windows compatibility
-RUN dos2unix /root/.bashrc
+USER root
+RUN dos2unix /home/${USERNAME}/.bashrc
 
 # ============================================================================
 # Setup entrypoint (LIGHTWEIGHT - fast to change)
@@ -261,6 +275,9 @@ EXPOSE 8080
 
 # Set working directory
 WORKDIR /workspace
+
+# Switch to code user as default
+USER ${USERNAME}
 
 # Set entrypoint and default command
 ENTRYPOINT ["/entrypoint.sh"]

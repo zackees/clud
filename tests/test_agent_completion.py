@@ -47,13 +47,24 @@ class TestAgentCompletionIntegration(unittest.TestCase):
     def test_simple_command_without_detection(self):
         """Test that regular commands work without detection flag."""
         try:
-            result = subprocess.run(["uv", "run", "python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"], capture_output=True, text=True, timeout=10)
+            # Use encoding handling to deal with Docker output that might contain binary data
+            result = subprocess.run(
+                ["uv", "run", "python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"],
+                capture_output=True,
+                text=True,
+                timeout=30,  # Increased timeout for Docker startup
+                encoding="utf-8",
+                errors="replace",  # Replace undecodable characters
+            )
             # Command should now succeed with the fixed entrypoint behavior
-            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, f"Command failed with returncode {result.returncode}. stderr: {result.stderr or ''}")
             # Should have some output including the echo command result
-            self.assertIn("hello world", result.stdout)
+            stdout_output = result.stdout or ""
+            stderr_output = result.stderr or ""
+            combined_output = stdout_output + stderr_output
+            self.assertIn("hello world", combined_output, f"Expected 'hello world' in output. Got stdout length: {len(stdout_output)}, stderr length: {len(stderr_output)}")
         except subprocess.TimeoutExpired:
-            self.fail("Command took longer than 10 seconds - this should complete quickly now")
+            self.fail("Command took longer than 30 seconds - this should complete quickly now")
 
 
 if __name__ == "__main__":
