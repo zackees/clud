@@ -33,9 +33,9 @@ from clud.agent_foreground import (
 )
 from clud.cli import (
     convert_to_background_args,
-    create_parser,
     main,
 )
+from clud.cli_args import parse_cli_args
 
 
 class TestCLIParser(unittest.TestCase):
@@ -43,11 +43,10 @@ class TestCLIParser(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.parser = create_parser()
 
     def test_basic_usage(self):
         """Test basic command line parsing."""
-        args = self.parser.parse_args(["/path/to/project"])
+        args = parse_cli_args(["/path/to/project"])
         self.assertEqual(args.path, "/path/to/project")
         self.assertFalse(args.no_dangerous)
         self.assertFalse(args.ssh_keys)
@@ -56,63 +55,63 @@ class TestCLIParser(unittest.TestCase):
 
     def test_no_dangerous_flag(self):
         """Test --no-dangerous flag."""
-        args = self.parser.parse_args(["/path", "--no-dangerous"])
+        args = parse_cli_args(["/path", "--no-dangerous"])
         self.assertTrue(args.no_dangerous)
 
     def test_ssh_keys_flag(self):
         """Test --ssh-keys flag."""
-        args = self.parser.parse_args(["/path", "--ssh-keys"])
+        args = parse_cli_args(["/path", "--ssh-keys"])
         self.assertTrue(args.ssh_keys)
 
     def test_no_sudo_flag(self):
         """Test --no-sudo flag."""
-        args = self.parser.parse_args(["/path", "--no-sudo"])
+        args = parse_cli_args(["/path", "--no-sudo"])
         self.assertTrue(args.no_sudo)
 
     def test_image_override(self):
         """Test --image option."""
-        args = self.parser.parse_args(["/path", "--image", "custom:latest"])
+        args = parse_cli_args(["/path", "--image", "custom:latest"])
         self.assertEqual(args.image, "custom:latest")
 
     def test_shell_override(self):
         """Test --shell option."""
-        args = self.parser.parse_args(["/path", "--shell", "zsh"])
+        args = parse_cli_args(["/path", "--shell", "zsh"])
         self.assertEqual(args.shell, "zsh")
 
     def test_task_option(self):
         """Test -t/--task option."""
-        args = self.parser.parse_args(["-t", "task.md"])
+        args = parse_cli_args(["-t", "task.md"])
         self.assertEqual(args.task, "task.md")
 
-        args = self.parser.parse_args(["--task", "another_task.md"])
+        args = parse_cli_args(["--task", "another_task.md"])
         self.assertEqual(args.task, "another_task.md")
 
     def test_profile_override(self):
         """Test --profile option."""
-        args = self.parser.parse_args(["/path", "--profile", "nodejs"])
+        args = parse_cli_args(["/path", "--profile", "nodejs"])
         self.assertEqual(args.profile, "nodejs")
 
     def test_env_variables(self):
         """Test --env option."""
-        args = self.parser.parse_args(["/path", "--env", "VAR1=value1", "--env", "VAR2=value2"])
+        args = parse_cli_args(["/path", "--env", "VAR1=value1", "--env", "VAR2=value2"])
         self.assertEqual(args.env, ["VAR1=value1", "VAR2=value2"])
 
     def test_api_key_from(self):
         """Test --api-key-from option."""
-        args = self.parser.parse_args(["/path", "--api-key-from", "my-key"])
+        args = parse_cli_args(["/path", "--api-key-from", "my-key"])
         self.assertEqual(args.api_key_from, "my-key")
 
     def test_no_firewall(self):
         """Test --no-firewall option."""
-        args = self.parser.parse_args(["/path", "--no-firewall"])
+        args = parse_cli_args(["/path", "--no-firewall"])
         self.assertTrue(args.no_firewall)
 
     def test_prompt_flag(self):
         """Test -p/--prompt option."""
-        args = self.parser.parse_args(["-p", "say hello and exit"])
+        args = parse_cli_args(["-p", "say hello and exit"])
         self.assertEqual(args.prompt, "say hello and exit")
 
-        args = self.parser.parse_args(["--prompt", "say hello and exit"])
+        args = parse_cli_args(["--prompt", "say hello and exit"])
         self.assertEqual(args.prompt, "say hello and exit")
 
 
@@ -363,13 +362,12 @@ class TestAPIKeyRetrieval(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.parser = create_parser()
         self.valid_key = "sk-ant-test123456789012345"
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-env123456789012345"})
     def test_get_api_key_from_env(self):
         """Test getting API key from environment variable."""
-        args = self.parser.parse_args(["/test/path"])
+        args = parse_cli_args(["/test/path"])
 
         with patch("clud.agent_foreground.load_api_key_from_config", return_value=None):
             api_key = get_api_key(args)
@@ -378,7 +376,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_get_api_key_from_config(self):
         """Test getting API key from config file."""
-        args = self.parser.parse_args(["/test/path"])
+        args = parse_cli_args(["/test/path"])
 
         with patch("clud.agent_foreground.load_api_key_from_config", return_value=self.valid_key):
             api_key = get_api_key(args)
@@ -387,7 +385,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_get_api_key_from_keyring(self):
         """Test getting API key from keyring via --api-key-from."""
-        args = self.parser.parse_args(["/test/path", "--api-key-from", "test-entry"])
+        args = parse_cli_args(["/test/path", "--api-key-from", "test-entry"])
 
         with patch("clud.agent_foreground.keyring") as mock_keyring, patch("clud.agent_foreground.load_api_key_from_config", return_value=None):
             mock_keyring.get_password.return_value = self.valid_key
@@ -397,7 +395,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_get_api_key_prompt(self):
         """Test getting API key from interactive prompt."""
-        args = self.parser.parse_args(["/test/path"])
+        args = parse_cli_args(["/test/path"])
 
         with patch("clud.agent_foreground.load_api_key_from_config", return_value=None), patch("clud.agent_foreground.prompt_for_api_key", return_value=self.valid_key):
             api_key = get_api_key(args)
@@ -405,7 +403,7 @@ class TestAPIKeyRetrieval(unittest.TestCase):
 
     def test_get_api_key_invalid(self):
         """Test validation error with invalid API key."""
-        args = self.parser.parse_args(["/test/path"])
+        args = parse_cli_args(["/test/path"])
 
         with patch("clud.agent_foreground.load_api_key_from_config", return_value=None), patch("clud.agent_foreground.prompt_for_api_key", return_value="invalid-key"):
             with self.assertRaises(ForegroundValidationError) as cm:
@@ -418,12 +416,11 @@ class TestWrapperCommand(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.parser = create_parser()
         self.project_path = Path("/test/project")
 
     def test_basic_wrapper_command(self):
         """Test basic wrapper command."""
-        args = self.parser.parse_args([str(self.project_path)])
+        args = parse_cli_args([str(self.project_path)])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
         cmd = build_wrapper_command(bg_args, self.project_path)
 
@@ -432,7 +429,7 @@ class TestWrapperCommand(unittest.TestCase):
 
     def test_wrapper_with_no_dangerous(self):
         """Test wrapper command with --no-dangerous flag."""
-        args = self.parser.parse_args([str(self.project_path), "--no-dangerous"])
+        args = parse_cli_args([str(self.project_path), "--no-dangerous"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
         cmd = build_wrapper_command(bg_args, self.project_path)
 
@@ -440,7 +437,7 @@ class TestWrapperCommand(unittest.TestCase):
 
     def test_wrapper_with_custom_shell(self):
         """Test wrapper command with custom shell."""
-        args = self.parser.parse_args([str(self.project_path), "--shell", "zsh"])
+        args = parse_cli_args([str(self.project_path), "--shell", "zsh"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
         cmd = build_wrapper_command(bg_args, self.project_path)
 
@@ -449,7 +446,7 @@ class TestWrapperCommand(unittest.TestCase):
 
     def test_wrapper_with_no_firewall(self):
         """Test wrapper command with firewall disabled."""
-        args = self.parser.parse_args([str(self.project_path), "--no-firewall"])
+        args = parse_cli_args([str(self.project_path), "--no-firewall"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
         cmd = build_wrapper_command(bg_args, self.project_path)
 
@@ -457,7 +454,7 @@ class TestWrapperCommand(unittest.TestCase):
 
     def test_wrapper_with_no_sudo(self):
         """Test wrapper command without sudo."""
-        args = self.parser.parse_args([str(self.project_path), "--no-sudo"])
+        args = parse_cli_args([str(self.project_path), "--no-sudo"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
         cmd = build_wrapper_command(bg_args, self.project_path)
 
@@ -469,13 +466,12 @@ class TestFallbackCommand(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.parser = create_parser()
         self.project_path = Path("/test/project")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_basic_fallback_command(self):
         """Test basic fallback command."""
-        args = self.parser.parse_args([str(self.project_path)])
+        args = parse_cli_args([str(self.project_path)])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
@@ -491,7 +487,7 @@ class TestFallbackCommand(unittest.TestCase):
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
     def test_fallback_with_api_key(self):
         """Test fallback command with API key."""
-        args = self.parser.parse_args([str(self.project_path)])
+        args = parse_cli_args([str(self.project_path)])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
@@ -503,7 +499,7 @@ class TestFallbackCommand(unittest.TestCase):
 
     def test_fallback_with_ssh_keys(self):
         """Test fallback command with SSH keys."""
-        args = self.parser.parse_args([str(self.project_path), "--ssh-keys"])
+        args = parse_cli_args([str(self.project_path), "--ssh-keys"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker") as mock_normalize, patch("clud.agent_background.get_ssh_dir", return_value=Path("/home/user/.ssh")):
@@ -519,7 +515,7 @@ class TestFallbackCommand(unittest.TestCase):
 
     def test_fallback_with_missing_ssh_keys(self):
         """Test fallback command with SSH keys when SSH dir doesn't exist."""
-        args = self.parser.parse_args([str(self.project_path), "--ssh-keys"])
+        args = parse_cli_args([str(self.project_path), "--ssh-keys"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.get_ssh_dir", return_value=None):
@@ -530,7 +526,7 @@ class TestFallbackCommand(unittest.TestCase):
     @patch("platform.system", return_value="Linux")
     def test_fallback_with_no_sudo(self, mock_system: MagicMock) -> None:
         """Test fallback command without sudo on Linux."""
-        args = self.parser.parse_args([str(self.project_path), "--no-sudo"])
+        args = parse_cli_args([str(self.project_path), "--no-sudo"])
 
         # Skip this test on Windows since getuid/getgid don't exist
         import platform
@@ -553,7 +549,7 @@ class TestFallbackCommand(unittest.TestCase):
 
     def test_fallback_with_env_vars(self):
         """Test fallback command with custom environment variables."""
-        args = self.parser.parse_args([str(self.project_path), "--env", "VAR1=value1", "--env", "VAR2=value2"])
+        args = parse_cli_args([str(self.project_path), "--env", "VAR1=value1", "--env", "VAR2=value2"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
@@ -564,7 +560,7 @@ class TestFallbackCommand(unittest.TestCase):
 
     def test_fallback_with_invalid_env_var(self):
         """Test fallback command with invalid environment variable."""
-        args = self.parser.parse_args([str(self.project_path), "--env", "INVALID_FORMAT"])
+        args = parse_cli_args([str(self.project_path), "--env", "INVALID_FORMAT"])
         bg_args = convert_to_background_args(args, validate_path_exists=False)
 
         with patch("clud.agent_background.normalize_path_for_docker", return_value="/test/project"):
