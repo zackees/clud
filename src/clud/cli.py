@@ -1,6 +1,7 @@
 """Minimal CLI entry point for clud - routes to appropriate agent modules."""
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,6 +33,71 @@ from .task import handle_task_command
 
 # Import keyring for tests to mock
 keyring = get_credential_store()
+
+
+def handle_lint_command() -> int:
+    """Handle the --lint command by running clud with a message to run codeup linting."""
+    lint_prompt = "run codeup --lint --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
+
+    try:
+        # Run clud with the lint message and idle timeout
+        result = subprocess.run(
+            ["clud", "-m", lint_prompt, "--idle-timeout", "3"],
+            check=False,  # Don't raise on non-zero exit
+            capture_output=False,  # Let output go to terminal
+        )
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: clud command not found. Make sure it's installed and in your PATH.", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error running clud: {e}", file=sys.stderr)
+        return 1
+
+
+def handle_test_command() -> int:
+    """Handle the --test command by running clud with a message to run codeup testing."""
+    test_prompt = "run codeup --test --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
+
+    try:
+        # Run clud with the test message and idle timeout
+        result = subprocess.run(
+            ["clud", "-m", test_prompt, "--idle-timeout", "3"],
+            check=False,  # Don't raise on non-zero exit
+            capture_output=False,  # Let output go to terminal
+        )
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: clud command not found. Make sure it's installed and in your PATH.", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error running clud: {e}", file=sys.stderr)
+        return 1
+
+
+def handle_fix_command() -> int:
+    """Handle the --fix command by running clud with a message to run both linting and testing."""
+    fix_prompt = (
+        "run `codeup --lint --dry-run` upto 5 times, fixing on each time or until it passes. "
+        "and if it succeed then run `codeup --test --dry-run` upto 5 times, fixing each time until it succeeds. "
+        "Finally run `codeup --lint --dry-run` and fix until it passes (upto 5 times) then halt. "
+        "If you run into a locked file then try two times, same with misc system error. Else halt."
+    )
+
+    try:
+        # Run clud with the fix message and idle timeout
+        result = subprocess.run(
+            ["clud", "-m", fix_prompt, "--idle-timeout", "3"],
+            check=False,  # Don't raise on non-zero exit
+            capture_output=False,  # Let output go to terminal
+        )
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: clud command not found. Make sure it's installed and in your PATH.", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error running clud: {e}", file=sys.stderr)
+        return 1
 
 
 def convert_to_background_args(parsed_args: argparse.Namespace, validate_path_exists: bool = True) -> BackgroundAgentArgs:
@@ -148,6 +214,12 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("-p", "--prompt", help="Run Claude with this prompt and exit when complete")
 
+    parser.add_argument("--lint", action="store_true", help="Run global linting with codeup and fix all errors")
+
+    parser.add_argument("--test", action="store_true", help="Run tests with codeup and fix all failures")
+
+    parser.add_argument("--fix", action="store_true", help="Run both linting and tests with codeup and fix all errors")
+
     # Git worktree management
     parser.add_argument("--worktree-create", metavar="BRANCH", help="Create a Git worktree for the specified branch inside Docker container")
 
@@ -198,6 +270,18 @@ def main(args: list[str] | None = None) -> int:
         # Handle task command (doesn't need Docker)
         if parsed_args.task:
             return handle_task_command(parsed_args.task)
+
+        # Handle lint command (doesn't need Docker)
+        if parsed_args.lint:
+            return handle_lint_command()
+
+        # Handle test command (doesn't need Docker)
+        if parsed_args.test:
+            return handle_test_command()
+
+        # Handle fix command (doesn't need Docker)
+        if parsed_args.fix:
+            return handle_fix_command()
 
         # Handle Git worktree commands (need Docker)
         worktree_commands = [parsed_args.worktree_create, parsed_args.worktree_new, parsed_args.worktree_remove, parsed_args.worktree_list, parsed_args.worktree_prune, parsed_args.worktree_cleanup]

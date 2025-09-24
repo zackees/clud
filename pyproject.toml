@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.24.0",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
     "running-process>=1.0.1",
+    "codeup>=1.0.8",
 ]
 # Change this with the version number bump.
 version = "1.0.6"
