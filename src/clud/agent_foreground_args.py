@@ -11,6 +11,7 @@ class Args:
 
     prompt: str | None
     message: str | None
+    cmd: str | None
     continue_flag: bool
     dry_run: bool
     claude_args: list[str]
@@ -40,6 +41,12 @@ def parse_args(args: list[str] | None = None) -> Args:
     )
 
     parser.add_argument(
+        "--cmd",
+        type=str,
+        help="Command to execute directly without interactive mode",
+    )
+
+    parser.add_argument(
         "-c",
         "--continue",
         action="store_true",
@@ -60,6 +67,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     return Args(
         prompt=known_args.prompt,
         message=known_args.message,
+        cmd=known_args.cmd,
         continue_flag=known_args.continue_flag,
         dry_run=known_args.dry_run,
         claude_args=unknown_args,

@@ -255,6 +255,11 @@ def run(args: Args) -> int:
     WARNING: This mode removes all safety guardrails. Use with caution.
     """
     try:
+        # If --cmd is provided, execute the command directly instead of launching Claude
+        if args.cmd:
+            result = subprocess.run(args.cmd, shell=True)
+            return result.returncode
+
         # Handle dry-run mode
         if args.dry_run:
             cmd_parts = ["claude", "--dangerously-skip-permissions"]
