@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>FastLED Web Interface</title>
+</head>
+<body>
+    <h1>FastLED Visualization</h1>
+    <canvas id="led-canvas" width="800" height="600"></canvas>
+    <script>
+        console.log("FastLED web interface loaded");
+        
+        // Simulate FastLED compilation errors
+        setTimeout(() => {
+            console.error("FastLED compilation error: undefined reference to FastLED::show()");
+            console.error("FastLED compilation error: undefined reference to FastLED::setBrightness()");
+            console.error("FastLED compilation error: CRGB not declared in this scope");
+            console.error("FastLED compilation error: no matching function for call to FastLED.addLeds()");
+            console.error("Runtime error: FastLED is not defined - compilation/loading failed");
+        }, 1000);
+        
+        // Try to use FastLED (will fail)
+        try {
+            if (typeof FastLED !== 'undefined') {
+                FastLED.show();
+            } else {
+                throw new Error('FastLED library not loaded - check Docker compilation');
+            }
+        } catch (error) {
+            console.error('FastLED Runtime Error:', error.message);
+        }
+    </script>
+</body>
+</html>
