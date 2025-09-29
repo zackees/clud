@@ -11,7 +11,7 @@ Claude, but on god mode, by default.
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`. Use `-bg` to launch the sandboxed background agent with full Docker server capabilities.
 
-## Why is clud batter?
+## Why is clud better?
 
 Claude Code's safety prompts, while well-intentioned, slow down experienced developers. `clud` removes these friction points by running Claude Code with `--dangerously-skip-permissions` in both foreground and background modes, delivering the uninterrupted coding experience Claude Code was meant to provide.
 
