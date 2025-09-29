@@ -248,6 +248,92 @@ def get_api_key(args: Any) -> str:
     return api_key
 
 
+def _find_claude_path() -> str | None:
+    """Find the path to the Claude executable."""
+    # Try to find claude in PATH, prioritizing Windows executables
+    if platform.system() == "Windows":
+        # On Windows, prefer .cmd and .exe extensions
+        claude_path = shutil.which("claude.cmd") or shutil.which("claude.exe")
+        if claude_path:
+            return claude_path
+
+    # Fall back to generic "claude" (for Unix or git bash on Windows)
+    claude_path = shutil.which("claude")
+    if claude_path:
+        return claude_path
+
+    # Check common Windows npm global locations
+    if platform.system() == "Windows":
+        possible_paths = [
+            os.path.expanduser("~/AppData/Roaming/npm/claude.cmd"),
+            os.path.expanduser("~/AppData/Roaming/npm/claude.exe"),
+            "C:/Users/" + os.environ.get("USERNAME", "") + "/AppData/Roaming/npm/claude.cmd",
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+
+    return None
+
+
+def _build_claude_command(args: Args, claude_path: str) -> list[str]:
+    """Build the Claude command with all arguments."""
+    cmd = [claude_path, "--dangerously-skip-permissions"]
+
+    if args.continue_flag:
+        cmd.append("--continue")
+
+    if args.prompt:
+        cmd.extend(["-p", args.prompt])
+
+    if args.message:
+        cmd.append(args.message)
+
+    cmd.extend(args.claude_args)
+
+    return cmd
+
+
+def _print_debug_info(claude_path: str | None, cmd: list[str]) -> None:
+    """Print debug information about Claude execution."""
+    if claude_path:
+        print(f"DEBUG: Found claude at: {claude_path}", file=sys.stderr)
+        print(f"DEBUG: Platform: {platform.system()}", file=sys.stderr)
+        print(f"DEBUG: File exists: {os.path.exists(claude_path)}", file=sys.stderr)
+
+    if cmd:
+        print(f"DEBUG: Executing command: {cmd}", file=sys.stderr)
+
+
+def _print_error_diagnostics(claude_path: str | None, cmd: list[str]) -> None:
+    """Print comprehensive error diagnostics."""
+    print(f"DEBUG: Current working directory: {os.getcwd()}", file=sys.stderr)
+    print(f"DEBUG: Command attempted: {subprocess.list2cmdline(cmd) if cmd else 'command not yet built'}", file=sys.stderr)
+    print(f"DEBUG: Claude path used: {claude_path if claude_path else 'path not yet determined'}", file=sys.stderr)
+    print("DEBUG: Claude search results:", file=sys.stderr)
+
+    if platform.system() == "Windows":
+        print(f"  - shutil.which('claude.cmd'): {shutil.which('claude.cmd')}", file=sys.stderr)
+        print(f"  - shutil.which('claude.exe'): {shutil.which('claude.exe')}", file=sys.stderr)
+
+    print(f"  - shutil.which('claude'): {shutil.which('claude')}", file=sys.stderr)
+    print(f"  - ~/AppData/Roaming/npm/claude.cmd exists: {os.path.exists(os.path.expanduser('~/AppData/Roaming/npm/claude.cmd'))}", file=sys.stderr)
+    print(f"  - ~/AppData/Roaming/npm/claude.exe exists: {os.path.exists(os.path.expanduser('~/AppData/Roaming/npm/claude.exe'))}", file=sys.stderr)
+
+
+def _execute_command(cmd: list[str], use_shell: bool = False) -> int:
+    """Execute a command and return its exit code."""
+    if use_shell:
+        # Convert command list to shell string and execute through shell
+        cmd_str = subprocess.list2cmdline(cmd)
+        print(f"DEBUG: Retrying with shell=True: {cmd_str}", file=sys.stderr)
+        result = subprocess.run(cmd_str, shell=True)
+    else:
+        result = subprocess.run(cmd)
+
+    return result.returncode
+
+
 def run(args: Args) -> int:
     """
     Launch Claude Code with dangerous mode (--dangerously-skip-permissions).
@@ -278,62 +364,21 @@ def run(args: Args) -> int:
             print("Would execute:", " ".join(cmd_parts))
             return 0
 
-        # Try to find claude in PATH, prioritizing Windows executables
-        if platform.system() == "Windows":
-            # On Windows, prefer .cmd and .exe extensions
-            claude_path = shutil.which("claude.cmd") or shutil.which("claude.exe")
-
-        if not claude_path:
-            # Fall back to generic "claude" (for Unix or git bash on Windows)
-            claude_path = shutil.which("claude")
-
-        if not claude_path:
-            # Check common Windows npm global locations
-            possible_paths = [
-                os.path.expanduser("~/AppData/Roaming/npm/claude.cmd"),
-                os.path.expanduser("~/AppData/Roaming/npm/claude.exe"),
-                "C:/Users/" + os.environ.get("USERNAME", "") + "/AppData/Roaming/npm/claude.cmd",
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    claude_path = path
-                    break
-
+        # Find Claude executable
+        claude_path = _find_claude_path()
         if not claude_path:
             print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
             print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
             return 1
 
-        # Debug logging
-        print(f"DEBUG: Found claude at: {claude_path}", file=sys.stderr)
-        print(f"DEBUG: Platform: {platform.system()}", file=sys.stderr)
-        print(f"DEBUG: File exists: {os.path.exists(claude_path)}", file=sys.stderr)
+        # Build command
+        cmd = _build_claude_command(args, claude_path)
 
-        # Build the command with all arguments passed through
-        cmd = [claude_path, "--dangerously-skip-permissions"]
-
-        # If continue flag is provided, add --continue
-        if args.continue_flag:
-            cmd.append("--continue")
-
-        # If prompt is provided, add it with -p flag
-        if args.prompt:
-            cmd.extend(["-p", args.prompt])
-
-        # If message is provided, add it directly (no flag)
-        if args.message:
-            cmd.append(args.message)
-
-        # Add any additional arguments
-        cmd.extend(args.claude_args)
-
-        # Debug logging
-        print(f"DEBUG: Executing command: {cmd}", file=sys.stderr)
+        # Print debug info
+        _print_debug_info(claude_path, cmd)
 
         # Execute Claude with the dangerous permissions flag
-        result = subprocess.run(cmd)
-
-        return result.returncode
+        return _execute_command(cmd, use_shell=False)
 
     except FileNotFoundError as e:
         print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
@@ -341,22 +386,44 @@ def run(args: Args) -> int:
         print(f"DEBUG: FileNotFoundError details: {e}", file=sys.stderr)
         traceback.print_exc()
         return 1
+
     except KeyboardInterrupt:
         print("\nInterrupted by user", file=sys.stderr)
         return 130
+
     except OSError as e:
         print(f"Error launching Claude: {e}", file=sys.stderr)
         print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
-        print(f"DEBUG: Command attempted: {cmd if cmd else 'command not yet built'}", file=sys.stderr)
-        print(f"DEBUG: Claude path: {claude_path if claude_path else 'path not yet determined'}", file=sys.stderr)
-        print("\nFull stack trace:", file=sys.stderr)
+        _print_error_diagnostics(claude_path, cmd)
+
+        # Try backup method with shell=True
+        if cmd and claude_path:
+            try:
+                print("\nAttempting backup method (shell=True)...", file=sys.stderr)
+                return _execute_command(cmd, use_shell=True)
+            except Exception as shell_error:
+                print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
+                traceback.print_exc()
+
+        print("\nFull stack trace from original error:", file=sys.stderr)
         traceback.print_exc()
         return 1
+
     except Exception as e:
         print(f"Error launching Claude: {e}", file=sys.stderr)
         print(f"DEBUG: Exception type: {type(e).__name__}", file=sys.stderr)
-        print(f"DEBUG: Command attempted: {cmd if cmd else 'command not yet built'}", file=sys.stderr)
-        print("\nFull stack trace:", file=sys.stderr)
+        _print_error_diagnostics(claude_path, cmd)
+
+        # Try backup method with shell=True
+        if cmd and claude_path:
+            try:
+                print("\nAttempting backup method (shell=True)...", file=sys.stderr)
+                return _execute_command(cmd, use_shell=True)
+            except Exception as shell_error:
+                print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
+                traceback.print_exc()
+
+        print("\nFull stack trace from original error:", file=sys.stderr)
         traceback.print_exc()
         return 1
 
