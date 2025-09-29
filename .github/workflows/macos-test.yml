@@ -1,0 +1,60 @@
+name: macOS Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  macos-test:
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+
+      - name: Verify Claude CLI installation
+        run: |
+          which claude
+          claude --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install clud package
+        run: |
+          uv pip install --system -e ".[dev]"
+
+      - name: Test clud dry-run (should succeed without API key)
+        run: |
+          clud --dry-run -p "test prompt"
+
+      - name: Verify clud execution produces correct output
+        run: |
+          output=$(clud --dry-run -p "hello world" 2>&1)
+          echo "Output: $output"
+          if ! echo "$output" | grep -q "Would execute:.*claude.*--dangerously-skip-permissions.*-p.*hello world"; then
+            echo "Error: Dry-run output does not match expected format"
+            exit 1
+          fi
+          echo "✓ macOS test passed - clud correctly detects and would execute Claude CLI"
