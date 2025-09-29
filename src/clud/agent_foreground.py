@@ -273,8 +273,16 @@ def run(args: Args) -> int:
             print("Would execute:", " ".join(cmd_parts))
             return 0
 
-        # Try to find claude in PATH, including common Windows locations
-        claude_path = shutil.which("claude")
+        # Try to find claude in PATH, prioritizing Windows executables
+        claude_path = None
+        if platform.system() == "Windows":
+            # On Windows, prefer .cmd and .exe extensions
+            claude_path = shutil.which("claude.cmd") or shutil.which("claude.exe")
+
+        if not claude_path:
+            # Fall back to generic "claude" (for Unix or git bash on Windows)
+            claude_path = shutil.which("claude")
+
         if not claude_path:
             # Check common Windows npm global locations
             possible_paths = [

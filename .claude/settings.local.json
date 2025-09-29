@@ -13,7 +13,9 @@
       "Bash(echo $?)",
       "Bash(chmod:*)",
       "Bash(./bash help)",
-      "Bash(./bash test --help)"
+      "Bash(./bash test --help)",
+      "Bash(where claude)",
+      "Read(//c/Users/niteris/AppData/Roaming/npm/**)"
     ],
     "deny": [],
     "ask": []

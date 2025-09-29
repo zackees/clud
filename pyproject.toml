@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "clud"
 readme = "README.md"
 description = "Claude in a Docker Box"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 keywords = ["claude", "docker", "cli"]
 license = { text = "BSD 3-Clause License" }
 classifiers = ["Programming Language :: Python :: 3"]
@@ -22,7 +22,7 @@ dependencies = [
     "codeup>=1.0.8",
 ]
 # Change this with the version number bump.
-version = "1.0.7"
+version = "1.0.9"
 
 [project.optional-dependencies]
 dev = [
