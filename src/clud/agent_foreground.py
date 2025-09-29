@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -254,6 +255,10 @@ def run(args: Args) -> int:
 
     WARNING: This mode removes all safety guardrails. Use with caution.
     """
+    # Initialize variables for exception handler access
+    claude_path: str | None = None
+    cmd: list[str] = []
+
     try:
         # If --cmd is provided, execute the command directly instead of launching Claude
         if args.cmd:
@@ -274,7 +279,6 @@ def run(args: Args) -> int:
             return 0
 
         # Try to find claude in PATH, prioritizing Windows executables
-        claude_path = None
         if platform.system() == "Windows":
             # On Windows, prefer .cmd and .exe extensions
             claude_path = shutil.which("claude.cmd") or shutil.which("claude.exe")
@@ -300,6 +304,11 @@ def run(args: Args) -> int:
             print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
             return 1
 
+        # Debug logging
+        print(f"DEBUG: Found claude at: {claude_path}", file=sys.stderr)
+        print(f"DEBUG: Platform: {platform.system()}", file=sys.stderr)
+        print(f"DEBUG: File exists: {os.path.exists(claude_path)}", file=sys.stderr)
+
         # Build the command with all arguments passed through
         cmd = [claude_path, "--dangerously-skip-permissions"]
 
@@ -318,20 +327,37 @@ def run(args: Args) -> int:
         # Add any additional arguments
         cmd.extend(args.claude_args)
 
+        # Debug logging
+        print(f"DEBUG: Executing command: {cmd}", file=sys.stderr)
+
         # Execute Claude with the dangerous permissions flag
         result = subprocess.run(cmd)
 
         return result.returncode
 
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
         print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
+        print(f"DEBUG: FileNotFoundError details: {e}", file=sys.stderr)
+        traceback.print_exc()
         return 1
     except KeyboardInterrupt:
         print("\nInterrupted by user", file=sys.stderr)
         return 130
+    except OSError as e:
+        print(f"Error launching Claude: {e}", file=sys.stderr)
+        print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
+        print(f"DEBUG: Command attempted: {cmd if cmd else 'command not yet built'}", file=sys.stderr)
+        print(f"DEBUG: Claude path: {claude_path if claude_path else 'path not yet determined'}", file=sys.stderr)
+        print("\nFull stack trace:", file=sys.stderr)
+        traceback.print_exc()
+        return 1
     except Exception as e:
         print(f"Error launching Claude: {e}", file=sys.stderr)
+        print(f"DEBUG: Exception type: {type(e).__name__}", file=sys.stderr)
+        print(f"DEBUG: Command attempted: {cmd if cmd else 'command not yet built'}", file=sys.stderr)
+        print("\nFull stack trace:", file=sys.stderr)
+        traceback.print_exc()
         return 1
 
 
