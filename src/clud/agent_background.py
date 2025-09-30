@@ -1085,6 +1085,23 @@ def main(args: list[str] | None = None):
         # Also set container_sync logger to debug
         logging.getLogger("clud.container_sync").setLevel(logging.DEBUG)
 
+    # Check if this is a container shell request (--cmd or interactive shell)
+    # These should use launch_container_shell instead of the sync agent
+    if parsed_args.cmd is not None or parsed_args.open:
+        # Get API key for container
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.error("ANTHROPIC_API_KEY environment variable not set")
+            sys.exit(1)
+
+        # Check Docker availability
+        if not check_docker_available():
+            logger.error("Docker is not available or not running")
+            sys.exit(1)
+
+        # Launch container shell with the command
+        return launch_container_shell(parsed_args, api_key)
+
     # Validate sync interval
     if parsed_args.sync_interval < 10:
         logger.error("Sync interval must be at least 10 seconds")
@@ -1093,11 +1110,9 @@ def main(args: list[str] | None = None):
     if parsed_args.sync_interval > 3600:
         logger.warning("Large sync interval detected (> 1 hour), consider using a smaller interval")
 
-    # We need to get the default workspace dir for comparison
+    # BackgroundAgent sync is designed to run INSIDE the container
+    # The workspace directory is always /workspace inside the container
     default_workspace_dir = "/workspace"
-    in_container = Path("/.dockerenv").exists() or os.environ.get("CLUD_BACKGROUND_SYNC") == "true" or Path("/host").exists() or Path("/workspace").exists()
-    if platform.system() == "Windows" and not in_container:
-        default_workspace_dir = str(Path.cwd() / "workspace")
 
     # Validate that host and workspace directories are different
     host_path = Path(parsed_args.host_dir).resolve()

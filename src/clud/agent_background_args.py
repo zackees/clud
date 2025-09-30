@@ -3,8 +3,6 @@
 
 import argparse
 import logging
-import os
-import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,29 +84,10 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     """Parse command line arguments into typed dataclass."""
     parser = argparse.ArgumentParser(description="CLUD background sync agent", add_help=False)
 
-    # Set default directories based on platform and environment
+    # Set default directories - these are only used when BackgroundAgent runs inside container
+    # When running from host (e.g., clud bg --cmd), these defaults are not used
+    # because launch_container_shell() is called instead
     default_host_dir = "/host"
-    default_workspace_dir = "/workspace"
-
-    # When running on Windows host (not in container), map container concepts to Windows paths
-    # But ONLY if we're running in background mode outside a container
-    # Check for container environment indicators
-    in_container = (
-        Path("/.dockerenv").exists()  # Docker creates this file
-        or os.environ.get("CLUD_BACKGROUND_SYNC") == "true"  # Set by container entrypoint
-        or Path("/host").exists()  # Container mount point should exist
-        or Path("/workspace").exists()  # Container mount point should exist
-    )
-
-    if platform.system() == "Windows" and not in_container:
-        # Map /host concept to current working directory by default
-        default_host_dir = str(Path.cwd())
-        # Map /workspace concept to a workspace subdirectory
-        default_workspace_dir = str(Path.cwd() / "workspace")
-        logger.info(f"Running on Windows host - mapping /host to {default_host_dir}")
-        logger.info(f"Running on Windows host - mapping /workspace to {default_workspace_dir}")
-    else:
-        logger.info("Running in container environment - using container paths")
 
     parser.add_argument("path", nargs="?", help="Project directory to mount (default: current working directory)")
     parser.add_argument("--host-dir", default=default_host_dir, help=f"Host directory path (default: {default_host_dir})")
