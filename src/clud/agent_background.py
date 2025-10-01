@@ -723,12 +723,13 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
             # For other commands, use --cmd format so entrypoint.sh handles them
             base_cmd.extend(["--cmd", args.cmd])
     else:
-        # Default interactive shell
+        # Default interactive shell - pass /bin/bash directly to leverage entrypoint's special handling
         if args.open:
             # When --open is used, start code-server in background then run bash
             cmd_string = "(code-server --bind-addr=0.0.0.0:8080 --auth=none --disable-telemetry /workspace &) && /bin/bash --login"
             base_cmd.extend(["--cmd", cmd_string])
         else:
+            # Pass /bin/bash --login directly - entrypoint will detect and exec into it
             base_cmd.extend(["/bin/bash", "--login"])
 
     # On Windows with mintty/git-bash, prepend winpty for TTY support when needed
@@ -1085,9 +1086,12 @@ def main(args: list[str] | None = None):
         # Also set container_sync logger to debug
         logging.getLogger("clud.container_sync").setLevel(logging.DEBUG)
 
-    # Check if this is a container shell request (--cmd or interactive shell)
-    # These should use launch_container_shell instead of the sync agent
-    if parsed_args.cmd is not None or parsed_args.open:
+    # Check if this is a container shell request (--cmd, --open, or default interactive shell)
+    # Only run the background sync agent when inside container (not from host)
+    is_container_environment = Path("/host").exists() and Path("/workspace").exists()
+
+    if not is_container_environment:
+        # Running from host - always launch container shell (default interactive)
         # Get API key for container
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -1099,7 +1103,7 @@ def main(args: list[str] | None = None):
             logger.error("Docker is not available or not running")
             sys.exit(1)
 
-        # Launch container shell with the command
+        # Launch container shell (interactive bash if no cmd specified)
         return launch_container_shell(parsed_args, api_key)
 
     # Validate sync interval

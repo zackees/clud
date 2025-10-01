@@ -28,6 +28,10 @@ if [ "$1" = "--cmd" ] && [ -n "$2" ]; then
     # Execute the custom command in /workspace
     echo "[ENTRYPOINT] Executing custom command: $2"
     exec bash -l -c "cd /workspace && $2"
+elif [ "$1" = "/bin/bash" ]; then
+    # Direct bash shell request - exec into it with remaining args
+    echo "[ENTRYPOINT] Launching interactive bash shell"
+    exec "$@"
 else
     # Start code-server
     echo "[ENTRYPOINT] Starting code-server..."

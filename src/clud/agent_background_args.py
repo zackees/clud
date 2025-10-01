@@ -173,4 +173,5 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
         worktree_name=parsed_args.worktree_name,
         detect_completion=parsed_args.detect_completion,
         idle_timeout=parsed_args.idle_timeout,
+        open=getattr(parsed_args, "open", False),
     )
