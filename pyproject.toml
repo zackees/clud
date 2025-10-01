@@ -22,7 +22,7 @@ dependencies = [
     "codeup>=1.0.8",
 ]
 # Change this with the version number bump.
-version = "1.0.12"
+version = "1.0.13"
 
 [project.optional-dependencies]
 dev = [
