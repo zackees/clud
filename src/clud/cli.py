@@ -50,6 +50,26 @@ def handle_test_command() -> int:
         return 1
 
 
+def handle_codeup_command() -> int:
+    """Handle the --codeup command by running clud with a message to run the global codeup command."""
+    codeup_prompt = "run the global command codeup, if it returns 0, halt, if it fails then read the output logs and apply the fixes. Run upto 5 times before giving up, else halt."
+
+    try:
+        # Run clud with the codeup message using current Python and module
+        result = subprocess.run(
+            [sys.executable, "-m", "clud", "-m", codeup_prompt],
+            check=False,  # Don't raise on non-zero exit
+            capture_output=False,  # Let output go to terminal
+        )
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: Python interpreter not found.", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error running clud: {e}", file=sys.stderr)
+        return 1
+
+
 def handle_fix_command(url: str | None = None) -> int:
     """Handle the --fix command by running clud with a message to run both linting and testing."""
     if url and is_github_url(url):
@@ -125,6 +145,7 @@ def main(args: list[str] | None = None) -> int:
             print("  --task PATH       Open task file in editor")
             print("  --lint           Run global linting with codeup")
             print("  --test           Run tests with codeup")
+            print("  --codeup         Run global codeup command with auto-fix (up to 5 retries)")
             print("  --fix [URL]      Fix linting issues and run tests (optionally from GitHub URL)")
             print("  -h, --help       Show this help")
             print()
@@ -143,6 +164,9 @@ def main(args: list[str] | None = None) -> int:
 
         if router_args.test:
             return handle_test_command()
+
+        if router_args.codeup:
+            return handle_codeup_command()
 
         if router_args.fix:
             return handle_fix_command(router_args.fix_url)

@@ -26,6 +26,7 @@ class RouterArgs:
     test: bool = False
     fix: bool = False
     fix_url: str | None = None
+    codeup: bool = False
     help: bool = False
 
 
@@ -43,6 +44,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     lint = "--lint" in args_copy
     test = "--test" in args_copy
     fix = "--fix" in args_copy  # --fix should be passed to agents, not intercepted
+    codeup = "--codeup" in args_copy
 
     # Extract fix URL argument if present
     fix_url = None
@@ -88,5 +90,6 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         test=test,
         fix=fix,
         fix_url=fix_url,
+        codeup=codeup,
         help=help_requested,
     )
