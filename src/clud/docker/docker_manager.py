@@ -13,7 +13,7 @@ import time
 import traceback
 import warnings
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from appdirs import user_data_dir  # type: ignore[import-untyped]
@@ -42,7 +42,7 @@ FORCE_CLEAR: bool = bool(os.environ.get("CLUD_FORCE_CLEAR", "0") == "1")
 # Docker uses datetimes in UTC but without the timezone info. If we pass in a tz
 # then it will throw an exception.
 def _utc_now_no_tz() -> datetime:
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     return now.replace(tzinfo=None)
 
 
