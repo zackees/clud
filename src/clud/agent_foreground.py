@@ -294,8 +294,11 @@ def _build_claude_command(args: Args, claude_path: str) -> list[str]:
     return cmd
 
 
-def _print_debug_info(claude_path: str | None, cmd: list[str]) -> None:
+def _print_debug_info(claude_path: str | None, cmd: list[str], verbose: bool = False) -> None:
     """Print debug information about Claude execution."""
+    if not verbose:
+        return
+
     if claude_path:
         print(f"DEBUG: Found claude at: {claude_path}", file=sys.stderr)
         print(f"DEBUG: Platform: {platform.system()}", file=sys.stderr)
@@ -321,12 +324,13 @@ def _print_error_diagnostics(claude_path: str | None, cmd: list[str]) -> None:
     print(f"  - ~/AppData/Roaming/npm/claude.exe exists: {os.path.exists(os.path.expanduser('~/AppData/Roaming/npm/claude.exe'))}", file=sys.stderr)
 
 
-def _execute_command(cmd: list[str], use_shell: bool = False) -> int:
+def _execute_command(cmd: list[str], use_shell: bool = False, verbose: bool = False) -> int:
     """Execute a command and return its exit code."""
     if use_shell:
         # Convert command list to shell string and execute through shell
         cmd_str = subprocess.list2cmdline(cmd)
-        print(f"DEBUG: Retrying with shell=True: {cmd_str}", file=sys.stderr)
+        if verbose:
+            print(f"DEBUG: Retrying with shell=True: {cmd_str}", file=sys.stderr)
         result = subprocess.run(cmd_str, shell=True)
     else:
         result = subprocess.run(cmd)
@@ -375,10 +379,10 @@ def run(args: Args) -> int:
         cmd = _build_claude_command(args, claude_path)
 
         # Print debug info
-        _print_debug_info(claude_path, cmd)
+        _print_debug_info(claude_path, cmd, args.verbose)
 
         # Execute Claude with the dangerous permissions flag
-        return _execute_command(cmd, use_shell=False)
+        return _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
     except FileNotFoundError as e:
         print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
@@ -400,7 +404,7 @@ def run(args: Args) -> int:
         if cmd and claude_path:
             try:
                 print("\nAttempting backup method (shell=True)...", file=sys.stderr)
-                return _execute_command(cmd, use_shell=True)
+                return _execute_command(cmd, use_shell=True, verbose=args.verbose)
             except Exception as shell_error:
                 print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
                 traceback.print_exc()
@@ -418,7 +422,7 @@ def run(args: Args) -> int:
         if cmd and claude_path:
             try:
                 print("\nAttempting backup method (shell=True)...", file=sys.stderr)
-                return _execute_command(cmd, use_shell=True)
+                return _execute_command(cmd, use_shell=True, verbose=args.verbose)
             except Exception as shell_error:
                 print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
                 traceback.print_exc()

@@ -14,6 +14,7 @@ class Args:
     cmd: str | None
     continue_flag: bool
     dry_run: bool
+    verbose: bool
     claude_args: list[str]
 
 
@@ -61,6 +62,14 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Print what would be executed without actually running Claude",
     )
 
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        dest="verbose",
+        help="Show debug output",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
 
@@ -70,5 +79,6 @@ def parse_args(args: list[str] | None = None) -> Args:
         cmd=known_args.cmd,
         continue_flag=known_args.continue_flag,
         dry_run=known_args.dry_run,
+        verbose=known_args.verbose,
         claude_args=unknown_args,
     )
