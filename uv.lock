@@ -302,7 +302,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "1.0.14"
+version = "1.0.15"
 source = { editable = "." }
 dependencies = [
     { name = "appdirs" },
