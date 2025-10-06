@@ -302,7 +302,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "1.0.18"
+version = "1.0.19"
 source = { editable = "." }
 dependencies = [
     { name = "appdirs" },
@@ -312,6 +312,7 @@ dependencies = [
     { name = "fasteners" },
     { name = "httpx" },
     { name = "keyring" },
+    { name = "nodeenv" },
     { name = "pywinpty", marker = "sys_platform == 'win32'" },
     { name = "running-process" },
 ]
@@ -345,6 +346,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.24.0" },
     { name = "keyring", specifier = ">=24.0.0" },
     { name = "keyrings-cryptfile", marker = "extra == 'keyring-fallbacks'", specifier = ">=1.3.0" },
+    { name = "nodeenv", specifier = ">=1.8.0" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=2.0.0" },

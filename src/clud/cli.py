@@ -90,6 +90,17 @@ def handle_codeup_publish_command() -> int:
         return 1
 
 
+def handle_kanban_command() -> int:
+    """Handle the --kanban command by setting up and running vibe-kanban."""
+    from .kanban_manager import setup_and_run_kanban
+
+    try:
+        return setup_and_run_kanban()
+    except Exception as e:
+        print(f"Error running kanban: {e}", file=sys.stderr)
+        return 1
+
+
 def handle_fix_command(url: str | None = None) -> int:
     """Handle the --fix command by running clud with a message to run both linting and testing."""
     if url and is_github_url(url):
@@ -169,6 +180,7 @@ def main(args: list[str] | None = None) -> int:
             print("  --codeup-publish     Run global codeup -p command with auto-fix (up to 5 retries)")
             print("  --codeup-p           Alias for --codeup-publish")
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
+            print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
             print("  -h, --help           Show this help")
             print()
             print("For mode-specific options, use: clud <mode> --help")
@@ -192,6 +204,9 @@ def main(args: list[str] | None = None) -> int:
 
         if router_args.codeup_publish:
             return handle_codeup_publish_command()
+
+        if router_args.kanban:
+            return handle_kanban_command()
 
         if router_args.fix:
             return handle_fix_command(router_args.fix_url)

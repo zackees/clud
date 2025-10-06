@@ -20,9 +20,10 @@ dependencies = [
     "pywinpty>=3.0.0; sys_platform == 'win32'",
     "running-process>=1.0.1",
     "codeup>=1.0.8",
+    "nodeenv>=1.8.0",
 ]
 # Change this with the version number bump.
-version = "1.0.18"
+version = "1.0.19"
 
 [project.optional-dependencies]
 dev = [
