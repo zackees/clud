@@ -67,6 +67,13 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         task_idx = args_copy.index(task_flag)
         if task_idx + 1 < len(args_copy):
             task = args_copy[task_idx + 1]
+            # Remove both the flag and its value from args_copy
+            args_copy.pop(task_idx)  # Remove flag
+            args_copy.pop(task_idx)  # Remove value (now at same index)
+        else:
+            # Flag present but no value - remove flag and set empty string to trigger error
+            args_copy.pop(task_idx)
+            task = ""  # Empty string will trigger error in handle_task_command
 
     # Check for background mode in multiple ways:
     # 1. Positional argument "bg" at start

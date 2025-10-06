@@ -178,7 +178,7 @@ def main(args: list[str] | None = None) -> int:
         if router_args.login:
             return handle_login()
 
-        if router_args.task:
+        if router_args.task is not None:
             return handle_task_command(router_args.task)
 
         if router_args.lint:

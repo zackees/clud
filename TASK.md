@@ -119,3 +119,13 @@ clud -t path/to/new_task.md
 
   * ✅ Audit this task for and make sure it's feasible - **COMPLETED: All requirements feasible and implemented**
   * ✅ Update this list with more actions - **COMPLETED: Added comprehensive implementation status**
+  * ✅ Fix task editor workflow - **COMPLETED: Restored editor opening and user confirmation before autonomous execution**
+
+## Recent Changes
+
+### 2025-01-05: Editor Workflow Fix
+- **Issue**: Task execution was starting immediately without giving user time to edit
+- **Fix**: Added back `open_in_editor()` and `_wait_for_user_edit()` calls in `process_existing_task()`
+- **Result**: Now opens task in editor, waits for user to press Enter, then starts autonomous execution
+- **Tests**: Updated test mocks to handle new workflow, all 38 tests passing
+- **Linting**: All code quality checks passing (ruff + pyright)

@@ -336,27 +336,35 @@ class TestProcessTaskFile(unittest.TestCase):
 class TestProcessExistingTask(unittest.TestCase):
     """Test existing task processing."""
 
-    @patch("clud.task._read_task_content")
     @patch("clud.task.process_new_task")
-    def test_process_existing_task_empty_content(self, mock_process_new, mock_read):
+    def test_process_existing_task_empty_content(self, mock_process_new):
         """Test when task content is empty."""
-        mock_read.return_value = ""
         mock_process_new.return_value = 0
 
-        result = process_existing_task(Path("task.md"))
-        self.assertEqual(result, 0)
-        mock_process_new.assert_called_once()  # type: ignore[misc]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_path = Path(tmpdir) / "task.md"
+            task_path.write_text("", encoding="utf-8")
+            result = process_existing_task(task_path)
+            self.assertEqual(result, 0)
+            mock_process_new.assert_called_once()  # type: ignore[misc]
 
-    @patch("clud.task._read_task_content")
-    @patch("clud.task._display_task_content")
+    @patch("clud.task._wait_for_user_edit")
     @patch("clud.task.open_in_editor")
-    def test_process_existing_task_editor_fails(self, mock_open, mock_display, mock_read):
-        """Test when editor fails to open."""
-        mock_read.return_value = "# Task\nContent"
-        mock_open.return_value = False
+    @patch("clud.task._execute_task_with_clud")
+    def test_process_existing_task_execution_success(self, mock_execute, mock_editor, mock_wait):
+        """Test successful task execution."""
+        mock_execute.return_value = 0
+        mock_editor.return_value = True
+        mock_wait.return_value = None
 
-        result = process_existing_task(Path("task.md"))
-        self.assertEqual(result, 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_path = Path(tmpdir) / "task.md"
+            task_path.write_text("# Task\nContent", encoding="utf-8")
+            result = process_existing_task(task_path)
+            self.assertEqual(result, 0)
+            mock_editor.assert_called_once_with(task_path)  # type: ignore[misc]
+            mock_wait.assert_called_once()  # type: ignore[misc]
+            mock_execute.assert_called_once()  # type: ignore[misc]
 
 
 class TestProcessNewTask(unittest.TestCase):
@@ -373,14 +381,10 @@ class TestProcessNewTask(unittest.TestCase):
             self.assertEqual(result, 1)
 
     @patch("clud.task._prompt_for_task_description")
-    @patch("clud.task.open_in_editor")
     @patch("clud.task.process_existing_task")
-    @patch("clud.task._wait_for_task_enhancement")
-    @patch("clud.task._display_next_steps")
-    def test_process_new_task_success(self, mock_display, mock_wait, mock_process_existing, mock_open, mock_prompt):
+    def test_process_new_task_success(self, mock_process_existing, mock_prompt):
         """Test successful new task creation."""
         mock_prompt.return_value = "Test task description"
-        mock_open.return_value = True
         mock_process_existing.return_value = 0
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -388,6 +392,7 @@ class TestProcessNewTask(unittest.TestCase):
             result = process_new_task(task_path)
             self.assertEqual(result, 0)
             self.assertTrue(task_path.exists())
+            mock_process_existing.assert_called_once()  # type: ignore[misc]
 
 
 class TestHandleTaskCommand(unittest.TestCase):

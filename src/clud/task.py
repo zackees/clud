@@ -243,6 +243,47 @@ def _task_file_has_content(task_path: Path) -> bool:
     return task_path.exists() and task_path.stat().st_size > 0
 
 
+def _build_task_execution_prompt(task_path: Path) -> str:
+    """Build prompt for autonomous task execution.
+
+    Args:
+        task_path: Path to task file.
+
+    Returns:
+        Prompt string for clud execution.
+    """
+    return (
+        f"implement {task_path}, the prompt will be research-plan-implement-test-fix-lint-fix-update_task "
+        "and continue until you are done, run into something you can't figure out and need user developer help on, "
+        "or 50 iterations pass. When you halt, give a final summary of the current state and whether you finished "
+        "because of SUCCESS! ALL DONE! or because NEED FEEDBACK: XXX or TASK NOT DONE AFTER 50 ITERATIONS: Reason"
+    )
+
+
+def _execute_task_with_clud(prompt: str) -> int:
+    """Execute task by invoking clud with a prompt.
+
+    Args:
+        prompt: Task execution prompt.
+
+    Returns:
+        Exit code from clud execution.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "clud", "-m", prompt],
+            check=False,
+            capture_output=False,
+        )
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: Python interpreter not found.", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error running clud: {e}", file=sys.stderr)
+        return 1
+
+
 def process_existing_task(task_path: Path) -> int:
     """Process an existing task file (PATH_HAS_TASK workflow).
 
@@ -253,26 +294,25 @@ def process_existing_task(task_path: Path) -> int:
         Exit code: 0 for success, 1 for failure.
     """
     try:
-        content = _read_task_content(task_path)
+        content = task_path.read_text(encoding="utf-8")
         if not content.strip():
             print("Task file is empty, switching to new task workflow...")
             return process_new_task(task_path)
 
-        _display_task_content(content)
+        print(f"Processing task file: {task_path}")
 
+        # Open the task in editor for user review/editing
         if not open_in_editor(task_path):
-            return 1
+            print("Warning: Could not open editor, continuing anyway...")
 
+        # Wait for user to finish editing
         _wait_for_user_edit()
 
-        updated_content = task_path.read_text(encoding="utf-8")
-        if _has_blocking_problem(updated_content):
-            _display_blocking_problem_warning()
-            return 1
+        # Build prompt to execute the task autonomously
+        task_prompt = _build_task_execution_prompt(task_path)
 
-        _run_lint_check()
-        _display_completion_message()
-        return 0
+        # Execute the task using clud
+        return _execute_task_with_clud(task_prompt)
 
     except Exception as e:
         print(f"Error processing existing task: {e}", file=sys.stderr)
@@ -366,13 +406,9 @@ def process_new_task(task_path: Path) -> int:
         initial_content = _create_initial_task_content(user_input)
         task_path.write_text(initial_content, encoding="utf-8")
         print(f"\nInitial task written to {task_path}")
+        print("Starting autonomous task processing...\n")
 
-        if not open_in_editor(task_path):
-            return 1
-
-        _wait_for_task_enhancement()
-        _display_next_steps()
-
+        # Now process the task autonomously
         return process_existing_task(task_path)
 
     except KeyboardInterrupt:
