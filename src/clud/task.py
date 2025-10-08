@@ -489,6 +489,25 @@ def _display_next_steps() -> None:
     print("For now, please manually enhance the task file.")
 
 
+def _prompt_to_create_task_file(task_path: Path) -> bool:
+    """Prompt user to create a new task file.
+
+    Args:
+        task_path: Path to the task file that doesn't exist.
+
+    Returns:
+        True if user wants to create the file, False otherwise.
+    """
+    print(f"{task_path.name} doesn't exist, create it? [y]/n: ", end="", flush=True)
+    try:
+        response = input().strip().lower()
+        # Empty response or 'y' means yes (default to yes)
+        return response == "" or response == "y"
+    except (EOFError, KeyboardInterrupt):
+        print()  # New line after interrupt
+        return False
+
+
 def handle_task_command(task_path_str: str) -> int:
     """Main entry point for -t/--task command.
 
@@ -504,6 +523,14 @@ def handle_task_command(task_path_str: str) -> int:
 
     try:
         task_path = Path(task_path_str).resolve()
+
+        # Check if file exists before processing
+        if not task_path.exists():
+            # Prompt user to create the file
+            if not _prompt_to_create_task_file(task_path):
+                print("Task creation cancelled.", file=sys.stderr)
+                return 0
+
         return process_task_file(task_path)
     except Exception as e:
         print(f"Error handling task command: {e}", file=sys.stderr)

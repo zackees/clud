@@ -15,6 +15,7 @@ from clud.task import (
     _handle_lint_result,
     _has_blocking_problem,
     _lint_script_exists,
+    _prompt_to_create_task_file,
     _task_file_has_content,
     find_editor,
     fix_lint_errors,
@@ -395,6 +396,45 @@ class TestProcessNewTask(unittest.TestCase):
             mock_process_existing.assert_called_once()  # type: ignore[misc]
 
 
+class TestPromptToCreateTaskFile(unittest.TestCase):
+    """Test prompting to create task file."""
+
+    @patch("builtins.input")
+    def test_prompt_to_create_yes(self, mock_input):
+        """Test user confirms creation with 'y'."""
+        mock_input.return_value = "y"
+        result = _prompt_to_create_task_file(Path("new_task.md"))
+        self.assertTrue(result)
+
+    @patch("builtins.input")
+    def test_prompt_to_create_default(self, mock_input):
+        """Test user confirms creation with default (empty input)."""
+        mock_input.return_value = ""
+        result = _prompt_to_create_task_file(Path("new_task.md"))
+        self.assertTrue(result)
+
+    @patch("builtins.input")
+    def test_prompt_to_create_no(self, mock_input):
+        """Test user declines creation with 'n'."""
+        mock_input.return_value = "n"
+        result = _prompt_to_create_task_file(Path("new_task.md"))
+        self.assertFalse(result)
+
+    @patch("builtins.input")
+    def test_prompt_to_create_keyboard_interrupt(self, mock_input):
+        """Test handling keyboard interrupt."""
+        mock_input.side_effect = KeyboardInterrupt()
+        result = _prompt_to_create_task_file(Path("new_task.md"))
+        self.assertFalse(result)
+
+    @patch("builtins.input")
+    def test_prompt_to_create_eof(self, mock_input):
+        """Test handling EOF."""
+        mock_input.side_effect = EOFError()
+        result = _prompt_to_create_task_file(Path("new_task.md"))
+        self.assertFalse(result)
+
+
 class TestHandleTaskCommand(unittest.TestCase):
     """Test main task command handler."""
 
@@ -404,21 +444,54 @@ class TestHandleTaskCommand(unittest.TestCase):
         self.assertEqual(result, 2)
 
     @patch("clud.task.process_task_file")
-    def test_handle_task_command_success(self, mock_process):
-        """Test successful task command handling."""
+    def test_handle_task_command_existing_file(self, mock_process):
+        """Test handling existing task file."""
         mock_process.return_value = 0
 
-        result = handle_task_command("task.md")
-        self.assertEqual(result, 0)
-        mock_process.assert_called_once()  # type: ignore[misc]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_path = Path(tmpdir) / "task.md"
+            task_path.write_text("# Task", encoding="utf-8")
+            result = handle_task_command(str(task_path))
+            self.assertEqual(result, 0)
+            mock_process.assert_called_once()  # type: ignore[misc]
+
+    @patch("clud.task._prompt_to_create_task_file")
+    @patch("clud.task.process_task_file")
+    def test_handle_task_command_new_file_yes(self, mock_process, mock_prompt):
+        """Test handling new task file when user confirms creation."""
+        mock_prompt.return_value = True
+        mock_process.return_value = 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_path = Path(tmpdir) / "new_task.md"
+            result = handle_task_command(str(task_path))
+            self.assertEqual(result, 0)
+            mock_prompt.assert_called_once()  # type: ignore[misc]
+            mock_process.assert_called_once()  # type: ignore[misc]
+
+    @patch("clud.task._prompt_to_create_task_file")
+    @patch("clud.task.process_task_file")
+    def test_handle_task_command_new_file_no(self, mock_process, mock_prompt):
+        """Test handling new task file when user declines creation."""
+        mock_prompt.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_path = Path(tmpdir) / "new_task.md"
+            result = handle_task_command(str(task_path))
+            self.assertEqual(result, 0)
+            mock_prompt.assert_called_once()  # type: ignore[misc]
+            mock_process.assert_not_called()  # type: ignore[misc]
 
     @patch("clud.task.process_task_file")
     def test_handle_task_command_exception(self, mock_process):
         """Test handling exceptions."""
         mock_process.side_effect = Exception("Test error")
 
-        result = handle_task_command("task.md")
-        self.assertEqual(result, 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_path = Path(tmpdir) / "task.md"
+            task_path.write_text("# Task", encoding="utf-8")
+            result = handle_task_command(str(task_path))
+            self.assertEqual(result, 1)
 
 
 if __name__ == "__main__":
