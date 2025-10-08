@@ -525,11 +525,9 @@ def handle_task_command(task_path_str: str) -> int:
         task_path = Path(task_path_str).resolve()
 
         # Check if file exists before processing
-        if not task_path.exists():
-            # Prompt user to create the file
-            if not _prompt_to_create_task_file(task_path):
-                print("Task creation cancelled.", file=sys.stderr)
-                return 0
+        if not task_path.exists() and not _prompt_to_create_task_file(task_path):
+            print("Task creation cancelled.", file=sys.stderr)
+            return 0
 
         return process_task_file(task_path)
     except Exception as e:

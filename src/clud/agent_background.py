@@ -347,15 +347,15 @@ def build_docker_image(dockerfile_path: str | None = None, force_rebuild: bool =
 def stop_existing_container(container_name: str = "clud-dev") -> None:
     """Stop and remove existing container if it exists."""
     try:
-        # Check if container exists and is running
-        result = subprocess.run(["docker", "ps", "-q", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
+        # Check if container exists and is running (use exact name match with anchors)
+        result = subprocess.run(["docker", "ps", "-q", "-f", f"name=^{container_name}$"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
 
         if result.stdout.strip():
             print(f"Stopping existing container {container_name}...")
             subprocess.run(["docker", "stop", container_name], check=True, capture_output=True, timeout=60)
 
-        # Check if container exists (stopped)
-        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name={container_name}"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
+        # Check if container exists (stopped) - use exact name match with anchors
+        result = subprocess.run(["docker", "ps", "-aq", "-f", f"name=^{container_name}$"], capture_output=True, text=True, check=True, timeout=30, encoding="utf-8", errors="replace")
 
         if result.stdout.strip():
             print(f"Removing existing container {container_name}...")
