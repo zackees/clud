@@ -165,11 +165,13 @@ def main(args: list[str] | None = None) -> int:
         # Handle help first
         if router_args.help:
             print("clud - Claude-powered development container")
-            print("Usage: clud [fg|bg] [options...]")
+            print("Usage: clud [fg|bg|fix|up] [options...]")
             print()
             print("Modes:")
             print("  fg    Run in foreground mode (Claude Code directly, default)")
             print("  bg    Run in background mode (Docker container)")
+            print("  fix   Fix linting and test issues (with optional GitHub URL)")
+            print("  up    Run global codeup command with auto-fix (alias for --codeup)")
             print()
             print("Special commands:")
             print("  --login              Configure API key for Claude")
@@ -211,8 +213,14 @@ def main(args: list[str] | None = None) -> int:
         if router_args.fix:
             return handle_fix_command(router_args.fix_url)
 
-        # Route to appropriate agent
-        if router_args.mode == AgentMode.BACKGROUND:
+        # Route to appropriate agent or mode-specific handler
+        if router_args.mode == AgentMode.FIX:
+            # Extract optional URL from remaining args
+            fix_url = router_args.remaining_args[0] if router_args.remaining_args else None
+            return handle_fix_command(fix_url)
+        elif router_args.mode == AgentMode.UP:
+            return handle_codeup_command()
+        elif router_args.mode == AgentMode.BACKGROUND:
             # Import background agent and pass remaining args
             from .agent_background import main as bg_main
 

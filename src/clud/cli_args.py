@@ -11,6 +11,8 @@ class AgentMode(Enum):
 
     FOREGROUND = "fg"
     BACKGROUND = "bg"
+    FIX = "fix"
+    UP = "up"
 
 
 @dataclass
@@ -77,20 +79,23 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
             args_copy.pop(task_idx)
             task = ""  # Empty string will trigger error in handle_task_command
 
-    # Check for background mode in multiple ways:
-    # 1. Positional argument "bg" at start
-    # 2. --bg flag anywhere
-    if args_copy and args_copy[0] == "bg":
-        mode = AgentMode.BACKGROUND
-        args_copy = args_copy[1:]  # Remove the "bg" positional arg
+    # Check for mode in multiple ways:
+    # 1. Positional argument at start (fg, bg, fix, up)
+    # 2. --bg flag anywhere (for backward compatibility)
+    if args_copy and args_copy[0] in ["fg", "bg", "fix", "up"]:
+        mode_str = args_copy[0]
+        if mode_str == "fg":
+            mode = AgentMode.FOREGROUND
+        elif mode_str == "bg":
+            mode = AgentMode.BACKGROUND
+        elif mode_str == "fix":
+            mode = AgentMode.FIX
+        elif mode_str == "up":
+            mode = AgentMode.UP
+        args_copy = args_copy[1:]  # Remove the positional arg
     elif "--bg" in args_copy:
         mode = AgentMode.BACKGROUND
         # Keep --bg flag for backward compatibility
-
-    # Also check if positional "fg" is explicitly specified
-    if args_copy and args_copy[0] == "fg":
-        mode = AgentMode.FOREGROUND
-        args_copy = args_copy[1:]  # Remove the "fg" positional arg
 
     return RouterArgs(
         mode=mode,
