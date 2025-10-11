@@ -22,16 +22,7 @@ from typing import Any
 from .agent_background_args import BackgroundAgentArgs, parse_background_agent_args
 from .agent_completion import detect_agent_completion
 from .running_process import RunningProcess
-
-# Import Telegram messaging (optional)
-try:
-    from .messaging import TelegramMessenger
-
-    TELEGRAM_AVAILABLE = True
-except ImportError:
-    TELEGRAM_AVAILABLE = False
-    # Define a dummy type for type checking when Telegram is not available
-    TelegramMessenger = Any  # type: ignore[misc, assignment]
+from .telegram_bot import TelegramBot
 
 # Container sync is now handled by standalone package in container
 
@@ -268,79 +259,6 @@ def load_clud_config() -> dict[str, Any] | None:
         except (OSError, json.JSONDecodeError) as e:
             print(f"Warning: Failed to parse .clud config file: {e}")
     return None
-
-
-def create_telegram_messenger(args: BackgroundAgentArgs) -> Any | None:
-    """Create Telegram messenger instance if enabled.
-
-    Args:
-        args: Background agent arguments
-
-    Returns:
-        TelegramMessenger instance or None if disabled/unavailable
-    """
-    if not TELEGRAM_AVAILABLE:
-        return None
-
-    # Try loading from config file if no args provided
-    if not args.telegram_enabled:
-        clud_config = load_clud_config()
-        if clud_config and "telegram" in clud_config:
-            telegram_config = clud_config["telegram"]
-            if telegram_config.get("enabled"):
-                return _create_telegram_from_config(telegram_config)
-        return None
-
-    # Validate credentials
-    if not args.telegram_bot_token or not args.telegram_chat_id:
-        logger.error("Telegram requires --telegram-bot-token and --telegram-chat-id (or env vars TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
-        return None
-
-    try:
-        messenger = TelegramMessenger(bot_token=args.telegram_bot_token, chat_id=args.telegram_chat_id)  # type: ignore[misc]
-        logger.info("Telegram notifications enabled")
-        return messenger  # type: ignore[return-value]
-    except Exception as e:
-        logger.error(f"Failed to create Telegram messenger: {e}")
-        return None
-
-
-def _create_telegram_from_config(telegram_config: dict[str, Any]) -> Any | None:
-    """Create Telegram messenger from .clud config file.
-
-    Args:
-        telegram_config: Telegram section from .clud config
-
-    Returns:
-        TelegramMessenger instance or None if invalid
-    """
-    if not TELEGRAM_AVAILABLE:
-        return None
-
-    try:
-        import os
-
-        # Expand environment variables in config
-        def expand_env_vars(value: Any) -> str | None:
-            if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-                env_var = value[2:-1]
-                return os.environ.get(env_var)
-            return value
-
-        bot_token = expand_env_vars(telegram_config.get("bot_token"))
-        chat_id = expand_env_vars(telegram_config.get("chat_id"))
-
-        if not bot_token or not chat_id:
-            logger.error("Telegram config missing bot_token or chat_id")
-            return None
-
-        messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)  # type: ignore[misc]
-        logger.info("Telegram notifications enabled (from config file)")
-        return messenger  # type: ignore[return-value]
-
-    except Exception as e:
-        logger.error(f"Failed to create Telegram messenger from config: {e}")
-        return None
 
 
 def pull_latest_image(image_name: str = "niteris/clud:latest") -> bool:
@@ -699,9 +617,8 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     # Stop existing container
     stop_existing_container()
 
-    # Initialize Telegram messenger if enabled
-    messenger = create_telegram_messenger(args)
-    container_start_time = datetime.now()
+    # Initialize Telegram bot if enabled
+    telegram_bot = TelegramBot.from_args(args)
 
     # Prepare Docker command
     docker_path = normalize_path_for_docker(project_path)
@@ -849,28 +766,9 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
     print("Starting CLUD development container...")
 
-    # Send invitation message if messenger is enabled
-    container_id = "clud-dev"
-    if messenger:
-
-        async def send_invitation():
-            metadata = {
-                "project_path": str(project_path),
-                "mode": "background",
-                "timestamp": container_start_time.isoformat(),
-            }
-            success = await messenger.send_invitation(agent_name=container_id, container_id=container_id, metadata=metadata)
-            if not success:
-                logger.warning("Failed to send invitation message")
-
-        # Run invitation in event loop
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(send_invitation())
-            loop.close()
-        except Exception as e:
-            logger.error(f"Error sending invitation: {e}")
+    # Send invitation if telegram bot is available
+    if telegram_bot:
+        telegram_bot.send_invitation(project_path=project_path, mode="background")
 
     # Schedule thread dump if requested - run in independent thread
     dump_thread = None
@@ -943,30 +841,9 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     except Exception as e:
         raise DockerError(f"Failed to start container shell: {e}") from e
     finally:
-        # Send cleanup notification if messenger is enabled
-        if messenger:
-            duration = datetime.now() - container_start_time
-            duration_str = str(duration).split(".")[0]
-            summary = {
-                "duration": duration_str,
-                "tasks_completed": 0,  # Could be tracked
-                "files_modified": 0,  # Could be tracked
-                "error_count": 0,
-            }
-
-            async def send_cleanup():
-                success = await messenger.send_cleanup_notification(agent_name=container_id, summary=summary)
-                if not success:
-                    logger.warning("Failed to send cleanup message")
-
-            # Run cleanup notification in event loop
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(send_cleanup())
-                loop.close()
-            except Exception as e:
-                logger.error(f"Error sending cleanup notification: {e}")
+        # Send cleanup notification if telegram bot is available
+        if telegram_bot:
+            telegram_bot.send_cleanup()
 
         # Note: dump_thread runs independently and will terminate naturally
         # No need to cancel it since it's a daemon thread with time.sleep()

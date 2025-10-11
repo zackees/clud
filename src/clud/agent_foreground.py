@@ -16,6 +16,7 @@ from .running_process import RunningProcess
 from .secrets import get_credential_store
 from .streaming_parser import StreamingParser
 from .streaming_ui import StreamingUI
+from .telegram_bot import TelegramBot
 
 # Get credential store once at module level
 keyring = get_credential_store()
@@ -528,6 +529,13 @@ def run(args: Args) -> int:
     claude_path: str | None = None
     cmd: list[str] = []
 
+    # Initialize Telegram bot if enabled
+    telegram_bot = TelegramBot.from_args(args)
+
+    # Send invitation if telegram bot is available
+    if telegram_bot:
+        telegram_bot.send_invitation(project_path=Path.cwd(), mode="foreground")
+
     try:
         # If --cmd is provided, execute the command directly instead of launching Claude
         if args.cmd:
@@ -674,6 +682,11 @@ def run(args: Args) -> int:
         print("\nFull stack trace from original error:", file=sys.stderr)
         traceback.print_exc()
         return 1
+
+    finally:
+        # Send cleanup notification if telegram bot is available
+        if telegram_bot:
+            telegram_bot.send_cleanup()
 
 
 def main(args: list[str] | None = None) -> int:

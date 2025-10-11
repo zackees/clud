@@ -18,6 +18,9 @@ class Args:
     idle_timeout: float | None
     loop_count: int | None
     loop_value: str | None  # Raw value from --loop for flexible parsing
+    telegram: bool
+    telegram_bot_token: str | None
+    telegram_chat_id: str | None
     claude_args: list[str]
 
 
@@ -89,8 +92,34 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Run N times, checking for DONE.md after each. Usage: --loop 50 -p 'msg', --loop 'msg' (prompts count), --loop 50 (prompts msg), or --loop (prompts both). Uses -p.",
     )
 
+    # Telegram notifications
+    parser.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Enable Telegram notifications",
+    )
+
+    parser.add_argument(
+        "--telegram-bot-token",
+        type=str,
+        help="Telegram bot token (or use TELEGRAM_BOT_TOKEN env var)",
+    )
+
+    parser.add_argument(
+        "--telegram-chat-id",
+        type=str,
+        help="Telegram chat ID to send messages to (or use TELEGRAM_CHAT_ID env var)",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
+
+    # Get Telegram credentials from env vars as fallback
+    import os
+
+    telegram_bot_token = known_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = known_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    telegram_enabled = known_args.telegram or bool(telegram_bot_token) or bool(telegram_chat_id)
 
     return Args(
         prompt=known_args.prompt,
@@ -102,5 +131,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         idle_timeout=known_args.idle_timeout,
         loop_count=None,  # Will be parsed from loop_value in agent_foreground.py
         loop_value=known_args.loop_value,
+        telegram=telegram_enabled,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
         claude_args=unknown_args,
     )
