@@ -169,7 +169,7 @@ class TelegramBot:
 
         if not bot_token or not chat_id:
             print("Error: Telegram requires bot token and chat ID (use --telegram-bot-token and --telegram-chat-id, or env vars TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)", file=sys.stderr)
-            return None
+            sys.exit(1)
 
         try:
             return cls(bot_token=bot_token, chat_id=chat_id)
