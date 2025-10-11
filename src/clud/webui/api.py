@@ -88,10 +88,13 @@ class ChatHandler:
             # Create a queue for communication between threads
             queue: asyncio.Queue[str | None] = asyncio.Queue()
 
+            # Capture the event loop from the async context to use in thread callbacks
+            loop = asyncio.get_running_loop()
+
             def stdout_callback(line: str) -> None:
                 """Callback for stdout lines."""
                 # Put line in queue for async processing
-                asyncio.run_coroutine_threadsafe(queue.put(line), asyncio.get_event_loop())
+                asyncio.run_coroutine_threadsafe(queue.put(line), loop)
 
             def run_process() -> None:
                 """Run process in thread."""
@@ -99,7 +102,7 @@ class ChatHandler:
                     RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
                 finally:
                     # Signal completion with None
-                    asyncio.run_coroutine_threadsafe(queue.put(None), asyncio.get_event_loop())
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
             # Start process in background thread
             import threading
