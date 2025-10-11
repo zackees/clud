@@ -45,6 +45,18 @@ class BackgroundAgentArgs:
     idle_timeout: float = 3.0
     # Browser opening for VS Code server
     open: bool = False
+    # Messaging configuration
+    messaging_enabled: bool = False
+    messaging_platform: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    sms_account_sid: str | None = None
+    sms_auth_token: str | None = None
+    sms_from_number: str | None = None
+    sms_to_number: str | None = None
+    whatsapp_phone_id: str | None = None
+    whatsapp_access_token: str | None = None
+    whatsapp_to_number: str | None = None
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +146,19 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     parser.add_argument("--detect-completion", action="store_true", help="Monitor terminal for agent completion (3-second idle detection)")
     parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
 
+    # Messaging configuration
+    parser.add_argument("--messaging", dest="messaging_platform", metavar="PLATFORM", help="Enable messaging notifications (telegram, sms, or whatsapp)")
+    parser.add_argument("--telegram-bot-token", help="Telegram bot token (or use TELEGRAM_BOT_TOKEN env var)")
+    parser.add_argument("--telegram-chat-id", help="Telegram chat ID to send messages to")
+    parser.add_argument("--sms-account-sid", help="Twilio account SID (or use TWILIO_ACCOUNT_SID env var)")
+    parser.add_argument("--sms-auth-token", help="Twilio auth token (or use TWILIO_AUTH_TOKEN env var)")
+    parser.add_argument("--sms-from-number", help="Phone number to send SMS from")
+    parser.add_argument("--sms-to-number", help="Phone number to send SMS to")
+    parser.add_argument("--whatsapp-phone-id", help="WhatsApp phone number ID")
+    parser.add_argument("--whatsapp-access-token", help="WhatsApp access token (or use WHATSAPP_ACCESS_TOKEN env var)")
+    parser.add_argument("--whatsapp-to-number", help="Phone number to send WhatsApp to")
+    parser.add_argument("--open", action="store_true", help="Open VS Code server in browser")
+
     # Help
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
 
@@ -147,6 +172,23 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     if parsed_args.help:
         parser.print_help()
         sys.exit(0)
+
+    # Import os for env var fallback
+    import os
+
+    # Determine messaging enabled
+    messaging_enabled = bool(parsed_args.messaging_platform)
+
+    # Get messaging credentials from env vars as fallback
+    telegram_bot_token = parsed_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = parsed_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    sms_account_sid = parsed_args.sms_account_sid or os.environ.get("TWILIO_ACCOUNT_SID")
+    sms_auth_token = parsed_args.sms_auth_token or os.environ.get("TWILIO_AUTH_TOKEN")
+    sms_from_number = parsed_args.sms_from_number or os.environ.get("TWILIO_FROM_NUMBER")
+    sms_to_number = parsed_args.sms_to_number or os.environ.get("TWILIO_TO_NUMBER")
+    whatsapp_phone_id = parsed_args.whatsapp_phone_id or os.environ.get("WHATSAPP_PHONE_ID")
+    whatsapp_access_token = parsed_args.whatsapp_access_token or os.environ.get("WHATSAPP_ACCESS_TOKEN")
+    whatsapp_to_number = parsed_args.whatsapp_to_number or os.environ.get("WHATSAPP_TO_NUMBER")
 
     return BackgroundAgentArgs(
         host_dir=parsed_args.host_dir,
@@ -174,4 +216,15 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
         detect_completion=parsed_args.detect_completion,
         idle_timeout=parsed_args.idle_timeout,
         open=getattr(parsed_args, "open", False),
+        messaging_enabled=messaging_enabled,
+        messaging_platform=parsed_args.messaging_platform,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+        sms_account_sid=sms_account_sid,
+        sms_auth_token=sms_auth_token,
+        sms_from_number=sms_from_number,
+        sms_to_number=sms_to_number,
+        whatsapp_phone_id=whatsapp_phone_id,
+        whatsapp_access_token=whatsapp_access_token,
+        whatsapp_to_number=whatsapp_to_number,
     )

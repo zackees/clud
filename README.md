@@ -76,6 +76,49 @@ clud bg --build-dockerfile PATH   # Build custom Docker image
 - Custom Docker image building and management
 - Git worktree support for isolated branch development
 - Container sync mechanism for workspace isolation
+- **Messaging notifications** via Telegram, SMS, or WhatsApp
+
+### Messaging Notifications (New!)
+
+Get notified when your agents launch and complete via Telegram, SMS, or WhatsApp:
+
+```bash
+# Telegram (recommended - free and easy)
+clud bg --messaging telegram \
+  --telegram-bot-token "123456:ABC-DEF..." \
+  --telegram-chat-id "123456789"
+
+# SMS via Twilio
+clud bg --messaging sms \
+  --sms-account-sid "ACxxxx" \
+  --sms-auth-token "token" \
+  --sms-from-number "+1234567890" \
+  --sms-to-number "+1987654321"
+
+# WhatsApp Business API
+clud bg --messaging whatsapp \
+  --whatsapp-phone-id "123456789012345" \
+  --whatsapp-access-token "token" \
+  --whatsapp-to-number "+1987654321"
+
+# Use environment variables
+export TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."
+export TELEGRAM_CHAT_ID="123456789"
+clud bg --messaging telegram
+```
+
+**Notification Features:**
+- 🚀 **Launch invitation** - Agent sends "I'm online!" when starting
+- ✅ **Cleanup notification** - Agent reports summary when finishing
+- 📊 **Status updates** - Track agent progress in real-time
+- 💬 **Bidirectional** - Communicate with your agent (Telegram)
+
+**Installation:**
+```bash
+pip install python-telegram-bot twilio requests
+```
+
+See [MESSAGING_INTEGRATION_GUIDE.md](MESSAGING_INTEGRATION_GUIDE.md) for complete setup instructions.
 
 ### Advanced Modes
 
@@ -217,6 +260,22 @@ clud bg --ssh-keys                # Mount SSH keys
 clud bg --build-dockerfile PATH   # Build custom image
 clud bg --port PORT               # Custom port
 clud bg --detect-completion       # Enable completion detection
+clud bg --messaging PLATFORM      # Enable messaging (telegram/sms/whatsapp)
+```
+
+### Messaging Commands
+```bash
+# Telegram
+clud bg --messaging telegram --telegram-bot-token TOKEN --telegram-chat-id ID
+clud bg --messaging telegram   # Uses TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars
+
+# SMS (Twilio)
+clud bg --messaging sms --sms-account-sid SID --sms-auth-token TOKEN \
+  --sms-from-number +1234567890 --sms-to-number +0987654321
+
+# WhatsApp
+clud bg --messaging whatsapp --whatsapp-phone-id ID \
+  --whatsapp-access-token TOKEN --whatsapp-to-number +1234567890
 ```
 
 ### Utility Commands

@@ -23,6 +23,14 @@ from .agent_background_args import BackgroundAgentArgs, parse_background_agent_a
 from .agent_completion import detect_agent_completion
 from .running_process import RunningProcess
 
+# Import messaging components (optional, only if enabled)
+try:
+    from .messaging import MessengerFactory
+
+    MESSAGING_AVAILABLE = True
+except ImportError:
+    MESSAGING_AVAILABLE = False
+
 # Container sync is now handled by standalone package in container
 
 
@@ -258,6 +266,111 @@ def load_clud_config() -> dict[str, Any] | None:
         except (OSError, json.JSONDecodeError) as e:
             print(f"Warning: Failed to parse .clud config file: {e}")
     return None
+
+
+def create_messenger(args: BackgroundAgentArgs) -> Any | None:
+    """Create messenger instance from args if messaging is enabled.
+
+    Args:
+        args: Background agent arguments
+
+    Returns:
+        Messenger instance or None if disabled/unavailable
+    """
+    if not MESSAGING_AVAILABLE:
+        return None
+
+    # Try loading from config file if no args provided
+    if not args.messaging_enabled:
+        clud_config = load_clud_config()
+        if clud_config and "messaging" in clud_config:
+            messaging_config = clud_config["messaging"]
+            if messaging_config.get("enabled"):
+                return _create_messenger_from_config(messaging_config)
+        return None
+
+    if not args.messaging_platform:
+        logger.warning("Messaging enabled but no platform specified")
+        return None
+
+    try:
+        platform = args.messaging_platform.lower()
+
+        if platform == "telegram":
+            if not args.telegram_bot_token or not args.telegram_chat_id:
+                logger.error("Telegram messaging requires --telegram-bot-token and --telegram-chat-id")
+                return None
+
+            config = {"bot_token": args.telegram_bot_token, "chat_id": args.telegram_chat_id}
+
+        elif platform == "sms":
+            if not all([args.sms_account_sid, args.sms_auth_token, args.sms_from_number, args.sms_to_number]):
+                logger.error("SMS messaging requires --sms-account-sid, --sms-auth-token, --sms-from-number, and --sms-to-number")
+                return None
+
+            config = {
+                "account_sid": args.sms_account_sid,
+                "auth_token": args.sms_auth_token,
+                "from_number": args.sms_from_number,
+                "to_number": args.sms_to_number,
+            }
+
+        elif platform == "whatsapp":
+            if not all([args.whatsapp_phone_id, args.whatsapp_access_token, args.whatsapp_to_number]):
+                logger.error("WhatsApp messaging requires --whatsapp-phone-id, --whatsapp-access-token, and --whatsapp-to-number")
+                return None
+
+            config = {"phone_number_id": args.whatsapp_phone_id, "access_token": args.whatsapp_access_token, "to_number": args.whatsapp_to_number}
+
+        else:
+            logger.error(f"Unsupported messaging platform: {platform}")
+            return None
+
+        messenger = MessengerFactory.create_messenger(platform, config)
+        logger.info(f"Messaging enabled via {platform}")
+        return messenger
+
+    except Exception as e:
+        logger.error(f"Failed to create messenger: {e}")
+        return None
+
+
+def _create_messenger_from_config(messaging_config: dict[str, Any]) -> Any | None:
+    """Create messenger from .clud config file.
+
+    Args:
+        messaging_config: Messaging section from .clud config
+
+    Returns:
+        Messenger instance or None if invalid
+    """
+    try:
+        platform = messaging_config.get("platform")
+        if not platform:
+            logger.error("Config missing 'platform' in messaging section")
+            return None
+
+        platform = platform.lower()
+        platform_config = messaging_config.get(platform, {})
+
+        # Expand environment variables in config
+        import os
+
+        def expand_env_vars(value):
+            if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+                env_var = value[2:-1]
+                return os.environ.get(env_var)
+            return value
+
+        expanded_config = {key: expand_env_vars(value) for key, value in platform_config.items()}
+
+        messenger = MessengerFactory.create_messenger(platform, expanded_config)
+        logger.info(f"Messaging enabled via {platform} (from config file)")
+        return messenger
+
+    except Exception as e:
+        logger.error(f"Failed to create messenger from config: {e}")
+        return None
 
 
 def pull_latest_image(image_name: str = "niteris/clud:latest") -> bool:
@@ -611,6 +724,10 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     # Stop existing container
     stop_existing_container()
 
+    # Initialize messenger if enabled
+    messenger = create_messenger(args)
+    container_start_time = datetime.now()
+
     # Prepare Docker command
     docker_path = normalize_path_for_docker(project_path)
 
@@ -754,6 +871,29 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
     print("Starting CLUD development container...")
 
+    # Send invitation message if messenger is enabled
+    container_id = "clud-dev"
+    if messenger:
+
+        async def send_invitation():
+            metadata = {
+                "project_path": str(project_path),
+                "mode": "background",
+                "timestamp": container_start_time.isoformat(),
+            }
+            success = await messenger.send_invitation(agent_name=container_id, container_id=container_id, metadata=metadata)
+            if not success:
+                logger.warning("Failed to send invitation message")
+
+        # Run invitation in event loop
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(send_invitation())
+            loop.close()
+        except Exception as e:
+            logger.error(f"Error sending invitation: {e}")
+
     # Schedule thread dump if requested - run in independent thread
     dump_thread = None
     dump_seconds = args.dump_threads_after
@@ -820,13 +960,39 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
     except KeyboardInterrupt:
         print("\nContainer terminated.", file=sys.stderr)
-        return 130
+        returncode = 130
     except Exception as e:
         raise DockerError(f"Failed to start container shell: {e}") from e
     finally:
+        # Send cleanup notification if messenger is enabled
+        if messenger:
+            duration = datetime.now() - container_start_time
+            duration_str = str(duration).split(".")[0]
+            summary = {
+                "duration": duration_str,
+                "tasks_completed": 0,  # Could be tracked
+                "files_modified": 0,  # Could be tracked
+                "error_count": 0,
+            }
+
+            async def send_cleanup():
+                success = await messenger.send_cleanup_notification(agent_name=container_id, summary=summary)
+                if not success:
+                    logger.warning("Failed to send cleanup message")
+
+            # Run cleanup notification in event loop
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(send_cleanup())
+                loop.close()
+            except Exception as e:
+                logger.error(f"Error sending cleanup notification: {e}")
+
         # Note: dump_thread runs independently and will terminate naturally
         # No need to cancel it since it's a daemon thread with time.sleep()
-        pass
+
+    return returncode if "returncode" in locals() else result.returncode
 
 
 class BackgroundAgent:
