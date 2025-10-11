@@ -45,7 +45,7 @@ class CryptFileKeyring:
         from keyrings.cryptfile.cryptfile import CryptFileKeyring as CryptFileBackend  # type: ignore[import-untyped]
 
         self._keyring_core = keyring.core
-        self._keyring_core.set_keyring(CryptFileBackend())
+        self._keyring_core.set_keyring(CryptFileBackend())  # type: ignore[arg-type]
 
     def get_password(self, service: str, username: str) -> str | None:
         """Get password from cryptfile keyring."""

@@ -826,7 +826,7 @@ class DockerManager:
             # Use list with filter to avoid stale cache issues
             # This forces a fresh query to the Docker daemon
             containers: list[Container] = self.client.containers.list(all=True, filters={"name": f"^{container_name}$"})  # type: ignore[assignment]
-            if containers and len(containers) > 0:
+            if containers and len(containers) > 0:  # type: ignore[arg-type]
                 container: Container = containers[0]
                 # Verify the container still exists by trying to reload it
                 try:

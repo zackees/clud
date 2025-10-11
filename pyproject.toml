@@ -113,7 +113,7 @@ reportUninitializedInstanceVariable = false
 reportInvalidStringEscapeSequence = true
 reportUnknownParameterType = "error"
 # Relax type checking for third-party library issues (Docker API)
-reportUnknownArgumentType = "warning"
+reportUnknownArgumentType = "error"
 reportUnknownLambdaType = "error"
 reportUnknownVariableType = "warning"
 reportUnknownMemberType = "error"
