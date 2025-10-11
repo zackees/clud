@@ -17,8 +17,6 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-import pytest
-
 # Import shared utilities
 from tests.integration.conftest import ContainerInfo
 
