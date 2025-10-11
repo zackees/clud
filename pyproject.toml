@@ -26,6 +26,10 @@ dependencies = [
 version = "1.0.19"
 
 [project.optional-dependencies]
+messaging = [
+    "python-telegram-bot>=21.0.0",
+    "twilio>=9.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-xdist>=2.0.0",
@@ -41,6 +45,8 @@ posix = [
 ]
 full = [
     "zcmds_win32>=1.2.0; sys_platform == 'win32'",
+    "python-telegram-bot>=21.0.0",
+    "twilio>=9.0.0",
 ]
 
 [tool.setuptools]

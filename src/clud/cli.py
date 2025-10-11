@@ -101,6 +101,18 @@ def handle_kanban_command() -> int:
         return 1
 
 
+def handle_configure_messaging_command() -> int:
+    """Handle the --configure-messaging command to set up Telegram/SMS/WhatsApp."""
+    from .messaging.config import prompt_for_messaging_config
+
+    try:
+        prompt_for_messaging_config()
+        return 0
+    except Exception as e:
+        print(f"Error configuring messaging: {e}", file=sys.stderr)
+        return 1
+
+
 def handle_fix_command(url: str | None = None) -> int:
     """Handle the --fix command by running clud with a message to run both linting and testing."""
     if url and is_github_url(url):
@@ -175,6 +187,7 @@ def main(args: list[str] | None = None) -> int:
             print()
             print("Special commands:")
             print("  --login              Configure API key for Claude")
+            print("  --configure-messaging Configure Telegram/SMS/WhatsApp notifications")
             print("  --task PATH          Open task file in editor")
             print("  --lint               Run global linting with codeup")
             print("  --test               Run tests with codeup")
@@ -191,6 +204,9 @@ def main(args: list[str] | None = None) -> int:
         # Handle special commands that don't require agents
         if router_args.login:
             return handle_login()
+
+        if router_args.configure_messaging:
+            return handle_configure_messaging_command()
 
         if router_args.task is not None:
             return handle_task_command(router_args.task)

@@ -1,9 +1,11 @@
+import asyncio
 import contextlib
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -338,6 +340,258 @@ def _execute_command(cmd: list[str], use_shell: bool = False, verbose: bool = Fa
     return result.returncode
 
 
+async def _run_with_notifications(args: Args) -> int:
+    """Run Claude with notification support (async version).
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code from Claude execution
+    """
+    from .messaging.config import load_messaging_config
+    from .messaging.factory import create_client
+    from .messaging.notifier import AgentNotifier
+
+    notifier = None
+
+    # Initialize notifier if requested
+    if args.notify_user:
+        try:
+            config = load_messaging_config()
+            client = create_client(args.notify_user, config)
+            if client is None:
+                print(f"Warning: Could not create messaging client for {args.notify_user}", file=sys.stderr)
+                print("Continuing without notifications...", file=sys.stderr)
+            else:
+                notifier = AgentNotifier(client, args.notify_user, args.notify_interval)
+
+                # Send start notification
+                task_desc = args.message or args.prompt or "Running Claude Code"
+                await notifier.notify_start(task_desc)
+
+        except Exception as e:
+            print(f"Warning: Failed to initialize notifications: {e}", file=sys.stderr)
+            print("Continuing without notifications...", file=sys.stderr)
+            notifier = None
+
+    # Run the actual command
+    try:
+        return_code = await _run_async(args, notifier)
+
+        # Send completion notification
+        if notifier:
+            try:
+                success = return_code == 0
+                await notifier.notify_completion(success)
+            except Exception as e:
+                print(f"Warning: Failed to send completion notification: {e}", file=sys.stderr)
+
+        return return_code
+
+    except Exception as e:
+        # Send error notification
+        if notifier:
+            try:
+                await notifier.notify_error(str(e))
+            except Exception:
+                pass  # Don't fail on notification error
+        raise
+
+
+async def _run_async(args: Args, notifier: Any = None) -> int:
+    """Async wrapper for Claude execution with optional progress monitoring.
+
+    Args:
+        args: Parsed command-line arguments
+        notifier: Optional AgentNotifier for status updates
+
+    Returns:
+        Exit code from Claude execution
+    """
+    # Initialize variables for exception handler access
+    claude_path: str | None = None
+    cmd: list[str] = []
+
+    try:
+        # If --cmd is provided, execute the command directly instead of launching Claude
+        if args.cmd:
+            result = subprocess.run(args.cmd, shell=True)
+            return result.returncode
+
+        # Handle dry-run mode
+        if args.dry_run:
+            cmd_parts = ["claude", "--dangerously-skip-permissions"]
+            if args.continue_flag:
+                cmd_parts.append("--continue")
+            if args.prompt:
+                cmd_parts.extend(["-p", args.prompt])
+            if args.message:
+                cmd_parts.append(args.message)
+            cmd_parts.extend(args.claude_args)
+            print("Would execute:", " ".join(cmd_parts))
+            return 0
+
+        # Find Claude executable
+        claude_path = _find_claude_path()
+        if not claude_path:
+            error_msg = "Claude Code is not installed or not in PATH"
+            if notifier:
+                await notifier.notify_error(error_msg)
+            print(f"Error: {error_msg}", file=sys.stderr)
+            print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
+            return 1
+
+        # Build command
+        cmd = _build_claude_command(args, claude_path)
+
+        # Print debug info
+        _print_debug_info(claude_path, cmd, args.verbose)
+
+        # Execute Claude with optional progress monitoring
+        if notifier:
+            return await _execute_with_monitoring(cmd, notifier, args.verbose)
+        else:
+            return _execute_command(cmd, use_shell=False, verbose=args.verbose)
+
+    except FileNotFoundError as e:
+        error_msg = "Claude Code is not installed or not in PATH"
+        if notifier:
+            await notifier.notify_error(error_msg)
+        print(f"Error: {error_msg}", file=sys.stderr)
+        print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
+        print(f"DEBUG: FileNotFoundError details: {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+    except KeyboardInterrupt:
+        if notifier:
+            await notifier.notify_status("⏸️", "Interrupted by user")
+        print("\nInterrupted by user", file=sys.stderr)
+        return 130
+
+    except OSError as e:
+        error_msg = f"Error launching Claude: {e}"
+        if notifier:
+            await notifier.notify_error(error_msg)
+        print(f"Error launching Claude: {e}", file=sys.stderr)
+        print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
+        _print_error_diagnostics(claude_path, cmd)
+
+        # Try backup method with shell=True
+        if cmd and claude_path:
+            try:
+                print("\nAttempting backup method (shell=True)...", file=sys.stderr)
+                return _execute_command(cmd, use_shell=True, verbose=args.verbose)
+            except Exception as shell_error:
+                print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
+                traceback.print_exc()
+
+        print("\nFull stack trace from original error:", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+    except Exception as e:
+        error_msg = f"Error launching Claude: {e}"
+        if notifier:
+            await notifier.notify_error(error_msg)
+        print(f"Error launching Claude: {e}", file=sys.stderr)
+        print(f"DEBUG: Exception type: {type(e).__name__}", file=sys.stderr)
+        _print_error_diagnostics(claude_path, cmd)
+
+        # Try backup method with shell=True
+        if cmd and claude_path:
+            try:
+                print("\nAttempting backup method (shell=True)...", file=sys.stderr)
+                return _execute_command(cmd, use_shell=True, verbose=args.verbose)
+            except Exception as shell_error:
+                print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
+                traceback.print_exc()
+
+        print("\nFull stack trace from original error:", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+
+async def _execute_with_monitoring(cmd: list[str], notifier: Any, verbose: bool = False) -> int:
+    """Execute command with progress monitoring and notifications.
+
+    Args:
+        cmd: Command to execute
+        notifier: AgentNotifier for status updates
+        verbose: Enable verbose output
+
+    Returns:
+        Process exit code
+    """
+    # Create subprocess
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    # Start monitoring task
+    monitor_task = asyncio.create_task(_monitor_progress(process, notifier, verbose))
+
+    # Wait for process to complete
+    await process.wait()
+
+    # Cancel monitoring
+    monitor_task.cancel()
+    try:
+        await monitor_task
+    except asyncio.CancelledError:
+        pass
+
+    return process.returncode if process.returncode is not None else 1
+
+
+async def _monitor_progress(process: Any, notifier: Any, verbose: bool) -> None:
+    """Monitor process output and send periodic updates.
+
+    Args:
+        process: Subprocess to monitor
+        notifier: AgentNotifier for status updates
+        verbose: Enable verbose output
+    """
+    last_output = ""
+    output_buffer = []
+
+    try:
+        while True:
+            # Read output with timeout
+            try:
+                line_bytes = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+                if not line_bytes:
+                    break  # EOF
+
+                line = line_bytes.decode("utf-8", errors="replace")
+                output_buffer.append(line)
+
+                # Print to stdout (passthrough)
+                print(line, end="", flush=True)
+
+                # Keep last 3 lines for status
+                if len(output_buffer) > 3:
+                    output_buffer.pop(0)
+
+                last_output = "".join(output_buffer).strip()
+
+            except asyncio.TimeoutError:
+                # No output for 1 second, check if we should send update
+                pass
+
+            # Send periodic updates
+            if notifier.should_send_progress_update():
+                status = last_output[-200:] if last_output else "Processing..."
+                await notifier.notify_progress(status)
+
+    except asyncio.CancelledError:
+        # Process completed
+        pass
+
+
 def run(args: Args) -> int:
     """
     Launch Claude Code with dangerous mode (--dangerously-skip-permissions).
@@ -345,6 +599,11 @@ def run(args: Args) -> int:
 
     WARNING: This mode removes all safety guardrails. Use with caution.
     """
+    # If notifications requested, use async version
+    if args.notify_user:
+        return asyncio.run(_run_with_notifications(args))
+
+    # Otherwise use synchronous version (original implementation)
     # Initialize variables for exception handler access
     claude_path: str | None = None
     cmd: list[str] = []

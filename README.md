@@ -18,7 +18,14 @@ Claude Code's safety prompts, while well-intentioned, slow down experienced deve
 ## Installation
 
 ```bash
+# Basic installation
 pip install clud
+
+# With messaging support (Telegram, SMS, WhatsApp notifications)
+pip install clud[messaging]
+
+# Full installation (all features)
+pip install clud[full]
 ```
 
 ## Quick Start
@@ -26,6 +33,11 @@ pip install clud
 ```bash
 # Unleash Claude Code instantly (YOLO mode enabled by default)
 clud
+
+# Get real-time updates via Telegram/SMS/WhatsApp
+clud --notify-user "@yourusername" -m "Fix authentication bug"
+clud --notify-user "+14155551234" -m "Deploy to production"
+clud --notify-user "whatsapp:+14155551234" -m "Run all tests"
 
 # Launch background agent with full Docker server capabilities
 clud bg
@@ -48,12 +60,18 @@ clud [directory]                    # Unleash Claude Code in directory
 clud -p "refactor this entire app"  # Execute with specific prompt
 clud -m "add error handling"        # Send direct message
 clud --continue                     # Continue previous conversation
+
+# With real-time notifications
+clud --notify-user "@username" -m "Deploy app"    # Telegram
+clud --notify-user "+14155551234" -m "Run tests"  # SMS
+clud --notify-user "whatsapp:+1234567890" -m "Build" # WhatsApp
 ```
 
 **Features:**
 - Claude Code with dangerous permissions enabled by default
 - Zero interruption workflow - no safety prompts
 - Direct prompt execution for rapid iteration
+- Real-time status updates via Telegram/SMS/WhatsApp
 - Supports all standard Claude Code arguments
 
 ### Background Agent (`bg` mode)
@@ -139,6 +157,38 @@ clud --api-key "sk-ant-..."
 
 The API key is stored securely in `~/.clud/anthropic-api-key.key` for future use.
 
+### Messaging Setup (Optional)
+
+Get real-time status updates via Telegram, SMS, or WhatsApp:
+
+```bash
+# Interactive setup (recommended)
+clud --configure-messaging
+
+# Or use environment variables
+export TELEGRAM_BOT_TOKEN="1234567890:ABC..."
+export TWILIO_ACCOUNT_SID="ACxxxxxxxxxx"
+export TWILIO_AUTH_TOKEN="your_token"
+export TWILIO_FROM_NUMBER="+15555555555"
+```
+
+**See [MESSAGING_SETUP.md](MESSAGING_SETUP.md) for detailed setup instructions.**
+
+#### Quick Setup:
+
+**Telegram (Free, Recommended):**
+1. Create bot: Message @BotFather on Telegram → `/newbot`
+2. Get chat ID: Message @userinfobot
+3. Configure: `clud --configure-messaging`
+4. Use: `clud --notify-user "123456789" -m "task"`
+
+**SMS/WhatsApp (via Twilio):**
+1. Sign up: https://www.twilio.com/try-twilio (get $15 free credit)
+2. Get phone number and credentials
+3. Configure: `clud --configure-messaging`
+4. Use: `clud --notify-user "+14155551234" -m "task"` (SMS)
+5. Use: `clud --notify-user "whatsapp:+14155551234" -m "task"` (WhatsApp)
+
 ### Container Configuration
 
 Configure container behavior with `.clud` file in your project root:
@@ -222,6 +272,7 @@ clud bg --detect-completion       # Enable completion detection
 ### Utility Commands
 ```bash
 clud --login                      # Configure API key
+clud --configure-messaging        # Configure Telegram/SMS/WhatsApp
 clud --task PATH                  # Process task file
 clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow
@@ -230,6 +281,23 @@ clud --codeup                     # Run codeup with auto-fix
 clud --codeup-publish             # Run codeup -p
 clud --kanban                     # Launch kanban board
 clud --help                       # Show help
+```
+
+### Notification Commands
+```bash
+# Telegram
+clud --notify-user "@username" -m "task"          # Telegram username
+clud --notify-user "123456789" -m "task"          # Telegram chat ID
+clud --notify-user "telegram:@user" -m "task"     # Explicit prefix
+
+# SMS
+clud --notify-user "+14155551234" -m "task"       # Phone number
+
+# WhatsApp
+clud --notify-user "whatsapp:+14155551234" -m "task"
+
+# Custom update interval (seconds)
+clud --notify-user "@user" --notify-interval 60 -m "task"
 ```
 
 ### Quick Mode Aliases
