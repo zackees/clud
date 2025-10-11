@@ -16,7 +16,6 @@ import uuid
 from pathlib import Path
 
 # Import shared utilities
-from clud.testing.docker_test_utils import ensure_test_image
 
 
 class IntegrationTestError(Exception):
@@ -50,7 +49,7 @@ def wait_for_server(url: str, timeout: int = 60, interval: float = 1.0) -> bool:
     return False
 
 
-def test_docker_integration(shared_test_container):
+def test_docker_integration(shared_test_container: dict[str, str | Path]) -> None:
     """Single test that verifies ALL Docker functionality and edge cases.
 
     Uses a shared container to dramatically speed up tests.
@@ -62,6 +61,9 @@ def test_docker_integration(shared_test_container):
     container_name = shared_test_container["name"]
     image_name = shared_test_container["image"]
     project_root = shared_test_container["project_root"]
+
+    # Type assertion for pyright (project_root is always Path from fixture)
+    assert isinstance(project_root, Path)
 
     # Store results for summary
     test_results: list[tuple[str, bool, str | None]] = []

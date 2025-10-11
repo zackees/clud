@@ -78,37 +78,95 @@ clud bg --build-dockerfile PATH   # Build custom Docker image
 - Container sync mechanism for workspace isolation
 - **Telegram notifications** for agent launch and completion
 
-### Telegram Notifications (New!)
+### Telegram Notifications
 
-Get notified when your agents launch and complete via Telegram:
+Get notified when your background agents launch and complete via Telegram. This feature only works with `clud bg` (background mode), not with foreground mode.
 
+#### Quick Setup (5 Minutes)
+
+**Step 1: Create a Telegram Bot**
+1. Open Telegram and search for `@BotFather`
+2. Send `/newbot` command and follow the prompts
+3. Save your bot token (looks like `123456:ABC-DEF1234ghIkl...`)
+
+**Step 2: Get Your Chat ID**
+1. Search for `@userinfobot` on Telegram
+2. Send `/start` command
+3. Note your chat ID (a number like `123456789`)
+
+**Step 3: Start Your Bot**
+1. Search for your bot by its username
+2. **IMPORTANT:** Send `/start` to your bot to initiate the conversation
+   - Bots cannot send messages until you start the conversation first
+   - This is a Telegram security requirement
+
+**Step 4: Configure Credentials**
+
+Option A - Environment Variables (Recommended):
 ```bash
-# Quick setup (5 minutes)
-clud bg --telegram \
-  --telegram-bot-token "123456:ABC-DEF..." \
-  --telegram-chat-id "123456789"
-
-# Use environment variables (recommended)
 export TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."
 export TELEGRAM_CHAT_ID="123456789"
 clud bg --telegram
 ```
 
-**What You Get:**
-- 🚀 **Launch notification** - "Agent is online!"
-- ✅ **Cleanup notification** - "Agent complete!" with summary
-- 📊 **Duration tracking** - See how long tasks took
-- 💬 **Bidirectional** - Send messages to your agent
-- 💰 **FREE** - No API costs
+Option B - Project Config File:
+Create a `.clud` file in your project root:
+```json
+{
+  "telegram": {
+    "enabled": true,
+    "bot_token": "${TELEGRAM_BOT_TOKEN}",
+    "chat_id": "${TELEGRAM_CHAT_ID}"
+  }
+}
+```
+Then run: `clud bg` (auto-detects config)
 
-**Setup:** Create bot via @BotFather, get chat ID from @userinfobot (5 minutes)
+Option C - Command Line:
+```bash
+clud bg --telegram \
+  --telegram-bot-token "123456:ABC-DEF..." \
+  --telegram-chat-id "123456789"
+```
 
 **Installation:**
 ```bash
 pip install python-telegram-bot
 ```
 
-See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for complete setup instructions.
+#### What You Get
+
+- 🚀 **Launch notification** - When agent starts with container details
+- ✅ **Cleanup notification** - When agent completes with duration and summary
+- 📊 **Duration tracking** - See how long your tasks took
+- 💬 **Bidirectional messaging** - Send messages to your agent (future feature)
+- 💰 **FREE** - No API costs, completely free
+
+#### Group Notifications
+
+Want to notify a team? You can send notifications to Telegram groups:
+
+1. Create a group chat in Telegram
+2. **Manually add your bot to the group** (bots cannot auto-join groups)
+3. Get the group chat ID:
+   - Add `@userinfobot` to the group temporarily
+   - It will show the group chat ID (negative number like `-987654321`)
+   - Remove @userinfobot from the group
+4. Use the group chat ID instead of your personal chat ID
+5. Run `clud bg --telegram` with the group chat ID
+
+Note: For groups, configure the bot's privacy settings via @BotFather using `/setprivacy` if needed.
+
+#### Important Notes
+
+- Telegram bots **cannot** automatically join groups - they must be manually invited
+- Users **must** send `/start` to a bot before it can send personal messages
+- Chat IDs for groups are negative numbers (e.g., `-123456789`)
+- Chat IDs for personal chats are positive numbers (e.g., `123456789`)
+- Credentials are stored via environment variables or project-local `.clud` file
+- There is no global clud settings file - use env vars for cross-project bots
+
+See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for detailed setup instructions and troubleshooting.
 
 ### Advanced Modes
 

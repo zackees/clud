@@ -86,7 +86,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         nargs="?",
         const="",  # Empty string when --loop is used without value
         dest="loop_value",
-        help="Run the command N times, checking for DONE.md after each iteration. Can be: --loop 50 -p 'msg', --loop 'msg' (prompts count), --loop 50 (prompts msg), or --loop (prompts both).",
+        help="Run N times, checking for DONE.md after each. Usage: --loop 50 -p 'msg', --loop 'msg' (prompts count), --loop 50 (prompts msg), or --loop (prompts both). Uses -p.",
     )
 
     # Parse known args, allowing unknown args to be passed to Claude

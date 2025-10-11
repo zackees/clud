@@ -540,9 +540,9 @@ def run(args: Args) -> int:
             if not args.prompt and not args.message and not loop_message:
                 loop_message = _prompt_for_message()
 
-            # Set the message if we got it from loop_value
+            # Set the prompt if we got it from loop_value (uses -p instead of -m)
             if loop_message and not args.message and not args.prompt:
-                args.message = loop_message
+                args.prompt = loop_message
 
             return _run_loop(args, claude_path, loop_count)
 

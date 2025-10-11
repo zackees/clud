@@ -4,6 +4,7 @@ import contextlib
 import subprocess
 import time
 import uuid
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from clud.testing.docker_test_utils import ensure_test_image
 
 
 @pytest.fixture(scope="session")
-def shared_test_container():
+def shared_test_container() -> Generator[dict[str, str | Path], None, None]:
     """Create a single long-running container for all integration tests.
 
     This dramatically speeds up tests by reusing the same container
@@ -34,36 +35,28 @@ def shared_test_container():
     try:
         # Start container in detached mode with long sleep
         run_cmd = [
-            "docker", "run",
+            "docker",
+            "run",
             "-d",
-            "--name", container_name,
-            "-v", f"{project_root}:/host:rw",
-            "-v", f"{project_root}:/home/coder/project:rw",
+            "--name",
+            container_name,
+            "-v",
+            f"{project_root}:/host:rw",
+            "-v",
+            f"{project_root}:/home/coder/project:rw",
             image_name,
-            "sleep", "3600"  # Keep alive for 1 hour
+            "sleep",
+            "3600",  # Keep alive for 1 hour
         ]
 
-        result = subprocess.run(
-            run_cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace"
-        )
+        _ = subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         # Wait for container to be ready
         time.sleep(2)
 
         # Verify container is running
         check_cmd = ["docker", "ps", "-q", "-f", f"name={container_name}"]
-        check_result = subprocess.run(
-            check_cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace"
-        )
+        check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         if not check_result.stdout.strip():
             raise RuntimeError(f"Container {container_name} failed to start")
@@ -80,15 +73,11 @@ def shared_test_container():
     finally:
         # Cleanup: destroy container after all tests
         print(f"\n[Teardown] Removing shared test container: {container_name}")
-        subprocess.run(
-            ["docker", "rm", "-f", container_name],
-            capture_output=True,
-            check=False
-        )
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
 
 
 @pytest.fixture(scope="function")
-def clean_container_workspace(shared_test_container):
+def clean_container_workspace(shared_test_container: dict[str, str | Path]) -> Generator[dict[str, str | Path], None, None]:
     """Clean the container workspace before each test.
 
     This ensures test isolation without recreating containers.
