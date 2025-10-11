@@ -23,7 +23,7 @@ dependencies = [
     "nodeenv>=1.8.0",
 ]
 # Change this with the version number bump.
-version = "1.0.19"
+version = "1.0.20"
 
 [project.optional-dependencies]
 dev = [

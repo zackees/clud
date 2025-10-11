@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 
 # Import shared utilities
-from tests.integration.conftest import ContainerInfo
+from conftest import ContainerInfo
 
 
 class IntegrationTestError(Exception):

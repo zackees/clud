@@ -578,12 +578,12 @@ def run(args: Args) -> int:
                     loop_message = args.loop_value
 
             # Prompt for missing values
-            if loop_count is None:
-                loop_count = _prompt_for_loop_count()
-
             # Check if we have a message from loop_value, -m, or -p
             if not args.prompt and not args.message and not loop_message:
                 loop_message = _prompt_for_message()
+
+            if loop_count is None:
+                loop_count = _prompt_for_loop_count()
 
             # Set the prompt if we got it from loop_value (uses -p instead of -m)
             if loop_message and not args.message and not args.prompt:
