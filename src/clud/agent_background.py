@@ -299,7 +299,7 @@ def create_telegram_messenger(args: BackgroundAgentArgs) -> Any | None:
     try:
         messenger = TelegramMessenger(bot_token=args.telegram_bot_token, chat_id=args.telegram_chat_id)  # type: ignore[misc]
         logger.info("Telegram notifications enabled")
-        return messenger
+        return messenger  # type: ignore[return-value]
     except Exception as e:
         logger.error(f"Failed to create Telegram messenger: {e}")
         return None
@@ -336,7 +336,7 @@ def _create_telegram_from_config(telegram_config: dict[str, Any]) -> Any | None:
 
         messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)  # type: ignore[misc]
         logger.info("Telegram notifications enabled (from config file)")
-        return messenger
+        return messenger  # type: ignore[return-value]
 
     except Exception as e:
         logger.error(f"Failed to create Telegram messenger from config: {e}")

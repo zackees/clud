@@ -827,11 +827,11 @@ class DockerManager:
             # This forces a fresh query to the Docker daemon
             containers: list[Container] = self.client.containers.list(all=True, filters={"name": f"^{container_name}$"})  # type: ignore[assignment]
             if containers and len(containers) > 0:  # type: ignore[arg-type]
-                container: Container = containers[0]
+                container: Container = containers[0]  # type: ignore[assignment]
                 # Verify the container still exists by trying to reload it
                 try:
                     container.reload()  # type: ignore[misc]
-                    return container
+                    return container  # type: ignore[return-value]
                 except NotFound:
                     # Container was removed between list and reload
                     return None

@@ -115,7 +115,7 @@ reportUnknownParameterType = "error"
 # Relax type checking for third-party library issues (Docker API)
 reportUnknownArgumentType = "error"
 reportUnknownLambdaType = "error"
-reportUnknownVariableType = "warning"
+reportUnknownVariableType = "error"
 reportUnknownMemberType = "error"
 reportMissingParameterType = "error"
 reportMissingTypeArgument = "error"

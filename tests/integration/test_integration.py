@@ -2,6 +2,8 @@
 """Single comprehensive integration test for all Docker functionality and edge cases.
 
 Optimized for speed by reusing a single container across all tests.
+
+DISABLED: API keys cannot be moved across machines (locked down), making background agent unusable.
 """
 
 import contextlib
@@ -14,6 +16,8 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+
+import pytest
 
 # Import shared utilities
 
@@ -49,6 +53,7 @@ def wait_for_server(url: str, timeout: int = 60, interval: float = 1.0) -> bool:
     return False
 
 
+@pytest.mark.skip(reason="API keys cannot be moved across machines (locked down), making background agent unusable")
 def test_docker_integration(shared_test_container: dict[str, str | Path]) -> None:
     """Single test that verifies ALL Docker functionality and edge cases.
 
