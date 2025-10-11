@@ -6,14 +6,23 @@ import time
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any, TypedDict
 
 import pytest
 
 from clud.testing.docker_test_utils import ensure_test_image
 
 
+class ContainerInfo(TypedDict):
+    """Type information for test container."""
+
+    name: str
+    image: str
+    project_root: Path
+
+
 @pytest.fixture(scope="session")
-def shared_test_container() -> Generator[dict[str, str | Path], None, None]:
+def shared_test_container() -> Generator[ContainerInfo, Any, None]:
     """Create a single long-running container for all integration tests.
 
     This dramatically speeds up tests by reusing the same container
@@ -49,7 +58,7 @@ def shared_test_container() -> Generator[dict[str, str | Path], None, None]:
             "3600",  # Keep alive for 1 hour
         ]
 
-        _ = subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         # Wait for container to be ready
         time.sleep(2)
@@ -77,7 +86,7 @@ def shared_test_container() -> Generator[dict[str, str | Path], None, None]:
 
 
 @pytest.fixture(scope="function")
-def clean_container_workspace(shared_test_container: dict[str, str | Path]) -> Generator[dict[str, str | Path], None, None]:
+def clean_container_workspace(shared_test_container: ContainerInfo) -> Generator[ContainerInfo, Any, None]:
     """Clean the container workspace before each test.
 
     This ensures test isolation without recreating containers.

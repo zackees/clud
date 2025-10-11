@@ -122,4 +122,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Strict type checking is enforced via pyright
 - All functions should have proper return type annotations
 - Use specific types rather than `Any` when possible
-- Docker API types may show warnings due to third-party library issues (acceptable)
+- `reportUnknownVariableType` and `reportUnknownArgumentType` are configured as **errors**
+- **Third-Party Library Amnesty**: Errors from third-party libraries (Docker API, keyring, etc.) should be given lint amnesty
+  - These errors from external dependencies are acceptable and should NOT be "fixed" with type ignore comments
+  - Always fix type errors in code you control (src/clud/ and tests/)
+  - Common acceptable errors from third-party: `reportUnknownVariableType`, `reportUnknownArgumentType` from Docker, keyring, etc.
+  - Do NOT add `# type: ignore` or `# pyright: ignore` comments for third-party library type issues
+  - The goal: zero unknown types in our code, but accept incomplete type stubs from dependencies

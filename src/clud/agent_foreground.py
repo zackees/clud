@@ -13,6 +13,8 @@ from .agent_foreground_args import Args, parse_args
 from .output_filter import OutputFilter
 from .running_process import RunningProcess
 from .secrets import get_credential_store
+from .streaming_parser import StreamingParser
+from .streaming_ui import StreamingUI
 
 # Get credential store once at module level
 keyring = get_credential_store()
@@ -438,6 +440,37 @@ def _open_file_in_editor(file_path: Path) -> None:
         print(f"Warning: Could not open {file_path}: {e}", file=sys.stderr)
 
 
+def _create_streaming_json_callback() -> tuple[Any, Any]:
+    """Create a callback function for parsing streaming JSON output.
+
+    Returns:
+        Tuple of (stdout_callback, stderr_callback) for RunningProcess
+    """
+    parser = StreamingParser()
+    ui = StreamingUI(use_colors=sys.stdout.isatty())
+
+    def stdout_callback(line: str) -> None:
+        """Parse and render JSON events from stdout."""
+        line = line.rstrip()
+        if not line:
+            return
+
+        # Try to parse as JSON event
+        event = parser.parse_line(line)
+        if event:
+            # Render the event using the UI
+            ui.render_event(event)
+        else:
+            # Not a JSON event, print as-is
+            print(line, flush=True)
+
+    def stderr_callback(line: str) -> None:
+        """Pass through stderr without parsing."""
+        print(line.rstrip(), file=sys.stderr, flush=True)
+
+    return stdout_callback, stderr_callback
+
+
 def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     """Run Claude in a loop, checking for DONE.md after each iteration."""
     done_file = Path("DONE.md")
@@ -571,7 +604,9 @@ def run(args: Args) -> int:
         elif args.prompt:
             # Use RunningProcess for streaming output when using -p flag
             # This ensures stream-json output is displayed line-by-line in real-time
-            return RunningProcess.run_streaming(cmd)
+            # with JSON parsing and rendering
+            stdout_callback, stderr_callback = _create_streaming_json_callback()
+            return RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback, stderr_callback=stderr_callback)
         else:
             return _execute_command(cmd, use_shell=False, verbose=args.verbose)
 

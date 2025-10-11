@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 # Import shared utilities
+from tests.integration.conftest import ContainerInfo
 
 
 class IntegrationTestError(Exception):
@@ -53,8 +54,7 @@ def wait_for_server(url: str, timeout: int = 60, interval: float = 1.0) -> bool:
     return False
 
 
-@pytest.mark.skip(reason="API keys cannot be moved across machines (locked down), making background agent unusable")
-def test_docker_integration(shared_test_container: dict[str, str | Path]) -> None:
+def test_docker_integration(shared_test_container: ContainerInfo) -> None:
     """Single test that verifies ALL Docker functionality and edge cases.
 
     Uses a shared container to dramatically speed up tests.

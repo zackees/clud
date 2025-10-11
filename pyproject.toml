@@ -112,7 +112,6 @@ reportMissingSuperCall = false
 reportUninitializedInstanceVariable = false
 reportInvalidStringEscapeSequence = true
 reportUnknownParameterType = "error"
-# Relax type checking for third-party library issues (Docker API)
 reportUnknownArgumentType = "error"
 reportUnknownLambdaType = "error"
 reportUnknownVariableType = "error"
