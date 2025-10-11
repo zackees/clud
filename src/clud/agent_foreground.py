@@ -11,6 +11,7 @@ from typing import Any
 from .agent_completion import detect_agent_completion
 from .agent_foreground_args import Args, parse_args
 from .output_filter import OutputFilter
+from .running_process import RunningProcess
 from .secrets import get_credential_store
 
 # Get credential store once at module level
@@ -450,8 +451,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)
 
-        # Execute the command
-        returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
+        # Execute the command with streaming if prompt is present
+        returncode = RunningProcess.run_streaming(cmd) if args.prompt else _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
         if returncode != 0 and args.verbose:
             print(f"Warning: Run {i + 1} exited with code {returncode}", file=sys.stderr)
@@ -567,6 +568,10 @@ def run(args: Args) -> int:
 
             detect_agent_completion(cmd, args.idle_timeout, output_callback)
             return 0
+        elif args.prompt:
+            # Use RunningProcess for streaming output when using -p flag
+            # This ensures stream-json output is displayed line-by-line in real-time
+            return RunningProcess.run_streaming(cmd)
         else:
             return _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
