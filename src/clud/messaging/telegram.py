@@ -4,7 +4,6 @@
 
 import asyncio
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ class TelegramMessenger:
             logger.error(f"Failed to initialize Telegram messenger: {e}")
             return False
 
-    async def send_invitation(self, agent_name: str, container_id: str, metadata: dict[str, Any]) -> bool:
+    async def send_invitation(self, agent_name: str, container_id: str, metadata: dict[str, str]) -> bool:
         """Send invitation message when agent launches.
 
         Args:
@@ -87,7 +86,7 @@ Send messages to interact with your agent!
             logger.error(f"Failed to send invitation: {e}")
             return False
 
-    async def send_status_update(self, agent_name: str, status: str, details: dict | None = None) -> bool:
+    async def send_status_update(self, agent_name: str, status: str, details: dict[str, str] | None = None) -> bool:
         """Send status update during agent operation.
 
         Args:
@@ -118,7 +117,7 @@ Send messages to interact with your agent!
             logger.error(f"Failed to send status update: {e}")
             return False
 
-    async def send_cleanup_notification(self, agent_name: str, summary: dict) -> bool:
+    async def send_cleanup_notification(self, agent_name: str, summary: dict[str, int | str]) -> bool:
         """Send notification when agent cleans up.
 
         Args:
