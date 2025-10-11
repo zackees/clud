@@ -109,6 +109,9 @@ class TestAgentCompletionIntegration(unittest.TestCase):
             )
 
             # Should complete successfully
+            if result.returncode != 0:
+                print(f"STDOUT: {result.stdout}")
+                print(f"STDERR: {result.stderr}")
             self.assertEqual(result.returncode, 0, f"Command failed with returncode {result.returncode}")
 
             # Should have output

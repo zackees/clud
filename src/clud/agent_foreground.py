@@ -10,6 +10,7 @@ from typing import Any
 
 from .agent_completion import detect_agent_completion
 from .agent_foreground_args import Args, parse_args
+from .json_formatter import StreamJsonFormatter, create_formatter_callback
 from .output_filter import OutputFilter
 from .running_process import RunningProcess
 from .secrets import get_credential_store
@@ -485,7 +486,18 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         _print_debug_info(claude_path, cmd, args.verbose)
 
         # Execute the command with streaming if prompt is present
-        returncode = RunningProcess.run_streaming(cmd) if args.prompt else _execute_command(cmd, use_shell=False, verbose=args.verbose)
+        if args.prompt:
+            # Create JSON formatter for beautiful output in loop mode
+            formatter = StreamJsonFormatter(
+                show_system=args.verbose,
+                show_usage=True,
+                show_cache=args.verbose,
+                verbose=args.verbose,
+            )
+            stdout_callback = create_formatter_callback(formatter)
+            returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+        else:
+            returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
         if returncode != 0 and args.verbose:
             print(f"Warning: Run {i + 1} exited with code {returncode}", file=sys.stderr)
@@ -604,9 +616,15 @@ def run(args: Args) -> int:
         elif args.prompt:
             # Use RunningProcess for streaming output when using -p flag
             # This ensures stream-json output is displayed line-by-line in real-time
-            # with JSON parsing and rendering
-            stdout_callback, stderr_callback = _create_streaming_json_callback()
-            return RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback, stderr_callback=stderr_callback)
+            # Create JSON formatter for beautiful output
+            formatter = StreamJsonFormatter(
+                show_system=args.verbose,
+                show_usage=True,
+                show_cache=args.verbose,
+                verbose=args.verbose,
+            )
+            stdout_callback = create_formatter_callback(formatter)
+            return RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
         else:
             return _execute_command(cmd, use_shell=False, verbose=args.verbose)
 

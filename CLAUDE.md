@@ -97,6 +97,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Code Quality Standards
 
+### Linting Requirement
+- **MANDATORY**: After ANY code editing (creating, modifying, or deleting Python files), you MUST run `bash lint`
+- This ensures all code changes pass ruff linting and pyright type checking before considering the task complete
+- The lint check must pass successfully - address all errors and warnings before marking work as done
+- This applies to all Python code in `src/` and `tests/` directories
+
 ### Exception Handling
 - **NEVER** use bare `except Exception: pass` or similar patterns that silently ignore exceptions
 - All caught exceptions MUST be logged at minimum with appropriate context

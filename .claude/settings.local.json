@@ -18,7 +18,8 @@
       "Read(//c/Users/niteris/AppData/Roaming/npm/**)",
       "Bash(uv run pytest:*)",
       "WebSearch",
-      "WebFetch(domain:invisible-island.net)"
+      "WebFetch(domain:invisible-island.net)",
+      "Read(//c/Users/niteris/dev/fastled-run/**)"
     ],
     "deny": [],
     "ask": []
