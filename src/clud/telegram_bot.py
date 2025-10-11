@@ -168,7 +168,15 @@ class TelegramBot:
         chat_id = getattr(args, "telegram_chat_id", None)
 
         if not bot_token or not chat_id:
-            print("Error: Telegram requires bot token and chat ID (use --telegram-bot-token and --telegram-chat-id, or env vars TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)", file=sys.stderr)
+            print("Error: Telegram notifications require bot token and chat ID\n", file=sys.stderr)
+            print("Quick setup:", file=sys.stderr)
+            print('  export TELEGRAM_BOT_TOKEN="..."  (get from @BotFather on Telegram)', file=sys.stderr)
+            print('  export TELEGRAM_CHAT_ID="..."    (get from @userinfobot on Telegram)', file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Or use command-line flags:", file=sys.stderr)
+            print("  clud --telegram --telegram-bot-token TOKEN --telegram-chat-id ID", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Setup guide: https://github.com/zackees/clud/blob/main/TELEGRAM_SETUP.md", file=sys.stderr)
             sys.exit(1)
 
         try:

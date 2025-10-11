@@ -151,6 +151,3 @@ functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
-clud-bg = "clud.cli_bg:main"
-clud-fb = "clud.cli_fb:main"
-# yolo = "clud.yolo:main"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Simplified CLI routing for clud."""
 
+import contextlib
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -9,10 +10,9 @@ from enum import Enum
 class AgentMode(Enum):
     """Agent execution modes."""
 
-    FOREGROUND = "fg"
-    BACKGROUND = "bg"
     FIX = "fix"
     UP = "up"
+    DEFAULT = "default"
 
 
 @dataclass
@@ -31,6 +31,9 @@ class RouterArgs:
     codeup: bool = False
     codeup_publish: bool = False
     kanban: bool = False
+    telegram: bool = False
+    code: bool = False
+    code_port: int | None = None
     help: bool = False
 
 
@@ -41,16 +44,18 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
 
     # Create a copy to modify
     args_copy = args[:]
-    mode = AgentMode.FOREGROUND  # Default to foreground
+    mode = AgentMode.DEFAULT  # Default mode
 
     # Check for special commands first (these don't need agent routing)
     login = "--login" in args_copy
     lint = "--lint" in args_copy
     test = "--test" in args_copy
-    fix = "--fix" in args_copy  # --fix should be passed to agents, not intercepted
+    fix = "--fix" in args_copy
     codeup = "--codeup" in args_copy
     codeup_publish = "--codeup-publish" in args_copy or "--codeup-p" in args_copy
     kanban = "--kanban" in args_copy
+    telegram = "--telegram" in args_copy or "-tg" in args_copy
+    code = "--code" in args_copy
 
     # Extract fix URL argument if present
     fix_url = None
@@ -60,9 +65,17 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         if fix_idx + 1 < len(args_copy) and not args_copy[fix_idx + 1].startswith("-"):
             fix_url = args_copy[fix_idx + 1]
 
-    # Only intercept help if no mode is specified (i.e., generic help)
-    has_mode_specified = (args_copy and args_copy[0] in ["bg", "fg"]) or "--bg" in args_copy
-    help_requested = ("--help" in args_copy or "-h" in args_copy) and not has_mode_specified
+    # Extract code port argument if present
+    code_port = None
+    if "--code" in args_copy:
+        code_idx = args_copy.index("--code")
+        # Check if there's a port argument after --code
+        if code_idx + 1 < len(args_copy) and not args_copy[code_idx + 1].startswith("-"):
+            with contextlib.suppress(ValueError):
+                code_port = int(args_copy[code_idx + 1])
+
+    # Only intercept help if no mode is specified
+    help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up"])
 
     # Extract task argument if present
     task = None
@@ -79,23 +92,14 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
             args_copy.pop(task_idx)
             task = ""  # Empty string will trigger error in handle_task_command
 
-    # Check for mode in multiple ways:
-    # 1. Positional argument at start (fg, bg, fix, up)
-    # 2. --bg flag anywhere (for backward compatibility)
-    if args_copy and args_copy[0] in ["fg", "bg", "fix", "up"]:
+    # Check for mode: only fix and up are special modes now
+    if args_copy and args_copy[0] in ["fix", "up"]:
         mode_str = args_copy[0]
-        if mode_str == "fg":
-            mode = AgentMode.FOREGROUND
-        elif mode_str == "bg":
-            mode = AgentMode.BACKGROUND
-        elif mode_str == "fix":
+        if mode_str == "fix":
             mode = AgentMode.FIX
         elif mode_str == "up":
             mode = AgentMode.UP
         args_copy = args_copy[1:]  # Remove the positional arg
-    elif "--bg" in args_copy:
-        mode = AgentMode.BACKGROUND
-        # Keep --bg flag for backward compatibility
 
     return RouterArgs(
         mode=mode,
@@ -109,5 +113,8 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         codeup=codeup,
         codeup_publish=codeup_publish,
         kanban=kanban,
+        telegram=telegram,
+        code=code,
+        code_port=code_port,
         help=help_requested,
     )

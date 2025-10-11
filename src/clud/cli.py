@@ -109,6 +109,102 @@ def handle_kanban_command() -> int:
         return 1
 
 
+def handle_telegram_command() -> int:
+    """Handle the --telegram/-tg command by starting Telegram Web App server."""
+    from .webapp.server import run_server
+
+    try:
+        print("Starting Telegram Web App server...")
+        return run_server()
+    except Exception as e:
+        print(f"Error running Telegram Web App: {e}", file=sys.stderr)
+        return 1
+
+
+def handle_code_command(port: int | None = None) -> int:
+    """Handle the --code command by launching code-server via npx."""
+    import os
+    import socket
+    import time
+    import webbrowser
+
+    def is_port_available(port: int) -> bool:
+        """Check if a port is available for binding."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("localhost", port))
+                return True
+        except OSError:
+            return False
+
+    def find_available_port(start_port: int = 8080) -> int:
+        """Find an available port starting from start_port."""
+        for port_candidate in range(start_port, start_port + 100):
+            if is_port_available(port_candidate):
+                return port_candidate
+        raise RuntimeError(f"No available ports found starting from {start_port}")
+
+    # Find available port
+    if port is None:
+        port = find_available_port(8080)
+    else:
+        # User specified a port, check if it's available
+        if not is_port_available(port):
+            print(f"⚠️  Port {port} is not available, finding alternative...")
+            port = find_available_port(port)
+
+    # Get current working directory
+    workspace = os.getcwd()
+
+    print(f"🚀 Launching code-server on port {port}...")
+    print(f"📁 Workspace: {workspace}")
+    print()
+
+    # Build npx command
+    cmd = [
+        "npx",
+        "code-server",
+        "--bind-addr",
+        f"0.0.0.0:{port}",
+        "--auth",
+        "none",
+        "--disable-telemetry",
+        workspace,
+    ]
+
+    # Schedule browser opening
+    def open_browser_delayed():
+        time.sleep(3)
+        url = f"http://localhost:{port}"
+        print(f"\n🌐 Opening browser to {url}")
+        try:
+            webbrowser.open(url)
+            print(f"✓ VS Code server is now accessible at {url}")
+            print("\nPress Ctrl+C to stop the server")
+        except Exception as e:
+            print(f"Could not open browser automatically: {e}")
+            print(f"Please open {url} in your browser")
+
+    import threading
+
+    browser_thread = threading.Thread(target=open_browser_delayed, daemon=True)
+    browser_thread.start()
+
+    # Run code-server
+    try:
+        result = subprocess.run(cmd, check=False)
+        return result.returncode
+    except FileNotFoundError:
+        print("Error: npx not found. Make sure Node.js is installed.", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\n\nStopping code-server...", file=sys.stderr)
+        return 0
+    except Exception as e:
+        print(f"Error running code-server: {e}", file=sys.stderr)
+        return 1
+
+
 def handle_fix_command(url: str | None = None) -> int:
     """Handle the --fix command by running clud with a message to run both linting and testing."""
     if url and is_github_url(url):
@@ -172,18 +268,17 @@ def main(args: list[str] | None = None) -> int:
 
         # Handle help first
         if router_args.help:
-            print("clud - Claude-powered development container")
-            print("Usage: clud [fg|bg|fix|up] [options...]")
+            print("clud - Claude Code in YOLO mode")
+            print("Usage: clud [options...]")
             print()
-            print("Modes:")
-            print("  fg    Run in foreground mode (Claude Code directly, default)")
-            print("  bg    Run in background mode (Docker container)")
+            print("Special modes:")
             print("  fix   Fix linting and test issues (with optional GitHub URL)")
-            print("  up    Run global codeup command with auto-fix (alias for --codeup)")
+            print("  up    Run global codeup command with auto-fix")
             print()
             print("Special commands:")
             print("  --login              Configure API key for Claude")
             print("  --task PATH          Open task file in editor")
+            print("  --code [PORT]        Launch code-server in browser (default port: 8080)")
             print("  --lint               Run global linting with codeup")
             print("  --test               Run tests with codeup")
             print("  --codeup             Run global codeup command with auto-fix (up to 5 retries)")
@@ -191,9 +286,10 @@ def main(args: list[str] | None = None) -> int:
             print("  --codeup-p           Alias for --codeup-publish")
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
+            print("  --telegram, -tg      Start Telegram Web App server for bot integration")
             print("  -h, --help           Show this help")
             print()
-            print("For mode-specific options, use: clud <mode> --help")
+            print("Default: Run Claude Code with --dangerously-skip-permissions")
             return 0
 
         # Handle special commands that don't require agents
@@ -218,25 +314,24 @@ def main(args: list[str] | None = None) -> int:
         if router_args.kanban:
             return handle_kanban_command()
 
+        if router_args.telegram:
+            return handle_telegram_command()
+
+        if router_args.code:
+            return handle_code_command(router_args.code_port)
+
         if router_args.fix:
             return handle_fix_command(router_args.fix_url)
 
-        # Route to appropriate agent or mode-specific handler
+        # Route to appropriate mode handler
         if router_args.mode == AgentMode.FIX:
             # Extract optional URL from remaining args
             fix_url = router_args.remaining_args[0] if router_args.remaining_args else None
             return handle_fix_command(fix_url)
         elif router_args.mode == AgentMode.UP:
             return handle_codeup_command()
-        elif router_args.mode == AgentMode.BACKGROUND:
-            # Import background agent and pass remaining args
-            from .agent_background import main as bg_main
-
-            # Pass raw args to background agent's main function
-            result = bg_main(router_args.remaining_args)
-            return result if result is not None else 0
         else:
-            # Foreground mode - import and run foreground agent
+            # Default mode - run foreground agent
             from .agent_foreground import main as fg_main
 
             return fg_main(router_args.remaining_args)

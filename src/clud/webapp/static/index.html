@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Code Chat</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #000000);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #header {
+            padding: 16px;
+            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            border-bottom: 1px solid var(--tg-theme-hint-color, #ccc);
+        }
+
+        #status {
+            font-size: 14px;
+            color: var(--tg-theme-hint-color, #999);
+        }
+
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .message {
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+
+        .message.user {
+            background-color: var(--tg-theme-button-color, #0088cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            margin-left: auto;
+            text-align: right;
+        }
+
+        .message.bot {
+            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+
+        #input-container {
+            padding: 16px;
+            border-top: 1px solid var(--tg-theme-hint-color, #ccc);
+            display: flex;
+            gap: 8px;
+        }
+
+        #message-input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid var(--tg-theme-hint-color, #ccc);
+            border-radius: 20px;
+            background-color: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #000000);
+        }
+
+        #send-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 20px;
+            background-color: var(--tg-theme-button-color, #0088cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            cursor: pointer;
+        }
+
+        #send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        code {
+            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+
+        #user-info {
+            font-size: 12px;
+            color: var(--tg-theme-hint-color, #999);
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h2>Claude Code Assistant</h2>
+        <div id="status">Initializing...</div>
+        <div id="user-info"></div>
+    </div>
+
+    <div id="messages"></div>
+
+    <div id="input-container">
+        <input
+            type="text"
+            id="message-input"
+            placeholder="Type your message..."
+            disabled
+        />
+        <button id="send-btn" disabled>Send</button>
+    </div>
+
+    <script>
+        // Initialize Telegram WebApp
+        const tg = window.Telegram.WebApp;
+
+        // Expand to full height
+        tg.expand();
+
+        // Set theme
+        tg.ready();
+
+        // UI elements
+        const messagesDiv = document.getElementById('messages');
+        const statusDiv = document.getElementById('status');
+        const userInfoDiv = document.getElementById('user-info');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        // Enable UI after initialization
+        function initialize() {
+            statusDiv.textContent = 'Ready - Start chatting!';
+            messageInput.disabled = false;
+            sendBtn.disabled = false;
+            messageInput.focus();
+
+            // Display user info if available
+            if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+                const user = tg.initDataUnsafe.user;
+                userInfoDiv.textContent = `User: ${user.first_name || 'Unknown'} (ID: ${user.id})`;
+            }
+
+            // Show welcome message
+            appendMessage('bot', 'Hello! I\'m Claude Code. How can I help you today?');
+        }
+
+        // Append message to chat
+        function appendMessage(sender, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}`;
+            messageDiv.textContent = text;
+            messagesDiv.appendChild(messageDiv);
+
+            // Auto-scroll to bottom
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Send message via Telegram
+        function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            // Show user message in UI
+            appendMessage('user', message);
+
+            // Send to Telegram bot backend
+            tg.sendData(JSON.stringify({
+                type: 'message',
+                text: message,
+                timestamp: Date.now()
+            }));
+
+            // Clear input
+            messageInput.value = '';
+
+            // Show status
+            statusDiv.textContent = 'Claude is thinking...';
+        }
+
+        // Handle send button click
+        sendBtn.addEventListener('click', sendMessage);
+
+        // Handle Enter key
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Listen for responses from bot (via web_app_data)
+        // Note: This is handled by Telegram's infrastructure
+        // The bot backend sends updates that Telegram delivers to this app
+
+        // Initialize after short delay
+        setTimeout(initialize, 500);
+
+        // For testing in browser (not in Telegram)
+        if (!window.Telegram.WebApp.initData) {
+            console.log('Running outside Telegram - demo mode');
+            initialize();
+
+            // Mock bot response for testing
+            setTimeout(() => {
+                appendMessage('bot', 'This is a test response. In production, messages come from your Telegram bot.');
+                statusDiv.textContent = 'Ready';
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

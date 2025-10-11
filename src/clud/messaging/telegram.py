@@ -206,3 +206,69 @@ Status: 🔴 Offline
                 logger.info("Stopped listening for Telegram messages")
             except Exception as e:
                 logger.error(f"Failed to stop listening: {e}")
+
+    async def handle_web_app_data(self, update, context):
+        """Handle data sent from Telegram Web App.
+
+        Args:
+            update: Telegram update with web_app_data
+            context: Telegram context
+
+        Returns:
+            True if message handled successfully, False otherwise
+        """
+        if not update.message or not update.message.web_app_data:
+            logger.warning("No web app data in update")
+            return False
+
+        # Extract chat context for multi-chat support
+        chat_id = update.message.chat_id
+        user_id = update.message.from_user.id
+        username = update.message.from_user.username or "Unknown"
+
+        # Import json at function scope
+        import json
+
+        try:
+            # Parse the JSON data sent from web app
+            data = json.loads(update.message.web_app_data.data)
+
+            message_text = data.get("text", "")
+            message_type = data.get("type", "message")
+
+            logger.info(f"Web app {message_type} from {username} (user_id: {user_id}, chat_id: {chat_id}): {message_text[:50]}...")
+
+            # TODO: Process with Claude agent (to be implemented)
+            # For now, just echo back the message
+            response = f"Received your message: {message_text}\n\n(Agent integration coming soon!)"
+
+            # Send response back to this specific chat
+            await update.message.reply_text(response, parse_mode="Markdown")
+
+            return True
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON from web app (chat {chat_id}): {e}")
+            await update.message.reply_text("Sorry, I received invalid data. Please try again.")
+            return False
+        except Exception as e:
+            logger.error(f"Error processing web app data (chat {chat_id}): {e}")
+            await update.message.reply_text("Sorry, an error occurred. Please try again.")
+            return False
+
+    async def setup_web_app_handler(self):
+        """Set up handler for web app data."""
+        if not await self._ensure_initialized():
+            return
+
+        try:
+            # Import here to avoid requiring telegram library if not used
+            from telegram import filters  # type: ignore[import-untyped]
+            from telegram.ext import MessageHandler  # type: ignore[import-untyped]
+
+            # Add handler for web app data
+            web_app_handler = MessageHandler(filters.StatusUpdate.WEB_APP_DATA, self.handle_web_app_data)  # type: ignore[attr-defined]
+            self.app.add_handler(web_app_handler)  # type: ignore[attr-defined]
+
+            logger.info("Web app handler registered")
+        except Exception as e:
+            logger.error(f"Failed to setup web app handler: {e}")
