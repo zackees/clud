@@ -122,6 +122,94 @@ def load_messaging_config() -> dict[str, Any]:
 
 ---
 
+## Registering a Telegram Bot Agent with BotFather
+
+Before using Telegram notifications, you need to register a bot with BotFather to get your bot token.
+
+### Quick Steps to Register:
+
+1. **Open Telegram** and search for `@BotFather`
+2. **Send:** `/newbot`
+3. **Choose name:** Any display name (e.g., "My Clud Bot")
+4. **Choose username:** Must end with 'bot' (e.g., "my_clud_bot")
+5. **Copy token:** BotFather sends your bot token (e.g., `1234567890:ABCdef...`)
+6. **Get Chat ID:** Message `@userinfobot` to get your numeric ID (e.g., `123456789`)
+7. **Configure clud:** Run `clud --configure-messaging` and paste token
+8. **Test:** `clud --notify-user "123456789" --cmd "echo test"`
+
+### Detailed BotFather Registration Process:
+
+#### Step 1: Find BotFather
+```
+Open Telegram → Search → @BotFather → START
+```
+
+#### Step 2: Create Bot
+```
+You: /newbot
+BotFather: Alright, a new bot. How are we going to call it?
+
+You: My Clud Agent Notifier
+BotFather: Good. Now let's choose a username for your bot. It must end in `bot`.
+
+You: my_clud_agent_bot
+BotFather: Done! Congratulations on your new bot...
+
+Use this token to access the HTTP API:
+1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+```
+
+#### Step 3: Get Your Chat ID
+
+**Method 1 (Easiest):**
+```
+1. Search @userinfobot
+2. Send any message
+3. Copy your Id: 123456789
+```
+
+**Method 2 (Using API):**
+```bash
+# Start conversation with your bot first
+# Then run:
+curl "https://api.telegram.org/bot{YOUR_TOKEN}/getUpdates"
+
+# Look for: "chat":{"id":123456789
+```
+
+#### Step 4: Save to clud (Encrypted)
+```bash
+clud --configure-messaging
+# Enter token when prompted
+# Token saved to ~/.clud/credentials.enc (encrypted)
+```
+
+### BotFather Commands Reference:
+
+| Command | Purpose |
+|---------|---------|
+| `/newbot` | Create a new bot (get token) |
+| `/mybots` | Manage your bots |
+| `/token` | Get token if you lost it |
+| `/revoke` | Generate new token (revoke old) |
+| `/deletebot` | Delete a bot permanently |
+| `/setname` | Change display name |
+| `/setdescription` | Set description |
+| `/setuserpic` | Set profile picture |
+
+### Token Format:
+```
+{bot_id}:{authentication_hash}
+
+Example: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz-abcd1234
+         └─────┬────┘ └──────────────┬──────────────┘
+           Bot ID      Auth Hash (keep secret!)
+```
+
+**See [TELEGRAM_BOT_SETUP_GUIDE.md](./TELEGRAM_BOT_SETUP_GUIDE.md) for complete walkthrough.**
+
+---
+
 ## How It SHOULD Be Integrated
 
 ### Recommended Architecture:

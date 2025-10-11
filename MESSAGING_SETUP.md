@@ -20,12 +20,30 @@ clud --notify-user "whatsapp:+14155551234" -m "Run all tests"
 
 **Recommended for developers** - Free, rich formatting, supports code blocks
 
-### Step 1: Create a Bot
+### Step 1: Create a Bot with BotFather
+
+**BotFather** is Telegram's official bot creation tool.
 
 1. Open Telegram and search for `@BotFather`
 2. Send `/newbot` command
-3. Follow the prompts to choose a name and username
-4. Copy the **bot token** (looks like: `1234567890:ABCdefGHI...`)
+3. Choose a **display name** (e.g., "My Clud Bot")
+4. Choose a **username** that ends with `bot` (e.g., "my_clud_bot")
+5. Copy the **bot token** (looks like: `1234567890:ABCdefGHI...`)
+
+**Example Conversation:**
+```
+You: /newbot
+BotFather: Alright, a new bot. How are we going to call it?
+
+You: My Clud Notifier
+BotFather: Good. Now let's choose a username for your bot.
+
+You: my_clud_notifier_bot
+BotFather: Done! Use this token to access the HTTP API:
+           1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+```
+
+**📖 Full Guide:** See [TELEGRAM_BOT_SETUP_GUIDE.md](./TELEGRAM_BOT_SETUP_GUIDE.md) for detailed walkthrough with troubleshooting.
 
 ### Step 2: Get Your Chat ID
 

@@ -61,6 +61,245 @@ Refactored messaging config to use **clud's existing encrypted credential store*
 
 ---
 
+## Registering a New Telegram Bot with BotFather
+
+### Step-by-Step Guide to Get Your Bot Token
+
+**BotFather** is Telegram's official bot that helps you create and manage your bots.
+
+#### 1. Start a Conversation with BotFather
+
+1. Open Telegram (mobile or desktop)
+2. Search for `@BotFather` in the search bar
+3. Click on the verified BotFather (it has a blue checkmark ✓)
+4. Click **START** or send `/start`
+
+#### 2. Create a New Bot
+
+Send the `/newbot` command to BotFather:
+
+```
+/newbot
+```
+
+BotFather will respond with:
+```
+Alright, a new bot. How are we going to call it? Please choose a name for your bot.
+```
+
+#### 3. Choose a Display Name
+
+Enter a display name for your bot (this is what users will see):
+
+```
+My Clud Notifier Bot
+```
+
+BotFather will respond:
+```
+Good. Now let's choose a username for your bot. It must end in `bot`. 
+Like this, for example: TetrisBot or tetris_bot.
+```
+
+#### 4. Choose a Username
+
+Enter a username that ends with `bot`:
+
+```
+my_clud_notifier_bot
+```
+
+Or:
+```
+MyNotifierBot
+```
+
+**Username Requirements:**
+- Must end with `bot` (case insensitive)
+- Must be unique (not already taken)
+- Can contain letters, numbers, and underscores
+- Minimum 5 characters
+
+#### 5. Get Your Bot Token
+
+If the username is available, BotFather will create your bot and respond with:
+
+```
+Done! Congratulations on your new bot. You will find it at t.me/my_clud_notifier_bot. 
+You can now add a description, about section and profile picture for your bot, 
+see /help for a list of commands.
+
+Use this token to access the HTTP API:
+1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+
+Keep your token secure and store it safely, it can be used by anyone to control your bot.
+
+For a description of the Bot API, see this page: https://core.telegram.org/bots/api
+```
+
+**📝 Copy this token!** This is your `TELEGRAM_BOT_TOKEN`.
+
+Format: `{bot_id}:{random_string}`
+Example: `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`
+
+#### 6. Get Your Chat ID (Required for Notifications)
+
+After creating the bot, you need to get your **chat ID** to receive notifications:
+
+**Option A: Use @userinfobot**
+1. Search for `@userinfobot` on Telegram
+2. Send any message to it
+3. It will reply with your user info including your **ID** (this is your chat ID)
+   ```
+   👤 User
+   Id: 123456789
+   First name: John
+   Username: @johnsmith
+   Language: en
+   ```
+4. Copy the `Id` number (e.g., `123456789`)
+
+**Option B: Use your bot**
+1. Start a conversation with your new bot (click the t.me link from BotFather)
+2. Send `/start` to your bot
+3. Use the bot token to check updates:
+   ```bash
+   curl https://api.telegram.org/bot{YOUR_BOT_TOKEN}/getUpdates
+   ```
+4. Look for `"chat":{"id":123456789` in the response
+5. That number is your chat ID
+
+#### 7. Configure clud with Your Credentials
+
+Now configure clud with your bot token:
+
+```bash
+clud --configure-messaging
+```
+
+When prompted:
+```
+Telegram Bot Token (or press Enter to skip): 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+✓ Telegram configured
+```
+
+#### 8. Test Your Bot
+
+Test that notifications work:
+
+```bash
+# Using your chat ID (numeric)
+clud --notify-user "123456789" --cmd "echo Hello from clud!"
+
+# Or if you started the bot, you can use your username
+clud --notify-user "@yourusername" -m "Test notification"
+```
+
+You should receive a message from your bot!
+
+### Full BotFather Command Reference
+
+Useful commands you can send to BotFather:
+
+| Command | Description |
+|---------|-------------|
+| `/newbot` | Create a new bot |
+| `/mybots` | List your bots and manage them |
+| `/setname` | Change bot's display name |
+| `/setdescription` | Change bot's description |
+| `/setabouttext` | Change bot's about text |
+| `/setuserpic` | Change bot's profile picture |
+| `/setcommands` | Set bot commands (shown in menu) |
+| `/deletebot` | Delete a bot |
+| `/token` | Get bot's token (if you lost it) |
+| `/revoke` | Revoke bot's token (generate new one) |
+
+### Security Best Practices
+
+**DO:**
+- ✅ Keep your bot token secret (treat like a password)
+- ✅ Store it in encrypted credential store (clud does this automatically)
+- ✅ Use environment variables in CI/CD
+- ✅ Revoke token immediately if compromised (`/revoke` in BotFather)
+
+**DON'T:**
+- ❌ Share your bot token publicly
+- ❌ Commit tokens to git repositories
+- ❌ Post tokens in chat messages
+- ❌ Store in plain text files (clud encrypts them for you)
+
+### Troubleshooting Bot Creation
+
+**Problem: "Sorry, this username is already taken"**
+- **Solution:** Choose a different username. Try adding numbers or underscores.
+
+**Problem: "Username is invalid"**
+- **Solution:** Make sure it ends with `bot` and contains only letters, numbers, and underscores.
+
+**Problem: "Can't find my bot after creation"**
+- **Solution:** Use the direct link provided by BotFather (t.me/your_bot_username)
+
+**Problem: "Bot doesn't respond to messages"**
+- **Solution:** Bot accounts don't receive messages until you implement a handler. For clud, you only need the bot to SEND messages, which works immediately.
+
+**Problem: "Cannot resolve Telegram username to chat_id"**
+- **Solution:** Use numeric chat ID instead. Get it from @userinfobot or by checking bot updates.
+
+### Example: Complete Setup Flow
+
+```bash
+# 1. Create bot with BotFather (via Telegram app)
+#    Get token: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+
+# 2. Get your chat ID from @userinfobot
+#    Get ID: 123456789
+
+# 3. Configure clud (saves encrypted)
+$ clud --configure-messaging
+Telegram Bot Token: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+✓ Credentials saved securely to encrypted credential store
+
+# 4. Test notification
+$ clud --notify-user "123456789" --cmd "echo Test"
+🤖 Clud Agent Starting
+Task: echo Test
+✅ Completed Successfully (1s)
+
+# 5. Use in real workflow
+$ clud --notify-user "123456789" -m "Deploy to production"
+```
+
+### Advanced: Bot Customization
+
+After creating your bot, you can customize it:
+
+```
+# Set description (shown in bot's profile)
+/setdescription
+@my_clud_notifier_bot
+This bot sends notifications from my clud development agent.
+
+# Set about text
+/setabouttext
+@my_clud_notifier_bot
+Automated notifications from clud - Claude in YOLO mode.
+GitHub: github.com/zackees/clud
+
+# Set profile picture
+/setuserpic
+@my_clud_notifier_bot
+[Upload an image]
+
+# Set commands (shown in bot menu)
+/setcommands
+@my_clud_notifier_bot
+start - Start receiving notifications
+help - Show help message
+status - Check bot status
+```
+
+---
+
 ## How It Works Now
 
 ### Saving Credentials (New Way)
