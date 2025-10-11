@@ -1,22 +1,8 @@
 {
-  "messaging": {
+  "telegram": {
     "enabled": true,
-    "platform": "telegram",
-    "telegram": {
-      "bot_token": "${TELEGRAM_BOT_TOKEN}",
-      "chat_id": "${TELEGRAM_CHAT_ID}"
-    },
-    "sms": {
-      "account_sid": "${TWILIO_ACCOUNT_SID}",
-      "auth_token": "${TWILIO_AUTH_TOKEN}",
-      "from_number": "${TWILIO_FROM_NUMBER}",
-      "to_number": "${TWILIO_TO_NUMBER}"
-    },
-    "whatsapp": {
-      "phone_number_id": "${WHATSAPP_PHONE_ID}",
-      "access_token": "${WHATSAPP_ACCESS_TOKEN}",
-      "to_number": "${WHATSAPP_TO_NUMBER}"
-    }
+    "bot_token": "${TELEGRAM_BOT_TOKEN}",
+    "chat_id": "${TELEGRAM_CHAT_ID}"
   },
   "dockerfile": "Dockerfile"
 }

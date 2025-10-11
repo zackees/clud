@@ -1,15 +1,6 @@
-"""Messaging module for Claude agent notifications via Telegram, SMS, and WhatsApp."""
+"""Messaging module for Claude agent notifications via Telegram."""
 
-from enum import Enum
 from typing import Optional, Protocol
-
-
-class MessagePlatform(Enum):
-    """Supported messaging platforms."""
-
-    TELEGRAM = "telegram"
-    SMS = "sms"
-    WHATSAPP = "whatsapp"
 
 
 class AgentMessenger(Protocol):
@@ -65,16 +56,9 @@ class AgentMessenger(Protocol):
         ...
 
 
-from .factory import MessengerFactory
-from .sms import SMSMessenger
 from .telegram import TelegramMessenger
-from .whatsapp import WhatsAppMessenger
 
 __all__ = [
-    "MessagePlatform",
     "AgentMessenger",
-    "MessengerFactory",
     "TelegramMessenger",
-    "SMSMessenger",
-    "WhatsAppMessenger",
 ]

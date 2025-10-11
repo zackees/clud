@@ -23,13 +23,13 @@ from .agent_background_args import BackgroundAgentArgs, parse_background_agent_a
 from .agent_completion import detect_agent_completion
 from .running_process import RunningProcess
 
-# Import messaging components (optional, only if enabled)
+# Import Telegram messaging (optional)
 try:
-    from .messaging import MessengerFactory
+    from .messaging import TelegramMessenger
 
-    MESSAGING_AVAILABLE = True
+    TELEGRAM_AVAILABLE = True
 except ImportError:
-    MESSAGING_AVAILABLE = False
+    TELEGRAM_AVAILABLE = False
 
 # Container sync is now handled by standalone package in container
 
@@ -268,108 +268,73 @@ def load_clud_config() -> dict[str, Any] | None:
     return None
 
 
-def create_messenger(args: BackgroundAgentArgs) -> Any | None:
-    """Create messenger instance from args if messaging is enabled.
+def create_telegram_messenger(args: BackgroundAgentArgs) -> Any | None:
+    """Create Telegram messenger instance if enabled.
 
     Args:
         args: Background agent arguments
 
     Returns:
-        Messenger instance or None if disabled/unavailable
+        TelegramMessenger instance or None if disabled/unavailable
     """
-    if not MESSAGING_AVAILABLE:
+    if not TELEGRAM_AVAILABLE:
         return None
 
     # Try loading from config file if no args provided
-    if not args.messaging_enabled:
+    if not args.telegram_enabled:
         clud_config = load_clud_config()
-        if clud_config and "messaging" in clud_config:
-            messaging_config = clud_config["messaging"]
-            if messaging_config.get("enabled"):
-                return _create_messenger_from_config(messaging_config)
+        if clud_config and "telegram" in clud_config:
+            telegram_config = clud_config["telegram"]
+            if telegram_config.get("enabled"):
+                return _create_telegram_from_config(telegram_config)
         return None
 
-    if not args.messaging_platform:
-        logger.warning("Messaging enabled but no platform specified")
+    # Validate credentials
+    if not args.telegram_bot_token or not args.telegram_chat_id:
+        logger.error("Telegram requires --telegram-bot-token and --telegram-chat-id (or env vars TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
         return None
 
     try:
-        platform = args.messaging_platform.lower()
-
-        if platform == "telegram":
-            if not args.telegram_bot_token or not args.telegram_chat_id:
-                logger.error("Telegram messaging requires --telegram-bot-token and --telegram-chat-id")
-                return None
-
-            config = {"bot_token": args.telegram_bot_token, "chat_id": args.telegram_chat_id}
-
-        elif platform == "sms":
-            if not all([args.sms_account_sid, args.sms_auth_token, args.sms_from_number, args.sms_to_number]):
-                logger.error("SMS messaging requires --sms-account-sid, --sms-auth-token, --sms-from-number, and --sms-to-number")
-                return None
-
-            config = {
-                "account_sid": args.sms_account_sid,
-                "auth_token": args.sms_auth_token,
-                "from_number": args.sms_from_number,
-                "to_number": args.sms_to_number,
-            }
-
-        elif platform == "whatsapp":
-            if not all([args.whatsapp_phone_id, args.whatsapp_access_token, args.whatsapp_to_number]):
-                logger.error("WhatsApp messaging requires --whatsapp-phone-id, --whatsapp-access-token, and --whatsapp-to-number")
-                return None
-
-            config = {"phone_number_id": args.whatsapp_phone_id, "access_token": args.whatsapp_access_token, "to_number": args.whatsapp_to_number}
-
-        else:
-            logger.error(f"Unsupported messaging platform: {platform}")
-            return None
-
-        messenger = MessengerFactory.create_messenger(platform, config)
-        logger.info(f"Messaging enabled via {platform}")
+        messenger = TelegramMessenger(bot_token=args.telegram_bot_token, chat_id=args.telegram_chat_id)
+        logger.info("Telegram notifications enabled")
         return messenger
-
     except Exception as e:
-        logger.error(f"Failed to create messenger: {e}")
+        logger.error(f"Failed to create Telegram messenger: {e}")
         return None
 
 
-def _create_messenger_from_config(messaging_config: dict[str, Any]) -> Any | None:
-    """Create messenger from .clud config file.
+def _create_telegram_from_config(telegram_config: dict[str, Any]) -> Any | None:
+    """Create Telegram messenger from .clud config file.
 
     Args:
-        messaging_config: Messaging section from .clud config
+        telegram_config: Telegram section from .clud config
 
     Returns:
-        Messenger instance or None if invalid
+        TelegramMessenger instance or None if invalid
     """
     try:
-        platform = messaging_config.get("platform")
-        if not platform:
-            logger.error("Config missing 'platform' in messaging section")
-            return None
-
-        platform = platform.lower()
-        platform_config = messaging_config.get(platform, {})
-
-        # Expand environment variables in config
         import os
 
+        # Expand environment variables in config
         def expand_env_vars(value):
             if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
                 env_var = value[2:-1]
                 return os.environ.get(env_var)
             return value
 
-        expanded_config = {key: expand_env_vars(value) for key, value in platform_config.items()}
+        bot_token = expand_env_vars(telegram_config.get("bot_token"))
+        chat_id = expand_env_vars(telegram_config.get("chat_id"))
 
-        messenger = MessengerFactory.create_messenger(platform, expanded_config)
-        logger.info(f"Messaging enabled via {platform} (from config file)")
+        if not bot_token or not chat_id:
+            logger.error("Telegram config missing bot_token or chat_id")
+            return None
+
+        messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)
+        logger.info("Telegram notifications enabled (from config file)")
         return messenger
 
     except Exception as e:
-        logger.error(f"Failed to create messenger from config: {e}")
+        logger.error(f"Failed to create Telegram messenger from config: {e}")
         return None
 
 
@@ -724,8 +689,8 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
     # Stop existing container
     stop_existing_container()
 
-    # Initialize messenger if enabled
-    messenger = create_messenger(args)
+    # Initialize Telegram messenger if enabled
+    messenger = create_telegram_messenger(args)
     container_start_time = datetime.now()
 
     # Prepare Docker command
