@@ -45,6 +45,10 @@ class BackgroundAgentArgs:
     idle_timeout: float = 3.0
     # Browser opening for VS Code server
     open: bool = False
+    # Telegram messaging configuration
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +138,12 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     parser.add_argument("--detect-completion", action="store_true", help="Monitor terminal for agent completion (3-second idle detection)")
     parser.add_argument("--idle-timeout", type=float, default=3.0, help="Timeout in seconds for agent completion detection (default: 3.0)")
 
+    # Telegram notifications
+    parser.add_argument("--telegram", action="store_true", help="Enable Telegram notifications")
+    parser.add_argument("--telegram-bot-token", help="Telegram bot token (or use TELEGRAM_BOT_TOKEN env var)")
+    parser.add_argument("--telegram-chat-id", help="Telegram chat ID to send messages to (or use TELEGRAM_CHAT_ID env var)")
+    parser.add_argument("--open", action="store_true", help="Open VS Code server in browser")
+
     # Help
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
 
@@ -147,6 +157,16 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
     if parsed_args.help:
         parser.print_help()
         sys.exit(0)
+
+    # Import os for env var fallback
+    import os
+
+    # Determine Telegram enabled
+    telegram_enabled = parsed_args.telegram or bool(parsed_args.telegram_bot_token) or bool(parsed_args.telegram_chat_id)
+
+    # Get Telegram credentials from env vars as fallback
+    telegram_bot_token = parsed_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = parsed_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
 
     return BackgroundAgentArgs(
         host_dir=parsed_args.host_dir,
@@ -174,4 +194,7 @@ def parse_background_agent_args(args: list[str] | None = None) -> BackgroundAgen
         detect_completion=parsed_args.detect_completion,
         idle_timeout=parsed_args.idle_timeout,
         open=getattr(parsed_args, "open", False),
+        telegram_enabled=telegram_enabled,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
     )

@@ -1,0 +1,4 @@
+# Telegram messaging dependency for CLUD
+# Install with: pip install python-telegram-bot
+
+python-telegram-bot>=20.0

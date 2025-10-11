@@ -76,6 +76,39 @@ clud bg --build-dockerfile PATH   # Build custom Docker image
 - Custom Docker image building and management
 - Git worktree support for isolated branch development
 - Container sync mechanism for workspace isolation
+- **Telegram notifications** for agent launch and completion
+
+### Telegram Notifications (New!)
+
+Get notified when your agents launch and complete via Telegram:
+
+```bash
+# Quick setup (5 minutes)
+clud bg --telegram \
+  --telegram-bot-token "123456:ABC-DEF..." \
+  --telegram-chat-id "123456789"
+
+# Use environment variables (recommended)
+export TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."
+export TELEGRAM_CHAT_ID="123456789"
+clud bg --telegram
+```
+
+**What You Get:**
+- 🚀 **Launch notification** - "Agent is online!"
+- ✅ **Cleanup notification** - "Agent complete!" with summary
+- 📊 **Duration tracking** - See how long tasks took
+- 💬 **Bidirectional** - Send messages to your agent
+- 💰 **FREE** - No API costs
+
+**Setup:** Create bot via @BotFather, get chat ID from @userinfobot (5 minutes)
+
+**Installation:**
+```bash
+pip install python-telegram-bot
+```
+
+See [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for complete setup instructions.
 
 ### Advanced Modes
 
@@ -217,6 +250,18 @@ clud bg --ssh-keys                # Mount SSH keys
 clud bg --build-dockerfile PATH   # Build custom image
 clud bg --port PORT               # Custom port
 clud bg --detect-completion       # Enable completion detection
+clud bg --telegram                # Enable Telegram notifications
+```
+
+### Telegram Notification Commands
+```bash
+# With credentials
+clud bg --telegram --telegram-bot-token TOKEN --telegram-chat-id ID
+
+# With environment variables (recommended)
+export TELEGRAM_BOT_TOKEN="123456:ABC-DEF..."
+export TELEGRAM_CHAT_ID="123456789"
+clud bg --telegram
 ```
 
 ### Utility Commands
