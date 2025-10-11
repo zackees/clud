@@ -16,6 +16,9 @@ class Args:
     dry_run: bool
     verbose: bool
     claude_args: list[str]
+    # Messaging/notification arguments
+    notify_user: str | None = None
+    notify_interval: int = 30
 
 
 def parse_args(args: list[str] | None = None) -> Args:
@@ -70,6 +73,21 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Show debug output",
     )
 
+    parser.add_argument(
+        "--notify-user",
+        type=str,
+        dest="notify_user",
+        help="Send status updates via Telegram/SMS/WhatsApp (format: +1234567890, @username, telegram:123456789, whatsapp:+1234567890)",
+    )
+
+    parser.add_argument(
+        "--notify-interval",
+        type=int,
+        default=30,
+        dest="notify_interval",
+        help="Seconds between progress updates (default: 30)",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
 
@@ -81,4 +99,6 @@ def parse_args(args: list[str] | None = None) -> Args:
         dry_run=known_args.dry_run,
         verbose=known_args.verbose,
         claude_args=unknown_args,
+        notify_user=known_args.notify_user,
+        notify_interval=known_args.notify_interval,
     )
