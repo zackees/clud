@@ -481,8 +481,6 @@ def run_ui_container(args: BackgroundAgentArgs, project_path: Path, api_key: str
         "-p",
         f"{port}:8080",
         "-e",
-        f"ANTHROPIC_API_KEY={api_key}",
-        "-e",
         "PASSWORD=",  # No authentication
         "-e",
         "CLUD_BACKGROUND_SYNC=true",  # Enable background sync
@@ -494,6 +492,11 @@ def run_ui_container(args: BackgroundAgentArgs, project_path: Path, api_key: str
         f"{home_config_path}:/root/.config",
         # Removed .local mount to preserve container's installed CLI tools
     ]
+
+    # Only add API key environment variable if it's provided
+    if api_key:
+        cmd.insert(-6, "-e")
+        cmd.insert(-6, f"ANTHROPIC_API_KEY={api_key}")
 
     # Add Claude commands mount if specified
     claude_mount = get_claude_commands_mount(args.claude_commands)
@@ -513,9 +516,10 @@ def run_ui_container(args: BackgroundAgentArgs, project_path: Path, api_key: str
     print("Starting CLUD development container...")
 
     try:
-        # Set up environment with API key
+        # Set up environment with API key (if provided)
         env = os.environ.copy()
-        env["ANTHROPIC_API_KEY"] = api_key
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
 
         # Schedule browser opening after a short delay
         def open_browser_delayed():
@@ -623,10 +627,10 @@ def build_fallback_command(args: BackgroundAgentArgs, project_path: Path) -> lis
     # Environment variables
     env_vars: list[str] = args.env or []
 
-    # Add ANTHROPIC_API_KEY if available in environment
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        cmd.extend(["-e", f"ANTHROPIC_API_KEY={api_key}"])
+    # Add ANTHROPIC_API_KEY if available in environment (optional)
+    api_key_env = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key_env:
+        cmd.extend(["-e", f"ANTHROPIC_API_KEY={api_key_env}"])
 
     # Add custom environment variables
     for env_var in env_vars:
@@ -653,9 +657,10 @@ def run_container(args: BackgroundAgentArgs, api_key: str) -> int:
     # Validate project path
     project_path = validate_path(args.path)
 
-    # Temporarily set the API key in environment for subprocess
+    # Temporarily set the API key in environment for subprocess (if provided)
     env = os.environ.copy()
-    env["ANTHROPIC_API_KEY"] = api_key
+    if api_key:
+        env["ANTHROPIC_API_KEY"] = api_key
 
     # Docker availability already checked in main()
 
@@ -728,8 +733,6 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
             "--name",
             "clud-dev",
             "-e",
-            f"ANTHROPIC_API_KEY={api_key}",
-            "-e",
             "CLUD_BACKGROUND_SYNC=true",  # Enable background sync
             "-e",
             "CLUD_SYNC_INTERVAL=300",  # 5 minute sync interval
@@ -739,6 +742,11 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
             "/workspace",  # Set working directory to /workspace
         ]
     )
+
+    # Only add API key environment variable if it's provided
+    if api_key:
+        base_cmd.insert(-4, "-e")
+        base_cmd.insert(-4, f"ANTHROPIC_API_KEY={api_key}")
 
     # If --open flag is set, expose the code-server port and enable code-server
     if args.open:
@@ -900,9 +908,10 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
         dump_thread.start()
 
     try:
-        # Set up environment with API key
+        # Set up environment with API key (if provided)
         env = os.environ.copy()
-        env["ANTHROPIC_API_KEY"] = api_key
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
 
         # Check if completion detection is enabled (for automated workflows)
         if args.detect_completion:
@@ -1226,11 +1235,10 @@ def main(args: list[str] | None = None):
 
     if not is_container_environment:
         # Running from host - always launch container shell (default interactive)
-        # Get API key for container
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        # Get API key for container (optional - container may have its own authentication)
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
-            logger.error("ANTHROPIC_API_KEY environment variable not set")
-            sys.exit(1)
+            logger.warning("ANTHROPIC_API_KEY environment variable not set - container may use its own authentication")
 
         # Check Docker availability
         if not check_docker_available():
