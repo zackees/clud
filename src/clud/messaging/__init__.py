@@ -1,12 +1,14 @@
 """Messaging module for Claude agent notifications via Telegram."""
 
-from typing import Optional, Protocol
+from typing import Protocol
+
+from .telegram import TelegramMessenger
 
 
 class AgentMessenger(Protocol):
     """Protocol for agent messaging implementations."""
 
-    async def send_invitation(self, agent_name: str, container_id: str, metadata: dict) -> bool:
+    async def send_invitation(self, agent_name: str, container_id: str, metadata: dict[str, str]) -> bool:
         """Send invitation message when agent launches.
 
         Args:
@@ -19,7 +21,7 @@ class AgentMessenger(Protocol):
         """
         ...
 
-    async def send_status_update(self, agent_name: str, status: str, details: Optional[dict] = None) -> bool:
+    async def send_status_update(self, agent_name: str, status: str, details: dict[str, str] | None = None) -> bool:
         """Send status update during agent operation.
 
         Args:
@@ -32,7 +34,7 @@ class AgentMessenger(Protocol):
         """
         ...
 
-    async def send_cleanup_notification(self, agent_name: str, summary: dict) -> bool:
+    async def send_cleanup_notification(self, agent_name: str, summary: dict[str, int | str]) -> bool:
         """Send notification when agent cleans up.
 
         Args:
@@ -44,7 +46,7 @@ class AgentMessenger(Protocol):
         """
         ...
 
-    async def receive_message(self, timeout: int = 60) -> Optional[str]:
+    async def receive_message(self, timeout: int = 60) -> str | None:
         """Receive message from user.
 
         Args:
@@ -55,8 +57,6 @@ class AgentMessenger(Protocol):
         """
         ...
 
-
-from .telegram import TelegramMessenger
 
 __all__ = [
     "AgentMessenger",

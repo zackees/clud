@@ -30,6 +30,8 @@ try:
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
+    # Define a dummy type for type checking when Telegram is not available
+    TelegramMessenger = Any  # type: ignore[misc, assignment]
 
 # Container sync is now handled by standalone package in container
 
@@ -295,7 +297,7 @@ def create_telegram_messenger(args: BackgroundAgentArgs) -> Any | None:
         return None
 
     try:
-        messenger = TelegramMessenger(bot_token=args.telegram_bot_token, chat_id=args.telegram_chat_id)
+        messenger = TelegramMessenger(bot_token=args.telegram_bot_token, chat_id=args.telegram_chat_id)  # type: ignore[misc]
         logger.info("Telegram notifications enabled")
         return messenger
     except Exception as e:
@@ -312,11 +314,14 @@ def _create_telegram_from_config(telegram_config: dict[str, Any]) -> Any | None:
     Returns:
         TelegramMessenger instance or None if invalid
     """
+    if not TELEGRAM_AVAILABLE:
+        return None
+
     try:
         import os
 
         # Expand environment variables in config
-        def expand_env_vars(value):
+        def expand_env_vars(value: Any) -> str | None:
             if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
                 env_var = value[2:-1]
                 return os.environ.get(env_var)
@@ -329,7 +334,7 @@ def _create_telegram_from_config(telegram_config: dict[str, Any]) -> Any | None:
             logger.error("Telegram config missing bot_token or chat_id")
             return None
 
-        messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)
+        messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)  # type: ignore[misc]
         logger.info("Telegram notifications enabled (from config file)")
         return messenger
 
@@ -925,7 +930,7 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
     except KeyboardInterrupt:
         print("\nContainer terminated.", file=sys.stderr)
-        returncode = 130
+        return 130
     except Exception as e:
         raise DockerError(f"Failed to start container shell: {e}") from e
     finally:
@@ -956,8 +961,6 @@ def launch_container_shell(args: BackgroundAgentArgs, api_key: str) -> int:
 
         # Note: dump_thread runs independently and will terminate naturally
         # No need to cancel it since it's a daemon thread with time.sleep()
-
-    return returncode if "returncode" in locals() else result.returncode
 
 
 class BackgroundAgent:

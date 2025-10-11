@@ -296,6 +296,9 @@ def _build_claude_command(args: Args, claude_path: str, inject_prompt: bool = Fa
         if inject_prompt:
             prompt_text = _inject_completion_prompt(prompt_text)
         cmd.extend(["-p", prompt_text])
+        # Enable streaming JSON output for -p flag by default
+        # Note: stream-json requires --verbose when used with --print/-p
+        cmd.extend(["--output-format", "stream-json", "--verbose"])
 
     if args.message:
         message_text = args.message
@@ -492,6 +495,9 @@ def run(args: Args) -> int:
                 cmd_parts.append("--continue")
             if args.prompt:
                 cmd_parts.extend(["-p", args.prompt])
+                # Enable streaming JSON output for -p flag by default
+                # Note: stream-json requires --verbose when used with --print/-p
+                cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
             if args.message:
                 cmd_parts.append(args.message)
             cmd_parts.extend(args.claude_args)

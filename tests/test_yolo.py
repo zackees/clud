@@ -75,7 +75,7 @@ class TestYolo(unittest.TestCase):
             result = run(args)
 
         self.assertEqual(result, 0)
-        expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit"
+        expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"
         self.assertEqual(captured_output.getvalue().strip(), expected_output)
 
     def test_main_with_dry_run_message(self):
@@ -96,7 +96,7 @@ class TestYolo(unittest.TestCase):
             result = main(["-p", "say hello and exit", "--dry-run"])
 
         self.assertEqual(result, 0)
-        expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit"
+        expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"
         self.assertEqual(captured_output.getvalue().strip(), expected_output)
 
 
