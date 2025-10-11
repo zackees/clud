@@ -23,6 +23,7 @@ class RouterArgs:
     remaining_args: list[str]
     # Commands that don't need agents
     login: bool = False
+    telegram_login: bool = False
     task: str | None = None
     lint: bool = False
     test: bool = False
@@ -50,6 +51,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
 
     # Check for special commands first (these don't need agent routing)
     login = "--login" in args_copy
+    telegram_login = "--telegram-login" in args_copy
     lint = "--lint" in args_copy
     test = "--test" in args_copy
     fix = "--fix" in args_copy
@@ -117,6 +119,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         mode=mode,
         remaining_args=args_copy,
         login=login,
+        telegram_login=telegram_login,
         task=task,
         lint=lint,
         test=test,

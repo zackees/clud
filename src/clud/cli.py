@@ -5,7 +5,7 @@ import sys
 
 from .agent_foreground import ConfigError as ForegroundConfigError
 from .agent_foreground import ValidationError as ForegroundValidationError
-from .agent_foreground import handle_login
+from .agent_foreground import handle_login, handle_telegram_login
 from .cli_args import AgentMode, parse_router_args
 from .task import handle_task_command
 
@@ -289,6 +289,7 @@ def main(args: list[str] | None = None) -> int:
             print()
             print("Special commands:")
             print("  --login              Configure API key for Claude")
+            print("  --telegram-login     Configure Telegram bot credentials")
             print("  --task PATH          Open task file in editor")
             print("  --code [PORT]        Launch code-server in browser (default port: 8080)")
             print("  --lint               Run global linting with codeup")
@@ -308,6 +309,9 @@ def main(args: list[str] | None = None) -> int:
         # Handle special commands that don't require agents
         if router_args.login:
             return handle_login()
+
+        if router_args.telegram_login:
+            return handle_telegram_login()
 
         if router_args.task is not None:
             return handle_task_command(router_args.task)

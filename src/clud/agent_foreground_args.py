@@ -114,11 +114,25 @@ def parse_args(args: list[str] | None = None) -> Args:
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
 
-    # Get Telegram credentials from env vars as fallback
+    # Get Telegram credentials with fallback priority:
+    # 1. Command-line args
+    # 2. Environment variables
+    # 3. Saved config file
     import os
+
+    from .agent_foreground import load_telegram_credentials
 
     telegram_bot_token = known_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = known_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+
+    # Load from saved config if not found in args/env
+    if not telegram_bot_token or not telegram_chat_id:
+        saved_token, saved_chat_id = load_telegram_credentials()
+        if not telegram_bot_token:
+            telegram_bot_token = saved_token
+        if not telegram_chat_id:
+            telegram_chat_id = saved_chat_id
+
     telegram_enabled = known_args.telegram or bool(telegram_bot_token) or bool(telegram_chat_id)
 
     return Args(
