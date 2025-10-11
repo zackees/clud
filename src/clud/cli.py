@@ -121,6 +121,18 @@ def handle_telegram_command() -> int:
         return 1
 
 
+def handle_webui_command(port: int | None = None) -> int:
+    """Handle the --webui command by launching Web UI server."""
+    from .webui.server import run_server
+
+    try:
+        print("Starting Claude Code Web UI...")
+        return run_server(port)
+    except Exception as e:
+        print(f"Error running Web UI: {e}", file=sys.stderr)
+        return 1
+
+
 def handle_code_command(port: int | None = None) -> int:
     """Handle the --code command by launching code-server via npx."""
     import os
@@ -287,6 +299,7 @@ def main(args: list[str] | None = None) -> int:
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
             print("  --telegram, -tg      Start Telegram Web App server for bot integration")
+            print("  --webui [PORT]       Launch Claude Code Web UI in browser (default port: 8888)")
             print("  -h, --help           Show this help")
             print()
             print("Default: Run Claude Code with --dangerously-skip-permissions")
@@ -316,6 +329,9 @@ def main(args: list[str] | None = None) -> int:
 
         if router_args.telegram:
             return handle_telegram_command()
+
+        if router_args.webui:
+            return handle_webui_command(router_args.webui_port)
 
         if router_args.code:
             return handle_code_command(router_args.code_port)

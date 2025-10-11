@@ -34,6 +34,8 @@ class RouterArgs:
     telegram: bool = False
     code: bool = False
     code_port: int | None = None
+    webui: bool = False
+    webui_port: int | None = None
     help: bool = False
 
 
@@ -56,6 +58,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     kanban = "--kanban" in args_copy
     telegram = "--telegram" in args_copy or "-tg" in args_copy
     code = "--code" in args_copy
+    webui = "--webui" in args_copy
 
     # Extract fix URL argument if present
     fix_url = None
@@ -73,6 +76,15 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         if code_idx + 1 < len(args_copy) and not args_copy[code_idx + 1].startswith("-"):
             with contextlib.suppress(ValueError):
                 code_port = int(args_copy[code_idx + 1])
+
+    # Extract webui port argument if present
+    webui_port = None
+    if "--webui" in args_copy:
+        webui_idx = args_copy.index("--webui")
+        # Check if there's a port argument after --webui
+        if webui_idx + 1 < len(args_copy) and not args_copy[webui_idx + 1].startswith("-"):
+            with contextlib.suppress(ValueError):
+                webui_port = int(args_copy[webui_idx + 1])
 
     # Only intercept help if no mode is specified
     help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up"])
@@ -116,5 +128,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         telegram=telegram,
         code=code,
         code_port=code_port,
+        webui=webui,
+        webui_port=webui_port,
         help=help_requested,
     )

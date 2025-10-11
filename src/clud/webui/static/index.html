@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Code Web UI</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="title">Claude Code Web UI</h1>
+                <div class="header-controls">
+                    <select id="project-selector" class="project-selector">
+                        <option value="">Loading projects...</option>
+                    </select>
+                    <button id="theme-toggle" class="icon-btn" title="Toggle theme">
+                        <span class="theme-icon">🌙</span>
+                    </button>
+                </div>
+            </div>
+            <div id="status" class="status">Connecting...</div>
+        </header>
+
+        <!-- Chat Messages -->
+        <main class="chat-container" id="chat-container">
+            <div class="welcome-message">
+                <h2>Welcome to Claude Code</h2>
+                <p>Start by selecting a project and typing your message below.</p>
+                <p class="yolo-notice">Running in YOLO mode - no permission prompts!</p>
+            </div>
+        </main>
+
+        <!-- Input Area -->
+        <footer class="input-area">
+            <div class="input-container">
+                <textarea
+                    id="message-input"
+                    class="message-input"
+                    placeholder="Ask Claude Code anything..."
+                    rows="1"
+                    disabled
+                ></textarea>
+                <button id="send-btn" class="send-btn" disabled title="Send message (Ctrl+Enter)">
+                    <span>Send</span>
+                </button>
+            </div>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
