@@ -3,7 +3,6 @@
     'use strict';
 
     // Configuration
-    const WS_PORT_OFFSET = 1;  // WebSocket port is HTTP port + 1
     const RECONNECT_DELAY = 3000;
     const THEME_KEY = 'claude-code-theme';
 
@@ -65,9 +64,10 @@
 
     // WebSocket Management
     function initWebSocket() {
-        const httpPort = parseInt(window.location.port) || 8888;
-        const wsPort = httpPort + WS_PORT_OFFSET;
-        const wsUrl = `ws://${window.location.hostname}:${wsPort}`;
+        // FastAPI serves WebSocket on same port as HTTP, at /ws endpoint
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const port = window.location.port ? `:${window.location.port}` : '';
+        const wsUrl = `${protocol}//${window.location.hostname}${port}/ws`;
 
         updateStatus('Connecting...', 'connecting');
 

@@ -1,7 +1,7 @@
-"""HTTP and WebSocket server for Claude Code Web UI."""
+"""FastAPI server for Claude Code Web UI."""
 
 import asyncio
-import json
+import contextlib
 import logging
 import os
 import socket
@@ -9,14 +9,15 @@ import sys
 import threading
 import time
 import webbrowser
-from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from typing import Any
 
-import websockets.asyncio.server
-from websockets.asyncio.server import ServerConnection
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from .api import ChatHandler
+from .api import ChatHandler, HistoryHandler, ProjectHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -41,98 +42,117 @@ def find_available_port(start_port: int = 8888) -> int:
     raise RuntimeError(f"No available ports found starting from {start_port}")
 
 
-class WebUIRequestHandler(SimpleHTTPRequestHandler):
-    """Custom request handler for serving static files."""
+def create_app(static_dir: Path) -> FastAPI:
+    """Create and configure FastAPI application.
 
-    def log_message(self, format: str, *args: Any) -> None:
-        """Override to use logger instead of stderr."""
-        logger.info("%s - %s", self.address_string(), format % args)
+    Args:
+        static_dir: Directory containing static files
 
-    def end_headers(self) -> None:
-        """Add CORS headers for API requests."""
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        super().end_headers()
+    Returns:
+        Configured FastAPI application
+    """
+    app = FastAPI(
+        title="Claude Code Web UI",
+        description="Web interface for Claude Code with real-time chat",
+        version="1.0.0",
+    )
 
-    def do_OPTIONS(self) -> None:
-        """Handle CORS preflight requests."""
-        self.send_response(200)
-        self.end_headers()
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
+    # Initialize handlers
+    chat_handler = ChatHandler()
+    project_handler = ProjectHandler()
+    history_handler = HistoryHandler()
 
-class WebSocketHandler:
-    """Handle WebSocket connections for real-time chat."""
-
-    def __init__(self) -> None:
-        """Initialize WebSocket handler."""
-        self.chat_handler = ChatHandler()
-        self.active_connections: set[ServerConnection] = set()
-
-    async def handle_connection(self, websocket: ServerConnection) -> None:
-        """Handle a WebSocket connection."""
-        self.active_connections.add(websocket)
-        logger.info("WebSocket client connected: %s", websocket.remote_address)
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket) -> None:
+        """WebSocket endpoint for real-time chat."""
+        await websocket.accept()
+        logger.info("WebSocket client connected: %s", websocket.client)
 
         try:
-            async for message in websocket:
-                await self.handle_message(websocket, message)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("WebSocket client disconnected: %s", websocket.remote_address)
-        finally:
-            self.active_connections.discard(websocket)
+            while True:
+                # Receive message from client
+                data = await websocket.receive_json()
+                message_type = data.get("type")
 
-    async def handle_message(self, websocket: ServerConnection, message: str | bytes) -> None:
-        """Handle incoming WebSocket message."""
-        try:
-            if isinstance(message, bytes):
-                message = message.decode("utf-8")
+                if message_type == "chat":
+                    # Handle chat message
+                    user_message = data.get("message", "")
+                    project_path = data.get("project_path", os.getcwd())
 
-            data = json.loads(message)
-            message_type = data.get("type")
+                    # Send acknowledgment
+                    await websocket.send_json({"type": "ack", "status": "processing"})
 
-            if message_type == "chat":
-                # Handle chat message
-                user_message = data.get("message", "")
-                project_path = data.get("project_path", os.getcwd())
+                    # Stream response from Claude Code
+                    async for chunk in chat_handler.handle_chat(user_message, project_path):
+                        await websocket.send_json({"type": "chunk", "content": chunk})
 
-                # Send acknowledgment
-                await websocket.send(json.dumps({"type": "ack", "status": "processing"}))
+                    # Send completion
+                    await websocket.send_json({"type": "done"})
 
-                # Stream response from Claude Code
-                async for chunk in self.chat_handler.handle_chat(user_message, project_path):
-                    await websocket.send(json.dumps({"type": "chunk", "content": chunk}))
+                elif message_type == "ping":
+                    await websocket.send_json({"type": "pong"})
 
-                # Send completion
-                await websocket.send(json.dumps({"type": "done"}))
+                else:
+                    await websocket.send_json({"type": "error", "error": f"Unknown message type: {message_type}"})
 
-            elif message_type == "ping":
-                await websocket.send(json.dumps({"type": "pong"}))
-
-            else:
-                await websocket.send(json.dumps({"type": "error", "error": f"Unknown message type: {message_type}"}))
-
-        except json.JSONDecodeError:
-            logger.error("Invalid JSON received: %s", message)
-            await websocket.send(json.dumps({"type": "error", "error": "Invalid JSON"}))
+        except WebSocketDisconnect:
+            logger.info("WebSocket client disconnected: %s", websocket.client)
         except Exception as e:
-            logger.exception("Error handling WebSocket message")
-            await websocket.send(json.dumps({"type": "error", "error": str(e)}))
+            logger.exception("Error handling WebSocket connection")
+            # Suppress exception if sending error message fails (connection may be closed)
+            with contextlib.suppress(Exception):
+                await websocket.send_json({"type": "error", "error": str(e)})
 
+    @app.get("/api/projects")
+    async def get_projects(base_path: str | None = None) -> JSONResponse:
+        """List available projects."""
+        projects = project_handler.list_projects(base_path)
+        return JSONResponse(content={"projects": projects})
 
-def run_http_server(port: int, static_dir: Path) -> None:
-    """Run HTTP server for static files in a separate thread."""
-    os.chdir(static_dir)
-    server = HTTPServer(("localhost", port), WebUIRequestHandler)
-    logger.info("HTTP server listening on http://localhost:%d", port)
-    server.serve_forever()
+    @app.get("/api/projects/validate")
+    async def validate_project(path: str) -> JSONResponse:
+        """Validate a project path."""
+        is_valid = project_handler.validate_project_path(path)
+        return JSONResponse(content={"valid": is_valid, "path": path})
 
+    @app.get("/api/history")
+    async def get_history() -> JSONResponse:
+        """Get conversation history."""
+        history = history_handler.get_history()
+        return JSONResponse(content={"history": history})
 
-async def run_websocket_server(ws_port: int, handler: WebSocketHandler) -> None:
-    """Run WebSocket server for real-time communication."""
-    async with websockets.asyncio.server.serve(handler.handle_connection, "localhost", ws_port):
-        logger.info("WebSocket server listening on ws://localhost:%d", ws_port)
-        await asyncio.Future()  # Run forever
+    @app.post("/api/history")
+    async def add_message(data: dict[str, str]) -> JSONResponse:
+        """Add a message to history."""
+        role = data.get("role", "user")
+        content = data.get("content", "")
+        history_handler.add_message(role, content)
+        return JSONResponse(content={"status": "ok"})
+
+    @app.delete("/api/history")
+    async def clear_history() -> JSONResponse:
+        """Clear conversation history."""
+        history_handler.clear_history()
+        return JSONResponse(content={"status": "ok"})
+
+    @app.get("/health")
+    async def health_check() -> JSONResponse:
+        """Health check endpoint."""
+        return JSONResponse(content={"status": "ok"})
+
+    # Mount static files (must be last)
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+
+    return app
 
 
 def open_browser_delayed(url: str, delay: float = 2.0) -> None:
@@ -149,16 +169,16 @@ def open_browser_delayed(url: str, delay: float = 2.0) -> None:
 
 
 def run_server(port: int | None = None) -> int:
-    """Start HTTP and WebSocket servers for Web UI.
+    """Start FastAPI server for Web UI.
 
     Args:
-        port: HTTP server port (WebSocket will use port+1). If None, auto-detect.
+        port: Server port. If None, auto-detect.
 
     Returns:
         Exit code (0 for success)
     """
     try:
-        # Find available ports
+        # Find available port
         if port is None:
             http_port = find_available_port(8888)
         else:
@@ -168,10 +188,6 @@ def run_server(port: int | None = None) -> int:
             else:
                 http_port = port
 
-        ws_port = http_port + 1
-        if not is_port_available(ws_port):
-            ws_port = find_available_port(ws_port + 1)
-
         # Get static directory
         static_dir = Path(__file__).parent / "static"
         if not static_dir.exists():
@@ -180,27 +196,34 @@ def run_server(port: int | None = None) -> int:
             return 1
 
         logger.info("Starting Claude Code Web UI...")
-        logger.info("HTTP Port: %d, WebSocket Port: %d", http_port, ws_port)
+        logger.info("Port: %d", http_port)
 
         url = f"http://localhost:{http_port}"
         print("\n🚀 Claude Code Web UI starting...")
-        print(f"📁 HTTP: {url}")
-        print(f"🔌 WebSocket: ws://localhost:{ws_port}")
+        print(f"📁 Server: {url}")
+        print(f"🔌 WebSocket: ws://localhost:{http_port}/ws")
+        print(f"📚 API Docs: {url}/docs")
         print()
 
-        # Create WebSocket handler
-        ws_handler = WebSocketHandler()
-
-        # Start HTTP server in separate thread
-        http_thread = threading.Thread(target=run_http_server, args=(http_port, static_dir), daemon=True)
-        http_thread.start()
+        # Create FastAPI app
+        app = create_app(static_dir)
 
         # Schedule browser opening
         browser_thread = threading.Thread(target=open_browser_delayed, args=(url,), daemon=True)
         browser_thread.start()
 
-        # Run WebSocket server in asyncio event loop
-        asyncio.run(run_websocket_server(ws_port, ws_handler))
+        # Run server with uvicorn
+        config = uvicorn.Config(
+            app,
+            host="localhost",
+            port=http_port,
+            log_level="info",
+            access_log=True,
+        )
+        server = uvicorn.Server(config)
+
+        # Run in asyncio event loop
+        asyncio.run(server.serve())
 
         return 0
 
