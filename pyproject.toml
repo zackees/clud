@@ -21,6 +21,7 @@ dependencies = [
     "running-process>=1.0.7",
     "codeup>=1.0.8",
     "nodeenv>=1.8.0",
+    "nodejs-wheel>=22.0.0",
 ]
 # Change this with the version number bump.
 version = "1.0.20"
