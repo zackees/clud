@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Claude Code Chat</title>
+    <title>Claude Code - Telegram Attach</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         * {
@@ -18,114 +18,102 @@
             color: var(--tg-theme-text-color, #000000);
             height: 100vh;
             display: flex;
-            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
         }
 
-        #header {
-            padding: 16px;
-            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
-            border-bottom: 1px solid var(--tg-theme-hint-color, #ccc);
+        .container {
+            max-width: 500px;
+            text-align: center;
         }
 
-        #status {
-            font-size: 14px;
+        .icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            font-size: 16px;
             color: var(--tg-theme-hint-color, #999);
+            margin-bottom: 20px;
         }
 
-        #messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 16px;
-        }
-
-        .message {
-            margin-bottom: 12px;
-            padding: 8px 12px;
-            border-radius: 8px;
-            max-width: 80%;
-        }
-
-        .message.user {
-            background-color: var(--tg-theme-button-color, #0088cc);
-            color: var(--tg-theme-button-text-color, #ffffff);
-            margin-left: auto;
-            text-align: right;
-        }
-
-        .message.bot {
+        .info-box {
             background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
-        }
-
-        #input-container {
+            border-radius: 12px;
             padding: 16px;
-            border-top: 1px solid var(--tg-theme-hint-color, #ccc);
+            margin: 20px 0;
+            text-align: left;
+        }
+
+        .info-row {
             display: flex;
-            gap: 8px;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--tg-theme-hint-color, #eee);
         }
 
-        #message-input {
-            flex: 1;
-            padding: 10px;
-            border: 1px solid var(--tg-theme-hint-color, #ccc);
-            border-radius: 20px;
-            background-color: var(--tg-theme-bg-color, #ffffff);
-            color: var(--tg-theme-text-color, #000000);
+        .info-row:last-child {
+            border-bottom: none;
         }
 
-        #send-btn {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 20px;
-            background-color: var(--tg-theme-button-color, #0088cc);
-            color: var(--tg-theme-button-text-color, #ffffff);
-            cursor: pointer;
+        .info-label {
+            font-weight: 600;
+            color: var(--tg-theme-hint-color, #666);
         }
 
-        #send-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
+        .info-value {
+            color: var(--tg-theme-text-color, #000);
+            word-break: break-all;
+        }
+
+        .success {
+            color: #28a745;
+        }
+
+        .error {
+            color: #dc3545;
         }
 
         code {
             background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
-            padding: 2px 4px;
-            border-radius: 3px;
+            padding: 2px 6px;
+            border-radius: 4px;
             font-family: 'Courier New', monospace;
-        }
-
-        #user-info {
             font-size: 12px;
-            color: var(--tg-theme-hint-color, #999);
-            margin-top: 4px;
         }
     </style>
 </head>
 <body>
-    <div id="header">
-        <h2>Claude Code Assistant</h2>
-        <div id="status">Initializing...</div>
-        <div id="user-info"></div>
-    </div>
+    <div class="container">
+        <div class="icon" id="icon">🔗</div>
+        <h1 id="title">Connecting...</h1>
+        <div class="status" id="status">Establishing connection to Telegram Web App</div>
 
-    <div id="messages">
-        <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 20px; text-align: center;">
-            <h1 style="margin-bottom: 20px; font-size: 48px;">👋</h1>
-            <h2 style="margin-bottom: 10px;">Welcome to Claude Code</h2>
-            <p style="margin-bottom: 20px; color: var(--tg-theme-hint-color, #999);">Your AI coding assistant via Telegram</p>
-            <button id="start-btn" style="padding: 15px 40px; font-size: 18px; border: none; border-radius: 25px; background-color: var(--tg-theme-button-color, #0088cc); color: var(--tg-theme-button-text-color, #ffffff); cursor: pointer; font-weight: bold;">
-                START
-            </button>
+        <div class="info-box" id="info-box" style="display: none;">
+            <div class="info-row">
+                <span class="info-label">User ID:</span>
+                <span class="info-value" id="user-id">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Username:</span>
+                <span class="info-value" id="username">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Chat ID Saved:</span>
+                <span class="info-value" id="chat-saved">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Working Dir:</span>
+                <span class="info-value" id="cwd" style="font-size: 11px;">-</span>
+            </div>
         </div>
-    </div>
-
-    <div id="input-container" style="display: none;">
-        <input
-            type="text"
-            id="message-input"
-            placeholder="Type your message..."
-            disabled
-        />
-        <button id="send-btn" disabled>Send</button>
     </div>
 
     <script>
@@ -135,151 +123,126 @@
         // Expand to full height
         tg.expand();
 
-        // Set theme
+        // Set theme and signal ready
         tg.ready();
 
         // UI elements
-        const messagesDiv = document.getElementById('messages');
-        const statusDiv = document.getElementById('status');
-        const userInfoDiv = document.getElementById('user-info');
-        const messageInput = document.getElementById('message-input');
-        const sendBtn = document.getElementById('send-btn');
-        const startScreen = document.getElementById('start-screen');
-        const startBtn = document.getElementById('start-btn');
-        const inputContainer = document.getElementById('input-container');
+        const iconEl = document.getElementById('icon');
+        const titleEl = document.getElementById('title');
+        const statusEl = document.getElementById('status');
+        const infoBoxEl = document.getElementById('info-box');
+        const userIdEl = document.getElementById('user-id');
+        const usernameEl = document.getElementById('username');
+        const chatSavedEl = document.getElementById('chat-saved');
+        const cwdEl = document.getElementById('cwd');
 
-        // Store server info
-        let serverInfo = null;
+        let attachComplete = false;
 
-        // Fetch server info on load
+        // Fetch server info
         async function fetchServerInfo() {
             try {
                 const response = await fetch('/api/info');
-                serverInfo = await response.json();
-                statusDiv.textContent = 'Ready to start';
+                const data = await response.json();
+                cwdEl.textContent = data.cwd || 'Unknown';
+                return data;
             } catch (error) {
                 console.error('Failed to fetch server info:', error);
-                statusDiv.textContent = 'Ready to start (offline mode)';
-                serverInfo = { cwd: 'Unknown', status: 'offline' };
+                cwdEl.textContent = 'Error fetching info';
+                return null;
             }
         }
 
         // Auto-detect and save chat ID from Telegram
-        async function autoDetectChatId() {
-            if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-                const user = tg.initDataUnsafe.user;
-                const chatId = user.id.toString();
+        async function attachTelegramBot() {
+            // Check if we have Telegram user data
+            if (!tg.initDataUnsafe || !tg.initDataUnsafe.user) {
+                showError('Not running in Telegram', 'Please open this page via the bot menu button in Telegram');
+                return false;
+            }
 
-                try {
-                    const response = await fetch('/api/save-chat-id', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ chat_id: chatId })
-                    });
+            const user = tg.initDataUnsafe.user;
+            const chatId = user.id.toString();
 
-                    const data = await response.json();
-                    if (data.status === 'ok') {
-                        console.log('Chat ID saved successfully:', chatId);
-                        // Show success message briefly in status
-                        const originalStatus = statusDiv.textContent;
-                        statusDiv.textContent = '✓ Chat ID detected and saved!';
-                        setTimeout(() => {
-                            statusDiv.textContent = originalStatus;
-                        }, 3000);
-                    } else {
-                        console.warn('Failed to save chat ID:', data.message);
-                    }
-                } catch (error) {
-                    console.error('Error saving chat ID:', error);
+            // Show user info
+            userIdEl.textContent = chatId;
+            usernameEl.textContent = user.username || user.first_name || 'Unknown';
+
+            try {
+                // Save chat ID to backend
+                const response = await fetch('/api/save-chat-id', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ chat_id: chatId })
+                });
+
+                const data = await response.json();
+
+                if (data.status === 'ok') {
+                    chatSavedEl.innerHTML = '<span class="success">✓ Yes</span>';
+                    return true;
+                } else {
+                    chatSavedEl.innerHTML = '<span class="error">✗ ' + (data.message || 'Failed') + '</span>';
+                    return false;
                 }
+            } catch (error) {
+                console.error('Error saving chat ID:', error);
+                chatSavedEl.innerHTML = '<span class="error">✗ Error: ' + error.message + '</span>';
+                return false;
             }
         }
 
-        // Handle START button click
-        startBtn.addEventListener('click', async () => {
-            // Hide start screen
-            startScreen.style.display = 'none';
-
-            // Show input container
-            inputContainer.style.display = 'flex';
-
-            // Enable inputs
-            messageInput.disabled = false;
-            sendBtn.disabled = false;
-
-            // Show welcome message with CWD
-            const cwd = serverInfo?.cwd || 'Unknown';
-            const welcomeMsg = `Welcome to Claude Code!\n\n📁 Working Directory:\n${cwd}\n\nHow can I help you today?`;
-            appendMessage('bot', welcomeMsg);
-
-            statusDiv.textContent = 'Ready - Start chatting!';
-            messageInput.focus();
-
-            // Display user info if available
-            if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-                const user = tg.initDataUnsafe.user;
-                userInfoDiv.textContent = `User: ${user.first_name || 'Unknown'} (ID: ${user.id})`;
-            }
-        });
-
-        // Append message to chat
-        function appendMessage(sender, text) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${sender}`;
-            messageDiv.style.whiteSpace = 'pre-wrap'; // Preserve newlines and wrap text
-            messageDiv.textContent = text;
-            messagesDiv.appendChild(messageDiv);
-
-            // Auto-scroll to bottom
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        // Show success state
+        function showSuccess() {
+            iconEl.textContent = '✅';
+            titleEl.textContent = 'Connected!';
+            statusEl.innerHTML = '<span class="success">Telegram Web App attached successfully</span>';
+            infoBoxEl.style.display = 'block';
+            attachComplete = true;
         }
 
-        // Send message via Telegram
-        function sendMessage() {
-            const message = messageInput.value.trim();
-            if (!message) return;
-
-            // Show user message in UI
-            appendMessage('user', message);
-
-            // Send to Telegram bot backend
-            tg.sendData(JSON.stringify({
-                type: 'message',
-                text: message,
-                timestamp: Date.now()
-            }));
-
-            // Clear input
-            messageInput.value = '';
-
-            // Show status
-            statusDiv.textContent = 'Claude is thinking...';
+        // Show error state
+        function showError(title, message) {
+            iconEl.textContent = '❌';
+            titleEl.textContent = title;
+            statusEl.innerHTML = '<span class="error">' + message + '</span>';
+            infoBoxEl.style.display = 'block';
         }
 
-        // Handle send button click
-        sendBtn.addEventListener('click', sendMessage);
+        // Main initialization
+        async function initialize() {
+            console.log('Initializing Telegram Web App...');
 
-        // Handle Enter key
-        messageInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
+            // Fetch server info in parallel
+            const serverInfoPromise = fetchServerInfo();
+
+            // Attempt to attach to Telegram bot
+            const attached = await attachTelegramBot();
+
+            // Wait for server info
+            await serverInfoPromise;
+
+            if (attached) {
+                showSuccess();
+                console.log('Telegram Web App attached successfully');
+            } else {
+                showError('Connection Failed', 'Could not attach to Telegram bot. Check console for details.');
             }
-        });
+        }
 
-        // Listen for responses from bot (via web_app_data)
-        // Note: This is handled by Telegram's infrastructure
-        // The bot backend sends updates that Telegram delivers to this app
-
-        // Initialize on page load
-        fetchServerInfo();
-        autoDetectChatId();
+        // Run on page load
+        initialize();
 
         // For testing in browser (not in Telegram)
         if (!window.Telegram.WebApp.initData) {
-            console.log('Running outside Telegram - demo mode');
+            console.warn('Running outside Telegram - demo mode');
+            setTimeout(() => {
+                showError('Testing Mode', 'This page must be opened via Telegram bot menu button');
+                userIdEl.textContent = 'Demo';
+                usernameEl.textContent = 'Demo User';
+                chatSavedEl.textContent = 'N/A (demo)';
+            }, 1000);
         }
     </script>
 </body>
