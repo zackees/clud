@@ -28,8 +28,27 @@ class TelegramWebAppHandler(SimpleHTTPRequestHandler):
             info = {"cwd": self.original_cwd, "status": "ready"}
 
             self.wfile.write(json.dumps(info).encode("utf-8"))
+        elif self.path == "/" or self.path == "/index.html":
+            # Serve index.html with cache-busting headers
+            try:
+                index_path = Path("index.html")
+                if index_path.exists():
+                    with open(index_path, "rb") as f:
+                        content = f.read()
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("Expires", "0")
+                    self.end_headers()
+                    self.wfile.write(content)
+                else:
+                    self.send_error(404, "File not found")
+            except Exception as e:
+                self.send_error(500, f"Server error: {e}")
         else:
-            # Serve static files
+            # Serve other static files normally
             super().do_GET()
 
     def do_POST(self) -> None:
