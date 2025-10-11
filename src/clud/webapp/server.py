@@ -1,5 +1,6 @@
 """Minimal HTTP server for serving Telegram Web App static files."""
 
+import json
 import os
 import sys
 import threading
@@ -7,6 +8,33 @@ import time
 import webbrowser
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+
+
+class TelegramWebAppHandler(SimpleHTTPRequestHandler):
+    """Custom handler that serves static files and provides API endpoints."""
+
+    # Store the original CWD before changing to static dir
+    original_cwd: str = ""
+
+    def do_GET(self) -> None:
+        """Handle GET requests - serve API or static files."""
+        if self.path == "/api/info":
+            # Serve info API endpoint
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            info = {"cwd": self.original_cwd, "status": "ready"}
+
+            self.wfile.write(json.dumps(info).encode("utf-8"))
+        else:
+            # Serve static files
+            super().do_GET()
+
+    def log_message(self, format: str, *args: object) -> None:
+        """Suppress log messages."""
+        pass
 
 
 def run_server() -> int:
@@ -17,6 +45,10 @@ def run_server() -> int:
     Returns:
         Exit code (0 for success)
     """
+    # Store original CWD before changing directories
+    original_cwd = os.getcwd()
+    TelegramWebAppHandler.original_cwd = original_cwd
+
     # Change to webapp static directory
     webapp_dir = Path(__file__).parent / "static"
     if not webapp_dir.exists():
@@ -26,7 +58,7 @@ def run_server() -> int:
     os.chdir(webapp_dir)
 
     # Create server with port 0 (auto-assign available port)
-    server = HTTPServer(("localhost", 0), SimpleHTTPRequestHandler)
+    server = HTTPServer(("localhost", 0), TelegramWebAppHandler)
 
     # Get the actual port that was assigned
     actual_port = server.server_address[1]

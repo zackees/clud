@@ -107,9 +107,18 @@
         <div id="user-info"></div>
     </div>
 
-    <div id="messages"></div>
+    <div id="messages">
+        <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 20px; text-align: center;">
+            <h1 style="margin-bottom: 20px; font-size: 48px;">👋</h1>
+            <h2 style="margin-bottom: 10px;">Welcome to Claude Code</h2>
+            <p style="margin-bottom: 20px; color: var(--tg-theme-hint-color, #999);">Your AI coding assistant via Telegram</p>
+            <button id="start-btn" style="padding: 15px 40px; font-size: 18px; border: none; border-radius: 25px; background-color: var(--tg-theme-button-color, #0088cc); color: var(--tg-theme-button-text-color, #ffffff); cursor: pointer; font-weight: bold;">
+                START
+            </button>
+        </div>
+    </div>
 
-    <div id="input-container">
+    <div id="input-container" style="display: none;">
         <input
             type="text"
             id="message-input"
@@ -135,12 +144,44 @@
         const userInfoDiv = document.getElementById('user-info');
         const messageInput = document.getElementById('message-input');
         const sendBtn = document.getElementById('send-btn');
+        const startScreen = document.getElementById('start-screen');
+        const startBtn = document.getElementById('start-btn');
+        const inputContainer = document.getElementById('input-container');
 
-        // Enable UI after initialization
-        function initialize() {
-            statusDiv.textContent = 'Ready - Start chatting!';
+        // Store server info
+        let serverInfo = null;
+
+        // Fetch server info on load
+        async function fetchServerInfo() {
+            try {
+                const response = await fetch('/api/info');
+                serverInfo = await response.json();
+                statusDiv.textContent = 'Ready to start';
+            } catch (error) {
+                console.error('Failed to fetch server info:', error);
+                statusDiv.textContent = 'Ready to start (offline mode)';
+                serverInfo = { cwd: 'Unknown', status: 'offline' };
+            }
+        }
+
+        // Handle START button click
+        startBtn.addEventListener('click', async () => {
+            // Hide start screen
+            startScreen.style.display = 'none';
+
+            // Show input container
+            inputContainer.style.display = 'flex';
+
+            // Enable inputs
             messageInput.disabled = false;
             sendBtn.disabled = false;
+
+            // Show welcome message with CWD
+            const cwd = serverInfo?.cwd || 'Unknown';
+            const welcomeMsg = `Welcome to Claude Code!\n\n📁 Working Directory:\n${cwd}\n\nHow can I help you today?`;
+            appendMessage('bot', welcomeMsg);
+
+            statusDiv.textContent = 'Ready - Start chatting!';
             messageInput.focus();
 
             // Display user info if available
@@ -148,15 +189,13 @@
                 const user = tg.initDataUnsafe.user;
                 userInfoDiv.textContent = `User: ${user.first_name || 'Unknown'} (ID: ${user.id})`;
             }
-
-            // Show welcome message
-            appendMessage('bot', 'Hello! I\'m Claude Code. How can I help you today?');
-        }
+        });
 
         // Append message to chat
         function appendMessage(sender, text) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${sender}`;
+            messageDiv.style.whiteSpace = 'pre-wrap'; // Preserve newlines and wrap text
             messageDiv.textContent = text;
             messagesDiv.appendChild(messageDiv);
 
@@ -201,19 +240,12 @@
         // Note: This is handled by Telegram's infrastructure
         // The bot backend sends updates that Telegram delivers to this app
 
-        // Initialize after short delay
-        setTimeout(initialize, 500);
+        // Initialize on page load
+        fetchServerInfo();
 
         // For testing in browser (not in Telegram)
         if (!window.Telegram.WebApp.initData) {
             console.log('Running outside Telegram - demo mode');
-            initialize();
-
-            // Mock bot response for testing
-            setTimeout(() => {
-                appendMessage('bot', 'This is a test response. In production, messages come from your Telegram bot.');
-                statusDiv.textContent = 'Ready';
-            }, 2000);
         }
     </script>
 </body>
