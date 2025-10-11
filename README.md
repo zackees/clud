@@ -228,11 +228,32 @@ The package provides one CLI entry point:
 
 - `clud` - Main CLI (runs Claude Code in YOLO mode)
 
-## Links
+## Cool Projects
 
-- **Awesome Claude Code**: https://github.com/hesreallyhim/awesome-claude-code
-- **SuperClaude Framework**: https://github.com/SuperClaude-Org/SuperClaude_Framework
-- **AB Method**: https://github.com/ayoubben18/ab-method
+### Curated Lists & Frameworks
+- **Awesome Claude Code**: https://github.com/hesreallyhim/awesome-claude-code - Curated list of commands, files, and workflows
+- **SuperClaude Framework**: https://github.com/SuperClaude-Org/SuperClaude_Framework - Framework for building Claude Code applications
+- **AB Method**: https://github.com/ayoubben18/ab-method - Workflow methodology for Claude Code
+
+### Web UIs
+- **Claude Code WebUI** (sugyan): https://github.com/sugyan/claude-code-webui - Web interface for Claude Code
+- **ClaudeCodeUI**: https://github.com/siteboon/claudecodeui - Alternative web UI for Claude Code
+
+### Official Tools
+- **Claude Code GitHub Action**: https://github.com/anthropics/claude-code-action - AI-powered automation for GitHub PRs and issues
+
+### IDE Integrations
+- **claude-code.nvim**: Neovim integration for Claude Code
+- **claude-code-ide.el**: Emacs integration with ediff-based code suggestions
+
+### Monitoring & Management
+- **CC Usage**: CLI tool for managing and analyzing Claude Code usage and costs
+- **ccflare**: Claude Code usage dashboard with web UI
+
+### Workflow Tools
+- **Crystal**: Desktop application for orchestrating and monitoring Claude Code agents
+- **Happy Coder**: Spawn and control multiple Claude Codes in parallel with push notifications
+- **Claude Task Runner**: Manages context isolation and focused task execution
 
 ## License
 
