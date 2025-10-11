@@ -66,6 +66,58 @@ class TestAgentCompletionIntegration(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("Command took longer than 30 seconds - this should complete quickly now")
 
+    def test_foreground_idle_detection(self):
+        """Test idle detection in foreground mode with Claude message."""
+        start_time = time.time()
+
+        try:
+            result = subprocess.run(
+                ["uv", "run", "clud", "-m", "respond with hi", "--idle-timeout", "10"],
+                capture_output=True,
+                text=True,
+                timeout=30,  # Max timeout including Claude startup
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            elapsed_time = time.time() - start_time
+
+            # Should complete successfully
+            self.assertEqual(result.returncode, 0, f"Command failed with returncode {result.returncode}")
+
+            # Should complete within reasonable time (Claude startup + idle timeout + buffer)
+            self.assertLess(elapsed_time, 30.0, f"Command took {elapsed_time}s, expected < 30s")
+
+            # Should have some output from Claude
+            combined_output = (result.stdout or "") + (result.stderr or "")
+            self.assertTrue(len(combined_output) > 0, "Expected some output from Claude")
+
+        except subprocess.TimeoutExpired:
+            self.fail("Command timed out - idle detection may not be working")
+
+    def test_foreground_without_idle_timeout(self):
+        """Test that foreground mode without --idle-timeout preserves status quo behavior."""
+        # This test just verifies that -p mode works normally without idle detection
+        try:
+            result = subprocess.run(
+                ["uv", "run", "clud", "-p", "respond with just the word 'ok'"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            # Should complete successfully
+            self.assertEqual(result.returncode, 0, f"Command failed with returncode {result.returncode}")
+
+            # Should have output
+            combined_output = (result.stdout or "") + (result.stderr or "")
+            self.assertTrue(len(combined_output) > 0, "Expected output from Claude")
+
+        except subprocess.TimeoutExpired:
+            self.fail("Command timed out - basic Claude functionality may be broken")
+
 
 if __name__ == "__main__":
     unittest.main()

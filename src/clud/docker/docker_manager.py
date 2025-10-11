@@ -823,11 +823,19 @@ class DockerManager:
         Get a container by name.
         """
         try:
-            # Force a fresh lookup to avoid stale cached data
-            container = self.client.containers.get(container_name)
-            # Reload to ensure we have the latest state
-            container.reload()
-            return container
+            # Use list with filter to avoid stale cache issues
+            # This forces a fresh query to the Docker daemon
+            containers: list[Container] = self.client.containers.list(all=True, filters={"name": f"^{container_name}$"})  # type: ignore[assignment]
+            if containers and len(containers) > 0:
+                container: Container = containers[0]
+                # Verify the container still exists by trying to reload it
+                try:
+                    container.reload()  # type: ignore[misc]
+                    return container
+                except NotFound:
+                    # Container was removed between list and reload
+                    return None
+            return None
         except NotFound:
             return None
         except Exception:

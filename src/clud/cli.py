@@ -52,7 +52,11 @@ def handle_test_command() -> int:
 
 def handle_codeup_command() -> int:
     """Handle the --codeup command by running clud with a message to run the global codeup command."""
-    codeup_prompt = "run the global command codeup, if it returns 0, halt, if it fails then read the output logs and apply the fixes. Run upto 5 times before giving up, else halt."
+    codeup_prompt = (
+        "run the global command codeup normally through the shell (it's a global command installed on the system), "
+        "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
+        "Run upto 5 times before giving up, else halt."
+    )
 
     try:
         # Run clud with the codeup message using current Python and module
@@ -72,7 +76,11 @@ def handle_codeup_command() -> int:
 
 def handle_codeup_publish_command() -> int:
     """Handle the --codeup-publish command by running clud with a message to run codeup -p."""
-    codeup_publish_prompt = "run the global command codeup -p, if it returns 0, halt, if it fails then read the output logs and apply the fixes. Run upto 5 times before giving up, else halt."
+    codeup_publish_prompt = (
+        "run the global command codeup -p normally through the shell (it's a global command installed on the system), "
+        "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
+        "Run upto 5 times before giving up, else halt."
+    )
 
     try:
         # Run clud with the codeup -p message using current Python and module

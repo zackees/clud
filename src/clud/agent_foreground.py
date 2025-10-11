@@ -8,7 +8,9 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from .agent_completion import detect_agent_completion
 from .agent_foreground_args import Args, parse_args
+from .output_filter import OutputFilter
 from .secrets import get_credential_store
 
 # Get credential store once at module level
@@ -276,7 +278,13 @@ def _find_claude_path() -> str | None:
     return None
 
 
-def _build_claude_command(args: Args, claude_path: str) -> list[str]:
+def _inject_completion_prompt(message: str) -> str:
+    """Inject the DONE.md completion prompt into the user's message."""
+    injection = " If you see that the task is 100 percent complete, then write out DONE.md and halt"
+    return message + injection
+
+
+def _build_claude_command(args: Args, claude_path: str, inject_prompt: bool = False) -> list[str]:
     """Build the Claude command with all arguments."""
     cmd = [claude_path, "--dangerously-skip-permissions"]
 
@@ -284,10 +292,22 @@ def _build_claude_command(args: Args, claude_path: str) -> list[str]:
         cmd.append("--continue")
 
     if args.prompt:
-        cmd.extend(["-p", args.prompt])
+        prompt_text = args.prompt
+        if inject_prompt:
+            prompt_text = _inject_completion_prompt(prompt_text)
+        cmd.extend(["-p", prompt_text])
 
     if args.message:
-        cmd.append(args.message)
+        message_text = args.message
+        if inject_prompt:
+            message_text = _inject_completion_prompt(message_text)
+
+        # If idle timeout is set, force non-interactive mode with -p
+        # to avoid TUI redraws being detected as activity
+        if args.idle_timeout is not None:
+            cmd.extend(["-p", message_text])
+        else:
+            cmd.append(message_text)
 
     cmd.extend(args.claude_args)
 
@@ -338,6 +358,116 @@ def _execute_command(cmd: list[str], use_shell: bool = False, verbose: bool = Fa
     return result.returncode
 
 
+def _prompt_for_loop_count() -> int:
+    """Prompt user for loop count."""
+    while True:
+        try:
+            sys.stdout.flush()
+            response = input("Loop count: ").strip()
+            if not response:
+                print("Loop count cannot be empty. Please enter a positive number.")
+                continue
+
+            count = int(response)
+            if count <= 0:
+                print("Loop count must be greater than 0.")
+                continue
+
+            return count
+
+        except ValueError:
+            print("Invalid input. Please enter a valid number.")
+            continue
+        except (EOFError, KeyboardInterrupt):
+            print("\nOperation cancelled.")
+            sys.exit(2)
+
+
+def _prompt_for_message() -> str:
+    """Prompt user for agent message/prompt."""
+    while True:
+        try:
+            sys.stdout.flush()
+            response = input("Prompt for agent: ").strip()
+            if not response:
+                print("Prompt cannot be empty. Please try again.")
+                continue
+
+            return response
+
+        except (EOFError, KeyboardInterrupt):
+            print("\nOperation cancelled.")
+            sys.exit(2)
+
+
+def _open_file_in_editor(file_path: Path) -> None:
+    """Open a file in the default text editor (cross-platform)."""
+    try:
+        system = platform.system()
+        if system == "Darwin":  # macOS
+            subprocess.run(["open", str(file_path)], check=False)
+        elif system == "Windows":
+            # Try sublime first, then fall back to default
+            sublime_paths = [
+                "C:\\Program Files\\Sublime Text\\sublime_text.exe",
+                "C:\\Program Files\\Sublime Text 3\\sublime_text.exe",
+                os.path.expanduser("~\\AppData\\Local\\Programs\\Sublime Text\\sublime_text.exe"),
+            ]
+            sublime_found = False
+            for sublime_path in sublime_paths:
+                if os.path.exists(sublime_path):
+                    subprocess.run([sublime_path, str(file_path)], check=False)
+                    sublime_found = True
+                    break
+
+            if not sublime_found:
+                # Fall back to default Windows opener
+                os.startfile(str(file_path))  # type: ignore
+        else:  # Linux and other Unix-like systems
+            # Try common editors in order
+            editors = ["sublime_text", "subl", "xdg-open"]
+            for editor in editors:
+                if shutil.which(editor):
+                    subprocess.run([editor, str(file_path)], check=False)
+                    break
+    except Exception as e:
+        print(f"Warning: Could not open {file_path}: {e}", file=sys.stderr)
+
+
+def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
+    """Run Claude in a loop, checking for DONE.md after each iteration."""
+    done_file = Path("DONE.md")
+
+    for i in range(loop_count):
+        print(f"\n--- Run {i + 1}/{loop_count} ---", file=sys.stderr)
+
+        # Build command with prompt injection
+        cmd = _build_claude_command(args, claude_path, inject_prompt=True)
+
+        # Print debug info
+        _print_debug_info(claude_path, cmd, args.verbose)
+
+        # Execute the command
+        returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
+
+        if returncode != 0 and args.verbose:
+            print(f"Warning: Run {i + 1} exited with code {returncode}", file=sys.stderr)
+
+        # Check if DONE.md was created
+        if done_file.exists():
+            print(f"\n✅ DONE.md detected after run {i + 1} — halting early.", file=sys.stderr)
+            break
+
+    print("\nAll runs complete or halted early.", file=sys.stderr)
+
+    # Open DONE.md if it exists
+    if done_file.exists():
+        print(f"Opening {done_file}...", file=sys.stderr)
+        _open_file_in_editor(done_file)
+
+    return 0
+
+
 def run(args: Args) -> int:
     """
     Launch Claude Code with dangerous mode (--dangerously-skip-permissions).
@@ -375,6 +505,40 @@ def run(args: Args) -> int:
             print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
             return 1
 
+        # Handle loop mode - parse loop_value flexibly
+        if args.loop_value is not None:
+            loop_count = None
+            loop_message = None
+
+            # Try to parse loop_value
+            if args.loop_value == "":
+                # --loop with no value: prompt for both
+                pass
+            else:
+                # Try parsing as integer first
+                try:
+                    loop_count = int(args.loop_value)
+                    if loop_count <= 0:
+                        print("Error: --loop count must be greater than 0", file=sys.stderr)
+                        return 1
+                except ValueError:
+                    # Not an integer, treat as message
+                    loop_message = args.loop_value
+
+            # Prompt for missing values
+            if loop_count is None:
+                loop_count = _prompt_for_loop_count()
+
+            # Check if we have a message from loop_value, -m, or -p
+            if not args.prompt and not args.message and not loop_message:
+                loop_message = _prompt_for_message()
+
+            # Set the message if we got it from loop_value
+            if loop_message and not args.message and not args.prompt:
+                args.message = loop_message
+
+            return _run_loop(args, claude_path, loop_count)
+
         # Build command
         cmd = _build_claude_command(args, claude_path)
 
@@ -382,7 +546,23 @@ def run(args: Args) -> int:
         _print_debug_info(claude_path, cmd, args.verbose)
 
         # Execute Claude with the dangerous permissions flag
-        return _execute_command(cmd, use_shell=False, verbose=args.verbose)
+        # Use idle detection if timeout is specified
+        if args.idle_timeout is not None:
+            # Create output filter to suppress terminal capability responses
+            output_filter = OutputFilter()
+
+            # Output callback to print data to stdout (with filtering)
+            def output_callback(data: str) -> None:
+                # Filter out terminal capability responses to prevent corrupting parent terminal
+                filtered_data = output_filter.filter_terminal_responses(data)
+                if filtered_data:
+                    sys.stdout.write(filtered_data)
+                    sys.stdout.flush()
+
+            detect_agent_completion(cmd, args.idle_timeout, output_callback)
+            return 0
+        else:
+            return _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
     except FileNotFoundError as e:
         print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)

@@ -15,6 +15,9 @@ class Args:
     continue_flag: bool
     dry_run: bool
     verbose: bool
+    idle_timeout: float | None
+    loop_count: int | None
+    loop_value: str | None  # Raw value from --loop for flexible parsing
     claude_args: list[str]
 
 
@@ -70,6 +73,22 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Show debug output",
     )
 
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        dest="idle_timeout",
+        help="Timeout in seconds for agent completion detection (enables auto-quit on idle)",
+    )
+
+    parser.add_argument(
+        "--loop",
+        type=str,
+        nargs="?",
+        const="",  # Empty string when --loop is used without value
+        dest="loop_value",
+        help="Run the command N times, checking for DONE.md after each iteration. Can be: --loop 50 -p 'msg', --loop 'msg' (prompts count), --loop 50 (prompts msg), or --loop (prompts both).",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
 
@@ -80,5 +99,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         continue_flag=known_args.continue_flag,
         dry_run=known_args.dry_run,
         verbose=known_args.verbose,
+        idle_timeout=known_args.idle_timeout,
+        loop_count=None,  # Will be parsed from loop_value in agent_foreground.py
+        loop_value=known_args.loop_value,
         claude_args=unknown_args,
     )

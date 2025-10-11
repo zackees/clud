@@ -10,10 +10,98 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .output_filter import OutputFilter
+
 logger = logging.getLogger(__name__)
 
 # Type alias for output callback function
 OutputCallback = Callable[[str], None] | None
+
+
+# Terminal state management
+class TerminalState:
+    """Context manager for saving and restoring terminal state."""
+
+    def __init__(self) -> None:
+        self.saved_state: Any = None
+        self.fd: int | None = None
+
+    def __enter__(self) -> "TerminalState":
+        """Save the current terminal state."""
+        try:
+            if sys.platform.startswith("win"):
+                self._save_windows_state()
+            else:
+                self._save_unix_state()
+        except Exception as e:
+            logger.warning(f"Could not save terminal state: {e}")
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Restore the saved terminal state."""
+        try:
+            if sys.platform.startswith("win"):
+                self._restore_windows_state()
+            else:
+                self._restore_unix_state()
+        except Exception as e:
+            logger.warning(f"Could not restore terminal state: {e}")
+
+    def _save_unix_state(self) -> None:
+        """Save Unix terminal state using termios."""
+        try:
+            import termios
+
+            fd = sys.stdin.fileno()
+            self.fd = fd
+            self.saved_state = termios.tcgetattr(fd)
+        except Exception:
+            # Not a TTY or termios unavailable
+            self.fd = None
+            self.saved_state = None
+
+    def _restore_unix_state(self) -> None:
+        """Restore Unix terminal state using termios."""
+        if self.fd is not None and self.saved_state is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(self.fd, termios.TCSANOW, self.saved_state)
+            except Exception as e:
+                logger.warning(f"Could not restore Unix terminal state: {e}")
+
+    def _save_windows_state(self) -> None:
+        """Save Windows console state."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            # Get handle to stdin
+            STD_INPUT_HANDLE = -10
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+
+            # Get current console mode
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                self.saved_state = (handle, mode.value)
+            else:
+                self.saved_state = None
+        except Exception:
+            # Not a console or Windows API unavailable
+            self.saved_state = None
+
+    def _restore_windows_state(self) -> None:
+        """Restore Windows console state."""
+        if self.saved_state is not None:
+            try:
+                import ctypes
+
+                handle, mode = self.saved_state
+                kernel32 = ctypes.windll.kernel32
+                kernel32.SetConsoleMode(handle, mode)
+            except Exception as e:
+                logger.warning(f"Could not restore Windows console state: {e}")
 
 
 def detect_agent_completion(command: list[str], idle_timeout: float = 3.0, output_callback: OutputCallback = None) -> bool:
@@ -27,10 +115,12 @@ def detect_agent_completion(command: list[str], idle_timeout: float = 3.0, outpu
     Returns:
         True if command completed due to idle timeout, False if it exited normally
     """
-    if sys.platform.startswith("win"):
-        return _detect_completion_windows(command, idle_timeout, output_callback)
-    else:
-        return _detect_completion_unix(command, idle_timeout, output_callback)
+    # Use TerminalState context manager to ensure terminal is restored on exit
+    with TerminalState():
+        if sys.platform.startswith("win"):
+            return _detect_completion_windows(command, idle_timeout, output_callback)
+        else:
+            return _detect_completion_unix(command, idle_timeout, output_callback)
 
 
 def _detect_completion_windows(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> bool:
@@ -76,15 +166,23 @@ def _detect_completion_unix(command: list[str], idle_timeout: float, output_call
 def _monitor_pty_process(process: Any, idle_timeout: float, output_callback: OutputCallback, platform: str) -> bool:
     """Monitor Windows PTY process for completion."""
     last_activity = time.time()
+    output_filter = OutputFilter()
 
     try:
         while process.isalive():
             try:
                 data = process.read()
                 if data:
-                    last_activity = time.time()
+                    # Always send output to callback (user sees everything)
                     if output_callback:
                         output_callback(data)
+
+                    # Only reset idle timer on meaningful activity
+                    if output_filter.is_meaningful(data):
+                        last_activity = time.time()
+                        logger.debug(f"Meaningful activity detected: {repr(data[:50])}")
+                    else:
+                        logger.debug(f"TUI noise filtered: {repr(data[:50])}")
                 else:
                     time.sleep(0.1)  # No data, avoid busy loop
             except Exception:
@@ -110,6 +208,7 @@ def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeou
     import select
 
     last_activity = time.time()
+    output_filter = OutputFilter()
 
     try:
         while process.poll() is None:
@@ -118,9 +217,18 @@ def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeou
                 try:
                     data = os.read(master, 1024)
                     if data:
-                        last_activity = time.time()
+                        data_str = data.decode("utf-8", errors="replace")
+
+                        # Always send output to callback (user sees everything)
                         if output_callback:
-                            output_callback(data.decode("utf-8", errors="replace"))
+                            output_callback(data_str)
+
+                        # Only reset idle timer on meaningful activity
+                        if output_filter.is_meaningful(data_str):
+                            last_activity = time.time()
+                            logger.debug(f"Meaningful activity detected: {repr(data_str[:50])}")
+                        else:
+                            logger.debug(f"TUI noise filtered: {repr(data_str[:50])}")
                 except OSError:
                     break  # PTY closed
 
@@ -163,13 +271,23 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
 
         # Monitor for idle timeout
         last_activity = time.time()
+        output_filter = OutputFilter()
+
         try:
             while process.poll() is None:
                 try:
                     line = output_queue.get(timeout=0.1)
-                    last_activity = time.time()
+
+                    # Always send output to callback (user sees everything)
                     if output_callback:
                         output_callback(line)
+
+                    # Only reset idle timer on meaningful activity
+                    if output_filter.is_meaningful(line):
+                        last_activity = time.time()
+                        logger.debug(f"Meaningful activity detected: {repr(line[:50])}")
+                    else:
+                        logger.debug(f"TUI noise filtered: {repr(line[:50])}")
                 except queue.Empty:
                     pass
 

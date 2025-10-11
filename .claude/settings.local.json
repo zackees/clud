@@ -15,7 +15,10 @@
       "Bash(./bash help)",
       "Bash(./bash test --help)",
       "Bash(where claude)",
-      "Read(//c/Users/niteris/AppData/Roaming/npm/**)"
+      "Read(//c/Users/niteris/AppData/Roaming/npm/**)",
+      "Bash(uv run pytest:*)",
+      "WebSearch",
+      "WebFetch(domain:invisible-island.net)"
     ],
     "deny": [],
     "ask": []
