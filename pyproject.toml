@@ -18,7 +18,7 @@ dependencies = [
     "disklru>=0.1.0",
     "httpx>=0.24.0",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
-    "running-process>=1.0.1",
+    "running-process>=1.0.7",
     "codeup>=1.0.8",
     "nodeenv>=1.8.0",
 ]

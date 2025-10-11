@@ -19,9 +19,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from running_process import RunningProcess
+
 from .agent_background_args import BackgroundAgentArgs, parse_background_agent_args
 from .agent_completion import detect_agent_completion
-from .running_process import RunningProcess
 from .telegram_bot import TelegramBot
 
 # Container sync is now handled by standalone package in container

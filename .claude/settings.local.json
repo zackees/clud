@@ -19,7 +19,10 @@
       "Bash(uv run pytest:*)",
       "WebSearch",
       "WebFetch(domain:invisible-island.net)",
-      "Read(//c/Users/niteris/dev/fastled-run/**)"
+      "Read(//c/Users/niteris/dev/fastled-run/**)",
+      "Bash(uv pip show:*)",
+      "Read(//c/Users/niteris/dev/running-process/**)",
+      "Bash(git describe:*)"
     ],
     "deny": [],
     "ask": []
