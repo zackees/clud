@@ -23,7 +23,6 @@ class RouterArgs:
     remaining_args: list[str]
     # Commands that don't need agents
     login: bool = False
-    telegram_login: bool = False
     task: str | None = None
     lint: bool = False
     test: bool = False
@@ -33,6 +32,7 @@ class RouterArgs:
     codeup_publish: bool = False
     kanban: bool = False
     telegram: bool = False
+    telegram_token: str | None = None
     code: bool = False
     code_port: int | None = None
     webui: bool = False
@@ -51,7 +51,6 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
 
     # Check for special commands first (these don't need agent routing)
     login = "--login" in args_copy
-    telegram_login = "--telegram-login" in args_copy
     lint = "--lint" in args_copy
     test = "--test" in args_copy
     fix = "--fix" in args_copy
@@ -88,6 +87,19 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
             with contextlib.suppress(ValueError):
                 webui_port = int(args_copy[webui_idx + 1])
 
+    # Extract telegram token argument if present
+    telegram_token = None
+    if "--telegram" in args_copy:
+        telegram_idx = args_copy.index("--telegram")
+        # Check if there's a token argument after --telegram
+        if telegram_idx + 1 < len(args_copy) and not args_copy[telegram_idx + 1].startswith("-"):
+            telegram_token = args_copy[telegram_idx + 1]
+    elif "-tg" in args_copy:
+        tg_idx = args_copy.index("-tg")
+        # Check if there's a token argument after -tg
+        if tg_idx + 1 < len(args_copy) and not args_copy[tg_idx + 1].startswith("-"):
+            telegram_token = args_copy[tg_idx + 1]
+
     # Only intercept help if no mode is specified
     help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up"])
 
@@ -119,7 +131,6 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         mode=mode,
         remaining_args=args_copy,
         login=login,
-        telegram_login=telegram_login,
         task=task,
         lint=lint,
         test=test,
@@ -129,6 +140,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         codeup_publish=codeup_publish,
         kanban=kanban,
         telegram=telegram,
+        telegram_token=telegram_token,
         code=code,
         code_port=code_port,
         webui=webui,

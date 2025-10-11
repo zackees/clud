@@ -5,7 +5,7 @@ import sys
 
 from .agent_foreground import ConfigError as ForegroundConfigError
 from .agent_foreground import ValidationError as ForegroundValidationError
-from .agent_foreground import handle_login, handle_telegram_login
+from .agent_foreground import handle_login, save_telegram_credentials
 from .cli_args import AgentMode, parse_router_args
 from .task import handle_task_command
 
@@ -109,11 +109,30 @@ def handle_kanban_command() -> int:
         return 1
 
 
-def handle_telegram_command() -> int:
-    """Handle the --telegram/-tg command by starting Telegram Web App server."""
+def handle_telegram_command(token: str | None = None) -> int:
+    """Handle the --telegram/-tg command by starting Telegram Web App server.
+
+    Args:
+        token: Optional bot token to save before launching
+
+    Returns:
+        Exit code
+    """
     from .webapp.server import run_server
 
     try:
+        # Save token if provided
+        if token:
+            print("Saving Telegram bot token...")
+            try:
+                # Save with empty chat_id - will be auto-detected from Web App
+                save_telegram_credentials(token, "")
+                print("✓ Token saved successfully")
+                print("  Chat ID will be auto-detected when you open the Web App in Telegram\n")
+            except Exception as e:
+                print(f"Warning: Could not save token: {e}", file=sys.stderr)
+                print("Continuing to launch Web App...\n", file=sys.stderr)
+
         print("Starting Telegram Web App server...")
         return run_server()
     except Exception as e:
@@ -289,7 +308,6 @@ def main(args: list[str] | None = None) -> int:
             print()
             print("Special commands:")
             print("  --login              Configure API key for Claude")
-            print("  --telegram-login     Configure Telegram bot credentials")
             print("  --task PATH          Open task file in editor")
             print("  --code [PORT]        Launch code-server in browser (default port: 8080)")
             print("  --lint               Run global linting with codeup")
@@ -310,9 +328,6 @@ def main(args: list[str] | None = None) -> int:
         if router_args.login:
             return handle_login()
 
-        if router_args.telegram_login:
-            return handle_telegram_login()
-
         if router_args.task is not None:
             return handle_task_command(router_args.task)
 
@@ -332,7 +347,7 @@ def main(args: list[str] | None = None) -> int:
             return handle_kanban_command()
 
         if router_args.telegram:
-            return handle_telegram_command()
+            return handle_telegram_command(router_args.telegram_token)
 
         if router_args.webui:
             return handle_webui_command(router_args.webui_port)

@@ -22,16 +22,16 @@ except ImportError:
 class TelegramBot:
     """Telegram bot manager for sending agent notifications."""
 
-    def __init__(self, bot_token: str, chat_id: str, agent_name: str | None = None):
+    def __init__(self, bot_token: str, chat_id: str | None = None, agent_name: str | None = None):
         """Initialize Telegram bot.
 
         Args:
             bot_token: Telegram bot API token
-            chat_id: Telegram chat ID to send messages to
+            chat_id: Optional Telegram chat ID to send messages to (can be auto-detected)
             agent_name: Optional agent name (will be auto-generated if not provided)
         """
         self.bot_token = bot_token
-        self.chat_id = chat_id
+        self.chat_id = chat_id or ""  # Empty string if not provided
         self.agent_name = agent_name or self._generate_agent_name()
         self.messenger: Any = None
         self.start_time = datetime.now()
@@ -167,15 +167,14 @@ class TelegramBot:
         bot_token = getattr(args, "telegram_bot_token", None)
         chat_id = getattr(args, "telegram_chat_id", None)
 
-        if not bot_token or not chat_id:
-            print("Error: Telegram notifications require bot token and chat ID\n", file=sys.stderr)
+        # Only require bot_token - chat_id can be auto-detected from Web App
+        if not bot_token:
+            print("Error: Telegram notifications require bot token\n", file=sys.stderr)
             print("Quick setup:", file=sys.stderr)
+            print("  clud --telegram <bot_token>  (saves token and launches Web App)", file=sys.stderr)
             print('  export TELEGRAM_BOT_TOKEN="..."  (get from @BotFather on Telegram)', file=sys.stderr)
-            print('  export TELEGRAM_CHAT_ID="..."    (get from @userinfobot on Telegram)', file=sys.stderr)
             print("", file=sys.stderr)
-            print("Or use command-line flags:", file=sys.stderr)
-            print("  clud --telegram --telegram-bot-token TOKEN --telegram-chat-id ID", file=sys.stderr)
-            print("", file=sys.stderr)
+            print("Chat ID will be auto-detected when you open the Web App in Telegram", file=sys.stderr)
             print("Setup guide: https://github.com/zackees/clud/blob/main/TELEGRAM_SETUP.md", file=sys.stderr)
             sys.exit(1)
 

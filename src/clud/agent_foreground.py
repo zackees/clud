@@ -215,14 +215,22 @@ def prompt_for_api_key() -> str:
 
 # Telegram credential management functions
 def save_telegram_credentials(bot_token: str, chat_id: str) -> None:
-    """Save Telegram credentials using the credential store."""
+    """Save Telegram credentials using the credential store.
+
+    Args:
+        bot_token: Telegram bot token (required)
+        chat_id: Telegram chat ID (can be empty string if not yet known)
+    """
     if keyring is None:
         raise ConfigError("No credential storage available. Install with: pip install keyring, keyrings.cryptfile, or cryptography")
 
     try:
-        # Save both credentials to keyring
+        # Save bot token (always required)
         keyring.set_password("clud-telegram", "bot-token", bot_token.strip())
-        keyring.set_password("clud-telegram", "chat-id", chat_id.strip())
+
+        # Save chat_id only if it's not empty
+        if chat_id and chat_id.strip():
+            keyring.set_password("clud-telegram", "chat-id", chat_id.strip())
     except Exception as e:
         raise ConfigError(f"Failed to save Telegram credentials: {e}") from e
 
@@ -243,54 +251,6 @@ def load_telegram_credentials() -> tuple[str | None, str | None]:
     except Exception as e:
         print(f"Warning: Could not load Telegram credentials: {e}", file=sys.stderr)
         return None, None
-
-
-def handle_telegram_login() -> int:
-    """Handle the --telegram-login command to configure Telegram credentials."""
-    print("Configure Telegram Bot Credentials")
-    print("-" * 40)
-
-    # Check if we already have saved credentials
-    existing_token, existing_chat_id = load_telegram_credentials()
-    if existing_token and existing_chat_id:
-        print("Telegram credentials are already configured.")
-        sys.stdout.flush()
-        overwrite = input("Do you want to replace them? (y/N): ").strip().lower()
-        if overwrite not in ["y", "yes"]:
-            print("Keeping existing credentials.")
-            return 0
-
-    # Prompt for new credentials
-    try:
-        # Get bot token
-        sys.stdout.flush()
-        print("\nGet your bot token from @BotFather on Telegram")
-        bot_token = input("Please enter your Telegram bot token: ").strip()
-        if not bot_token:
-            print("Error: Bot token cannot be empty.")
-            return 1
-
-        # Get chat ID
-        sys.stdout.flush()
-        print("\nGet your chat ID from @userinfobot on Telegram")
-        chat_id = input("Please enter your Telegram chat ID: ").strip()
-        if not chat_id:
-            print("Error: Chat ID cannot be empty.")
-            return 1
-
-        # Save the credentials
-        try:
-            save_telegram_credentials(bot_token, chat_id)
-            print("\n✓ Telegram credentials saved successfully to credential store")
-            print("\nYou can now use Telegram notifications with: clud --telegram")
-            return 0
-        except ConfigError as e:
-            print(f"\nError: Could not save Telegram credentials: {e}", file=sys.stderr)
-            return 1
-
-    except (EOFError, KeyboardInterrupt):
-        print("\nOperation cancelled.")
-        return 2
 
 
 def get_api_key(args: Any) -> str:

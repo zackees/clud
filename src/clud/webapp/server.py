@@ -32,6 +32,61 @@ class TelegramWebAppHandler(SimpleHTTPRequestHandler):
             # Serve static files
             super().do_GET()
 
+    def do_POST(self) -> None:
+        """Handle POST requests - save chat ID."""
+        if self.path == "/api/save-chat-id":
+            try:
+                # Read request body
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode("utf-8")
+                data = json.loads(body)
+
+                chat_id = data.get("chat_id", "").strip()
+                if not chat_id:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    response = {"status": "error", "message": "chat_id is required"}
+                    self.wfile.write(json.dumps(response).encode("utf-8"))
+                    return
+
+                # Import here to avoid circular dependencies
+                from ..agent_foreground import load_telegram_credentials, save_telegram_credentials
+
+                # Load existing bot token
+                bot_token, _ = load_telegram_credentials()
+                if not bot_token:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    response = {"status": "error", "message": "Bot token not found. Please save bot token first."}
+                    self.wfile.write(json.dumps(response).encode("utf-8"))
+                    return
+
+                # Save with the detected chat_id
+                save_telegram_credentials(bot_token, chat_id)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                response = {"status": "ok", "message": "Chat ID saved successfully"}
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                response = {"status": "error", "message": str(e)}
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+        else:
+            # Unknown POST endpoint
+            self.send_response(404)
+            self.end_headers()
+
     def log_message(self, format: str, *args: object) -> None:
         """Suppress log messages."""
         pass

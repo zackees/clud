@@ -164,6 +164,39 @@
             }
         }
 
+        // Auto-detect and save chat ID from Telegram
+        async function autoDetectChatId() {
+            if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+                const user = tg.initDataUnsafe.user;
+                const chatId = user.id.toString();
+
+                try {
+                    const response = await fetch('/api/save-chat-id', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ chat_id: chatId })
+                    });
+
+                    const data = await response.json();
+                    if (data.status === 'ok') {
+                        console.log('Chat ID saved successfully:', chatId);
+                        // Show success message briefly in status
+                        const originalStatus = statusDiv.textContent;
+                        statusDiv.textContent = '✓ Chat ID detected and saved!';
+                        setTimeout(() => {
+                            statusDiv.textContent = originalStatus;
+                        }, 3000);
+                    } else {
+                        console.warn('Failed to save chat ID:', data.message);
+                    }
+                } catch (error) {
+                    console.error('Error saving chat ID:', error);
+                }
+            }
+        }
+
         // Handle START button click
         startBtn.addEventListener('click', async () => {
             // Hide start screen
@@ -242,6 +275,7 @@
 
         // Initialize on page load
         fetchServerInfo();
+        autoDetectChatId();
 
         // For testing in browser (not in Telegram)
         if (!window.Telegram.WebApp.initData) {
