@@ -335,7 +335,7 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
     if iteration is not None and total_iterations is not None:
         # Loop mode: include iteration context and summary instruction
         injection = (
-            f" IMPORTANT: This is iteration {iteration} of {total_iterations}. "
+            f" IMPORTANT: This is iteration {iteration} of many. "
             f"Before finishing this iteration, create a summary file "
             f"named .agent_task/ITERATION_{iteration}.md documenting what you accomplished. "
             f"If you determine that ALL work across ALL iterations is 100% complete, "
