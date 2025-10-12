@@ -336,14 +336,14 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         # Loop mode: include iteration context and summary instruction
         injection = (
             f" IMPORTANT: This is iteration {iteration} of {total_iterations}. "
-            f"When you complete your work for this iteration, create a summary file "
-            f"named ITERATION_{iteration}.md documenting what you accomplished. "
+            f"Before finishing this iteration, create a summary file "
+            f"named .agent_task/ITERATION_{iteration}.md documenting what you accomplished. "
             f"If you determine that ALL work across ALL iterations is 100% complete, "
-            f"then write out DONE.md and halt the loop early."
+            f"also write .agent_task/DONE.md to halt the loop early."
         )
     else:
         # Non-loop mode: standard completion prompt
-        injection = " If you see that the task is 100 percent complete, then write out DONE.md and halt"
+        injection = " If you see that the task is 100 percent complete, then write out .agent_task/DONE.md and halt"
 
     return message + injection
 
@@ -548,7 +548,11 @@ def _create_streaming_json_callback() -> tuple[Any, Any]:
 
 def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     """Run Claude in a loop, checking for DONE.md after each iteration."""
-    done_file = Path("DONE.md")
+    # Create .agent_task directory if it doesn't exist
+    agent_task_dir = Path(".agent_task")
+    agent_task_dir.mkdir(exist_ok=True)
+
+    done_file = agent_task_dir / "DONE.md"
 
     for i in range(loop_count):
         iteration_num = i + 1
@@ -585,7 +589,7 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
         # Check if DONE.md was created
         if done_file.exists():
-            print(f"\n✅ DONE.md detected after iteration {iteration_num} — halting early.", file=sys.stderr)
+            print(f"\n✅ .agent_task/DONE.md detected after iteration {iteration_num} — halting early.", file=sys.stderr)
             break
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)
