@@ -558,6 +558,12 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         iteration_num = i + 1
         print(f"\n--- Iteration {iteration_num}/{loop_count} ---", file=sys.stderr)
 
+        # Print the user's prompt for this iteration
+        user_prompt = args.prompt if args.prompt else args.message
+        if user_prompt:
+            print(f"Prompt: {user_prompt}", file=sys.stderr)
+            print(file=sys.stderr)  # Empty line for spacing
+
         # Build command with prompt injection, including iteration context
         cmd = _build_claude_command(
             args,

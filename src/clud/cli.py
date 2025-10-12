@@ -10,14 +10,34 @@ from .cli_args import AgentMode, parse_router_args
 from .task import handle_task_command
 
 
-def handle_lint_command() -> int:
-    """Handle the --lint command by running clud with a message to run codeup linting."""
-    lint_prompt = "run codeup --lint --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
+def run_clud_subprocess(
+    prompt: str,
+    use_print_flag: bool = False,
+    additional_args: list[str] | None = None,
+) -> int:
+    """Run clud as a subprocess with the given prompt.
 
+    Args:
+        prompt: The prompt/message to pass to clud
+        use_print_flag: If True, uses -p flag; if False, uses -m flag
+        additional_args: Optional additional command-line arguments
+
+    Returns:
+        Exit code from clud subprocess
+    """
     try:
-        # Run clud with the lint message using current Python and module
+        cmd = [sys.executable, "-m", "clud"]
+
+        # Add prompt with appropriate flag
+        flag = "-p" if use_print_flag else "-m"
+        cmd.extend([flag, prompt])
+
+        # Add any additional arguments
+        if additional_args:
+            cmd.extend(additional_args)
+
         result = subprocess.run(
-            [sys.executable, "-m", "clud", "-m", lint_prompt],
+            cmd,
             check=False,  # Don't raise on non-zero exit
             capture_output=False,  # Let output go to terminal
         )
@@ -26,28 +46,20 @@ def handle_lint_command() -> int:
         print("Error: Python interpreter not found.", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Error running clud: {e}", file=sys.stderr)
+        print(f"Error running clud subprocess: {e}", file=sys.stderr)
         return 1
+
+
+def handle_lint_command() -> int:
+    """Handle the --lint command by running clud with a message to run codeup linting."""
+    lint_prompt = "run codeup --lint --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
+    return run_clud_subprocess(lint_prompt)
 
 
 def handle_test_command() -> int:
     """Handle the --test command by running clud with a message to run codeup testing."""
     test_prompt = "run codeup --test --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
-
-    try:
-        # Run clud with the test message using current Python and module
-        result = subprocess.run(
-            [sys.executable, "-m", "clud", "-m", test_prompt],
-            check=False,  # Don't raise on non-zero exit
-            capture_output=False,  # Let output go to terminal
-        )
-        return result.returncode
-    except FileNotFoundError:
-        print("Error: Python interpreter not found.", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error running clud: {e}", file=sys.stderr)
-        return 1
+    return run_clud_subprocess(test_prompt)
 
 
 def handle_codeup_command() -> int:
@@ -57,21 +69,7 @@ def handle_codeup_command() -> int:
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."
     )
-
-    try:
-        # Run clud with the codeup message using current Python and module
-        result = subprocess.run(
-            [sys.executable, "-m", "clud", "-m", codeup_prompt],
-            check=False,  # Don't raise on non-zero exit
-            capture_output=False,  # Let output go to terminal
-        )
-        return result.returncode
-    except FileNotFoundError:
-        print("Error: Python interpreter not found.", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error running clud: {e}", file=sys.stderr)
-        return 1
+    return run_clud_subprocess(codeup_prompt)
 
 
 def handle_codeup_publish_command() -> int:
@@ -81,21 +79,7 @@ def handle_codeup_publish_command() -> int:
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."
     )
-
-    try:
-        # Run clud with the codeup -p message using current Python and module
-        result = subprocess.run(
-            [sys.executable, "-m", "clud", "-m", codeup_publish_prompt],
-            check=False,  # Don't raise on non-zero exit
-            capture_output=False,  # Let output go to terminal
-        )
-        return result.returncode
-    except FileNotFoundError:
-        print("Error: Python interpreter not found.", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error running clud: {e}", file=sys.stderr)
-        return 1
+    return run_clud_subprocess(codeup_publish_prompt)
 
 
 def handle_kanban_command() -> int:
@@ -150,6 +134,17 @@ def handle_webui_command(port: int | None = None) -> int:
     except Exception as e:
         print(f"Error running Web UI: {e}", file=sys.stderr)
         return 1
+
+
+def handle_init_loop_command() -> int:
+    """Handle the --init-loop command by running clud to create a LOOP.md index file."""
+    init_loop_prompt = (
+        "Look at checked-out *.md files and ones not added to the repo yet (use git status). "
+        "Then write out LOOP.md which will contain an index of md files to consult. "
+        "The index should list each markdown file with a brief description of its contents. "
+        "Format LOOP.md as a reference guide for loop mode iterations."
+    )
+    return run_clud_subprocess(init_loop_prompt, use_print_flag=True)
 
 
 def handle_code_command(port: int | None = None) -> int:
@@ -249,21 +244,7 @@ def handle_fix_command(url: str | None = None) -> int:
             "Finally run `codeup --lint --dry-run` and fix until it passes (upto 5 times) then halt. "
             "If you run into a locked file then try two times, same with misc system error. Else halt."
         )
-
-    try:
-        # Run clud with the fix message using current Python and module
-        result = subprocess.run(
-            [sys.executable, "-m", "clud", "-m", fix_prompt],
-            check=False,  # Don't raise on non-zero exit
-            capture_output=False,  # Let output go to terminal
-        )
-        return result.returncode
-    except FileNotFoundError:
-        print("Error: Python interpreter not found.", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Error running clud: {e}", file=sys.stderr)
-        return 1
+    return run_clud_subprocess(fix_prompt)
 
 
 def is_github_url(url: str) -> bool:
@@ -316,6 +297,7 @@ def main(args: list[str] | None = None) -> int:
             print("  --codeup-publish     Run global codeup -p command with auto-fix (up to 5 retries)")
             print("  --codeup-p           Alias for --codeup-publish")
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
+            print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
             print("  --telegram, -tg      Start Telegram Web App server for bot integration")
             print("  --webui [PORT]       Launch Claude Code Web UI in browser (default port: 8888)")
@@ -357,6 +339,9 @@ def main(args: list[str] | None = None) -> int:
 
         if router_args.fix:
             return handle_fix_command(router_args.fix_url)
+
+        if router_args.init_loop:
+            return handle_init_loop_command()
 
         # Route to appropriate mode handler
         if router_args.mode == AgentMode.FIX:

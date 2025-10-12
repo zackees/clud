@@ -37,6 +37,7 @@ class RouterArgs:
     code_port: int | None = None
     webui: bool = False
     webui_port: int | None = None
+    init_loop: bool = False
     help: bool = False
 
 
@@ -60,6 +61,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     telegram = "--telegram" in args_copy or "-tg" in args_copy
     code = "--code" in args_copy
     webui = "--webui" in args_copy
+    init_loop = "--init-loop" in args_copy
 
     # Extract fix URL argument if present
     fix_url = None
@@ -145,5 +147,6 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         code_port=code_port,
         webui=webui,
         webui_port=webui_port,
+        init_loop=init_loop,
         help=help_requested,
     )
