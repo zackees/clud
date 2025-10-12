@@ -127,7 +127,13 @@ class StreamJsonFormatter:
                             output_lines.append(f"🔧 Read: {file_path}")
                         elif tool_name == "Edit":
                             file_path = cast(str, tool_input.get("file_path", ""))
-                            output_lines.append(f"🔧 Edit: {file_path}")
+                            old_string = cast(str, tool_input.get("old_string", ""))
+                            new_string = cast(str, tool_input.get("new_string", ""))
+                            replace_all = tool_input.get("replace_all", False)
+
+                            # Format the edit details
+                            edit_info = self._format_edit_details(file_path, old_string, new_string, replace_all)
+                            output_lines.append(f"🔧 Edit: {edit_info}")
                         elif tool_name == "Write":
                             file_path = cast(str, tool_input.get("file_path", ""))
                             output_lines.append(f"🔧 Write: {file_path}")
@@ -160,6 +166,49 @@ class StreamJsonFormatter:
             output_lines.append(f"📊 {', '.join(usage_parts)}")
 
         return "\n".join(output_lines) + "\n" if output_lines else ""
+
+    def _format_edit_details(self, file_path: str, old_string: str, new_string: str, replace_all: bool) -> str:
+        """Format edit details for display.
+
+        Args:
+            file_path: Path to the file being edited
+            old_string: The old string being replaced
+            new_string: The new string replacing it
+            replace_all: Whether this is a replace_all operation
+
+        Returns:
+            Formatted string with edit details
+        """
+        import os
+
+        # Use just the filename if path is long
+        filename = os.path.basename(file_path)
+
+        # Count lines in old and new strings
+        old_lines = old_string.count("\n") + (1 if old_string and not old_string.endswith("\n") else 0)
+        new_lines = new_string.count("\n") + (1 if new_string and not new_string.endswith("\n") else 0)
+
+        # Determine format based on edit characteristics
+        max_inline_length = 50
+
+        # For replace_all, show that info
+        if replace_all:
+            char_count = len(old_string)
+            return f"{filename} (replace all, {char_count} chars)"
+
+        # For short single-line edits, show inline preview
+        if old_lines == 1 and new_lines == 1 and len(old_string) <= max_inline_length and len(new_string) <= max_inline_length:
+            old_preview = old_string.strip()[:max_inline_length]
+            new_preview = new_string.strip()[:max_inline_length]
+            return f'{filename} | "{old_preview}" → "{new_preview}"'
+
+        # For multi-line edits or longer edits, show line count changes
+        if old_lines != new_lines:
+            return f"{filename} ({old_lines}→{new_lines} lines)"
+        else:
+            char_diff = len(new_string) - len(old_string)
+            char_info = f"+{char_diff}" if char_diff > 0 else str(char_diff)
+            return f"{filename} ({old_lines} lines, {char_info} chars)"
 
 
 def create_formatter_callback(formatter: StreamJsonFormatter | None = None, output_file: Any = None) -> Any:
