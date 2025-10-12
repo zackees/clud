@@ -324,14 +324,46 @@ def _find_claude_path() -> str | None:
     return None
 
 
-def _inject_completion_prompt(message: str) -> str:
-    """Inject the DONE.md completion prompt into the user's message."""
-    injection = " If you see that the task is 100 percent complete, then write out DONE.md and halt"
+def _inject_completion_prompt(message: str, iteration: int | None = None, total_iterations: int | None = None) -> str:
+    """Inject the DONE.md completion prompt into the user's message.
+
+    Args:
+        message: The user's original message
+        iteration: Current iteration number (1-indexed) if in loop mode
+        total_iterations: Total number of iterations if in loop mode
+    """
+    if iteration is not None and total_iterations is not None:
+        # Loop mode: include iteration context and summary instruction
+        injection = (
+            f" IMPORTANT: This is iteration {iteration} of {total_iterations}. "
+            f"When you complete your work for this iteration, create a summary file "
+            f"named ITERATION_{iteration}.md documenting what you accomplished. "
+            f"If you determine that ALL work across ALL iterations is 100% complete, "
+            f"then write out DONE.md and halt the loop early."
+        )
+    else:
+        # Non-loop mode: standard completion prompt
+        injection = " If you see that the task is 100 percent complete, then write out DONE.md and halt"
+
     return message + injection
 
 
-def _build_claude_command(args: Args, claude_path: str, inject_prompt: bool = False) -> list[str]:
-    """Build the Claude command with all arguments."""
+def _build_claude_command(
+    args: Args,
+    claude_path: str,
+    inject_prompt: bool = False,
+    iteration: int | None = None,
+    total_iterations: int | None = None,
+) -> list[str]:
+    """Build the Claude command with all arguments.
+
+    Args:
+        args: Parsed command-line arguments
+        claude_path: Path to Claude executable
+        inject_prompt: Whether to inject completion prompt
+        iteration: Current iteration number (1-indexed) if in loop mode
+        total_iterations: Total number of iterations if in loop mode
+    """
     cmd = [claude_path, "--dangerously-skip-permissions"]
 
     if args.continue_flag:
@@ -340,7 +372,7 @@ def _build_claude_command(args: Args, claude_path: str, inject_prompt: bool = Fa
     if args.prompt:
         prompt_text = args.prompt
         if inject_prompt:
-            prompt_text = _inject_completion_prompt(prompt_text)
+            prompt_text = _inject_completion_prompt(prompt_text, iteration, total_iterations)
         cmd.extend(["-p", prompt_text])
         # Enable streaming JSON output for -p flag by default
         # Note: stream-json requires --verbose when used with --print/-p
@@ -349,7 +381,7 @@ def _build_claude_command(args: Args, claude_path: str, inject_prompt: bool = Fa
     if args.message:
         message_text = args.message
         if inject_prompt:
-            message_text = _inject_completion_prompt(message_text)
+            message_text = _inject_completion_prompt(message_text, iteration, total_iterations)
 
         # If idle timeout is set, force non-interactive mode with -p
         # to avoid TUI redraws being detected as activity
@@ -519,10 +551,17 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     done_file = Path("DONE.md")
 
     for i in range(loop_count):
-        print(f"\n--- Run {i + 1}/{loop_count} ---", file=sys.stderr)
+        iteration_num = i + 1
+        print(f"\n--- Iteration {iteration_num}/{loop_count} ---", file=sys.stderr)
 
-        # Build command with prompt injection
-        cmd = _build_claude_command(args, claude_path, inject_prompt=True)
+        # Build command with prompt injection, including iteration context
+        cmd = _build_claude_command(
+            args,
+            claude_path,
+            inject_prompt=True,
+            iteration=iteration_num,
+            total_iterations=loop_count,
+        )
 
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)
@@ -542,14 +581,14 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
         if returncode != 0 and args.verbose:
-            print(f"Warning: Run {i + 1} exited with code {returncode}", file=sys.stderr)
+            print(f"Warning: Iteration {iteration_num} exited with code {returncode}", file=sys.stderr)
 
         # Check if DONE.md was created
         if done_file.exists():
-            print(f"\n✅ DONE.md detected after run {i + 1} — halting early.", file=sys.stderr)
+            print(f"\n✅ DONE.md detected after iteration {iteration_num} — halting early.", file=sys.stderr)
             break
 
-    print("\nAll runs complete or halted early.", file=sys.stderr)
+    print("\nAll iterations complete or halted early.", file=sys.stderr)
 
     # Open DONE.md if it exists
     if done_file.exists():
