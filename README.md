@@ -263,6 +263,9 @@ BSD 3-Clause License
 
 Contributions are welcome! Please ensure all tests pass and code is properly linted before submitting PRs.
 
+<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/d624a37f-a9a6-4bd3-a501-63bcf4807f35" />
+
+
 ```bash
 # Setup environment
 bash install
