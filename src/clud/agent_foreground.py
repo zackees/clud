@@ -1,9 +1,11 @@
 import contextlib
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -546,15 +548,104 @@ def _create_streaming_json_callback() -> tuple[Any, Any]:
     return stdout_callback, stderr_callback
 
 
+def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
+    """Handle existing .agent_task directory from previous session.
+
+    Args:
+        agent_task_dir: Path to .agent_task directory
+
+    Returns:
+        Tuple of (should_continue, start_iteration)
+        - should_continue: False if user cancelled
+        - start_iteration: Iteration number to start from (1 for fresh, N+1 for continuation)
+    """
+    if not agent_task_dir.exists():
+        return True, 1
+
+    # Scan for existing files
+    iteration_files = sorted(agent_task_dir.glob("ITERATION_*.md"))
+    done_file = agent_task_dir / "DONE.md"
+
+    # If directory is empty, treat as fresh start
+    if not iteration_files and not done_file.exists():
+        return True, 1
+
+    # Display warning
+    print("\n⚠️  Previous agent session detected (.agent_task/ exists)", file=sys.stderr)
+    print("Contains:", file=sys.stderr)
+
+    for file in iteration_files:
+        mtime = file.stat().st_mtime
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+        print(f"  - {file.name} ({timestamp})", file=sys.stderr)
+
+    if done_file.exists():
+        mtime = done_file.stat().st_mtime
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+        print(f"  - DONE.md ({timestamp}) ⚠️  Will halt immediately!", file=sys.stderr)
+
+    # Prompt user
+    print(file=sys.stderr)
+    sys.stdout.flush()
+
+    try:
+        response = input("Delete and start over? [y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nOperation cancelled.", file=sys.stderr)
+        return False, 1
+
+    if response in ["y", "yes"]:
+        # Delete entire directory
+        try:
+            shutil.rmtree(agent_task_dir)
+            print("✓ Previous session deleted", file=sys.stderr)
+            return True, 1
+        except Exception as e:
+            print(f"Error: Failed to delete .agent_task directory: {e}", file=sys.stderr)
+            return False, 1
+
+    elif response in ["n", "no"]:
+        # Keep directory, determine next iteration
+        last_iteration = 0
+        for file in iteration_files:
+            # Extract number from ITERATION_N.md
+            match = re.match(r"ITERATION_(\d+)\.md", file.name)
+            if match:
+                last_iteration = max(last_iteration, int(match.group(1)))
+
+        # Remove DONE.md to prevent immediate halt
+        if done_file.exists():
+            try:
+                done_file.unlink()
+                print("✓ Removed DONE.md to allow continuation", file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: Could not remove DONE.md: {e}", file=sys.stderr)
+
+        next_iteration = last_iteration + 1
+        print(f"✓ Continuing from iteration {next_iteration}", file=sys.stderr)
+        return True, next_iteration
+
+    else:
+        print("Invalid response. Operation cancelled.", file=sys.stderr)
+        return False, 1
+
+
 def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     """Run Claude in a loop, checking for DONE.md after each iteration."""
-    # Create .agent_task directory if it doesn't exist
     agent_task_dir = Path(".agent_task")
+
+    # Handle existing session from previous run
+    should_continue, start_iteration = _handle_existing_agent_task(agent_task_dir)
+    if not should_continue:
+        return 2  # User cancelled
+
+    # Create .agent_task directory if it doesn't exist (may have been deleted)
     agent_task_dir.mkdir(exist_ok=True)
 
     done_file = agent_task_dir / "DONE.md"
 
-    for i in range(loop_count):
+    # Start from determined iteration (may be > 1 if continuing previous session)
+    for i in range(start_iteration - 1, loop_count):
         iteration_num = i + 1
         print(f"\n--- Iteration {iteration_num}/{loop_count} ---", file=sys.stderr)
 
