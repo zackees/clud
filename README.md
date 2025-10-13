@@ -72,7 +72,8 @@ Run the global `codeup` command with auto-fix capabilities:
 
 ```bash
 clud up                           # Run codeup with auto-fix (up to 5 retries)
-clud --codeup-publish            # Run codeup -p for publishing
+clud up -p                        # Run codeup -p for publishing
+clud up --publish                 # Same as above
 ```
 
 ### Task System
@@ -161,8 +162,6 @@ clud --task PATH                  # Process task file
 clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow
 clud --fix [URL]                  # Fix linting and tests
-clud --codeup                     # Run codeup with auto-fix
-clud --codeup-publish             # Run codeup -p
 clud --kanban                     # Launch kanban board
 clud --help                       # Show help
 ```
@@ -180,8 +179,8 @@ clud-cluster --help               # Show help
 
 ### Quick Mode Aliases
 ```bash
-clud fix                          # Alias for --fix
-clud up                           # Alias for --codeup
+clud fix [URL]                    # Fix linting and test issues
+clud up [-p|--publish]            # Run global codeup command with auto-fix
 ```
 
 ## Development

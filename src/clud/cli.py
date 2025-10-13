@@ -284,8 +284,8 @@ def main(args: list[str] | None = None) -> int:
             print("Usage: clud [options...]")
             print()
             print("Special modes:")
-            print("  fix   Fix linting and test issues (with optional GitHub URL)")
-            print("  up    Run global codeup command with auto-fix")
+            print("  fix [URL]            Fix linting and test issues (with optional GitHub URL)")
+            print("  up [-p|--publish]    Run global codeup command with auto-fix")
             print()
             print("Special commands:")
             print("  --login              Configure API key for Claude")
@@ -293,9 +293,6 @@ def main(args: list[str] | None = None) -> int:
             print("  --code [PORT]        Launch code-server in browser (default port: 8080)")
             print("  --lint               Run global linting with codeup")
             print("  --test               Run tests with codeup")
-            print("  --codeup             Run global codeup command with auto-fix (up to 5 retries)")
-            print("  --codeup-publish     Run global codeup -p command with auto-fix (up to 5 retries)")
-            print("  --codeup-p           Alias for --codeup-publish")
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
@@ -319,12 +316,6 @@ def main(args: list[str] | None = None) -> int:
 
         if router_args.test:
             return handle_test_command()
-
-        if router_args.codeup:
-            return handle_codeup_command()
-
-        if router_args.codeup_publish:
-            return handle_codeup_publish_command()
 
         if router_args.kanban:
             return handle_kanban_command()
@@ -350,7 +341,11 @@ def main(args: list[str] | None = None) -> int:
             fix_url = router_args.remaining_args[0] if router_args.remaining_args else None
             return handle_fix_command(fix_url)
         elif router_args.mode == AgentMode.UP:
-            return handle_codeup_command()
+            # Check if publish flag was provided
+            if router_args.up_publish:
+                return handle_codeup_publish_command()
+            else:
+                return handle_codeup_command()
         else:
             # Default mode - run foreground agent
             # If --track is enabled, set up tracking before launching agent

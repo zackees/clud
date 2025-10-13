@@ -28,8 +28,7 @@ class RouterArgs:
     test: bool = False
     fix: bool = False
     fix_url: str | None = None
-    codeup: bool = False
-    codeup_publish: bool = False
+    up_publish: bool = False  # For 'clud up -p' or 'clud up --publish'
     kanban: bool = False
     telegram: bool = False
     telegram_token: str | None = None
@@ -56,8 +55,6 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     lint = "--lint" in args_copy
     test = "--test" in args_copy
     fix = "--fix" in args_copy
-    codeup = "--codeup" in args_copy
-    codeup_publish = "--codeup-publish" in args_copy or "--codeup-p" in args_copy
     kanban = "--kanban" in args_copy
     telegram = "--telegram" in args_copy or "-tg" in args_copy
     code = "--code" in args_copy
@@ -123,12 +120,21 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
             task = ""  # Empty string will trigger error in handle_task_command
 
     # Check for mode: only fix and up are special modes now
+    up_publish = False
     if args_copy and args_copy[0] in ["fix", "up"]:
         mode_str = args_copy[0]
         if mode_str == "fix":
             mode = AgentMode.FIX
         elif mode_str == "up":
             mode = AgentMode.UP
+            # Check for -p or --publish flag after 'up'
+            if "-p" in args_copy or "--publish" in args_copy:
+                up_publish = True
+                # Remove the publish flag from args
+                if "-p" in args_copy:
+                    args_copy.remove("-p")
+                if "--publish" in args_copy:
+                    args_copy.remove("--publish")
         args_copy = args_copy[1:]  # Remove the positional arg
 
     return RouterArgs(
@@ -140,8 +146,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         test=test,
         fix=fix,
         fix_url=fix_url,
-        codeup=codeup,
-        codeup_publish=codeup_publish,
+        up_publish=up_publish,
         kanban=kanban,
         telegram=telegram,
         telegram_token=telegram_token,
