@@ -94,6 +94,28 @@ def get_clud_config_dir() -> Path:
     return config_dir
 
 
+def set_terminal_title() -> None:
+    """Set terminal title to 'clud: {parent_dir}' where parent_dir is the parent directory of cwd."""
+    try:
+        # Only set terminal title if stdout is a TTY (not redirected/captured)
+        if not sys.stdout.isatty():
+            return
+
+        cwd = Path.cwd()
+        # Get parent directory name (the directory containing the current directory)
+        parent_dir = cwd.parent.name if cwd.parent.name else cwd.name
+
+        # Use ANSI escape sequence to set terminal title
+        # \033]0; sets the title, \007 (bell) terminates it
+        # This works on Windows (Git Bash, Windows Terminal), macOS, and Linux
+        title = f"clud: {parent_dir}"
+        sys.stdout.write(f"\033]0;{title}\007")
+        sys.stdout.flush()
+    except Exception:
+        # Silently ignore errors - terminal title is nice-to-have, not critical
+        pass
+
+
 def save_api_key_to_config(api_key: str, key_name: str = "anthropic-api-key") -> None:
     """Save API key to .clud config directory."""
     try:
@@ -1233,6 +1255,9 @@ def run_agent(args: Args) -> int:
 def main(args_list: list[str] | None = None) -> int:
     """Main entry point for clud - handles routing and execution."""
     try:
+        # Set terminal title early
+        set_terminal_title()
+
         # Parse arguments
         args = parse_args(args_list)
 
