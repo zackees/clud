@@ -183,7 +183,7 @@ class DaemonServer:
         self.port = port
         self.registry = AgentRegistry(db_path=db_path, use_persistence=db_path is not None)
         self.server: socketserver.TCPServer | None = None
-        self.central_client: Any = None  # CentralClient instance (optional)
+        self.cluster_client: Any = None  # ClusterClient instance (optional)
 
     def start(self) -> None:
         """Start the daemon server."""
@@ -191,19 +191,19 @@ class DaemonServer:
         handler_class = DaemonRequestHandler
         handler_class.registry = self.registry
 
-        # Try to connect to central (non-blocking)
+        # Try to connect to cluster (non-blocking)
         try:
-            from .central_client import CentralClient
+            from .cluster_client import ClusterClient
 
-            self.central_client = CentralClient(daemon_port=self.port)
-            if self.central_client.start(self.registry):
-                logger.info("Connected to clud-central")
+            self.cluster_client = ClusterClient(daemon_port=self.port)
+            if self.cluster_client.start(self.registry):
+                logger.info("Connected to clud-cluster")
             else:
-                logger.info("Running in offline mode (central not available)")
-                self.central_client = None
+                logger.info("Running in offline mode (cluster not available)")
+                self.cluster_client = None
         except Exception as e:
-            logger.warning(f"Failed to connect to central: {e}")
-            self.central_client = None
+            logger.warning(f"Failed to connect to cluster: {e}")
+            self.cluster_client = None
 
         # Create and start server
         self.server = socketserver.TCPServer((self.host, self.port), handler_class)
@@ -220,8 +220,8 @@ class DaemonServer:
 
     def shutdown(self) -> None:
         """Shutdown the daemon server."""
-        if self.central_client:
-            self.central_client.stop()
+        if self.cluster_client:
+            self.cluster_client.stop()
         if self.server:
             self.server.shutdown()
             self.server.server_close()

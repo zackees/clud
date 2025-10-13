@@ -1,5 +1,5 @@
 """
-Data models for CLUD-CENTRAL.
+Data models for CLUD-CLUSTER.
 
 These models define the core entities: Agent, Daemon, Session, TelegramBinding, and AuditEvent.
 Based on the design specification in DESIGN.md (Data Models section).
@@ -45,7 +45,7 @@ class Agent(BaseModel):
     Agent represents a tracked clud process.
 
     State is owned by the daemon (source of truth) and eventually
-    consistent in Central (view layer).
+    consistent in Cluster (view layer).
     """
 
     id: UUID = Field(default_factory=uuid4)
@@ -201,7 +201,7 @@ class DaemonRegisterMessage(BaseModel):
 
 
 class RegisterAckMessage(BaseModel):
-    """Central's acknowledgment of daemon registration."""
+    """Cluster's acknowledgment of daemon registration."""
 
     type: Literal["register_ack"] = "register_ack"
     daemon_id: UUID
@@ -235,7 +235,7 @@ class AgentRegisterAckMessage(BaseModel):
 
 
 class HeartbeatMessage(BaseModel):
-    """Periodic heartbeat from daemon to Central."""
+    """Periodic heartbeat from daemon to Cluster."""
 
     type: Literal["heartbeat"] = "heartbeat"
     daemon_id: UUID

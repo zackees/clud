@@ -25,7 +25,7 @@ dependencies = [
     "uvicorn[standard]>=0.32.0",
     "markdown2>=2.4.0",
     "websockets>=12.0",
-    # Central control plane dependencies
+    # Cluster control plane dependencies
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.19.0",
     "alembic>=1.12.0",
@@ -56,7 +56,7 @@ posix = [
 ]
 full = [
     "zcmds_win32>=1.2.0; sys_platform == 'win32'",
-    # "clud-central>=0.1.0",  # Temporarily commented for Phase 1 development
+    # "clud-cluster>=0.1.0",  # Temporarily commented for Phase 1 development
 ]
 
 [tool.setuptools]
@@ -167,4 +167,4 @@ functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
-clud-central = "clud.central.cli:main"
+clud-cluster = "clud.cluster.cli:main"

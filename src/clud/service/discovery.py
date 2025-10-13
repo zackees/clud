@@ -1,10 +1,10 @@
 """
-Central server discovery and optional auto-spawn logic.
+Cluster server discovery and optional auto-spawn logic.
 
 This module handles:
-1. Discovery of clud-central server (env var, config file, default localhost:9876)
-2. Health probing of central server
-3. Optional auto-spawn of central via uvx (dev mode only)
+1. Discovery of clud-cluster server (env var, config file, default localhost:9876)
+2. Health probing of cluster server
+3. Optional auto-spawn of cluster via uvx (dev mode only)
 4. Automatic reconnection with exponential backoff
 """
 
@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class CentralInfo:
-    """Information about the central server."""
+class ClusterInfo:
+    """Information about the cluster server."""
 
     url: str
     auto_spawned: bool = False
@@ -37,71 +37,71 @@ def _get_config_dir() -> Path:
     return config_dir
 
 
-def discover_central_url() -> str:
+def discover_cluster_url() -> str:
     """
-    Discover the central server URL using priority order:
+    Discover the cluster server URL using priority order:
     1. CLUD_CENTRAL_URL environment variable
-    2. ~/.config/clud/central.yaml config file
+    2. ~/.config/clud/cluster.yaml config file
     3. Default to http://localhost:9876
 
     Returns:
-        Central server URL
+        Cluster server URL
     """
     # 1. Check environment variable
     env_url = os.environ.get("CLUD_CENTRAL_URL")
     if env_url:
-        logger.info(f"Using central URL from CLUD_CENTRAL_URL: {env_url}")
+        logger.info(f"Using cluster URL from CLUD_CENTRAL_URL: {env_url}")
         return env_url
 
     # 2. Check config file
-    config_file = _get_config_dir() / "central.yaml"
+    config_file = _get_config_dir() / "cluster.yaml"
     if config_file.exists():
         try:
             import yaml
 
             with open(config_file) as f:
                 config = yaml.safe_load(f)
-                if config and "central_url" in config:
-                    url = str(config["central_url"])
-                    logger.info(f"Using central URL from config file: {url}")
+                if config and "cluster_url" in config:
+                    url = str(config["cluster_url"])
+                    logger.info(f"Using cluster URL from config file: {url}")
                     return url
         except Exception as e:
             logger.warning(f"Failed to parse config file {config_file}: {e}")
 
     # 3. Default to localhost:9876
     default_url = "http://localhost:9876"
-    logger.info(f"Using default central URL: {default_url}")
+    logger.info(f"Using default cluster URL: {default_url}")
     return default_url
 
 
-def probe_central_health(url: str, timeout: float = 2.0) -> bool:
+def probe_cluster_health(url: str, timeout: float = 2.0) -> bool:
     """
-    Probe the central server health endpoint.
+    Probe the cluster server health endpoint.
 
     Args:
-        url: Central server URL
+        url: Cluster server URL
         timeout: Request timeout in seconds
 
     Returns:
-        True if central is reachable and healthy, False otherwise
+        True if cluster is reachable and healthy, False otherwise
     """
     try:
         health_url = f"{url}/health"
         response = httpx.get(health_url, timeout=timeout)
         if response.status_code == 200:
-            logger.debug(f"Central health check passed: {health_url}")
+            logger.debug(f"Cluster health check passed: {health_url}")
             return True
         else:
-            logger.debug(f"Central health check failed with status {response.status_code}: {health_url}")
+            logger.debug(f"Cluster health check failed with status {response.status_code}: {health_url}")
             return False
     except Exception as e:
-        logger.debug(f"Central health check failed: {e}")
+        logger.debug(f"Cluster health check failed: {e}")
         return False
 
 
 def _try_spawn_via_uvx() -> subprocess.Popen[bytes] | None:
     """
-    Try to spawn clud-central via uvx.
+    Try to spawn clud-cluster via uvx.
 
     Returns:
         Subprocess if successful, None otherwise
@@ -112,22 +112,22 @@ def _try_spawn_via_uvx() -> subprocess.Popen[bytes] | None:
         return None
 
     try:
-        log_file = _get_config_dir() / "central.log"
-        logger.info(f"Spawning clud-central via uvx (logs: {log_file})")
+        log_file = _get_config_dir() / "cluster.log"
+        logger.info(f"Spawning clud-cluster via uvx (logs: {log_file})")
 
         # First time might take longer to download and install
-        logger.info("Downloading clud-central (first time only)...")
+        logger.info("Downloading clud-cluster (first time only)...")
 
         with open(log_file, "a") as f:
             process = subprocess.Popen(
-                ["uvx", "clud-central", "serve"],
+                ["uvx", "clud-cluster", "serve"],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,  # Detach from parent on Unix
             )
 
-        logger.info(f"Auto-spawned clud-central (dev mode) - logs: {log_file}")
+        logger.info(f"Auto-spawned clud-cluster (dev mode) - logs: {log_file}")
         return process
     except Exception as e:
         logger.warning(f"Failed to spawn via uvx: {e}")
@@ -136,7 +136,7 @@ def _try_spawn_via_uvx() -> subprocess.Popen[bytes] | None:
 
 def _try_spawn_via_pipx() -> subprocess.Popen[bytes] | None:
     """
-    Try to spawn clud-central via pipx.
+    Try to spawn clud-cluster via pipx.
 
     Returns:
         Subprocess if successful, None otherwise
@@ -147,19 +147,19 @@ def _try_spawn_via_pipx() -> subprocess.Popen[bytes] | None:
         return None
 
     try:
-        log_file = _get_config_dir() / "central.log"
-        logger.info(f"Spawning clud-central via pipx (logs: {log_file})")
+        log_file = _get_config_dir() / "cluster.log"
+        logger.info(f"Spawning clud-cluster via pipx (logs: {log_file})")
 
         with open(log_file, "a") as f:
             process = subprocess.Popen(
-                ["pipx", "run", "clud-central", "serve"],
+                ["pipx", "run", "clud-cluster", "serve"],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,  # Detach from parent on Unix
             )
 
-        logger.info(f"Auto-spawned clud-central (dev mode) - logs: {log_file}")
+        logger.info(f"Auto-spawned clud-cluster (dev mode) - logs: {log_file}")
         return process
     except Exception as e:
         logger.warning(f"Failed to spawn via pipx: {e}")
@@ -168,48 +168,48 @@ def _try_spawn_via_pipx() -> subprocess.Popen[bytes] | None:
 
 def _try_spawn_direct() -> subprocess.Popen[bytes] | None:
     """
-    Try to spawn clud-central directly if it's in PATH.
+    Try to spawn clud-cluster directly if it's in PATH.
 
     Returns:
         Subprocess if successful, None otherwise
     """
-    # Check if clud-central is available
-    if not shutil.which("clud-central"):
-        logger.debug("clud-central not found in PATH")
+    # Check if clud-cluster is available
+    if not shutil.which("clud-cluster"):
+        logger.debug("clud-cluster not found in PATH")
         return None
 
     try:
-        log_file = _get_config_dir() / "central.log"
-        logger.info(f"Spawning clud-central directly (logs: {log_file})")
+        log_file = _get_config_dir() / "cluster.log"
+        logger.info(f"Spawning clud-cluster directly (logs: {log_file})")
 
         with open(log_file, "a") as f:
             process = subprocess.Popen(
-                ["clud-central", "serve"],
+                ["clud-cluster", "serve"],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,  # Detach from parent on Unix
             )
 
-        logger.info(f"Auto-spawned clud-central (dev mode) - logs: {log_file}")
+        logger.info(f"Auto-spawned clud-cluster (dev mode) - logs: {log_file}")
         return process
     except Exception as e:
         logger.warning(f"Failed to spawn directly: {e}")
         return None
 
 
-def auto_spawn_central(url: str) -> subprocess.Popen[bytes] | None:
+def auto_spawn_cluster(url: str) -> subprocess.Popen[bytes] | None:
     """
-    Attempt to auto-spawn clud-central if CLUD_AUTO_SPAWN=1.
+    Attempt to auto-spawn clud-cluster if CLUD_AUTO_SPAWN=1.
 
     Tries in priority order:
-    1. uvx clud-central serve (auto-installs if needed)
-    2. pipx run clud-central serve (if pipx available)
-    3. clud-central serve (if installed in PATH)
+    1. uvx clud-cluster serve (auto-installs if needed)
+    2. pipx run clud-cluster serve (if pipx available)
+    3. clud-cluster serve (if installed in PATH)
     4. Fail with clear error message
 
     Args:
-        url: Central server URL to wait for
+        url: Cluster server URL to wait for
 
     Returns:
         Subprocess if successful, None otherwise
@@ -226,7 +226,7 @@ def auto_spawn_central(url: str) -> subprocess.Popen[bytes] | None:
     process = _try_spawn_via_uvx() or _try_spawn_via_pipx() or _try_spawn_direct()
 
     if not process:
-        error_msg = "Failed to auto-spawn clud-central. Install uvx or clud-central:\n  pip install uv  # For uvx support\n  pip install clud-central  # For direct execution"
+        error_msg = "Failed to auto-spawn clud-cluster. Install uvx or clud-cluster:\n  pip install uv  # For uvx support\n  pip install clud-cluster  # For direct execution"
         logger.error(error_msg)
         print(error_msg)
         return None
@@ -237,21 +237,21 @@ def auto_spawn_central(url: str) -> subprocess.Popen[bytes] | None:
     retry_count = 0
 
     while time.time() - start_time < max_wait:
-        if probe_central_health(url, timeout=2.0):
-            logger.info(f"Central health check passed after {time.time() - start_time:.1f}s")
+        if probe_cluster_health(url, timeout=2.0):
+            logger.info(f"Cluster health check passed after {time.time() - start_time:.1f}s")
             return process
 
         retry_count += 1
         wait_time = min(2**retry_count, 5.0)  # Exponential backoff, max 5s
-        logger.debug(f"Waiting for central to start (retry {retry_count}, wait {wait_time}s)...")
+        logger.debug(f"Waiting for cluster to start (retry {retry_count}, wait {wait_time}s)...")
         time.sleep(wait_time)
 
         # Check if process died
         if process.poll() is not None:
-            logger.error(f"Central process died with exit code {process.returncode}")
+            logger.error(f"Cluster process died with exit code {process.returncode}")
             return None
 
-    logger.error(f"Central failed to start within {max_wait}s")
+    logger.error(f"Cluster failed to start within {max_wait}s")
     # Kill the process if it's still running
     try:
         process.terminate()
@@ -262,42 +262,42 @@ def auto_spawn_central(url: str) -> subprocess.Popen[bytes] | None:
     return None
 
 
-def ensure_central(url: str | None = None) -> CentralInfo | None:
+def ensure_cluster(url: str | None = None) -> ClusterInfo | None:
     """
-    Ensure central server is available.
+    Ensure cluster server is available.
 
-    1. Discover central URL (if not provided)
+    1. Discover cluster URL (if not provided)
     2. Probe health endpoint
     3. If not reachable and CLUD_AUTO_SPAWN=1, attempt auto-spawn
     4. If still not reachable, fail with clear error message
 
     Args:
-        url: Optional central URL (if None, uses discovery)
+        url: Optional cluster URL (if None, uses discovery)
 
     Returns:
-        CentralInfo if successful, None otherwise
+        ClusterInfo if successful, None otherwise
     """
     # Discover URL if not provided
     if url is None:
-        url = discover_central_url()
+        url = discover_cluster_url()
 
     # Probe health
-    if probe_central_health(url):
-        logger.info(f"Central is reachable at {url}")
-        return CentralInfo(url=url, auto_spawned=False)
+    if probe_cluster_health(url):
+        logger.info(f"Cluster is reachable at {url}")
+        return ClusterInfo(url=url, auto_spawned=False)
 
     # Try auto-spawn if enabled
-    logger.warning(f"Central not reachable at {url}")
-    process = auto_spawn_central(url)
+    logger.warning(f"Cluster not reachable at {url}")
+    process = auto_spawn_cluster(url)
 
     if process:
-        return CentralInfo(url=url, auto_spawned=True, process=process)
+        return ClusterInfo(url=url, auto_spawned=True, process=process)
 
-    # Failed to reach or spawn central
+    # Failed to reach or spawn cluster
     error_msg = (
-        f"Cannot reach clud-central at {url}\n\n"
+        f"Cannot reach clud-cluster at {url}\n\n"
         "To fix this:\n"
-        "1. Start central manually: clud-central serve\n"
+        "1. Start cluster manually: clud-cluster serve\n"
         "2. Or enable auto-spawn (dev mode): export CLUD_AUTO_SPAWN=1\n"
         "3. Or set custom URL: export CLUD_CENTRAL_URL=http://your-server:9876\n"
     )
@@ -306,13 +306,13 @@ def ensure_central(url: str | None = None) -> CentralInfo | None:
     return None
 
 
-class CentralConnection:
+class ClusterConnection:
     """
-    Manages connection to central server with automatic reconnection.
+    Manages connection to cluster server with automatic reconnection.
     """
 
-    def __init__(self, central_info: CentralInfo):
-        self.central_info = central_info
+    def __init__(self, cluster_info: ClusterInfo):
+        self.cluster_info = cluster_info
         self.client = httpx.Client(timeout=10.0)
         self._retry_count = 0
         self._max_backoff = 30.0
@@ -329,7 +329,7 @@ class CentralConnection:
 
     def request(self, method: str, path: str, **kwargs: object) -> httpx.Response | None:
         """
-        Make a request to central with automatic retry and exponential backoff.
+        Make a request to cluster with automatic retry and exponential backoff.
 
         Args:
             method: HTTP method (GET, POST, etc.)
@@ -339,7 +339,7 @@ class CentralConnection:
         Returns:
             Response if successful, None otherwise
         """
-        url = f"{self.central_info.url}{path}"
+        url = f"{self.cluster_info.url}{path}"
 
         while True:
             try:
@@ -360,7 +360,7 @@ class CentralConnection:
 
     def post_json(self, path: str, data: dict[str, object]) -> httpx.Response | None:
         """
-        POST JSON data to central.
+        POST JSON data to cluster.
 
         Args:
             path: Request path
@@ -373,7 +373,7 @@ class CentralConnection:
 
     def get_json(self, path: str) -> dict[str, object] | None:
         """
-        GET JSON data from central.
+        GET JSON data from cluster.
 
         Args:
             path: Request path
@@ -390,20 +390,20 @@ class CentralConnection:
         """Close the HTTP client."""
         self.client.close()
 
-        # Terminate auto-spawned central if we own the process
-        if self.central_info.auto_spawned and self.central_info.process:
-            logger.info("Terminating auto-spawned central")
+        # Terminate auto-spawned cluster if we own the process
+        if self.cluster_info.auto_spawned and self.cluster_info.process:
+            logger.info("Terminating auto-spawned cluster")
             try:
-                self.central_info.process.terminate()
-                self.central_info.process.wait(timeout=5.0)
-                logger.info("Central terminated gracefully")
+                self.cluster_info.process.terminate()
+                self.cluster_info.process.wait(timeout=5.0)
+                logger.info("Cluster terminated gracefully")
             except subprocess.TimeoutExpired:
-                logger.warning("Central did not terminate, killing...")
-                self.central_info.process.kill()
-                self.central_info.process.wait()
-                logger.info("Central killed")
+                logger.warning("Cluster did not terminate, killing...")
+                self.cluster_info.process.kill()
+                self.cluster_info.process.wait()
+                logger.info("Cluster killed")
 
-    def __enter__(self) -> "CentralConnection":
+    def __enter__(self) -> "ClusterConnection":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]

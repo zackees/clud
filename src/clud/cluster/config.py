@@ -1,5 +1,5 @@
 """
-Configuration management for CLUD-CENTRAL.
+Configuration management for CLUD-CLUSTER.
 
 Uses pydantic-settings for environment variable loading and validation.
 """
@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Application
-    app_name: str = "CLUD-CENTRAL"
+    app_name: str = "CLUD-CLUSTER"
     app_version: str = "1.0.0-beta"
     debug: bool = False
     log_level: str = "INFO"
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     reload: bool = False
 
     # Database
-    database_url: str = "sqlite+aiosqlite:///./clud_central.db"
+    database_url: str = "sqlite+aiosqlite:///./clud_cluster.db"
 
     # Security
     secret_key: str = "change-me-in-production-min-32-characters"

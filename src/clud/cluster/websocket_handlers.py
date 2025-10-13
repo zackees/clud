@@ -1,5 +1,5 @@
 """
-WebSocket handlers for CLUD-CENTRAL.
+WebSocket handlers for CLUD-CLUSTER.
 
 Handles three types of WebSocket connections:
 1. Daemon control connections - daemon registration, heartbeats, control intents
@@ -222,7 +222,7 @@ class WebSocketConnectionManager:
 
     async def _reconcile_agents(self, session: AsyncSession, daemon_uuid: UUID, agents_data: list[dict[str, Any]]) -> dict[str, list[str]]:
         """
-        Reconcile daemon's agent list with Central's database.
+        Reconcile daemon's agent list with Cluster's database.
 
         Returns reconciliation info for daemon to sync state.
         """
@@ -522,10 +522,10 @@ class WebSocketConnectionManager:
         """
         Handle browser terminal WebSocket connection.
 
-        This connection receives PTY data from Central and sends user input to daemon.
+        This connection receives PTY data from Cluster and sends user input to daemon.
 
-        Browser -> Central -> Daemon (control connection)
-        Daemon -> Central (PTY pool) -> Browser
+        Browser -> Cluster -> Daemon (control connection)
+        Daemon -> Cluster (PTY pool) -> Browser
         """
         await websocket.accept()
         agent_uuid = UUID(agent_id)

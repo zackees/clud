@@ -1,5 +1,5 @@
 """
-Authentication and authorization module for CLUD-CENTRAL.
+Authentication and authorization module for CLUD-CLUSTER.
 
 Provides JWT token generation/validation, password hashing, and API key management.
 Supports multiple authentication methods: password, Telegram, and API keys.

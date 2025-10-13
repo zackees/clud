@@ -1,5 +1,5 @@
 """
-CLUD-CENTRAL - Central control plane for clud agents.
+CLUD-CLUSTER - Cluster control plane for clud agents.
 
 Provides monitoring, control, and coordination for distributed clud agents.
 """

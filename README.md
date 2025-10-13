@@ -18,7 +18,7 @@ Because safety is number three.
 ## Installation
 
 ```bash
-pip install clud  # Everything included: CLI, service, and central control plane
+pip install clud  # Everything included: CLI, service, and cluster control plane
 ```
 
 ## Quick Start
@@ -98,15 +98,15 @@ Launch an interactive kanban board for task management:
 clud --kanban                     # Launch vibe-kanban board
 ```
 
-### Central Control Plane
+### Cluster Control Plane
 
-`clud` now includes a central control plane for monitoring and managing agents across your development environment:
+`clud` now includes a cluster control plane for monitoring and managing agents across your development environment:
 
 ```bash
-clud-central serve                # Start central control plane (default port :8000)
-clud-central serve --host 0.0.0.0 --port 9000  # Custom host/port
-clud-central migrate              # Run database migrations
-clud-central bot                  # Run Telegram bot (requires bot extra)
+clud-cluster serve                # Start cluster control plane (default port :8000)
+clud-cluster serve --host 0.0.0.0 --port 9000  # Custom host/port
+clud-cluster migrate              # Run database migrations
+clud-cluster bot                  # Run Telegram bot (requires bot extra)
 ```
 
 **Features:**
@@ -119,10 +119,10 @@ clud-central bot                  # Run Telegram bot (requires bot extra)
 
 **Port Assignments:**
 - Background service: `:7565`
-- Central control plane: `:8000` (default, configurable)
+- Cluster control plane: `:8000` (default, configurable)
 
 **Architecture:**
-The central control plane provides a unified interface for monitoring all `clud` agents running on your system. Agents register with the background service (`:7565`), which communicates with the central control plane to provide real-time status updates, metrics, and control capabilities.
+The cluster control plane provides a unified interface for monitoring all `clud` agents running on your system. Agents register with the background service (`:7565`), which communicates with the cluster control plane to provide real-time status updates, metrics, and control capabilities.
 
 ## Configuration
 
@@ -168,15 +168,15 @@ clud --kanban                     # Launch kanban board
 clud --help                       # Show help
 ```
 
-### Central Control Plane Commands
+### Cluster Control Plane Commands
 ```bash
-clud-central serve                # Start central control plane
-clud-central serve --host HOST    # Specify host
-clud-central serve --port PORT    # Specify port
-clud-central serve --reload       # Enable auto-reload
-clud-central migrate              # Run database migrations
-clud-central bot                  # Run Telegram bot
-clud-central --help               # Show help
+clud-cluster serve                # Start cluster control plane
+clud-cluster serve --host HOST    # Specify host
+clud-cluster serve --port PORT    # Specify port
+clud-cluster serve --reload       # Enable auto-reload
+clud-cluster migrate              # Run database migrations
+clud-cluster bot                  # Run Telegram bot
+clud-cluster --help               # Show help
 ```
 
 ### Quick Mode Aliases
@@ -219,7 +219,7 @@ clud/
 │   │   ├── registry.py        # Agent registry
 │   │   ├── models.py          # Shared models
 │   │   └── central_client.py  # Connects to central
-│   ├── central/          # Central control plane
+│   ├── central/          # Cluster control plane
 │   │   ├── app.py            # FastAPI application
 │   │   ├── cli.py            # Central CLI entry point
 │   │   ├── auth.py           # JWT authentication
@@ -282,7 +282,7 @@ uv run pyright
 The package provides two CLI entry points:
 
 - `clud` - Main CLI (runs Claude Code in YOLO mode)
-- `clud-central` - Central control plane for monitoring and managing agents
+- `clud-cluster` - Cluster control plane for monitoring and managing agents
 
 ## Cool Projects
 

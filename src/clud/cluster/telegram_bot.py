@@ -1,5 +1,5 @@
 """
-Telegram bot integration for CLUD-CENTRAL.
+Telegram bot integration for CLUD-CLUSTER.
 
 Provides remote control and monitoring of agents via Telegram chat interface.
 Supports commands: /start, /list, /bind, /unbind, /stop, /tail, /status, /help.
@@ -28,7 +28,7 @@ class TelegramBot:
     """
     Telegram bot for remote agent control.
 
-    Integrates with CLUD-CENTRAL to provide chat-based interface for:
+    Integrates with CLUD-CLUSTER to provide chat-based interface for:
     - Listing agents
     - Binding chat to agent (for PTY output streaming)
     - Stopping agents
@@ -126,7 +126,7 @@ class TelegramBot:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
-        await update.message.reply_text("🤖 *CLUD-CENTRAL Bot*\n\nI help you monitor and control your clud agents remotely.\n\nUse /help to see available commands.")
+        await update.message.reply_text("🤖 *CLUD-CLUSTER Bot*\n\nI help you monitor and control your clud agents remotely.\n\nUse /help to see available commands.")
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /help command."""

@@ -1,5 +1,5 @@
 """
-Database configuration and ORM models for CLUD-CENTRAL.
+Database configuration and ORM models for CLUD-CLUSTER.
 
 Uses SQLAlchemy 2.0 async API with SQLite (default) or PostgreSQL.
 """
@@ -122,15 +122,15 @@ class AuditEventDB(Base):
 class Database:
     """Database connection manager."""
 
-    def __init__(self, database_url: str = "sqlite+aiosqlite:///./clud_central.db"):
+    def __init__(self, database_url: str = "sqlite+aiosqlite:///./clud_cluster.db"):
         """
         Initialize database connection.
 
         Args:
             database_url: SQLAlchemy database URL
                 Examples:
-                - SQLite: "sqlite+aiosqlite:///./clud_central.db"
-                - PostgreSQL: "postgresql+asyncpg://user:pass@localhost/clud_central"
+                - SQLite: "sqlite+aiosqlite:///./clud_cluster.db"
+                - PostgreSQL: "postgresql+asyncpg://user:pass@localhost/clud_cluster"
         """
         self.database_url = database_url
         self.engine = create_async_engine(

@@ -1,5 +1,5 @@
 """
-CLI entry point for CLUD-CENTRAL.
+CLI entry point for CLUD-CLUSTER.
 
 Provides commands:
 - serve: Run the FastAPI server
@@ -13,7 +13,7 @@ import sys
 
 
 def serve(args: argparse.Namespace) -> None:
-    """Start the CLUD-CENTRAL server."""
+    """Start the CLUD-CLUSTER server."""
     import uvicorn
 
     from .config import settings
@@ -26,10 +26,10 @@ def serve(args: argparse.Namespace) -> None:
     if args.reload:
         settings.reload = args.reload
 
-    logging.info(f"Starting CLUD-CENTRAL server on {settings.host}:{settings.port}")
+    logging.info(f"Starting CLUD-CLUSTER server on {settings.host}:{settings.port}")
 
     uvicorn.run(
-        "clud.central.app:app",
+        "clud.cluster.app:app",
         host=settings.host,
         port=settings.port,
         reload=settings.reload,
@@ -51,12 +51,12 @@ def bot(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    """Main entry point for clud-central CLI."""
-    parser = argparse.ArgumentParser(description="CLUD-CENTRAL - Central control plane for clud agents")
+    """Main entry point for clud-cluster CLI."""
+    parser = argparse.ArgumentParser(description="CLUD-CLUSTER - Cluster control plane for clud agents")
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
     # Serve command
-    serve_parser = subparsers.add_parser("serve", help="Start the CLUD-CENTRAL server")
+    serve_parser = subparsers.add_parser("serve", help="Start the CLUD-CLUSTER server")
     serve_parser.add_argument("--host", type=str, help="Host to bind to")
     serve_parser.add_argument("--port", type=int, help="Port to bind to")
     serve_parser.add_argument("--reload", action="store_true", help="Enable auto-reload")

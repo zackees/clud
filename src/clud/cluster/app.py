@@ -1,5 +1,5 @@
 """
-Main FastAPI application for CLUD-CENTRAL.
+Main FastAPI application for CLUD-CLUSTER.
 
 Provides:
 - REST API for agent management
@@ -135,7 +135,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="Central control plane for clud agents",
+    description="Cluster control plane for clud agents",
     lifespan=lifespan,
     debug=settings.debug,
 )
