@@ -7,13 +7,15 @@ Claude, but on god mode, by default.
 
 ![hero-clud](https://github.com/user-attachments/assets/4009dfee-e703-446d-b073-80d826708a10)
 
-**A Python CLI that runs Claude Code in "YOLO mode" by default, eliminating permission prompts for maximum development velocity**. In other words, it unlocks god mode for claude cli.
+**A Python CLI that runs Claude Code in God mode by default, eliminating permission prompts and optimizing for long term agent work**
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
 ## Why is clud better?
 
-Claude Code's safety prompts, while well-intentioned, slow down experienced developers. `clud` removes these friction points by running Claude Code with `--dangerously-skip-permissions`, delivering the uninterrupted coding experience Claude Code was meant to provide.
+Because safety is number three.
+
+<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
 
 ## Installation
 
@@ -263,7 +265,7 @@ BSD 3-Clause License
 
 Contributions are welcome! Please ensure all tests pass and code is properly linted before submitting PRs.
 
-<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
+
 
 
 
