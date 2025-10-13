@@ -335,14 +335,20 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         total_iterations: Total number of iterations if in loop mode
     """
     if iteration is not None and total_iterations is not None:
-        # Loop mode: include iteration context and summary instruction
-        injection = (
-            f" IMPORTANT: This is iteration {iteration} of many. "
-            f"Before finishing this iteration, create a summary file "
-            f"named .agent_task/ITERATION_{iteration}.md documenting what you accomplished. "
-            f"If you determine that ALL work across ALL iterations is 100% complete, "
-            f"also write .agent_task/DONE.md to halt the loop early."
-        )
+        # Loop mode: build prompt parts conditionally
+        parts = [" IMPORTANT:"]
+
+        # Add iteration-specific intro
+        if iteration == 1:
+            parts.append(f"You are the first agent spawned for this task (iteration 1 of {total_iterations}).")
+        else:
+            parts.append(f"This is iteration {iteration} of {total_iterations}.")
+
+        # Add common instructions (same for all iterations)
+        parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
+        parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write .agent_task/DONE.md to halt the loop early.")
+
+        injection = " ".join(parts)
     else:
         # Non-loop mode: standard completion prompt
         injection = " If you see that the task is 100 percent complete, then write out .agent_task/DONE.md and halt"
