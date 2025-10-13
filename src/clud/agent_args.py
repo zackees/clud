@@ -49,6 +49,7 @@ class Args:
     idle_timeout: float | None = None
     loop_count: int | None = None
     loop_value: str | None = None  # Raw value from --loop for flexible parsing
+    plain: bool = False  # For --plain (disable JSON formatting, enable raw text I/O)
     telegram: bool = False  # For --telegram (notification mode)
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -255,6 +256,13 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Telegram chat ID to send messages to (or use TELEGRAM_CHAT_ID env var)",
     )
 
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        dest="plain",
+        help="Disable JSON formatting and use raw text I/O (for web/telegram integration)",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args_copy)
 
@@ -302,6 +310,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         idle_timeout=known_args.idle_timeout,
         loop_count=None,  # Will be parsed from loop_value in agent.py
         loop_value=known_args.loop_value,
+        plain=known_args.plain,
         telegram=telegram_enabled,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,

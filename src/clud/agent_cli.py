@@ -464,7 +464,10 @@ def handle_kanban_command() -> int:
 
 
 def handle_telegram_command(token: str | None = None) -> int:
-    """Handle the --telegram/-tg command by launching local landing page.
+    """Handle the --telegram/-tg command by launching landing page OR runner mode.
+
+    If bot credentials (token + chat_id) are available, launches runner mode.
+    Otherwise, launches landing page.
 
     Args:
         token: Optional bot token to save
@@ -472,8 +475,6 @@ def handle_telegram_command(token: str | None = None) -> int:
     Returns:
         Exit code
     """
-    from .webapp.server import run_server
-
     try:
         # Save token if provided
         if token:
@@ -484,7 +485,41 @@ def handle_telegram_command(token: str | None = None) -> int:
             except Exception as e:
                 print(f"Warning: Could not save token: {e}\n", file=sys.stderr)
 
-        # Start local server with landing page
+        # Load credentials from environment or saved config
+        saved_token, saved_chat_id = load_telegram_credentials()
+        env_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        env_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+        # Prioritize env vars, fall back to saved
+        bot_token = env_token or saved_token or token
+        chat_id = env_chat_id or saved_chat_id
+
+        # If we have both token and chat_id, launch runner mode
+        if bot_token and chat_id:
+            print("✅ Telegram credentials found")
+            print(f"Bot Token: {bot_token[:20]}...")
+            print(f"Chat ID: {chat_id}")
+            print()
+            print("Launching Telegram runner mode...")
+            print()
+
+            # Import runner
+            from .messaging.telegram import TelegramMessenger
+            from .sub_clud_runner import run_telegram_message_loop
+
+            # Create messenger
+            messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)
+
+            # Run the message loop
+            return run_telegram_message_loop(messenger)
+
+        # Otherwise, launch landing page mode
+        print("⚠️  No Telegram credentials found")
+        print("Launching landing page mode...")
+        print()
+
+        from .webapp.server import run_server
+
         return run_server()
 
     except Exception as e:
@@ -695,9 +730,10 @@ def _build_claude_command(
         if inject_prompt:
             prompt_text = _inject_completion_prompt(prompt_text, iteration, total_iterations)
         cmd.extend(["-p", prompt_text])
-        # Enable streaming JSON output for -p flag by default
+        # Enable streaming JSON output for -p flag by default (unless --plain is used)
         # Note: stream-json requires --verbose when used with --print/-p
-        cmd.extend(["--output-format", "stream-json", "--verbose"])
+        if not args.plain:
+            cmd.extend(["--output-format", "stream-json", "--verbose"])
 
     if args.message:
         message_text = args.message
@@ -963,15 +999,19 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
         # Execute the command with streaming if prompt is present
         if args.prompt:
-            # Create JSON formatter for beautiful output in loop mode
-            formatter = StreamJsonFormatter(
-                show_system=args.verbose,
-                show_usage=True,
-                show_cache=args.verbose,
-                verbose=args.verbose,
-            )
-            stdout_callback = create_formatter_callback(formatter)
-            returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+            if args.plain:
+                # Plain mode: no JSON formatting, just pass through output
+                returncode = RunningProcess.run_streaming(cmd)
+            else:
+                # Create JSON formatter for beautiful output in loop mode
+                formatter = StreamJsonFormatter(
+                    show_system=args.verbose,
+                    show_usage=True,
+                    show_cache=args.verbose,
+                    verbose=args.verbose,
+                )
+                stdout_callback = create_formatter_callback(formatter)
+                returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
         else:
             returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
@@ -1044,9 +1084,10 @@ def run_agent(args: Args) -> int:
                 cmd_parts.append("--continue")
             if args.prompt:
                 cmd_parts.extend(["-p", args.prompt])
-                # Enable streaming JSON output for -p flag by default
+                # Enable streaming JSON output for -p flag by default (unless --plain is used)
                 # Note: stream-json requires --verbose when used with --print/-p
-                cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
+                if not args.plain:
+                    cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
             if args.message:
                 cmd_parts.append(args.message)
             if args.claude_args:
@@ -1120,15 +1161,19 @@ def run_agent(args: Args) -> int:
         elif args.prompt:
             # Use RunningProcess for streaming output when using -p flag
             # This ensures stream-json output is displayed line-by-line in real-time
-            # Create JSON formatter for beautiful output
-            formatter = StreamJsonFormatter(
-                show_system=args.verbose,
-                show_usage=True,
-                show_cache=args.verbose,
-                verbose=args.verbose,
-            )
-            stdout_callback = create_formatter_callback(formatter)
-            return RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+            if args.plain:
+                # Plain mode: no JSON formatting, just pass through output
+                return RunningProcess.run_streaming(cmd)
+            else:
+                # Create JSON formatter for beautiful output
+                formatter = StreamJsonFormatter(
+                    show_system=args.verbose,
+                    show_usage=True,
+                    show_cache=args.verbose,
+                    verbose=args.verbose,
+                )
+                stdout_callback = create_formatter_callback(formatter)
+                return RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
         else:
             return _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
