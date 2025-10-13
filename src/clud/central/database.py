@@ -7,7 +7,7 @@ Uses SQLAlchemy 2.0 async API with SQLite (default) or PostgreSQL.
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import JSON, DateTime, Integer, String, Text, select
@@ -42,9 +42,9 @@ class AgentDB(Base):
     capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
-    last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    last_heartbeat: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Freshness tracking
@@ -52,7 +52,7 @@ class AgentDB(Base):
 
     # Daemon-reported state (ground truth)
     daemon_reported_status: Mapped[str] = mapped_column(String(50))
-    daemon_reported_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    daemon_reported_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Metrics (stored as JSON for flexibility)
     metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -72,8 +72,8 @@ class DaemonDB(Base):
     agent_count: Mapped[int] = mapped_column(Integer, default=0)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
-    last_seen: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class TelegramBindingDB(Base):
@@ -86,7 +86,7 @@ class TelegramBindingDB(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
     operator_id: Mapped[str] = mapped_column(String(255))
     mode: Mapped[str] = mapped_column(String(50))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class SessionDB(Base):
@@ -113,7 +113,7 @@ class AuditEventDB(Base):
     agent_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     result: Mapped[str] = mapped_column(String(50))
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC), index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 # Database connection management
@@ -212,7 +212,7 @@ async def update_agent_staleness(session: AsyncSession, agent: AgentDB):
     - Stale: 15s <= last_heartbeat < 90s ago
     - Disconnected: last_heartbeat >= 90s ago
     """
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     age = (now - agent.last_heartbeat).total_seconds()
 
     if age < 15:

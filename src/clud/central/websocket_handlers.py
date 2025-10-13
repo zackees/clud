@@ -11,7 +11,7 @@ Based on DESIGN.md WebSocket Protocol section.
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -126,7 +126,7 @@ class WebSocketConnectionManager:
                 daemon_db = await get_daemon_by_id(session, daemon_uuid)
                 if daemon_db:
                     daemon_db.status = DaemonStatus.DISCONNECTED.value
-                    daemon_db.last_seen = datetime.now(UTC)
+                    daemon_db.last_seen = datetime.now(timezone.utc)
                     await session.flush()
 
                     # Broadcast daemon_disconnected event
@@ -171,7 +171,7 @@ class WebSocketConnectionManager:
                 daemon_db.version = msg.version
                 daemon_db.status = DaemonStatus.CONNECTED.value
                 daemon_db.agent_count = len(msg.agents)
-                daemon_db.last_seen = datetime.now(UTC)
+                daemon_db.last_seen = datetime.now(timezone.utc)
             else:
                 # Create new daemon
                 daemon_db = DaemonDB(
@@ -182,8 +182,8 @@ class WebSocketConnectionManager:
                     bind_address="127.0.0.1:7565",
                     status=DaemonStatus.CONNECTED.value,
                     agent_count=len(msg.agents),
-                    created_at=datetime.now(UTC),
-                    last_seen=datetime.now(UTC),
+                    created_at=datetime.now(timezone.utc),
+                    last_seen=datetime.now(timezone.utc),
                 )
                 session.add(daemon_db)
 
@@ -246,8 +246,8 @@ class WebSocketConnectionManager:
             if agent and agent.status != AgentStatus.STOPPED.value:
                 agent.status = AgentStatus.STOPPED.value
                 agent.daemon_reported_status = "stopped"
-                agent.stopped_at = datetime.now(UTC)
-                agent.updated_at = datetime.now(UTC)
+                agent.stopped_at = datetime.now(timezone.utc)
+                agent.updated_at = datetime.now(timezone.utc)
                 await session.flush()
 
         logger.info(f"Reconciliation for daemon {daemon_uuid}: {len(new_agents)} new, {len(stopped_agents)} stopped, {len(daemon_agent_ids & db_agent_ids)} existing")
@@ -277,7 +277,7 @@ class WebSocketConnectionManager:
             # Update daemon last_seen
             daemon_db = await get_daemon_by_id(session, daemon_uuid)
             if daemon_db:
-                daemon_db.last_seen = datetime.now(UTC)
+                daemon_db.last_seen = datetime.now(timezone.utc)
                 daemon_db.agent_count = len(msg.agents)
                 await session.flush()
 
@@ -288,9 +288,9 @@ class WebSocketConnectionManager:
 
                 if agent_db:
                     # Update status from daemon
-                    agent_db.last_heartbeat = datetime.now(UTC)
+                    agent_db.last_heartbeat = datetime.now(timezone.utc)
                     agent_db.daemon_reported_status = agent_data.get("status", "running")
-                    agent_db.daemon_reported_at = datetime.now(UTC)
+                    agent_db.daemon_reported_at = datetime.now(timezone.utc)
                     agent_db.status = agent_data.get("status", "running")
 
                     # Update metrics if provided
@@ -350,9 +350,9 @@ class WebSocketConnectionManager:
                 agent_db.status = AgentStatus.RUNNING.value
                 agent_db.capabilities = msg.capabilities
                 agent_db.daemon_reported_status = "running"
-                agent_db.daemon_reported_at = datetime.now(UTC)
-                agent_db.last_heartbeat = datetime.now(UTC)
-                agent_db.updated_at = datetime.now(UTC)
+                agent_db.daemon_reported_at = datetime.now(timezone.utc)
+                agent_db.last_heartbeat = datetime.now(timezone.utc)
+                agent_db.updated_at = datetime.now(timezone.utc)
                 agent_db.staleness = Staleness.FRESH.value
             else:
                 # Create new agent
@@ -365,12 +365,12 @@ class WebSocketConnectionManager:
                     command=msg.command,
                     status=AgentStatus.RUNNING.value,
                     capabilities=msg.capabilities,
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                    last_heartbeat=datetime.now(UTC),
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                    last_heartbeat=datetime.now(timezone.utc),
                     staleness=Staleness.FRESH.value,
                     daemon_reported_status="running",
-                    daemon_reported_at=datetime.now(UTC),
+                    daemon_reported_at=datetime.now(timezone.utc),
                     metrics={},
                 )
                 session.add(agent_db)
@@ -430,8 +430,8 @@ class WebSocketConnectionManager:
             if agent_db:
                 agent_db.status = AgentStatus.STOPPED.value
                 agent_db.daemon_reported_status = "stopped"
-                agent_db.stopped_at = datetime.now(UTC)
-                agent_db.updated_at = datetime.now(UTC)
+                agent_db.stopped_at = datetime.now(timezone.utc)
+                agent_db.updated_at = datetime.now(timezone.utc)
                 agent_db.staleness = Staleness.DISCONNECTED.value
                 await session.flush()
 

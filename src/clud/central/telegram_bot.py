@@ -6,7 +6,7 @@ Supports commands: /start, /list, /bind, /unbind, /stop, /tail, /status, /help.
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -198,7 +198,7 @@ Example: `/status a1b2c3d4`
 
         # Format status message
         status_emoji = self._status_emoji(agent.status, agent.staleness)
-        uptime = (datetime.now(UTC) - agent.created_at).total_seconds()
+        uptime = (datetime.now(timezone.utc) - agent.created_at).total_seconds()
         uptime_str = self._format_duration(int(uptime))
 
         status_text = f"""

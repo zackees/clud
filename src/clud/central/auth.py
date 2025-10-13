@@ -5,7 +5,7 @@ Provides JWT token generation/validation, password hashing, and API key manageme
 Supports multiple authentication methods: password, Telegram, and API keys.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from jose import JWTError, jwt
@@ -72,7 +72,7 @@ def create_access_token(
     if expires_delta is None:
         expires_delta = timedelta(minutes=settings.access_token_expire_minutes)
 
-    expire = datetime.now(UTC) + expires_delta
+    expire = datetime.now(timezone.utc) + expires_delta
     to_encode = {
         "operator_id": operator_id,
         "session_id": str(session_id),
@@ -122,7 +122,7 @@ def create_session(
         operator_id=operator_id,
         type=session_type,
         token="",  # Will be set below
-        expires_at=datetime.now(UTC) + timedelta(minutes=settings.access_token_expire_minutes),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes),
         scopes=scopes or ["agent:read"],
     )
 

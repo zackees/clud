@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "clud"
 readme = "README.md"
 description = "Claude Code in YOLO mode"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 keywords = ["claude", "cli", "ai"]
 license = { text = "BSD 3-Clause License" }
 classifiers = ["Programming Language :: Python :: 3"]
@@ -38,7 +38,7 @@ dependencies = [
     "python-telegram-bot>=20.0",
 ]
 # Change this with the version number bump.
-version = "1.0.20"
+version = "1.0.22"
 
 [project.optional-dependencies]
 dev = [
@@ -64,7 +64,7 @@ package-dir = {"" = "src"}
 
 [tool.ruff]
 line-length = 200
-target-version = "py313"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
@@ -91,7 +91,7 @@ exclude = ["**/__pycache__"]
 
 # Type checking configuration
 typeCheckingMode = "strict"
-pythonVersion = "3.13"
+pythonVersion = "3.10"
 pythonPlatform = "All"
 useLibraryCodeForTypes = true
 analyzeUnannotatedFunctions = true

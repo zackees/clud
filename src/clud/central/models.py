@@ -5,7 +5,7 @@ These models define the core entities: Agent, Daemon, Session, TelegramBinding, 
 Based on the design specification in DESIGN.md (Data Models section).
 """
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -58,9 +58,9 @@ class Agent(BaseModel):
     capabilities: list[str] = Field(default_factory=lambda: ["terminal"])
 
     # Timestamps
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     stopped_at: datetime | None = None
 
     # Freshness tracking (computed field)
@@ -68,7 +68,7 @@ class Agent(BaseModel):
 
     # Daemon-reported state (ground truth)
     daemon_reported_status: str = "running"
-    daemon_reported_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    daemon_reported_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Metrics
     metrics: AgentMetrics = Field(default_factory=AgentMetrics)
@@ -101,8 +101,8 @@ class Daemon(BaseModel):
     agent_count: int = 0
 
     # Timestamps
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:
         use_enum_values = True
@@ -127,7 +127,7 @@ class TelegramBinding(BaseModel):
     agent_id: UUID
     operator_id: str  # Telegram username or user_id
     mode: BindingMode = BindingMode.ACTIVE
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:
         use_enum_values = True
@@ -179,7 +179,7 @@ class AuditEvent(BaseModel):
     agent_id: UUID | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     result: EventResult
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Config:
         use_enum_values = True
