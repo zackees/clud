@@ -113,11 +113,23 @@ def parse_args(args: list[str] | None = None) -> Args:
         # Check if there's a token argument after --telegram
         if telegram_idx + 1 < len(args_copy) and not args_copy[telegram_idx + 1].startswith("-"):
             telegram_token = args_copy[telegram_idx + 1]
+            # Remove both the flag and its value
+            args_copy.pop(telegram_idx)  # Remove flag
+            args_copy.pop(telegram_idx)  # Remove value (now at same index)
+        else:
+            # No token argument, just remove the flag
+            args_copy.pop(telegram_idx)
     elif "-tg" in args_copy:
         tg_idx = args_copy.index("-tg")
         # Check if there's a token argument after -tg
         if tg_idx + 1 < len(args_copy) and not args_copy[tg_idx + 1].startswith("-"):
             telegram_token = args_copy[tg_idx + 1]
+            # Remove both the flag and its value
+            args_copy.pop(tg_idx)  # Remove flag
+            args_copy.pop(tg_idx)  # Remove value (now at same index)
+        else:
+            # No token argument, just remove the flag
+            args_copy.pop(tg_idx)
 
     # Only intercept help if no mode is specified
     help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up"])

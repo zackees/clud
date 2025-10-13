@@ -401,7 +401,23 @@ def handle_test_command() -> int:
 
 
 def handle_codeup_command() -> int:
-    """Handle the --codeup command by running clud with a message to run the global codeup command."""
+    """Handle the --codeup command by running codeup --pre-test first, then clud with a message to run the global codeup command."""
+    # Run codeup --pre-test first
+    print("Running codeup --pre-test before agent invocation...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            ["codeup", "--pre-test"],
+            check=False,
+            capture_output=False,
+        )
+        if result.returncode != 0:
+            print(f"Warning: codeup --pre-test exited with code {result.returncode}", file=sys.stderr)
+    except FileNotFoundError:
+        print("Warning: codeup command not found. Skipping pre-test.", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Error running codeup --pre-test: {e}", file=sys.stderr)
+
+    # Now run the agent with the codeup prompt
     codeup_prompt = (
         "run the global command codeup normally through the shell (it's a global command installed on the system), "
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
@@ -411,7 +427,23 @@ def handle_codeup_command() -> int:
 
 
 def handle_codeup_publish_command() -> int:
-    """Handle the --codeup-publish command by running clud with a message to run codeup -p."""
+    """Handle the --codeup-publish command by running codeup --pre-test first, then clud with a message to run codeup -p."""
+    # Run codeup --pre-test first
+    print("Running codeup --pre-test before agent invocation...", file=sys.stderr)
+    try:
+        result = subprocess.run(
+            ["codeup", "--pre-test"],
+            check=False,
+            capture_output=False,
+        )
+        if result.returncode != 0:
+            print(f"Warning: codeup --pre-test exited with code {result.returncode}", file=sys.stderr)
+    except FileNotFoundError:
+        print("Warning: codeup command not found. Skipping pre-test.", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Error running codeup --pre-test: {e}", file=sys.stderr)
+
+    # Now run the agent with the codeup -p prompt
     codeup_publish_prompt = (
         "run the global command codeup -p normally through the shell (it's a global command installed on the system), "
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
@@ -432,15 +464,15 @@ def handle_kanban_command() -> int:
 
 
 def handle_telegram_command(token: str | None = None) -> int:
-    """Handle the --telegram/-tg command by starting Telegram Web App server.
+    """Handle the --telegram/-tg command by opening bot page in browser.
 
     Args:
-        token: Optional bot token to save before launching
+        token: Optional bot token to save before opening browser
 
     Returns:
         Exit code
     """
-    from .webapp.server import run_server
+    bot_url = "https://t.me/clud_ckl_bot"
 
     try:
         # Save token if provided
@@ -450,15 +482,24 @@ def handle_telegram_command(token: str | None = None) -> int:
                 # Save with empty chat_id - will be auto-detected from Web App
                 save_telegram_credentials(token, "")
                 print("✓ Token saved successfully")
-                print("  Chat ID will be auto-detected when you open the Web App in Telegram\n")
+                print()
             except Exception as e:
                 print(f"Warning: Could not save token: {e}", file=sys.stderr)
-                print("Continuing to launch Web App...\n", file=sys.stderr)
+                print()
 
-        print("Starting Telegram Web App server...")
-        return run_server()
+        # Open bot page in browser
+        print(f"Opening Telegram bot: {bot_url}")
+        print()
+        print("This will open your default browser.")
+        print("If you have Telegram installed, you can start chatting with the bot.")
+        print()
+
+        webbrowser.open(bot_url)
+        print("✓ Browser opened")
+        return 0
+
     except Exception as e:
-        print(f"Error running Telegram Web App: {e}", file=sys.stderr)
+        print(f"Error opening bot page: {e}", file=sys.stderr)
         return 1
 
 
@@ -995,20 +1036,12 @@ def run_agent(args: Args) -> int:
         telegram_bot.send_invitation(project_path=Path.cwd(), mode="foreground")
 
     try:
-        # Validate that we have input when running in non-interactive mode
-        # Claude Code requires either a prompt (-p), message (-m), stdin input, or loop mode
-        has_input = args.prompt or args.message or args.cmd or args.loop_value is not None
-        has_stdin = not sys.stdin.isatty()
+        # Get and set API key before launching Claude
+        api_key = get_api_key(args)
+        os.environ["ANTHROPIC_API_KEY"] = api_key
 
-        if not has_input and not has_stdin:
-            print("Error: Input must be provided either through stdin or as a prompt argument", file=sys.stderr)
-            print("Usage:", file=sys.stderr)
-            print("  clud -p 'your prompt here'       # Run with prompt", file=sys.stderr)
-            print("  clud -m 'your message'           # Send message", file=sys.stderr)
-            print("  echo 'prompt' | clud             # Pipe input", file=sys.stderr)
-            print("  clud --loop 5 -p 'prompt'        # Run in loop mode", file=sys.stderr)
-            print("  clud                             # Interactive mode (reads from stdin)", file=sys.stderr)
-            return 1
+        # No validation needed - if no input is provided and stdin is a tty,
+        # Claude Code will launch in interactive mode
 
         # If --cmd is provided, execute the command directly instead of launching Claude
         if args.cmd:
@@ -1239,17 +1272,37 @@ def main(args_list: list[str] | None = None) -> int:
             # Default mode - run foreground agent
             # If --track is enabled, set up tracking before launching agent
             if args.track:
+                # Configure logging for tracking based on verbose flag
+                import logging
+
+                log_level = logging.DEBUG if args.verbose else logging.INFO
+                logging.basicConfig(
+                    level=log_level,
+                    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+                    force=True,  # Override any existing config
+                )
+
+                logger = logging.getLogger(__name__)
+                logger.debug("Tracking enabled with debug logging")
+                logger.debug(f"Command: {args.prompt or args.message or 'claude code'}")
+                logger.debug(f"Verbose mode: {args.verbose}")
+
                 from .agent.tracking import create_tracker
 
                 # Get command from args or use default description
                 command = args.prompt or args.message or "claude code"
+                logger.debug(f"Creating tracker for command: {command}")
                 tracker = create_tracker(command)
 
                 exit_code = 1  # Default exit code in case of exception
                 try:
+                    logger.debug("Starting agent execution")
                     exit_code = run_agent(args)
+                    logger.debug(f"Agent execution completed with exit code: {exit_code}")
                 finally:
+                    logger.debug("Stopping tracker")
                     tracker.stop(exit_code)
+                    logger.debug("Tracker stopped")
 
                 return exit_code
             else:
