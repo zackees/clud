@@ -311,7 +311,7 @@ class ClusterConnection:
     Manages connection to cluster server with automatic reconnection.
     """
 
-    def __init__(self, cluster_info: ClusterInfo):
+    def __init__(self, cluster_info: ClusterInfo) -> None:
         self.cluster_info = cluster_info
         self.client = httpx.Client(timeout=10.0)
         self._retry_count = 0
@@ -406,5 +406,5 @@ class ClusterConnection:
     def __enter__(self) -> "ClusterConnection":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
         self.close()

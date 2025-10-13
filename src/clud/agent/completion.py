@@ -255,7 +255,7 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
         output_queue: queue.Queue[str] = queue.Queue()
 
         # Start output reader thread
-        def read_output():
+        def read_output() -> None:
             if process.stdout:
                 try:
                     for line in iter(process.stdout.readline, ""):

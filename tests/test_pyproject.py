@@ -1,18 +1,26 @@
 """Tests for pyproject.toml configuration."""
 
+import unittest
 from pathlib import Path
 
 import tomllib
 
 
-def test_minimal_python_version() -> None:
-    """Test that the minimal Python version requirement is 3.10."""
-    pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
+class TestPyprojectConfig(unittest.TestCase):
+    """Test pyproject.toml configuration."""
 
-    with open(pyproject_path, "rb") as f:
-        pyproject_data = tomllib.load(f)
+    def test_minimal_python_version(self) -> None:
+        """Test that the minimal Python version requirement is 3.10."""
+        pyproject_path = Path(__file__).parent.parent / "pyproject.toml"
 
-    requires_python = pyproject_data["project"]["requires-python"]
+        with open(pyproject_path, "rb") as f:
+            pyproject_data = tomllib.load(f)
 
-    # Assert that the requirement is >=3.10
-    assert requires_python == ">=3.10", f"Expected minimal Python version to be >=3.10, got {requires_python}"
+        requires_python = pyproject_data["project"]["requires-python"]
+
+        # Assert that the requirement is >=3.10
+        self.assertEqual(requires_python, ">=3.10", f"Expected minimal Python version to be >=3.10, got {requires_python}")
+
+
+if __name__ == "__main__":
+    unittest.main()

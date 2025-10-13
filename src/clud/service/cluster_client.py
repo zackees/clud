@@ -24,7 +24,7 @@ class ClusterClient:
     - Handle reconnection with exponential backoff
     """
 
-    def __init__(self, daemon_id: str | None = None, daemon_port: int = 7565):
+    def __init__(self, daemon_id: str | None = None, daemon_port: int = 7565) -> None:
         """
         Initialize cluster client.
 

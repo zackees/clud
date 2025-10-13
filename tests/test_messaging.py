@@ -1,54 +1,58 @@
 """Tests for Telegram messaging module."""
 
-import pytest
+import unittest
 
 
-class TestMessagingImports:
+class TestMessagingImports(unittest.TestCase):
     """Test that messaging module can be imported."""
 
-    def test_import_messaging_module(self):
+    def test_import_messaging_module(self) -> None:
         """Test importing messaging module."""
         try:
             from clud.messaging import TelegramMessenger
 
-            assert TelegramMessenger is not None
+            self.assertIsNotNone(TelegramMessenger)
         except ImportError as e:
-            pytest.skip(f"Telegram dependencies not installed: {e}")
+            self.skipTest(f"Telegram dependencies not installed: {e}")
 
 
-class TestTelegramMessenger:
+class TestTelegramMessenger(unittest.TestCase):
     """Test Telegram messenger."""
 
-    def test_telegram_messenger_creation(self):
+    def test_telegram_messenger_creation(self) -> None:
         """Test creating Telegram messenger."""
         try:
             from clud.messaging import TelegramMessenger
 
             messenger = TelegramMessenger(bot_token="test_token", chat_id="123456789")
-            assert messenger is not None
-            assert messenger.bot_token == "test_token"
-            assert messenger.chat_id == "123456789"
+            self.assertIsNotNone(messenger)
+            self.assertEqual(messenger.bot_token, "test_token")
+            self.assertEqual(messenger.chat_id, "123456789")
         except ImportError:
-            pytest.skip("Telegram dependencies not installed")
+            self.skipTest("Telegram dependencies not installed")
 
-    def test_telegram_config_validation(self):
+    def test_telegram_config_validation(self) -> None:
         """Test Telegram configuration validation."""
         try:
             from clud.messaging.factory import validate_telegram_config
 
             # Valid config
             valid, error = validate_telegram_config("token", "123")
-            assert valid is True
-            assert error == ""
+            self.assertTrue(valid)
+            self.assertEqual(error, "")
 
             # Missing token
             valid, error = validate_telegram_config("", "123")
-            assert valid is False
-            assert "bot_token" in error
+            self.assertFalse(valid)
+            self.assertIn("bot_token", error)
 
             # Missing chat_id
             valid, error = validate_telegram_config("token", "")
-            assert valid is False
-            assert "chat_id" in error
+            self.assertFalse(valid)
+            self.assertIn("chat_id", error)
         except ImportError:
-            pytest.skip("Telegram dependencies not installed")
+            self.skipTest("Telegram dependencies not installed")
+
+
+if __name__ == "__main__":
+    unittest.main()

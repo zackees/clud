@@ -60,7 +60,7 @@ event_subscribers: set[WebSocket] = set()
 class WebSocketConnectionManager:
     """Manages WebSocket connections and message routing."""
 
-    def __init__(self, db_session_factory: Any):
+    def __init__(self, db_session_factory: Any) -> None:
         """
         Initialize connection manager.
 
@@ -69,7 +69,7 @@ class WebSocketConnectionManager:
         """
         self.db_session_factory = db_session_factory
 
-    async def handle_daemon_control(self, websocket: WebSocket, daemon_id: str):
+    async def handle_daemon_control(self, websocket: WebSocket, daemon_id: str) -> None:
         """
         Handle daemon control WebSocket connection.
 
@@ -144,7 +144,7 @@ class WebSocketConnectionManager:
 
             logger.info(f"Daemon control connection cleaned up: {daemon_id}")
 
-    async def _handle_daemon_register(self, websocket: WebSocket, daemon_uuid: UUID, message_data: dict[str, Any]):
+    async def _handle_daemon_register(self, websocket: WebSocket, daemon_uuid: UUID, message_data: dict[str, Any]) -> None:
         """
         Handle daemon_register message.
 
@@ -258,7 +258,7 @@ class WebSocketConnectionManager:
             "existing_agents": [str(a) for a in (daemon_agent_ids & db_agent_ids)],
         }
 
-    async def _handle_heartbeat(self, daemon_uuid: UUID, message_data: dict[str, Any]):
+    async def _handle_heartbeat(self, daemon_uuid: UUID, message_data: dict[str, Any]) -> None:
         """
         Handle heartbeat message from daemon.
 
@@ -318,7 +318,7 @@ class WebSocketConnectionManager:
 
             break
 
-    async def _handle_agent_register(self, websocket: WebSocket, message_data: dict[str, Any]):
+    async def _handle_agent_register(self, websocket: WebSocket, message_data: dict[str, Any]) -> None:
         """
         Handle agent_register message.
 
@@ -409,7 +409,7 @@ class WebSocketConnectionManager:
 
             break
 
-    async def _handle_agent_stopped(self, message_data: dict[str, Any]):
+    async def _handle_agent_stopped(self, message_data: dict[str, Any]) -> None:
         """
         Handle agent_stopped notification.
 
@@ -455,7 +455,7 @@ class WebSocketConnectionManager:
 
             break
 
-    async def handle_pty_pool(self, websocket: WebSocket, pool_id: str):
+    async def handle_pty_pool(self, websocket: WebSocket, pool_id: str) -> None:
         """
         Handle PTY pool WebSocket connection.
 
@@ -518,7 +518,7 @@ class WebSocketConnectionManager:
 
             logger.info(f"PTY pool connection cleaned up: {pool_id}")
 
-    async def handle_browser_terminal(self, websocket: WebSocket, agent_id: str):
+    async def handle_browser_terminal(self, websocket: WebSocket, agent_id: str) -> None:
         """
         Handle browser terminal WebSocket connection.
 
@@ -579,7 +579,7 @@ class WebSocketConnectionManager:
 
             logger.info(f"Browser terminal connection cleaned up: {agent_id}")
 
-    async def send_control_intent(self, daemon_id: UUID, intent: dict[str, Any]):
+    async def send_control_intent(self, daemon_id: UUID, intent: dict[str, Any]) -> None:
         """
         Send a control intent to a daemon.
 
@@ -596,7 +596,7 @@ class WebSocketConnectionManager:
         await daemon_ws.send_json(intent)
         logger.info(f"Sent control intent {intent.get('type')} to daemon {daemon_id}")
 
-    async def broadcast_event(self, event: dict[str, Any]):
+    async def broadcast_event(self, event: dict[str, Any]) -> None:
         """
         Broadcast an event to all event subscribers.
 
@@ -626,7 +626,7 @@ class WebSocketConnectionManager:
 
         logger.debug(f"Broadcast event {event.get('type')} to {len(event_subscribers)} subscribers")
 
-    async def handle_events(self, websocket: WebSocket):
+    async def handle_events(self, websocket: WebSocket) -> None:
         """
         Handle event subscription WebSocket connection.
 

@@ -67,8 +67,11 @@ line-length = 200
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
-ignore = ["B008"]  # Allow function calls in argument defaults (FastAPI Depends pattern)
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "ANN"]
+ignore = [
+    "B008",  # Allow function calls in argument defaults (FastAPI Depends pattern)
+    "ANN401",  # Allow typing.Any when necessary (e.g., __exit__ parameters)
+]
 fixable = ["ALL"]
 unfixable = []
 

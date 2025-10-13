@@ -10,37 +10,37 @@ from clud.agent.foreground import main, parse_args, run
 class TestYolo(unittest.TestCase):
     """Test yolo functionality."""
 
-    def test_parse_args_with_message(self):
+    def test_parse_args_with_message(self) -> None:
         """Test parsing args with -m flag."""
         args = parse_args(["-m", "hello world"])
         self.assertEqual(args.message, "hello world")
         self.assertFalse(args.dry_run)
 
-    def test_parse_args_with_dry_run(self):
+    def test_parse_args_with_dry_run(self) -> None:
         """Test parsing args with --dry-run flag."""
         args = parse_args(["--dry-run"])
         self.assertTrue(args.dry_run)
         self.assertIsNone(args.message)
 
-    def test_parse_args_with_message_and_dry_run(self):
+    def test_parse_args_with_message_and_dry_run(self) -> None:
         """Test parsing args with both -m and --dry-run flags."""
         args = parse_args(["-m", "test message", "--dry-run"])
         self.assertEqual(args.message, "test message")
         self.assertTrue(args.dry_run)
 
-    def test_parse_args_with_prompt(self):
+    def test_parse_args_with_prompt(self) -> None:
         """Test parsing args with -p flag."""
         args = parse_args(["-p", "say hello and exit"])
         self.assertEqual(args.prompt, "say hello and exit")
         self.assertFalse(args.dry_run)
 
-    def test_parse_args_with_prompt_and_dry_run(self):
+    def test_parse_args_with_prompt_and_dry_run(self) -> None:
         """Test parsing args with both -p and --dry-run flags."""
         args = parse_args(["-p", "say hello and exit", "--dry-run"])
         self.assertEqual(args.prompt, "say hello and exit")
         self.assertTrue(args.dry_run)
 
-    def test_dry_run_with_message(self):
+    def test_dry_run_with_message(self) -> None:
         """Test dry-run mode with a message shows the full command and exits 0."""
         args = parse_args(["-m", "hello world", "--dry-run"])
 
@@ -53,7 +53,7 @@ class TestYolo(unittest.TestCase):
         expected_output = "Would execute: claude --dangerously-skip-permissions hello world"
         self.assertEqual(captured_output.getvalue().strip(), expected_output)
 
-    def test_dry_run_without_message(self):
+    def test_dry_run_without_message(self) -> None:
         """Test dry-run mode without message prints appropriate message and exits 0."""
         args = parse_args(["--dry-run"])
 
@@ -65,7 +65,7 @@ class TestYolo(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Would execute: claude --dangerously-skip-permissions", captured_output.getvalue())
 
-    def test_dry_run_with_prompt(self):
+    def test_dry_run_with_prompt(self) -> None:
         """Test dry-run mode with a prompt shows the full command and exits 0."""
         args = parse_args(["-p", "say hello and exit", "--dry-run"])
 
@@ -78,7 +78,7 @@ class TestYolo(unittest.TestCase):
         expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"
         self.assertEqual(captured_output.getvalue().strip(), expected_output)
 
-    def test_main_with_dry_run_message(self):
+    def test_main_with_dry_run_message(self) -> None:
         """Test main function with dry-run and message."""
         # Capture stdout
         captured_output = StringIO()
@@ -88,7 +88,7 @@ class TestYolo(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Would execute: claude --dangerously-skip-permissions test message", captured_output.getvalue())
 
-    def test_main_with_dry_run_prompt(self):
+    def test_main_with_dry_run_prompt(self) -> None:
         """Test main function with dry-run and prompt."""
         # Capture stdout
         captured_output = StringIO()

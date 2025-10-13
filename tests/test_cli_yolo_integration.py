@@ -10,7 +10,7 @@ from clud.cli import main
 class TestCliYoloIntegration(unittest.TestCase):
     """Test CLI integration with yolo functionality."""
 
-    def test_cli_with_message_and_dry_run(self):
+    def test_cli_with_message_and_dry_run(self) -> None:
         """Test CLI with -m and --dry-run flags."""
         # Capture stdout
         captured_output = StringIO()
@@ -20,7 +20,7 @@ class TestCliYoloIntegration(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(captured_output.getvalue().strip(), "Would execute: claude --dangerously-skip-permissions test message from CLI")
 
-    def test_cli_dry_run_without_message(self):
+    def test_cli_dry_run_without_message(self) -> None:
         """Test CLI with --dry-run but no message."""
         # Capture stdout
         captured_output = StringIO()
@@ -30,7 +30,7 @@ class TestCliYoloIntegration(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(captured_output.getvalue().strip(), "Would execute: claude --dangerously-skip-permissions")
 
-    def test_cli_message_without_dry_run_mocked(self):
+    def test_cli_message_without_dry_run_mocked(self) -> None:
         """Test CLI with -m but no --dry-run (should try to run Claude, but we mock it)."""
         # Mock subprocess.run to avoid actually trying to run Claude
         with patch("clud.agent.foreground.subprocess.run") as mock_yolo_run:

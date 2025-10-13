@@ -36,7 +36,7 @@ class TelegramBot:
     - Agent status monitoring
     """
 
-    def __init__(self, db: Database, token: str):
+    def __init__(self, db: Database, token: str) -> None:
         """
         Initialize Telegram bot.
 

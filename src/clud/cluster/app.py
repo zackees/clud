@@ -8,6 +8,7 @@ Provides:
 """
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from .auth import TokenData, decode_access_token
 from .config import settings
 from .database import Database
-from .models import Agent, AgentMetrics, AgentStatus, BindingMode, Daemon, DaemonStatus, SessionType, Staleness
+from .models import Agent, AgentMetrics, AgentStatus, BindingMode, Daemon, DaemonStatus, Session, SessionType, Staleness, TelegramBinding
 
 # Initialize logging
 logging.basicConfig(
@@ -86,7 +87,7 @@ async def optional_auth(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Application lifespan manager.
 
@@ -160,7 +161,7 @@ else:
 
 # Health check endpoint
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict[str, str]:
     """
     Health check endpoint.
 
@@ -174,7 +175,7 @@ async def health_check():
 
 
 @app.get("/")
-async def root():
+async def root() -> FileResponse | dict[str, str]:
     """Root endpoint - serves web UI if available, otherwise API info."""
     index_file = static_dir / "index.html"
     if index_file.exists():
@@ -193,7 +194,7 @@ async def root():
 
 
 @app.get("/api/v1/agents", response_model=list[Agent])
-async def list_agents(daemon_id: str | None = None):
+async def list_agents(daemon_id: str | None = None) -> list[Agent]:
     """
     List all agents.
 
@@ -236,7 +237,7 @@ async def list_agents(daemon_id: str | None = None):
 
 
 @app.get("/api/v1/agents/{agent_id}", response_model=Agent)
-async def get_agent(agent_id: str):
+async def get_agent(agent_id: str) -> Agent:
     """Get agent details by ID."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -271,7 +272,7 @@ async def get_agent(agent_id: str):
 
 
 @app.get("/api/v1/daemons", response_model=list[Daemon])
-async def list_daemons():
+async def list_daemons() -> list[Daemon]:
     """List all connected daemons."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -298,7 +299,7 @@ async def list_daemons():
 
 
 @app.get("/api/v1/daemons/{daemon_id}", response_model=Daemon)
-async def get_daemon(daemon_id: str):
+async def get_daemon(daemon_id: str) -> Daemon:
     """Get daemon details by ID."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -329,7 +330,7 @@ async def get_daemon(daemon_id: str):
 
 
 @app.post("/api/v1/auth/login")
-async def login(username: str, password: str):
+async def login(username: str, password: str) -> dict[str, str | list[str]]:
     """
     Login with username and password.
 
@@ -369,7 +370,7 @@ async def login(username: str, password: str):
 
 
 @app.post("/api/v1/auth/api-key")
-async def create_api_key(operator_id: str, scopes: list[str] | None = None):
+async def create_api_key(operator_id: str, scopes: list[str] | None = None) -> dict[str, str | list[str]]:
     """
     Create an API key for programmatic access.
 
@@ -405,7 +406,7 @@ async def create_api_key(operator_id: str, scopes: list[str] | None = None):
 
 
 @app.get("/api/v1/auth/sessions")
-async def list_sessions(operator_id: str | None = None):
+async def list_sessions(operator_id: str | None = None) -> list[Session]:
     """
     List active sessions.
 
@@ -435,7 +436,7 @@ async def list_sessions(operator_id: str | None = None):
 
 
 @app.delete("/api/v1/auth/sessions/{session_id}")
-async def revoke_session(session_id: str):
+async def revoke_session(session_id: str) -> dict[str, str]:
     """Revoke (delete) a session."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -458,7 +459,7 @@ async def revoke_session(session_id: str):
 
 
 @app.get("/api/v1/telegram/bindings")
-async def list_telegram_bindings(agent_id: str | None = None, chat_id: int | None = None):
+async def list_telegram_bindings(agent_id: str | None = None, chat_id: int | None = None) -> list[TelegramBinding]:
     """
     List Telegram bindings.
 
@@ -492,7 +493,7 @@ async def list_telegram_bindings(agent_id: str | None = None, chat_id: int | Non
 
 
 @app.delete("/api/v1/telegram/bindings/{binding_id}")
-async def delete_telegram_binding(binding_id: str):
+async def delete_telegram_binding(binding_id: str) -> dict[str, str]:
     """Delete a Telegram binding."""
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -521,7 +522,7 @@ async def stop_agent(
     force: bool = False,
     timeout_seconds: int = 10,
     token: TokenData = Depends(require_auth),
-):
+) -> dict[str, str]:
     """
     Stop an agent.
 
@@ -564,7 +565,7 @@ async def exec_command(
     env: dict[str, str] | None = None,
     timeout_seconds: int = 300,
     token: TokenData = Depends(require_auth),
-):
+) -> dict[str, str]:
     """
     Execute a command in the agent's working directory.
 
@@ -603,7 +604,7 @@ async def exec_command(
 
 
 @app.get("/api/v1/agents/{agent_id}/scrollback")
-async def get_scrollback(agent_id: str, lines: int = 1000):
+async def get_scrollback(agent_id: str, lines: int = 1000) -> dict[str, str]:
     """
     Request scrollback from the agent's ring buffer.
 
@@ -643,7 +644,7 @@ async def get_scrollback(agent_id: str, lines: int = 1000):
 
 
 @app.websocket("/ws/daemon/{daemon_id}")
-async def websocket_daemon_control(websocket: WebSocket, daemon_id: str):
+async def websocket_daemon_control(websocket: WebSocket, daemon_id: str) -> None:
     """
     WebSocket control connection for daemon.
 
@@ -661,7 +662,7 @@ async def websocket_daemon_control(websocket: WebSocket, daemon_id: str):
 
 
 @app.websocket("/ws/pty/pool-{pool_id}")
-async def websocket_pty_pool(websocket: WebSocket, pool_id: str):
+async def websocket_pty_pool(websocket: WebSocket, pool_id: str) -> None:
     """
     WebSocket PTY data connection (pooled).
 
@@ -676,7 +677,7 @@ async def websocket_pty_pool(websocket: WebSocket, pool_id: str):
 
 
 @app.websocket("/ws/terminal/{agent_id}")
-async def websocket_terminal(websocket: WebSocket, agent_id: str):
+async def websocket_terminal(websocket: WebSocket, agent_id: str) -> None:
     """
     WebSocket terminal connection for browser.
 
@@ -690,7 +691,7 @@ async def websocket_terminal(websocket: WebSocket, agent_id: str):
 
 
 @app.websocket("/ws/events")
-async def websocket_events(websocket: WebSocket):
+async def websocket_events(websocket: WebSocket) -> None:
     """
     WebSocket events connection for browser.
 
@@ -712,7 +713,7 @@ async def websocket_events(websocket: WebSocket):
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """Handle HTTP exceptions with consistent error format."""
     return JSONResponse(
         status_code=exc.status_code,
@@ -727,7 +728,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 
 @app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unexpected exceptions."""
     logger.exception("Unhandled exception", exc_info=exc)
     return JSONResponse(

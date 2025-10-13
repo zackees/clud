@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class AgentTracker:
     """Tracks a single agent and sends telemetry to daemon."""
 
-    def __init__(self, command: str, agent_id: str | None = None):
+    def __init__(self, command: str, agent_id: str | None = None) -> None:
         """Initialize agent tracker.
 
         Args:

@@ -9,7 +9,7 @@ import unittest
 class TestAgentCompletionIntegration(unittest.TestCase):
     """Test agent completion detection with real commands."""
 
-    def test_agent_completion_timeout(self):
+    def test_agent_completion_timeout(self) -> None:
         """Test that agent completion detection works with real clud command."""
         # This should timeout quickly since "respond with 0" should complete fast
         start_time = time.time()
@@ -45,7 +45,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("Command took longer than 60 seconds - agent completion detection may not be working")
 
-    def test_simple_command_without_detection(self):
+    def test_simple_command_without_detection(self) -> None:
         """Test that regular commands work without detection flag."""
         try:
             # Use encoding handling to deal with output that might contain binary data
@@ -68,7 +68,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
             self.fail("Command took longer than 30 seconds - this should complete quickly now")
 
     @unittest.skipUnless(os.getenv("RUN_API_TESTS") == "1", "Requires API key and RUN_API_TESTS=1")
-    def test_foreground_idle_detection(self):
+    def test_foreground_idle_detection(self) -> None:
         """Test idle detection in foreground mode with Claude message."""
         start_time = time.time()
 
@@ -98,7 +98,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
             self.fail("Command timed out - idle detection may not be working")
 
     @unittest.skipUnless(os.getenv("RUN_API_TESTS") == "1", "Requires API key and RUN_API_TESTS=1")
-    def test_foreground_without_idle_timeout(self):
+    def test_foreground_without_idle_timeout(self) -> None:
         """Test that foreground mode without --idle-timeout preserves status quo behavior."""
         # This test just verifies that -p mode works normally without idle detection
         try:

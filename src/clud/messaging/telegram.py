@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 class TelegramMessenger:
     """Telegram bot messenger for agent notifications."""
 
-    def __init__(self, bot_token: str, chat_id: str):
+    def __init__(self, bot_token: str, chat_id: str) -> None:
         """Initialize Telegram messenger.
 
         Args:
@@ -172,7 +173,7 @@ Status: 🔴 Offline
             logger.error(f"Failed to receive message: {e}")
             return None
 
-    async def _message_handler(self, update, context):
+    async def _message_handler(self, update: Any, context: Any) -> None:
         """Handle incoming messages from Telegram.
 
         Args:
@@ -183,7 +184,7 @@ Status: 🔴 Offline
             await self.message_queue.put(update.message.text)
             logger.debug(f"Received message: {update.message.text[:50]}")
 
-    async def start_listening(self):
+    async def start_listening(self) -> None:
         """Start listening for messages from Telegram."""
         if not await self._ensure_initialized():
             return
@@ -196,7 +197,7 @@ Status: 🔴 Offline
         except Exception as e:
             logger.error(f"Failed to start listening: {e}")
 
-    async def stop_listening(self):
+    async def stop_listening(self) -> None:
         """Stop listening for messages."""
         if self.app:
             try:
@@ -207,7 +208,7 @@ Status: 🔴 Offline
             except Exception as e:
                 logger.error(f"Failed to stop listening: {e}")
 
-    async def handle_web_app_data(self, update, context):
+    async def handle_web_app_data(self, update: Any, context: Any) -> bool:
         """Handle data sent from Telegram Web App.
 
         Args:
@@ -255,7 +256,7 @@ Status: 🔴 Offline
             await update.message.reply_text("Sorry, an error occurred. Please try again.")
             return False
 
-    async def setup_web_app_handler(self):
+    async def setup_web_app_handler(self) -> None:
         """Set up handler for web app data."""
         if not await self._ensure_initialized():
             return

@@ -97,13 +97,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `sys.path` imports before regular imports are strictly forbidden and should be flagged as code quality violations
 
 ### Type Annotations
-- Strict type checking is enforced via pyright
-- All functions should have proper return type annotations
-- Use specific types rather than `Any` when possible
-- `reportUnknownVariableType` and `reportUnknownArgumentType` are configured as **errors**
+- **Return Type Annotations**: Enforced via ruff's ANN ruleset (flake8-annotations)
+  - **MANDATORY**: All functions must have explicit return type annotations (e.g., `-> None`, `-> str`, `-> int`)
+  - This includes public functions (ANN201), private functions (ANN202), and special methods like `__init__` (ANN204)
+  - Function arguments must also have type annotations (ANN001)
+  - `typing.Any` is allowed when necessary (ANN401 is ignored)
+- **Type Checking**: Strict type checking is enforced via pyright
+  - Use specific types rather than `Any` when possible
+  - `reportUnknownVariableType` and `reportUnknownArgumentType` are configured as **errors**
 - **Third-Party Library Amnesty**: Errors from third-party libraries (keyring, telegram, etc.) should be given lint amnesty
   - These errors from external dependencies are acceptable and should NOT be "fixed" with type ignore comments
   - Always fix type errors in code you control (src/clud/ and tests/)
   - Common acceptable errors from third-party: `reportUnknownVariableType`, `reportUnknownArgumentType` from keyring, telegram, etc.
   - Do NOT add `# type: ignore` or `# pyright: ignore` comments for third-party library type issues
   - The goal: zero unknown types in our code, but accept incomplete type stubs from dependencies
+
+### Test Framework Standard
+- **MANDATORY**: All unit tests MUST use the `unittest` framework
+- All test files MUST have a `main` function that runs `unittest.main()`
+- Tests are executed via pytest (which is compatible with unittest), but the test code itself must use unittest
+- Example test file structure:
+  ```python
+  import unittest
+
+  class TestMyFeature(unittest.TestCase):
+      def test_something(self) -> None:
+          self.assertEqual(1, 1)
+
+  if __name__ == "__main__":
+      unittest.main()
+  ```
+- This allows tests to be run both via pytest and directly as Python scripts

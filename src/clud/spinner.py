@@ -8,7 +8,7 @@ from types import TracebackType
 class Spinner:
     """Simple text-based spinner for CLI operations."""
 
-    def __init__(self, message: str = "Working..."):
+    def __init__(self, message: str = "Working...") -> None:
         self.message = message
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -43,7 +43,7 @@ class Spinner:
             time.sleep(0.1)
             i += 1
 
-    def __enter__(self):
+    def __enter__(self) -> "Spinner":
         """Context manager entry."""
         self.start()
         return self

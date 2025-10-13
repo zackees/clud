@@ -8,7 +8,7 @@ from typing import Any, cast
 class StreamJsonFormatter:
     """Format Claude Code's stream-json output to show only relevant information."""
 
-    def __init__(self, show_system: bool = False, show_usage: bool = True, show_cache: bool = False, verbose: bool = False):
+    def __init__(self, show_system: bool = False, show_usage: bool = True, show_cache: bool = False, verbose: bool = False) -> None:
         """Initialize the formatter.
 
         Args:

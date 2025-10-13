@@ -13,11 +13,11 @@ class CredentialStore(Protocol):
 
     def get_password(self, service: str, username: str) -> str | None:
         """Get password for service and username."""
-        ...
+        ...  # pragma: no cover
 
     def set_password(self, service: str, username: str, password: str) -> None:
         """Set password for service and username."""
-        ...
+        ...  # pragma: no cover
 
 
 class SystemKeyring:

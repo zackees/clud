@@ -22,7 +22,7 @@ except ImportError:
 class TelegramBot:
     """Telegram bot manager for sending agent notifications."""
 
-    def __init__(self, bot_token: str, chat_id: str | None = None, agent_name: str | None = None):
+    def __init__(self, bot_token: str, chat_id: str | None = None, agent_name: str | None = None) -> None:
         """Initialize Telegram bot.
 
         Args:

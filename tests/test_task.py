@@ -4,7 +4,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from clud.task import (
     _build_editor_command,
@@ -33,7 +33,7 @@ class TestFindEditor(unittest.TestCase):
 
     @patch("platform.system")
     @patch("clud.task._find_windows_editor")
-    def test_find_editor_windows(self, mock_windows, mock_system):
+    def test_find_editor_windows(self, mock_windows: MagicMock, mock_system: MagicMock) -> None:
         """Test finding editor on Windows."""
         mock_system.return_value = "Windows"
         mock_windows.return_value = "notepad.exe"
@@ -44,7 +44,7 @@ class TestFindEditor(unittest.TestCase):
 
     @patch("platform.system")
     @patch("clud.task._find_macos_editor")
-    def test_find_editor_macos(self, mock_macos, mock_system):
+    def test_find_editor_macos(self, mock_macos: MagicMock, mock_system: MagicMock) -> None:
         """Test finding editor on macOS."""
         mock_system.return_value = "Darwin"
         mock_macos.return_value = "nano"
@@ -55,7 +55,7 @@ class TestFindEditor(unittest.TestCase):
 
     @patch("platform.system")
     @patch("clud.task._find_linux_editor")
-    def test_find_editor_linux(self, mock_linux, mock_system):
+    def test_find_editor_linux(self, mock_linux: MagicMock, mock_system: MagicMock) -> None:
         """Test finding editor on Linux."""
         mock_system.return_value = "Linux"
         mock_linux.return_value = "vim"
@@ -65,7 +65,7 @@ class TestFindEditor(unittest.TestCase):
         mock_linux.assert_called_once()  # type: ignore[misc]
 
     @patch("pathlib.Path.exists")
-    def test_find_windows_editor_sublime(self, mock_exists):
+    def test_find_windows_editor_sublime(self, mock_exists: MagicMock) -> None:
         """Test finding Sublime Text on Windows."""
         mock_exists.return_value = True
 
@@ -74,7 +74,7 @@ class TestFindEditor(unittest.TestCase):
 
     @patch("pathlib.Path.exists")
     @patch("shutil.which")
-    def test_find_windows_editor_fallback(self, mock_which, mock_exists):
+    def test_find_windows_editor_fallback(self, mock_which: MagicMock, mock_exists: MagicMock) -> None:
         """Test fallback to notepad on Windows."""
         mock_exists.return_value = False
         mock_which.return_value = None
@@ -83,7 +83,7 @@ class TestFindEditor(unittest.TestCase):
         self.assertEqual(result, "notepad.exe")
 
     @patch("shutil.which")
-    def test_find_macos_editor(self, mock_which):
+    def test_find_macos_editor(self, mock_which: MagicMock) -> None:
         """Test finding editor on macOS."""
         mock_which.side_effect = lambda cmd: "nano" if cmd == "nano" else None
 
@@ -91,7 +91,7 @@ class TestFindEditor(unittest.TestCase):
         self.assertEqual(result, "nano")
 
     @patch("shutil.which")
-    def test_find_linux_editor(self, mock_which):
+    def test_find_linux_editor(self, mock_which: MagicMock) -> None:
         """Test finding editor on Linux."""
         mock_which.side_effect = lambda cmd: "vim" if cmd == "vim" else None
 
@@ -103,7 +103,7 @@ class TestBuildEditorCommand(unittest.TestCase):
     """Test editor command building."""
 
     @patch("platform.system")
-    def test_build_editor_command_windows_gui(self, mock_system):
+    def test_build_editor_command_windows_gui(self, mock_system: MagicMock) -> None:
         """Test building command for GUI editor on Windows."""
         mock_system.return_value = "Windows"
 
@@ -111,7 +111,7 @@ class TestBuildEditorCommand(unittest.TestCase):
         self.assertEqual(cmd, ["start", "", "sublime_text.exe", "test.md"])
 
     @patch("platform.system")
-    def test_build_editor_command_windows_notepad(self, mock_system):
+    def test_build_editor_command_windows_notepad(self, mock_system: MagicMock) -> None:
         """Test building command for notepad on Windows."""
         mock_system.return_value = "Windows"
 
@@ -119,7 +119,7 @@ class TestBuildEditorCommand(unittest.TestCase):
         self.assertEqual(cmd, ["notepad.exe", "test.md"])
 
     @patch("platform.system")
-    def test_build_editor_command_macos_gui(self, mock_system):
+    def test_build_editor_command_macos_gui(self, mock_system: MagicMock) -> None:
         """Test building command for GUI editor on macOS."""
         mock_system.return_value = "Darwin"
 
@@ -127,7 +127,7 @@ class TestBuildEditorCommand(unittest.TestCase):
         self.assertEqual(cmd, ["subl", "test.md"])
 
     @patch("platform.system")
-    def test_build_editor_command_terminal(self, mock_system):
+    def test_build_editor_command_terminal(self, mock_system: MagicMock) -> None:
         """Test building command for terminal editor."""
         mock_system.return_value = "Linux"
 
@@ -139,7 +139,7 @@ class TestOpenInEditor(unittest.TestCase):
     """Test opening files in editor."""
 
     @patch("clud.task.find_editor")
-    def test_open_in_editor_no_editor(self, mock_find_editor):
+    def test_open_in_editor_no_editor(self, mock_find_editor: MagicMock) -> None:
         """Test handling when no editor is found."""
         mock_find_editor.return_value = None
 
@@ -149,7 +149,7 @@ class TestOpenInEditor(unittest.TestCase):
     @patch("clud.task.find_editor")
     @patch("clud.task._exec")
     @patch("clud.task._build_editor_command")
-    def test_open_in_editor_success(self, mock_build_cmd, mock_exec, mock_find_editor):
+    def test_open_in_editor_success(self, mock_build_cmd: MagicMock, mock_exec: MagicMock, mock_find_editor: MagicMock) -> None:
         """Test successful editor opening."""
         mock_find_editor.return_value = "nano"
         mock_build_cmd.return_value = ["nano", "test.md"]
@@ -161,7 +161,7 @@ class TestOpenInEditor(unittest.TestCase):
 
     @patch("clud.task.find_editor")
     @patch("clud.task._exec")
-    def test_open_in_editor_exception(self, mock_exec, mock_find_editor):
+    def test_open_in_editor_exception(self, mock_exec: MagicMock, mock_find_editor: MagicMock) -> None:
         """Test handling editor launch exception."""
         mock_find_editor.return_value = "nano"
         mock_exec.side_effect = Exception("Launch failed")
@@ -174,7 +174,7 @@ class TestLintFunctionality(unittest.TestCase):
     """Test lint-related functions."""
 
     @patch("pathlib.Path.exists")
-    def test_lint_script_exists_true(self, mock_exists):
+    def test_lint_script_exists_true(self, mock_exists: MagicMock) -> None:
         """Test when lint script exists."""
         mock_exists.return_value = True
 
@@ -182,21 +182,21 @@ class TestLintFunctionality(unittest.TestCase):
         self.assertTrue(result)
 
     @patch("pathlib.Path.exists")
-    def test_lint_script_exists_false(self, mock_exists):
+    def test_lint_script_exists_false(self, mock_exists: MagicMock) -> None:
         """Test when lint script doesn't exist."""
         mock_exists.return_value = False
 
         result = _lint_script_exists()
         self.assertFalse(result)
 
-    def test_handle_lint_result_success(self):
+    def test_handle_lint_result_success(self) -> None:
         """Test handling successful lint result."""
         result = Mock(returncode=0)
 
         success = _handle_lint_result(result)
         self.assertTrue(success)
 
-    def test_handle_lint_result_failure(self):
+    def test_handle_lint_result_failure(self) -> None:
         """Test handling failed lint result."""
         result = Mock(returncode=1, stdout="Error", stderr="")
 
@@ -204,7 +204,7 @@ class TestLintFunctionality(unittest.TestCase):
         self.assertFalse(success)
 
     @patch("clud.task._lint_script_exists")
-    def test_run_lint_no_script(self, mock_lint_exists):
+    def test_run_lint_no_script(self, mock_lint_exists: MagicMock) -> None:
         """Test when no lint script exists."""
         mock_lint_exists.return_value = False
 
@@ -214,7 +214,7 @@ class TestLintFunctionality(unittest.TestCase):
     @patch("clud.task._lint_script_exists")
     @patch("clud.task._exec")
     @patch("clud.task._handle_lint_result")
-    def test_run_lint_success(self, mock_handle, mock_exec, mock_lint_exists):
+    def test_run_lint_success(self, mock_handle: MagicMock, mock_exec: MagicMock, mock_lint_exists: MagicMock) -> None:
         """Test successful lint run."""
         mock_lint_exists.return_value = True
         mock_exec.return_value = Mock(returncode=0)
@@ -225,7 +225,7 @@ class TestLintFunctionality(unittest.TestCase):
         mock_exec.assert_called_once()  # type: ignore[misc]
 
     @patch("clud.task.run_lint")
-    def test_fix_lint_errors_immediate_success(self, mock_run_lint):
+    def test_fix_lint_errors_immediate_success(self, mock_run_lint: MagicMock) -> None:
         """Test immediate lint success."""
         mock_run_lint.return_value = True
 
@@ -235,7 +235,7 @@ class TestLintFunctionality(unittest.TestCase):
 
     @patch("clud.task.run_lint")
     @patch("time.sleep")
-    def test_fix_lint_errors_max_iterations(self, mock_sleep, mock_run_lint):
+    def test_fix_lint_errors_max_iterations(self, mock_sleep: MagicMock, mock_run_lint: MagicMock) -> None:
         """Test reaching max iterations."""
         mock_run_lint.return_value = False
 
@@ -247,7 +247,7 @@ class TestLintFunctionality(unittest.TestCase):
 class TestTaskFileHelpers(unittest.TestCase):
     """Test task file helper functions."""
 
-    def test_task_file_has_content_true(self):
+    def test_task_file_has_content_true(self) -> None:
         """Test when task file has content."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             f.write("# Task\nSome content")
@@ -259,7 +259,7 @@ class TestTaskFileHelpers(unittest.TestCase):
         finally:
             temp_path.unlink()
 
-    def test_task_file_has_content_empty(self):
+    def test_task_file_has_content_empty(self) -> None:
         """Test when task file is empty."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             temp_path = Path(f.name)
@@ -270,35 +270,35 @@ class TestTaskFileHelpers(unittest.TestCase):
         finally:
             temp_path.unlink()
 
-    def test_task_file_has_content_nonexistent(self):
+    def test_task_file_has_content_nonexistent(self) -> None:
         """Test when task file doesn't exist."""
         temp_path = Path("nonexistent_task.md")
 
         result = _task_file_has_content(temp_path)
         self.assertFalse(result)
 
-    def test_has_blocking_problem_true(self):
+    def test_has_blocking_problem_true(self) -> None:
         """Test detecting blocking problem."""
         content = "# Task\nBLOCKING PROBLEM: Can't continue"
 
         result = _has_blocking_problem(content)
         self.assertTrue(result)
 
-    def test_has_blocking_problem_critical_decision(self):
+    def test_has_blocking_problem_critical_decision(self) -> None:
         """Test detecting critical decision."""
         content = "# Task\nCRITICAL DECISION needs to be made"
 
         result = _has_blocking_problem(content)
         self.assertTrue(result)
 
-    def test_has_blocking_problem_false(self):
+    def test_has_blocking_problem_false(self) -> None:
         """Test when no blocking problem exists."""
         content = "# Task\nNormal task content"
 
         result = _has_blocking_problem(content)
         self.assertFalse(result)
 
-    def test_create_initial_task_content(self):
+    def test_create_initial_task_content(self) -> None:
         """Test creating initial task content."""
         user_input = "Fix the login bug"
 
@@ -313,7 +313,7 @@ class TestProcessTaskFile(unittest.TestCase):
 
     @patch("clud.task._task_file_has_content")
     @patch("clud.task.process_existing_task")
-    def test_process_task_file_existing(self, mock_process_existing, mock_has_content):
+    def test_process_task_file_existing(self, mock_process_existing: MagicMock, mock_has_content: MagicMock) -> None:
         """Test processing existing task file."""
         mock_has_content.return_value = True
         mock_process_existing.return_value = 0
@@ -324,7 +324,7 @@ class TestProcessTaskFile(unittest.TestCase):
 
     @patch("clud.task._task_file_has_content")
     @patch("clud.task.process_new_task")
-    def test_process_task_file_new(self, mock_process_new, mock_has_content):
+    def test_process_task_file_new(self, mock_process_new: MagicMock, mock_has_content: MagicMock) -> None:
         """Test processing new task file."""
         mock_has_content.return_value = False
         mock_process_new.return_value = 0
@@ -338,7 +338,7 @@ class TestProcessExistingTask(unittest.TestCase):
     """Test existing task processing."""
 
     @patch("clud.task.process_new_task")
-    def test_process_existing_task_empty_content(self, mock_process_new):
+    def test_process_existing_task_empty_content(self, mock_process_new: MagicMock) -> None:
         """Test when task content is empty."""
         mock_process_new.return_value = 0
 
@@ -352,7 +352,7 @@ class TestProcessExistingTask(unittest.TestCase):
     @patch("clud.task._wait_for_user_edit")
     @patch("clud.task.open_in_editor")
     @patch("clud.task._execute_task_with_clud")
-    def test_process_existing_task_execution_success(self, mock_execute, mock_editor, mock_wait):
+    def test_process_existing_task_execution_success(self, mock_execute: MagicMock, mock_editor: MagicMock, mock_wait: MagicMock) -> None:
         """Test successful task execution."""
         mock_execute.return_value = 0
         mock_editor.return_value = True
@@ -372,7 +372,7 @@ class TestProcessNewTask(unittest.TestCase):
     """Test new task processing."""
 
     @patch("clud.task._prompt_for_task_description")
-    def test_process_new_task_no_input(self, mock_prompt):
+    def test_process_new_task_no_input(self, mock_prompt: MagicMock) -> None:
         """Test when user provides no input."""
         mock_prompt.return_value = ""
 
@@ -383,7 +383,7 @@ class TestProcessNewTask(unittest.TestCase):
 
     @patch("clud.task._prompt_for_task_description")
     @patch("clud.task.process_existing_task")
-    def test_process_new_task_success(self, mock_process_existing, mock_prompt):
+    def test_process_new_task_success(self, mock_process_existing: MagicMock, mock_prompt: MagicMock) -> None:
         """Test successful new task creation."""
         mock_prompt.return_value = "Test task description"
         mock_process_existing.return_value = 0
@@ -400,35 +400,35 @@ class TestPromptToCreateTaskFile(unittest.TestCase):
     """Test prompting to create task file."""
 
     @patch("builtins.input")
-    def test_prompt_to_create_yes(self, mock_input):
+    def test_prompt_to_create_yes(self, mock_input: MagicMock) -> None:
         """Test user confirms creation with 'y'."""
         mock_input.return_value = "y"
         result = _prompt_to_create_task_file(Path("new_task.md"))
         self.assertTrue(result)
 
     @patch("builtins.input")
-    def test_prompt_to_create_default(self, mock_input):
+    def test_prompt_to_create_default(self, mock_input: MagicMock) -> None:
         """Test user confirms creation with default (empty input)."""
         mock_input.return_value = ""
         result = _prompt_to_create_task_file(Path("new_task.md"))
         self.assertTrue(result)
 
     @patch("builtins.input")
-    def test_prompt_to_create_no(self, mock_input):
+    def test_prompt_to_create_no(self, mock_input: MagicMock) -> None:
         """Test user declines creation with 'n'."""
         mock_input.return_value = "n"
         result = _prompt_to_create_task_file(Path("new_task.md"))
         self.assertFalse(result)
 
     @patch("builtins.input")
-    def test_prompt_to_create_keyboard_interrupt(self, mock_input):
+    def test_prompt_to_create_keyboard_interrupt(self, mock_input: MagicMock) -> None:
         """Test handling keyboard interrupt."""
         mock_input.side_effect = KeyboardInterrupt()
         result = _prompt_to_create_task_file(Path("new_task.md"))
         self.assertFalse(result)
 
     @patch("builtins.input")
-    def test_prompt_to_create_eof(self, mock_input):
+    def test_prompt_to_create_eof(self, mock_input: MagicMock) -> None:
         """Test handling EOF."""
         mock_input.side_effect = EOFError()
         result = _prompt_to_create_task_file(Path("new_task.md"))
@@ -438,13 +438,13 @@ class TestPromptToCreateTaskFile(unittest.TestCase):
 class TestHandleTaskCommand(unittest.TestCase):
     """Test main task command handler."""
 
-    def test_handle_task_command_no_path(self):
+    def test_handle_task_command_no_path(self) -> None:
         """Test when no path is provided."""
         result = handle_task_command("")
         self.assertEqual(result, 2)
 
     @patch("clud.task.process_task_file")
-    def test_handle_task_command_existing_file(self, mock_process):
+    def test_handle_task_command_existing_file(self, mock_process: MagicMock) -> None:
         """Test handling existing task file."""
         mock_process.return_value = 0
 
@@ -457,7 +457,7 @@ class TestHandleTaskCommand(unittest.TestCase):
 
     @patch("clud.task._prompt_to_create_task_file")
     @patch("clud.task.process_task_file")
-    def test_handle_task_command_new_file_yes(self, mock_process, mock_prompt):
+    def test_handle_task_command_new_file_yes(self, mock_process: MagicMock, mock_prompt: MagicMock) -> None:
         """Test handling new task file when user confirms creation."""
         mock_prompt.return_value = True
         mock_process.return_value = 0
@@ -471,7 +471,7 @@ class TestHandleTaskCommand(unittest.TestCase):
 
     @patch("clud.task._prompt_to_create_task_file")
     @patch("clud.task.process_task_file")
-    def test_handle_task_command_new_file_no(self, mock_process, mock_prompt):
+    def test_handle_task_command_new_file_no(self, mock_process: MagicMock, mock_prompt: MagicMock) -> None:
         """Test handling new task file when user declines creation."""
         mock_prompt.return_value = False
 
@@ -483,7 +483,7 @@ class TestHandleTaskCommand(unittest.TestCase):
             mock_process.assert_not_called()  # type: ignore[misc]
 
     @patch("clud.task.process_task_file")
-    def test_handle_task_command_exception(self, mock_process):
+    def test_handle_task_command_exception(self, mock_process: MagicMock) -> None:
         """Test handling exceptions."""
         mock_process.side_effect = Exception("Test error")
 

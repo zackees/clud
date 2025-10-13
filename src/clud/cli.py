@@ -199,7 +199,7 @@ def handle_code_command(port: int | None = None) -> int:
     ]
 
     # Schedule browser opening
-    def open_browser_delayed():
+    def open_browser_delayed() -> None:
         time.sleep(3)
         url = f"http://localhost:{port}"
         print(f"\n🌐 Opening browser to {url}")

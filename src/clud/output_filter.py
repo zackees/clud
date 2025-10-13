@@ -38,7 +38,7 @@ class OutputFilter:
     # Progress indicators (still noise, but different from cursor movement)
     PROGRESS_INDICATOR: Pattern[str] = re.compile(r"\.\.\.|━|▓|█|Waiting|Loading", re.IGNORECASE)
 
-    def __init__(self, min_text_length: int = 5):
+    def __init__(self, min_text_length: int = 5) -> None:
         """Initialize the output filter.
 
         Args:

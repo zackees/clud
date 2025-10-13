@@ -171,7 +171,7 @@ class DaemonRequestHandler(http.server.BaseHTTPRequestHandler):
 class DaemonServer:
     """Local daemon server for agent coordination."""
 
-    def __init__(self, host: str = DAEMON_HOST, port: int = DAEMON_PORT, db_path: Path | None = None):
+    def __init__(self, host: str = DAEMON_HOST, port: int = DAEMON_PORT, db_path: Path | None = None) -> None:
         """Initialize daemon server.
 
         Args:

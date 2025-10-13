@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class AgentRegistry:
     """Registry for tracking agents."""
 
-    def __init__(self, db_path: Path | None = None, use_persistence: bool = False):
+    def __init__(self, db_path: Path | None = None, use_persistence: bool = False) -> None:
         """Initialize agent registry.
 
         Args:

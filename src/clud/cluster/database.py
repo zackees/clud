@@ -122,7 +122,7 @@ class AuditEventDB(Base):
 class Database:
     """Database connection manager."""
 
-    def __init__(self, database_url: str = "sqlite+aiosqlite:///./clud_cluster.db"):
+    def __init__(self, database_url: str = "sqlite+aiosqlite:///./clud_cluster.db") -> None:
         """
         Initialize database connection.
 
@@ -145,12 +145,12 @@ class Database:
             expire_on_commit=False,
         )
 
-    async def create_tables(self):
+    async def create_tables(self) -> None:
         """Create all database tables."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    async def drop_tables(self):
+    async def drop_tables(self) -> None:
         """Drop all database tables (WARNING: destructive!)."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
@@ -168,7 +168,7 @@ class Database:
             finally:
                 await session.close()
 
-    async def close(self):
+    async def close(self) -> None:
         """Close database connections."""
         await self.engine.dispose()
 
@@ -203,7 +203,7 @@ async def list_daemons(session: AsyncSession) -> list[DaemonDB]:
     return list(result.scalars().all())
 
 
-async def update_agent_staleness(session: AsyncSession, agent: AgentDB):
+async def update_agent_staleness(session: AsyncSession, agent: AgentDB) -> None:
     """
     Update agent staleness based on last_heartbeat.
 
@@ -256,7 +256,7 @@ async def get_session_by_id(session: AsyncSession, session_id: uuid.UUID) -> Ses
     return result.scalar_one_or_none()
 
 
-async def delete_session(session: AsyncSession, session_id: uuid.UUID):
+async def delete_session(session: AsyncSession, session_id: uuid.UUID) -> None:
     """Delete a session."""
     db_session = await get_session_by_id(session, session_id)
     if db_session:
@@ -314,7 +314,7 @@ async def list_telegram_bindings(session: AsyncSession, agent_id: uuid.UUID | No
     return list(result.scalars().all())
 
 
-async def delete_telegram_binding(session: AsyncSession, binding_id: uuid.UUID):
+async def delete_telegram_binding(session: AsyncSession, binding_id: uuid.UUID) -> None:
     """Delete a Telegram binding."""
     db_binding = await get_telegram_binding_by_id(session, binding_id)
     if db_binding:
