@@ -330,8 +330,8 @@ bash test
 bash lint
 ```
 
-# Is clud --loop AGI?
+# Is `clud --loop` AGI?
 
-Yes
+Yes.
 
 <img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
