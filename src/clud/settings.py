@@ -1,8 +1,6 @@
 """Configuration settings for clud."""
 
-# Docker configuration
-IMAGE_NAME = "alpine"
-DEFAULT_CONTAINER_NAME = "clud-test-container"
+# Server configuration
 SERVER_PORT = 8080
 
 # Environment variables

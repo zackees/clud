@@ -5,14 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clud"
 readme = "README.md"
-description = "Claude in a Docker Box"
-requires-python = ">=3.10"
-keywords = ["claude", "docker", "cli"]
+description = "Claude Code in YOLO mode"
+requires-python = ">=3.13"
+keywords = ["claude", "cli", "ai"]
 license = { text = "BSD 3-Clause License" }
 classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
     "keyring>=24.0.0",
-    "docker>=6.0.0",
     "fasteners>=0.17.0",
     "appdirs>=1.4.4",
     "disklru>=0.1.0",
@@ -25,6 +24,18 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "markdown2>=2.4.0",
+    "websockets>=12.0",
+    # Central control plane dependencies
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.19.0",
+    "alembic>=1.12.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.6",
+    "psutil>=5.9.0",
+    "python-telegram-bot>=20.0",
 ]
 # Change this with the version number bump.
 version = "1.0.20"
@@ -45,6 +56,7 @@ posix = [
 ]
 full = [
     "zcmds_win32>=1.2.0; sys_platform == 'win32'",
+    # "clud-central>=0.1.0",  # Temporarily commented for Phase 1 development
 ]
 
 [tool.setuptools]
@@ -52,11 +64,11 @@ package-dir = {"" = "src"}
 
 [tool.ruff]
 line-length = 200
-target-version = "py310"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
-ignore = []
+ignore = ["B008"]  # Allow function calls in argument defaults (FastAPI Depends pattern)
 fixable = ["ALL"]
 unfixable = []
 
@@ -79,7 +91,7 @@ exclude = ["**/__pycache__"]
 
 # Type checking configuration
 typeCheckingMode = "strict"
-pythonVersion = "3.10"
+pythonVersion = "3.13"
 pythonPlatform = "All"
 useLibraryCodeForTypes = true
 analyzeUnannotatedFunctions = true
@@ -155,3 +167,4 @@ functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
+clud-central = "clud.central.cli:main"

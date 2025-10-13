@@ -51,7 +51,7 @@ class ChatHandler:
 
         return None
 
-    async def handle_chat(self, message: str, project_path: str) -> AsyncGenerator[str, None]:
+    async def handle_chat(self, message: str, project_path: str) -> AsyncGenerator[str]:
         """Handle a chat message and stream the response.
 
         Args:

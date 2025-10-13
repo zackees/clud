@@ -1,5 +1,6 @@
 """Testing utilities for CLUD."""
 
-from .docker_test_utils import DockerTestImageManager, ensure_test_image
+# Docker test utilities have been removed.
+# The project no longer uses Docker-based background agents.
 
-__all__ = ["DockerTestImageManager", "ensure_test_image"]
+__all__: list[str] = []

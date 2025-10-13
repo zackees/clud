@@ -18,7 +18,7 @@ Because safety is number three.
 ## Installation
 
 ```bash
-pip install clud
+pip install clud  # Everything included: CLI, service, and central control plane
 ```
 
 ## Quick Start
@@ -98,6 +98,32 @@ Launch an interactive kanban board for task management:
 clud --kanban                     # Launch vibe-kanban board
 ```
 
+### Central Control Plane
+
+`clud` now includes a central control plane for monitoring and managing agents across your development environment:
+
+```bash
+clud-central serve                # Start central control plane (default port :8000)
+clud-central serve --host 0.0.0.0 --port 9000  # Custom host/port
+clud-central migrate              # Run database migrations
+clud-central bot                  # Run Telegram bot (requires bot extra)
+```
+
+**Features:**
+- Web-based UI for agent monitoring and management
+- Real-time WebSocket updates for agent status
+- JWT authentication for secure access
+- SQLite database for persistent storage
+- Telegram bot integration for notifications
+- RESTful API for programmatic access
+
+**Port Assignments:**
+- Background service: `:7565`
+- Central control plane: `:8000` (default, configurable)
+
+**Architecture:**
+The central control plane provides a unified interface for monitoring all `clud` agents running on your system. Agents register with the background service (`:7565`), which communicates with the central control plane to provide real-time status updates, metrics, and control capabilities.
+
 ## Configuration
 
 ### API Key Setup
@@ -142,6 +168,17 @@ clud --kanban                     # Launch kanban board
 clud --help                       # Show help
 ```
 
+### Central Control Plane Commands
+```bash
+clud-central serve                # Start central control plane
+clud-central serve --host HOST    # Specify host
+clud-central serve --port PORT    # Specify port
+clud-central serve --reload       # Enable auto-reload
+clud-central migrate              # Run database migrations
+clud-central bot                  # Run Telegram bot
+clud-central --help               # Show help
+```
+
 ### Quick Mode Aliases
 ```bash
 clud fix                          # Alias for --fix
@@ -172,9 +209,27 @@ bash lint
 clud/
 ├── src/clud/              # Main package source
 │   ├── cli.py            # CLI router and main entry point
-│   ├── agent_foreground.py   # Foreground YOLO mode agent
+│   ├── agent/            # Agent execution subpackage
+│   │   ├── foreground.py      # Direct Claude Code execution
+│   │   ├── foreground_args.py # Argument parsing
+│   │   ├── completion.py      # Completion detection
+│   │   └── tracking.py        # Agent tracking
+│   ├── service/          # Background service (formerly daemon)
+│   │   ├── server.py          # HTTP server on :7565
+│   │   ├── registry.py        # Agent registry
+│   │   ├── models.py          # Shared models
+│   │   └── central_client.py  # Connects to central
+│   ├── central/          # Central control plane
+│   │   ├── app.py            # FastAPI application
+│   │   ├── cli.py            # Central CLI entry point
+│   │   ├── auth.py           # JWT authentication
+│   │   ├── database.py       # SQLAlchemy models
+│   │   ├── telegram_bot.py   # Telegram integration
+│   │   ├── websocket_handlers.py # WebSocket protocol
+│   │   └── static/           # Built React UI
 │   ├── task.py           # Task management system
 │   └── ...
+├── packages/web/         # React frontend source
 ├── tests/                # Unit and integration tests
 ├── pyproject.toml        # Package configuration
 └── ...
@@ -199,7 +254,7 @@ bash test
 # Run with verbose output
 bash test -v
 
-# Run integration tests (sequential, avoid Docker conflicts)
+# Run integration tests (sequential, avoid resource conflicts)
 uv run pytest tests/integration/ -v --tb=short --maxfail=1
 
 # Run specific test file
@@ -224,9 +279,10 @@ uv run pyright
 
 ## Entry Points
 
-The package provides one CLI entry point:
+The package provides two CLI entry points:
 
 - `clud` - Main CLI (runs Claude Code in YOLO mode)
+- `clud-central` - Central control plane for monitoring and managing agents
 
 ## Cool Projects
 

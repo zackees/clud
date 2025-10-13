@@ -8,12 +8,12 @@ from .telegram import TelegramMessenger
 class AgentMessenger(Protocol):
     """Protocol for agent messaging implementations."""
 
-    async def send_invitation(self, agent_name: str, container_id: str, metadata: dict[str, str]) -> bool:
+    async def send_invitation(self, agent_name: str, process_id: str, metadata: dict[str, str]) -> bool:
         """Send invitation message when agent launches.
 
         Args:
             agent_name: Name of the agent
-            container_id: Docker container ID
+            process_id: Process ID
             metadata: Additional metadata about the agent
 
         Returns:

@@ -33,12 +33,12 @@ class TestCliYoloIntegration(unittest.TestCase):
     def test_cli_message_without_dry_run_mocked(self):
         """Test CLI with -m but no --dry-run (should try to run Claude, but we mock it)."""
         # Mock subprocess.run to avoid actually trying to run Claude
-        with patch("clud.agent_foreground.subprocess.run") as mock_yolo_run:
+        with patch("clud.agent.foreground.subprocess.run") as mock_yolo_run:
             # Mock successful return for yolo subprocess call
             mock_yolo_run.return_value.returncode = 0
 
             # Mock shutil.which to return a fake claude path
-            with patch("clud.agent_foreground.shutil.which", return_value="/fake/claude"):
+            with patch("clud.agent.foreground.shutil.which", return_value="/fake/claude"):
                 result = main(["-m", "test message"])
 
         self.assertEqual(result, 0)

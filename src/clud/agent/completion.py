@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from .output_filter import OutputFilter
+from ..output_filter import OutputFilter
 
 logger = logging.getLogger(__name__)
 

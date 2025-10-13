@@ -3,9 +3,9 @@
 import subprocess
 import sys
 
-from .agent_foreground import ConfigError as ForegroundConfigError
-from .agent_foreground import ValidationError as ForegroundValidationError
-from .agent_foreground import handle_login, save_telegram_credentials
+from .agent.foreground import ConfigError as ForegroundConfigError
+from .agent.foreground import ValidationError as ForegroundValidationError
+from .agent.foreground import handle_login, save_telegram_credentials
 from .cli_args import AgentMode, parse_router_args
 from .task import handle_task_command
 
@@ -301,6 +301,7 @@ def main(args: list[str] | None = None) -> int:
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
             print("  --telegram, -tg      Start Telegram Web App server for bot integration")
             print("  --webui [PORT]       Launch Claude Code Web UI in browser (default port: 8888)")
+            print("  --track              Enable agent tracking with local daemon")
             print("  -h, --help           Show this help")
             print()
             print("Default: Run Claude Code with --dangerously-skip-permissions")
@@ -352,9 +353,27 @@ def main(args: list[str] | None = None) -> int:
             return handle_codeup_command()
         else:
             # Default mode - run foreground agent
-            from .agent_foreground import main as fg_main
+            # If --track is enabled, set up tracking before launching agent
+            if router_args.track:
+                from .agent.tracking import create_tracker
 
-            return fg_main(router_args.remaining_args)
+                # Get command from remaining args
+                command = " ".join(router_args.remaining_args) if router_args.remaining_args else "claude code"
+                tracker = create_tracker(command)
+
+                exit_code = 1  # Default exit code in case of exception
+                try:
+                    from .agent.foreground import main as fg_main
+
+                    exit_code = fg_main(router_args.remaining_args)
+                finally:
+                    tracker.stop(exit_code)
+
+                return exit_code
+            else:
+                from .agent.foreground import main as fg_main
+
+                return fg_main(router_args.remaining_args)
 
     except (ForegroundValidationError, ForegroundConfigError) as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -365,10 +384,7 @@ def main(args: list[str] | None = None) -> int:
     except Exception as e:
         # Handle other common exceptions that might come from agents
         error_msg = str(e)
-        if "Docker" in error_msg or "docker" in error_msg:
-            print(f"Docker error: {e}", file=sys.stderr)
-            return 3
-        elif "Config" in error_msg or "config" in error_msg:
+        if "Config" in error_msg or "config" in error_msg:
             print(f"Configuration error: {e}", file=sys.stderr)
             return 4
         else:

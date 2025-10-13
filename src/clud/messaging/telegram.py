@@ -51,12 +51,12 @@ class TelegramMessenger:
             logger.error(f"Failed to initialize Telegram messenger: {e}")
             return False
 
-    async def send_invitation(self, agent_name: str, container_id: str, metadata: dict[str, str]) -> bool:
+    async def send_invitation(self, agent_name: str, process_id: str, metadata: dict[str, str]) -> bool:
         """Send invitation message when agent launches.
 
         Args:
             agent_name: Name of the agent
-            container_id: Docker container ID
+            process_id: Process ID
             metadata: Additional metadata about the agent
 
         Returns:
@@ -70,9 +70,9 @@ class TelegramMessenger:
 🚀 **Claude Agent Launched**
 
 **Agent**: `{agent_name}`
-**Container**: `{container_id[:12]}`
+**Process**: `{process_id}`
 **Project**: {metadata.get("project_path", "N/A")}
-**Mode**: {metadata.get("mode", "background")}
+**Mode**: {metadata.get("mode", "foreground")}
 
 Status: ✅ Online and ready
 
@@ -165,7 +165,7 @@ Status: 🔴 Offline
         try:
             message = await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
             return message
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug("Message receive timeout")
             return None
         except Exception as e:

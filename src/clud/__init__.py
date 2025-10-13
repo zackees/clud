@@ -1,4 +1,4 @@
-"""Claude in a Docker Box package."""
+"""Claude Code in YOLO mode package."""
 
 import os
 import sys

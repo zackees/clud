@@ -120,7 +120,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     # 3. Saved config file
     import os
 
-    from .agent_foreground import load_telegram_credentials
+    from .foreground import load_telegram_credentials
 
     telegram_bot_token = known_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = known_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")

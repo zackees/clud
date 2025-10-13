@@ -12,14 +12,14 @@ from typing import Any
 
 from running_process import RunningProcess
 
-from .agent_completion import detect_agent_completion
-from .agent_foreground_args import Args, parse_args
-from .json_formatter import StreamJsonFormatter, create_formatter_callback
-from .output_filter import OutputFilter
-from .secrets import get_credential_store
-from .streaming_parser import StreamingParser
-from .streaming_ui import StreamingUI
-from .telegram_bot import TelegramBot
+from ..json_formatter import StreamJsonFormatter, create_formatter_callback
+from ..output_filter import OutputFilter
+from ..secrets import get_credential_store
+from ..streaming_parser import StreamingParser
+from ..streaming_ui import StreamingUI
+from ..telegram_bot import TelegramBot
+from .completion import detect_agent_completion
+from .foreground_args import Args, parse_args
 
 # Get credential store once at module level
 keyring = get_credential_store()
