@@ -1,7 +1,5 @@
 # clud
 
-A better claude cli
-
 [![Build and Push Multi Docker Image](https://github.com/zackees/clud/actions/workflows/build_multi_docker_image.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/build_multi_docker_image.yml)[![Windows Tests](https://github.com/zackees/clud/actions/workflows/windows-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/windows-test.yml)[![macOS Tests](https://github.com/zackees/clud/actions/workflows/macos-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-test.yml)[![Linux Tests](https://github.com/zackees/clud/actions/workflows/linux-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/linux-test.yml)
 [![Integration Tests](https://github.com/zackees/clud/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/integration-tests.yml)
 
