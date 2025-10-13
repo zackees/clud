@@ -12,7 +12,7 @@ The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
 Because safety is number three.
 
-<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
+
 
 ## Installation
 
@@ -319,11 +319,6 @@ BSD 3-Clause License
 Contributions are welcome! Please ensure all tests pass and code is properly linted before submitting PRs.
 
 
-
-
-
-
-
 ```bash
 # Setup environment
 bash install
@@ -334,3 +329,7 @@ bash test
 # Lint code
 bash lint
 ```
+
+# Yes
+
+<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
