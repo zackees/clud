@@ -4,7 +4,9 @@ import unittest
 from io import StringIO
 from unittest.mock import patch
 
-from clud.agent.foreground import main, parse_args, run
+from clud.agent_args import parse_args
+from clud.agent_cli import main
+from clud.agent_cli import run_agent as run
 
 
 class TestYolo(unittest.TestCase):

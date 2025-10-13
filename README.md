@@ -206,10 +206,12 @@ bash lint
 ```
 clud/
 ├── src/clud/              # Main package source
-│   ├── cli.py            # CLI router and main entry point
-│   ├── agent/            # Agent execution subpackage
-│   │   ├── foreground.py      # Direct Claude Code execution
-│   │   ├── foreground_args.py # Argument parsing
+│   ├── cli.py            # Minimal CLI router (delegates to agent_cli)
+│   ├── agent_cli.py      # Consolidated agent execution module
+│   ├── agent_args.py     # Unified argument parser
+│   ├── agent/            # Agent support subpackage
+│   │   ├── foreground.py      # [Legacy] Direct Claude Code execution
+│   │   ├── foreground_args.py # [Legacy] Argument parsing
 │   │   ├── completion.py      # Completion detection
 │   │   └── tracking.py        # Agent tracking
 │   ├── service/          # Background service (formerly daemon)
