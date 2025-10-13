@@ -62,6 +62,10 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     init_loop = "--init-loop" in args_copy
     track = "--track" in args_copy
 
+    # Remove --track from args_copy since it's handled by router
+    if "--track" in args_copy:
+        args_copy.remove("--track")
+
     # Extract fix URL argument if present
     fix_url = None
     if "--fix" in args_copy:

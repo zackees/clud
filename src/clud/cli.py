@@ -352,7 +352,7 @@ def main(args: list[str] | None = None) -> int:
             if router_args.track:
                 from .agent.tracking import create_tracker
 
-                # Get command from remaining args
+                # Get command from remaining args, or use default description
                 command = " ".join(router_args.remaining_args) if router_args.remaining_args else "claude code"
                 tracker = create_tracker(command)
 

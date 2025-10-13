@@ -270,7 +270,7 @@ def spawn_daemon() -> bool:
     config_dir.mkdir(parents=True, exist_ok=True)
 
     # Create daemon command
-    daemon_cmd = [sys.executable, "-m", "clud.daemon.server"]
+    daemon_cmd = [sys.executable, "-m", "clud.service.server"]
 
     # Spawn daemon as background process
     try:

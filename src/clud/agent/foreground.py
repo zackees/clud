@@ -724,6 +724,21 @@ def run(args: Args) -> int:
         telegram_bot.send_invitation(project_path=Path.cwd(), mode="foreground")
 
     try:
+        # Validate that we have input when running in non-interactive mode
+        # Claude Code requires either a prompt (-p), message (-m), stdin input, or loop mode
+        has_input = args.prompt or args.message or args.cmd or args.loop_value is not None
+        has_stdin = not sys.stdin.isatty()
+
+        if not has_input and not has_stdin:
+            print("Error: Input must be provided either through stdin or as a prompt argument", file=sys.stderr)
+            print("Usage:", file=sys.stderr)
+            print("  clud -p 'your prompt here'       # Run with prompt", file=sys.stderr)
+            print("  clud -m 'your message'           # Send message", file=sys.stderr)
+            print("  echo 'prompt' | clud             # Pipe input", file=sys.stderr)
+            print("  clud --loop 5 -p 'prompt'        # Run in loop mode", file=sys.stderr)
+            print("  clud                             # Interactive mode (reads from stdin)", file=sys.stderr)
+            return 1
+
         # If --cmd is provided, execute the command directly instead of launching Claude
         if args.cmd:
             result = subprocess.run(args.cmd, shell=True)
