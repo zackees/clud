@@ -464,42 +464,31 @@ def handle_kanban_command() -> int:
 
 
 def handle_telegram_command(token: str | None = None) -> int:
-    """Handle the --telegram/-tg command by opening bot page in browser.
+    """Handle the --telegram/-tg command by launching local landing page.
 
     Args:
-        token: Optional bot token to save before opening browser
+        token: Optional bot token to save
 
     Returns:
         Exit code
     """
-    bot_url = "https://t.me/clud_ckl_bot"
+    from .webapp.server import run_server
 
     try:
         # Save token if provided
         if token:
             print("Saving Telegram bot token...")
             try:
-                # Save with empty chat_id - will be auto-detected from Web App
                 save_telegram_credentials(token, "")
-                print("✓ Token saved successfully")
-                print()
+                print("✓ Token saved successfully\n")
             except Exception as e:
-                print(f"Warning: Could not save token: {e}", file=sys.stderr)
-                print()
+                print(f"Warning: Could not save token: {e}\n", file=sys.stderr)
 
-        # Open bot page in browser
-        print(f"Opening Telegram bot: {bot_url}")
-        print()
-        print("This will open your default browser.")
-        print("If you have Telegram installed, you can start chatting with the bot.")
-        print()
-
-        webbrowser.open(bot_url)
-        print("✓ Browser opened")
-        return 0
+        # Start local server with landing page
+        return run_server()
 
     except Exception as e:
-        print(f"Error opening bot page: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
 
@@ -1220,7 +1209,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
-            print("  --telegram, -tg      Start Telegram Web App server for bot integration")
+            print("  --telegram, -tg      Open Telegram bot landing page in browser")
             print("  --webui [PORT]       Launch Claude Code Web UI in browser (default port: 8888)")
             print("  --track              Enable agent tracking with local daemon")
             print("  -h, --help           Show this help")

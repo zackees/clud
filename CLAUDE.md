@@ -25,6 +25,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Cleanup
 - `bash clean` - Remove all build artifacts, caches, and virtual environment
 
+### Telegram Bot Integration
+- `clud --telegram` (or `clud -tg`) - Open Telegram bot landing page in browser
+  - Launches a local HTTP server on an auto-assigned port
+  - Opens the landing page in your default browser
+  - Landing page provides:
+    - Button to open the Claude Code Telegram bot (https://t.me/clud_ckl_bot)
+    - Explanation of why direct iframe embedding isn't possible (Telegram security)
+    - Preview of upcoming features (custom chat UI, dashboard, etc.)
+  - Press Ctrl+C to stop the server
+  - Note: Telegram blocks iframe embedding with X-Frame-Options for security, so the landing page provides a button to open the bot in Telegram instead
+
 ## Architecture
 
 ### Purpose
