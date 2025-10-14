@@ -4,5 +4,41 @@
     "bot_token": "${TELEGRAM_BOT_TOKEN}",
     "chat_id": "${TELEGRAM_CHAT_ID}"
   },
+  "hooks": {
+    "enabled": false,
+    "telegram": {
+      "enabled": false,
+      "bot_token": "${TELEGRAM_BOT_TOKEN}",
+      "chat_id": "${TELEGRAM_CHAT_ID}",
+      "buffer_size": 2000,
+      "events": ["AGENT_START", "OUTPUT_CHUNK", "POST_EXECUTION", "ERROR"]
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "https://your-webhook-endpoint.example.com/hook",
+      "method": "POST",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_TOKEN"
+      },
+      "events": ["AGENT_START", "POST_EXECUTION", "ERROR"],
+      "timeout": 30
+    }
+  },
+  "api": {
+    "host": "localhost",
+    "port": 8765,
+    "max_instances": 100,
+    "idle_timeout": 1800,
+    "cleanup_interval": 300
+  },
+  "webui": {
+    "port": 8888,
+    "host": "localhost",
+    "auto_open_browser": true,
+    "default_theme": "dark"
+  },
+  "agent": {
+    "debug": false
+  },
   "dockerfile": "Dockerfile"
 }

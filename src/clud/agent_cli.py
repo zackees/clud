@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ from running_process import RunningProcess
 
 from .agent.completion import detect_agent_completion
 from .agent_args import AgentMode, Args, parse_args
+from .hooks import HookContext, HookEvent, get_hook_manager
+from .hooks.config import load_hook_config
+from .hooks.telegram import TelegramHookHandler
+from .hooks.webhook import WebhookHookHandler
 from .json_formatter import StreamJsonFormatter, create_formatter_callback
 from .output_filter import OutputFilter
 from .secrets import get_credential_store
@@ -46,6 +51,88 @@ class ConfigError(CludError):
     """Configuration error."""
 
     pass
+
+
+# ============================================================================
+# Hook System Helpers
+# ============================================================================
+
+
+def register_hooks_from_config(instance_id: str, session_id: str, hook_debug: bool = False) -> None:
+    """Register hooks based on configuration file and environment variables.
+
+    Args:
+        instance_id: Unique ID for this agent instance
+        session_id: Session ID (typically same as instance_id for standalone runs)
+        hook_debug: Whether to enable debug logging for hooks
+    """
+    try:
+        # Load hook configuration
+        config = load_hook_config()
+
+        if not config.enabled:
+            if hook_debug:
+                print("DEBUG: Hooks disabled in configuration", file=sys.stderr)
+            return
+
+        hook_manager = get_hook_manager()
+
+        # Register Telegram hook if enabled
+        if config.telegram_enabled and config.telegram_bot_token and config.telegram_chat_id:
+            telegram_handler = TelegramHookHandler(
+                bot_token=config.telegram_bot_token,
+                buffer_size=config.buffer_size,
+                flush_interval=config.flush_interval,
+            )
+            hook_manager.register(telegram_handler)
+            if hook_debug:
+                print("DEBUG: Registered Telegram hook (will use session_id as chat_id)", file=sys.stderr)
+
+        # Register webhook hook if enabled
+        if config.webhook_enabled and config.webhook_url:
+            webhook_handler = WebhookHookHandler(
+                webhook_url=config.webhook_url,
+                secret=config.webhook_secret,
+            )
+            hook_manager.register(webhook_handler)
+            if hook_debug:
+                print(f"DEBUG: Registered webhook hook (url={config.webhook_url})", file=sys.stderr)
+
+    except Exception as e:
+        if hook_debug:
+            print(f"DEBUG: Failed to register hooks: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        # Don't fail if hooks can't be registered - hooks are optional
+
+
+def trigger_hook_sync(event: HookEvent, context: HookContext, hook_debug: bool = False) -> None:
+    """Trigger a hook event synchronously.
+
+    Args:
+        event: The hook event type
+        context: The hook context
+        hook_debug: Whether to print debug info
+    """
+    try:
+        hook_manager = get_hook_manager()
+
+        # Skip if no handlers registered
+        if not hook_manager.has_handlers(event):
+            if hook_debug:
+                print(f"DEBUG: No handlers for event {event.value}", file=sys.stderr)
+            return
+
+        if hook_debug:
+            print(f"DEBUG: Triggering hook event: {event.value}", file=sys.stderr)
+
+        # Trigger synchronously - just pass context (event is inside context)
+        hook_manager.trigger_sync(context)
+
+    except Exception as e:
+        if hook_debug:
+            print(f"DEBUG: Hook trigger failed: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        # Don't fail if hooks fail - they are optional
 
 
 # ============================================================================
@@ -558,6 +645,48 @@ def handle_webui_command(port: int | None = None) -> int:
         return run_server(port)
     except Exception as e:
         print(f"Error running Web UI: {e}", file=sys.stderr)
+        return 1
+
+
+def handle_api_server_command(port: int | None = None) -> int:
+    """Handle the --api-server command by launching the Message Handler API server."""
+    try:
+        # Set default port if not provided
+        if port is None:
+            port = 8765
+
+        print(f"Starting Message Handler API server on port {port}...")
+        print(f"API will be available at http://localhost:{port}")
+        print()
+        print("Endpoints:")
+        print(f"  - POST   http://localhost:{port}/api/message")
+        print(f"  - GET    http://localhost:{port}/api/instances")
+        print(f"  - GET    http://localhost:{port}/api/instances/{{id}}")
+        print(f"  - DELETE http://localhost:{port}/api/instances/{{id}}")
+        print(f"  - POST   http://localhost:{port}/api/cleanup")
+        print(f"  - GET    http://localhost:{port}/health")
+        print()
+        print("Press Ctrl+C to stop the server")
+        print()
+
+        # Import uvicorn and run the server
+        import uvicorn
+
+        from clud.api.server import create_app
+
+        app = create_app()
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+        return 0
+
+    except ImportError as e:
+        print(f"Error: Missing required dependency: {e}", file=sys.stderr)
+        print("Install with: pip install fastapi uvicorn", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\n\nStopping API server...", file=sys.stderr)
+        return 0
+    except Exception as e:
+        print(f"Error running API server: {e}", file=sys.stderr)
         return 1
 
 
@@ -1083,6 +1212,13 @@ def run_agent(args: Args) -> int:
     claude_path: str | None = None
     cmd: list[str] = []
 
+    # Generate unique instance ID for this agent run
+    instance_id = str(uuid.uuid4())
+    session_id = instance_id  # In standalone mode, session_id equals instance_id
+
+    # Register hooks early (before any execution)
+    register_hooks_from_config(instance_id=instance_id, session_id=session_id, hook_debug=args.hook_debug)
+
     # Load telegram credentials from saved config if not already provided
     if args.telegram and (not args.telegram_bot_token or not args.telegram_chat_id):
         saved_token, saved_chat_id = load_telegram_credentials()
@@ -1176,8 +1312,24 @@ def run_agent(args: Args) -> int:
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)
 
+        # Trigger AGENT_START hook
+        user_message = args.prompt if args.prompt else args.message if args.message else None
+        trigger_hook_sync(
+            HookEvent.AGENT_START,
+            HookContext(
+                event=HookEvent.AGENT_START,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                message=user_message,
+            ),
+            hook_debug=args.hook_debug,
+        )
+
         # Execute Claude with the dangerous permissions flag
         # Use idle detection if timeout is specified
+        returncode = 0  # Initialize returncode for hook triggers
         if args.idle_timeout is not None:
             # Create output filter to suppress terminal capability responses
             output_filter = OutputFilter()
@@ -1191,13 +1343,13 @@ def run_agent(args: Args) -> int:
                     sys.stdout.flush()
 
             detect_agent_completion(cmd, args.idle_timeout, output_callback)
-            return 0
+            returncode = 0
         elif args.prompt:
             # Use RunningProcess for streaming output when using -p flag
             # This ensures stream-json output is displayed line-by-line in real-time
             if args.plain:
                 # Plain mode: no JSON formatting, just pass through output
-                return RunningProcess.run_streaming(cmd)
+                returncode = RunningProcess.run_streaming(cmd)
             else:
                 # Create JSON formatter for beautiful output
                 formatter = StreamJsonFormatter(
@@ -1207,22 +1359,69 @@ def run_agent(args: Args) -> int:
                     verbose=args.verbose,
                 )
                 stdout_callback = create_formatter_callback(formatter)
-                return RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+                returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
         else:
-            return _execute_command(cmd, use_shell=False, verbose=args.verbose)
+            returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
+
+        # Trigger POST_EXECUTION hook after successful completion
+        trigger_hook_sync(
+            HookEvent.POST_EXECUTION,
+            HookContext(
+                event=HookEvent.POST_EXECUTION,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                message=user_message,
+                metadata={"returncode": returncode},
+            ),
+            hook_debug=args.hook_debug,
+        )
+
+        return returncode
 
     except FileNotFoundError as e:
-        print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
+        error_msg = f"Claude Code is not installed or not in PATH: {e}"
+        print(f"Error: {error_msg}", file=sys.stderr)
         print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
         print(f"DEBUG: FileNotFoundError details: {e}", file=sys.stderr)
         traceback.print_exc()
+
+        # Trigger ERROR hook
+        trigger_hook_sync(
+            HookEvent.ERROR,
+            HookContext(
+                event=HookEvent.ERROR,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                error=error_msg,
+            ),
+            hook_debug=args.hook_debug,
+        )
         return 1
 
     except KeyboardInterrupt:
         print("\nInterrupted by user", file=sys.stderr)
+
+        # Trigger AGENT_STOP hook on interrupt
+        trigger_hook_sync(
+            HookEvent.AGENT_STOP,
+            HookContext(
+                event=HookEvent.AGENT_STOP,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                metadata={"reason": "interrupted"},
+            ),
+            hook_debug=args.hook_debug,
+        )
         return 130
 
     except OSError as e:
+        error_msg = f"OS error launching Claude: {e}"
         print(f"Error launching Claude: {e}", file=sys.stderr)
         print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
         _print_error_diagnostics(claude_path, cmd)
@@ -1238,9 +1437,24 @@ def run_agent(args: Args) -> int:
 
         print("\nFull stack trace from original error:", file=sys.stderr)
         traceback.print_exc()
+
+        # Trigger ERROR hook
+        trigger_hook_sync(
+            HookEvent.ERROR,
+            HookContext(
+                event=HookEvent.ERROR,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                error=error_msg,
+            ),
+            hook_debug=args.hook_debug,
+        )
         return 1
 
     except Exception as e:
+        error_msg = f"Unexpected error launching Claude: {e}"
         print(f"Error launching Claude: {e}", file=sys.stderr)
         print(f"DEBUG: Exception type: {type(e).__name__}", file=sys.stderr)
         _print_error_diagnostics(claude_path, cmd)
@@ -1256,12 +1470,39 @@ def run_agent(args: Args) -> int:
 
         print("\nFull stack trace from original error:", file=sys.stderr)
         traceback.print_exc()
+
+        # Trigger ERROR hook
+        trigger_hook_sync(
+            HookEvent.ERROR,
+            HookContext(
+                event=HookEvent.ERROR,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                error=error_msg,
+            ),
+            hook_debug=args.hook_debug,
+        )
         return 1
 
     finally:
         # Send cleanup notification if telegram bot is available
         if telegram_bot:
             telegram_bot.send_cleanup()
+
+        # Trigger AGENT_STOP hook in finally block
+        trigger_hook_sync(
+            HookEvent.AGENT_STOP,
+            HookContext(
+                event=HookEvent.AGENT_STOP,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+            ),
+            hook_debug=args.hook_debug,
+        )
 
 
 def main(args_list: list[str] | None = None) -> int:
@@ -1293,6 +1534,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")
             print("  --telegram, -tg      Open Telegram bot landing page in browser")
             print("  --webui [PORT]       Launch Claude Code Web UI in browser (default port: 8888)")
+            print("  --api-server [PORT]  Launch Message Handler API server (default port: 8765)")
             print("  --track              Enable agent tracking with local daemon")
             print("  -h, --help           Show this help")
             print()
@@ -1320,6 +1562,9 @@ def main(args_list: list[str] | None = None) -> int:
 
         if args.webui:
             return handle_webui_command(args.webui_port)
+
+        if args.api_server:
+            return handle_api_server_command(args.api_port)
 
         if args.code:
             return handle_code_command(args.code_port)

@@ -1,6 +1,7 @@
 """Subprocess runner for Telegram message processing.
 
 This module handles running clud subprocesses for each incoming Telegram message.
+It can use either direct subprocess calls or the MessageHandler API.
 """
 
 import asyncio
@@ -12,8 +13,59 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+async def run_clud_with_message_api(message: str, chat_id: str, user_id: str, username: str, message_handler: Any) -> tuple[bool, str]:
+    """Run clud via MessageHandler API (async version).
+
+    Args:
+        message: The message/prompt to send to clud
+        chat_id: Telegram chat ID (used as session_id)
+        user_id: Telegram user ID (used as client_id)
+        username: Username for logging
+        message_handler: MessageHandler instance
+
+    Returns:
+        Tuple of (success: bool, response_message: str)
+    """
+    try:
+        from clud.api.models import ClientType, MessageRequest
+
+        # Create MessageRequest from Telegram message
+        request = MessageRequest(
+            message=message,
+            session_id=chat_id,  # Use chat_id as session_id for session persistence
+            client_type=ClientType.TELEGRAM,
+            client_id=user_id,
+            metadata={"username": username},
+        )
+
+        logger.info(f"Processing message via API for chat {chat_id}: {message[:50]}...")
+
+        # Forward to MessageHandler API
+        response = await message_handler.handle_message(request)
+
+        # Format response
+        if response.error:
+            logger.error(f"MessageHandler returned error: {response.error}")
+            return False, f"❌ Error: {response.error}"
+
+        # Build response message
+        status_emoji = {"completed": "✅", "running": "⏳", "failed": "❌", "pending": "📝"}.get(response.status.value, "📝")
+
+        response_text = f"{status_emoji} Message processed\nInstance: `{response.instance_id[:8]}...`"
+
+        if response.message:
+            response_text += f"\n\n{response.message}"
+
+        logger.info(f"Message processed successfully via API, status: {response.status.value}")
+        return True, response_text
+
+    except Exception as e:
+        logger.error(f"Error processing message via API: {e}", exc_info=True)
+        return False, f"❌ Error: {str(e)}"
+
+
 def run_clud_with_message(message: str, plain: bool = True, continue_flag: bool = False) -> int:
-    """Run clud subprocess with a message via -p flag.
+    """Run clud subprocess with a message via -p flag (legacy direct subprocess method).
 
     Args:
         message: The message/prompt to send to clud
@@ -56,23 +108,27 @@ def run_clud_with_message(message: str, plain: bool = True, continue_flag: bool 
         return 1
 
 
-async def run_telegram_message_loop_async(messenger: Any) -> int:
+async def run_telegram_message_loop_async(messenger: Any, message_handler: Any = None) -> int:
     """Run the main Telegram message processing loop (async version).
 
     This function:
     1. Starts listening for Telegram messages
     2. Waits for incoming messages
-    3. For each message, runs clud -p in subprocess
+    3. For each message, either:
+       - Uses MessageHandler API if provided (recommended)
+       - Falls back to running clud -p in subprocess
     4. Checks for more pending messages and repeats
 
     Args:
         messenger: TelegramMessenger instance
+        message_handler: Optional MessageHandler instance for API-based processing
 
     Returns:
         Exit code (0 for success, non-zero for error)
     """
     logger.info("Starting Telegram message loop...")
-    print("🤖 Telegram runner started. Listening for messages...")
+    mode = "API" if message_handler else "subprocess"
+    print(f"🤖 Telegram runner started ({mode} mode). Listening for messages...")
     print("Press Ctrl+C to stop.")
 
     try:
@@ -88,15 +144,35 @@ async def run_telegram_message_loop_async(messenger: Any) -> int:
                 logger.info(f"Received message: {message_text[:50]}...")
                 print(f"\n📨 Received message: {message_text[:80]}...")
 
-                # Run clud -p with the message
-                exit_code = run_clud_with_message(message_text, plain=True)
+                # Use MessageHandler API if available, otherwise fall back to subprocess
+                if message_handler:
+                    # Extract chat info (we need to get this from the messenger somehow)
+                    chat_id = str(messenger.chat_id)
+                    # For now, use chat_id as user_id and username
+                    success, response = await run_clud_with_message_api(
+                        message=message_text,
+                        chat_id=chat_id,
+                        user_id=chat_id,
+                        username="telegram_user",
+                        message_handler=message_handler,
+                    )
 
-                if exit_code != 0:
-                    logger.warning(f"Message processing exited with code {exit_code}")
-                    print(f"⚠️  Processing completed with exit code {exit_code}")
+                    if not success:
+                        logger.warning(f"Message processing failed: {response}")
+                        print(f"⚠️  {response}")
+                    else:
+                        logger.info("Message processed successfully via API")
+                        print(f"✅ {response}")
                 else:
-                    logger.info("Message processed successfully")
-                    print("✅ Message processed successfully")
+                    # Legacy subprocess method
+                    exit_code = run_clud_with_message(message_text, plain=True)
+
+                    if exit_code != 0:
+                        logger.warning(f"Message processing exited with code {exit_code}")
+                        print(f"⚠️  Processing completed with exit code {exit_code}")
+                    else:
+                        logger.info("Message processed successfully")
+                        print("✅ Message processed successfully")
 
                 # Check if there are more messages in queue
                 if not messenger.message_queue.empty():
@@ -124,11 +200,12 @@ async def run_telegram_message_loop_async(messenger: Any) -> int:
     return 0
 
 
-def run_telegram_message_loop(messenger: Any) -> int:
+def run_telegram_message_loop(messenger: Any, message_handler: Any = None) -> int:
     """Run the main Telegram message processing loop (sync wrapper).
 
     Args:
         messenger: TelegramMessenger instance
+        message_handler: Optional MessageHandler instance for API-based processing
 
     Returns:
         Exit code (0 for success, non-zero for error)
@@ -139,7 +216,7 @@ def run_telegram_message_loop(messenger: Any) -> int:
         asyncio.set_event_loop(loop)
 
         # Run the async loop
-        result = loop.run_until_complete(run_telegram_message_loop_async(messenger))
+        result = loop.run_until_complete(run_telegram_message_loop_async(messenger, message_handler))
 
         loop.close()
         return result

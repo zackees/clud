@@ -208,12 +208,13 @@ Status: 🔴 Offline
             except Exception as e:
                 logger.error(f"Failed to stop listening: {e}")
 
-    async def handle_web_app_data(self, update: Any, context: Any) -> bool:
+    async def handle_web_app_data(self, update: Any, context: Any, message_handler: Any = None) -> bool:
         """Handle data sent from Telegram Web App.
 
         Args:
             update: Telegram update with web_app_data
             context: Telegram context
+            message_handler: Optional MessageHandler instance for processing messages
 
         Returns:
             True if message handled successfully, False otherwise
@@ -223,7 +224,7 @@ Status: 🔴 Offline
             return False
 
         # Extract chat context for multi-chat support
-        chat_id = update.message.chat_id
+        chat_id = str(update.message.chat_id)
         user_id = update.message.from_user.id
         username = update.message.from_user.username or "Unknown"
 
@@ -239,14 +240,39 @@ Status: 🔴 Offline
 
             logger.info(f"Web app {message_type} from {username} (user_id: {user_id}, chat_id: {chat_id}): {message_text[:50]}...")
 
-            # TODO: Process with Claude agent (to be implemented)
-            # For now, just echo back the message
-            response = f"Received your message: {message_text}\n\n(Agent integration coming soon!)"
+            # If MessageHandler is available, use it to process the message
+            if message_handler:
+                from clud.api.models import ClientType, MessageRequest
 
-            # Send response back to this specific chat
-            await update.message.reply_text(response, parse_mode="Markdown")
+                # Create MessageRequest from Telegram update
+                request = MessageRequest(
+                    message=message_text,
+                    session_id=chat_id,  # Use chat_id as session_id for persistence
+                    client_type=ClientType.TELEGRAM,
+                    client_id=str(user_id),
+                    metadata={"username": username, "message_type": message_type},
+                )
 
-            return True
+                # Forward to MessageHandler API
+                response = await message_handler.handle_message(request)
+
+                # Send response back to Telegram
+                if response.error:
+                    await update.message.reply_text(f"❌ Error: {response.error}", parse_mode="Markdown")
+                else:
+                    status_emoji = {"completed": "✅", "running": "⏳", "failed": "❌"}.get(response.status.value, "📝")
+                    reply = f"{status_emoji} Message processed\nInstance: `{response.instance_id[:8]}...`"
+                    if response.message:
+                        reply += f"\n\n{response.message}"
+                    await update.message.reply_text(reply, parse_mode="Markdown")
+
+                return True
+            else:
+                # Fallback: just echo back the message
+                response = f"Received your message: {message_text}\n\n(Agent integration coming soon!)"
+                await update.message.reply_text(response, parse_mode="Markdown")
+                return True
+
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON from web app (chat {chat_id}): {e}")
             await update.message.reply_text("Sorry, I received invalid data. Please try again.")

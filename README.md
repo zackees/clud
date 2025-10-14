@@ -98,6 +98,52 @@ Launch an interactive kanban board for task management:
 clud --kanban                     # Launch vibe-kanban board
 ```
 
+### Web UI
+
+Launch a browser-based interface for Claude Code with real-time streaming:
+
+```bash
+clud --webui                      # Launch Web UI on port 8888 (auto-opens browser)
+clud --webui 3000                 # Launch on custom port 3000
+```
+
+**Features:**
+- Real-time streaming chat interface with Claude Code
+- Project directory selection
+- Conversation history (last 10 messages loaded on startup)
+- Dark/light theme toggle
+- Mobile-responsive design
+- WebSocket-based streaming for instant responses
+- Runs in YOLO mode (no permission prompts)
+- Markdown rendering with code block syntax highlighting
+
+**Architecture:**
+The Web UI is a FastAPI-based server that wraps Claude Code execution and provides a clean chat interface. It uses WebSocket for real-time streaming of Claude's responses and stores conversation history in browser localStorage.
+
+**Inspired by:** [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui) - Python/FastAPI implementation with minimal dependencies.
+
+### Hook System & Message Handler API
+
+Clud includes a sophisticated event-based architecture for intercepting and forwarding execution events to external systems:
+
+**Hook System (`src/clud/hooks/`):**
+- Event-based interception: PRE_EXECUTION, POST_EXECUTION, OUTPUT_CHUNK, ERROR, AGENT_START, AGENT_STOP
+- Built-in handlers: TelegramHookHandler, WebhookHandler
+- Configuration via .clud files and environment variables
+
+**Message Handler API (`src/clud/api/`):**
+- Unified API for routing messages from multiple client types to clud instances
+- Instance pooling with session-based reuse and automatic cleanup
+- WebSocket streaming for real-time output
+- REST endpoints: `/api/message`, `/api/instances`, health checks
+- Supports concurrent sessions with configurable limits (default: 100 instances, 30-minute idle timeout)
+
+This architecture enables:
+- Telegram native clients can send messages to running clud instances with real-time output streaming
+- Web clients can interact via REST API with the same functionality
+- Multiple users can interact with separate clud instances simultaneously
+- Sessions persist across multiple messages in the same chat
+
 ### Cluster Control Plane
 
 `clud` now includes a cluster control plane for monitoring and managing agents across your development environment:
@@ -163,6 +209,7 @@ clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow
 clud --fix [URL]                  # Fix linting and tests
 clud --kanban                     # Launch kanban board
+clud --webui [PORT]               # Launch Web UI (default port: 8888)
 clud --help                       # Show help
 ```
 
@@ -214,6 +261,20 @@ clud/
 │   │   ├── foreground_args.py # [Legacy] Argument parsing
 │   │   ├── completion.py      # Completion detection
 │   │   └── tracking.py        # Agent tracking
+│   ├── hooks/            # Hook system for event interception
+│   │   ├── __init__.py        # HookManager, HookEvent, HookContext
+│   │   ├── telegram.py        # TelegramHookHandler
+│   │   ├── webhook.py         # WebhookHandler
+│   │   └── config.py          # Configuration loading
+│   ├── api/              # Message Handler API
+│   │   ├── models.py          # Data models (MessageRequest, MessageResponse)
+│   │   ├── message_handler.py # Core routing logic
+│   │   ├── instance_manager.py # Instance lifecycle management
+│   │   └── server.py          # FastAPI server
+│   ├── webui/            # Web UI for browser-based interface
+│   │   ├── server.py          # FastAPI application
+│   │   ├── api.py             # Handler classes
+│   │   └── static/            # HTML/CSS/JavaScript frontend
 │   ├── service/          # Background service (formerly daemon)
 │   │   ├── server.py          # HTTP server on :7565
 │   │   ├── registry.py        # Agent registry
@@ -231,6 +292,11 @@ clud/
 │   └── ...
 ├── packages/web/         # React frontend source
 ├── tests/                # Unit and integration tests
+│   ├── test_hooks.py          # Hook system tests (17 test methods)
+│   ├── test_api_models.py     # API models tests (25 test methods)
+│   ├── test_message_handler.py # Message handler tests (13 test methods)
+│   ├── test_instance_manager.py # Instance manager tests (23 test methods)
+│   └── ...
 ├── pyproject.toml        # Package configuration
 └── ...
 ```

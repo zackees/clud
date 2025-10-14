@@ -36,6 +36,61 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Press Ctrl+C to stop the server
   - Note: Telegram blocks iframe embedding with X-Frame-Options for security, so the landing page provides a button to open the bot in Telegram instead
 
+### Web UI
+- `clud --webui [PORT]` - Launch browser-based interface for Claude Code
+  - Default port: 8888 (auto-detects if unavailable)
+  - Automatically opens browser to Web UI
+  - Features:
+    - Real-time streaming chat interface
+    - Project directory selection
+    - Conversation history (stored in browser localStorage)
+    - Dark/light theme toggle
+    - Mobile-responsive design
+    - WebSocket-based communication
+    - Markdown rendering with code syntax highlighting
+    - Runs in YOLO mode (no permission prompts)
+  - Architecture:
+    - FastAPI backend with WebSocket streaming
+    - Vanilla HTML/CSS/JavaScript frontend
+    - Uses `running-process` library for Claude Code execution
+    - Static files served from `src/clud/webui/static/`
+  - Configuration:
+    - Can specify custom port: `clud --webui 3000`
+    - Browser auto-opens after 2-second delay
+    - Server logs to console with INFO level
+  - Press Ctrl+C to stop the server
+  - Inspired by: [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui)
+
+### Hook System and Message Handler API
+
+The hook system provides an event-based architecture for intercepting and forwarding execution events to external systems (Telegram, webhooks, etc.).
+
+**Hook System** (`src/clud/hooks/`):
+- **Events**: PRE_EXECUTION, POST_EXECUTION, OUTPUT_CHUNK, ERROR, AGENT_START, AGENT_STOP
+- **HookManager**: Singleton that manages hook registration and event triggering
+- **HookHandler Protocol**: Interface for implementing custom hook handlers
+- **TelegramHookHandler**: Built-in handler for streaming output to Telegram
+- **WebhookHandler**: Built-in handler for HTTP webhook notifications
+
+**Message Handler API** (`src/clud/api/`):
+- **Purpose**: Unified API for routing messages from multiple client types to clud instances
+- **MessageHandler**: Core routing logic with session management
+- **InstancePool**: Manages lifecycle of clud subprocess instances
+  - Automatic instance reuse per session
+  - Idle timeout and cleanup (default: 30 minutes)
+  - Max instances limit (default: 100)
+- **FastAPI Server**: REST and WebSocket endpoints
+  - `POST /api/message` - Send message to clud instance
+  - `GET /api/instances` - List all active instances
+  - `DELETE /api/instances/{id}` - Delete an instance
+  - `WebSocket /ws/{instance_id}` - Real-time output streaming
+
+**Testing**:
+- `tests/test_hooks.py` - Hook system unit tests
+- `tests/test_api_models.py` - API models unit tests
+- `tests/test_message_handler.py` - Message handler unit tests
+- `tests/test_instance_manager.py` - Instance manager unit tests
+
 ## Architecture
 
 ### Purpose
@@ -54,6 +109,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Foreground Agent** (`agent_foreground.py`): Direct Claude Code execution with `--dangerously-skip-permissions`
 - **Task System** (`task.py`): File-based task execution system
 - **Agent Completion Detection** (`agent_completion.py`): Monitors terminal for idle detection
+- **Hook System** (`src/clud/hooks/`): Event-based architecture for intercepting and forwarding execution events
+  - `hooks/__init__.py`: Core hook infrastructure (HookManager, HookEvent, HookContext, HookHandler)
+  - `hooks/telegram.py`: Telegram-specific hook handler for real-time output streaming
+  - `hooks/webhook.py`: Generic webhook handler for HTTP-based integrations
+  - `hooks/config.py`: Configuration loading and validation
+- **Message Handler API** (`src/clud/api/`): Unified API for routing messages to clud instances
+  - `api/models.py`: Data models (MessageRequest, MessageResponse, InstanceInfo, ExecutionResult)
+  - `api/message_handler.py`: Core message routing logic with session management
+  - `api/instance_manager.py`: Subprocess lifecycle management (CludInstance, InstancePool)
+  - `api/server.py`: FastAPI server with REST and WebSocket endpoints
+- **Web UI** (`src/clud/webui/`): Browser-based interface for Claude Code
+  - `webui/server.py`: FastAPI application with WebSocket support
+  - `webui/api.py`: Handler classes for chat, projects, and history
+  - `webui/static/`: HTML/CSS/JavaScript frontend files
 
 ### Package Configuration
 - Uses setuptools with pyproject.toml for modern Python packaging

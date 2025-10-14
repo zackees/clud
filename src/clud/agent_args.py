@@ -36,9 +36,12 @@ class Args:
     code_port: int | None = None
     webui: bool = False
     webui_port: int | None = None
+    api_server: bool = False  # For --api-server (REST API mode)
+    api_port: int | None = None  # Port for API server
     init_loop: bool = False
     help: bool = False
     track: bool = False
+    hook_debug: bool = False  # For --hook-debug (verbose hook logging)
     # Agent-level arguments (execution)
     prompt: str | None = None
     message: str | None = None
@@ -74,12 +77,18 @@ def parse_args(args: list[str] | None = None) -> Args:
     telegram_web = "--telegram" in args_copy or "-tg" in args_copy
     code = "--code" in args_copy
     webui = "--webui" in args_copy
+    api_server = "--api-server" in args_copy
     init_loop = "--init-loop" in args_copy
     track = "--track" in args_copy
+    hook_debug = "--hook-debug" in args_copy
 
     # Remove --track from args_copy since it's handled by router
     if "--track" in args_copy:
         args_copy.remove("--track")
+
+    # Remove --hook-debug from args_copy since it's handled by router
+    if "--hook-debug" in args_copy:
+        args_copy.remove("--hook-debug")
 
     # Extract fix URL argument if present
     fix_url = None
@@ -106,6 +115,15 @@ def parse_args(args: list[str] | None = None) -> Args:
         if webui_idx + 1 < len(args_copy) and not args_copy[webui_idx + 1].startswith("-"):
             with contextlib.suppress(ValueError):
                 webui_port = int(args_copy[webui_idx + 1])
+
+    # Extract api port argument if present
+    api_port = None
+    if "--api-server" in args_copy:
+        api_idx = args_copy.index("--api-server")
+        # Check if there's a port argument after --api-server
+        if api_idx + 1 < len(args_copy) and not args_copy[api_idx + 1].startswith("-"):
+            with contextlib.suppress(ValueError):
+                api_port = int(args_copy[api_idx + 1])
 
     # Extract telegram token argument if present
     telegram_token = None
@@ -297,9 +315,12 @@ def parse_args(args: list[str] | None = None) -> Args:
         code_port=code_port,
         webui=webui,
         webui_port=webui_port,
+        api_server=api_server,
+        api_port=api_port,
         init_loop=init_loop,
         help=help_requested,
         track=track,
+        hook_debug=hook_debug,
         # Agent-level
         prompt=known_args.prompt,
         message=known_args.message,

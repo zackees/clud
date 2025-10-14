@@ -116,7 +116,10 @@ class ChatHandler:
                 if line is None:
                     # Process finished
                     break
-                yield line.rstrip() + "\n"
+
+                # Parse JSON line and extract displayable content
+                async for chunk in self._parse_json_line(line):
+                    yield chunk
 
         except subprocess.CalledProcessError as e:
             logger.error("Claude Code execution failed: %s", e)
@@ -126,6 +129,80 @@ class ChatHandler:
             yield f"Error: {e}\n"
         finally:
             os.chdir(original_cwd)
+
+    async def _parse_json_line(self, line: str) -> AsyncGenerator[str]:
+        """Parse a JSON line from Claude Code and extract displayable content.
+
+        Args:
+            line: JSON line from Claude Code output
+
+        Yields:
+            Display text chunks
+        """
+        import json
+
+        try:
+            data = json.loads(line.strip())
+            msg_type = data.get("type")
+
+            if msg_type == "system":
+                # System initialization - show basic info
+                subtype = data.get("subtype")
+                if subtype == "init":
+                    model = data.get("model", "unknown")
+                    yield f"[Using {model}]\n\n"
+
+            elif msg_type == "assistant":
+                # Assistant messages - extract text and tool uses
+                message = data.get("message", {})
+                content = message.get("content", [])
+
+                for item in content:
+                    item_type = item.get("type")
+
+                    if item_type == "text":
+                        # Plain text from Claude
+                        text = item.get("text", "")
+                        if text:
+                            yield text
+
+                    elif item_type == "tool_use":
+                        # Tool use - show what tool is being called
+                        tool_name = item.get("name", "unknown")
+                        tool_input = item.get("input", {})
+
+                        # Format tool use nicely
+                        yield f"\n\n[Calling {tool_name}]\n"
+
+                        # Show description if available (Bash commands)
+                        if tool_name == "Bash" and "description" in tool_input:
+                            yield f"  {tool_input['description']}\n"
+                        elif tool_name == "Read" and "file_path" in tool_input:
+                            yield f"  Reading: {tool_input['file_path']}\n"
+                        elif tool_name == "Edit" and "file_path" in tool_input:
+                            yield f"  Editing: {tool_input['file_path']}\n"
+                        elif tool_name == "Write" and "file_path" in tool_input:
+                            yield f"  Writing: {tool_input['file_path']}\n"
+
+            elif msg_type == "result":
+                # Final result - show summary
+                subtype = data.get("subtype")
+                result_text = data.get("result", "")
+
+                if subtype == "success" and result_text:
+                    yield f"\n\n---\n\n{result_text}\n"
+                elif subtype == "error":
+                    yield f"\n\n[Error: {result_text}]\n"
+
+            # Ignore "user" type messages (tool results) - they're internal
+
+        except json.JSONDecodeError:
+            # Not JSON, pass through as-is (might be plain text error)
+            logger.debug("Non-JSON line: %s", line[:100])
+            yield line
+        except Exception as e:
+            logger.warning("Error parsing JSON line: %s", e)
+            # Don't fail, just skip malformed lines
 
 
 class ProjectHandler:
