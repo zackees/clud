@@ -10,6 +10,8 @@ from pathlib import Path
 
 from running_process import RunningProcess
 
+from ..views import DiffTreeView, DiffView
+
 logger = logging.getLogger(__name__)
 
 
@@ -279,3 +281,179 @@ class HistoryHandler:
     def clear_history(self) -> None:
         """Clear conversation history."""
         self.history.clear()
+
+
+class DiffHandler:
+    """Handle diff-related requests."""
+
+    def __init__(self) -> None:
+        """Initialize diff handler."""
+        self.diff_trees: dict[str, DiffTreeView] = {}  # project_path -> DiffTreeView
+
+    def get_or_create_tree(self, project_path: str) -> DiffTreeView:
+        """Get or create a diff tree for a project.
+
+        Args:
+            project_path: Path to project
+
+        Returns:
+            DiffTreeView instance
+        """
+        if project_path not in self.diff_trees:
+            self.diff_trees[project_path] = DiffTreeView(project_path)
+        return self.diff_trees[project_path]
+
+    def add_diff(self, project_path: str, file_path: str, old_content: str, new_content: str) -> None:
+        """Add a diff to the tree.
+
+        Args:
+            project_path: Path to project
+            file_path: Path to file (relative to project)
+            old_content: Original content
+            new_content: Modified content
+        """
+        tree = self.get_or_create_tree(project_path)
+        tree.add_diff(file_path, old_content, new_content)
+
+    def remove_diff(self, project_path: str, file_path: str) -> None:
+        """Remove a diff from the tree.
+
+        Args:
+            project_path: Path to project
+            file_path: Path to file (relative to project)
+        """
+        tree = self.get_or_create_tree(project_path)
+        tree.remove_diff(file_path)
+
+    def get_diff_tree(self, project_path: str) -> dict[str, object]:
+        """Get diff tree structure.
+
+        Args:
+            project_path: Path to project
+
+        Returns:
+            Tree structure with file list and stats
+        """
+        tree = self.get_or_create_tree(project_path)
+        return tree.render_webui()
+
+    def get_file_diff(self, project_path: str, file_path: str) -> str:
+        """Get unified diff for a specific file.
+
+        Args:
+            project_path: Path to project
+            file_path: Path to file (relative to project)
+
+        Returns:
+            Unified diff string
+
+        Raises:
+            ValueError: If no diff available
+        """
+        tree = self.get_or_create_tree(project_path)
+        return tree.get_unified_diff(file_path)
+
+    def render_diff_html(self, project_path: str, file_path: str) -> str:
+        """Render diff as HTML.
+
+        Args:
+            project_path: Path to project
+            file_path: Path to file (relative to project)
+
+        Returns:
+            HTML-rendered diff
+
+        Raises:
+            ValueError: If no diff available
+        """
+        tree = self.get_or_create_tree(project_path)
+        if file_path not in tree.modified_files:
+            raise ValueError(f"No diff available for {file_path}")
+
+        old_content, new_content = tree.modified_files[file_path]
+        diff_view = DiffView("webui")
+        return diff_view.render_diff(file_path, old_content, new_content)
+
+    def clear_diffs(self, project_path: str) -> None:
+        """Clear all diffs for a project.
+
+        Args:
+            project_path: Path to project
+        """
+        if project_path in self.diff_trees:
+            self.diff_trees[project_path].clear_diffs()
+
+    def scan_git_changes(self, project_path: str) -> int:
+        """Scan git working directory for changes and populate diff tree.
+
+        Args:
+            project_path: Path to project (must be a git repository)
+
+        Returns:
+            Number of changed files found
+
+        Raises:
+            RuntimeError: If not a git repository or git command fails
+        """
+        import subprocess
+
+        project_dir = Path(project_path)
+        if not (project_dir / ".git").exists():
+            raise RuntimeError(f"Not a git repository: {project_path}")
+
+        try:
+            # Get list of modified and added files
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD"],
+                cwd=project_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            changed_files = [line.strip() for line in result.stdout.strip().split("\n") if line.strip()]
+
+            if not changed_files:
+                # No changes found
+                return 0
+
+            # For each changed file, get old content (from HEAD) and new content (from working tree)
+            count = 0
+            for file_path in changed_files:
+                full_path = project_dir / file_path
+
+                # Skip if file doesn't exist in working tree (deleted files)
+                if not full_path.exists():
+                    logger.info(f"Skipping deleted file: {file_path}")
+                    continue
+
+                try:
+                    # Get old content from git (HEAD version)
+                    git_show_result = subprocess.run(
+                        ["git", "show", f"HEAD:{file_path}"],
+                        cwd=project_path,
+                        capture_output=True,
+                        text=True,
+                        check=False,  # Don't fail if file doesn't exist in HEAD (new file)
+                    )
+
+                    # File is new (doesn't exist in HEAD) if returncode != 0
+                    old_content = git_show_result.stdout if git_show_result.returncode == 0 else ""
+
+                    # Get new content from working tree
+                    new_content = full_path.read_text(encoding="utf-8", errors="replace")
+
+                    # Add diff to tree
+                    self.add_diff(project_path, file_path, old_content, new_content)
+                    count += 1
+
+                except Exception as e:
+                    logger.warning(f"Failed to read file {file_path}: {e}")
+                    continue
+
+            return count
+
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Git command failed: {e.stderr}") from e
+        except Exception as e:
+            raise RuntimeError(f"Failed to scan git changes: {e}") from e

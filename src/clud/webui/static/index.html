@@ -6,6 +6,7 @@
     <title>Claude Code Web UI</title>
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css">
 </head>
 <body>
     <div class="container">
@@ -27,6 +28,26 @@
 
         <!-- Main Content with Split Panes -->
         <div class="main-content">
+            <!-- Diff Navigator Panel (left sidebar for modified files) -->
+            <div class="diff-navigator-panel" id="diff-navigator-panel">
+                <div class="diff-navigator-header">
+                    <h3>Modified Files</h3>
+                    <div class="diff-navigator-controls">
+                        <button class="icon-btn" id="refresh-diffs-btn" title="Refresh diffs">🔄</button>
+                        <button class="icon-btn" id="clear-diffs-btn" title="Clear all diffs">✖</button>
+                    </div>
+                </div>
+                <div class="diff-navigator-content" id="diff-navigator-content">
+                    <div class="diff-navigator-empty">
+                        <p>No modified files</p>
+                        <small>Changes made by Claude will appear here</small>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Resize Handle for Diff Navigator -->
+            <div class="resize-handle-vertical" id="diff-nav-resize"></div>
+
             <!-- Chat Panel -->
             <div class="chat-panel" id="chat-panel">
                 <main class="chat-container" id="chat-container">
@@ -53,7 +74,29 @@
                 </footer>
             </div>
 
-            <!-- Resize Handle -->
+            <!-- Resize Handle for Chat Panel -->
+            <div class="resize-handle-vertical" id="chat-resize"></div>
+
+            <!-- Diff Renderer Panel (main content area for showing diffs) -->
+            <div class="diff-renderer-panel" id="diff-renderer-panel">
+                <div class="diff-renderer-header">
+                    <div class="diff-renderer-title">
+                        <span id="diff-file-name">No file selected</span>
+                    </div>
+                    <div class="diff-renderer-controls">
+                        <button class="btn-small" id="accept-diff-btn" title="Accept changes" disabled>Accept</button>
+                        <button class="btn-small" id="reject-diff-btn" title="Reject changes" disabled>Reject</button>
+                        <button class="icon-btn" id="close-diff-btn" title="Close diff">✖</button>
+                    </div>
+                </div>
+                <div class="diff-renderer-content" id="diff-renderer-content">
+                    <div class="diff-renderer-empty">
+                        <p>Select a file from the navigator to view its diff</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Resize Handle for Terminal -->
             <div class="resize-handle" id="resize-handle"></div>
 
             <!-- Terminal Panel -->
@@ -76,6 +119,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

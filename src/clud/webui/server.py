@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import ChatHandler, HistoryHandler, ProjectHandler
+from .api import ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
 from .pty_manager import PTYManager
 from .terminal_handler import TerminalHandler
 
@@ -72,6 +72,7 @@ def create_app(static_dir: Path) -> FastAPI:
     chat_handler = ChatHandler()
     project_handler = ProjectHandler()
     history_handler = HistoryHandler()
+    diff_handler = DiffHandler()
     pty_manager = PTYManager()
     terminal_handler = TerminalHandler(pty_manager)
 
@@ -171,6 +172,130 @@ def create_app(static_dir: Path) -> FastAPI:
     async def get_cwd() -> JSONResponse:
         """Get current working directory."""
         return JSONResponse(content={"cwd": os.getcwd()})
+
+    @app.get("/api/diff/tree")
+    async def get_diff_tree(path: str) -> JSONResponse:
+        """Get tree structure of files with pending diffs.
+
+        Args:
+            path: Root project path
+
+        Returns:
+            JSON tree structure containing only modified files with diff stats
+        """
+        try:
+            tree_data = diff_handler.get_diff_tree(path)
+            return JSONResponse(content=tree_data)
+        except Exception as e:
+            logger.exception("Error getting diff tree")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.get("/api/diff/file")
+    async def get_file_diff(path: str, project_path: str) -> JSONResponse:
+        """Get unified diff for a specific file.
+
+        Args:
+            path: File path (relative to project)
+            project_path: Project path
+
+        Returns:
+            Unified diff string (plain text)
+        """
+        try:
+            diff_text = diff_handler.get_file_diff(project_path, path)
+            return JSONResponse(content={"diff": diff_text})
+        except ValueError as e:
+            return JSONResponse(content={"error": str(e)}, status_code=404)
+        except Exception as e:
+            logger.exception("Error getting file diff")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.post("/api/diff")
+    async def render_diff(data: dict[str, str]) -> JSONResponse:
+        """Render diff between old and new content.
+
+        Args:
+            data: Dict with 'project_path', 'file_path', 'old_content', 'new_content'
+
+        Returns:
+            HTML diff rendered with diff2html
+        """
+        try:
+            project_path = data.get("project_path", "")
+            file_path = data.get("file_path", "")
+            old_content = data.get("old_content", "")
+            new_content = data.get("new_content", "")
+
+            if not file_path:
+                return JSONResponse(content={"error": "file_path is required"}, status_code=400)
+
+            # Add diff to tree
+            diff_handler.add_diff(project_path, file_path, old_content, new_content)
+
+            # Render HTML
+            html = diff_handler.render_diff_html(project_path, file_path)
+            return JSONResponse(content={"html": html})
+        except Exception as e:
+            logger.exception("Error rendering diff")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.delete("/api/diff")
+    async def remove_diff(path: str, project_path: str) -> JSONResponse:
+        """Remove a diff from the tree.
+
+        Args:
+            path: File path (relative to project)
+            project_path: Project path
+
+        Returns:
+            Status response
+        """
+        try:
+            diff_handler.remove_diff(project_path, path)
+            return JSONResponse(content={"status": "ok"})
+        except Exception as e:
+            logger.exception("Error removing diff")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.delete("/api/diff/all")
+    async def clear_all_diffs(project_path: str) -> JSONResponse:
+        """Clear all diffs for a project.
+
+        Args:
+            project_path: Project path
+
+        Returns:
+            Status response
+        """
+        try:
+            diff_handler.clear_diffs(project_path)
+            return JSONResponse(content={"status": "ok"})
+        except Exception as e:
+            logger.exception("Error clearing diffs")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.post("/api/diff/scan")
+    async def scan_git_changes(data: dict[str, str]) -> JSONResponse:
+        """Scan git working directory for changes and populate diff tree.
+
+        Args:
+            data: Dict with 'project_path'
+
+        Returns:
+            Status response with count of files found
+        """
+        try:
+            project_path = data.get("project_path")
+            if not project_path:
+                return JSONResponse(content={"error": "project_path is required"}, status_code=400)
+
+            count = diff_handler.scan_git_changes(project_path)
+            return JSONResponse(content={"status": "ok", "count": count, "message": f"Found {count} changed files"})
+        except RuntimeError as e:
+            return JSONResponse(content={"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.exception("Error scanning git changes")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
 
     # Mount static files (must be last)
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")

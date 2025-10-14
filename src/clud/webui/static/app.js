@@ -189,7 +189,7 @@
         scrollToBottom();
     }
 
-    function handleDone() {
+    async function handleDone() {
         if (currentAssistantMessage) {
             const contentDiv = currentAssistantMessage.querySelector('.message-content');
             const text = contentDiv.textContent;
@@ -206,6 +206,9 @@
         messageInput.disabled = false;
         sendBtn.disabled = false;
         messageInput.focus();
+
+        // Auto-scan for git changes after Claude finishes
+        await scanGitChanges();
     }
 
     function handleError(error) {
@@ -214,6 +217,38 @@
         updateStatus('Connected', 'connected');
         messageInput.disabled = false;
         sendBtn.disabled = false;
+    }
+
+    async function scanGitChanges() {
+        if (!currentProject || !window.diffNavigator) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/diff/scan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ project_path: currentProject })
+            });
+
+            if (!response.ok) {
+                // Silently fail if not a git repository or other errors
+                console.log('Git scan skipped:', response.statusText);
+                return;
+            }
+
+            const result = await response.json();
+            if (result.count > 0) {
+                console.log(`Found ${result.count} changed files`);
+                // Refresh the diff navigator
+                await window.diffNavigator.loadModifiedFiles();
+            }
+        } catch (error) {
+            // Silently fail - git scanning is optional
+            console.log('Git scan error:', error);
+        }
     }
 
     // UI Functions
@@ -648,8 +683,459 @@
         }
     }
 
+    // Diff Navigator Panel Class
+    class DiffNavigatorPanel {
+        constructor(diffRenderer) {
+            this.container = document.getElementById('diff-navigator-content');
+            this.diffRenderer = diffRenderer;  // Reference to DiffPanel instance
+            this.modifiedFiles = [];
+            this.selectedFile = null;
+            this.expandedFolders = new Set();
+
+            this.initEventListeners();
+        }
+
+        initEventListeners() {
+            // Refresh button
+            document.getElementById('refresh-diffs-btn').addEventListener('click', () => {
+                this.loadModifiedFiles();
+            });
+
+            // Clear all button
+            document.getElementById('clear-diffs-btn').addEventListener('click', () => {
+                this.clearAll();
+            });
+        }
+
+        async loadModifiedFiles() {
+            if (!currentProject) {
+                console.warn('No project selected');
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/diff/tree?path=${encodeURIComponent(currentProject)}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                this.modifiedFiles = data.files || [];
+                this.render();
+            } catch (error) {
+                console.error('Error loading modified files:', error);
+                this.showError('Failed to load modified files');
+            }
+        }
+
+        render() {
+            if (this.modifiedFiles.length === 0) {
+                this.container.innerHTML = `
+                    <div class="diff-navigator-empty">
+                        <p>No modified files</p>
+                        <small>Changes made by Claude will appear here</small>
+                    </div>
+                `;
+                return;
+            }
+
+            // Build tree structure from flat file list
+            const tree = this.buildTree(this.modifiedFiles);
+            const treeHtml = this.renderTree(tree);
+
+            this.container.innerHTML = `<ul class="diff-tree">${treeHtml}</ul>`;
+            this.attachEventListeners();
+        }
+
+        buildTree(files) {
+            const tree = {};
+
+            for (const file of files) {
+                const parts = file.path.split(/[\\/]/);
+                let current = tree;
+
+                for (let i = 0; i < parts.length; i++) {
+                    const part = parts[i];
+                    const isFile = i === parts.length - 1;
+
+                    if (isFile) {
+                        current[part] = {
+                            _file: true,
+                            _data: file
+                        };
+                    } else {
+                        if (!current[part]) {
+                            current[part] = {};
+                        }
+                        current = current[part];
+                    }
+                }
+            }
+
+            return tree;
+        }
+
+        renderTree(tree, path = '') {
+            let html = '';
+
+            for (const [name, value] of Object.entries(tree)) {
+                if (value._file) {
+                    // Render file
+                    const file = value._data;
+                    const fullPath = file.path;
+                    const isSelected = this.selectedFile === fullPath;
+                    const icon = this.getFileIcon(file.status);
+                    const stats = `<span class="diff-additions">+${file.additions}</span> <span class="diff-deletions">-${file.deletions}</span>`;
+
+                    html += `
+                        <li class="diff-tree-file ${isSelected ? 'selected' : ''}" data-path="${fullPath}">
+                            <div class="diff-tree-file-name">
+                                <span class="diff-tree-file-icon">${icon}</span>
+                                <span class="diff-tree-file-text">${name}</span>
+                            </div>
+                            <div class="diff-tree-file-stats">${stats}</div>
+                        </li>
+                    `;
+                } else {
+                    // Render folder
+                    const folderPath = path ? `${path}/${name}` : name;
+                    const isExpanded = this.expandedFolders.has(folderPath);
+                    const children = this.renderTree(value, folderPath);
+
+                    html += `
+                        <li class="diff-tree-folder ${isExpanded ? 'expanded' : ''}" data-folder-path="${folderPath}">
+                            <div class="diff-tree-folder-name">
+                                <span class="diff-tree-folder-icon">▶</span>
+                                <span>${name}/</span>
+                            </div>
+                            <ul class="diff-tree-folder-children" style="display: ${isExpanded ? 'block' : 'none'}">
+                                ${children}
+                            </ul>
+                        </li>
+                    `;
+                }
+            }
+
+            return html;
+        }
+
+        getFileIcon(status) {
+            switch (status) {
+                case 'added': return '➕';
+                case 'deleted': return '➖';
+                case 'modified': return '✏️';
+                default: return '📄';
+            }
+        }
+
+        attachEventListeners() {
+            // File click events
+            this.container.querySelectorAll('.diff-tree-file').forEach(fileEl => {
+                fileEl.addEventListener('click', () => {
+                    const filePath = fileEl.dataset.path;
+                    this.selectFile(filePath);
+                });
+            });
+
+            // Folder click events
+            this.container.querySelectorAll('.diff-tree-folder-name').forEach(folderEl => {
+                folderEl.addEventListener('click', () => {
+                    const folder = folderEl.parentElement;
+                    const folderPath = folder.dataset.folderPath;
+                    this.toggleFolder(folder, folderPath);
+                });
+            });
+        }
+
+        toggleFolder(folderEl, folderPath) {
+            const isExpanded = folderEl.classList.contains('expanded');
+            const children = folderEl.querySelector('.diff-tree-folder-children');
+
+            if (isExpanded) {
+                folderEl.classList.remove('expanded');
+                children.style.display = 'none';
+                this.expandedFolders.delete(folderPath);
+            } else {
+                folderEl.classList.add('expanded');
+                children.style.display = 'block';
+                this.expandedFolders.add(folderPath);
+            }
+        }
+
+        async selectFile(filePath) {
+            // Update selection state
+            this.selectedFile = filePath;
+            this.updateSelection();
+
+            // Load diff for this file into diff2html renderer
+            try {
+                const response = await fetch(`/api/diff/file?path=${encodeURIComponent(filePath)}&project_path=${encodeURIComponent(currentProject)}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const unifiedDiff = await response.text();
+
+                // Feed to diff2html renderer
+                this.diffRenderer.renderDiff(filePath, unifiedDiff);
+            } catch (error) {
+                console.error('Error loading diff:', error);
+                this.diffRenderer.showError('Failed to load diff');
+            }
+        }
+
+        updateSelection() {
+            // Remove previous selection
+            this.container.querySelectorAll('.diff-tree-file').forEach(el => {
+                el.classList.remove('selected');
+            });
+
+            // Add selection to current file
+            const fileEl = this.container.querySelector(`[data-path="${this.selectedFile}"]`);
+            if (fileEl) {
+                fileEl.classList.add('selected');
+            }
+        }
+
+        async clearAll() {
+            if (!currentProject) return;
+
+            if (!confirm('Clear all diffs? This cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/diff/all?project_path=${encodeURIComponent(currentProject)}`, {
+                    method: 'DELETE'
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                this.modifiedFiles = [];
+                this.selectedFile = null;
+                this.diffRenderer.clear();
+                this.render();
+            } catch (error) {
+                console.error('Error clearing diffs:', error);
+                this.showError('Failed to clear diffs');
+            }
+        }
+
+        showError(message) {
+            this.container.innerHTML = `
+                <div class="diff-navigator-empty">
+                    <p style="color: var(--error-color);">${message}</p>
+                </div>
+            `;
+        }
+    }
+
+    // Diff Panel Class
+    class DiffPanel {
+        constructor() {
+            this.container = document.getElementById('diff-renderer-content');
+            this.fileNameEl = document.getElementById('diff-file-name');
+            this.acceptBtn = document.getElementById('accept-diff-btn');
+            this.rejectBtn = document.getElementById('reject-diff-btn');
+            this.closeBtn = document.getElementById('close-diff-btn');
+            this.currentFile = null;
+
+            this.initEventListeners();
+        }
+
+        initEventListeners() {
+            this.acceptBtn.addEventListener('click', () => this.acceptDiff());
+            this.rejectBtn.addEventListener('click', () => this.rejectDiff());
+            this.closeBtn.addEventListener('click', () => this.clear());
+        }
+
+        renderDiff(filePath, unifiedDiff) {
+            this.currentFile = filePath;
+            this.fileNameEl.textContent = filePath;
+
+            // Enable action buttons
+            this.acceptBtn.disabled = false;
+            this.rejectBtn.disabled = false;
+
+            // Render using diff2html
+            if (typeof Diff2HtmlUI !== 'undefined') {
+                try {
+                    const diffHtml = Diff2HtmlUI.createDiff(unifiedDiff, {
+                        drawFileList: false,
+                        matching: 'lines',
+                        outputFormat: 'side-by-side',
+                        synchronisedScroll: true,
+                        highlight: true,
+                        renderNothingWhenEmpty: false
+                    });
+
+                    this.container.innerHTML = diffHtml;
+                } catch (error) {
+                    console.error('Error rendering diff:', error);
+                    // Fallback to plain text
+                    this.container.innerHTML = `<pre style="font-family: monospace; white-space: pre-wrap; padding: 16px;">${this.escapeHtml(unifiedDiff)}</pre>`;
+                }
+            } else {
+                // Fallback if diff2html not loaded
+                this.container.innerHTML = `<pre style="font-family: monospace; white-space: pre-wrap; padding: 16px;">${this.escapeHtml(unifiedDiff)}</pre>`;
+            }
+        }
+
+        async acceptDiff() {
+            if (!this.currentFile) return;
+
+            // TODO: Implement accept logic - apply the diff and remove from tree
+            console.log('Accepting diff for:', this.currentFile);
+
+            try {
+                // In the future, this would call an API endpoint to apply the diff
+                // For now, just remove it from the tree
+                await this.removeDiff();
+                addSystemMessage(`Accepted changes to ${this.currentFile}`);
+            } catch (error) {
+                console.error('Error accepting diff:', error);
+                this.showError('Failed to accept changes');
+            }
+        }
+
+        async rejectDiff() {
+            if (!this.currentFile) return;
+
+            if (!confirm(`Reject changes to ${this.currentFile}? This cannot be undone.`)) {
+                return;
+            }
+
+            console.log('Rejecting diff for:', this.currentFile);
+
+            try {
+                await this.removeDiff();
+                addSystemMessage(`Rejected changes to ${this.currentFile}`);
+            } catch (error) {
+                console.error('Error rejecting diff:', error);
+                this.showError('Failed to reject changes');
+            }
+        }
+
+        async removeDiff() {
+            if (!this.currentFile || !currentProject) return;
+
+            const response = await fetch(`/api/diff?path=${encodeURIComponent(this.currentFile)}&project_path=${encodeURIComponent(currentProject)}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            this.clear();
+
+            // Refresh the navigator
+            if (window.diffNavigator) {
+                window.diffNavigator.loadModifiedFiles();
+            }
+        }
+
+        clear() {
+            this.currentFile = null;
+            this.fileNameEl.textContent = 'No file selected';
+            this.acceptBtn.disabled = true;
+            this.rejectBtn.disabled = true;
+            this.container.innerHTML = `
+                <div class="diff-renderer-empty">
+                    <p>Select a file from the navigator to view its diff</p>
+                </div>
+            `;
+        }
+
+        showError(message) {
+            this.container.innerHTML = `
+                <div class="diff-renderer-empty">
+                    <p style="color: var(--error-color);">${message}</p>
+                </div>
+            `;
+        }
+
+        escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    }
+
     // Initialize terminal manager (will be created after project selector is ready)
     let terminalManager;
+    let diffNavigator;
+    let diffPanel;
+
+    // Vertical Resize Handles for Diff Panels
+    function initVerticalResizeHandles() {
+        // Diff Navigator Resize Handle
+        const diffNavHandle = document.getElementById('diff-nav-resize');
+        const diffNavPanel = document.getElementById('diff-navigator');
+
+        if (diffNavHandle && diffNavPanel) {
+            let isResizing = false;
+
+            diffNavHandle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+
+                const newWidth = e.clientX;
+
+                // Clamp between 200px and 400px
+                if (newWidth >= 200 && newWidth <= 400) {
+                    diffNavPanel.style.flex = `0 0 ${newWidth}px`;
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isResizing) {
+                    isResizing = false;
+                }
+            });
+        }
+
+        // Chat Panel Resize Handle
+        const chatHandle = document.getElementById('chat-resize');
+        const chatPanel = document.getElementById('chat-panel');
+        const diffRendererPanel = document.getElementById('diff-renderer');
+
+        if (chatHandle && chatPanel && diffRendererPanel) {
+            let isResizing = false;
+
+            chatHandle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+
+                const mainContent = document.querySelector('.main-content');
+                const containerRect = mainContent.getBoundingClientRect();
+
+                // Calculate offset from left edge (accounting for diff navigator)
+                const diffNavWidth = diffNavPanel ? diffNavPanel.offsetWidth : 0;
+                const offsetX = e.clientX - containerRect.left - diffNavWidth;
+                const availableWidth = containerRect.width - diffNavWidth;
+                const percentage = (offsetX / availableWidth) * 100;
+
+                // Clamp between 30% and 70%
+                if (percentage >= 30 && percentage <= 70) {
+                    chatPanel.style.flex = `0 0 ${percentage}%`;
+                    diffRendererPanel.style.flex = `0 0 ${100 - percentage}%`;
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isResizing) {
+                    isResizing = false;
+                }
+            });
+        }
+    }
 
     // Modified init to create terminal after project is loaded
     async function startApp() {
@@ -658,6 +1144,16 @@
         initWebSocket();
         initEventListeners();
         loadHistory();
+
+        // Initialize diff panels
+        diffPanel = new DiffPanel();
+        diffNavigator = new DiffNavigatorPanel(diffPanel);
+
+        // Make diffNavigator available globally for DiffPanel to access
+        window.diffNavigator = diffNavigator;
+
+        // Initialize vertical resize handles for diff panels
+        initVerticalResizeHandles();
 
         // Now create terminal with proper project path
         if (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined') {
