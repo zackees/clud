@@ -335,23 +335,51 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         total_iterations: Total number of iterations if in loop mode
     """
     if iteration is not None and total_iterations is not None:
-        # Loop mode: build prompt parts conditionally
-        parts = [" IMPORTANT:"]
+        # Loop mode: comprehensive error detection and completion protocol
+        injection = f"""
 
-        # Add iteration-specific intro
-        if iteration == 1:
-            parts.append(f"You are the first agent spawned for this task (iteration 1 of {total_iterations}).")
-        else:
-            parts.append(f"This is iteration {iteration} of {total_iterations}.")
+IMPORTANT: You are iteration {iteration} of {total_iterations}.
 
-        # Add common instructions (same for all iterations)
-        parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
-        parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write .agent_task/DONE.md to halt the loop early.")
+ITERATION PROTOCOL:
+1. Before starting work, check for error signals from previous iteration:
+   - Read .agent_task/ERROR_LINT.md if it exists (contains lint failures you must fix)
+   - Read .agent_task/ERROR_TEST.md if it exists (contains test failures you must fix)
+   - If either exists, DELETE them after reading and prioritize fixing those errors
 
-        injection = " ".join(parts)
+2. During your work:
+   - If you run 'bash lint' and it FAILS:
+     * Create .agent_task/ERROR_LINT.md with the FIRST 10 lint errors
+     * Include the full error messages and file locations
+     * DO NOT create DONE.md - there are unfixed errors
+
+   - If you run 'bash test' (or pytest) and it FAILS:
+     * Create .agent_task/ERROR_TEST.md with the FIRST 10 test failures
+     * Include the test names and failure messages
+     * DO NOT create DONE.md - there are unfixed tests
+
+3. Before finishing this iteration:
+   - Create .agent_task/ITERATION_{iteration}.md documenting what you accomplished
+   - Include: what you did, what succeeded, what failed, what needs attention
+
+4. Completion detection:
+   - When you BEGIN the process of checking if work is complete, create .agent_task/BEGIN_DONE.md
+   - This signals to the next agent that completion was attempted
+
+5. Final completion:
+   - If ALL work across ALL iterations is 100% complete (tests pass, lint passes, requirements met):
+     * Create DONE.md at the PROJECT ROOT (not .agent_task/)
+     * This will halt the loop immediately
+     * Delete .agent_task/BEGIN_DONE.md if it exists
+
+REMEMBER:
+- ERROR_LINT.md and ERROR_TEST.md must contain first 10 errors with full context
+- DONE.md goes at PROJECT ROOT, not in .agent_task/
+- Always check for error files at the START of your iteration
+- Always delete error files AFTER reading them to prevent confusion
+"""
     else:
-        # Non-loop mode: standard completion prompt
-        injection = " If you see that the task is 100 percent complete, then write out .agent_task/DONE.md and halt"
+        # Non-loop mode: standard completion prompt (also using project root)
+        injection = " If you see that the task is 100 percent complete, then write out DONE.md at the project root and halt"
 
     return message + injection
 
@@ -570,10 +598,15 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
 
     # Scan for existing files
     iteration_files = sorted(agent_task_dir.glob("ITERATION_*.md"))
-    done_file = agent_task_dir / "DONE.md"
+    error_lint_file = agent_task_dir / "ERROR_LINT.md"
+    error_test_file = agent_task_dir / "ERROR_TEST.md"
+    begin_done_file = agent_task_dir / "BEGIN_DONE.md"
 
-    # If directory is empty, treat as fresh start
-    if not iteration_files and not done_file.exists():
+    # Check for DONE.md at project root (new location)
+    done_file_root = Path("DONE.md")
+
+    # If directory is empty and no root DONE.md, treat as fresh start
+    if not iteration_files and not error_lint_file.exists() and not error_test_file.exists() and not done_file_root.exists():
         return True, 1
 
     # Display warning
@@ -585,10 +618,27 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
         print(f"  - {file.name} ({timestamp})", file=sys.stderr)
 
-    if done_file.exists():
-        mtime = done_file.stat().st_mtime
+    # Display error files if they exist
+    if error_lint_file.exists():
+        mtime = error_lint_file.stat().st_mtime
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
-        print(f"  - DONE.md ({timestamp}) ⚠️  Will halt immediately!", file=sys.stderr)
+        print(f"  - ERROR_LINT.md ({timestamp}) ⚠️  Lint failures detected!", file=sys.stderr)
+
+    if error_test_file.exists():
+        mtime = error_test_file.stat().st_mtime
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+        print(f"  - ERROR_TEST.md ({timestamp}) ⚠️  Test failures detected!", file=sys.stderr)
+
+    if begin_done_file.exists():
+        mtime = begin_done_file.stat().st_mtime
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+        print(f"  - BEGIN_DONE.md ({timestamp}) ℹ️  Completion was attempted", file=sys.stderr)
+
+    # Check for DONE.md at project root
+    if done_file_root.exists():
+        mtime = done_file_root.stat().st_mtime
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+        print(f"\n  - DONE.md at project root ({timestamp}) ⚠️  Will halt immediately!", file=sys.stderr)
 
     # Prompt user
     print(file=sys.stderr)
@@ -619,11 +669,11 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
             if match:
                 last_iteration = max(last_iteration, int(match.group(1)))
 
-        # Remove DONE.md to prevent immediate halt
-        if done_file.exists():
+        # Remove DONE.md at project root to prevent immediate halt
+        if done_file_root.exists():
             try:
-                done_file.unlink()
-                print("✓ Removed DONE.md to allow continuation", file=sys.stderr)
+                done_file_root.unlink()
+                print("✓ Removed DONE.md from project root to allow continuation", file=sys.stderr)
             except Exception as e:
                 print(f"Warning: Could not remove DONE.md: {e}", file=sys.stderr)
 
@@ -648,7 +698,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     # Create .agent_task directory if it doesn't exist (may have been deleted)
     agent_task_dir.mkdir(exist_ok=True)
 
-    done_file = agent_task_dir / "DONE.md"
+    # DONE.md lives at project root, not .agent_task/
+    done_file = Path("DONE.md")
 
     # Start from determined iteration (may be > 1 if continuing previous session)
     for i in range(start_iteration - 1, loop_count):
@@ -690,9 +741,9 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         if returncode != 0 and args.verbose:
             print(f"Warning: Iteration {iteration_num} exited with code {returncode}", file=sys.stderr)
 
-        # Check if DONE.md was created
+        # Check if DONE.md was created (at project root)
         if done_file.exists():
-            print(f"\n✅ .agent_task/DONE.md detected after iteration {iteration_num} — halting early.", file=sys.stderr)
+            print(f"\n✅ DONE.md detected at project root after iteration {iteration_num} — halting early.", file=sys.stderr)
             break
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)

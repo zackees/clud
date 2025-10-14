@@ -845,12 +845,12 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
 
         # Add common instructions (same for all iterations)
         parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
-        parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write .agent_task/DONE.md to halt the loop early.")
+        parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .agent_task/) to halt the loop early.")
 
         injection = " ".join(parts)
     else:
-        # Non-loop mode: standard completion prompt
-        injection = " If you see that the task is 100 percent complete, then write out .agent_task/DONE.md and halt"
+        # Non-loop mode: standard completion prompt (also using project root)
+        injection = " If you see that the task is 100 percent complete, then write out DONE.md at the project root and halt"
 
     return message + injection
 
@@ -1045,10 +1045,12 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
 
     # Scan for existing files
     iteration_files = sorted(agent_task_dir.glob("ITERATION_*.md"))
-    done_file = agent_task_dir / "DONE.md"
 
-    # If directory is empty, treat as fresh start
-    if not iteration_files and not done_file.exists():
+    # Check for DONE.md at project root (new location)
+    done_file_root = Path("DONE.md")
+
+    # If directory is empty and no root DONE.md, treat as fresh start
+    if not iteration_files and not done_file_root.exists():
         return True, 1
 
     # Display warning
@@ -1060,10 +1062,11 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
         print(f"  - {file.name} ({timestamp})", file=sys.stderr)
 
-    if done_file.exists():
-        mtime = done_file.stat().st_mtime
+    # Check for DONE.md at project root
+    if done_file_root.exists():
+        mtime = done_file_root.stat().st_mtime
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
-        print(f"  - DONE.md ({timestamp}) ⚠️  Will halt immediately!", file=sys.stderr)
+        print(f"\n  - DONE.md at project root ({timestamp}) ⚠️  Will halt immediately!", file=sys.stderr)
 
     # Prompt user
     print(file=sys.stderr)
@@ -1094,11 +1097,11 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
             if match:
                 last_iteration = max(last_iteration, int(match.group(1)))
 
-        # Remove DONE.md to prevent immediate halt
-        if done_file.exists():
+        # Remove DONE.md at project root to prevent immediate halt
+        if done_file_root.exists():
             try:
-                done_file.unlink()
-                print("✓ Removed DONE.md to allow continuation", file=sys.stderr)
+                done_file_root.unlink()
+                print("✓ Removed DONE.md from project root to allow continuation", file=sys.stderr)
             except Exception as e:
                 print(f"Warning: Could not remove DONE.md: {e}", file=sys.stderr)
 
@@ -1123,7 +1126,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     # Create .agent_task directory if it doesn't exist (may have been deleted)
     agent_task_dir.mkdir(exist_ok=True)
 
-    done_file = agent_task_dir / "DONE.md"
+    # DONE.md lives at project root, not .agent_task/
+    done_file = Path("DONE.md")
 
     # Start from determined iteration (may be > 1 if continuing previous session)
     for i in range(start_iteration - 1, loop_count):
@@ -1169,10 +1173,10 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         if returncode != 0 and args.verbose:
             print(f"Warning: Iteration {iteration_num} exited with code {returncode}", file=sys.stderr)
 
-        # Check if DONE.md was created
+        # Check if DONE.md was created (at project root)
         if done_file.exists():
             # Validate that lint and test pass before accepting DONE.md
-            print(f"\n📋 .agent_task/DONE.md detected after iteration {iteration_num}.", file=sys.stderr)
+            print(f"\n📋 DONE.md detected at project root after iteration {iteration_num}.", file=sys.stderr)
             print("Validating with `lint-test`...", file=sys.stderr)
 
             # Run lint-test
