@@ -22,14 +22,7 @@
     const themeToggle = document.getElementById('theme-toggle');
     const themeIcon = themeToggle.querySelector('.theme-icon');
 
-    // Initialize
-    function init() {
-        initTheme();
-        initProjectSelector();
-        initWebSocket();
-        initEventListeners();
-        loadHistory();
-    }
+    // Initialize function removed - now using async startApp() at the bottom
 
     // Theme Management
     function initTheme() {
@@ -385,6 +378,295 @@
         }
     }
 
+    // Terminal Manager Class
+    class TerminalManager {
+        constructor() {
+            this.terminals = new Map(); // terminalId -> {xterm, socket, fitAddon, wrapper}
+            this.activeTerminalId = null;
+            this.nextTerminalId = 0;
+            this.container = document.getElementById('terminal-container');
+            this.tabsContainer = document.getElementById('terminal-tabs');
+
+            this.initResizeHandle();
+            this.initEventListeners();
+            this.createTerminal(); // Create initial terminal
+        }
+
+        createTerminal() {
+            const terminalId = this.nextTerminalId++;
+
+            // Create xterm.js instance
+            const term = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+                theme: {
+                    background: '#1e1e1e',
+                    foreground: '#d4d4d4',
+                    cursor: '#aeafad',
+                    black: '#000000',
+                    red: '#cd3131',
+                    green: '#0dbc79',
+                    yellow: '#e5e510',
+                    blue: '#2472c8',
+                    magenta: '#bc3fbc',
+                    cyan: '#11a8cd',
+                    white: '#e5e5e5',
+                },
+                cols: 80,
+                rows: 24,
+            });
+
+            // Fit addon for responsive sizing
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+
+            // Create wrapper element
+            const wrapper = document.createElement('div');
+            wrapper.id = `terminal-${terminalId}`;
+            wrapper.className = 'xterm-wrapper';
+            this.container.appendChild(wrapper);
+
+            // Open terminal in wrapper
+            term.open(wrapper);
+            fitAddon.fit();
+
+            // Connect to WebSocket
+            const socket = this.connectTerminalWebSocket(terminalId, term);
+
+            // Store terminal info
+            this.terminals.set(terminalId, {
+                term,
+                socket,
+                fitAddon,
+                wrapper,
+                cwd: null,
+            });
+
+            // Create tab
+            this.createTab(terminalId);
+
+            // Set as active
+            this.setActiveTerminal(terminalId);
+
+            // Handle terminal input
+            term.onData(data => {
+                if (socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({
+                        type: 'input',
+                        data: data,
+                    }));
+                }
+            });
+
+            // Handle resize
+            const resizeObserver = new ResizeObserver(() => {
+                fitAddon.fit();
+                const dims = { cols: term.cols, rows: term.rows };
+                if (socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({
+                        type: 'resize',
+                        ...dims,
+                    }));
+                }
+            });
+            resizeObserver.observe(wrapper);
+
+            return terminalId;
+        }
+
+        connectTerminalWebSocket(terminalId, term) {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(
+                `${wsProtocol}//${window.location.host}/ws/term?id=${terminalId}`
+            );
+
+            socket.onopen = () => {
+                console.log(`Terminal ${terminalId} WebSocket connected`);
+                // Send initial dimensions and project path
+                // Use currentProject variable which was loaded by initProjectSelector
+                const projectPath = currentProject || '';
+                console.log(`Terminal ${terminalId} starting in directory: ${projectPath}`);
+                socket.send(JSON.stringify({
+                    type: 'init',
+                    cols: term.cols,
+                    rows: term.rows,
+                    cwd: projectPath,
+                }));
+            };
+
+            socket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'output') {
+                    term.write(data.data);
+                } else if (data.type === 'exit') {
+                    term.write(`\r\n\n[Process exited with code ${data.code}]\r\n`);
+                } else if (data.type === 'error') {
+                    term.write(`\r\n[Error: ${data.error}]\r\n`);
+                }
+            };
+
+            socket.onerror = (error) => {
+                console.error(`Terminal ${terminalId} WebSocket error:`, error);
+                term.write('\r\n[Connection error]\r\n');
+            };
+
+            socket.onclose = () => {
+                console.log(`Terminal ${terminalId} WebSocket closed`);
+                term.write('\r\n[Connection closed]\r\n');
+            };
+
+            return socket;
+        }
+
+        createTab(terminalId) {
+            const tab = document.createElement('button');
+            tab.className = 'terminal-tab';
+            tab.dataset.terminalId = terminalId;
+            tab.innerHTML = `Terminal ${terminalId + 1} <span class="tab-close">&times;</span>`;
+
+            tab.addEventListener('click', (e) => {
+                if (e.target.classList.contains('tab-close')) {
+                    this.closeTerminal(terminalId);
+                } else {
+                    this.setActiveTerminal(terminalId);
+                }
+            });
+
+            // Insert before the "+" button
+            const addButton = document.getElementById('new-terminal-btn');
+            this.tabsContainer.insertBefore(tab, addButton);
+        }
+
+        setActiveTerminal(terminalId) {
+            // Hide all terminals
+            this.terminals.forEach((term, id) => {
+                term.wrapper.classList.remove('active');
+                document.querySelector(`[data-terminal-id="${id}"]`)?.classList.remove('active');
+            });
+
+            // Show active terminal
+            const terminal = this.terminals.get(terminalId);
+            if (terminal) {
+                terminal.wrapper.classList.add('active');
+                document.querySelector(`[data-terminal-id="${terminalId}"]`)?.classList.add('active');
+                this.activeTerminalId = terminalId;
+                terminal.term.focus();
+                terminal.fitAddon.fit();
+            }
+        }
+
+        closeTerminal(terminalId) {
+            const terminal = this.terminals.get(terminalId);
+            if (!terminal) return;
+
+            // Close socket
+            terminal.socket.close();
+
+            // Dispose terminal
+            terminal.term.dispose();
+
+            // Remove wrapper
+            terminal.wrapper.remove();
+
+            // Remove tab
+            document.querySelector(`[data-terminal-id="${terminalId}"]`)?.remove();
+
+            // Remove from map
+            this.terminals.delete(terminalId);
+
+            // Switch to another terminal if this was active
+            if (this.activeTerminalId === terminalId) {
+                const remainingIds = Array.from(this.terminals.keys());
+                if (remainingIds.length > 0) {
+                    this.setActiveTerminal(remainingIds[0]);
+                } else {
+                    // Create a new terminal if none remain
+                    this.createTerminal();
+                }
+            }
+        }
+
+        initResizeHandle() {
+            const handle = document.getElementById('resize-handle');
+            const chatPanel = document.getElementById('chat-panel');
+            const termPanel = document.getElementById('terminal-panel');
+
+            let isResizing = false;
+
+            handle.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+
+                const containerRect = document.querySelector('.main-content').getBoundingClientRect();
+                const offsetX = e.clientX - containerRect.left;
+                const percentage = (offsetX / containerRect.width) * 100;
+
+                if (percentage > 20 && percentage < 80) {
+                    chatPanel.style.flex = `0 0 ${percentage}%`;
+                    termPanel.style.flex = `0 0 ${100 - percentage}%`;
+
+                    // Trigger resize for active terminal
+                    if (this.activeTerminalId !== null) {
+                        const terminal = this.terminals.get(this.activeTerminalId);
+                        if (terminal) {
+                            setTimeout(() => terminal.fitAddon.fit(), 10);
+                        }
+                    }
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                isResizing = false;
+            });
+        }
+
+        initEventListeners() {
+            // New terminal button
+            document.getElementById('new-terminal-btn').addEventListener('click', () => {
+                this.createTerminal();
+            });
+
+            // Clear terminal
+            document.getElementById('terminal-clear').addEventListener('click', () => {
+                if (this.activeTerminalId !== null) {
+                    const terminal = this.terminals.get(this.activeTerminalId);
+                    terminal?.term.clear();
+                }
+            });
+
+            // Toggle terminal panel
+            document.getElementById('terminal-toggle').addEventListener('click', () => {
+                const panel = document.getElementById('terminal-panel');
+                panel.classList.toggle('collapsed');
+            });
+        }
+    }
+
+    // Initialize terminal manager (will be created after project selector is ready)
+    let terminalManager;
+
+    // Modified init to create terminal after project is loaded
+    async function startApp() {
+        initTheme();
+        await initProjectSelector();  // Wait for project to load
+        initWebSocket();
+        initEventListeners();
+        loadHistory();
+
+        // Now create terminal with proper project path
+        if (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined') {
+            terminalManager = new TerminalManager();
+        } else {
+            console.error('xterm.js or FitAddon not loaded');
+        }
+    }
+
     // Start the application
-    init();
+    startApp();
 })();

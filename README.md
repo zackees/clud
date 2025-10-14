@@ -109,6 +109,11 @@ clud --webui 3000                 # Launch on custom port 3000
 
 **Features:**
 - Real-time streaming chat interface with Claude Code
+- **Integrated terminal console** with split-pane layout and xterm.js
+  - Multiple terminals with tabbed interface
+  - Full shell access with ANSI color support
+  - Cross-platform (Windows git-bash/cmd, Unix/Linux bash/zsh)
+  - Adjustable resize handle between chat and terminal panels
 - Project directory selection
 - Conversation history (last 10 messages loaded on startup)
 - Dark/light theme toggle
@@ -118,7 +123,9 @@ clud --webui 3000                 # Launch on custom port 3000
 - Markdown rendering with code block syntax highlighting
 
 **Architecture:**
-The Web UI is a FastAPI-based server that wraps Claude Code execution and provides a clean chat interface. It uses WebSocket for real-time streaming of Claude's responses and stores conversation history in browser localStorage.
+The Web UI is a FastAPI-based server that wraps Claude Code execution and provides a clean chat interface. It uses WebSocket for real-time streaming of Claude's responses and stores conversation history in browser localStorage. The integrated terminal uses PTY (pseudo-terminal) for full shell access with cross-platform support.
+
+**Security Note:** The Web UI includes full shell access through the integrated terminal. Only run on trusted localhost environments. Network deployment requires authentication and security hardening.
 
 **Inspired by:** [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui) - Python/FastAPI implementation with minimal dependencies.
 
@@ -274,7 +281,9 @@ clud/
 │   ├── webui/            # Web UI for browser-based interface
 │   │   ├── server.py          # FastAPI application
 │   │   ├── api.py             # Handler classes
-│   │   └── static/            # HTML/CSS/JavaScript frontend
+│   │   ├── pty_manager.py     # Cross-platform PTY session management
+│   │   ├── terminal_handler.py # WebSocket handler for terminal I/O
+│   │   └── static/            # HTML/CSS/JavaScript frontend (xterm.js)
 │   ├── service/          # Background service (formerly daemon)
 │   │   ├── server.py          # HTTP server on :7565
 │   │   ├── registry.py        # Agent registry

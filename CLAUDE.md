@@ -41,7 +41,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Default port: 8888 (auto-detects if unavailable)
   - Automatically opens browser to Web UI
   - Features:
-    - Real-time streaming chat interface
+    - Real-time streaming chat interface with Claude Code
+    - **Integrated terminal console** with xterm.js (split-pane layout)
     - Project directory selection
     - Conversation history (stored in browser localStorage)
     - Dark/light theme toggle
@@ -53,6 +54,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - FastAPI backend with WebSocket streaming
     - Vanilla HTML/CSS/JavaScript frontend
     - Uses `running-process` library for Claude Code execution
+    - PTY-based terminal with cross-platform support
     - Static files served from `src/clud/webui/static/`
   - Configuration:
     - Can specify custom port: `clud --webui 3000`
@@ -60,6 +62,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - Server logs to console with INFO level
   - Press Ctrl+C to stop the server
   - Inspired by: [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui)
+
+#### Terminal Console
+
+The Web UI includes an integrated terminal console that provides direct shell access alongside the chat interface.
+
+**Features**:
+- **Multiple Terminals**: Create multiple terminal sessions with tabbed interface
+- **Split-Pane Layout**: Adjustable resize handle between chat and terminal panels
+- **Full Shell Access**: Real PTY (pseudo-terminal) with ANSI color support
+- **Cross-Platform**: Works on Windows (git-bash/cmd) and Unix (bash/zsh/sh)
+- **Responsive Design**: Stacks vertically on mobile devices
+
+**Usage**:
+- **New Terminal**: Click the "+" button in the terminal tabs area
+- **Switch Terminals**: Click on tab to switch between terminals
+- **Close Terminal**: Click "×" on the tab to close a terminal
+- **Clear Terminal**: Click the trash icon (🗑️) to clear the active terminal
+- **Toggle Panel**: Click the arrow icon (⬇️) to collapse/expand terminal panel
+- **Resize Panels**: Drag the vertical resize handle between chat and terminal
+
+**Keyboard Shortcuts**:
+- All standard terminal shortcuts work (Ctrl+C, Ctrl+D, Ctrl+Z, etc.)
+- Tab completion, command history (↑/↓), and line editing work as expected
+- Copy/paste: Use browser's standard shortcuts (Ctrl+C/V or Cmd+C/V)
+
+**Shell Behavior**:
+- **Windows**: Automatically uses git-bash if available, falls back to cmd.exe
+- **Unix/Linux**: Uses user's default shell ($SHELL) or /bin/bash
+- **Working Directory**: Terminals start in the selected project directory
+- **Environment**: Inherits environment variables from the Web UI server
+
+**Architecture**:
+- **Frontend**: xterm.js terminal emulator with FitAddon for responsive sizing
+- **Backend**: PTY manager (`pty_manager.py`) with platform-specific implementations
+  - Unix: Native `pty.fork()` with file descriptor I/O
+  - Windows: `pywinpty` library wrapping Windows ConPTY
+- **Communication**: WebSocket endpoint (`/ws/term`) for real-time I/O streaming
+- **Terminal Handler**: `terminal_handler.py` bridges WebSocket and PTY with async I/O
+
+**Components**:
+- `src/clud/webui/pty_manager.py` - Cross-platform PTY session management
+- `src/clud/webui/terminal_handler.py` - WebSocket handler for terminal I/O
+- `src/clud/webui/static/app.js` - TerminalManager class (frontend logic)
+- `tests/test_pty_manager.py` - PTY manager unit tests
+- `tests/test_terminal_handler.py` - Terminal handler unit tests
+
+**Security Considerations**:
+- **Localhost Only**: Terminal provides full shell access - only run on trusted localhost
+- **No Authentication**: Current implementation has no authentication mechanism
+- **Network Deployment**: Requires authentication, resource limits, and security hardening
+- **Working Directory Validation**: Terminal starts in validated project directory
+- **Environment Inheritance**: Shell inherits all environment variables from server
+
+**Troubleshooting**:
+- **Terminal Not Appearing**: Check browser console for WebSocket connection errors
+- **Commands Not Working**: Verify shell is running (check for shell prompt)
+- **Garbled Output**: Ensure terminal is properly sized (resize window to trigger refit)
+- **Windows Issues**: Ensure git-bash is installed at `C:\Program Files\Git\bin\bash.exe`
+- **Connection Lost**: Terminal will show "[Connection closed]" - create a new terminal tab
 
 ### Hook System and Message Handler API
 
@@ -122,7 +183,9 @@ The hook system provides an event-based architecture for intercepting and forwar
 - **Web UI** (`src/clud/webui/`): Browser-based interface for Claude Code
   - `webui/server.py`: FastAPI application with WebSocket support
   - `webui/api.py`: Handler classes for chat, projects, and history
-  - `webui/static/`: HTML/CSS/JavaScript frontend files
+  - `webui/pty_manager.py`: Cross-platform PTY session management for terminals
+  - `webui/terminal_handler.py`: WebSocket handler for terminal I/O streaming
+  - `webui/static/`: HTML/CSS/JavaScript frontend files with integrated xterm.js terminal
 
 ### Package Configuration
 - Uses setuptools with pyproject.toml for modern Python packaging

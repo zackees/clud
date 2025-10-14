@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Claude Code Web UI</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 </head>
 <body>
     <div class="container">
@@ -24,32 +25,57 @@
             <div id="status" class="status">Connecting...</div>
         </header>
 
-        <!-- Chat Messages -->
-        <main class="chat-container" id="chat-container">
-            <div class="welcome-message">
-                <h2>Welcome to Claude Code</h2>
-                <p>Start by selecting a project and typing your message below.</p>
-                <p class="yolo-notice">Running in YOLO mode - no permission prompts!</p>
-            </div>
-        </main>
+        <!-- Main Content with Split Panes -->
+        <div class="main-content">
+            <!-- Chat Panel -->
+            <div class="chat-panel" id="chat-panel">
+                <main class="chat-container" id="chat-container">
+                    <div class="welcome-message">
+                        <h2>Welcome to Claude Code</h2>
+                        <p>Start by selecting a project and typing your message below.</p>
+                        <p class="yolo-notice">Running in YOLO mode - no permission prompts!</p>
+                    </div>
+                </main>
 
-        <!-- Input Area -->
-        <footer class="input-area">
-            <div class="input-container">
-                <textarea
-                    id="message-input"
-                    class="message-input"
-                    placeholder="Ask Claude Code anything..."
-                    rows="1"
-                    disabled
-                ></textarea>
-                <button id="send-btn" class="send-btn" disabled title="Send message (Ctrl+Enter)">
-                    <span>Send</span>
-                </button>
+                <footer class="input-area">
+                    <div class="input-container">
+                        <textarea
+                            id="message-input"
+                            class="message-input"
+                            placeholder="Ask Claude Code anything..."
+                            rows="1"
+                            disabled
+                        ></textarea>
+                        <button id="send-btn" class="send-btn" disabled title="Send message (Ctrl+Enter)">
+                            <span>Send</span>
+                        </button>
+                    </div>
+                </footer>
             </div>
-        </footer>
+
+            <!-- Resize Handle -->
+            <div class="resize-handle" id="resize-handle"></div>
+
+            <!-- Terminal Panel -->
+            <div class="terminal-panel" id="terminal-panel">
+                <div class="terminal-header">
+                    <div class="terminal-tabs" id="terminal-tabs">
+                        <button class="terminal-tab-add" id="new-terminal-btn" title="New terminal">+</button>
+                    </div>
+                    <div class="terminal-controls">
+                        <button class="icon-btn" id="terminal-clear" title="Clear terminal">🗑️</button>
+                        <button class="icon-btn" id="terminal-toggle" title="Toggle terminal">⬇️</button>
+                    </div>
+                </div>
+                <div class="terminal-container" id="terminal-container">
+                    <!-- xterm.js terminal instances rendered here -->
+                </div>
+            </div>
+        </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

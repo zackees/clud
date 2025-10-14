@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import ChatHandler, HistoryHandler, ProjectHandler
+from .pty_manager import PTYManager
+from .terminal_handler import TerminalHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -70,6 +72,8 @@ def create_app(static_dir: Path) -> FastAPI:
     chat_handler = ChatHandler()
     project_handler = ProjectHandler()
     history_handler = HistoryHandler()
+    pty_manager = PTYManager()
+    terminal_handler = TerminalHandler(pty_manager)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -115,6 +119,16 @@ def create_app(static_dir: Path) -> FastAPI:
             # Suppress exception if sending error message fails (connection may be closed)
             with contextlib.suppress(Exception):
                 await websocket.send_json({"type": "error", "error": str(e)})
+
+    @app.websocket("/ws/term")
+    async def terminal_websocket(websocket: WebSocket, id: str) -> None:
+        """WebSocket endpoint for terminal sessions.
+
+        Args:
+            websocket: WebSocket connection
+            id: Terminal session identifier
+        """
+        await terminal_handler.handle_websocket(websocket, id)
 
     @app.get("/api/projects")
     async def get_projects(base_path: str | None = None) -> JSONResponse:
