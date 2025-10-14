@@ -366,7 +366,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "1.0.23"
+version = "1.0.24"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
