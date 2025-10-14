@@ -18,7 +18,6 @@ dependencies = [
     "httpx>=0.24.0",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
     "running-process>=1.0.7",
-    "codeup>=1.0.15",
     "nodeenv>=1.8.0",
     "nodejs-wheel>=22.0.0",
     "fastapi>=0.115.0",
@@ -36,6 +35,7 @@ dependencies = [
     "python-multipart>=0.0.6",
     "psutil>=5.9.0",
     "python-telegram-bot>=20.0",
+    "codeup>=1.0.15",
 ]
 # Change this with the version number bump.
 version = "1.0.23"

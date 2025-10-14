@@ -156,7 +156,7 @@ class StreamingUI:
         if content.input:
             self._print(self._colorize("  Input:", Colors.BRIGHT_BLACK))
             for key, value in content.input.items():
-                if isinstance(value, (dict, list)):
+                if isinstance(value, dict | list):
                     value_str = self._format_json_compact(value)
                 else:
                     value_str = str(value)
