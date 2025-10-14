@@ -5,6 +5,17 @@
     // Configuration
     const RECONNECT_DELAY = 3000;
     const THEME_KEY = 'claude-code-theme';
+    const SETTINGS_KEY = 'claude-code-settings';
+    const ACTIVE_TAB_KEY = 'claude-code-active-tab';
+
+    // Default settings
+    const DEFAULT_SETTINGS = {
+        terminalScrollback: 100000,  // Increased to 100k for long command history
+        terminalFontSize: 14,
+        chatHistoryLimit: 100,
+        autoScrollChat: true,
+        autoScanDiffs: true
+    };
 
     // State
     let ws = null;
@@ -12,6 +23,7 @@
     let currentProject = null;
     let isProcessing = false;
     let currentAssistantMessage = null;
+    let settings = { ...DEFAULT_SETTINGS };
 
     // DOM Elements
     const chatContainer = document.getElementById('chat-container');
@@ -326,6 +338,83 @@
         chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 
+    // Tab Management
+    function initTabSwitching() {
+        const tabs = document.querySelectorAll('.main-tab');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        // Restore last active tab from localStorage
+        const savedTab = localStorage.getItem(ACTIVE_TAB_KEY) || 'chat';
+        switchToTab(savedTab);
+
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const targetTab = tab.dataset.tab;
+                switchToTab(targetTab);
+            });
+        });
+    }
+
+    function switchToTab(targetTab) {
+        const tabs = document.querySelectorAll('.main-tab');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        // Update tab active state
+        tabs.forEach(t => t.classList.remove('active'));
+        const activeTab = document.querySelector(`[data-tab="${targetTab}"]`);
+        if (activeTab) {
+            activeTab.classList.add('active');
+        }
+
+        // Update content active state
+        tabContents.forEach(content => {
+            content.classList.remove('active');
+        });
+        const activeContent = document.getElementById(`tab-${targetTab}`);
+        if (activeContent) {
+            activeContent.classList.add('active');
+        }
+
+        // Save to localStorage
+        localStorage.setItem(ACTIVE_TAB_KEY, targetTab);
+
+        // Trigger terminal resize if switching to terminal tab
+        if (targetTab === 'terminal' && terminalManager) {
+            setTimeout(() => {
+                if (terminalManager.activeTerminalId !== null) {
+                    const terminal = terminalManager.terminals.get(terminalManager.activeTerminalId);
+                    if (terminal) {
+                        terminal.fitAddon.fit();
+                    }
+                }
+            }, 10);
+        }
+
+        // Load history if switching to history tab
+        if (targetTab === 'history' && window.historyPanel) {
+            window.historyPanel.render();
+        }
+
+        // Clear badge when switching to a tab
+        updateTabBadge(targetTab, 0);
+    }
+
+    // Update tab badge count
+    function updateTabBadge(tabName, count) {
+        const badge = document.getElementById(`${tabName}-badge`);
+        if (badge) {
+            if (count > 0) {
+                badge.textContent = count > 99 ? '99+' : count;
+                badge.style.display = 'block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+    }
+
+    // Expose updateTabBadge globally for use by other components
+    window.updateTabBadge = updateTabBadge;
+
     // Event Listeners
     function initEventListeners() {
         // Send button
@@ -348,6 +437,9 @@
 
         // Theme toggle
         themeToggle.addEventListener('click', toggleTheme);
+
+        // Initialize tab switching
+        initTabSwitching();
 
         // Keep WebSocket alive with periodic pings
         setInterval(() => {
@@ -413,6 +505,199 @@
         }
     }
 
+    // Settings Manager Class
+    class SettingsPanel {
+        constructor() {
+            this.loadSettings();
+            this.initEventListeners();
+            this.populateForm();
+        }
+
+        loadSettings() {
+            try {
+                const saved = localStorage.getItem(SETTINGS_KEY);
+                if (saved) {
+                    settings = { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+                } else {
+                    settings = { ...DEFAULT_SETTINGS };
+                }
+            } catch (error) {
+                console.error('Error loading settings:', error);
+                settings = { ...DEFAULT_SETTINGS };
+            }
+        }
+
+        saveSettings() {
+            try {
+                localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+                addSystemMessage('Settings saved successfully');
+            } catch (error) {
+                console.error('Error saving settings:', error);
+                addSystemMessage('Error: Failed to save settings', 'error');
+            }
+        }
+
+        populateForm() {
+            document.getElementById('terminal-scrollback').value = settings.terminalScrollback;
+            document.getElementById('terminal-font-size').value = settings.terminalFontSize;
+            document.getElementById('chat-history-limit').value = settings.chatHistoryLimit;
+            document.getElementById('auto-scroll-chat').checked = settings.autoScrollChat;
+            document.getElementById('auto-scan-diffs').checked = settings.autoScanDiffs;
+        }
+
+        readFormValues() {
+            settings.terminalScrollback = parseInt(document.getElementById('terminal-scrollback').value);
+            settings.terminalFontSize = parseInt(document.getElementById('terminal-font-size').value);
+            settings.chatHistoryLimit = parseInt(document.getElementById('chat-history-limit').value);
+            settings.autoScrollChat = document.getElementById('auto-scroll-chat').checked;
+            settings.autoScanDiffs = document.getElementById('auto-scan-diffs').checked;
+        }
+
+        initEventListeners() {
+            document.getElementById('save-settings-btn').addEventListener('click', () => {
+                this.readFormValues();
+                this.saveSettings();
+
+                // Apply terminal settings if terminal manager exists
+                if (terminalManager) {
+                    addSystemMessage('Terminal settings will apply to new terminals. Please create a new terminal to see changes.');
+                }
+            });
+
+            document.getElementById('reset-settings-btn').addEventListener('click', () => {
+                if (confirm('Reset all settings to defaults?')) {
+                    settings = { ...DEFAULT_SETTINGS };
+                    this.populateForm();
+                    this.saveSettings();
+                }
+            });
+        }
+    }
+
+    // History Panel Class
+    class HistoryPanel {
+        constructor() {
+            this.container = document.getElementById('history-content');
+            this.initEventListeners();
+        }
+
+        initEventListeners() {
+            document.getElementById('export-history-btn').addEventListener('click', () => {
+                this.exportHistory();
+            });
+
+            document.getElementById('clear-history-btn').addEventListener('click', () => {
+                this.clearHistory();
+            });
+        }
+
+        render() {
+            try {
+                const history = JSON.parse(localStorage.getItem('chat-history') || '[]');
+
+                // Update badge
+                if (window.updateTabBadge) {
+                    window.updateTabBadge('history', history.length);
+                }
+
+                if (history.length === 0) {
+                    this.container.innerHTML = `
+                        <div class="history-empty">
+                            <p>No conversation history</p>
+                            <small>Your chat messages will appear here</small>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Render history items (most recent first)
+                const items = history.slice().reverse().map(msg => {
+                    const time = new Date(msg.timestamp).toLocaleString();
+                    const preview = msg.content.substring(0, 100) + (msg.content.length > 100 ? '...' : '');
+
+                    return `
+                        <div class="history-item" data-timestamp="${msg.timestamp}">
+                            <div class="history-item-header">
+                                <span class="history-item-role">${msg.role}</span>
+                                <span class="history-item-time">${time}</span>
+                            </div>
+                            <div class="history-item-content">${escapeHtml(preview)}</div>
+                        </div>
+                    `;
+                }).join('');
+
+                this.container.innerHTML = items;
+
+                // Add click handlers
+                this.container.querySelectorAll('.history-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        const timestamp = parseInt(item.dataset.timestamp);
+                        this.showHistoryDetail(timestamp);
+                    });
+                });
+            } catch (error) {
+                console.error('Error rendering history:', error);
+                this.container.innerHTML = `
+                    <div class="history-empty">
+                        <p style="color: var(--error-color);">Error loading history</p>
+                    </div>
+                `;
+            }
+        }
+
+        showHistoryDetail(timestamp) {
+            try {
+                const history = JSON.parse(localStorage.getItem('chat-history') || '[]');
+                const msg = history.find(m => m.timestamp === timestamp);
+
+                if (msg) {
+                    alert(`${msg.role.toUpperCase()}\n\n${msg.content}`);
+                }
+            } catch (error) {
+                console.error('Error showing history detail:', error);
+            }
+        }
+
+        exportHistory() {
+            try {
+                const history = JSON.parse(localStorage.getItem('chat-history') || '[]');
+
+                if (history.length === 0) {
+                    alert('No history to export');
+                    return;
+                }
+
+                const blob = new Blob([JSON.stringify(history, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `claude-code-history-${Date.now()}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                addSystemMessage('History exported successfully');
+            } catch (error) {
+                console.error('Error exporting history:', error);
+                addSystemMessage('Error: Failed to export history', 'error');
+            }
+        }
+
+        clearHistory() {
+            if (confirm('Clear all conversation history? This cannot be undone.')) {
+                try {
+                    localStorage.removeItem('chat-history');
+                    this.render();
+                    addSystemMessage('History cleared');
+                } catch (error) {
+                    console.error('Error clearing history:', error);
+                    addSystemMessage('Error: Failed to clear history', 'error');
+                }
+            }
+        }
+    }
+
     // Terminal Manager Class
     class TerminalManager {
         constructor() {
@@ -430,10 +715,10 @@
         createTerminal() {
             const terminalId = this.nextTerminalId++;
 
-            // Create xterm.js instance
+            // Create xterm.js instance with configurable scrollback buffer from settings
             const term = new Terminal({
                 cursorBlink: true,
-                fontSize: 14,
+                fontSize: settings.terminalFontSize || 14,
                 fontFamily: 'Consolas, Monaco, "Courier New", monospace',
                 theme: {
                     background: '#1e1e1e',
@@ -450,6 +735,11 @@
                 },
                 cols: 80,
                 rows: 24,
+                scrollback: settings.terminalScrollback || 100000,  // Configurable scrollback buffer for command history (from settings)
+                allowProposedApi: true,  // Enable proposed APIs for enhanced features
+                fastScrollModifier: 'shift',  // Use shift+scroll for fast scrolling through history
+                fastScrollSensitivity: 5,  // Sensitivity for fast scroll
+                scrollSensitivity: 1,  // Normal scroll sensitivity
             });
 
             // Fit addon for responsive sizing
@@ -483,6 +773,9 @@
 
             // Set as active
             this.setActiveTerminal(terminalId);
+
+            // Update terminal badge count
+            this.updateTerminalCount();
 
             // Handle terminal input
             term.onData(data => {
@@ -611,6 +904,9 @@
             // Remove from map
             this.terminals.delete(terminalId);
 
+            // Update terminal badge count
+            this.updateTerminalCount();
+
             // Switch to another terminal if this was active
             if (this.activeTerminalId === terminalId) {
                 const remainingIds = Array.from(this.terminals.keys());
@@ -623,42 +919,17 @@
             }
         }
 
+        updateTerminalCount() {
+            // Update badge to show terminal count (only if > 1)
+            const count = this.terminals.size;
+            if (window.updateTabBadge) {
+                window.updateTabBadge('terminal', count > 1 ? count : 0);
+            }
+        }
+
         initResizeHandle() {
-            const handle = document.getElementById('resize-handle');
-            const chatPanel = document.getElementById('chat-panel');
-            const termPanel = document.getElementById('terminal-panel');
-
-            let isResizing = false;
-
-            handle.addEventListener('mousedown', (e) => {
-                isResizing = true;
-                e.preventDefault();
-            });
-
-            document.addEventListener('mousemove', (e) => {
-                if (!isResizing) return;
-
-                const containerRect = document.querySelector('.main-content').getBoundingClientRect();
-                const offsetX = e.clientX - containerRect.left;
-                const percentage = (offsetX / containerRect.width) * 100;
-
-                if (percentage > 20 && percentage < 80) {
-                    chatPanel.style.flex = `0 0 ${percentage}%`;
-                    termPanel.style.flex = `0 0 ${100 - percentage}%`;
-
-                    // Trigger resize for active terminal
-                    if (this.activeTerminalId !== null) {
-                        const terminal = this.terminals.get(this.activeTerminalId);
-                        if (terminal) {
-                            setTimeout(() => terminal.fitAddon.fit(), 10);
-                        }
-                    }
-                }
-            });
-
-            document.addEventListener('mouseup', () => {
-                isResizing = false;
-            });
+            // Resize handling not needed for tabbed layout
+            // Terminals will auto-resize when switching tabs
         }
 
         initEventListeners() {
@@ -673,12 +944,6 @@
                     const terminal = this.terminals.get(this.activeTerminalId);
                     terminal?.term.clear();
                 }
-            });
-
-            // Toggle terminal panel
-            document.getElementById('terminal-toggle').addEventListener('click', () => {
-                const panel = document.getElementById('terminal-panel');
-                panel.classList.toggle('collapsed');
             });
         }
     }
@@ -728,6 +993,11 @@
         }
 
         render() {
+            // Update badge count for diff tab
+            if (window.updateTabBadge) {
+                window.updateTabBadge('diff', this.modifiedFiles.length);
+            }
+
             if (this.modifiedFiles.length === 0) {
                 this.container.innerHTML = `
                     <div class="diff-navigator-empty">
@@ -1060,10 +1330,12 @@
         }
     }
 
-    // Initialize terminal manager (will be created after project selector is ready)
+    // Initialize managers (will be created after project selector is ready)
     let terminalManager;
     let diffNavigator;
     let diffPanel;
+    let settingsPanel;
+    let historyPanel;
 
     // Vertical Resize Handles for Diff Panels
     function initVerticalResizeHandles() {
@@ -1140,6 +1412,10 @@
     // Modified init to create terminal after project is loaded
     async function startApp() {
         initTheme();
+
+        // Initialize settings panel first (loads settings from localStorage)
+        settingsPanel = new SettingsPanel();
+
         await initProjectSelector();  // Wait for project to load
         initWebSocket();
         initEventListeners();
@@ -1149,13 +1425,18 @@
         diffPanel = new DiffPanel();
         diffNavigator = new DiffNavigatorPanel(diffPanel);
 
-        // Make diffNavigator available globally for DiffPanel to access
+        // Initialize history panel
+        historyPanel = new HistoryPanel();
+
+        // Make panels available globally
         window.diffNavigator = diffNavigator;
+        window.historyPanel = historyPanel;
+        window.settingsPanel = settingsPanel;
 
         // Initialize vertical resize handles for diff panels
         initVerticalResizeHandles();
 
-        // Now create terminal with proper project path
+        // Now create terminal with proper project path and settings
         if (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined') {
             terminalManager = new TerminalManager();
         } else {

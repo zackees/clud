@@ -26,92 +26,198 @@
             <div id="status" class="status">Connecting...</div>
         </header>
 
-        <!-- Main Content with Split Panes -->
+        <!-- Main Content with Tabbed Interface -->
         <div class="main-content">
-            <!-- Diff Navigator Panel (left sidebar for modified files) -->
-            <div class="diff-navigator-panel" id="diff-navigator-panel">
-                <div class="diff-navigator-header">
-                    <h3>Modified Files</h3>
-                    <div class="diff-navigator-controls">
-                        <button class="icon-btn" id="refresh-diffs-btn" title="Refresh diffs">🔄</button>
-                        <button class="icon-btn" id="clear-diffs-btn" title="Clear all diffs">✖</button>
-                    </div>
-                </div>
-                <div class="diff-navigator-content" id="diff-navigator-content">
-                    <div class="diff-navigator-empty">
-                        <p>No modified files</p>
-                        <small>Changes made by Claude will appear here</small>
-                    </div>
-                </div>
+            <!-- Main Tab Bar -->
+            <div class="main-tab-bar">
+                <button class="main-tab active" data-tab="chat" title="Chat with Claude Code">
+                    <span class="tab-icon">💬</span>
+                    <span class="tab-label">Chat</span>
+                    <span class="tab-badge" id="chat-badge" style="display: none;">0</span>
+                </button>
+                <button class="main-tab" data-tab="terminal" title="Integrated Terminal Console">
+                    <span class="tab-icon">🖥️</span>
+                    <span class="tab-label">Terminal</span>
+                    <span class="tab-badge" id="terminal-badge" style="display: none;">0</span>
+                </button>
+                <button class="main-tab" data-tab="diff" title="Code Diff Viewer">
+                    <span class="tab-icon">📝</span>
+                    <span class="tab-label">Diff View</span>
+                    <span class="tab-badge" id="diff-badge" style="display: none;">0</span>
+                </button>
+                <button class="main-tab" data-tab="history" title="Conversation History">
+                    <span class="tab-icon">📜</span>
+                    <span class="tab-label">History</span>
+                    <span class="tab-badge" id="history-badge" style="display: none;">0</span>
+                </button>
+                <button class="main-tab" data-tab="settings" title="Settings and Configuration">
+                    <span class="tab-icon">⚙️</span>
+                    <span class="tab-label">Settings</span>
+                </button>
             </div>
 
-            <!-- Resize Handle for Diff Navigator -->
-            <div class="resize-handle-vertical" id="diff-nav-resize"></div>
+            <!-- Tab Contents -->
+            <div class="tab-content-container">
+                <!-- Chat Tab Content -->
+                <div class="tab-content active" id="tab-chat">
+                    <div class="chat-panel" id="chat-panel">
+                        <main class="chat-container" id="chat-container">
+                            <div class="welcome-message">
+                                <h2>Welcome to Claude Code</h2>
+                                <p>Start by selecting a project and typing your message below.</p>
+                                <p class="yolo-notice">Running in YOLO mode - no permission prompts!</p>
+                            </div>
+                        </main>
 
-            <!-- Chat Panel -->
-            <div class="chat-panel" id="chat-panel">
-                <main class="chat-container" id="chat-container">
-                    <div class="welcome-message">
-                        <h2>Welcome to Claude Code</h2>
-                        <p>Start by selecting a project and typing your message below.</p>
-                        <p class="yolo-notice">Running in YOLO mode - no permission prompts!</p>
-                    </div>
-                </main>
-
-                <footer class="input-area">
-                    <div class="input-container">
-                        <textarea
-                            id="message-input"
-                            class="message-input"
-                            placeholder="Ask Claude Code anything..."
-                            rows="1"
-                            disabled
-                        ></textarea>
-                        <button id="send-btn" class="send-btn" disabled title="Send message (Ctrl+Enter)">
-                            <span>Send</span>
-                        </button>
-                    </div>
-                </footer>
-            </div>
-
-            <!-- Resize Handle for Chat Panel -->
-            <div class="resize-handle-vertical" id="chat-resize"></div>
-
-            <!-- Diff Renderer Panel (main content area for showing diffs) -->
-            <div class="diff-renderer-panel" id="diff-renderer-panel">
-                <div class="diff-renderer-header">
-                    <div class="diff-renderer-title">
-                        <span id="diff-file-name">No file selected</span>
-                    </div>
-                    <div class="diff-renderer-controls">
-                        <button class="btn-small" id="accept-diff-btn" title="Accept changes" disabled>Accept</button>
-                        <button class="btn-small" id="reject-diff-btn" title="Reject changes" disabled>Reject</button>
-                        <button class="icon-btn" id="close-diff-btn" title="Close diff">✖</button>
+                        <footer class="input-area">
+                            <div class="input-container">
+                                <textarea
+                                    id="message-input"
+                                    class="message-input"
+                                    placeholder="Ask Claude Code anything..."
+                                    rows="1"
+                                    disabled
+                                ></textarea>
+                                <button id="send-btn" class="send-btn" disabled title="Send message (Ctrl+Enter)">
+                                    <span>Send</span>
+                                </button>
+                            </div>
+                        </footer>
                     </div>
                 </div>
-                <div class="diff-renderer-content" id="diff-renderer-content">
-                    <div class="diff-renderer-empty">
-                        <p>Select a file from the navigator to view its diff</p>
+
+                <!-- Terminal Tab Content -->
+                <div class="tab-content" id="tab-terminal">
+                    <div class="terminal-panel" id="terminal-panel">
+                        <div class="terminal-header">
+                            <div class="terminal-tabs" id="terminal-tabs">
+                                <button class="terminal-tab-add" id="new-terminal-btn" title="New terminal">+</button>
+                            </div>
+                            <div class="terminal-controls">
+                                <button class="icon-btn" id="terminal-clear" title="Clear terminal">🗑️</button>
+                            </div>
+                        </div>
+                        <div class="terminal-container" id="terminal-container">
+                            <!-- xterm.js terminal instances rendered here -->
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- Resize Handle for Terminal -->
-            <div class="resize-handle" id="resize-handle"></div>
+                <!-- Diff View Tab Content -->
+                <div class="tab-content" id="tab-diff">
+                    <div class="diff-view-container">
+                        <!-- Diff Navigator Panel (left sidebar for modified files) -->
+                        <div class="diff-navigator-panel" id="diff-navigator-panel">
+                            <div class="diff-navigator-header">
+                                <h3>Modified Files</h3>
+                                <div class="diff-navigator-controls">
+                                    <button class="icon-btn" id="refresh-diffs-btn" title="Refresh diffs">🔄</button>
+                                    <button class="icon-btn" id="clear-diffs-btn" title="Clear all diffs">✖</button>
+                                </div>
+                            </div>
+                            <div class="diff-navigator-content" id="diff-navigator-content">
+                                <div class="diff-navigator-empty">
+                                    <p>No modified files</p>
+                                    <small>Changes made by Claude will appear here</small>
+                                </div>
+                            </div>
+                        </div>
 
-            <!-- Terminal Panel -->
-            <div class="terminal-panel" id="terminal-panel">
-                <div class="terminal-header">
-                    <div class="terminal-tabs" id="terminal-tabs">
-                        <button class="terminal-tab-add" id="new-terminal-btn" title="New terminal">+</button>
-                    </div>
-                    <div class="terminal-controls">
-                        <button class="icon-btn" id="terminal-clear" title="Clear terminal">🗑️</button>
-                        <button class="icon-btn" id="terminal-toggle" title="Toggle terminal">⬇️</button>
+                        <!-- Resize Handle for Diff Navigator -->
+                        <div class="resize-handle-vertical" id="diff-nav-resize"></div>
+
+                        <!-- Diff Renderer Panel (main content area for showing diffs) -->
+                        <div class="diff-renderer-panel" id="diff-renderer-panel">
+                            <div class="diff-renderer-header">
+                                <div class="diff-renderer-title">
+                                    <span id="diff-file-name">No file selected</span>
+                                </div>
+                                <div class="diff-renderer-controls">
+                                    <button class="btn-small" id="accept-diff-btn" title="Accept changes" disabled>Accept</button>
+                                    <button class="btn-small" id="reject-diff-btn" title="Reject changes" disabled>Reject</button>
+                                    <button class="icon-btn" id="close-diff-btn" title="Close diff">✖</button>
+                                </div>
+                            </div>
+                            <div class="diff-renderer-content" id="diff-renderer-content">
+                                <div class="diff-renderer-empty">
+                                    <p>Select a file from the navigator to view its diff</p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-                <div class="terminal-container" id="terminal-container">
-                    <!-- xterm.js terminal instances rendered here -->
+
+                <!-- History Tab Content -->
+                <div class="tab-content" id="tab-history">
+                    <div class="history-panel">
+                        <div class="history-header">
+                            <h2>Conversation History</h2>
+                            <div class="history-controls">
+                                <button class="btn-small" id="export-history-btn" title="Export history">Export</button>
+                                <button class="btn-small" id="clear-history-btn" title="Clear history">Clear All</button>
+                            </div>
+                        </div>
+                        <div class="history-content" id="history-content">
+                            <div class="history-empty">
+                                <p>No conversation history</p>
+                                <small>Your chat messages will appear here</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings Tab Content -->
+                <div class="tab-content" id="tab-settings">
+                    <div class="settings-panel">
+                        <div class="settings-header">
+                            <h2>Settings</h2>
+                        </div>
+                        <div class="settings-content">
+                            <div class="settings-group">
+                                <h3>Terminal Settings</h3>
+                                <div class="setting-item">
+                                    <label for="terminal-scrollback">Scrollback Buffer Size:</label>
+                                    <input type="number" id="terminal-scrollback" value="100000" min="1000" max="200000" step="1000">
+                                    <small>Number of lines to keep in terminal history (1,000-200,000). Default: 100,000 lines for extensive command history</small>
+                                </div>
+                                <div class="setting-item">
+                                    <label for="terminal-font-size">Font Size:</label>
+                                    <input type="number" id="terminal-font-size" value="14" min="8" max="24" step="1">
+                                    <small>Terminal font size in pixels (8-24)</small>
+                                </div>
+                            </div>
+
+                            <div class="settings-group">
+                                <h3>Chat Settings</h3>
+                                <div class="setting-item">
+                                    <label for="chat-history-limit">History Message Limit:</label>
+                                    <input type="number" id="chat-history-limit" value="100" min="10" max="1000" step="10">
+                                    <small>Maximum messages to store (10-1000)</small>
+                                </div>
+                                <div class="setting-item">
+                                    <label>
+                                        <input type="checkbox" id="auto-scroll-chat" checked>
+                                        Auto-scroll to bottom
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="settings-group">
+                                <h3>Diff View Settings</h3>
+                                <div class="setting-item">
+                                    <label>
+                                        <input type="checkbox" id="auto-scan-diffs" checked>
+                                        Auto-scan for git changes after Claude responds
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="settings-actions">
+                                <button class="btn-primary" id="save-settings-btn">Save Settings</button>
+                                <button class="btn-secondary" id="reset-settings-btn">Reset to Defaults</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
