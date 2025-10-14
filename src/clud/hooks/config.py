@@ -96,10 +96,21 @@ def load_hook_config(config_file: Path | str | None = None) -> HookConfig:
         # Check for .clud in current directory and parent directories
         current_dir = Path.cwd()
         for parent in [current_dir] + list(current_dir.parents):
-            clud_file = parent / ".clud"
-            if clud_file.exists():
-                _load_from_file(config, clud_file)
-                break
+            clud_path = parent / ".clud"
+            if clud_path.exists():
+                # If .clud is a file, use it directly
+                if clud_path.is_file():
+                    _load_from_file(config, clud_path)
+                    break
+                # If .clud is a directory, look for config file inside
+                elif clud_path.is_dir():
+                    # Try common config file names
+                    for config_name in ["config", "config.ini", "config.yaml", "config.yml"]:
+                        config_file_path = clud_path / config_name
+                        if config_file_path.is_file():
+                            _load_from_file(config, config_file_path)
+                            break
+                    break
 
     # Override with environment variables
     _load_from_env(config)
@@ -123,6 +134,11 @@ def _load_from_file(config: HookConfig, config_file: Path) -> None:
     try:
         if not config_file.exists():
             logger.debug(f"Configuration file not found: {config_file}")
+            return
+
+        # Check if it's actually a file (not a directory)
+        if not config_file.is_file():
+            logger.debug(f"Configuration path is not a file: {config_file}")
             return
 
         # Read the file
