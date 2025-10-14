@@ -203,6 +203,19 @@
             }
         }
     </style>
+    <script>
+        function openWebUI() {
+            // Default webui port
+            const webuiUrl = 'http://localhost:8888';
+
+            // Try to open in new tab
+            const newWindow = window.open(webuiUrl, '_blank');
+
+            if (!newWindow) {
+                alert('Unable to open Web UI. Please allow pop-ups or manually navigate to:\n\n' + webuiUrl + '\n\nMake sure you have the Web UI running first:\nclud --webui');
+            }
+        }
+    </script>
 </head>
 <body>
     <div class="container">
@@ -223,15 +236,27 @@
             <p class="note">(Telegram doesn't allow embedding bot pages for security reasons)</p>
         </div>
 
+        <!-- Web Chat Section -->
+        <div class="top-section" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white;">
+            <h1 style="color: white;">💬 Direct Web Chat - Available Now!</h1>
+            <p style="color: rgba(255, 255, 255, 0.95);">Chat directly in your browser with full functionality</p>
+            <button onclick="openWebUI()" class="open-bot-button" style="background: white; color: #28a745; border: 2px solid white;">
+                Launch Web Chat Interface
+            </button>
+            <p style="color: rgba(255, 255, 255, 0.8); font-size: 14px; margin-top: 15px;">
+                Run <code style="background: rgba(0,0,0,0.2); padding: 4px 8px; border-radius: 4px;">clud --webui</code> in your terminal first
+            </p>
+        </div>
+
         <!-- Coming Soon Section -->
         <div class="coming-soon">
-            <h2>Coming Soon <span class="badge">Preview</span></h2>
-            <p>Exciting new features are on the way!</p>
+            <h2>More Features <span class="badge">Coming Soon</span></h2>
+            <p>Exciting enhancements are on the way!</p>
 
             <div class="features">
                 <div class="feature-item">
-                    <h3>💬 Direct Chat Integration</h3>
-                    <p>Chat with Claude Code directly from this page without leaving your browser</p>
+                    <h3>📊 Usage Dashboard</h3>
+                    <p>Track your bot interactions, token usage, and conversation history</p>
                 </div>
 
                 <div class="feature-item">

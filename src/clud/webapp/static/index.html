@@ -88,6 +88,26 @@
             font-family: 'Courier New', monospace;
             font-size: 12px;
         }
+
+        .action-button {
+            display: inline-block;
+            padding: 12px 24px;
+            margin-top: 20px;
+            background-color: var(--tg-theme-button-color, #0088cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+
+        .action-button:hover {
+            opacity: 0.9;
+        }
+
+        .action-button:active {
+            opacity: 0.8;
+        }
     </style>
 </head>
 <body>
@@ -113,6 +133,12 @@
                 <span class="info-label">Working Dir:</span>
                 <span class="info-value" id="cwd" style="font-size: 11px;">-</span>
             </div>
+        </div>
+
+        <div id="chat-link-container" style="display: none;">
+            <a href="chat.html" class="action-button">
+                💬 Start Chatting with Claude
+            </a>
         </div>
     </div>
 
@@ -200,6 +226,12 @@
             statusEl.innerHTML = '<span class="success">Telegram Web App attached successfully</span>';
             infoBoxEl.style.display = 'block';
             attachComplete = true;
+
+            // Show chat link button
+            const chatLinkContainer = document.getElementById('chat-link-container');
+            if (chatLinkContainer) {
+                chatLinkContainer.style.display = 'block';
+            }
         }
 
         // Show error state

@@ -51,7 +51,7 @@ class TelegramWebAppHandler(SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_POST(self) -> None:
-        """Handle POST requests - save chat ID."""
+        """Handle POST requests - save chat ID or handle chat messages."""
         if self.path == "/api/save-chat-id":
             try:
                 # Read request body
@@ -100,6 +100,47 @@ class TelegramWebAppHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
                 response = {"status": "error", "message": str(e)}
                 self.wfile.write(json.dumps(response).encode("utf-8"))
+
+        elif self.path == "/api/chat":
+            try:
+                # Read request body
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode("utf-8")
+                data = json.loads(body)
+
+                chat_id = data.get("chat_id", "").strip()
+                message = data.get("message", "").strip()
+
+                if not chat_id or not message:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    response = {"status": "error", "message": "chat_id and message are required"}
+                    self.wfile.write(json.dumps(response).encode("utf-8"))
+                    return
+
+                # Import here to avoid circular dependencies
+                from ..chat_agent import process_chat_message
+
+                # Process message with Claude agent
+                agent_response = process_chat_message(message, chat_id, self.original_cwd)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                response = {"status": "ok", "response": agent_response}
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                response = {"status": "error", "message": str(e)}
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+
         else:
             # Unknown POST endpoint
             self.send_response(404)

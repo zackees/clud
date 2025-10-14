@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Code - Direct Chat</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #000000);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #header {
+            padding: 16px;
+            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            border-bottom: 1px solid var(--tg-theme-hint-color, #ccc);
+        }
+
+        #status {
+            font-size: 14px;
+            color: var(--tg-theme-hint-color, #999);
+        }
+
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message {
+            padding: 10px 14px;
+            border-radius: 12px;
+            max-width: 80%;
+            word-wrap: break-word;
+            line-height: 1.4;
+        }
+
+        .message.user {
+            background-color: var(--tg-theme-button-color, #0088cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot {
+            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.system {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+            margin: 0 auto;
+            max-width: 90%;
+            text-align: center;
+            font-size: 13px;
+        }
+
+        .message-timestamp {
+            font-size: 11px;
+            color: var(--tg-theme-hint-color, #999);
+            margin-top: 4px;
+        }
+
+        .message.user .message-timestamp {
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        #input-container {
+            padding: 12px 16px;
+            border-top: 1px solid var(--tg-theme-hint-color, #ccc);
+            display: flex;
+            gap: 8px;
+            background-color: var(--tg-theme-bg-color, #ffffff);
+        }
+
+        #message-input {
+            flex: 1;
+            padding: 10px 14px;
+            border: 1px solid var(--tg-theme-hint-color, #ccc);
+            border-radius: 20px;
+            background-color: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #000000);
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        #message-input:focus {
+            border-color: var(--tg-theme-button-color, #0088cc);
+        }
+
+        #send-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 20px;
+            background-color: var(--tg-theme-button-color, #0088cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            cursor: pointer;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+
+        #send-btn:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+
+        #send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        code {
+            background-color: rgba(0, 0, 0, 0.05);
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+
+        pre {
+            background-color: rgba(0, 0, 0, 0.05);
+            padding: 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 8px 0;
+        }
+
+        pre code {
+            background-color: transparent;
+            padding: 0;
+        }
+
+        .typing-indicator {
+            display: none;
+            padding: 10px 14px;
+            border-radius: 12px;
+            max-width: 80%;
+            background-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            border-bottom-left-radius: 4px;
+        }
+
+        .typing-indicator.visible {
+            display: block;
+        }
+
+        .typing-indicator span {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--tg-theme-hint-color, #999);
+            margin-right: 4px;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% {
+                transform: translateY(0);
+                opacity: 0.5;
+            }
+            30% {
+                transform: translateY(-10px);
+                opacity: 1;
+            }
+        }
+
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 12px 16px;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h2>Claude Code Assistant</h2>
+        <div id="status">Initializing...</div>
+    </div>
+
+    <div id="messages">
+        <!-- Messages will be appended here -->
+    </div>
+
+    <div class="typing-indicator" id="typing-indicator">
+        <span></span><span></span><span></span>
+    </div>
+
+    <div id="input-container">
+        <input
+            type="text"
+            id="message-input"
+            placeholder="Type your message..."
+            disabled
+        />
+        <button id="send-btn" disabled>Send</button>
+    </div>
+
+    <script>
+        // Initialize Telegram WebApp
+        const tg = window.Telegram.WebApp;
+
+        // Expand to full height
+        tg.expand();
+
+        // Set theme and signal ready
+        tg.ready();
+
+        // UI elements
+        const messagesDiv = document.getElementById('messages');
+        const statusDiv = document.getElementById('status');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const typingIndicator = document.getElementById('typing-indicator');
+
+        // Chat state
+        let chatId = null;
+        let isAgentResponding = false;
+
+        // Get chat ID from Telegram or query params
+        function getChatId() {
+            // Try Telegram user data first
+            if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+                return tg.initDataUnsafe.user.id.toString();
+            }
+
+            // Fall back to URL query parameter
+            const params = new URLSearchParams(window.location.search);
+            return params.get('chat_id');
+        }
+
+        // Format timestamp
+        function formatTime(date) {
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        // Append message to chat
+        function appendMessage(sender, text, timestamp = null) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}`;
+
+            const textDiv = document.createElement('div');
+            textDiv.textContent = text;
+            messageDiv.appendChild(textDiv);
+
+            if (timestamp) {
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'message-timestamp';
+                timeDiv.textContent = formatTime(timestamp);
+                messageDiv.appendChild(timeDiv);
+            }
+
+            messagesDiv.appendChild(messageDiv);
+
+            // Auto-scroll to bottom
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Show/hide typing indicator
+        function setTypingIndicator(visible) {
+            if (visible) {
+                typingIndicator.classList.add('visible');
+            } else {
+                typingIndicator.classList.remove('visible');
+            }
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Send message to backend API
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || isAgentResponding) return;
+
+            // Show user message immediately
+            appendMessage('user', message, new Date());
+
+            // Clear input and disable controls
+            messageInput.value = '';
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            isAgentResponding = true;
+
+            // Show typing indicator
+            setTypingIndicator(true);
+            statusDiv.textContent = 'Claude is thinking...';
+
+            try {
+                // Send to backend API
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        message: message,
+                        timestamp: Date.now()
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.status === 'ok') {
+                    // Show bot response
+                    appendMessage('bot', data.response, new Date());
+                    statusDiv.textContent = 'Ready';
+                } else {
+                    // Show error
+                    appendMessage('system', `Error: ${data.message || 'Unknown error'}`);
+                    statusDiv.textContent = 'Error occurred';
+                }
+
+            } catch (error) {
+                console.error('Error sending message:', error);
+                appendMessage('system', `Failed to send message: ${error.message}`);
+                statusDiv.textContent = 'Connection error';
+            } finally {
+                // Re-enable controls
+                setTypingIndicator(false);
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+                messageInput.focus();
+                isAgentResponding = false;
+            }
+        }
+
+        // Handle send button click
+        sendBtn.addEventListener('click', sendMessage);
+
+        // Handle Enter key
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // Initialize chat
+        async function initialize() {
+            console.log('Initializing chat...');
+
+            // Get chat ID
+            chatId = getChatId();
+
+            if (!chatId) {
+                statusDiv.innerHTML = '<span style="color: #dc3545;">Error: No chat ID available</span>';
+                appendMessage('system', 'Could not determine chat ID. Please access this page via the Telegram bot or provide chat_id in URL.');
+                return;
+            }
+
+            // Verify backend is ready
+            try {
+                const response = await fetch('/api/info');
+                const data = await response.json();
+
+                if (data.status === 'ready') {
+                    statusDiv.textContent = 'Ready - Start chatting!';
+                    messageInput.disabled = false;
+                    sendBtn.disabled = false;
+                    messageInput.focus();
+
+                    // Show welcome message
+                    appendMessage('bot', 'Hello! I\'m Claude Code. How can I help you today?', new Date());
+                } else {
+                    statusDiv.textContent = 'Backend not ready';
+                    appendMessage('system', 'Backend service is not ready. Please try again later.');
+                }
+            } catch (error) {
+                console.error('Failed to initialize:', error);
+                statusDiv.textContent = 'Initialization failed';
+                appendMessage('system', `Failed to connect to backend: ${error.message}`);
+            }
+        }
+
+        // Run on page load
+        initialize();
+
+        // For testing in browser (not in Telegram)
+        if (!window.Telegram.WebApp.initData) {
+            console.warn('Running outside Telegram - demo mode');
+            // In demo mode, use a test chat ID if none provided
+            if (!chatId) {
+                chatId = 'demo';
+            }
+        }
+    </script>
+</body>
+</html>
