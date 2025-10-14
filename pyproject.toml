@@ -35,7 +35,7 @@ dependencies = [
     "python-multipart>=0.0.6",
     "psutil>=5.9.0",
     "python-telegram-bot>=20.0",
-    "codeup>=1.0.15",
+    "codeup>=1.0.18",
 ]
 # Change this with the version number bump.
 version = "1.0.23"

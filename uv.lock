@@ -418,7 +418,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "alembic", specifier = ">=1.12.0" },
     { name = "appdirs", specifier = ">=1.4.4" },
-    { name = "codeup", specifier = ">=1.0.15" },
+    { name = "codeup", specifier = ">=1.0.18" },
     { name = "cryptography", marker = "extra == 'keyring-fallbacks'", specifier = ">=3.0.0" },
     { name = "disklru", specifier = ">=0.1.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
@@ -452,7 +452,7 @@ provides-extras = ["dev", "keyring-fallbacks", "posix", "full"]
 
 [[package]]
 name = "codeup"
-version = "1.0.15"
+version = "1.0.18"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -464,7 +464,7 @@ dependencies = [
     { name = "semi-secret" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/09/a4c7e63ce8f55861d21f4ac8ee121c2f5502cc43076dbec1aa8c28513b8d/codeup-1.0.15-py3-none-any.whl", hash = "sha256:c0ac3c9d76e9bb890bc965bd9e354084792d8a168120596b54df5db34bc8f6d2", size = 36979, upload-time = "2025-10-08T16:43:55.259Z" },
+    { url = "https://files.pythonhosted.org/packages/92/dc/79c399ec000f12601eaaf9c21cb39fc38f21a488223ff7f7b94fb150a645/codeup-1.0.18-py3-none-any.whl", hash = "sha256:e855e0d32058e6a686a3d62b8a15cb264f53240ade39a3bd357a81889da7d25b", size = 38533, upload-time = "2025-10-14T21:22:24.915Z" },
 ]
 
 [[package]]
