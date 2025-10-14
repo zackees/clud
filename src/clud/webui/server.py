@@ -86,7 +86,11 @@ def create_app(static_dir: Path) -> FastAPI:
                 if message_type == "chat":
                     # Handle chat message
                     user_message = data.get("message", "")
-                    project_path = data.get("project_path", os.getcwd())
+                    project_path = data.get("project_path")
+
+                    # Validate project_path - if empty, invalid, or just "/", use server's cwd
+                    if not project_path or project_path == "/" or not os.path.isdir(project_path):
+                        project_path = os.getcwd()
 
                     # Send acknowledgment
                     await websocket.send_json({"type": "ack", "status": "processing"})
@@ -148,6 +152,11 @@ def create_app(static_dir: Path) -> FastAPI:
     async def health_check() -> JSONResponse:
         """Health check endpoint."""
         return JSONResponse(content={"status": "ok"})
+
+    @app.get("/api/cwd")
+    async def get_cwd() -> JSONResponse:
+        """Get current working directory."""
+        return JSONResponse(content={"cwd": os.getcwd()})
 
     # Mount static files (must be last)
     app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")

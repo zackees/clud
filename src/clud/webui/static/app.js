@@ -50,10 +50,22 @@
     }
 
     // Project Management
-    function initProjectSelector() {
-        // Set current directory as default
-        currentProject = window.location.pathname.replace(/\\/g, '/');
-        projectSelector.innerHTML = `<option value="${currentProject}">Current Directory</option>`;
+    async function initProjectSelector() {
+        try {
+            // Fetch current working directory from server
+            const response = await fetch('/api/cwd');
+            const data = await response.json();
+            currentProject = data.cwd;
+
+            // Display the directory name (last part of path)
+            const dirName = currentProject.split(/[\\/]/).filter(Boolean).pop() || currentProject;
+            projectSelector.innerHTML = `<option value="${currentProject}">${dirName}</option>`;
+        } catch (error) {
+            console.error('Error fetching current directory:', error);
+            // Fallback: let server decide (will use its cwd)
+            currentProject = null;
+            projectSelector.innerHTML = `<option value="">Current Directory</option>`;
+        }
     }
 
     function handleProjectChange() {
@@ -164,7 +176,7 @@
         const payload = {
             type: 'chat',
             message: message,
-            project_path: currentProject || process.cwd()
+            project_path: currentProject || null
         };
 
         ws.send(JSON.stringify(payload));
