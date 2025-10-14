@@ -1042,7 +1042,19 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
         # Check if DONE.md was created
         if done_file.exists():
-            print(f"\n✅ .agent_task/DONE.md detected after iteration {iteration_num} — halting early.", file=sys.stderr)
+            # Validate that lint and test pass before accepting DONE.md
+            print(f"\n📋 .agent_task/DONE.md detected after iteration {iteration_num}.", file=sys.stderr)
+            print("Validating with `lint-test`...", file=sys.stderr)
+
+            # Run lint-test
+            lint_test_result = subprocess.run(["lint-test"], capture_output=True, shell=True)
+            if lint_test_result.returncode != 0:
+                print("❌ lint-test failed. Deleting DONE.md and continuing loop.", file=sys.stderr)
+                done_file.unlink()
+                continue
+
+            # Passed - accept DONE.md
+            print("✅ lint-test passed. Accepting DONE.md and halting early.", file=sys.stderr)
             break
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)
