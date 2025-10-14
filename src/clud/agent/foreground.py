@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from ..streaming_ui import StreamingUI
 from ..telegram_bot import TelegramBot
 from .completion import detect_agent_completion
 from .foreground_args import Args, parse_args
+from .task_info import TaskInfo
 
 # Get credential store once at module level
 keyring = get_credential_store()
@@ -700,6 +702,25 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
     # DONE.md lives at project root, not .agent_task/
     done_file = Path("DONE.md")
+    info_file = agent_task_dir / "info.json"
+
+    # Initialize or load task info
+    user_prompt = args.prompt if args.prompt else args.message
+    task_info = TaskInfo.load(info_file)
+
+    if task_info is None:
+        # Create new task info for fresh session
+        task_info = TaskInfo(
+            session_id=str(uuid.uuid4()),
+            start_time=time.time(),
+            prompt=user_prompt,
+            total_iterations=loop_count,
+        )
+        task_info.save(info_file)
+    else:
+        # Update existing task info for continuation
+        task_info.total_iterations = loop_count
+        task_info.save(info_file)
 
     # Start from determined iteration (may be > 1 if continuing previous session)
     for i in range(start_iteration - 1, loop_count):
@@ -707,10 +728,13 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         print(f"\n--- Iteration {iteration_num}/{loop_count} ---", file=sys.stderr)
 
         # Print the user's prompt for this iteration
-        user_prompt = args.prompt if args.prompt else args.message
         if user_prompt:
             print(f"Prompt: {user_prompt}", file=sys.stderr)
             print(file=sys.stderr)  # Empty line for spacing
+
+        # Mark iteration start
+        task_info.start_iteration(iteration_num)
+        task_info.save(info_file)
 
         # Build command with prompt injection, including iteration context
         cmd = _build_claude_command(
@@ -738,13 +762,25 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         else:
             returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
+        # Mark iteration end
+        error_msg = f"Exit code: {returncode}" if returncode != 0 else None
+        task_info.end_iteration(returncode, error_msg)
+        task_info.save(info_file)
+
         if returncode != 0 and args.verbose:
             print(f"Warning: Iteration {iteration_num} exited with code {returncode}", file=sys.stderr)
 
         # Check if DONE.md was created (at project root)
         if done_file.exists():
             print(f"\n✅ DONE.md detected at project root after iteration {iteration_num} — halting early.", file=sys.stderr)
+            task_info.mark_completed()
+            task_info.save(info_file)
             break
+
+    # Mark completion if we finished all iterations
+    if not done_file.exists():
+        task_info.mark_completed(error="Completed all iterations without DONE.md")
+        task_info.save(info_file)
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)
 
