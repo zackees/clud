@@ -498,14 +498,14 @@ def run_clud_subprocess(
 
 
 def handle_lint_command() -> int:
-    """Handle the --lint command by running clud with a message to run codeup linting."""
-    lint_prompt = "run codeup --lint --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
+    """Handle the --lint command by running clud with a message to run lint-test."""
+    lint_prompt = "run lint-test, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
     return run_clud_subprocess(lint_prompt)
 
 
 def handle_test_command() -> int:
-    """Handle the --test command by running clud with a message to run codeup testing."""
-    test_prompt = "run codeup --test --dry-run, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
+    """Handle the --test command by running clud with a message to run lint-test."""
+    test_prompt = "run lint-test, if it succeeds halt. Else fix issues and re-run, do this up to 5 times or until it succeeds"
     return run_clud_subprocess(test_prompt)
 
 
@@ -786,12 +786,7 @@ def is_github_url(url: str) -> bool:
 
 def generate_github_fix_prompt(url: str) -> str:
     """Generate a prompt for fixing issues based on a GitHub URL."""
-    base_fix_instructions = (
-        "run `codeup --lint --dry-run` upto 5 times, fixing on each time or until it passes. "
-        "and if it succeed then run `codeup --test --dry-run` upto 5 times, fixing each time until it succeeds. "
-        "Finally run `codeup --lint --dry-run` and fix until it passes (upto 5 times) then halt. "
-        "If you run into a locked file then try two times, same with misc system error. Else halt."
-    )
+    base_fix_instructions = "run `lint-test` upto 5 times, fixing on each time or until it passes. If you run into a locked file then try two times, same with misc system error. Else halt."
 
     github_prompt = f"""First, download the logs from the GitHub URL: {url}
 Use the `gh` command if available (e.g., `gh run view <run_id> --log` for workflow runs, or `gh pr view <pr_number>` for pull requests).
@@ -811,12 +806,7 @@ def handle_fix_command(url: str | None = None) -> int:
         fix_prompt = generate_github_fix_prompt(url)
     else:
         # Default fix prompt
-        fix_prompt = (
-            "run `codeup --lint --dry-run` upto 5 times, fixing on each time or until it passes. "
-            "and if it succeed then run `codeup --test --dry-run` upto 5 times, fixing each time until it succeeds. "
-            "Finally run `codeup --lint --dry-run` and fix until it passes (upto 5 times) then halt. "
-            "If you run into a locked file then try two times, same with misc system error. Else halt."
-        )
+        fix_prompt = "run `lint-test` upto 5 times, fixing on each time or until it passes. If you run into a locked file then try two times, same with misc system error. Else halt."
     return run_clud_subprocess(fix_prompt)
 
 
@@ -1531,8 +1521,8 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --login              Configure API key for Claude")
             print("  --task PATH          Open task file in editor")
             print("  --code [PORT]        Launch code-server in browser (default port: 8080)")
-            print("  --lint               Run global linting with codeup")
-            print("  --test               Run tests with codeup")
+            print("  --lint               Run lint and tests with lint-test")
+            print("  --test               Run lint and tests with lint-test")
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --kanban             Launch vibe-kanban board (installs Node 22 if needed)")

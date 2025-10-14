@@ -63,9 +63,9 @@ clud fix https://github.com/...   # Fix issues from GitHub URL logs
 ```
 
 Fix mode runs:
-1. `codeup --lint --dry-run` up to 5 times, fixing issues each iteration
-2. `codeup --test --dry-run` up to 5 times, fixing issues each iteration
-3. Final lint pass to ensure code quality
+1. `lint-test` command up to 5 times, fixing issues each iteration
+
+**Note:** `lint-test` is a safer alternative that wraps `codeup --lint --dry-run` and `codeup --test --dry-run` without exposing the command name to LLMs, preventing accidental bare `codeup` invocations.
 
 #### Up Mode - Project Maintenance
 Run the global `codeup` command with auto-fix capabilities:
