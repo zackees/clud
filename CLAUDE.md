@@ -291,3 +291,25 @@ The hook system provides an event-based architecture for intercepting and forwar
       unittest.main()
   ```
 - This allows tests to be run both via pytest and directly as Python scripts
+
+### Process Execution Standard
+- **MANDATORY**: Prefer `running-process` over `subprocess` for executing external commands
+- **CRITICAL**: NEVER use `subprocess.run()` with `capture_output=True` for long-running processes
+  - `capture_output=True` buffers stdout/stderr in memory, causing processes to **stall** when buffers fill
+  - This is especially problematic for commands like `lint-test`, `pytest`, or any process with substantial output
+- **ALWAYS** use `RunningProcess.run_streaming()` for commands that may produce significant output
+  - Streams output to console in real-time without buffering
+  - Prevents stdout/stderr buffer stalls
+  - Provides better user experience with live output
+- Example of proper process execution:
+  ```python
+  from running_process import RunningProcess
+
+  # Good: Streaming output for long-running processes
+  returncode = RunningProcess.run_streaming(["lint-test"])
+
+  # Bad: Can stall on long output!
+  # result = subprocess.run(["lint-test"], capture_output=True)
+  ```
+- **When to use subprocess**: Only for simple, short-lived commands where you need to capture a small amount of output
+- **Why this matters**: Stdout/stderr buffers have limited capacity (typically 64KB). When full, the process blocks until the buffer is read. With `capture_output=True`, the buffer is only read after the process completes, creating a deadlock for processes with large output.

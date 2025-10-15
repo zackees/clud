@@ -1168,9 +1168,9 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             print(f"\n📋 DONE.md detected at project root after iteration {iteration_num}.", file=sys.stderr)
             print("Validating with `lint-test`...", file=sys.stderr)
 
-            # Run lint-test
-            lint_test_result = subprocess.run(["lint-test"], capture_output=True, shell=True)
-            if lint_test_result.returncode != 0:
+            # Run lint-test with streaming output (avoid buffer stalls)
+            lint_test_returncode = RunningProcess.run_streaming(["lint-test"])
+            if lint_test_returncode != 0:
                 print("❌ lint-test failed. Deleting DONE.md and continuing loop.", file=sys.stderr)
                 done_file.unlink()
                 continue
