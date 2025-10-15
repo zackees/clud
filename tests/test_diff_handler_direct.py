@@ -1,6 +1,7 @@
 """Direct test of DiffHandler path normalization."""
 
 import logging
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,54 @@ logger = logging.getLogger(__name__)
 
 class TestDiffHandlerDirect(unittest.TestCase):
     """Test DiffHandler directly."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        """Create test project directory if it doesn't exist."""
+        test_project_dir = Path(__file__).parent / "artifacts" / "test_diff_project"
+        test_project_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize git repo if not already initialized
+        if not (test_project_dir / ".git").exists():
+            subprocess.run(
+                ["git", "init"],
+                cwd=str(test_project_dir),
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=str(test_project_dir),
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test User"],
+                cwd=str(test_project_dir),
+                check=True,
+                capture_output=True,
+            )
+
+            # Create initial README.md
+            readme_path = test_project_dir / "README.md"
+            readme_path.write_text("# Test Project\n\nThis is a test project.\n", encoding="utf-8")
+
+            # Commit the initial file
+            subprocess.run(
+                ["git", "add", "README.md"],
+                cwd=str(test_project_dir),
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "Initial commit"],
+                cwd=str(test_project_dir),
+                check=True,
+                capture_output=True,
+            )
+
+            # Make a modification to create a diff
+            readme_path.write_text("# Test Project\n\nThis is a test project.\n\nModified for testing.\n", encoding="utf-8")
 
     def test_path_normalization(self) -> None:
         """Test that path normalization works correctly."""
