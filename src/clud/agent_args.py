@@ -32,6 +32,9 @@ class Args:
     kanban: bool = False
     telegram_web: bool = False  # For --telegram/-tg (web app mode)
     telegram_token: str | None = None  # Token for telegram web app
+    telegram_server: bool = False  # For --telegram-server (advanced integration)
+    telegram_server_port: int | None = None  # Port for telegram server
+    telegram_server_config: str | None = None  # Path to telegram config file
     code: bool = False
     code_port: int | None = None
     webui: bool = False
@@ -75,6 +78,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     fix = "--fix" in args_copy
     kanban = "--kanban" in args_copy
     telegram_web = "--telegram" in args_copy or "-tg" in args_copy
+    telegram_server = "--telegram-server" in args_copy
     code = "--code" in args_copy
     webui = "--webui" in args_copy
     api_server = "--api-server" in args_copy
@@ -124,6 +128,21 @@ def parse_args(args: list[str] | None = None) -> Args:
         if api_idx + 1 < len(args_copy) and not args_copy[api_idx + 1].startswith("-"):
             with contextlib.suppress(ValueError):
                 api_port = int(args_copy[api_idx + 1])
+
+    # Extract telegram server port and config arguments if present
+    telegram_server_port = None
+    telegram_server_config = None
+    if "--telegram-server" in args_copy:
+        tg_server_idx = args_copy.index("--telegram-server")
+        # Check for optional port argument
+        if tg_server_idx + 1 < len(args_copy) and not args_copy[tg_server_idx + 1].startswith("-"):
+            with contextlib.suppress(ValueError):
+                telegram_server_port = int(args_copy[tg_server_idx + 1])
+        # Check for --telegram-config flag
+        if "--telegram-config" in args_copy:
+            tg_config_idx = args_copy.index("--telegram-config")
+            if tg_config_idx + 1 < len(args_copy) and not args_copy[tg_config_idx + 1].startswith("-"):
+                telegram_server_config = args_copy[tg_config_idx + 1]
 
     # Extract telegram token argument if present
     telegram_token = None
@@ -311,6 +330,9 @@ def parse_args(args: list[str] | None = None) -> Args:
         kanban=kanban,
         telegram_web=telegram_web,
         telegram_token=telegram_token,
+        telegram_server=telegram_server,
+        telegram_server_port=telegram_server_port,
+        telegram_server_config=telegram_server_config,
         code=code,
         code_port=code_port,
         webui=webui,

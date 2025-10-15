@@ -129,6 +129,43 @@ The Web UI is a FastAPI-based server that wraps Claude Code execution and provid
 
 **Inspired by:** [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui) - Python/FastAPI implementation with minimal dependencies.
 
+### Advanced Telegram Integration
+
+Interact with Claude Code through Telegram with a synchronized web dashboard for monitoring conversations:
+
+```bash
+clud --telegram-server                    # Launch server on default port 8889
+clud --telegram-server 9000               # Launch on custom port
+clud --telegram-server --telegram-config telegram_config.yaml  # Use config file
+```
+
+**Features:**
+- **Telegram Bot Integration**: Send messages to your bot, get responses from Claude Code
+- **Real-time Web Dashboard**: Monitor all Telegram conversations in a web interface
+- **Multi-Session Support**: Handle multiple concurrent users with isolated sessions
+- **Message History**: Full conversation history synchronized between Telegram and web
+- **WebSocket Streaming**: Real-time updates with minimal latency
+- **SvelteKit Frontend**: Modern, responsive UI with dark/light theme support
+- **Session Management**: View active sessions, switch between users, monitor activity
+
+**Quick Setup:**
+1. Get a bot token from [@BotFather](https://t.me/BotFather) on Telegram
+2. Set your bot token: `export TELEGRAM_BOT_TOKEN="your_token_here"`
+3. Start the server: `clud --telegram-server`
+4. Message your bot on Telegram and watch responses appear on both Telegram and the web dashboard
+
+**Configuration:**
+- Environment variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEB_PORT`, `TELEGRAM_ALLOWED_USERS`
+- Configuration file: See `telegram_config.example.yaml` for all options
+- Example environment file: `.env.example`
+
+**Documentation:**
+- Full guide: [docs/telegram-integration.md](docs/telegram-integration.md)
+- API reference, troubleshooting, security considerations, and more
+
+**Architecture:**
+The integration uses a SessionManager to orchestrate message flow between Telegram, Claude Code instances (via InstancePool), and web clients (via WebSocket). Each Telegram user gets their own isolated session with persistent message history.
+
 ### Hook System & Message Handler API
 
 Clud includes a sophisticated event-based architecture for intercepting and forwarding execution events to external systems:
@@ -217,6 +254,7 @@ clud --test                       # Run testing workflow
 clud --fix [URL]                  # Fix linting and tests
 clud --kanban                     # Launch kanban board
 clud --webui [PORT]               # Launch Web UI (default port: 8888)
+clud --telegram-server [PORT]     # Launch Telegram integration server (default port: 8889)
 clud --help                       # Show help
 ```
 

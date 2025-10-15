@@ -1,5 +1,6 @@
-"""Local daemon server for agent coordination."""
+"""Local daemon server for agent coordination and telegram service management."""
 
+import asyncio
 import http.server
 import json
 import logging
@@ -8,6 +9,7 @@ import socket
 import socketserver
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ class DaemonRequestHandler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for daemon endpoints."""
 
     registry: AgentRegistry  # Set by server
+    telegram_manager: Any  # TelegramServiceManager, set by server
 
     def log_message(self, format: str, *args: Any) -> None:
         """Override to use logging instead of stderr."""
@@ -60,6 +63,8 @@ class DaemonRequestHandler(http.server.BaseHTTPRequestHandler):
         """Handle GET requests."""
         if self.path == "/health":
             self._handle_health()
+        elif self.path == "/telegram/status":
+            self._handle_telegram_status()
         elif self.path == "/agents":
             self._handle_list_agents()
         elif self.path.startswith("/agents/"):
@@ -70,7 +75,11 @@ class DaemonRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """Handle POST requests."""
-        if self.path == "/agents/register":
+        if self.path == "/telegram/start":
+            self._handle_telegram_start()
+        elif self.path == "/telegram/stop":
+            self._handle_telegram_stop()
+        elif self.path == "/agents/register":
             self._handle_register_agent()
         elif self.path.startswith("/agents/") and self.path.endswith("/heartbeat"):
             agent_id = self.path.split("/")[-2]
@@ -189,9 +198,187 @@ class DaemonRequestHandler(http.server.BaseHTTPRequestHandler):
             logger.warning(f"Stop failed - agent not found: {agent_id}")
             self._send_error_response("Agent not found", 404)
 
+    def _handle_telegram_status(self) -> None:
+        """Handle telegram service status request."""
+        status = self.telegram_manager.get_status()
+        self._send_json_response(status)
+
+    def _handle_telegram_start(self) -> None:
+        """Handle telegram service start request."""
+        logger.debug("Received telegram start request")
+
+        data = self._read_json_body() or {}
+        config_path = data.get("config_path")
+        port = data.get("port")
+
+        try:
+            success = self.telegram_manager.start_service(config_path=config_path, port=port)
+            if success:
+                self._send_json_response({"status": "started"}, 201)
+            else:
+                self._send_error_response("Failed to start telegram service", 500)
+        except Exception as e:
+            logger.error(f"Error starting telegram service: {e}")
+            self._send_error_response(f"Failed to start telegram service: {e}", 500)
+
+    def _handle_telegram_stop(self) -> None:
+        """Handle telegram service stop request."""
+        logger.debug("Received telegram stop request")
+
+        try:
+            success = self.telegram_manager.stop_service()
+            if success:
+                self._send_json_response({"status": "stopped"})
+            else:
+                self._send_error_response("Telegram service not running", 400)
+        except Exception as e:
+            logger.error(f"Error stopping telegram service: {e}")
+            self._send_error_response(f"Failed to stop telegram service: {e}", 500)
+
+
+class TelegramServiceManager:
+    """Manages telegram service lifecycle within the daemon."""
+
+    def __init__(self) -> None:
+        """Initialize telegram service manager."""
+        self.is_running = False
+        self.server_thread: threading.Thread | None = None
+        self.telegram_server: Any = None  # TelegramServer instance
+        self.asyncio_loop: asyncio.AbstractEventLoop | None = None
+        self.config: Any = None  # TelegramIntegrationConfig
+        logger.debug("TelegramServiceManager initialized")
+
+    def get_status(self) -> dict[str, Any]:
+        """Get telegram service status.
+
+        Returns:
+            Status dictionary with running state and config info
+        """
+        status: dict[str, Any] = {"running": self.is_running}
+        if self.is_running and self.config:
+            status["port"] = self.config.web.port
+            status["host"] = self.config.web.host
+            status["bot_configured"] = bool(self.config.telegram.bot_token)
+        return status
+
+    def start_service(self, config_path: str | None = None, port: int | None = None) -> bool:
+        """Start the telegram service.
+
+        Args:
+            config_path: Optional path to telegram config file
+            port: Optional port override
+
+        Returns:
+            True if started successfully, False otherwise
+        """
+        if self.is_running:
+            logger.warning("Telegram service already running")
+            return False
+
+        logger.info("Starting telegram service...")
+
+        try:
+            # Import telegram modules (lazy import to avoid dependency issues)
+            from clud.telegram.config import TelegramIntegrationConfig
+            from clud.telegram.server import TelegramServer
+
+            # Load configuration
+            self.config = TelegramIntegrationConfig.load(config_file=config_path)
+
+            # Override port if provided
+            if port is not None:
+                self.config.web.port = port
+
+            # Validate configuration
+            validation_errors = self.config.validate()
+            if validation_errors:
+                logger.error(f"Telegram configuration errors: {validation_errors}")
+                return False
+
+            # Create telegram server
+            self.telegram_server = TelegramServer(self.config)
+
+            # Start in separate thread with its own event loop
+            def run_telegram_service() -> None:
+                """Run telegram service in its own thread."""
+                import uvicorn
+
+                # Create new event loop for this thread
+                self.asyncio_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.asyncio_loop)
+
+                try:
+                    # Start telegram server (bot + web)
+                    self.asyncio_loop.run_until_complete(self.telegram_server.start())
+
+                    # Run uvicorn server
+                    if self.telegram_server.app:
+                        uvicorn_config = uvicorn.Config(
+                            self.telegram_server.app,
+                            host=self.config.web.host,
+                            port=self.config.web.port,
+                            log_level=self.config.logging.level.lower(),
+                        )
+                        uvicorn_server = uvicorn.Server(uvicorn_config)
+                        self.asyncio_loop.run_until_complete(uvicorn_server.serve())
+                except Exception as e:
+                    logger.error(f"Telegram service error: {e}", exc_info=True)
+                finally:
+                    # Cleanup
+                    if self.telegram_server:
+                        self.asyncio_loop.run_until_complete(self.telegram_server.stop())
+                    self.asyncio_loop.close()
+                    self.is_running = False
+
+            # Start thread
+            self.server_thread = threading.Thread(target=run_telegram_service, daemon=True)
+            self.server_thread.start()
+            self.is_running = True
+
+            logger.info(f"Telegram service started on {self.config.web.host}:{self.config.web.port}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to start telegram service: {e}", exc_info=True)
+            return False
+
+    def stop_service(self) -> bool:
+        """Stop the telegram service.
+
+        Returns:
+            True if stopped successfully, False if not running
+        """
+        if not self.is_running:
+            logger.warning("Telegram service not running")
+            return False
+
+        logger.info("Stopping telegram service...")
+
+        try:
+            # Signal the event loop to stop
+            if self.asyncio_loop and self.telegram_server:
+                # Schedule stop coroutine in the telegram service's event loop
+                asyncio.run_coroutine_threadsafe(self.telegram_server.stop(), self.asyncio_loop)
+
+            # Wait for thread to finish (with timeout)
+            if self.server_thread:
+                self.server_thread.join(timeout=5.0)
+
+            self.is_running = False
+            self.server_thread = None
+            self.telegram_server = None
+            self.asyncio_loop = None
+
+            logger.info("Telegram service stopped")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error stopping telegram service: {e}", exc_info=True)
+            return False
+
 
 class DaemonServer:
-    """Local daemon server for agent coordination."""
+    """Local daemon server for agent coordination and telegram service."""
 
     def __init__(self, host: str = DAEMON_HOST, port: int = DAEMON_PORT, db_path: Path | None = None) -> None:
         """Initialize daemon server.
@@ -204,6 +391,7 @@ class DaemonServer:
         self.host = host
         self.port = port
         self.registry = AgentRegistry(db_path=db_path, use_persistence=db_path is not None)
+        self.telegram_manager = TelegramServiceManager()
         self.server: socketserver.TCPServer | None = None
         self.cluster_client: Any = None  # ClusterClient instance (optional)
 
@@ -211,10 +399,11 @@ class DaemonServer:
         """Start the daemon server."""
         logger.debug("Starting daemon server")
 
-        # Create request handler class with registry access
+        # Create request handler class with registry and telegram manager access
         handler_class = DaemonRequestHandler
         handler_class.registry = self.registry
-        logger.debug("Request handler class configured with registry")
+        handler_class.telegram_manager = self.telegram_manager
+        logger.debug("Request handler class configured with registry and telegram manager")
 
         # Try to connect to cluster (non-blocking)
         logger.debug("Attempting to connect to clud-cluster")
@@ -248,11 +437,21 @@ class DaemonServer:
 
     def shutdown(self) -> None:
         """Shutdown the daemon server."""
+        # Stop telegram service if running
+        if self.telegram_manager.is_running:
+            logger.info("Stopping telegram service...")
+            self.telegram_manager.stop_service()
+
+        # Stop cluster client
         if self.cluster_client:
             self.cluster_client.stop()
+
+        # Shutdown HTTP server
         if self.server:
             self.server.shutdown()
             self.server.server_close()
+
+        # Close registry
         self.registry.close()
 
 
@@ -388,6 +587,82 @@ def ensure_daemon_running(max_wait: float = 5.0) -> bool:
     elapsed = time.time() - start_time
     logger.error(f"Daemon failed to start within {elapsed:.2f}s timeout ({attempts} attempts)")
     return False
+
+
+def ensure_telegram_running(config_path: str | None = None, port: int | None = None, max_wait: float = 10.0) -> bool:
+    """Ensure telegram service is running via daemon, starting if necessary.
+
+    Args:
+        config_path: Optional path to telegram config file
+        port: Optional port override
+        max_wait: Maximum time to wait for telegram to start (seconds)
+
+    Returns:
+        True if telegram service is running, False otherwise
+    """
+    import urllib.request
+
+    logger.debug("Ensuring telegram service is running")
+
+    # First ensure daemon is running
+    if not ensure_daemon_running():
+        logger.error("Failed to ensure daemon is running")
+        return False
+
+    # Check telegram status
+    status_url = f"http://{DAEMON_HOST}:{DAEMON_PORT}/telegram/status"
+    try:
+        with urllib.request.urlopen(status_url, timeout=2.0) as response:
+            status_data = json.loads(response.read().decode("utf-8"))
+            if status_data.get("running"):
+                logger.debug("Telegram service already running")
+                return True
+    except Exception as e:
+        logger.debug(f"Telegram status check failed: {e}")
+
+    # Start telegram service
+    logger.info("Starting telegram service via daemon...")
+    start_url = f"http://{DAEMON_HOST}:{DAEMON_PORT}/telegram/start"
+    request_data = {}
+    if config_path:
+        request_data["config_path"] = config_path
+    if port:
+        request_data["port"] = port
+
+    try:
+        req = urllib.request.Request(
+            start_url,
+            data=json.dumps(request_data).encode("utf-8") if request_data else None,
+            headers={"Content-Type": "application/json"},
+        )
+
+        with urllib.request.urlopen(req, timeout=5.0) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            if result.get("status") == "started":
+                logger.info("Telegram service started successfully")
+
+                # Wait for service to be ready
+                start_time = time.time()
+                while time.time() - start_time < max_wait:
+                    try:
+                        with urllib.request.urlopen(status_url, timeout=2.0) as status_response:
+                            status_data = json.loads(status_response.read().decode("utf-8"))
+                            if status_data.get("running"):
+                                logger.info("Telegram service is ready")
+                                return True
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+
+                logger.warning(f"Telegram service started but not ready within {max_wait}s")
+                return True  # Service started, even if not fully ready
+
+            logger.error(f"Failed to start telegram service: {result}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Failed to start telegram service: {e}", exc_info=True)
+        return False
 
 
 def main() -> int:

@@ -41,11 +41,10 @@ class TestDiffHandlerDirect(unittest.TestCase):
                 capture_output=True,
             )
 
-            # Create initial README.md
-            readme_path = test_project_dir / "README.md"
+        # Ensure README.md exists and is committed
+        readme_path = test_project_dir / "README.md"
+        if not readme_path.exists():
             readme_path.write_text("# Test Project\n\nThis is a test project.\n", encoding="utf-8")
-
-            # Commit the initial file
             subprocess.run(
                 ["git", "add", "README.md"],
                 cwd=str(test_project_dir),
@@ -59,8 +58,20 @@ class TestDiffHandlerDirect(unittest.TestCase):
                 capture_output=True,
             )
 
-            # Make a modification to create a diff
-            readme_path.write_text("# Test Project\n\nThis is a test project.\n\nModified for testing.\n", encoding="utf-8")
+    def setUp(self) -> None:
+        """Ensure there are changes to detect before each test."""
+        test_project_dir = Path(__file__).parent / "artifacts" / "test_diff_project"
+        readme_path = test_project_dir / "README.md"
+
+        # Reset to committed state first (ignore errors if already clean)
+        subprocess.run(
+            ["git", "checkout", "README.md"],
+            cwd=str(test_project_dir),
+            capture_output=True,
+        )
+
+        # Make a modification to create a diff
+        readme_path.write_text("# Test Project\n\nThis is a test project.\n\nModified for testing.\n", encoding="utf-8")
 
     def test_path_normalization(self) -> None:
         """Test that path normalization works correctly."""

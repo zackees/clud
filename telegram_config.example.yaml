@@ -1,0 +1,104 @@
+# Example Telegram Integration Configuration
+# Copy this file to telegram_config.yaml and customize for your setup
+
+# Telegram Bot Configuration
+telegram:
+  # Bot token from @BotFather (required)
+  # Can reference environment variables with ${VAR_NAME}
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+
+  # Webhook URL for production deployments (optional)
+  # Set to null to use polling mode (recommended for development)
+  webhook_url: null
+  # webhook_url: "https://yourdomain.com/telegram/webhook"
+
+  # Whitelist of allowed Telegram user IDs (optional)
+  # Empty list = allow all users
+  # Format: [123456789, 987654321]
+  allowed_users: []
+
+# Web Interface Configuration
+web:
+  # Port for the web interface (default: 8889)
+  port: 8889
+
+  # Host to bind to (default: 127.0.0.1 for localhost only)
+  # Use "0.0.0.0" to allow external connections (not recommended without auth)
+  host: "127.0.0.1"
+
+  # Require authentication for web access (optional)
+  # Set to true to enable, then provide auth token via TELEGRAM_WEB_AUTH env var
+  auth_required: false
+
+  # Allow web-initiated messages (bidirectional mode) (optional)
+  # When true, users can send messages from the web interface to Telegram
+  bidirectional: false
+
+# Session Management Configuration
+sessions:
+  # Session timeout in seconds (default: 3600 = 1 hour)
+  # Sessions inactive for this duration will be cleaned up
+  timeout_seconds: 3600
+
+  # Maximum number of concurrent sessions (default: 50)
+  # When limit is reached, oldest idle session is removed
+  max_sessions: 50
+
+  # Maximum messages to keep in history per session (default: 1000)
+  # Older messages are discarded when limit is reached
+  message_history_limit: 1000
+
+  # Cleanup interval in seconds (default: 300 = 5 minutes)
+  # How often to check for idle sessions to clean up
+  cleanup_interval: 300
+
+# Logging Configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+
+  # Log file path (optional)
+  # Set to null to log to console only
+  file: null
+  # file: "logs/telegram.log"
+
+# Claude Code Configuration (optional)
+# These settings affect how Claude Code instances are created
+claude:
+  # Working directory for Claude Code (default: current directory)
+  # working_directory: "/path/to/your/project"
+
+  # Model to use (default: claude-sonnet-4.5)
+  # model: "claude-sonnet-4.5"
+
+  # Maximum loop count for agent iterations (default: 50)
+  # max_loops: 50
+
+  # Enable YOLO mode (skip permission prompts) (default: true)
+  # yolo_mode: true
+
+# Instance Pool Configuration (optional)
+instance_pool:
+  # Maximum number of instances in the pool (default: 100)
+  max_instances: 100
+
+  # Instance idle timeout in seconds (default: 1800 = 30 minutes)
+  idle_timeout: 1800
+
+  # Cleanup check interval in seconds (default: 300 = 5 minutes)
+  cleanup_interval: 300
+
+# Advanced Options (optional)
+advanced:
+  # Enable debug mode for verbose logging
+  debug: false
+
+  # Enable performance metrics collection
+  metrics: false
+
+  # Enable CORS for web API (default: false)
+  # Only enable if you need to access the API from a different origin
+  cors_enabled: false
+
+  # CORS allowed origins (if cors_enabled is true)
+  # cors_origins: ["http://localhost:3000"]

@@ -36,6 +36,7 @@ dependencies = [
     "psutil>=5.9.0",
     "python-telegram-bot>=20.0",
     "codeup>=1.0.18",
+    "pyyaml>=6.0.0",
 ]
 # Change this with the version number bump.
 version = "1.0.25"
@@ -63,6 +64,10 @@ full = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+"clud.webui" = ["static/**/*", "frontend/build/**/*"]
 
 [tool.ruff]
 line-length = 200
