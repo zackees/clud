@@ -33,6 +33,10 @@ fi
 uv pip install -e ".[dev]"
 # This is needed to force the installation to finalize.
 uv run python -c "import os; _ = os.getcwd()"
+
+# Install Playwright browsers (for end-to-end testing)
+echo "Installing Playwright browsers..."
+uv run playwright install chromium
 set +e
 
 # if ./activate exists, remove it

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import mimetypes
 import os
 import socket
 import sys
@@ -14,12 +15,18 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .api import ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
 from .pty_manager import PTYManager
 from .terminal_handler import TerminalHandler
+
+# Fix MIME types for JavaScript modules on Windows
+# This is required for ES6 modules to load correctly
+mimetypes.init()
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -297,8 +304,64 @@ def create_app(static_dir: Path) -> FastAPI:
             logger.exception("Error scanning git changes")
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
-    # Mount static files (must be last)
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    # Note: We don't use StaticFiles middleware because it doesn't properly set
+    # MIME types for .js files on Windows. Instead, we handle all file serving
+    # through the catch-all route below with explicit media_type settings.
+
+    # Serve static files at root (robots.txt, etc.)
+    @app.get("/robots.txt")
+    async def robots() -> FileResponse:
+        """Serve robots.txt."""
+        robots_file = static_dir / "robots.txt"
+        if robots_file.exists():
+            return FileResponse(robots_file)
+        return FileResponse(static_dir / "index.html")
+
+    # Catch-all route for SPA - must be last
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str) -> Response:
+        """Serve SPA index.html for all routes (SvelteKit SPA mode)."""
+        # Try to serve the file directly if it exists
+        file_path = static_dir / full_path
+        if file_path.is_file():
+            # Determine correct media type based on file extension
+            # IMPORTANT: Use Response with explicit content reading to avoid
+            # Windows registry MIME type issues with FileResponse
+            suffix = file_path.suffix.lower()
+            if suffix == ".js":
+                media_type = "application/javascript"
+            elif suffix == ".css":
+                media_type = "text/css"
+            elif suffix == ".svg":
+                media_type = "image/svg+xml"
+            elif suffix == ".json":
+                media_type = "application/json"
+            elif suffix == ".html":
+                media_type = "text/html"
+            elif suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                media_type = f"image/{suffix[1:]}"
+            else:
+                # Default to octet-stream for unknown types
+                media_type = "application/octet-stream"
+
+            # Read file content and return with explicit media type
+            with open(file_path, "rb") as f:
+                content = f.read()
+            return Response(content=content, media_type=media_type)
+
+        # Try to serve as HTML file (for SvelteKit prerendered pages)
+        # Check if path.html exists (e.g., /terminal -> terminal.html)
+        html_file_path = static_dir / f"{full_path}.html"
+        if html_file_path.is_file():
+            with open(html_file_path, "rb") as f:
+                content = f.read()
+            return Response(content=content, media_type="text/html")
+
+        # Fall back to index.html for client-side routing
+        index_file = static_dir / "index.html"
+        with open(index_file, "rb") as f:
+            content = f.read()
+        return Response(content=content, media_type="text/html")
 
     return app
 
@@ -336,11 +399,21 @@ def run_server(port: int | None = None) -> int:
             else:
                 http_port = port
 
-        # Get static directory
+        # Get static directory - prefer frontend/build over static for Svelte app
+        frontend_build_dir = Path(__file__).parent / "frontend" / "build"
         static_dir = Path(__file__).parent / "static"
-        if not static_dir.exists():
-            logger.error("Static directory not found: %s", static_dir)
-            print(f"Error: Static directory not found: {static_dir}", file=sys.stderr)
+
+        if frontend_build_dir.exists():
+            # Use new Svelte frontend
+            serve_dir = frontend_build_dir
+            logger.info("Serving from Svelte build: %s", serve_dir)
+        elif static_dir.exists():
+            # Fall back to old static files
+            serve_dir = static_dir
+            logger.info("Serving from legacy static: %s", serve_dir)
+        else:
+            logger.error("Neither frontend build nor static directory found")
+            print("Error: No frontend files found", file=sys.stderr)
             return 1
 
         logger.info("Starting Claude Code Web UI...")
@@ -354,11 +427,12 @@ def run_server(port: int | None = None) -> int:
         print()
 
         # Create FastAPI app
-        app = create_app(static_dir)
+        app = create_app(serve_dir)
 
-        # Schedule browser opening
-        browser_thread = threading.Thread(target=open_browser_delayed, args=(url,), daemon=True)
-        browser_thread.start()
+        # Schedule browser opening (unless disabled for testing)
+        if not os.environ.get("CLUD_NO_BROWSER"):
+            browser_thread = threading.Thread(target=open_browser_delayed, args=(url,), daemon=True)
+            browser_thread.start()
 
         # Run server with uvicorn
         config = uvicorn.Config(

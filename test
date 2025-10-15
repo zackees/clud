@@ -10,6 +10,28 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
+# Check if --full flag is present
+if [[ "$*" == *"--full"* ]]; then
+    echo "Running full test suite including Playwright end-to-end tests..."
+
+    # Install Playwright browsers if not already installed
+    echo "Ensuring Playwright browsers are installed..."
+    uv run playwright install chromium --with-deps
+
+    # Remove --full from arguments to pass to pytest
+    args=("$@")
+    new_args=()
+    for arg in "${args[@]}"; do
+        if [[ "$arg" != "--full" ]]; then
+            new_args+=("$arg")
+        fi
+    done
+
+    # Run all tests including Playwright tests
+    uv run pytest tests/ "${new_args[@]}"
+    exit 0
+fi
+
 # Check if running integration tests specifically
 if [[ "$*" == *"tests/integration"* ]] || [[ "$PWD" == *"/tests/integration" ]]; then
     echo "Running integration tests sequentially (no parallel execution)"
@@ -17,5 +39,6 @@ if [[ "$*" == *"tests/integration"* ]] || [[ "$PWD" == *"/tests/integration" ]];
     uv run pytest tests/integration/ -v --tb=short --maxfail=1 "$@"
 else
     # Normal test execution (can use parallel for unit tests)
-    uv run pytest tests/ "$@"
+    # Exclude Playwright tests by default (they require --full flag)
+    uv run pytest tests/ --ignore=tests/test_webui_e2e.py "$@"
 fi

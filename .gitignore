@@ -143,3 +143,18 @@ activate
 # Docker test cache
 .docker_test_cache.json
 **/.docker_build.lock
+
+# Frontend build artifacts
+src/clud/webui/frontend/build/
+src/clud/webui/frontend/.svelte-kit/
+src/clud/webui/frontend/node_modules/
+src/clud/webui/node_modules/
+src/clud/webui/frontend/coverage/
+
+# Test artifacts and screenshots
+tests/artifacts/
+*.png
+*_before.png
+*_after.png
+playwright-report/
+test-results/

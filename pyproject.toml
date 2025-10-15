@@ -46,6 +46,8 @@ dev = [
     "pytest-xdist>=2.0.0",
     "ruff>=0.1.0",
     "pyright>=1.1.0",
+    "playwright>=1.40.0",
+    "pytest-playwright>=0.4.0",
 ]
 keyring-fallbacks = [
     "keyrings.cryptfile>=1.3.0",
@@ -87,10 +89,18 @@ line-ending = "auto"
 
 [tool.pytest.ini_options]
 addopts = "--durations=0"
+# Playwright configuration
+# Use --headed to run with visible browser (useful for debugging)
+# Use --browser chromium to specify browser
 
 [tool.pyright]
 include = ["src", "tests"]
-exclude = ["**/__pycache__"]
+exclude = [
+    "**/__pycache__",
+    "**/node_modules/**",
+    "tests/test_webui_e2e.py",  # E2E tests use Playwright which has incomplete type stubs
+    "tests/test_terminal_e2e.py",  # E2E tests use Playwright which has incomplete type stubs
+]
 
 # Type checking configuration
 typeCheckingMode = "strict"

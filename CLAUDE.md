@@ -9,7 +9,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `source activate` (or `. activate`) - Activate the virtual environment (symlinked to .venv/bin/activate or .venv/Scripts/activate on Windows)
 
 ### Testing
-- `bash test` - Run tests using `uv run pytest tests/`
+- `bash test` - Run unit tests (excludes E2E tests by default)
+- `bash test --full` - Run full test suite including Playwright E2E tests
+  - Automatically installs Playwright browsers with system dependencies
+  - Tests Web UI loading and verifies no console errors
+  - Takes longer than unit tests, recommended before releases
+  - Test artifacts (screenshots, reports) are stored in `tests/artifacts/` (git-ignored)
 - `uv run pytest tests/ -n auto -vv` - Run tests directly with pytest (parallel execution)
 
 ### Linting and Code Quality
@@ -21,6 +26,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Build and Package
 - `uv pip install -e ".[dev]"` - Install package in editable mode with dev dependencies
 - The package builds a wheel to `dist/clud-{version}-py3-none-any.whl`
+
+### Frontend Development
+- `cd src/clud/webui/frontend && npm install` - Install frontend dependencies (SvelteKit, TypeScript, etc.)
+- `cd src/clud/webui/frontend && npm run dev` - Run frontend dev server with hot reload (port 5173)
+- `cd src/clud/webui/frontend && npm run build` - Build frontend for production (outputs to `build/`)
+- `cd src/clud/webui/frontend && npm run preview` - Preview production build locally
+- `cd src/clud/webui/frontend && npm run check` - Type-check Svelte components with TypeScript
+- Frontend architecture: Svelte 5 + SvelteKit + TypeScript with `@sveltejs/adapter-static` for SPA mode
 
 ### Cleanup
 - `bash clean` - Remove all build artifacts, caches, and virtual environment
@@ -52,10 +65,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - Runs in YOLO mode (no permission prompts)
   - Architecture:
     - FastAPI backend with WebSocket streaming
-    - Vanilla HTML/CSS/JavaScript frontend
+    - **Svelte 5 + SvelteKit + TypeScript frontend** (migrated from vanilla JS)
     - Uses `running-process` library for Claude Code execution
     - PTY-based terminal with cross-platform support
-    - Static files served from `src/clud/webui/static/`
+    - Static files served from `src/clud/webui/frontend/build/` (falls back to `static/` if build missing)
   - Configuration:
     - Can specify custom port: `clud --webui 3000`
     - Browser auto-opens after 2-second delay
@@ -104,7 +117,7 @@ The Web UI includes an integrated terminal console that provides direct shell ac
 **Components**:
 - `src/clud/webui/pty_manager.py` - Cross-platform PTY session management
 - `src/clud/webui/terminal_handler.py` - WebSocket handler for terminal I/O
-- `src/clud/webui/static/app.js` - TerminalManager class (frontend logic)
+- `src/clud/webui/frontend/src/lib/components/Terminal.svelte` - Terminal component (Svelte)
 - `tests/test_pty_manager.py` - PTY manager unit tests
 - `tests/test_terminal_handler.py` - Terminal handler unit tests
 
@@ -151,6 +164,7 @@ The hook system provides an event-based architecture for intercepting and forwar
 - `tests/test_api_models.py` - API models unit tests
 - `tests/test_message_handler.py` - Message handler unit tests
 - `tests/test_instance_manager.py` - Instance manager unit tests
+- `tests/test_webui_e2e.py` - End-to-end Playwright tests for Web UI (run with `bash test --full`)
 
 ## Architecture
 
@@ -163,6 +177,7 @@ The hook system provides an event-based architecture for intercepting and forwar
 - `src/clud/agent_foreground.py` - Handles Claude Code execution in YOLO mode
 - `src/clud/task.py` - File-based task execution system
 - `tests/` - Unit and integration tests using pytest
+  - `tests/artifacts/` - Test output artifacts (screenshots, reports) - git-ignored
 - `pyproject.toml` - Modern Python packaging configuration
 
 ### Key Components
@@ -185,7 +200,11 @@ The hook system provides an event-based architecture for intercepting and forwar
   - `webui/api.py`: Handler classes for chat, projects, and history
   - `webui/pty_manager.py`: Cross-platform PTY session management for terminals
   - `webui/terminal_handler.py`: WebSocket handler for terminal I/O streaming
-  - `webui/static/`: HTML/CSS/JavaScript frontend files with integrated xterm.js terminal
+  - `webui/frontend/`: Svelte 5 + SvelteKit + TypeScript frontend (replaces `webui/static/`)
+    - `frontend/src/lib/components/`: UI components (Chat, Terminal, DiffViewer, Settings, History)
+    - `frontend/src/lib/stores/`: Svelte stores for state management (app, chat, settings)
+    - `frontend/src/lib/services/`: WebSocket and API services
+    - `frontend/build/`: Production build output (served by FastAPI)
 
 ### Package Configuration
 - Uses setuptools with pyproject.toml for modern Python packaging
@@ -199,6 +218,7 @@ The hook system provides an event-based architecture for intercepting and forwar
 - **ruff** - Fast Python linter and formatter (configured for 200 char line length)
 - **pyright** - Type checker with strict mode
 - **pytest** - Testing framework with xdist for parallel execution
+- **Playwright** - Browser automation for end-to-end testing (Chromium headless)
 
 ### Code Quality Configuration
 - Ruff configured with 200-character line length and Python 3.13 target

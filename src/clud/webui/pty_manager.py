@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import select
+import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -172,7 +173,13 @@ class PTYManager:
 
         # Create winpty process
         process = winpty.PTY(cols, rows)
-        process.spawn(" ".join(shell), cwd=cwd)
+
+        # Build shell command with proper escaping for Windows
+        # subprocess.list2cmdline() handles all special characters and quoting
+        shell_cmd = subprocess.list2cmdline(shell)
+
+        logger.debug("Spawning Windows PTY with command: %s in directory: %s", shell_cmd, cwd)
+        process.spawn(shell_cmd, cwd=cwd)
 
         # Create session (using process handle as fd for consistency)
         session = PTYSession(
