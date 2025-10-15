@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 from running_process import RunningProcess
 
@@ -290,6 +291,18 @@ class DiffHandler:
         """Initialize diff handler."""
         self.diff_trees: dict[str, DiffTreeView] = {}  # project_path -> DiffTreeView
 
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize a file path to use forward slashes for consistent keys.
+
+        Args:
+            path: File path to normalize
+
+        Returns:
+            Normalized path with forward slashes
+        """
+        return str(Path(path).resolve()).replace("\\", "/")
+
     def get_or_create_tree(self, project_path: str) -> DiffTreeView:
         """Get or create a diff tree for a project.
 
@@ -299,9 +312,10 @@ class DiffHandler:
         Returns:
             DiffTreeView instance
         """
-        if project_path not in self.diff_trees:
-            self.diff_trees[project_path] = DiffTreeView(project_path)
-        return self.diff_trees[project_path]
+        normalized_path = self._normalize_path(project_path)
+        if normalized_path not in self.diff_trees:
+            self.diff_trees[normalized_path] = DiffTreeView(project_path)
+        return self.diff_trees[normalized_path]
 
     def add_diff(self, project_path: str, file_path: str, old_content: str, new_content: str) -> None:
         """Add a diff to the tree.
@@ -325,7 +339,7 @@ class DiffHandler:
         tree = self.get_or_create_tree(project_path)
         tree.remove_diff(file_path)
 
-    def get_diff_tree(self, project_path: str) -> dict[str, object]:
+    def get_diff_tree(self, project_path: str) -> dict[str, Any]:
         """Get diff tree structure.
 
         Args:
@@ -380,8 +394,9 @@ class DiffHandler:
         Args:
             project_path: Path to project
         """
-        if project_path in self.diff_trees:
-            self.diff_trees[project_path].clear_diffs()
+        normalized_path = self._normalize_path(project_path)
+        if normalized_path in self.diff_trees:
+            self.diff_trees[normalized_path].clear_diffs()
 
     def scan_git_changes(self, project_path: str) -> int:
         """Scan git working directory for changes and populate diff tree.
