@@ -18,7 +18,7 @@ from clud.telegram.ws_server import TelegramWebSocketHandler
 pytestmark = pytest.mark.anyio
 
 
-class TestTelegramWebSocketHandler(unittest.TestCase):
+class TestTelegramWebSocketHandler(unittest.IsolatedAsyncioTestCase):
     """Test cases for TelegramWebSocketHandler."""
 
     def setUp(self) -> None:

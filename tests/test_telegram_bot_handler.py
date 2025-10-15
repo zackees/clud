@@ -28,7 +28,7 @@ from clud.telegram.session_manager import SessionManager
 pytestmark = pytest.mark.anyio
 
 
-class TestTelegramBotHandler(unittest.TestCase):
+class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
     """Test cases for TelegramBotHandler."""
 
     def setUp(self) -> None:
@@ -214,7 +214,7 @@ class TestTelegramBotHandler(unittest.TestCase):
         self.message.reply_text.assert_called_once()
         call_args = self.message.reply_text.call_args
         assert "Session Status" in call_args[0][0]
-        assert "test-session" in call_args[0][0]
+        assert "test-ses" in call_args[0][0]  # Session ID truncated to first 8 chars
         assert call_args[1]["parse_mode"] == "Markdown"
 
     async def test_status_command_no_session(self) -> None:
