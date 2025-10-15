@@ -1611,7 +1611,8 @@ def main(args_list: list[str] | None = None) -> int:
     """Main entry point for clud - handles routing and execution."""
     try:
         # Set terminal title early
-        set_terminal_title()
+        # DISABLED: Causes escape sequence artifacts on some terminals (git-bash/mintty)
+        # set_terminal_title()
 
         # Parse arguments
         args = parse_args(args_list)
