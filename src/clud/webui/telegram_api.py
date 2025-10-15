@@ -9,9 +9,10 @@ from ..secrets import get_credential_store
 logger = logging.getLogger(__name__)
 
 # Service name for credential storage
-TELEGRAM_SERVICE = "clud_telegram"
-BOT_TOKEN_KEY = "bot_token"
-CHAT_ID_KEY = "chat_id"
+# IMPORTANT: Must match agent_cli.py to ensure credentials are shared
+TELEGRAM_SERVICE = "clud-telegram"
+BOT_TOKEN_KEY = "bot-token"
+CHAT_ID_KEY = "chat-id"
 
 
 class TelegramAPIHandler:
