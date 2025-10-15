@@ -574,10 +574,10 @@ def handle_kanban_command() -> int:
 
 
 def handle_telegram_command(token: str | None = None) -> int:
-    """Handle the --telegram/-tg command by launching landing page OR runner mode.
+    """Handle the --telegram/-tg command by launching Telegram integration server via daemon.
 
-    If bot credentials (token + chat_id) are available, launches runner mode.
-    Otherwise, launches landing page.
+    Automatically starts the daemon-based Telegram server if credentials are available.
+    Falls back to landing page if no credentials found.
 
     Args:
         token: Optional bot token to save
@@ -596,36 +596,29 @@ def handle_telegram_command(token: str | None = None) -> int:
                 print(f"Warning: Could not save token: {e}\n", file=sys.stderr)
 
         # Load credentials from environment or saved config
-        saved_token, saved_chat_id = load_telegram_credentials()
+        saved_token, _ = load_telegram_credentials()
         env_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        env_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
         # Prioritize env vars, fall back to saved
         bot_token = env_token or saved_token or token
-        chat_id = env_chat_id or saved_chat_id
 
-        # If we have both token and chat_id, launch runner mode
-        if bot_token and chat_id:
-            print("✅ Telegram credentials found")
+        # If we have a bot token, launch Telegram server via daemon
+        if bot_token:
+            print("✅ Telegram bot token found")
             print(f"Bot Token: {bot_token[:20]}...")
-            print(f"Chat ID: {chat_id}")
             print()
-            print("Launching Telegram runner mode...")
-            print()
-
-            # Import runner
-            from .messaging.telegram import TelegramMessenger
-            from .sub_clud_runner import run_telegram_message_loop
-
-            # Create messenger
-            messenger = TelegramMessenger(bot_token=bot_token, chat_id=chat_id)
-
-            # Run the message loop
-            return run_telegram_message_loop(messenger)
+            # Launch the full Telegram integration server via daemon
+            return handle_telegram_server_command(port=None, config_path=None)
 
         # Otherwise, launch landing page mode
-        print("⚠️  No Telegram credentials found")
-        print("Launching landing page mode...")
+        print("⚠️  No Telegram bot token found")
+        print("Please provide a bot token:")
+        print("  1. Set TELEGRAM_BOT_TOKEN environment variable, OR")
+        print("  2. Run: clud --telegram YOUR_BOT_TOKEN")
+        print()
+        print("To get a bot token, message @BotFather on Telegram")
+        print()
+        print("Launching landing page...")
         print()
 
         from .webapp.server import run_server

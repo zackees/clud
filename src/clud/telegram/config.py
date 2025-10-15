@@ -115,8 +115,17 @@ class TelegramIntegrationConfig:
             ValueError: If required environment variables are missing
         """
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+        # Fall back to keyring if environment variable not set
         if not bot_token:
-            raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
+            from ..agent_cli import load_telegram_credentials
+
+            bot_token_keyring, _ = load_telegram_credentials()
+            if bot_token_keyring:
+                bot_token = bot_token_keyring
+
+        if not bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN environment variable or stored credentials required")
 
         # Parse allowed users
         allowed_users_str = os.getenv("TELEGRAM_ALLOWED_USERS", "")

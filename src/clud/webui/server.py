@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from .api import ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
 from .pty_manager import PTYManager
+from .telegram_api import TelegramAPIHandler
 from .terminal_handler import TerminalHandler
 
 # Fix MIME types for JavaScript modules on Windows
@@ -82,6 +83,7 @@ def create_app(static_dir: Path) -> FastAPI:
     diff_handler = DiffHandler()
     pty_manager = PTYManager()
     terminal_handler = TerminalHandler(pty_manager)
+    telegram_handler = TelegramAPIHandler()
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -302,6 +304,214 @@ def create_app(static_dir: Path) -> FastAPI:
             return JSONResponse(content={"error": str(e)}, status_code=400)
         except Exception as e:
             logger.exception("Error scanning git changes")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    # Telegram API endpoints
+    @app.post("/api/telegram/credentials")
+    async def save_telegram_credentials(data: dict[str, str | None]) -> JSONResponse:
+        """Save Telegram bot credentials.
+
+        Args:
+            data: Dict with 'bot_token' and optional 'chat_id'
+
+        Returns:
+            Status response
+        """
+        try:
+            bot_token = data.get("bot_token")
+            chat_id = data.get("chat_id")
+
+            if not bot_token:
+                return JSONResponse(content={"error": "bot_token is required"}, status_code=400)
+
+            success = telegram_handler.save_credentials(bot_token, chat_id)  # type: ignore[arg-type]
+
+            if success:
+                return JSONResponse(content={"status": "ok"})
+            else:
+                return JSONResponse(content={"error": "Failed to save credentials"}, status_code=500)
+        except Exception as e:
+            logger.exception("Error saving Telegram credentials")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.post("/api/telegram/test")
+    async def test_telegram_connection(data: dict[str, str]) -> JSONResponse:
+        """Test Telegram bot connection.
+
+        Args:
+            data: Dict with 'bot_token'
+
+        Returns:
+            Bot info if successful
+        """
+        try:
+            bot_token = data.get("bot_token")
+
+            if not bot_token:
+                return JSONResponse(content={"error": "bot_token is required"}, status_code=400)
+
+            bot_info = await telegram_handler.test_bot_connection(bot_token)
+
+            if bot_info:
+                return JSONResponse(content={"status": "ok", "bot_info": bot_info})
+            else:
+                return JSONResponse(
+                    content={
+                        "error": "Failed to connect to bot. Please check your bot token and network connection.",
+                        "details": "Check server logs for more information.",
+                    },
+                    status_code=400,
+                )
+        except Exception as e:
+            logger.exception("Error testing Telegram connection")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.get("/api/telegram/status")
+    async def get_telegram_status() -> JSONResponse:
+        """Get Telegram connection status.
+
+        Returns:
+            Connection status and bot info if connected
+        """
+        try:
+            # Check both Web UI handler and system keyring
+            connected = telegram_handler.is_connected()
+            bot_token, chat_id = telegram_handler.get_credentials()
+
+            # Fall back to system keyring if not found in Web UI handler
+            if not bot_token:
+                from ..agent_cli import load_telegram_credentials
+
+                bot_token, chat_id = load_telegram_credentials()
+
+            if bot_token:
+                # Get bot info
+                bot_info = await telegram_handler.test_bot_connection(bot_token)
+
+                # Return credentials_saved flag even if bot test fails
+                # This allows UI to show "credentials configured" vs "connection verified"
+                return JSONResponse(
+                    content={
+                        "connected": bot_info is not None,  # True only if bot test succeeds
+                        "credentials_saved": True,  # True if credentials exist
+                        "bot_info": bot_info,
+                        "chat_id": chat_id,
+                        "from_keyring": not connected,
+                    }
+                )
+            else:
+                return JSONResponse(
+                    content={
+                        "connected": False,
+                        "credentials_saved": False,
+                        "bot_info": None,
+                        "chat_id": None,
+                        "from_keyring": False,
+                    }
+                )
+        except Exception as e:
+            logger.exception("Error getting Telegram status")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.get("/api/telegram/bot_info")
+    async def get_telegram_bot_info() -> JSONResponse:
+        """Get Telegram bot information.
+
+        Returns:
+            Bot info if available
+        """
+        try:
+            bot_token, _ = telegram_handler.get_credentials()
+
+            # Fall back to system keyring if not found
+            if not bot_token:
+                from ..agent_cli import load_telegram_credentials
+
+                bot_token, _ = load_telegram_credentials()
+
+            if not bot_token:
+                return JSONResponse(content={"error": "No bot token configured"}, status_code=404)
+
+            bot_info = await telegram_handler.test_bot_connection(bot_token)
+
+            if bot_info:
+                return JSONResponse(content={"status": "ok", "bot_info": bot_info})
+            else:
+                return JSONResponse(content={"error": "Failed to get bot info"}, status_code=500)
+        except Exception as e:
+            logger.exception("Error getting bot info")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.post("/api/telegram/start_server")
+    async def start_telegram_server() -> JSONResponse:
+        """Start the Telegram bot server via daemon.
+
+        Returns:
+            Status response with server URL
+        """
+        try:
+            from ..service import ensure_telegram_running
+
+            # Start Telegram service via daemon
+            success = ensure_telegram_running()
+
+            if success:
+                return JSONResponse(
+                    content={
+                        "status": "ok",
+                        "message": "Telegram server started",
+                        "url": "http://127.0.0.1:8889",
+                    }
+                )
+            else:
+                return JSONResponse(content={"error": "Failed to start Telegram server"}, status_code=500)
+        except Exception as e:
+            logger.exception("Error starting Telegram server")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.post("/api/telegram/send")
+    async def send_telegram_message(data: dict[str, str]) -> JSONResponse:
+        """Send message to Telegram chat.
+
+        Args:
+            data: Dict with 'chat_id' and 'message'
+
+        Returns:
+            Status response
+        """
+        try:
+            chat_id = data.get("chat_id")
+            message = data.get("message")
+
+            if not chat_id or not message:
+                return JSONResponse(content={"error": "chat_id and message are required"}, status_code=400)
+
+            success = await telegram_handler.send_message(chat_id, message)
+
+            if success:
+                return JSONResponse(content={"status": "ok"})
+            else:
+                return JSONResponse(content={"error": "Failed to send message"}, status_code=500)
+        except Exception as e:
+            logger.exception("Error sending Telegram message")
+            return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    @app.delete("/api/telegram/credentials")
+    async def delete_telegram_credentials() -> JSONResponse:
+        """Clear Telegram credentials.
+
+        Returns:
+            Status response
+        """
+        try:
+            success = telegram_handler.clear_credentials()
+
+            if success:
+                return JSONResponse(content={"status": "ok"})
+            else:
+                return JSONResponse(content={"error": "Failed to clear credentials"}, status_code=500)
+        except Exception as e:
+            logger.exception("Error clearing Telegram credentials")
             return JSONResponse(content={"error": str(e)}, status_code=500)
 
     # Note: We don't use StaticFiles middleware because it doesn't properly set
