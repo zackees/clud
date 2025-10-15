@@ -38,8 +38,7 @@ dependencies = [
     "codeup>=1.0.18",
     "pyyaml>=6.0.0",
 ]
-# Change this with the version number bump.
-version = "1.0.25"
+version = "1.0.26"
 
 [project.optional-dependencies]
 dev = [
