@@ -38,7 +38,7 @@ dependencies = [
     "codeup>=1.0.18",
     "pyyaml>=6.0.0",
 ]
-version = "1.0.26"
+version = "1.0.27"
 
 [project.optional-dependencies]
 dev = [

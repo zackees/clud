@@ -1631,7 +1631,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --telegram, -tg      Open Telegram bot landing page in browser")
             print("  --telegram-server [PORT] [--telegram-config PATH]")
             print("                       Launch advanced Telegram integration server (default port: 8889)")
-            print("  --webui [PORT]       Launch Claude Code Web UI in browser (default port: 8888)")
+            print("  --webui, --ui [PORT] Launch Claude Code Web UI in browser (default port: 8888)")
             print("  --api-server [PORT]  Launch Message Handler API server (default port: 8765)")
             print("  --track              Enable agent tracking with local daemon")
             print("  -h, --help           Show this help")

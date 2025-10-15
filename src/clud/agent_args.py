@@ -80,7 +80,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     telegram_web = "--telegram" in args_copy or "-tg" in args_copy
     telegram_server = "--telegram-server" in args_copy
     code = "--code" in args_copy
-    webui = "--webui" in args_copy
+    webui = "--webui" in args_copy or "--ui" in args_copy
     api_server = "--api-server" in args_copy
     init_loop = "--init-loop" in args_copy
     track = "--track" in args_copy
@@ -119,6 +119,12 @@ def parse_args(args: list[str] | None = None) -> Args:
         if webui_idx + 1 < len(args_copy) and not args_copy[webui_idx + 1].startswith("-"):
             with contextlib.suppress(ValueError):
                 webui_port = int(args_copy[webui_idx + 1])
+    elif "--ui" in args_copy:
+        ui_idx = args_copy.index("--ui")
+        # Check if there's a port argument after --ui
+        if ui_idx + 1 < len(args_copy) and not args_copy[ui_idx + 1].startswith("-"):
+            with contextlib.suppress(ValueError):
+                webui_port = int(args_copy[ui_idx + 1])
 
     # Extract api port argument if present
     api_port = None

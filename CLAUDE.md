@@ -50,7 +50,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Note: Telegram blocks iframe embedding with X-Frame-Options for security, so the landing page provides a button to open the bot in Telegram instead
 
 ### Web UI
-- `clud --webui [PORT]` - Launch browser-based interface for Claude Code
+- `clud --webui [PORT]` (or `clud --ui [PORT]`) - Launch browser-based interface for Claude Code
   - Default port: 8888 (auto-detects if unavailable)
   - Automatically opens browser to Web UI
   - Features:
@@ -70,7 +70,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - PTY-based terminal with cross-platform support
     - Static files served from `src/clud/webui/frontend/build/` (falls back to `static/` if build missing)
   - Configuration:
-    - Can specify custom port: `clud --webui 3000`
+    - Can specify custom port: `clud --webui 3000` or `clud --ui 3000`
     - Browser auto-opens after 2-second delay
     - Server logs to console with INFO level
   - Press Ctrl+C to stop the server
