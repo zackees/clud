@@ -19,6 +19,7 @@ from typing import Any
 from running_process import RunningProcess
 
 from .agent.completion import detect_agent_completion
+from .agent.task_info import TaskInfo
 from .agent_args import AgentMode, Args, parse_args
 from .hooks import HookContext, HookEvent, get_hook_manager
 from .hooks.config import load_hook_config
@@ -1118,10 +1119,33 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     # DONE.md lives at project root, not .agent_task/
     done_file = Path("DONE.md")
 
+    # Initialize or load task info
+    info_file = agent_task_dir / "info.json"
+    user_prompt = args.prompt if args.prompt else args.message
+    task_info = TaskInfo.load(info_file)
+
+    if task_info is None:
+        # Create new task info for fresh session
+        task_info = TaskInfo(
+            session_id=str(uuid.uuid4()),
+            start_time=time.time(),
+            prompt=user_prompt,
+            total_iterations=loop_count,
+        )
+        task_info.save(info_file)
+    else:
+        # Update existing task info for continuation
+        task_info.total_iterations = loop_count
+        task_info.save(info_file)
+
     # Start from determined iteration (may be > 1 if continuing previous session)
     for i in range(start_iteration - 1, loop_count):
         iteration_num = i + 1
         print(f"\n--- Iteration {iteration_num}/{loop_count} ---", file=sys.stderr)
+
+        # Mark iteration start
+        task_info.start_iteration(iteration_num)
+        task_info.save(info_file)
 
         # Print the user's prompt for this iteration
         user_prompt = args.prompt if args.prompt else args.message
@@ -1159,6 +1183,11 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         else:
             returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
+        # Mark iteration end
+        error_msg = f"Exit code: {returncode}" if returncode != 0 else None
+        task_info.end_iteration(returncode, error_msg)
+        task_info.save(info_file)
+
         if returncode != 0 and args.verbose:
             print(f"Warning: Iteration {iteration_num} exited with code {returncode}", file=sys.stderr)
 
@@ -1177,9 +1206,16 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
             # Passed - accept DONE.md
             print("✅ lint-test passed. Accepting DONE.md and halting early.", file=sys.stderr)
+            task_info.mark_completed()
+            task_info.save(info_file)
             break
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)
+
+    # Mark completion if all iterations finish without DONE.md
+    if not done_file.exists():
+        task_info.mark_completed(error="Completed all iterations without DONE.md")
+        task_info.save(info_file)
 
     # Open DONE.md if it exists
     if done_file.exists():

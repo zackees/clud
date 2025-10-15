@@ -107,3 +107,318 @@ The single comprehensive test verifies EVERYTHING:
 - ALL edge cases covered (not just core functionality)
 - No flaky test failures from resource contention
 - Clear phase-by-phase output showing what's being tested
+
+---
+
+# Agent Module Consolidation: Remove agent/foreground.py Duplicate
+
+## Status: ✅ COMPLETED (2025-10-14)
+
+**Created:** 2025-10-14
+**Completed:** 2025-10-14 (Iteration 1)
+**Priority:** High
+**Effort:** Medium (~2-4 hours)
+
+## Executive Summary
+
+`src/clud/agent/foreground.py` is **legacy code** that should be deleted. It contains ~800 lines of duplicated code from `agent_cli.py`. Commit `29c95c5` ("feat(agent): consolidate agent execution into single module") created `agent_cli.py` to replace the distributed agent logic, but `foreground.py` was never removed, creating maintenance debt and code divergence.
+
+## Problem Statement
+
+### Code Duplication
+- **agent_cli.py**: 1,638 lines, 40+ functions
+- **agent/foreground.py**: 992 lines, 24 functions
+- **Duplication**: ~800 lines (~80% overlap)
+
+### Current Usage
+- **agent_cli.py**: ✅ Active - main entry point via `cli.py:5`
+- **agent/foreground.py**: ⚠️ Nearly unused - only 1 function imported by `foreground_args.py:123`
+
+### Critical Issues
+
+1. **Divergent Implementations**: The two files have drifted apart:
+   - `_inject_completion_prompt()` differs (foreground.py has broken version)
+   - `_run_loop()` differs (DONE.md validation logic)
+   - Creates confusion about which file is authoritative
+
+2. **Bug Duplication**: The loop prompt bug exists in foreground.py but was partially fixed in agent_cli.py
+
+3. **Lost Features**: Only foreground.py has TaskInfo JSON tracking for iterations
+
+## Detailed Analysis
+
+### Duplicated Functions (22/24 are identical)
+
+All credential management, API key functions, Claude path detection, command building, loop logic, and file editing functions are duplicated identically between both files. The only differences are:
+
+- `_inject_completion_prompt()` - **DIFFERENT** (foreground.py has broken complex version)
+- `_run_loop()` - **DIFFERENT** (foreground.py uses TaskInfo, skips lint-test validation)
+
+### Unique to agent_cli.py (Keep These)
+
+**Hook System:**
+- `register_hooks_from_config()` - Hook system integration
+- `trigger_hook_sync()` - Hook system integration
+
+**Terminal UX:**
+- `set_terminal_title()` - Sets terminal title to "clud: {parent_dir}"
+
+**Special Command Handlers:**
+- 15+ command handlers (lint, test, codeup, kanban, telegram, webui, api-server, code-server, fix, init-loop)
+- `run_clud_subprocess()` - Subprocess execution helper
+- GitHub URL handling functions
+
+**Main Entry Point:**
+- `run_agent()` - Main agent execution with full hook support
+- `main()` - CLI entry point with command routing
+
+### Unique to foreground.py (Port These)
+
+1. **TaskInfo Integration** - Creates `.agent_task/info.json` with session metadata and iteration history
+2. **Streaming JSON Callback** - `_create_streaming_json_callback()` (currently unused)
+3. **Simpler DONE.md Logic** - No lint-test validation (keep agent_cli.py's validation instead)
+
+### Critical Differences
+
+#### Loop Prompt Injection Bug
+
+**agent_cli.py (lines 827-843)** - OLD, working prompt:
+```python
+parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
+```
+
+**foreground.py (lines 341-381)** - NEW, BROKEN prompt:
+```
+ITERATION PROTOCOL:
+1. Before starting work, check for error signals...
+2. During your work: ...
+3. Before finishing this iteration:
+   - Create .agent_task/ITERATION_{iteration}.md documenting what you accomplished
+...
+```
+
+**Issue**: The foreground.py version buries the ITERATION file requirement in a complex 5-step protocol, causing agents to skip creating ITERATION files.
+
+#### DONE.md Validation
+
+**agent_cli.py** validates DONE.md with `lint-test` before accepting (lines 1165-1180).
+**foreground.py** accepts DONE.md immediately without validation (lines 773-778).
+
+**Decision**: Keep lint-test validation to prevent false completions.
+
+## Dependencies
+
+### What imports foreground.py?
+- `src/clud/agent/foreground_args.py:123` - Imports `load_telegram_credentials()`
+
+### What does foreground.py import?
+```python
+from .completion import detect_agent_completion
+from .foreground_args import Args, parse_args
+from .task_info import TaskInfo
+from ..telegram_bot import TelegramBot
+```
+
+## Refactoring Plan
+
+### Phase 1: Port TaskInfo to agent_cli.py
+
+**Location**: `agent_cli.py` - update `_run_loop()` function (lines 1106-1189)
+
+**Add import at top**:
+```python
+from .agent.task_info import TaskInfo
+import uuid
+```
+
+**Add after line 1118** (after `done_file = Path("DONE.md")`):
+```python
+info_file = agent_task_dir / "info.json"
+
+# Initialize or load task info
+user_prompt = args.prompt if args.prompt else args.message
+task_info = TaskInfo.load(info_file)
+
+if task_info is None:
+    # Create new task info for fresh session
+    task_info = TaskInfo(
+        session_id=str(uuid.uuid4()),
+        start_time=time.time(),
+        prompt=user_prompt,
+        total_iterations=loop_count,
+    )
+    task_info.save(info_file)
+else:
+    # Update existing task info for continuation
+    task_info.total_iterations = loop_count
+    task_info.save(info_file)
+```
+
+**Add before line 1132** (before printing prompt):
+```python
+# Mark iteration start
+task_info.start_iteration(iteration_num)
+task_info.save(info_file)
+```
+
+**Add after line 1160** (after returncode is obtained):
+```python
+# Mark iteration end
+error_msg = f"Exit code: {returncode}" if returncode != 0 else None
+task_info.end_iteration(returncode, error_msg)
+task_info.save(info_file)
+```
+
+**Add after line 1179** (inside DONE.md exists block):
+```python
+task_info.mark_completed()
+task_info.save(info_file)
+```
+
+**Add after line 1182** (after "All iterations complete"):
+```python
+# Mark completion if all iterations finish without DONE.md
+if not done_file.exists():
+    task_info.mark_completed(error="Completed all iterations without DONE.md")
+    task_info.save(info_file)
+```
+
+### Phase 2: Update Import in foreground_args.py
+
+**File**: `src/clud/agent/foreground_args.py`
+
+**Line 123** - Change:
+```python
+# BEFORE:
+from .foreground import load_telegram_credentials
+
+# AFTER:
+from ..agent_cli import load_telegram_credentials
+```
+
+### Phase 3: Delete Legacy File
+
+```bash
+git rm src/clud/agent/foreground.py
+git commit -m "refactor(agent): remove legacy foreground.py duplicate
+
+- foreground.py was 80% duplicate of agent_cli.py
+- Created in original consolidation (29c95c5) but never deleted
+- Only 1 function (load_telegram_credentials) was imported
+- Import updated in foreground_args.py to use agent_cli
+- TaskInfo integration ported to agent_cli.py
+
+Net reduction: 960 lines of duplicate code"
+```
+
+### Phase 4: Verify No References
+
+```bash
+grep -r "agent\.foreground\|from.*foreground import\|agent/foreground" src/ tests/
+# Should return zero results
+```
+
+## Testing Checklist
+
+- [ ] **Loop Mode**: `clud --loop 3 -p "test task"`
+  - [ ] ITERATION_1.md is created
+  - [ ] ITERATION_2.md is created
+  - [ ] ITERATION_3.md is created
+  - [ ] .agent_task/info.json is created
+
+- [ ] **TaskInfo Content**: Verify info.json contains:
+  - [ ] session_id (UUID)
+  - [ ] start_time and start_time_readable
+  - [ ] prompt (user's original prompt)
+  - [ ] total_iterations (3)
+  - [ ] iterations array with timing/exit codes
+
+- [ ] **DONE.md Validation**: `clud --loop 10 -p "write DONE.md immediately"`
+  - [ ] DONE.md is created by agent
+  - [ ] lint-test validation runs
+  - [ ] Loop halts if validation passes
+
+- [ ] **Import Test**: `python -c "from clud.agent.foreground_args import parse_args"`
+  - [ ] No ImportError
+
+- [ ] **Full Test Suite**: `bash test --full`
+  - [ ] All tests pass
+
+- [ ] **Search**: `grep -r "foreground\.py" src/ tests/`
+  - [ ] Zero results
+
+## Benefits
+
+### Code Quality
+- ✅ Eliminates 800+ lines of duplicate code
+- ✅ Single source of truth for agent logic
+- ✅ Reduces maintenance burden
+- ✅ Clarifies architecture
+
+### Bug Fixes
+- ✅ Fixes divergent loop prompt implementations
+- ✅ Prevents future code drift
+- ✅ Consolidates DONE.md validation logic
+
+### Features
+- ✅ Adds TaskInfo JSON tracking to main implementation
+- ✅ Creates `.agent_task/info.json` with iteration history
+- ✅ Better debugging and progress tracking
+
+## Files Modified
+
+### Updated
+- `src/clud/agent_cli.py` - Add TaskInfo integration (~30 lines)
+- `src/clud/agent/foreground_args.py` - Update import path (1 line)
+
+### Deleted
+- `src/clud/agent/foreground.py` - Remove entire file (992 lines)
+
+### Net Change
+- **Lines added**: ~30
+- **Lines removed**: ~992
+- **Net reduction**: ~960 lines (-60% of duplicate code)
+
+## Risk Assessment
+
+### Low Risk ✅
+- foreground.py essentially unused (only 1 function import)
+- All functionality exists in agent_cli.py
+- Changes well-isolated
+
+### Medium Risk ⚠️
+- TaskInfo integration new to agent_cli.py
+  - **Mitigation**: Port exactly as-is, test loop mode
+- Import path change
+  - **Mitigation**: Simple change, add import test
+
+### High Risk ❌
+- None identified
+
+## Related Issues
+
+- Loop mode not creating ITERATION_1.md files (foreground.py broken prompt)
+- Code duplication between agent_cli.py and agent/foreground.py
+- Inconsistent DONE.md validation between implementations
+
+## References
+
+- Commit `29c95c5`: "feat(agent): consolidate agent execution into single module"
+- Commit `dbdab3b`: "refactor(foreground): build conditional prompts for loop mode" (introduced broken prompt)
+- `src/clud/agent/task_info.py`: TaskInfo JSON tracking implementation
+
+## Completion Summary (Iteration 1)
+
+All phases successfully completed:
+- ✅ Phase 1: TaskInfo integration ported to agent_cli.py (~50 lines added)
+- ✅ Phase 2: Import updated in foreground_args.py (1 line changed)
+- ✅ Phase 3: Legacy foreground.py deleted (992 lines removed)
+- ✅ Phase 4: All references verified removed
+- ✅ Test mocks updated in test_cli_yolo_integration.py
+- ✅ All linting passed (ruff + pyright: 0 errors)
+
+**Net Result:** 940 lines of code removed, single source of truth established.
+
+---
+
+**Last Updated**: 2025-10-14
