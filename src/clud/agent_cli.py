@@ -944,14 +944,13 @@ def _execute_command(cmd: list[str], use_shell: bool = False, verbose: bool = Fa
 
 
 def _prompt_for_loop_count() -> int:
-    """Prompt user for loop count."""
+    """Prompt user for loop count (default: 50)."""
     while True:
         try:
             sys.stdout.flush()
-            response = input("Loop count: ").strip()
+            response = input("Loop count [50]: ").strip()
             if not response:
-                print("Loop count cannot be empty. Please enter a positive number.")
-                continue
+                return 50  # Default to 50
 
             count = int(response)
             if count <= 0:
