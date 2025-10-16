@@ -176,6 +176,31 @@ class TelegramAPIHandler:
             logger.error(f"Failed to send message: {e}")
             return False
 
+    def extract_bot_id_from_token(self, bot_token: str) -> str | None:
+        """Extract bot ID from Telegram bot token.
+
+        Telegram bot tokens have format: {bot_id}:{random_string}
+        This allows us to get the bot ID without making an API call.
+
+        Args:
+            bot_token: Telegram bot token
+
+        Returns:
+            Bot ID as string, or None if token format is invalid
+        """
+        if not bot_token or ":" not in bot_token:
+            return None
+
+        try:
+            bot_id = bot_token.split(":")[0]
+            # Validate it's numeric
+            if bot_id.isdigit():
+                return bot_id
+            return None
+        except Exception as e:
+            logger.error(f"Failed to extract bot ID from token: {e}")
+            return None
+
     def is_connected(self) -> bool:
         """Check if Telegram is configured and connected.
 

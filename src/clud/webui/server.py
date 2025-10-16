@@ -388,11 +388,24 @@ def create_app(static_dir: Path) -> FastAPI:
                 # Get bot info
                 bot_info = await telegram_handler.test_bot_connection(bot_token)
 
+                # If bot test fails, try to extract bot_id from token as fallback
+                # This allows the UI to show at least partial info even when API is unavailable
+                if bot_info is None:
+                    bot_id = telegram_handler.extract_bot_id_from_token(bot_token)
+                    if bot_id:
+                        bot_info = {
+                            "id": bot_id,
+                            "username": None,  # Can't get username without API
+                            "first_name": None,
+                            "deep_link": None,
+                            "from_token": True,  # Flag indicating this is partial info from token
+                        }
+
                 # Return credentials_saved flag even if bot test fails
                 # This allows UI to show "credentials configured" vs "connection verified"
                 return JSONResponse(
                     content={
-                        "connected": bot_info is not None,  # True only if bot test succeeds
+                        "connected": bot_info is not None and not bot_info.get("from_token", False),  # True only if bot test succeeds
                         "credentials_saved": True,  # True if credentials exist
                         "bot_info": bot_info,
                         "chat_id": chat_id,
