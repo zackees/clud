@@ -22,7 +22,11 @@
       "Read(//c/Users/niteris/dev/fastled-run/**)",
       "Bash(uv pip show:*)",
       "Read(//c/Users/niteris/dev/running-process/**)",
-      "Bash(git describe:*)"
+      "Bash(git describe:*)",
+      "Read(//c/Users/niteris/.clud/**)",
+      "Bash(uv run python:*)",
+      "Bash(/c/tools/python13/Scripts/npm config get prefix)",
+      "Bash(claude --version:*)"
     ],
     "deny": [],
     "ask": []

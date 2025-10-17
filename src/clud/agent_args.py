@@ -42,6 +42,7 @@ class Args:
     api_server: bool = False  # For --api-server (REST API mode)
     api_port: int | None = None  # Port for API server
     init_loop: bool = False
+    install_claude: bool = False
     help: bool = False
     track: bool = False
     hook_debug: bool = False  # For --hook-debug (verbose hook logging)
@@ -83,6 +84,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     webui = "--webui" in args_copy or "--ui" in args_copy
     api_server = "--api-server" in args_copy
     init_loop = "--init-loop" in args_copy
+    install_claude = "--install-claude" in args_copy
     track = "--track" in args_copy
     hook_debug = "--hook-debug" in args_copy
 
@@ -346,6 +348,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         api_server=api_server,
         api_port=api_port,
         init_loop=init_loop,
+        install_claude=install_claude,
         help=help_requested,
         track=track,
         hook_debug=hook_debug,

@@ -21,6 +21,7 @@ from running_process import RunningProcess
 from .agent.completion import detect_agent_completion
 from .agent.task_info import TaskInfo
 from .agent_args import AgentMode, Args, parse_args
+from .claude_installer import find_claude_code, install_claude_local, is_claude_installed_locally, prompt_install_claude
 from .hooks import HookContext, HookEvent, get_hook_manager
 from .hooks.config import load_hook_config
 from .hooks.telegram import TelegramHookHandler
@@ -426,31 +427,12 @@ def load_telegram_credentials() -> tuple[str | None, str | None]:
 
 
 def _find_claude_path() -> str | None:
-    """Find the path to the Claude executable."""
-    # Try to find claude in PATH, prioritizing Windows executables
-    if platform.system() == "Windows":
-        # On Windows, prefer .cmd and .exe extensions
-        claude_path = shutil.which("claude.cmd") or shutil.which("claude.exe")
-        if claude_path:
-            return claude_path
+    """Find the path to the Claude executable.
 
-    # Fall back to generic "claude" (for Unix or git bash on Windows)
-    claude_path = shutil.which("claude")
-    if claude_path:
-        return claude_path
-
-    # Check common Windows npm global locations
-    if platform.system() == "Windows":
-        possible_paths = [
-            os.path.expanduser("~/AppData/Roaming/npm/claude.cmd"),
-            os.path.expanduser("~/AppData/Roaming/npm/claude.exe"),
-            "C:/Users/" + os.environ.get("USERNAME", "") + "/AppData/Roaming/npm/claude.cmd",
-        ]
-        for path in possible_paths:
-            if os.path.exists(path):
-                return path
-
-    return None
+    This is now a wrapper around claude_installer.find_claude_code()
+    for backward compatibility.
+    """
+    return find_claude_code()
 
 
 # ============================================================================
@@ -766,6 +748,39 @@ def handle_init_loop_command() -> int:
         "Format LOOP.md as a reference guide for loop mode iterations."
     )
     return run_clud_subprocess(init_loop_prompt, use_print_flag=True)
+
+
+def handle_install_claude_command() -> int:
+    """Handle the --install-claude command by installing Claude Code locally."""
+    print("Installing Claude Code to ~/.clud/npm...", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Check if already installed
+    if is_claude_installed_locally():
+        print("Claude Code is already installed locally.", file=sys.stderr)
+        claude_path = find_claude_code()
+        if claude_path:
+            print(f"Location: {claude_path}", file=sys.stderr)
+
+        sys.stdout.flush()
+        response = input("\nReinstall? [y/N]: ").strip().lower()
+        if response not in ["y", "yes"]:
+            print("Installation cancelled.", file=sys.stderr)
+            return 0
+
+    # Install Claude Code
+    if install_claude_local(verbose=True):
+        print(file=sys.stderr)
+        print("✓ Installation complete!", file=sys.stderr)
+        print("You can now use 'clud' to run Claude Code.", file=sys.stderr)
+        return 0
+    else:
+        print(file=sys.stderr)
+        print("✗ Installation failed.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("You can try installing globally instead:", file=sys.stderr)
+        print("  npm install -g @anthropic-ai/claude-code@latest", file=sys.stderr)
+        return 1
 
 
 def handle_code_command(port: int | None = None) -> int:
@@ -1513,9 +1528,25 @@ def run_agent(args: Args) -> int:
         # Find Claude executable
         claude_path = _find_claude_path()
         if not claude_path:
+            # Claude Code not found - offer to install it locally
             print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
-            print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
-            return 1
+            print(file=sys.stderr)
+
+            # Offer automatic installation
+            if prompt_install_claude():
+                # Installation succeeded, try finding it again
+                claude_path = _find_claude_path()
+                if not claude_path:
+                    print("Error: Installation succeeded but claude executable still not found", file=sys.stderr)
+                    return 1
+            else:
+                # Installation declined or failed
+                print(file=sys.stderr)
+                print("You can also:", file=sys.stderr)
+                print("  - Install globally: npm install -g @anthropic-ai/claude-code@latest", file=sys.stderr)
+                print("  - Install later with: clud --install-claude", file=sys.stderr)
+                print("  - Download from: https://claude.ai/download", file=sys.stderr)
+                return 1
 
         # Handle loop mode - parse loop_value flexibly
         if args.loop_value is not None:
@@ -1783,6 +1814,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("                       Launch advanced Telegram integration server (default port: 8889)")
             print("  --webui, --ui [PORT] Launch Claude Code Web UI in browser (default port: 8888)")
             print("  --api-server [PORT]  Launch Message Handler API server (default port: 8765)")
+            print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  --track              Enable agent tracking with local daemon")
             print("  -h, --help           Show this help")
             print()
@@ -1825,6 +1857,9 @@ def main(args_list: list[str] | None = None) -> int:
 
         if args.init_loop:
             return handle_init_loop_command()
+
+        if args.install_claude:
+            return handle_install_claude_command()
 
         # Route to appropriate mode handler
         if args.mode == AgentMode.FIX:
