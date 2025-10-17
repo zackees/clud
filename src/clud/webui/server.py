@@ -384,12 +384,17 @@ def create_app(static_dir: Path) -> FastAPI:
 
                 bot_token, chat_id = load_telegram_credentials()
 
-            if bot_token:
-                # Get bot info
-                bot_info = await telegram_handler.test_bot_connection(bot_token)
+            # Treat empty string as no token (credentials were cleared)
+            if bot_token and bot_token.strip():
+                # Get bot info - with timeout protection
+                try:
+                    bot_info = await asyncio.wait_for(telegram_handler.test_bot_connection(bot_token), timeout=10.0)
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning("Bot connection test failed (%s), using fallback to extract bot_id from token", type(e).__name__)
+                    bot_info = None
 
-                # If bot test fails, try to extract bot_id from token as fallback
-                # This allows the UI to show at least partial info even when API is unavailable
+                # If bot test fails or times out, ALWAYS extract bot_id from token as fallback
+                # This ensures UI can show at least partial info even when API is unavailable
                 if bot_info is None:
                     bot_id = telegram_handler.extract_bot_id_from_token(bot_token)
                     if bot_id:
@@ -400,6 +405,9 @@ def create_app(static_dir: Path) -> FastAPI:
                             "deep_link": None,
                             "from_token": True,  # Flag indicating this is partial info from token
                         }
+                    else:
+                        # Token format is invalid - log warning but still report credentials saved
+                        logger.warning("Could not extract bot_id from token - token may be invalid")
 
                 # Return credentials_saved flag even if bot test fails
                 # This allows UI to show "credentials configured" vs "connection verified"

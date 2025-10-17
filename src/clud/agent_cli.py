@@ -1170,6 +1170,43 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
         return False, 1
 
 
+def _print_red_banner(message: str) -> None:
+    """Print a red banner message to stderr for critical warnings."""
+    terminal_width = shutil.get_terminal_size((80, 20)).columns
+    banner_char = "="
+    padding_char = " "
+
+    # Build banner lines
+    border: str = banner_char * terminal_width
+    padding: str = padding_char * terminal_width
+
+    # Center the message
+    message_lines: list[str] = message.split("\n")
+    centered_lines: list[str] = []
+    for line in message_lines:
+        spaces_needed = max(0, (terminal_width - len(line)) // 2)
+        centered_line: str = padding_char * spaces_needed + line
+        # Pad to full width
+        centered_line = centered_line + padding_char * (terminal_width - len(centered_line))
+        centered_lines.append(centered_line)
+
+    # ANSI color codes: red background + white text
+    RED_BG = "\033[41m"
+    WHITE_TEXT = "\033[97m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+    # Print banner
+    print(file=sys.stderr)
+    print(f"{RED_BG}{WHITE_TEXT}{BOLD}{border}{RESET}", file=sys.stderr)
+    print(f"{RED_BG}{WHITE_TEXT}{BOLD}{padding}{RESET}", file=sys.stderr)
+    for centered_line_text in centered_lines:
+        print(f"{RED_BG}{WHITE_TEXT}{BOLD}{centered_line_text}{RESET}", file=sys.stderr)
+    print(f"{RED_BG}{WHITE_TEXT}{BOLD}{padding}{RESET}", file=sys.stderr)
+    print(f"{RED_BG}{WHITE_TEXT}{BOLD}{border}{RESET}", file=sys.stderr)
+    print(file=sys.stderr)
+
+
 def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     """Run Claude in a loop, checking for DONE.md after each iteration."""
     agent_task_dir = Path(".agent_task")
@@ -1263,18 +1300,131 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             print(f"\n📋 DONE.md detected at project root after iteration {iteration_num}.", file=sys.stderr)
             print("Validating with `lint-test`...", file=sys.stderr)
 
-            # Run lint-test with streaming output (avoid buffer stalls)
-            lint_test_returncode = RunningProcess.run_streaming(["lint-test"])
-            if lint_test_returncode != 0:
-                print("❌ lint-test failed. Deleting DONE.md and continuing loop.", file=sys.stderr)
-                done_file.unlink()
-                continue
+            # Run lint-test and capture output
+            try:
+                # Run lint-test with output redirection
+                result = subprocess.run(
+                    ["lint-test"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+                lint_test_output = result.stdout
+                lint_test_returncode = result.returncode
 
-            # Passed - accept DONE.md
-            print("✅ lint-test passed. Accepting DONE.md and halting early.", file=sys.stderr)
-            task_info.mark_completed()
-            task_info.save(info_file)
-            break
+                # Display output to user
+                print(lint_test_output)
+
+                if lint_test_returncode != 0:
+                    # lint-test failed - invoke fix loop
+                    print("❌ lint-test failed. Keeping DONE.md and attempting to fix...", file=sys.stderr)
+
+                    # Determine if errors are lint or test related
+                    error_lint_file = Path("ERROR_LINT.md")
+                    error_test_file = Path("ERROR_TEST.md")
+
+                    # Categorize errors (simple heuristic)
+                    has_lint_errors = "ruff" in lint_test_output.lower() or "pyright" in lint_test_output.lower()
+                    has_test_errors = "pytest" in lint_test_output.lower() or "failed" in lint_test_output.lower()
+
+                    # Write error files
+                    if has_lint_errors:
+                        error_lint_file.write_text(f"# Linting Errors\n\n```\n{lint_test_output}\n```\n", encoding="utf-8")
+                        print(f"  Written lint errors to {error_lint_file}", file=sys.stderr)
+
+                    if has_test_errors:
+                        error_test_file.write_text(f"# Test Errors\n\n```\n{lint_test_output}\n```\n", encoding="utf-8")
+                        print(f"  Written test errors to {error_test_file}", file=sys.stderr)
+
+                    # Retry loop: invoke agent to fix errors
+                    max_fix_attempts = 5
+                    retest_returncode: int = 1  # Initialize as failed
+                    for fix_attempt in range(1, max_fix_attempts + 1):
+                        print(f"\n🔧 Fix attempt {fix_attempt}/{max_fix_attempts}...", file=sys.stderr)
+
+                        # Build fix prompt
+                        fix_prompt = "Read ERROR_LINT.md and/or ERROR_TEST.md files and fix all the errors listed. Then run lint-test to verify the fixes."
+
+                        # Build fix command (using -p flag for non-interactive)
+                        fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
+                        if not args.plain:
+                            fix_cmd.extend(["--output-format", "stream-json", "--verbose"])
+
+                        # Execute fix command
+                        if args.plain:
+                            RunningProcess.run_streaming(fix_cmd)
+                        else:
+                            formatter = StreamJsonFormatter(
+                                show_system=args.verbose,
+                                show_usage=True,
+                                show_cache=args.verbose,
+                                verbose=args.verbose,
+                            )
+                            stdout_callback = create_formatter_callback(formatter)
+                            RunningProcess.run_streaming(fix_cmd, stdout_callback=stdout_callback)
+
+                        # Re-run lint-test to check if fixed
+                        print(f"\n🔍 Re-running lint-test after fix attempt {fix_attempt}...", file=sys.stderr)
+                        retest_result = subprocess.run(
+                            ["lint-test"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            check=False,
+                        )
+                        retest_output = retest_result.stdout
+                        retest_returncode = retest_result.returncode
+
+                        # Display retest output
+                        print(retest_output)
+
+                        if retest_returncode == 0:
+                            # Fixed!
+                            print(f"✅ lint-test passed after {fix_attempt} fix attempt(s)!", file=sys.stderr)
+
+                            # Clean up error files
+                            if error_lint_file.exists():
+                                error_lint_file.unlink()
+                            if error_test_file.exists():
+                                error_test_file.unlink()
+
+                            # Accept DONE.md
+                            task_info.mark_completed()
+                            task_info.save(info_file)
+                            break
+                        else:
+                            # Still failing, update error files for next attempt
+                            has_lint_errors = "ruff" in retest_output.lower() or "pyright" in retest_output.lower()
+                            has_test_errors = "pytest" in retest_output.lower() or "failed" in retest_output.lower()
+
+                            if has_lint_errors:
+                                error_lint_file.write_text(f"# Linting Errors (Attempt {fix_attempt})\n\n```\n{retest_output}\n```\n", encoding="utf-8")
+
+                            if has_test_errors:
+                                error_test_file.write_text(f"# Test Errors (Attempt {fix_attempt})\n\n```\n{retest_output}\n```\n", encoding="utf-8")
+
+                            if fix_attempt == max_fix_attempts:
+                                # Max attempts reached
+                                _print_red_banner("LINTING/TESTING ISSUES REMAIN UNRESOLVED AFTER 5 FIX ATTEMPTS")
+                                print(f"\nERROR: Failed to fix lint/test errors after {max_fix_attempts} attempts.", file=sys.stderr)
+                                print("Please review ERROR_LINT.md and/or ERROR_TEST.md manually.", file=sys.stderr)
+                                # Keep DONE.md and error files for manual review
+
+                    # If we get here and retest_returncode == 0, we fixed it successfully
+                    if retest_returncode == 0:
+                        break  # Exit main loop
+                    else:
+                        # Still broken after max attempts, continue main loop
+                        continue
+                else:
+                    # Passed - accept DONE.md
+                    print("✅ lint-test passed. Accepting DONE.md and halting early.", file=sys.stderr)
+                    task_info.mark_completed()
+                    task_info.save(info_file)
+                    break
+            except Exception as e:
+                print(f"Error during lint-test validation: {e}", file=sys.stderr)
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)
 

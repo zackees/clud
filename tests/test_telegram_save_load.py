@@ -15,8 +15,8 @@ class TestTelegramSaveLoad(unittest.TestCase):
         store = get_credential_store()
         self.assertIsNotNone(store, "Credential store must be available")
 
-        # Test token
-        test_token = "test-bot-token-12345"
+        # Test token (proper Telegram token format: bot_id:secret)
+        test_token = "123456789:ABCdefGHI-jklMNOpqr123456"
 
         print("\n=== Testing Save/Load Cycle ===")
         print(f"1. Saving test token: {test_token[:15]}...")
