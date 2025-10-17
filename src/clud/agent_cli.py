@@ -1498,6 +1498,7 @@ def run_agent(args: Args) -> int:
         # Get and set API key before launching Claude
         api_key = get_api_key(args)
         os.environ["ANTHROPIC_API_KEY"] = api_key
+        os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "16000"
 
         # No validation needed - if no input is provided and stdin is a tty,
         # Claude Code will launch in interactive mode
