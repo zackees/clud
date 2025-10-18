@@ -423,6 +423,7 @@ The package provides two CLI entry points:
 - **Crystal**: Desktop application for orchestrating and monitoring Claude Code agents
 - **Happy Coder**: Spawn and control multiple Claude Codes in parallel with push notifications
 - **Claude Task Runner**: Manages context isolation and focused task execution
+- **Backlog.md**: Tool for managing project collaboration between humans and AI agents in a git ecosystem - turns any folder with a Git repo into a self-contained project board using plain Markdown files with zero-config CLI
 
 ## License
 
