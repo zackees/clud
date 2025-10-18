@@ -7,6 +7,7 @@
 	import DiffViewer from '$lib/components/DiffViewer.svelte';
 	import History from '$lib/components/History.svelte';
 	import Settings from '$lib/components/Settings.svelte';
+	import Backlog from '$lib/components/Backlog.svelte';
 
 	let projectPath = '';
 
@@ -70,6 +71,13 @@
 		</button>
 		<button
 			class="tab-button"
+			class:active={$activeTab === 'backlog'}
+			on:click={() => handleTabClick('backlog')}
+		>
+			Backlog
+		</button>
+		<button
+			class="tab-button"
 			class:active={$activeTab === 'diff'}
 			on:click={() => handleTabClick('diff')}
 		>
@@ -98,6 +106,9 @@
 		</div>
 		<div class="tab-panel" class:active={$activeTab === 'terminal'}>
 			<Terminal />
+		</div>
+		<div class="tab-panel" class:active={$activeTab === 'backlog'}>
+			<Backlog />
 		</div>
 		<div class="tab-panel" class:active={$activeTab === 'diff'}>
 			<DiffViewer />
