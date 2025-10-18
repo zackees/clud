@@ -1168,14 +1168,6 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
             if match:
                 last_iteration = max(last_iteration, int(match.group(1)))
 
-        # Remove DONE.md at project root to prevent immediate halt
-        if done_file_root.exists():
-            try:
-                done_file_root.unlink()
-                print("✓ Removed DONE.md from project root to allow continuation", file=sys.stderr)
-            except Exception as e:
-                print(f"Warning: Could not remove DONE.md: {e}", file=sys.stderr)
-
         next_iteration = last_iteration + 1
         print(f"✓ Continuing from iteration {next_iteration}", file=sys.stderr)
         return True, next_iteration

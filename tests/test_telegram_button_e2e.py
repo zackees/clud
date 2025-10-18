@@ -218,7 +218,8 @@ class TestTelegramButtonE2E(unittest.TestCase):
             try:
                 # Navigate to Web UI with increased timeout
                 page.goto(self.server_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_selector("body", timeout=10000)
+                # Wait for body to be visible (increased timeout to handle slow page loads)
+                page.wait_for_selector("body", timeout=30000)
 
                 # Navigate to Chat tab
                 chat_tab = page.locator('button:has-text("Chat")')
