@@ -29,6 +29,7 @@ from .hooks.webhook import WebhookHookHandler
 from .json_formatter import StreamJsonFormatter, create_formatter_callback
 from .output_filter import OutputFilter
 from .secrets import get_credential_store
+from .settings_manager import get_model_preference, set_model_preference
 from .task import handle_task_command
 from .telegram_bot import TelegramBot
 
@@ -927,6 +928,38 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
     return message + injection
 
 
+def _get_model_from_args(claude_args: list[str] | None) -> str | None:
+    """Detect which model is being used from claude_args or saved settings.
+
+    Returns the model flag (e.g., '--haiku', '--sonnet') or None if not specified.
+    Checks args first, then falls back to saved preferences.
+    """
+    # Check for common model flags in provided arguments
+    if claude_args:
+        model_flags = ["--haiku", "--sonnet", "--opus", "--claude-3-5-sonnet", "--claude-3-opus"]
+        for flag in model_flags:
+            if flag in claude_args:
+                return flag
+
+    # Fall back to saved preference
+    saved_model = get_model_preference()
+    return saved_model
+
+
+def _print_model_message(model_flag: str | None) -> None:
+    """Print a message about which model is being loaded."""
+    if model_flag == "--haiku":
+        print("Loading Haiku 4.5...", file=sys.stderr)
+    elif model_flag == "--sonnet":
+        print("Loading Sonnet 4.5...", file=sys.stderr)
+    else:
+        # For any other model, extract a readable name
+        if model_flag:
+            # Remove dashes and capitalize for display
+            display_name = model_flag.lstrip("-").replace("-", " ").title()
+            print(f"Loading {display_name}...", file=sys.stderr)
+
+
 def _build_claude_command(
     args: Args,
     claude_path: str,
@@ -969,6 +1002,26 @@ def _build_claude_command(
             cmd.extend(["-p", message_text])
         else:
             cmd.append(message_text)
+
+    # Determine model flag (from args or saved settings, defaulting to haiku)
+    model_flag = _get_model_from_args(args.claude_args)
+    model_in_args = False
+
+    # If a model was explicitly provided in args, save it as the preference
+    if args.claude_args:
+        for arg in args.claude_args:
+            if arg in ["--haiku", "--sonnet", "--opus", "--claude-3-5-sonnet", "--claude-3-opus"]:
+                set_model_preference(arg)
+                model_flag = arg
+                model_in_args = True
+                break
+
+    # Add model flag if not already present (either from args or from default)
+    if not model_flag:
+        model_flag = "--haiku"  # Default to haiku
+        # Don't save the default, only save explicit user choices
+    if not model_in_args:
+        cmd.append(model_flag)
 
     if args.claude_args:
         cmd.extend(args.claude_args)
@@ -1272,6 +1325,12 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             total_iterations=loop_count,
         )
 
+        # Detect and print model message
+        model_flag = _get_model_from_args(args.claude_args)
+        if not model_flag:
+            model_flag = "--haiku"  # Match default from _build_claude_command
+        _print_model_message(model_flag)
+
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)
 
@@ -1355,8 +1414,20 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
                         # Build fix command (using -p flag for non-interactive)
                         fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
+
+                        # Add default model flag to fix command if not specified
+                        fix_model_flag = _get_model_from_args(args.claude_args)
+                        if not fix_model_flag:
+                            fix_cmd.append("--haiku")
+                            fix_model_flag = "--haiku"
+                        if args.claude_args:
+                            fix_cmd.extend(args.claude_args)
+
                         if not args.plain:
                             fix_cmd.extend(["--output-format", "stream-json", "--verbose"])
+
+                        # Print model message for fix attempt
+                        _print_model_message(fix_model_flag)
 
                         # Execute fix command
                         if args.plain:
@@ -1577,6 +1648,12 @@ def run_agent(args: Args) -> int:
 
         # Build command
         cmd = _build_claude_command(args, claude_path)
+
+        # Detect and print model message
+        model_flag = _get_model_from_args(args.claude_args)
+        if not model_flag:
+            model_flag = "--haiku"  # Match default from _build_claude_command
+        _print_model_message(model_flag)
 
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)
