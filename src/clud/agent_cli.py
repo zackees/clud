@@ -504,7 +504,8 @@ def handle_codeup_command() -> int:
             capture_output=False,
         )
         if result.returncode != 0:
-            print(f"Warning: codeup --pre-test exited with code {result.returncode}", file=sys.stderr)
+            _print_red_banner("PRE-CHECK FAILED")
+            return result.returncode
     except FileNotFoundError:
         print("Warning: codeup command not found. Skipping pre-test.", file=sys.stderr)
     except Exception as e:
@@ -530,7 +531,8 @@ def handle_codeup_publish_command() -> int:
             capture_output=False,
         )
         if result.returncode != 0:
-            print(f"Warning: codeup --pre-test exited with code {result.returncode}", file=sys.stderr)
+            _print_red_banner("PRE-CHECK FAILED")
+            return result.returncode
     except FileNotFoundError:
         print("Warning: codeup command not found. Skipping pre-test.", file=sys.stderr)
     except Exception as e:
@@ -1003,25 +1005,16 @@ def _build_claude_command(
         else:
             cmd.append(message_text)
 
-    # Determine model flag (from args or saved settings, defaulting to haiku)
-    model_flag = _get_model_from_args(args.claude_args)
-    model_in_args = False
+    # Note: Claude Code CLI doesn't support --haiku, --sonnet, etc. flags
+    # These custom flags are only used for internal messaging and preferences
+    # Don't append model flags to the actual Claude command
 
     # If a model was explicitly provided in args, save it as the preference
     if args.claude_args:
         for arg in args.claude_args:
             if arg in ["--haiku", "--sonnet", "--opus", "--claude-3-5-sonnet", "--claude-3-opus"]:
                 set_model_preference(arg)
-                model_flag = arg
-                model_in_args = True
                 break
-
-    # Add model flag if not already present (either from args or from default)
-    if not model_flag:
-        model_flag = "--haiku"  # Default to haiku
-        # Don't save the default, only save explicit user choices
-    if not model_in_args:
-        cmd.append(model_flag)
 
     if args.claude_args:
         cmd.extend(args.claude_args)
@@ -1325,10 +1318,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             total_iterations=loop_count,
         )
 
-        # Detect and print model message
+        # Detect and print model message (for display only)
         model_flag = _get_model_from_args(args.claude_args)
-        if not model_flag:
-            model_flag = "--haiku"  # Match default from _build_claude_command
         _print_model_message(model_flag)
 
         # Print debug info
@@ -1649,10 +1640,8 @@ def run_agent(args: Args) -> int:
         # Build command
         cmd = _build_claude_command(args, claude_path)
 
-        # Detect and print model message
+        # Detect and print model message (for display only)
         model_flag = _get_model_from_args(args.claude_args)
-        if not model_flag:
-            model_flag = "--haiku"  # Match default from _build_claude_command
         _print_model_message(model_flag)
 
         # Print debug info
