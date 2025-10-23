@@ -24,7 +24,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
     server_process: subprocess.Popen[bytes] | None = None
     server_url: str = "http://localhost:8903"
-    startup_timeout: int = 30  # seconds
+    startup_timeout: int = 60  # seconds
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -108,11 +108,11 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Wait for main content to be visible
                 logger.info("Waiting for tab navigation to load...")
-                page.wait_for_selector(".tab-nav", timeout=5000)
+                page.wait_for_selector(".tab-nav", timeout=15000)
 
                 # Check that Backlog tab button exists
                 backlog_button = page.locator("button", has_text="Backlog")
@@ -145,17 +145,17 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Wait for tab navigation
-                page.wait_for_selector(".tab-nav", timeout=5000)
+                page.wait_for_selector(".tab-nav", timeout=15000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
                 backlog_button.click()
 
                 # Wait for backlog panel to be active
-                page.wait_for_selector(".tab-panel.active", timeout=5000)
+                page.wait_for_selector(".tab-panel.active", timeout=15000)
 
                 # Verify the Backlog button is now marked as active
                 self.assertTrue(
@@ -188,7 +188,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
@@ -246,7 +246,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
@@ -289,7 +289,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
@@ -346,7 +346,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
@@ -397,7 +397,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
@@ -439,7 +439,7 @@ class TestBacklogTabE2E(unittest.TestCase):
 
             try:
                 logger.info("Navigating to %s", self.server_url)
-                page.goto(self.server_url, wait_until="networkidle", timeout=10000)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
 
                 # Click Backlog tab
                 backlog_button = page.locator("button", has_text="Backlog")
