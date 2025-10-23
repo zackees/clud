@@ -1757,21 +1757,29 @@ def run_agent(args: Args) -> int:
 
     except OSError as e:
         error_msg = f"OS error launching Claude: {e}"
-        print(f"Error launching Claude: {e}", file=sys.stderr)
-        print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
-        _print_error_diagnostics(claude_path, cmd)
 
-        # Try backup method with shell=True
+        # Try backup method with shell=True first (Windows shell script issue)
+        # Only show error if backup also fails
         if cmd and claude_path:
             try:
-                print("\nAttempting backup method (shell=True)...", file=sys.stderr)
+                # Silently try shell=True method first
+                if args.verbose:
+                    print(f"DEBUG: OSError {e.winerror if hasattr(e, 'winerror') else e.errno}, retrying with shell=True...", file=sys.stderr)
                 return _execute_command(cmd, use_shell=True, verbose=args.verbose)
             except Exception as shell_error:
+                # Both methods failed - now show full error details
+                print(f"Error launching Claude: {e}", file=sys.stderr)
+                print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
+                _print_error_diagnostics(claude_path, cmd)
                 print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
                 traceback.print_exc()
-
-        print("\nFull stack trace from original error:", file=sys.stderr)
-        traceback.print_exc()
+        else:
+            # Can't attempt backup
+            print(f"Error launching Claude: {e}", file=sys.stderr)
+            print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
+            _print_error_diagnostics(claude_path, cmd)
+            print("\nFull stack trace from original error:", file=sys.stderr)
+            traceback.print_exc()
 
         # Trigger ERROR hook
         trigger_hook_sync(
