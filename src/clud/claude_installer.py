@@ -48,16 +48,17 @@ def get_local_claude_path() -> Path | None:
     if claude_bin.exists():
         return claude_bin
 
-    # Check node_modules/.bin/claude (where npm link creates scripts)
-    claude_node_bin = npm_dir / "node_modules" / ".bin" / "claude"
-    if claude_node_bin.exists():
-        return claude_node_bin
-
-    # Windows: Also check node_modules/.bin/claude.cmd
+    # Windows: Check node_modules/.bin/claude.cmd BEFORE generic shell script
+    # (npm creates .cmd wrapper on Windows, not executable directly)
     if platform.system() == "Windows":
         claude_node_cmd = npm_dir / "node_modules" / ".bin" / "claude.cmd"
         if claude_node_cmd.exists():
             return claude_node_cmd
+
+    # Check node_modules/.bin/claude (shell script - works on Unix, not Windows)
+    claude_node_bin = npm_dir / "node_modules" / ".bin" / "claude"
+    if claude_node_bin.exists():
+        return claude_node_bin
 
     return None
 
