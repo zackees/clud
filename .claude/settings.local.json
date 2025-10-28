@@ -26,7 +26,8 @@
       "Read(//c/Users/niteris/.clud/**)",
       "Bash(uv run python:*)",
       "Bash(/c/tools/python13/Scripts/npm config get prefix)",
-      "Bash(claude --version:*)"
+      "Bash(claude --version:*)",
+      "Read(//c/Users/niteris/dev/fastled2/**)"
     ],
     "deny": [],
     "ask": []

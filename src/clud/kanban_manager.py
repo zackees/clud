@@ -1,6 +1,9 @@
 """Kanban board manager using vibe-kanban with nodeenv-based Node.js."""
 
+import _thread
+import contextlib
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -187,20 +190,42 @@ def run_vibe_kanban() -> int:
         return 1
 
     plugins_dir = get_plugins_dir()
+    process = None
 
     try:
         # Run vibe-kanban using npx
         print("Starting vibe-kanban...")
-        result = subprocess.run(
+
+        # Start the process
+        process = subprocess.Popen(
             [str(npx_path), "vibe-kanban"],
             cwd=str(plugins_dir),
-            check=False,
         )
 
-        return result.returncode
+        # Wait for process to complete
+        returncode = process.wait()
+        return returncode
 
     except KeyboardInterrupt:
-        print("\nvibe-kanban stopped by user")
+        # Suppress all output during cleanup to prevent traceback spam
+        # Redirect stderr to devnull temporarily
+        old_stderr = sys.stderr
+        try:
+            with open(os.devnull, "w") as devnull:
+                sys.stderr = devnull
+
+                if process is not None:
+                    with contextlib.suppress(Exception):
+                        process.terminate()
+                        process.wait(timeout=2)
+                    with contextlib.suppress(Exception):
+                        process.kill()
+        finally:
+            sys.stderr = old_stderr
+
+        # Interrupt main thread to ensure proper cleanup
+        _thread.interrupt_main()
+        print("\n\nvibe-kanban stopped by user")
         return 0
     except Exception as e:
         print(f"Error: Failed to run vibe-kanban: {e}", file=sys.stderr)

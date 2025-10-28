@@ -1,5 +1,6 @@
 """PTY (pseudo-terminal) manager for terminal sessions."""
 
+import _thread
 import contextlib
 import logging
 import os
@@ -322,6 +323,11 @@ class PTYManager:
                     except OSError:
                         # FD closed or error
                         break
+        except KeyboardInterrupt:
+            logger.info("PTY read loop interrupted by user")
+            # Interrupt main thread to ensure proper cleanup
+            _thread.interrupt_main()
+            raise
         except Exception as e:
             logger.exception("Error in PTY read loop: %s", e)
         finally:
@@ -364,6 +370,11 @@ class PTYManager:
                 except Exception as e:
                     logger.error("Error reading from winpty: %s", e)
                     break
+        except KeyboardInterrupt:
+            logger.info("Windows PTY read loop interrupted by user")
+            # Interrupt main thread to ensure proper cleanup
+            _thread.interrupt_main()
+            raise
         except Exception as e:
             logger.exception("Error in Windows PTY read loop: %s", e)
         finally:

@@ -1,5 +1,6 @@
 """FastAPI server for Claude Code Web UI."""
 
+import _thread
 import asyncio
 import contextlib
 import logging
@@ -682,6 +683,8 @@ def run_server(port: int | None = None) -> int:
 
     except KeyboardInterrupt:
         print("\n\nShutting down Web UI server...")
+        # Interrupt main thread to ensure proper cleanup
+        _thread.interrupt_main()
         return 0
     except Exception as e:
         logger.exception("Error running Web UI server")

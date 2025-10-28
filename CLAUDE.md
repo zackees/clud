@@ -243,6 +243,47 @@ The hook system provides an event-based architecture for intercepting and forwar
 - All caught exceptions MUST be logged at minimum with appropriate context
 - Use specific exception types when possible rather than catching broad `Exception`
 - If an exception truly needs to be suppressed, use `contextlib.suppress()` and document why
+- **CRITICAL: KeyboardInterrupt Handling**
+  - **NEVER** silently catch or suppress `KeyboardInterrupt` exceptions
+  - **RECOMMENDED**: Use the `handle_keyboard_interrupt()` utility from `clud.util` for centralized handling:
+    ```python
+    from clud.util import handle_keyboard_interrupt
+
+    # Simple usage
+    result = handle_keyboard_interrupt(risky_operation, arg1, arg2)
+
+    # With cleanup and logging
+    result = handle_keyboard_interrupt(
+        risky_operation,
+        arg1,
+        arg2,
+        cleanup=cleanup_function,
+        logger=logger,
+        log_message="Operation interrupted by user"
+    )
+    ```
+  - **Manual handling** when `handle_keyboard_interrupt()` isn't suitable:
+    ```python
+    try:
+        operation()
+    except KeyboardInterrupt:
+        raise  # MANDATORY: Always re-raise KeyboardInterrupt
+    except Exception as e:
+        logger.error(f"Operation failed: {e}")
+    ```
+  - KeyboardInterrupt (Ctrl+C) is a user signal to stop execution - suppressing it creates unresponsive processes
+  - This applies to ALL exception handlers, including hook handlers, cleanup code, and background tasks
+  - The `handle_keyboard_interrupt()` utility:
+    - Ensures KeyboardInterrupt is ALWAYS re-raised
+    - Optionally calls cleanup function before re-raising
+    - Handles cleanup failures gracefully (logs but doesn't suppress interrupt)
+    - Optionally logs the interrupt with custom message
+    - See `src/clud/util.py` and `tests/test_util.py` for implementation and examples
+  - **Linter Support**:
+    - Ruff's **BLE001** (blind-except) rule can detect overly broad exception handlers that catch `KeyboardInterrupt`
+    - BLE001 is NOT active by default - must be explicitly enabled with `--select BLE001` or in pyproject.toml
+    - Consider enabling BLE001 in the future for automatic detection of this pattern
+    - Currently relying on manual code review for KeyboardInterrupt handling
 - Example of proper exception handling:
   ```python
   try:

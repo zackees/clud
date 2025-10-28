@@ -1,6 +1,7 @@
 """Consolidated agent module - handles all Claude Code execution and special commands."""
 
 import contextlib
+import logging
 import os
 import platform
 import re
@@ -35,6 +36,9 @@ from .telegram_bot import TelegramBot
 
 # Get credential store once at module level
 keyring = get_credential_store()
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 
 # Exception classes
@@ -101,6 +105,8 @@ def register_hooks_from_config(instance_id: str, session_id: str, hook_debug: bo
             if hook_debug:
                 print(f"DEBUG: Registered webhook hook (url={config.webhook_url})", file=sys.stderr)
 
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
         if hook_debug:
             print(f"DEBUG: Failed to register hooks: {e}", file=sys.stderr)
@@ -131,6 +137,8 @@ def trigger_hook_sync(event: HookEvent, context: HookContext, hook_debug: bool =
         # Trigger synchronously - just pass context (event is inside context)
         hook_manager.trigger_sync(context)
 
+    except KeyboardInterrupt:
+        raise
     except Exception as e:
         if hook_debug:
             print(f"DEBUG: Hook trigger failed: {e}", file=sys.stderr)
@@ -201,9 +209,9 @@ def set_terminal_title() -> None:
         title = f"clud: {parent_dir}"
         sys.stdout.write(f"\033]0;{title}\007")
         sys.stdout.flush()
-    except Exception:
-        # Silently ignore errors - terminal title is nice-to-have, not critical
-        pass
+    except (OSError, AttributeError) as e:
+        # Terminal title is nice-to-have, not critical - log at debug level
+        logger.debug("Failed to set terminal title: %s", e)
 
 
 def save_api_key_to_config(api_key: str, key_name: str = "anthropic-api-key") -> None:
@@ -226,8 +234,9 @@ def save_api_key_to_config(api_key: str, key_name: str = "anthropic-api-key") ->
 
                 FILE_ATTRIBUTE_HIDDEN = 0x02
                 ctypes.windll.kernel32.SetFileAttributesW(str(key_file), FILE_ATTRIBUTE_HIDDEN)
-            except Exception:
-                pass  # Not critical if hiding fails
+            except (OSError, AttributeError) as e:
+                # Not critical if hiding fails - log at debug level
+                logger.debug("Failed to set file as hidden on Windows: %s", e)
 
     except Exception as e:
         raise ConfigError(f"Failed to save API key to config: {e}") from e
@@ -921,6 +930,8 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         # Add common instructions (same for all iterations)
         parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
         parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .agent_task/) to halt the loop early.")
+        parts.append("CRITICAL: NEVER delete or overwrite an existing DONE.md file - it is the terminal signal to halt the loop.")
+        parts.append("If DONE.md already exists, read it first to understand the completion status before proceeding.")
 
         injection = " ".join(parts)
     else:
@@ -1299,6 +1310,14 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
         iteration_num = i + 1
         print(f"\n--- Iteration {iteration_num}/{loop_count} ---", file=sys.stderr)
 
+        # Check if DONE.md was already validated in a previous iteration
+        done_validated_marker = agent_task_dir / "done_validated"
+        if done_validated_marker.exists():
+            print("✅ DONE.md was already validated. Halting immediately.", file=sys.stderr)
+            print(f"Opening {done_file}...", file=sys.stderr)
+            _open_file_in_editor(done_file)
+            return 0
+
         # Mark iteration start
         task_info.start_iteration(iteration_num)
         task_info.save(info_file)
@@ -1352,19 +1371,25 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             print(f"Warning: Iteration {iteration_num} exited with code {returncode}", file=sys.stderr)
 
         # Check if DONE.md was created (at project root)
+        # FSM State: DONE.md exists → enter validation/fix loop (never delete DONE.md)
         if done_file.exists():
             # Validate that lint and test pass before accepting DONE.md
             print(f"\n📋 DONE.md detected at project root after iteration {iteration_num}.", file=sys.stderr)
             print("Validating with `lint-test`...", file=sys.stderr)
 
+            # Error log file for validation failures
+            error_log_file = agent_task_dir / "ERROR.log"
+
             # Run lint-test and capture output
             try:
                 # Run lint-test with output redirection
+                # Use UTF-8 encoding with error replacement to handle non-ASCII output
                 result = subprocess.run(
                     ["lint-test"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",  # Replace undecodable bytes with � instead of raising exception
                     check=False,
                 )
                 lint_test_output = result.stdout
@@ -1374,34 +1399,29 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
                 print(lint_test_output)
 
                 if lint_test_returncode != 0:
-                    # lint-test failed - invoke fix loop
+                    # FSM State: Validation failed → enter fix loop (keep DONE.md)
                     print("❌ lint-test failed. Keeping DONE.md and attempting to fix...", file=sys.stderr)
 
-                    # Determine if errors are lint or test related
-                    error_lint_file = Path("ERROR_LINT.md")
-                    error_test_file = Path("ERROR_TEST.md")
+                    # Save full output to ERROR.log (with tee-like behavior - already printed above)
+                    error_log_file.write_text(
+                        f"# Lint-Test Validation Errors\n\nTimestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\n\n```\n{lint_test_output}\n```\n",
+                        encoding="utf-8",
+                    )
+                    print(f"  Saved validation output to {error_log_file}", file=sys.stderr)
 
-                    # Categorize errors (simple heuristic)
-                    has_lint_errors = "ruff" in lint_test_output.lower() or "pyright" in lint_test_output.lower()
-                    has_test_errors = "pytest" in lint_test_output.lower() or "failed" in lint_test_output.lower()
-
-                    # Write error files
-                    if has_lint_errors:
-                        error_lint_file.write_text(f"# Linting Errors\n\n```\n{lint_test_output}\n```\n", encoding="utf-8")
-                        print(f"  Written lint errors to {error_lint_file}", file=sys.stderr)
-
-                    if has_test_errors:
-                        error_test_file.write_text(f"# Test Errors\n\n```\n{lint_test_output}\n```\n", encoding="utf-8")
-                        print(f"  Written test errors to {error_test_file}", file=sys.stderr)
-
-                    # Retry loop: invoke agent to fix errors
-                    max_fix_attempts = 5
+                    # FSM State: Fix loop (max 3 attempts, not 5)
+                    max_fix_attempts = 3
                     retest_returncode: int = 1  # Initialize as failed
                     for fix_attempt in range(1, max_fix_attempts + 1):
                         print(f"\n🔧 Fix attempt {fix_attempt}/{max_fix_attempts}...", file=sys.stderr)
 
-                        # Build fix prompt
-                        fix_prompt = "Read ERROR_LINT.md and/or ERROR_TEST.md files and fix all the errors listed. Then run lint-test to verify the fixes."
+                        # Build fix prompt referencing ERROR.log and lint-test command
+                        fix_prompt = (
+                            "Read .agent_task/ERROR.log to see the linting and testing errors. "
+                            "Fix all the errors listed in ERROR.log. "
+                            "You can run the `lint-test` command yourself to validate the errors and confirm they are fixed. "
+                            "After fixing, the system will automatically re-run lint-test to verify."
+                        )
 
                         # Build fix command (using -p flag for non-interactive)
                         fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
@@ -1439,7 +1459,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
                             ["lint-test"],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
-                            text=True,
+                            encoding="utf-8",
+                            errors="replace",  # Replace undecodable bytes with � instead of raising exception
                             check=False,
                         )
                         retest_output = retest_result.stdout
@@ -1449,51 +1470,100 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
                         print(retest_output)
 
                         if retest_returncode == 0:
-                            # Fixed!
+                            # FSM State: Validation passed → mark as complete and halt
                             print(f"✅ lint-test passed after {fix_attempt} fix attempt(s)!", file=sys.stderr)
 
-                            # Clean up error files
-                            if error_lint_file.exists():
-                                error_lint_file.unlink()
-                            if error_test_file.exists():
-                                error_test_file.unlink()
+                            # Clean up ERROR.log since validation passed
+                            if error_log_file.exists():
+                                error_log_file.unlink()
+                                print(f"  Removed {error_log_file}", file=sys.stderr)
 
-                            # Accept DONE.md
+                            # Accept DONE.md and mark as validated
                             task_info.mark_completed()
                             task_info.save(info_file)
+                            done_validated_marker.write_text(
+                                f"DONE.md validated successfully on {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\nFix attempts: {fix_attempt}\n",
+                                encoding="utf-8",
+                            )
                             break
                         else:
-                            # Still failing, update error files for next attempt
-                            has_lint_errors = "ruff" in retest_output.lower() or "pyright" in retest_output.lower()
-                            has_test_errors = "pytest" in retest_output.lower() or "failed" in retest_output.lower()
+                            # FSM State: Still failing → update ERROR.log for next attempt
+                            print(f"❌ lint-test still failing after fix attempt {fix_attempt}", file=sys.stderr)
 
-                            if has_lint_errors:
-                                error_lint_file.write_text(f"# Linting Errors (Attempt {fix_attempt})\n\n```\n{retest_output}\n```\n", encoding="utf-8")
-
-                            if has_test_errors:
-                                error_test_file.write_text(f"# Test Errors (Attempt {fix_attempt})\n\n```\n{retest_output}\n```\n", encoding="utf-8")
+                            # Update ERROR.log with latest output
+                            error_log_file.write_text(
+                                f"# Lint-Test Validation Errors (Attempt {fix_attempt})\n\n"
+                                f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                f"Iteration: {iteration_num}/{loop_count}\n"
+                                f"Fix Attempt: {fix_attempt}/{max_fix_attempts}\n\n"
+                                f"```\n{retest_output}\n```\n",
+                                encoding="utf-8",
+                            )
 
                             if fix_attempt == max_fix_attempts:
-                                # Max attempts reached
-                                _print_red_banner("LINTING/TESTING ISSUES REMAIN UNRESOLVED AFTER 5 FIX ATTEMPTS")
+                                # FSM State: Max attempts reached → halt with warning (keep DONE.md)
+                                _print_red_banner("LINTING/TESTING ISSUES REMAIN UNRESOLVED AFTER 3 FIX ATTEMPTS")
                                 print(f"\nERROR: Failed to fix lint/test errors after {max_fix_attempts} attempts.", file=sys.stderr)
-                                print("Please review ERROR_LINT.md and/or ERROR_TEST.md manually.", file=sys.stderr)
-                                # Keep DONE.md and error files for manual review
+                                print("Please review .agent_task/ERROR.log manually.", file=sys.stderr)
+                                print("DONE.md is kept at project root for review.", file=sys.stderr)
+                                print("Halting loop - linting & testing could not pass.", file=sys.stderr)
+                                # NEVER delete DONE.md - keep it along with ERROR.log for manual review
 
                     # If we get here and retest_returncode == 0, we fixed it successfully
                     if retest_returncode == 0:
-                        break  # Exit main loop
+                        break  # Exit main loop - validation passed
                     else:
-                        # Still broken after max attempts, continue main loop
-                        continue
+                        # FSM State: Still broken after max attempts - HALT (keep DONE.md)
+                        # This prevents infinite loops and wasted API credits
+                        print(f"\n⚠️  Halting loop after {max_fix_attempts} failed fix attempts.", file=sys.stderr)
+                        print("Review DONE.md and .agent_task/ERROR.log to understand the issues.", file=sys.stderr)
+                        break
                 else:
-                    # Passed - accept DONE.md
+                    # FSM State: Validation passed on first attempt → accept DONE.md and halt
                     print("✅ lint-test passed. Accepting DONE.md and halting early.", file=sys.stderr)
                     task_info.mark_completed()
                     task_info.save(info_file)
+                    done_validated_marker.write_text(
+                        f"DONE.md validated successfully on {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\nValidated on first attempt (no fixes needed)\n",
+                        encoding="utf-8",
+                    )
                     break
+            except KeyboardInterrupt:
+                raise  # Always re-raise KeyboardInterrupt
             except Exception as e:
+                # Validation failed due to exception (e.g., encoding error)
                 print(f"Error during lint-test validation: {e}", file=sys.stderr)
+                _print_red_banner("DONE.md VALIDATION FAILED DUE TO ERROR")
+                print(f"Exception type: {type(e).__name__}", file=sys.stderr)
+                print(f"Exception details: {e}", file=sys.stderr)
+                print(file=sys.stderr)
+                print("⚠️  DONE.md will be KEPT and loop will HALT to prevent infinite loop.", file=sys.stderr)
+                print("Review the error above and fix the issue manually.", file=sys.stderr)
+                print("Possible causes:", file=sys.stderr)
+                print("  - Encoding errors in lint-test output (see BUG_CHARMAP.md)", file=sys.stderr)
+                print("  - lint-test command not found or failed to execute", file=sys.stderr)
+                print("  - Permission errors reading/writing files", file=sys.stderr)
+                print(file=sys.stderr)
+                print(f"DONE.md location: {done_file.absolute()}", file=sys.stderr)
+
+                # Mark as completed (even though validation failed) to prevent re-running
+                task_info.mark_completed(error=f"Validation failed with exception: {e}")
+                task_info.save(info_file)
+
+                # Create a marker file to indicate validation was attempted but failed
+                validation_failed_marker = agent_task_dir / "done_validation_failed"
+                validation_failed_marker.write_text(
+                    f"DONE.md validation failed on {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Iteration: {iteration_num}/{loop_count}\n"
+                    f"Exception: {type(e).__name__}: {e}\n"
+                    f"\n"
+                    f"IMPORTANT: DONE.md was KEPT to prevent infinite loop.\n"
+                    f"Fix the validation issue manually and re-run if needed.\n",
+                    encoding="utf-8",
+                )
+
+                # HALT the loop (do NOT continue to next iteration)
+                break
 
     print("\nAll iterations complete or halted early.", file=sys.stderr)
 
@@ -1773,6 +1843,7 @@ def run_agent(args: Args) -> int:
                 _print_error_diagnostics(claude_path, cmd)
                 print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
                 traceback.print_exc()
+                # Fall through to trigger ERROR hook and return 1
         else:
             # Can't attempt backup
             print(f"Error launching Claude: {e}", file=sys.stderr)
@@ -1780,8 +1851,9 @@ def run_agent(args: Args) -> int:
             _print_error_diagnostics(claude_path, cmd)
             print("\nFull stack trace from original error:", file=sys.stderr)
             traceback.print_exc()
+            # Fall through to trigger ERROR hook and return 1
 
-        # Trigger ERROR hook
+        # Trigger ERROR hook (reached when both methods fail or backup can't be attempted)
         trigger_hook_sync(
             HookEvent.ERROR,
             HookContext(

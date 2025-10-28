@@ -1,5 +1,6 @@
 """Local daemon server for agent coordination and telegram service management."""
 
+import _thread
 import asyncio
 import http.server
 import json
@@ -433,6 +434,8 @@ class DaemonServer:
             self.server.serve_forever()
         except KeyboardInterrupt:
             logger.info("Daemon server shutting down")
+            # Interrupt main thread to ensure proper cleanup
+            _thread.interrupt_main()
             self.shutdown()
 
     def shutdown(self) -> None:

@@ -1,5 +1,6 @@
 """Cross-platform PTY-based agent completion detection."""
 
+import _thread
 import contextlib
 import logging
 import queue
@@ -199,6 +200,8 @@ def _monitor_pty_process(process: Any, idle_timeout: float, output_callback: Out
         with contextlib.suppress(Exception):
             if hasattr(process, "terminate"):
                 process.terminate()
+        # Interrupt main thread to ensure proper cleanup
+        _thread.interrupt_main()
         raise  # Re-raise to allow CLI to handle it
 
 
@@ -242,6 +245,8 @@ def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeou
         # Try to terminate the process gracefully
         with contextlib.suppress(Exception):
             process.terminate()
+        # Interrupt main thread to ensure proper cleanup
+        _thread.interrupt_main()
         raise  # Re-raise to allow CLI to handle it
 
 
@@ -310,6 +315,8 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
             # Try to terminate the process gracefully
             with contextlib.suppress(Exception):
                 process.terminate()
+            # Interrupt main thread to ensure proper cleanup
+            _thread.interrupt_main()
             raise  # Re-raise to allow CLI to handle it
     except Exception as e:
         logger.error(f"Subprocess detection failed: {e}")
