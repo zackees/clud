@@ -40,11 +40,11 @@ echo ""
 echo "📝 PYTHON LINTING"
 echo "------------------"
 echo "Running ruff check (linting)"
-uv run ruff check --fix src/ tests/
+uv run --no-sync ruff check --fix src/ tests/
 echo "Running ruff format (formatting + import sorting)"
-uv run ruff format src/ tests/
+uv run --no-sync ruff format src/ tests/
 echo "Running pyright (type checking)"
-uv run pyright
+uv run --no-sync pyright
 
 echo ""
 echo "🎉 All linting completed!"

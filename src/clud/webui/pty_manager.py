@@ -11,6 +11,8 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from clud.util import detect_git_bash
+
 logger = logging.getLogger(__name__)
 
 
@@ -394,13 +396,16 @@ class PTYManager:
     def _get_shell() -> list[str]:
         """Get shell command for current platform.
 
+        Uses detect_git_bash() to intelligently find git-bash on Windows,
+        avoiding WSL bash and checking multiple installation paths.
+
         Returns:
             Shell command as list
         """
         if platform.system() == "Windows":
-            # On Windows, prefer git-bash if available
-            git_bash = r"C:\Program Files\Git\bin\bash.exe"
-            if os.path.exists(git_bash):
+            # On Windows, use intelligent git-bash detection
+            git_bash = detect_git_bash()
+            if git_bash:
                 return [git_bash, "-l"]
             # Fall back to cmd.exe
             return ["cmd.exe"]

@@ -436,7 +436,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "1.0.30"
+version = "1.0.31"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -491,7 +491,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "alembic", specifier = ">=1.12.0" },
     { name = "appdirs", specifier = ">=1.4.4" },
-    { name = "codeup", specifier = ">=1.0.18" },
+    { name = "codeup", specifier = ">=1.0.22" },
     { name = "cryptography", marker = "extra == 'keyring-fallbacks'", specifier = ">=3.0.0" },
     { name = "disklru", specifier = ">=0.1.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
@@ -528,7 +528,7 @@ provides-extras = ["dev", "keyring-fallbacks", "posix", "full"]
 
 [[package]]
 name = "codeup"
-version = "1.0.20"
+version = "1.0.22"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -540,7 +540,7 @@ dependencies = [
     { name = "semi-secret" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/13/006eaa1f3fc8f1ab93890026b685b6855bd03aa5fe8168e4022eb120569c/codeup-1.0.20-py3-none-any.whl", hash = "sha256:29095b1c84bc02733d0bd82066d713b199d44de767c576d605719f0e82d9a153", size = 40835, upload-time = "2025-10-15T04:52:18.74Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/46/e385aedcf8c341ad56c99acd9b5f320a8429bf9104586f449ea26886f3e5/codeup-1.0.22-py3-none-any.whl", hash = "sha256:d4522d4eb75d623e156dd79c8f0bfbbad0b2fa18b3b00d81d104306cb407dc55", size = 46675, upload-time = "2025-10-28T22:23:57.494Z" },
 ]
 
 [[package]]

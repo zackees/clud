@@ -31,8 +31,10 @@ from .json_formatter import StreamJsonFormatter, create_formatter_callback
 from .output_filter import OutputFilter
 from .secrets import get_credential_store
 from .settings_manager import get_model_preference, set_model_preference
+from .shell_config import ShellLaunchConfig
 from .task import handle_task_command
 from .telegram_bot import TelegramBot
+from .util import detect_git_bash
 
 # Get credential store once at module level
 keyring = get_credential_store()
@@ -503,22 +505,19 @@ def handle_test_command() -> int:
 
 
 def handle_codeup_command() -> int:
-    """Handle the --codeup command by running codeup --pre-test first, then clud with a message to run the global codeup command."""
-    # Run codeup --pre-test first
-    print("Running codeup --pre-test before agent invocation...", file=sys.stderr)
+    """Handle the --codeup command by running git pre-check first, then clud with a message to run the global codeup command."""
+    # Run git pre-check using CodeUp API
+    from .git_precheck import run_two_phase_precheck
+
+    print("Running git pre-check before agent invocation...", file=sys.stderr)
     try:
-        result = subprocess.run(
-            ["codeup", "--pre-test"],
-            check=False,
-            capture_output=False,
-        )
-        if result.returncode != 0:
-            _print_red_banner("PRE-CHECK FAILED")
-            return result.returncode
-    except FileNotFoundError:
-        print("Warning: codeup command not found. Skipping pre-test.", file=sys.stderr)
+        result = run_two_phase_precheck(verbose=True)
+        if not result.success:
+            _print_red_banner("GIT PRE-CHECK FAILED")
+            print(f"Error: {result.error_message}", file=sys.stderr)
+            return 1
     except Exception as e:
-        print(f"Warning: Error running codeup --pre-test: {e}", file=sys.stderr)
+        print(f"Warning: Error running git pre-check: {e}", file=sys.stderr)
 
     # Now run the agent with the codeup prompt
     codeup_prompt = (
@@ -530,22 +529,19 @@ def handle_codeup_command() -> int:
 
 
 def handle_codeup_publish_command() -> int:
-    """Handle the --codeup-publish command by running codeup --pre-test first, then clud with a message to run codeup -p."""
-    # Run codeup --pre-test first
-    print("Running codeup --pre-test before agent invocation...", file=sys.stderr)
+    """Handle the --codeup-publish command by running git pre-check first, then clud with a message to run codeup -p."""
+    # Run git pre-check using CodeUp API
+    from .git_precheck import run_two_phase_precheck
+
+    print("Running git pre-check before agent invocation...", file=sys.stderr)
     try:
-        result = subprocess.run(
-            ["codeup", "--pre-test"],
-            check=False,
-            capture_output=False,
-        )
-        if result.returncode != 0:
-            _print_red_banner("PRE-CHECK FAILED")
-            return result.returncode
-    except FileNotFoundError:
-        print("Warning: codeup command not found. Skipping pre-test.", file=sys.stderr)
+        result = run_two_phase_precheck(verbose=True)
+        if not result.success:
+            _print_red_banner("GIT PRE-CHECK FAILED")
+            print(f"Error: {result.error_message}", file=sys.stderr)
+            return 1
     except Exception as e:
-        print(f"Warning: Error running codeup --pre-test: {e}", file=sys.stderr)
+        print(f"Warning: Error running git pre-check: {e}", file=sys.stderr)
 
     # Now run the agent with the codeup -p prompt
     codeup_publish_prompt = (
@@ -931,6 +927,10 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
         parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .agent_task/) to halt the loop early.")
         parts.append("CRITICAL: NEVER delete or overwrite an existing DONE.md file - it is the terminal signal to halt the loop.")
+        parts.append(
+            "CRITICAL: YOU CAN NEVER ASK QUESTIONS AND EXPECT ANSWERS! THIS IS AN AGENT LOOP. NO QUESTIONS TO THE USER! "
+            "If you must ask a question, then leave it for the next iteration to research or resolve."
+        )
         parts.append("If DONE.md already exists, read it first to understand the completion status before proceeding.")
 
         injection = " ".join(parts)
@@ -1031,6 +1031,73 @@ def _build_claude_command(
         cmd.extend(args.claude_args)
 
     return cmd
+
+
+def _wrap_command_for_git_bash(cmd: list[str]) -> list[str]:
+    """Wrap command in git-bash on Windows if available.
+
+    On Windows, if git-bash is detected, this wraps the command to execute
+    through git-bash rather than cmd.exe. This provides a proper bash environment
+    for Claude Code, avoiding WSL and ensuring consistent behavior.
+
+    Args:
+        cmd: Original command as list of strings
+
+    Returns:
+        Modified command wrapped in git-bash if on Windows and git-bash is available,
+        otherwise returns the original command unchanged.
+    """
+    if platform.system() != "Windows":
+        # Not Windows, return unchanged
+        return cmd
+
+    git_bash = detect_git_bash()
+    if not git_bash:
+        # No git-bash available, return unchanged
+        return cmd
+
+    # Convert command to bash-compatible format
+    # 1. Convert Windows paths (backslashes) to forward slashes for bash
+    # 2. Use bash-style single quoting to avoid escaping issues
+    bash_cmd_parts: list[str] = []
+    for arg in cmd:
+        # Convert Windows paths to forward slashes (bash on Windows understands these)
+        if "\\" in arg:
+            arg = arg.replace("\\", "/")
+
+        # Use single quotes for bash (no variable expansion, simpler escaping)
+        # Escape any single quotes in the argument
+        arg_escaped = arg.replace("'", "'\\''")
+        bash_cmd_parts.append(f"'{arg_escaped}'")
+
+    cmd_str = " ".join(bash_cmd_parts)
+
+    # Wrap in git-bash: bash -c "command"
+    # Use -c flag to execute command directly
+    return [git_bash, "-c", cmd_str]
+
+
+def _build_shell_command(claude_path: str, command_args: list[str]) -> list[str]:
+    """Build command using ShellLaunchConfig for proper shell and path handling.
+
+    This function:
+    1. Preserves the original claude_path without premature normalization
+    2. Determines the best shell to use (prefers git-bash on Windows)
+    3. Tests that the shell can be launched
+    4. Normalizes the path at the last moment before execution
+
+    Args:
+        claude_path: Original path to Claude executable
+        command_args: Command-line arguments (e.g., ["--dangerously-skip-permissions", "-p", "message"])
+
+    Returns:
+        Final command list ready for subprocess.run(), with path normalized for the target shell
+    """
+    config = ShellLaunchConfig(
+        claude_path=claude_path,
+        command_args=command_args,
+    )
+    return config.build_command()
 
 
 def _print_debug_info(claude_path: str | None, cmd: list[str], verbose: bool = False) -> None:
@@ -1271,6 +1338,46 @@ def _print_red_banner(message: str) -> None:
     print(file=sys.stderr)
 
 
+def _find_and_run_lint_test() -> tuple[int, str]:
+    """Find lint-test command using shutil.which and run it with output capture.
+
+    Returns:
+        Tuple of (returncode, output)
+
+    Raises:
+        FileNotFoundError: If lint-test command is not found in PATH
+
+    Note:
+        This function uses subprocess.run() with PIPE to capture output.
+        While CLAUDE.md recommends RunningProcess.run_streaming() for long-running
+        processes, we need to capture the full output here for ERROR.log and
+        validation purposes. The output buffer (typically 64KB) should be sufficient
+        for most lint-test runs, but very large outputs could potentially stall.
+        Future improvement: Use streaming with a custom callback that accumulates output.
+    """
+    # Use shutil.which to find lint-test in PATH
+    lint_test_path = shutil.which("lint-test")
+
+    if lint_test_path is None:
+        raise FileNotFoundError("lint-test command not found in PATH. Please ensure lint-test is installed and available in your PATH.")
+
+    # Run lint-test with output capture
+    # Note: We capture output here because we need to:
+    # 1. Display it to the user
+    # 2. Save it to ERROR.log file
+    # 3. Check the return code
+    result = subprocess.run(
+        [lint_test_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",  # Replace undecodable bytes with � instead of raising exception
+        check=False,
+    )
+
+    return result.returncode, result.stdout
+
+
 def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
     """Run Claude in a loop, checking for DONE.md after each iteration."""
     agent_task_dir = Path(".agent_task")
@@ -1336,6 +1443,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
             iteration=iteration_num,
             total_iterations=loop_count,
         )
+        # Wrap command in git-bash on Windows if available
+        cmd = _wrap_command_for_git_bash(cmd)
 
         # Detect and print model message (for display only)
         model_flag = _get_model_from_args(args.claude_args)
@@ -1382,18 +1491,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
             # Run lint-test and capture output
             try:
-                # Run lint-test with output redirection
-                # Use UTF-8 encoding with error replacement to handle non-ASCII output
-                result = subprocess.run(
-                    ["lint-test"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    encoding="utf-8",
-                    errors="replace",  # Replace undecodable bytes with � instead of raising exception
-                    check=False,
-                )
-                lint_test_output = result.stdout
-                lint_test_returncode = result.returncode
+                # Find and run lint-test using shutil.which for validation
+                lint_test_returncode, lint_test_output = _find_and_run_lint_test()
 
                 # Display output to user
                 print(lint_test_output)
@@ -1455,16 +1554,7 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
 
                         # Re-run lint-test to check if fixed
                         print(f"\n🔍 Re-running lint-test after fix attempt {fix_attempt}...", file=sys.stderr)
-                        retest_result = subprocess.run(
-                            ["lint-test"],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            encoding="utf-8",
-                            errors="replace",  # Replace undecodable bytes with � instead of raising exception
-                            check=False,
-                        )
-                        retest_output = retest_result.stdout
-                        retest_returncode = retest_result.returncode
+                        retest_returncode, retest_output = _find_and_run_lint_test()
 
                         # Display retest output
                         print(retest_output)
@@ -1709,6 +1799,8 @@ def run_agent(args: Args) -> int:
 
         # Build command
         cmd = _build_claude_command(args, claude_path)
+        # Wrap command in git-bash on Windows if available
+        cmd = _wrap_command_for_git_bash(cmd)
 
         # Detect and print model message (for display only)
         model_flag = _get_model_from_args(args.claude_args)

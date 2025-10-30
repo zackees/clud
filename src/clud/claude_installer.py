@@ -243,6 +243,11 @@ def find_claude_code() -> str | None:
 
     Returns:
         Path to claude executable or None if not found
+
+    Note:
+        Returns the path in its original form without normalization.
+        Path normalization is handled by shell_config.ShellLaunchConfig
+        at the last moment before execution.
     """
     # Priority 1: Check local installation
     local_path = get_local_claude_path()
