@@ -224,7 +224,7 @@ def _is_git_bash(bash_path: str) -> bool:
         if "linux" in version_output:
             return False
 
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return False
 
     return False

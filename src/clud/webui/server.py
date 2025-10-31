@@ -141,6 +141,51 @@ def create_app(static_dir: Path) -> FastAPI:
         """
         await terminal_handler.handle_websocket(websocket, id)
 
+    @app.websocket("/ws/telegram")
+    async def telegram_websocket(websocket: WebSocket) -> None:
+        """WebSocket endpoint for Telegram real-time updates.
+
+        This endpoint provides real-time updates for Telegram bot messages and status.
+        Currently a stub endpoint - full Telegram integration is work in progress.
+        """
+        await websocket.accept()
+        logger.info("Telegram WebSocket client connected: %s", websocket.client)
+
+        try:
+            # Send initial connection acknowledgment
+            await websocket.send_json({"type": "telegram_status", "status": "connected"})
+
+            while True:
+                # Receive and handle messages from client
+                data = await websocket.receive_json()
+                message_type = data.get("type")
+
+                if message_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                elif message_type == "telegram_send":
+                    # Handle outgoing message request
+                    chat_id = data.get("chat_id")
+                    message = data.get("message")
+                    logger.info("Telegram send request: chat_id=%s", chat_id)
+
+                    # Use telegram handler to send message
+                    success = await telegram_handler.send_message(chat_id, message)
+
+                    if success:
+                        await websocket.send_json({"type": "telegram_sent", "status": "ok"})
+                    else:
+                        await websocket.send_json({"type": "telegram_error", "error": "Failed to send message"})
+                else:
+                    logger.warning("Unknown Telegram WebSocket message type: %s", message_type)
+                    await websocket.send_json({"type": "error", "error": f"Unknown message type: {message_type}"})
+
+        except WebSocketDisconnect:
+            logger.info("Telegram WebSocket client disconnected: %s", websocket.client)
+        except Exception as e:
+            logger.exception("Error handling Telegram WebSocket connection")
+            with contextlib.suppress(Exception):
+                await websocket.send_json({"type": "error", "error": str(e)})
+
     @app.get("/api/projects")
     async def get_projects(base_path: str | None = None) -> JSONResponse:
         """List available projects."""
