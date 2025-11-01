@@ -101,8 +101,8 @@ class TestDiffTabE2E(unittest.TestCase):
         cls.server_process = subprocess.Popen(
             ["uv", "run", "--no-sync", "clud", "--webui", "8902"],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             cwd=str(Path(__file__).parent.parent),
         )
 

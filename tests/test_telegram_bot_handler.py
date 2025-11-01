@@ -4,14 +4,14 @@ Tests the Telegram bot handler's command processing, message handling,
 user authentication, and error handling.
 """
 
-# pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false
-# Mock objects from unittest.mock have incomplete type stubs
+# pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportMissingImports=false, reportUntypedFunctionDecorator=false, reportUnknownVariableType=false
+# Mock objects from unittest.mock and pytest have incomplete type stubs
 
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 from telegram import Chat, Message, Update, User
 from telegram.ext import ContextTypes
 
@@ -470,7 +470,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
             mock_builder = MagicMock()
             mock_app_class.builder.return_value = mock_builder
             mock_builder.token.return_value = mock_builder
-            mock_app = AsyncMock()
+            # Use MagicMock for app since add_handler/add_error_handler are synchronous
+            mock_app = MagicMock()
             mock_builder.build.return_value = mock_app
             mock_app.initialize = AsyncMock()
             mock_app.start = AsyncMock()
@@ -496,7 +497,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
             mock_builder = MagicMock()
             mock_app_class.builder.return_value = mock_builder
             mock_builder.token.return_value = mock_builder
-            mock_app = AsyncMock()
+            # Use MagicMock for app since add_handler/add_error_handler are synchronous
+            mock_app = MagicMock()
             mock_builder.build.return_value = mock_app
             mock_app.initialize = AsyncMock(side_effect=Exception("Connection error"))
 

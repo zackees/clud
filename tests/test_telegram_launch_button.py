@@ -6,6 +6,9 @@ disabled even when valid credentials are saved.
 Run with: bash test --full
 """
 
+# Playwright has incomplete type stubs - disable type checking for third-party import errors
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
+
 import logging
 import os
 import subprocess

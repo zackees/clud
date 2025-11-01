@@ -5,6 +5,9 @@ and filtering/searching functionality works.
 Run with: bash test --full
 """
 
+# Playwright has incomplete type stubs - disable type checking for third-party import errors
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
+
 import logging
 import os
 import subprocess
@@ -62,8 +65,8 @@ class TestBacklogTabE2E(unittest.TestCase):
         cls.server_process = subprocess.Popen(
             ["uv", "run", "--no-sync", "clud", "--webui", "8903"],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             cwd=str(Path(__file__).parent.parent),
         )
 

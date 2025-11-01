@@ -27,7 +27,8 @@
       "Bash(uv run python:*)",
       "Bash(/c/tools/python13/Scripts/npm config get prefix)",
       "Bash(claude --version:*)",
-      "Read(//c/Users/niteris/dev/fastled2/**)"
+      "Read(//c/Users/niteris/dev/fastled2/**)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": []

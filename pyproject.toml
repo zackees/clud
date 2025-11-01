@@ -102,8 +102,6 @@ include = ["src", "tests"]
 exclude = [
     "**/__pycache__",
     "**/node_modules/**",
-    "tests/test_webui_e2e.py",  # E2E tests use Playwright which has incomplete type stubs
-    "tests/test_terminal_e2e.py",  # E2E tests use Playwright which has incomplete type stubs
 ]
 
 # Type checking configuration

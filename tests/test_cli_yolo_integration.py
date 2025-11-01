@@ -38,7 +38,8 @@ class TestCliYoloIntegration(unittest.TestCase):
             mock_execute.return_value = 0
 
             # Mock shutil.which to return a fake claude path
-            with patch("clud.agent_cli.shutil.which", return_value="/fake/claude"):
+            # Also mock detect_git_bash to avoid subprocess calls in git-bash detection
+            with patch("clud.agent_cli.shutil.which", return_value="/fake/claude"), patch("clud.agent_cli.detect_git_bash", return_value=None):
                 result = main(["-m", "test message"])
 
         self.assertEqual(result, 0)

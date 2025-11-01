@@ -4,6 +4,9 @@ This test ensures the Web UI can load properly and displays without console erro
 Run with: bash test --full
 """
 
+# Playwright has incomplete type stubs - disable type checking for third-party import errors
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
+
 import logging
 import os
 import subprocess
@@ -41,8 +44,8 @@ class TestWebUIE2E(unittest.TestCase):
         cls.server_process = subprocess.Popen(
             ["uv", "run", "--no-sync", "clud", "--webui", "8899"],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             cwd=str(Path(__file__).parent.parent),
         )
 

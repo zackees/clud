@@ -1,13 +1,13 @@
 """Unit tests for telegram/session_manager.py."""
 
-# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false
-# Mock objects from unittest.mock have incomplete type stubs
+# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false, reportMissingImports=false, reportUntypedFunctionDecorator=false
+# Mock objects from unittest.mock and pytest have incomplete type stubs
 
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 from clud.api.instance_manager import CludInstance, InstancePool
 from clud.telegram.models import TelegramMessage, TelegramSession

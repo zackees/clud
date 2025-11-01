@@ -263,10 +263,10 @@ class TestDetectGitBash(unittest.TestCase):
     def test_skips_wsl_bash(self, mock_is_git_bash: MagicMock, mock_isfile: MagicMock, mock_run: MagicMock, mock_system: MagicMock) -> None:
         """Test that detect_git_bash skips WSL bash and finds real git-bash."""
         mock_system.return_value = "Windows"
-        # 'where bash' returns WSL bash first, then git-bash (with actual newline, not \n string)
+        # 'where bash' returns WSL bash first, then git-bash
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="C:\\Windows\\System32\\wsl.exe\nC:\\Program Files\\Git\\bin\\bash.exe",
+            stdout=r"C:\Windows\System32\wsl.exe" + "\n" + r"C:\Program Files\Git\bin\bash.exe",
         )
         mock_isfile.return_value = True
         # First call (WSL) returns False, second call (git-bash) returns True

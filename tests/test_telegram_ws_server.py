@@ -4,11 +4,14 @@ Tests the WebSocket handler's connection management, authentication,
 message routing, and error handling.
 """
 
+# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUntypedFunctionDecorator=false, reportUnknownVariableType=false
+# pytest has incomplete type stubs
+
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 from fastapi import WebSocket
 
 from clud.telegram.models import ContentType, EventType, MessageSender, TelegramMessage, TelegramSession
