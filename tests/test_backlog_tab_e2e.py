@@ -65,8 +65,6 @@ class TestBacklogTabE2E(unittest.TestCase):
         cls.server_process = subprocess.Popen(
             ["uv", "run", "--no-sync", "clud", "--webui", "8903"],
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             cwd=str(Path(__file__).parent.parent),
         )
 
