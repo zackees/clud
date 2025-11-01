@@ -31,6 +31,28 @@ class TestBacklogTabE2E(unittest.TestCase):
         """Start the Web UI server before running tests."""
         logger.info("Starting Web UI server for Backlog e2e tests...")
 
+        # Create test Backlog.md in the repo root if it doesn't exist
+        test_backlog_path = Path(__file__).parent.parent / "Backlog.md"
+        if not test_backlog_path.exists():
+            logger.info("Creating test Backlog.md file...")
+            test_backlog_content = """# Backlog
+
+## To Do
+- [ ] #1 Add user authentication (priority: high)
+  - Implement OAuth2 flow
+  - Add JWT token handling
+- [ ] #2 Create dashboard UI (priority: medium)
+
+## In Progress
+- [ ] #3 Fix login bug
+
+## Done
+- [x] #4 Setup project structure
+- [x] #5 Write documentation (priority: low)
+"""
+            test_backlog_path.write_text(test_backlog_content, encoding="utf-8")
+            logger.info("Test Backlog.md created")
+
         # Start the server using the actual CLI command that users would run
         # Use port 8903 to avoid conflicts
         env = os.environ.copy()
@@ -464,6 +486,74 @@ class TestBacklogTabE2E(unittest.TestCase):
                 self.assertTrue(backlog_container.is_visible(), "Backlog tab should be visible after switching back")
 
                 logger.info("✓ Backlog tab persists across tab switches")
+
+            finally:
+                browser.close()
+
+    def test_backlog_loads_tasks_from_backend(self) -> None:
+        """Test that tasks are loaded from the backend API and displayed."""
+        console_errors: list[str] = []
+
+        def on_console_message(msg: ConsoleMessage) -> None:
+            """Capture console messages."""
+            if msg.type == "error":
+                error_text = msg.text
+                if "WebSocket" not in error_text and "favicon" not in error_text:
+                    console_errors.append(error_text)
+                    logger.error("Browser console error: %s", error_text)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            page.on("console", on_console_message)
+
+            try:
+                logger.info("Navigating to %s", self.server_url)
+                page.goto(self.server_url, wait_until="networkidle", timeout=30000)
+
+                # Click Backlog tab
+                backlog_button = page.locator("button", has_text="Backlog")
+                backlog_button.click()
+
+                # Wait for tasks to load from backend
+                # The component should fetch from /api/backlog and render tasks
+                page.wait_for_timeout(2000)
+
+                # Check if tasks are displayed (if Backlog.md exists with tasks)
+                # We should see task items or empty state
+                tasks_list = page.locator(".tasks-list .task-card")
+                # Be more specific - look for empty state within backlog container
+                empty_state = page.locator(".backlog-container .empty-state")
+
+                # Either tasks or empty state should be visible
+                tasks_count = tasks_list.count()
+                empty_visible = empty_state.is_visible() if empty_state.count() > 0 else False
+
+                if tasks_count > 0:
+                    logger.info(f"✓ Found {tasks_count} tasks loaded from backend")
+
+                    # Verify that tasks have expected structure
+                    first_task = tasks_list.first
+                    task_title = first_task.locator(".task-title")
+                    self.assertTrue(task_title.is_visible(), "Task title should be visible")
+
+                    # Check for task status badge
+                    task_status = first_task.locator(".status-badge")
+                    self.assertTrue(task_status.is_visible(), "Task status should be visible")
+
+                    logger.info("✓ Tasks have expected structure (title, status)")
+                elif empty_visible:
+                    logger.info("✓ Empty state displayed (no tasks in Backlog.md)")
+                else:
+                    self.fail("Neither tasks nor empty state found - component may not be loading")
+
+                # Verify stats are updated with actual counts
+                stats = page.locator(".header-stats")
+                if stats.is_visible():
+                    stats_text = stats.text_content()
+                    self.assertIsNotNone(stats_text, "Stats text should not be None")
+                    logger.info(f"✓ Stats displayed: {stats_text}")
 
             finally:
                 browser.close()

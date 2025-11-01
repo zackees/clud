@@ -11,6 +11,7 @@ from typing import Any
 
 from running_process import RunningProcess
 
+from ..backlog.parser import load_backlog
 from ..views import DiffTreeView, DiffView
 
 logger = logging.getLogger(__name__)
@@ -472,3 +473,50 @@ class DiffHandler:
             raise RuntimeError(f"Git command failed: {e.stderr}") from e
         except Exception as e:
             raise RuntimeError(f"Failed to scan git changes: {e}") from e
+
+
+class BacklogHandler:
+    """Handle backlog-related requests."""
+
+    @staticmethod
+    def get_backlog_tasks(project_path: str) -> list[dict[str, Any]]:
+        """Get all backlog tasks from Backlog.md.
+
+        Args:
+            project_path: Path to project directory
+
+        Returns:
+            List of task dictionaries with id, title, status, description, priority, created_at, updated_at
+        """
+        backlog_path = Path(project_path) / "Backlog.md"
+
+        try:
+            tasks = load_backlog(backlog_path)
+
+            # Convert BacklogTask dataclass instances to dicts for JSON serialization
+            task_dicts: list[dict[str, Any]] = []
+            for task in tasks:
+                task_dict: dict[str, Any] = {
+                    "id": task.id,
+                    "title": task.title,
+                    "status": task.status,
+                }
+
+                # Add optional fields if present
+                if task.description:
+                    task_dict["description"] = task.description
+                if task.priority:
+                    task_dict["priority"] = task.priority
+                if task.created_at is not None:
+                    task_dict["created_at"] = task.created_at
+                if task.updated_at is not None:
+                    task_dict["updated_at"] = task.updated_at
+
+                task_dicts.append(task_dict)
+
+            return task_dicts
+
+        except Exception as e:
+            logger.warning("Failed to load backlog from %s: %s", backlog_path, e)
+            # Return empty list on error (graceful degradation)
+            return []

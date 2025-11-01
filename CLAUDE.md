@@ -56,6 +56,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - Features:
     - Real-time streaming chat interface with Claude Code
     - **Integrated terminal console** with xterm.js (split-pane layout)
+    - **Backlog tab** for visualizing and managing tasks from `Backlog.md`
     - Project directory selection
     - Conversation history (stored in browser localStorage)
     - Dark/light theme toggle
@@ -134,6 +135,115 @@ The Web UI includes an integrated terminal console that provides direct shell ac
 - **Garbled Output**: Ensure terminal is properly sized (resize window to trigger refit)
 - **Windows Issues**: Ensure git-bash is installed at `C:\Program Files\Git\bin\bash.exe`
 - **Connection Lost**: Terminal will show "[Connection closed]" - create a new terminal tab
+
+#### Backlog Tab
+
+The Web UI includes an integrated Backlog tab for visualizing and managing project tasks from a `Backlog.md` file in your project directory.
+
+**Features**:
+- **Task Visualization**: View tasks organized by status (To Do, In Progress, Done)
+- **Status Filtering**: Filter tasks by status using button controls
+- **Search**: Search tasks by title or description
+- **Real-time Updates**: Refresh button to reload tasks from `Backlog.md`
+- **Task Statistics**: Header displays task counts by status
+- **Markdown-based**: Tasks are stored in a simple `Backlog.md` file in your project root
+
+**Usage**:
+1. **Create Backlog.md**: Create a `Backlog.md` file in your project root directory
+2. **Open Web UI**: Launch the Web UI with `clud --webui`
+3. **Navigate to Backlog Tab**: Click the "Backlog" tab in the navigation bar
+4. **View Tasks**: Tasks are automatically loaded and displayed by status
+5. **Filter Tasks**: Click status buttons (All, To Do, In Progress, Done) to filter
+6. **Search Tasks**: Use the search input to find tasks by title or description
+7. **Refresh**: Click the refresh button to reload tasks from the file
+
+**Backlog.md Format**:
+
+The parser supports GitHub-style task lists with status sections and optional metadata:
+
+```markdown
+# Backlog
+
+## To Do
+- [ ] #1 Add user authentication (priority: high)
+  - Implement OAuth2 flow
+  - Add JWT token handling
+- [ ] #2 Create dashboard UI (priority: medium)
+  - Design wireframes
+  - Implement frontend components
+
+## In Progress
+- [ ] #3 Fix login bug
+  - Debug session handling
+  - Add error logging
+
+## Done
+- [x] #4 Setup project structure
+  - Initialize repository
+  - Configure build system
+- [x] #5 Write documentation (priority: low)
+  - README.md completed
+  - API docs added
+```
+
+**Task Format Details**:
+- **Task ID**: `#N` format (e.g., `#1`, `#2`) - auto-extracted from task text
+- **Status**: Determined by section heading (To Do, In Progress, Done)
+- **Checkbox**: `- [ ]` for incomplete, `- [x]` for complete
+- **Priority**: Optional inline metadata `(priority: high|medium|low)`
+- **Description**: Indented sub-items under the main task
+- **Timestamps**: Automatically tracked (created_at, updated_at)
+
+**API Endpoint**:
+- **Endpoint**: `GET /api/backlog`
+- **Response Format**:
+  ```json
+  {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Add user authentication",
+        "status": "todo",
+        "description": "Implement OAuth2 flow and JWT tokens",
+        "priority": "high",
+        "created_at": 1736899200,
+        "updated_at": 1736899200
+      }
+    ]
+  }
+  ```
+- **Error Handling**: Returns empty tasks array if `Backlog.md` is missing or unreadable
+
+**Architecture**:
+- **Backend**: Backlog parser (`backlog/parser.py`) reads and parses `Backlog.md`
+- **API Handler**: `BacklogHandler` in `webui/api.py` provides REST endpoint
+- **Frontend**: Svelte component (`frontend/src/lib/components/Backlog.svelte`)
+- **Data Flow**: File → Parser → API → WebSocket → UI
+
+**Components**:
+- `src/clud/backlog/parser.py` - Markdown parser for Backlog.md (includes BacklogTask, StatusType, PriorityType models)
+- `src/clud/webui/api.py` - BacklogHandler for API endpoint
+- `src/clud/webui/frontend/src/lib/components/Backlog.svelte` - Backlog UI component
+- `tests/test_backlog_parser.py` - Parser unit tests (15 tests)
+- `tests/test_backlog_tab_e2e.py` - E2E tests (9 tests)
+
+**Testing**:
+- **Unit Tests**: `uv run pytest tests/test_backlog_parser.py -vv` (15 tests)
+- **E2E Tests**: `uv run pytest tests/test_backlog_tab_e2e.py -vv` (9 tests)
+- **Full Suite**: `bash test --full` includes all Backlog tests
+
+**Limitations**:
+- **Read-Only**: Current implementation only reads tasks (no editing via UI)
+- **Single File**: Only supports `Backlog.md` in project root (no custom paths)
+- **No Persistence**: Task updates must be made by editing `Backlog.md` directly
+- **No Sorting**: Tasks displayed in file order (no custom sorting)
+
+**Future Enhancements**:
+- AI agent integration for automated task management
+- Task editing and creation via UI
+- Task sorting and grouping options
+- Multiple backlog file support
+- Task dependencies and relationships
 
 ### Hook System and Message Handler API
 
@@ -354,3 +464,58 @@ The hook system provides an event-based architecture for intercepting and forwar
   ```
 - **When to use subprocess**: Only for simple, short-lived commands where you need to capture a small amount of output
 - **Why this matters**: Stdout/stderr buffers have limited capacity (typically 64KB). When full, the process blocks until the buffer is read. With `capture_output=True`, the buffer is only read after the process completes, creating a deadlock for processes with large output.
+
+### Playwright E2E Testing Protocol
+- **File naming**: `tests/test_*_e2e.py` (excluded from pyright type checking)
+- **Run command**: `bash test --full` (auto-installs Playwright browsers)
+- **Unique ports**: Each E2E test must use a unique port (e.g., 8899, 8902, 8903) to avoid conflicts
+- **Server lifecycle**: Start in `setUpClass()`, stop in `tearDownClass()`, use `CLUD_NO_BROWSER=1` env var
+- **Console error filtering**: Ignore "WebSocket" and "favicon" errors, fail on all others
+- **Test artifacts**: Save screenshots/reports to `tests/artifacts/` (git-ignored)
+- **Standard template**:
+  ```python
+  import unittest
+  from pathlib import Path
+  import subprocess, time, os
+  from playwright.sync_api import ConsoleMessage, sync_playwright
+
+  class TestFeatureE2E(unittest.TestCase):
+      server_process: subprocess.Popen[bytes] | None = None
+      server_url: str = "http://localhost:PORT"  # Use unique port
+      startup_timeout: int = 30
+
+      @classmethod
+      def setUpClass(cls) -> None:
+          env = os.environ.copy()
+          env["CLUD_NO_BROWSER"] = "1"
+          cls.server_process = subprocess.Popen(
+              ["uv", "run", "--no-sync", "clud", "--webui", "PORT"],
+              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+              cwd=str(Path(__file__).parent.parent)
+          )
+          # Poll /health endpoint until ready (see test_webui_e2e.py for full example)
+
+      @classmethod
+      def tearDownClass(cls) -> None:
+          if cls.server_process:
+              cls.server_process.terminate()
+              try:
+                  cls.server_process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  cls.server_process.kill()
+
+      def test_feature(self) -> None:
+          console_errors: list[str] = []
+          def on_console_message(msg: ConsoleMessage) -> None:
+              if msg.type == "error" and "WebSocket" not in msg.text and "favicon" not in msg.text:
+                  console_errors.append(msg.text)
+
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch(headless=True)
+              page = browser.new_page()
+              page.on("console", on_console_message)
+              page.goto(self.server_url, wait_until="networkidle", timeout=30000)
+              # Test assertions here
+              self.assertEqual(len(console_errors), 0)
+              browser.close()
+  ```

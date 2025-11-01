@@ -18,7 +18,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from .api import ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
+from .api import BacklogHandler, ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
 from .pty_manager import PTYManager
 from .telegram_api import TelegramAPIHandler
 from .terminal_handler import TerminalHandler
@@ -82,6 +82,7 @@ def create_app(static_dir: Path) -> FastAPI:
     project_handler = ProjectHandler()
     history_handler = HistoryHandler()
     diff_handler = DiffHandler()
+    backlog_handler = BacklogHandler()
     pty_manager = PTYManager()
     terminal_handler = TerminalHandler(pty_manager)
     telegram_handler = TelegramAPIHandler()
@@ -227,6 +228,28 @@ def create_app(static_dir: Path) -> FastAPI:
     async def get_cwd() -> JSONResponse:
         """Get current working directory."""
         return JSONResponse(content={"cwd": os.getcwd()})
+
+    @app.get("/api/backlog")
+    async def get_backlog(project_path: str | None = None) -> JSONResponse:
+        """Get backlog tasks from Backlog.md.
+
+        Args:
+            project_path: Project directory path (defaults to cwd)
+
+        Returns:
+            JSON response with tasks array
+        """
+        # Use current working directory if no project_path provided
+        if not project_path:
+            project_path = os.getcwd()
+
+        try:
+            tasks = backlog_handler.get_backlog_tasks(project_path)
+            return JSONResponse(content={"tasks": tasks})
+        except Exception:
+            logger.exception("Error getting backlog tasks")
+            # Return empty tasks array on error (graceful degradation)
+            return JSONResponse(content={"tasks": []})
 
     @app.get("/api/diff/tree")
     async def get_diff_tree(path: str) -> JSONResponse:
@@ -420,6 +443,20 @@ def create_app(static_dir: Path) -> FastAPI:
             Connection status and bot info if connected
         """
         try:
+            # Check if Telegram bot server is running via daemon
+            server_running = False
+            try:
+                import json
+                import urllib.request
+
+                status_url = "http://127.0.0.1:7565/telegram/status"
+                with urllib.request.urlopen(status_url, timeout=2) as response:
+                    daemon_status = json.loads(response.read())
+                    server_running = daemon_status.get("running", False)
+            except Exception:
+                # Daemon not running or no bot server
+                pass
+
             # Check both Web UI handler and system keyring
             connected = telegram_handler.is_connected()
             bot_token, chat_id = telegram_handler.get_credentials()
@@ -464,6 +501,7 @@ def create_app(static_dir: Path) -> FastAPI:
                         "bot_info": bot_info,
                         "chat_id": chat_id,
                         "from_keyring": not connected,
+                        "server_running": server_running,  # Whether bot server is polling Telegram
                     }
                 )
             else:
@@ -474,6 +512,7 @@ def create_app(static_dir: Path) -> FastAPI:
                         "bot_info": None,
                         "chat_id": None,
                         "from_keyring": False,
+                        "server_running": server_running,  # Whether bot server is polling Telegram
                     }
                 )
         except Exception as e:
