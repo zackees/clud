@@ -635,7 +635,7 @@ def ensure_telegram_running(config_path: str | None = None, port: int | None = N
     try:
         req = urllib.request.Request(
             start_url,
-            data=json.dumps(request_data).encode("utf-8") if request_data else None,
+            data=json.dumps(request_data).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
 

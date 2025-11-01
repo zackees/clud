@@ -36,11 +36,13 @@ class TestPTYManager(unittest.TestCase):
     def test_get_shell_windows(self) -> None:
         """Test shell detection on Windows."""
         with patch("platform.system", return_value="Windows"):
-            with patch("os.path.exists", return_value=True):
+            # Test when detect_git_bash finds git-bash
+            with patch("clud.webui.pty_manager.detect_git_bash", return_value=r"C:\Program Files\Git\bin\bash.exe"):
                 shell = PTYManager._get_shell()
                 self.assertIn("bash.exe", shell[0].lower())
 
-            with patch("os.path.exists", return_value=False):
+            # Test when detect_git_bash doesn't find git-bash (returns None)
+            with patch("clud.webui.pty_manager.detect_git_bash", return_value=None):
                 shell = PTYManager._get_shell()
                 self.assertEqual(shell, ["cmd.exe"])
 
