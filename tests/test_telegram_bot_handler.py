@@ -9,12 +9,14 @@ user authentication, and error handling.
 
 import unittest
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest  # pyright: ignore[reportMissingImports]
+from mocks import create_mock_api
 from telegram import Chat, Message, Update, User
 from telegram.ext import ContextTypes
 
+from clud.telegram.api_config import TelegramAPIConfig
 from clud.telegram.bot_handler import TelegramBotHandler
 from clud.telegram.config import (
     SessionConfig,
@@ -43,13 +45,17 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
             ),
             web=WebConfig(port=8889, host="127.0.0.1", auth_required=False, bidirectional=False),
             sessions=SessionConfig(timeout_seconds=3600, max_sessions=50, message_history_limit=1000, cleanup_interval=300),
+            api=TelegramAPIConfig.for_testing(implementation="mock"),
         )
 
         # Create mock session manager
         self.session_manager = MagicMock(spec=SessionManager)
 
+        # Create mock Telegram API
+        self.mock_api = create_mock_api()
+
         # Create bot handler
-        self.bot_handler = TelegramBotHandler(config=self.config, session_manager=self.session_manager)
+        self.bot_handler = TelegramBotHandler(config=self.config, session_manager=self.session_manager, api=self.mock_api)
 
         # Create mock update and context
         self.user = User(id=12345, first_name="John", last_name="Doe", is_bot=False, username="johndoe")
@@ -68,11 +74,12 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
 
     async def test_init(self) -> None:
         """Test TelegramBotHandler initialization."""
-        handler = TelegramBotHandler(config=self.config, session_manager=self.session_manager)
+        mock_api = create_mock_api()
+        handler = TelegramBotHandler(config=self.config, session_manager=self.session_manager, api=mock_api)
 
         assert handler.config == self.config
         assert handler.session_manager == self.session_manager
-        assert handler.application is None
+        assert handler.api == mock_api
 
     async def test_start_command_authorized_user(self) -> None:
         """Test /start command with authorized user."""
@@ -101,8 +108,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
             telegram_first_name="John",
             telegram_last_name="Doe",
         )
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "Welcome to Claude Code" in call_args
         assert "/help" in call_args
 
@@ -116,8 +123,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
 
         # Verify
         self.session_manager.get_or_create_session.assert_not_called()
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "not authorized" in call_args
 
     async def test_start_command_no_user(self) -> None:
@@ -141,8 +148,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         await self.bot_handler.start_command(self.update, self.context)
 
         # Verify
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "error occurred" in call_args
 
     async def test_help_command(self) -> None:
@@ -151,9 +158,9 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         await self.bot_handler.help_command(self.update, self.context)
 
         # Verify
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args
-        assert "Claude Code Bot Help" in call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args
+        assert "Claude Code Bot Help" in call_args[1]["text"]
         assert call_args[1]["parse_mode"] == "Markdown"
 
     async def test_help_command_no_message(self) -> None:
@@ -211,10 +218,10 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
 
         # Verify
         self.session_manager.get_user_session.assert_called_once_with(12345)
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args
-        assert "Session Status" in call_args[0][0]
-        assert "test-ses" in call_args[0][0]  # Session ID truncated to first 8 chars
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args
+        assert "Session Status" in call_args[1]["text"]
+        assert "test-ses" in call_args[1]["text"]  # Session ID truncated to first 8 chars
         assert call_args[1]["parse_mode"] == "Markdown"
 
     async def test_status_command_no_session(self) -> None:
@@ -226,8 +233,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         await self.bot_handler.status_command(self.update, self.context)
 
         # Verify
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "No active session" in call_args
 
     async def test_clear_command_with_session(self) -> None:
@@ -263,8 +270,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
 
         # Verify
         assert len(session.message_history) == 0
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "cleared" in call_args.lower()
 
     async def test_clear_command_no_session(self) -> None:
@@ -276,8 +283,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         await self.bot_handler.clear_command(self.update, self.context)
 
         # Verify
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "No active session" in call_args
 
     async def test_handle_message_authorized_user(self) -> None:
@@ -303,9 +310,11 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         await self.bot_handler.handle_message(self.update, self.context)
 
         # Verify
-        self.chat.send_action.assert_called_once_with(action="typing")
+        self.mock_api.send_typing_action.assert_called_once()
         self.session_manager.process_user_message.assert_called_once_with(session_id="test-session-id", message_content="What is Python?", telegram_message_id=1)
-        self.message.reply_text.assert_called_once_with("Bot response")
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
+        assert call_args == "Bot response"
 
     async def test_handle_message_unauthorized_user(self) -> None:
         """Test handling message from unauthorized user."""
@@ -319,8 +328,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         # Verify
         self.session_manager.get_user_session.assert_not_called()
         self.session_manager.process_user_message.assert_not_called()
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "not authorized" in call_args
 
     async def test_handle_message_creates_session_if_needed(self) -> None:
@@ -351,7 +360,7 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         self.session_manager.process_user_message.assert_called_once_with(session_id="new-session-id", message_content="Hello", telegram_message_id=1)
 
     async def test_handle_message_splits_long_response(self) -> None:
-        """Test that long responses are split into chunks."""
+        """Test that long responses are sent to API (splitting is handled by API implementation)."""
         # Setup
         session = TelegramSession(
             session_id="test-session-id",
@@ -374,11 +383,10 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         # Execute
         await self.bot_handler.handle_message(self.update, self.context)
 
-        # Verify - should be called twice (two chunks)
-        assert self.message.reply_text.call_count == 2
-        # First chunk should be 4096 chars
-        first_call_text = self.message.reply_text.call_args_list[0][0][0]
-        assert len(first_call_text) == 4096
+        # Verify - bot handler calls send_message once, API handles splitting
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
+        assert len(call_args) == 5000
 
     async def test_handle_message_no_text(self) -> None:
         """Test handling update with no text."""
@@ -414,8 +422,8 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
         await self.bot_handler.handle_message(self.update, self.context)
 
         # Verify
-        self.message.reply_text.assert_called_once()
-        call_args = self.message.reply_text.call_args[0][0]
+        self.mock_api.send_message.assert_called_once()
+        call_args = self.mock_api.send_message.call_args[1]["text"]
         assert "error occurred" in call_args
 
     async def test_error_handler(self) -> None:
@@ -465,65 +473,36 @@ class TestTelegramBotHandler(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_polling_success(self) -> None:
         """Test starting bot in polling mode."""
-        with patch("clud.telegram.bot_handler.Application") as mock_app_class:
-            # Setup mocks
-            mock_builder = MagicMock()
-            mock_app_class.builder.return_value = mock_builder
-            mock_builder.token.return_value = mock_builder
-            # Use MagicMock for app since add_handler/add_error_handler are synchronous
-            mock_app = MagicMock()
-            mock_builder.build.return_value = mock_app
-            mock_app.initialize = AsyncMock()
-            mock_app.start = AsyncMock()
-            mock_updater = MagicMock()
-            mock_updater.start_polling = AsyncMock()
-            mock_app.updater = mock_updater
+        # Execute
+        await self.bot_handler.start_polling()
 
-            # Execute
-            await self.bot_handler.start_polling()
-
-            # Verify
-            mock_app_class.builder.assert_called_once()
-            mock_builder.token.assert_called_once_with("test_token_123")
-            mock_app.initialize.assert_called_once()
-            mock_app.start.assert_called_once()
-            mock_updater.start_polling.assert_called_once_with(drop_pending_updates=True)
-            assert self.bot_handler.application == mock_app
+        # Verify
+        self.mock_api.initialize.assert_called_once()
+        self.mock_api.add_command_handler.assert_any_call("start", self.bot_handler.start_command)
+        self.mock_api.add_command_handler.assert_any_call("help", self.bot_handler.help_command)
+        self.mock_api.add_command_handler.assert_any_call("status", self.bot_handler.status_command)
+        self.mock_api.add_command_handler.assert_any_call("clear", self.bot_handler.clear_command)
+        self.mock_api.add_message_handler.assert_called_once_with(self.bot_handler.handle_message)
+        self.mock_api.add_error_handler.assert_called_once_with(self.bot_handler.error_handler)
+        self.mock_api.start_polling.assert_called_once_with(drop_pending_updates=True)
 
     async def test_start_polling_failure(self) -> None:
         """Test start polling with error."""
-        with patch("clud.telegram.bot_handler.Application") as mock_app_class:
-            # Setup mocks to raise error
-            mock_builder = MagicMock()
-            mock_app_class.builder.return_value = mock_builder
-            mock_builder.token.return_value = mock_builder
-            # Use MagicMock for app since add_handler/add_error_handler are synchronous
-            mock_app = MagicMock()
-            mock_builder.build.return_value = mock_app
-            mock_app.initialize = AsyncMock(side_effect=Exception("Connection error"))
+        # Setup mock to raise error
+        self.mock_api.initialize = AsyncMock(return_value=False)
 
-            # Execute & Verify
-            with pytest.raises(RuntimeError, match="Failed to start Telegram bot"):
-                await self.bot_handler.start_polling()
+        # Execute & Verify
+        with pytest.raises(RuntimeError, match="Failed to initialize Telegram bot API"):
+            await self.bot_handler.start_polling()
 
     async def test_stop_success(self) -> None:
         """Test stopping bot successfully."""
-        # Setup
-        mock_app = AsyncMock()
-        mock_updater = MagicMock()
-        mock_updater.stop = AsyncMock()
-        mock_app.updater = mock_updater
-        mock_app.stop = AsyncMock()
-        mock_app.shutdown = AsyncMock()
-        self.bot_handler.application = mock_app
-
         # Execute
         await self.bot_handler.stop()
 
         # Verify
-        mock_updater.stop.assert_called_once()
-        mock_app.stop.assert_called_once()
-        mock_app.shutdown.assert_called_once()
+        self.mock_api.stop_polling.assert_called_once()
+        self.mock_api.shutdown.assert_called_once()
 
     async def test_stop_with_error(self) -> None:
         """Test stopping bot with error."""

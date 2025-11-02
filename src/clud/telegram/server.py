@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from clud.api.instance_manager import InstancePool
 from clud.telegram.api import create_telegram_api_router
+from clud.telegram.api_factory import create_telegram_api
 from clud.telegram.bot_handler import TelegramBotHandler
 from clud.telegram.config import TelegramIntegrationConfig
 from clud.telegram.session_manager import SessionManager
@@ -59,7 +60,9 @@ class TelegramServer:
         # Start bot handler
         if self.config.telegram.bot_token:
             logger.info("Starting Telegram bot handler...")
-            self.bot_handler = TelegramBotHandler(self.config, self.session_manager)
+            # Create Telegram API instance using API configuration
+            telegram_api = create_telegram_api(config=self.config.api, bot_token=self.config.telegram.bot_token)
+            self.bot_handler = TelegramBotHandler(self.config, self.session_manager, telegram_api)
             await self.bot_handler.start_polling()
         else:
             logger.warning("No bot token provided, bot handler will not start")

@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from .api_config import TelegramAPIConfig
+
 
 @dataclass
 class TelegramConfig:
@@ -59,6 +61,7 @@ class TelegramIntegrationConfig:
     web: WebConfig = field(default_factory=WebConfig)
     sessions: SessionConfig = field(default_factory=SessionConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    api: TelegramAPIConfig = field(default_factory=TelegramAPIConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TelegramIntegrationConfig":
@@ -102,7 +105,17 @@ class TelegramIntegrationConfig:
         logging_data = data.get("logging", {})
         logging_cfg = LoggingConfig(level=logging_data.get("level", "INFO"), file=logging_data.get("file"))
 
-        return cls(telegram=telegram, web=web, sessions=sessions, logging=logging_cfg)
+        # Parse API config
+        api_data = data.get("api", {})
+        api_cfg = TelegramAPIConfig(
+            implementation=api_data.get("implementation", "real"),  # type: ignore[arg-type]
+            bot_token=api_data.get("bot_token"),
+            auto_detect_from_env=api_data.get("auto_detect_from_env", True),
+            fake_delay_ms=api_data.get("fake_delay_ms", 100),
+            fake_error_rate=api_data.get("fake_error_rate", 0.0),
+        )
+
+        return cls(telegram=telegram, web=web, sessions=sessions, logging=logging_cfg, api=api_cfg)
 
     @classmethod
     def from_env(cls) -> "TelegramIntegrationConfig":
@@ -160,7 +173,10 @@ class TelegramIntegrationConfig:
 
         logging_cfg = LoggingConfig(level=os.getenv("TELEGRAM_LOG_LEVEL", "INFO"), file=os.getenv("TELEGRAM_LOG_FILE"))
 
-        return cls(telegram=telegram, web=web, sessions=sessions, logging=logging_cfg)
+        # Create API config (will auto-load from environment)
+        api_cfg = TelegramAPIConfig.from_environment()
+
+        return cls(telegram=telegram, web=web, sessions=sessions, logging=logging_cfg, api=api_cfg)
 
     @classmethod
     def from_file(cls, file_path: Path | str) -> "TelegramIntegrationConfig":
@@ -269,4 +285,11 @@ class TelegramIntegrationConfig:
                 "cleanup_interval": self.sessions.cleanup_interval,
             },
             "logging": {"level": self.logging.level, "file": self.logging.file},
+            "api": {
+                "implementation": self.api.implementation,
+                "bot_token": "***" if self.api.bot_token else None,  # Mask token
+                "auto_detect_from_env": self.api.auto_detect_from_env,
+                "fake_delay_ms": self.api.fake_delay_ms,
+                "fake_error_rate": self.api.fake_error_rate,
+            },
         }

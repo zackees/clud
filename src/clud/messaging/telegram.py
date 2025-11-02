@@ -6,21 +6,25 @@ import asyncio
 import logging
 from typing import Any
 
+from clud.telegram.api_interface import TelegramBotAPI
+
 logger = logging.getLogger(__name__)
 
 
 class TelegramMessenger:
     """Telegram bot messenger for agent notifications."""
 
-    def __init__(self, bot_token: str, chat_id: str) -> None:
+    def __init__(self, bot_token: str, chat_id: str, api: TelegramBotAPI | None = None) -> None:
         """Initialize Telegram messenger.
 
         Args:
             bot_token: Telegram bot API token
             chat_id: Telegram chat ID to send messages to
+            api: Optional TelegramBotAPI instance for abstraction (enables testing with fakes/mocks)
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
+        self._api = api
         self.bot = None
         self.app = None
         self.message_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -29,6 +33,12 @@ class TelegramMessenger:
     async def _ensure_initialized(self) -> bool:
         """Ensure bot is initialized."""
         if self._initialized:
+            return True
+
+        # If using abstract API, we don't need to initialize the bot directly
+        if self._api:
+            self._initialized = True
+            logger.info("Telegram messenger initialized with abstract API")
             return True
 
         try:
@@ -80,9 +90,20 @@ Status: ✅ Online and ready
 Send messages to interact with your agent!
             """
 
-            await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
-            logger.info(f"Sent invitation for agent {agent_name}")
-            return True
+            if self._api:
+                # Preferred: Use TelegramBotAPI interface
+                result = await self._api.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+                if result.success:
+                    logger.info(f"Sent invitation for agent {agent_name}")
+                    return True
+                else:
+                    logger.error(f"Failed to send invitation: {result.error}")
+                    return False
+            else:
+                # Fallback: Use direct bot instance
+                await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+                logger.info(f"Sent invitation for agent {agent_name}")
+                return True
         except Exception as e:
             logger.error(f"Failed to send invitation: {e}")
             return False
@@ -111,9 +132,20 @@ Send messages to interact with your agent!
                 for key, value in details.items():
                     message += f"- {key}: {value}\n"
 
-            await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
-            logger.info(f"Sent status update for agent {agent_name}")
-            return True
+            if self._api:
+                # Preferred: Use TelegramBotAPI interface
+                result = await self._api.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+                if result.success:
+                    logger.info(f"Sent status update for agent {agent_name}")
+                    return True
+                else:
+                    logger.error(f"Failed to send status update: {result.error}")
+                    return False
+            else:
+                # Fallback: Use direct bot instance
+                await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+                logger.info(f"Sent status update for agent {agent_name}")
+                return True
         except Exception as e:
             logger.error(f"Failed to send status update: {e}")
             return False
@@ -144,9 +176,20 @@ Send messages to interact with your agent!
 Status: 🔴 Offline
             """
 
-            await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
-            logger.info(f"Sent cleanup notification for agent {agent_name}")
-            return True
+            if self._api:
+                # Preferred: Use TelegramBotAPI interface
+                result = await self._api.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+                if result.success:
+                    logger.info(f"Sent cleanup notification for agent {agent_name}")
+                    return True
+                else:
+                    logger.error(f"Failed to send cleanup notification: {result.error}")
+                    return False
+            else:
+                # Fallback: Use direct bot instance
+                await self.bot.send_message(chat_id=self.chat_id, text=message, parse_mode="Markdown")
+                logger.info(f"Sent cleanup notification for agent {agent_name}")
+                return True
         except Exception as e:
             logger.error(f"Failed to send cleanup notification: {e}")
             return False

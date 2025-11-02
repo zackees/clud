@@ -2,17 +2,20 @@
 
 import logging
 
+from clud.telegram.api_interface import TelegramBotAPI
+
 from .telegram import TelegramMessenger
 
 logger = logging.getLogger(__name__)
 
 
-def create_telegram_messenger(bot_token: str, chat_id: str) -> TelegramMessenger:
+def create_telegram_messenger(bot_token: str, chat_id: str, api: TelegramBotAPI | None = None) -> TelegramMessenger:
     """Create Telegram messenger instance.
 
     Args:
         bot_token: Telegram bot token
         chat_id: Telegram chat ID
+        api: Optional TelegramBotAPI instance for abstraction (enables testing with fakes/mocks)
 
     Returns:
         TelegramMessenger instance
@@ -26,7 +29,7 @@ def create_telegram_messenger(bot_token: str, chat_id: str) -> TelegramMessenger
         raise ValueError("Telegram chat_id is required")
 
     logger.info("Creating Telegram messenger")
-    return TelegramMessenger(bot_token=bot_token, chat_id=chat_id)
+    return TelegramMessenger(bot_token=bot_token, chat_id=chat_id, api=api)
 
 
 def validate_telegram_config(bot_token: str, chat_id: str) -> tuple[bool, str]:

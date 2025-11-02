@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from clud.hooks import HookContext, HookEvent
+from clud.telegram.api_interface import TelegramBotAPI
 
 logger = logging.getLogger(__name__)
 
@@ -44,20 +45,23 @@ class TelegramHookHandler:
         self,
         bot_token: str,
         send_callback: Callable[[str, str], Awaitable[None]] | None = None,
+        api: TelegramBotAPI | None = None,
         buffer_size: int = TELEGRAM_MAX_MESSAGE_LENGTH,
         flush_interval: float = 2.0,
     ) -> None:
         """Initialize the Telegram hook handler.
 
         Args:
-            bot_token: Telegram bot API token
+            bot_token: Telegram bot API token (used if api is None)
             send_callback: Optional async callback function to send messages
                           Should accept (chat_id: str, text: str) and return None
+            api: Optional TelegramBotAPI instance for sending messages (preferred)
             buffer_size: Maximum buffer size before auto-flush (default: 2000)
             flush_interval: Time in seconds to wait before auto-flush (default: 2.0)
         """
         self._bot_token = bot_token
         self._send_callback = send_callback
+        self._api = api
         self._buffer_size = buffer_size
         self._flush_interval = flush_interval
 
@@ -228,7 +232,10 @@ class TelegramHookHandler:
             return
 
         try:
-            if self._send_callback:
+            if self._api:
+                # Preferred: Use TelegramBotAPI interface
+                await self._api.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            elif self._send_callback:
                 # Use provided callback
                 await self._send_callback(chat_id, text)
             else:
