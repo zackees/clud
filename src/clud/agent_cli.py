@@ -1780,8 +1780,18 @@ def run_agent(args: Args) -> int:
                         print("Error: --loop count must be greater than 0", file=sys.stderr)
                         return 1
                 except ValueError:
-                    # Not an integer, treat as message
-                    loop_message = args.loop_value
+                    # Not an integer, check if it's a file path
+                    # File paths (especially .md files) get expanded to a template message
+                    if args.loop_value.endswith(".md") or Path(args.loop_value).exists():
+                        # Expand to template message for file-based loop mode
+                        loop_message = (
+                            f"Read {args.loop_value} and do the next task. "
+                            f"You are free to update {args.loop_value} with information critical "
+                            f"for the next agent and future agents as this task is worked on."
+                        )
+                    else:
+                        # Not a file path, treat as regular message
+                        loop_message = args.loop_value
 
             # Prompt for missing values
             # Check if we have a message from loop_value, -m, or -p

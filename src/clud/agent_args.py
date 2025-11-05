@@ -278,7 +278,10 @@ def parse_args(args: list[str] | None = None) -> Args:
         nargs="?",
         const="",  # Empty string when --loop is used without value
         dest="loop_value",
-        help="Run N times, checking for DONE.md after each. Usage: --loop 50 -p 'msg', --loop 'msg' (prompts count), --loop 50 (prompts msg), or --loop (prompts both). Uses -p.",
+        help=(
+            "Run N times, checking for DONE.md after each. Usage: --loop 50 -p 'msg', --loop 'msg' (prompts count), "
+            "--loop 50 (prompts msg), --loop LOOP.md (expands to template), or --loop (prompts both). Uses -p."
+        ),
     )
 
     # Telegram notifications (different from --telegram web app)
