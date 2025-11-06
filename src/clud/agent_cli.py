@@ -1042,11 +1042,15 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             "If you must ask a question, then leave it for the next iteration to research or resolve."
         )
         parts.append("If DONE.md already exists, read it first to understand the completion status before proceeding.")
+        parts.append("IMPORTANT: Maximize parallel execution - run as many independent operations in parallel as possible to improve efficiency.")
 
         injection = " ".join(parts)
     else:
         # Non-loop mode: standard completion prompt (also using project root)
-        injection = " If you see that the task is 100 percent complete, then write out DONE.md at the project root and halt"
+        injection = (
+            " If you see that the task is 100 percent complete, then write out DONE.md at the project root and halt. "
+            "IMPORTANT: Maximize parallel execution - run as many independent operations in parallel as possible to improve efficiency."
+        )
 
     return message + injection
 
