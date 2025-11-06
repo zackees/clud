@@ -35,6 +35,7 @@ from .shell_config import ShellLaunchConfig
 from .task import handle_task_command
 from .telegram_bot import TelegramBot
 from .util import detect_git_bash
+from .util.process import launch_detached
 
 # Get credential store once at module level
 keyring = get_credential_store()
@@ -1305,35 +1306,66 @@ def _prompt_for_message() -> str:
 
 
 def _open_file_in_editor(file_path: Path) -> None:
-    """Open a file in the default text editor (cross-platform)."""
+    """Open a file in the default text editor (cross-platform, non-blocking)."""
     try:
         system = platform.system()
         if system == "Darwin":  # macOS
-            subprocess.run(["open", str(file_path)], check=False)
+            # Try Sublime Text first with --new-window, then fall back to system open
+            if shutil.which("subl"):
+                launch_detached(["subl", "--new-window", str(file_path)])
+            else:
+                # macOS 'open' command is already non-blocking
+                subprocess.run(["open", str(file_path)], check=False)
         elif system == "Windows":
-            # Try sublime first, then fall back to default
+            # Try editors in order: Sublime Text, TextPad, Notepad
             sublime_paths = [
-                "C:\\Program Files\\Sublime Text\\sublime_text.exe",
-                "C:\\Program Files\\Sublime Text 3\\sublime_text.exe",
-                os.path.expanduser("~\\AppData\\Local\\Programs\\Sublime Text\\sublime_text.exe"),
+                Path("C:\\Program Files\\Sublime Text\\sublime_text.exe"),
+                Path("C:\\Program Files\\Sublime Text 3\\sublime_text.exe"),
+                Path(os.path.expanduser("~\\AppData\\Local\\Programs\\Sublime Text\\sublime_text.exe")),
             ]
-            sublime_found = False
-            for sublime_path in sublime_paths:
-                if os.path.exists(sublime_path):
-                    subprocess.run([sublime_path, str(file_path)], check=False)
-                    sublime_found = True
-                    break
 
-            if not sublime_found:
-                # Fall back to default Windows opener
-                os.startfile(str(file_path))  # type: ignore
+            # Try Sublime Text with --new-window
+            for sublime_path in sublime_paths:
+                if sublime_path.exists():
+                    launch_detached([str(sublime_path), "--new-window", str(file_path)])
+                    return
+
+            # Try 'subl' in PATH
+            if shutil.which("subl"):
+                launch_detached(["subl", "--new-window", str(file_path)])
+                return
+
+            # Try TextPad
+            textpad_paths = [
+                Path("C:\\Program Files\\TextPad 9\\TextPad.exe"),
+                Path("C:\\Program Files\\TextPad 8\\TextPad.exe"),
+                Path("C:\\Program Files (x86)\\TextPad 9\\TextPad.exe"),
+                Path("C:\\Program Files (x86)\\TextPad 8\\TextPad.exe"),
+            ]
+            for textpad_path in textpad_paths:
+                if textpad_path.exists():
+                    launch_detached([str(textpad_path), str(file_path)])
+                    return
+
+            # Fall back to notepad (always available, non-blocking via detached process)
+            launch_detached(["notepad.exe", str(file_path)])
+
         else:  # Linux and other Unix-like systems
-            # Try common editors in order
-            editors = ["sublime_text", "subl", "xdg-open"]
+            # Try editors in order with detached process
+            editors = ["subl", "sublime_text", "gedit", "kate", "nano"]
             for editor in editors:
                 if shutil.which(editor):
-                    subprocess.run([editor, str(file_path)], check=False)
-                    break
+                    if editor in ["subl", "sublime_text"]:
+                        launch_detached([editor, "--new-window", str(file_path)])
+                    else:
+                        launch_detached([editor, str(file_path)])
+                    return
+
+            # Final fallback: xdg-open (delegates to system default)
+            if shutil.which("xdg-open"):
+                # xdg-open is typically non-blocking, but use launch_detached to be safe
+                launch_detached(["xdg-open", str(file_path)])
+
     except Exception as e:
         print(f"Warning: Could not open {file_path}: {e}", file=sys.stderr)
 
