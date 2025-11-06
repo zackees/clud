@@ -504,8 +504,114 @@ def handle_test_command() -> int:
     return run_clud_subprocess(test_prompt)
 
 
+def _check_agent_artifacts() -> bool:
+    """Check for agent task artifacts before running clud up.
+
+    Checks for DONE.md, LOOP.md, and .agent_task/ directory.
+    Prompts user to delete or abort if found.
+
+    Returns:
+        True if should continue, False if should abort
+    """
+    artifacts = ["DONE.md", "LOOP.md", ".agent_task"]
+    found_artifacts: list[str] = []
+    tracked_and_modified_artifacts: list[str] = []
+
+    # Check which artifacts exist and are new or modified
+    for artifact in artifacts:
+        artifact_path = Path(artifact)
+        if not artifact_path.exists():
+            continue
+
+        # Check git status to determine if artifact is new or modified
+        try:
+            # Check if file is tracked (exists in previous commits)
+            ls_result = subprocess.run(["git", "ls-files", artifact], capture_output=True, text=True, check=False)
+            is_tracked = ls_result.returncode == 0 and ls_result.stdout.strip()
+
+            if is_tracked:
+                # Check if modified (using git status --porcelain)
+                status_result = subprocess.run(["git", "status", "--porcelain", artifact], capture_output=True, text=True, check=False)
+                is_modified = status_result.returncode == 0 and status_result.stdout.strip()
+
+                if is_modified:
+                    # Tracked and modified - include in prompt with warning
+                    found_artifacts.append(artifact)
+                    tracked_and_modified_artifacts.append(artifact)
+                # If tracked but NOT modified (unchanged), skip it - no prompt needed
+            else:
+                # Not tracked (new file) - include in prompt
+                found_artifacts.append(artifact)
+        except Exception:
+            # Git not available or not a git repo - treat as new file
+            found_artifacts.append(artifact)
+
+    if not found_artifacts:
+        return True  # No artifacts, continue
+
+    # ANSI color codes
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+    # Display found artifacts
+    print(f"\n{RED}{BOLD}Found {len(found_artifacts)} artifact file(s) from an agent loop{RESET}")
+    for artifact in found_artifacts:
+        print(f"  * {artifact}")
+    print()
+
+    # Warn about tracked and modified artifacts
+    if tracked_and_modified_artifacts:
+        print(f"{YELLOW}Warning: The following artifacts were found in previous commits but have been modified:{RESET}")
+        for artifact in tracked_and_modified_artifacts:
+            print(f"  - {artifact}")
+        print(f"{YELLOW}It's recommended you should purge these files{RESET}")
+        print()
+
+    # Prompt user
+    while True:
+        try:
+            sys.stdout.flush()
+            response = input("Do you want to [a]bort or [d]elete and continue? ").strip().lower()
+
+            if response in ["a", "abort"]:
+                print(f"\n{RED}Aborted: Agent loop artifacts need to be cleared before 'clud up' can run.{RESET}")
+                return False
+
+            elif response in ["d", "delete"]:
+                # Delete artifacts
+                for artifact in found_artifacts:
+                    artifact_path = Path(artifact)
+                    try:
+                        if artifact_path.is_dir():
+                            shutil.rmtree(artifact_path)
+                            print(f"Deleted directory: {artifact}")
+                        else:
+                            artifact_path.unlink()
+                            print(f"Deleted file: {artifact}")
+                    except Exception as e:
+                        print(f"Error deleting {artifact}: {e}", file=sys.stderr)
+                        return False
+
+                print("✓ Artifacts deleted. Continuing with 'clud up'...\n")
+                return True
+
+            else:
+                print("Invalid choice. Please enter 'a' to abort or 'd' to delete.")
+                continue
+
+        except (EOFError, KeyboardInterrupt):
+            print("\nOperation cancelled.")
+            return False
+
+
 def handle_codeup_command() -> int:
     """Handle the --codeup command by running git pre-check first, then clud with a message to run the global codeup command."""
+    # Check for agent task artifacts first
+    if not _check_agent_artifacts():
+        return 1  # User aborted
+
     # Run git pre-check using CodeUp API
     from .git_precheck import run_two_phase_precheck
 
@@ -530,6 +636,10 @@ def handle_codeup_command() -> int:
 
 def handle_codeup_publish_command() -> int:
     """Handle the --codeup-publish command by running git pre-check first, then clud with a message to run codeup -p."""
+    # Check for agent task artifacts first
+    if not _check_agent_artifacts():
+        return 1  # User aborted
+
     # Run git pre-check using CodeUp API
     from .git_precheck import run_two_phase_precheck
 
