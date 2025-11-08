@@ -22,7 +22,17 @@ from running_process import RunningProcess
 from .agent.completion import detect_agent_completion
 from .agent.task_info import TaskInfo
 from .agent_args import AgentMode, Args, parse_args
-from .claude_installer import find_claude_code, install_claude_local, is_claude_installed_locally, prompt_install_claude
+from .claude_installer import (
+    find_claude_code,
+    find_npm_executable,
+    get_claude_version,
+    get_clud_bin_dir,
+    get_clud_npm_dir,
+    get_local_claude_path,
+    install_claude_local,
+    is_claude_installed_locally,
+    prompt_install_claude,
+)
 from .hooks import HookContext, HookEvent, get_hook_manager
 from .hooks.config import load_hook_config
 from .hooks.telegram import TelegramHookHandler
@@ -869,6 +879,73 @@ def handle_init_loop_command() -> int:
     return run_clud_subprocess(init_loop_prompt, use_print_flag=True)
 
 
+def handle_info_command() -> int:
+    """Handle the --info command by displaying Claude Code installation information."""
+    print("Claude Code Installation Information", file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Find Claude Code executable
+    claude_path = find_claude_code()
+
+    if not claude_path:
+        print("Status: NOT FOUND", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Claude Code is not installed or not in PATH.", file=sys.stderr)
+        print("Install with: clud --install-claude", file=sys.stderr)
+        return 1
+
+    # Display installation path
+    print("Status: INSTALLED", file=sys.stderr)
+    print(file=sys.stderr)
+    print("Executable Path:", file=sys.stderr)
+    print(f"  {claude_path}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Get and display version
+    version = get_claude_version(claude_path)
+    if version:
+        print("Version:", file=sys.stderr)
+        print(f"  {version}", file=sys.stderr)
+    else:
+        print("Version: Unable to determine", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Display installation type
+    local_path = get_local_claude_path()
+    if local_path and str(local_path) == claude_path:
+        print("Installation Type: Local (clud-managed)", file=sys.stderr)
+        print(f"  Installed in: {get_clud_npm_dir()}", file=sys.stderr)
+    else:
+        print("Installation Type: System/Global", file=sys.stderr)
+        print("  Found in PATH", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Display npm information
+    npm_path = find_npm_executable()
+    if npm_path:
+        print("npm Executable:", file=sys.stderr)
+        print(f"  {npm_path}", file=sys.stderr)
+    else:
+        print("npm Executable: NOT FOUND", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Display clud directories
+    print("clud Directories:", file=sys.stderr)
+    print(f"  npm packages: {get_clud_npm_dir()}", file=sys.stderr)
+    print(f"  binaries: {get_clud_bin_dir()}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Display platform information
+    print("Platform Information:", file=sys.stderr)
+    print(f"  OS: {platform.system()}", file=sys.stderr)
+    print(f"  Python: {sys.version.split()[0]}", file=sys.stderr)
+    print(file=sys.stderr)
+
+    print("=" * 70, file=sys.stderr)
+    return 0
+
+
 def handle_install_claude_command() -> int:
     """Handle the --install-claude command by installing Claude Code locally."""
     print("Installing Claude Code to ~/.clud/npm...", file=sys.stderr)
@@ -1671,11 +1748,8 @@ def _run_loop(args: Args, claude_path: str, loop_count: int) -> int:
                         # Build fix command (using -p flag for non-interactive)
                         fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
 
-                        # Add default model flag to fix command if not specified
+                        # Add model flag from args if specified (no default model)
                         fix_model_flag = _get_model_from_args(args.claude_args)
-                        if not fix_model_flag:
-                            fix_cmd.append("--haiku")
-                            fix_model_flag = "--haiku"
                         if args.claude_args:
                             fix_cmd.extend(args.claude_args)
 
@@ -2201,6 +2275,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("                       Launch advanced Telegram integration server (default port: 8889)")
             print("  --webui, --ui [PORT] Launch Claude Code Web UI in browser (default port: 8888)")
             print("  --api-server [PORT]  Launch Message Handler API server (default port: 8765)")
+            print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  --track              Enable agent tracking with local daemon")
             print("  -h, --help           Show this help")
@@ -2244,6 +2319,9 @@ def main(args_list: list[str] | None = None) -> int:
 
         if args.init_loop:
             return handle_init_loop_command()
+
+        if args.info:
+            return handle_info_command()
 
         if args.install_claude:
             return handle_install_claude_command()
