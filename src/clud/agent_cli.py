@@ -642,7 +642,7 @@ def handle_codeup_command() -> int:
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."
     )
-    return run_clud_subprocess(codeup_prompt)
+    return run_clud_subprocess(codeup_prompt, use_print_flag=True)
 
 
 def handle_codeup_publish_command() -> int:
@@ -1910,6 +1910,18 @@ def run_agent(args: Args) -> int:
     instance_id = str(uuid.uuid4())
     session_id = instance_id  # In standalone mode, session_id equals instance_id
 
+    # Check for piped stdin input (non-TTY mode)
+    # This enables: echo "prompt" | clud
+    if not sys.stdin.isatty() and not args.prompt and not args.message:
+        try:
+            # Read all input from stdin
+            stdin_input = sys.stdin.read().strip()
+            if stdin_input:
+                # Use the piped input as the prompt
+                args.prompt = stdin_input
+        except Exception as e:
+            logger.warning(f"Failed to read from stdin: {e}")
+
     # Register hooks early (before any execution)
     register_hooks_from_config(instance_id=instance_id, session_id=session_id, hook_debug=args.hook_debug)
 
@@ -2256,6 +2268,11 @@ def main(args_list: list[str] | None = None) -> int:
         if args.help:
             print("clud - Claude Code in YOLO mode")
             print("Usage: clud [options...]")
+            print()
+            print("Pipe mode:")
+            print("  echo 'prompt' | clud       Read prompt from stdin (non-TTY mode)")
+            print("  clud -p 'prompt' | cat     Pipe output to another command")
+            print("  cat file | clud | less     Chain pipes for input and output")
             print()
             print("Special modes:")
             print("  fix [URL]            Fix linting and test issues (with optional GitHub URL)")

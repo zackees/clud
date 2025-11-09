@@ -31,7 +31,56 @@ clud -p "refactor this entire app"
 
 # Send direct message
 clud -m "add error handling"
+
+# Pipe mode - seamless Unix-style integration
+echo "make me a poem about roses" | clud
+cat prompt.txt | clud | less
+git log --oneline -5 | clud
 ```
+
+## Pipe Mode (Unix & Windows)
+
+**clud** supports full I/O piping for seamless integration with command-line workflows:
+
+**Input Piping:**
+```bash
+# Pipe prompt from echo
+echo "make me a poem about roses" | clud
+
+# Pipe from file
+cat prompt.txt | clud
+
+# Pipe command output
+git log --oneline -5 | clud
+git diff | clud
+```
+
+**Output Piping:**
+```bash
+# Pipe to pager
+clud -p "explain python asyncio" | less
+
+# Pipe to file
+clud -p "generate config" | tee config.json
+
+# Pipe to grep
+clud -p "list all functions" | grep "def "
+```
+
+**Chained Pipes:**
+```bash
+# Full pipeline
+echo "summarize" | clud | cat
+cat article.txt | clud | tee summary.txt | wc -w
+
+# Complex workflows
+git diff | clud -p "review this diff" | less
+```
+
+**Platform Support:**
+- ✅ Linux, macOS (native bash/zsh)
+- ✅ Windows (git-bash, MSYS2, WSL)
+- ✅ Cross-platform TTY detection via `sys.stdin.isatty()`
 
 ## Operation Modes
 

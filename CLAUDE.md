@@ -4,6 +4,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+### Pipe Mode (Unix & Windows)
+
+The `clud` command supports I/O piping for seamless integration with Unix-style command chains. Pipe mode automatically activates when stdin is not a TTY (pseudo-terminal).
+
+**Input Piping**:
+```bash
+# Pipe prompt from echo
+echo "make me a poem about roses" | clud
+
+# Pipe from file
+cat prompt.txt | clud
+
+# Pipe from command output
+git log --oneline -5 | clud
+```
+
+**Output Piping**:
+```bash
+# Pipe output to cat
+clud -p "list unix commands" | cat
+
+# Pipe to less for paging
+clud -p "explain python asyncio" | less
+
+# Pipe to grep for filtering
+clud -p "generate json data" | grep -E "^\{.*\}$"
+```
+
+**Chained Pipes**:
+```bash
+# Input and output piping together
+echo "summarize this" | clud | cat
+
+# Complex pipeline
+cat article.txt | clud | tee summary.txt | wc -w
+```
+
+**How it works**:
+- When stdin is piped (non-TTY), `clud` automatically reads the entire input and uses it as the prompt
+- Works seamlessly with `-p` flag for explicit prompts: `clud -p "prompt" | cat`
+- Compatible with both Unix (Linux/macOS) and Windows (git-bash/MSYS2)
+- Uses standard `sys.stdin.isatty()` detection for cross-platform compatibility
+
 ### Development Setup
 - `bash install` - Set up development environment with Python 3.13 virtual environment using uv
 - `source activate` (or `. activate`) - Activate the virtual environment (symlinked to .venv/bin/activate or .venv/Scripts/activate on Windows)
