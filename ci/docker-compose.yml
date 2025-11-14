@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  fastled-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.fastled
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./examples:/fastled-project/examples
+    environment:
+      - NODE_ENV=development
+    networks:
+      - fastled-net
+
+  playwright-tests:
+    image: mcr.microsoft.com/playwright:v1.55.0-noble
+    depends_on:
+      - fastled-web
+    volumes:
+      - ./tests:/tests
+      - ./playwright.config.js:/playwright.config.js
+    working_dir: /
+    command: npx playwright test
+    networks:
+      - fastled-net
+    environment:
+      - FASTLED_BASE_URL=http://fastled-web:8080
+
+networks:
+  fastled-net:
+    driver: bridge
