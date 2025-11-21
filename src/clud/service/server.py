@@ -1,22 +1,32 @@
 """Local daemon server for agent coordination and telegram service management."""
 
 import _thread
-import asyncio
 import http.server
 import json
 import logging
-import os
 import socket
 import socketserver
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from .models import AgentInfo, AgentStatus
+from .handlers.agent_routes import (
+    handle_get_agent,
+    handle_heartbeat,
+    handle_list_agents,
+    handle_register_agent,
+    handle_stop_agent,
+)
+from .handlers.daemon_routes import (
+    handle_health,
+    handle_telegram_start,
+    handle_telegram_status,
+    handle_telegram_stop,
+)
 from .registry import AgentRegistry
+from .telegram_manager import TelegramServiceManager
 
 logger = logging.getLogger(__name__)
 
@@ -93,289 +103,39 @@ class DaemonRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_health(self) -> None:
         """Handle health check."""
-        agent_count = len(self.registry.list_all())
-        running_count = len(self.registry.list_by_status(AgentStatus.RUNNING))
-        stale_count = len(self.registry.list_stale())
-
-        self._send_json_response(
-            {
-                "status": "ok",
-                "pid": os.getpid(),
-                "agents": {"total": agent_count, "running": running_count, "stale": stale_count},
-            }
-        )
+        handle_health(self, self.registry)
 
     def _handle_register_agent(self) -> None:
         """Handle agent registration."""
-        logger.debug("Received agent registration request")
-
-        data = self._read_json_body()
-        if not data:
-            logger.warning("Registration request missing body")
-            self._send_error_response("Missing request body")
-            return
-
-        logger.debug(f"Registration data: {data}")
-
-        required_fields = ["agent_id", "cwd", "pid", "command"]
-        if not all(field in data for field in required_fields):
-            logger.warning(f"Registration missing required fields: {[f for f in required_fields if f not in data]}")
-            self._send_error_response(f"Missing required fields: {required_fields}")
-            return
-
-        try:
-            agent = AgentInfo(
-                agent_id=data["agent_id"],
-                cwd=data["cwd"],
-                pid=data["pid"],
-                command=data["command"],
-                status=AgentStatus.STARTING,
-                capabilities=data.get("capabilities", {}),
-            )
-            logger.debug(f"Created AgentInfo: agent_id={agent.agent_id}, pid={agent.pid}")
-            self.registry.register(agent)
-            logger.info(f"Registered agent: {agent.agent_id}")
-            self._send_json_response({"status": "registered", "agent_id": agent.agent_id}, 201)
-        except Exception as e:
-            logger.error(f"Error registering agent: {e}", exc_info=True)
-            self._send_error_response(f"Registration failed: {e}", 500)
+        handle_register_agent(self, self.registry)
 
     def _handle_heartbeat(self, agent_id: str) -> None:
         """Handle agent heartbeat."""
-        logger.debug(f"Received heartbeat for agent: {agent_id}")
-
-        data = self._read_json_body() or {}
-        logger.debug(f"Heartbeat data: {data}")
-
-        # Extract optional status update
-        status = None
-        if "status" in data:
-            try:
-                status = AgentStatus(data["status"])
-                logger.debug(f"Heartbeat includes status update: {status.value}")
-            except ValueError:
-                logger.warning(f"Invalid status in heartbeat: {data['status']}")
-                self._send_error_response(f"Invalid status: {data['status']}")
-                return
-            # Remove status from data to avoid overwriting with raw string
-            data = {k: v for k, v in data.items() if k != "status"}
-
-        # Update heartbeat
-        success = self.registry.update_heartbeat(agent_id, status=status, **data)
-
-        if success:
-            logger.debug(f"Heartbeat updated successfully for agent: {agent_id}")
-            self._send_json_response({"status": "ok"})
-        else:
-            logger.warning(f"Heartbeat failed - agent not found: {agent_id}")
-            self._send_error_response("Agent not found", 404)
+        handle_heartbeat(self, self.registry, agent_id)
 
     def _handle_get_agent(self, agent_id: str) -> None:
         """Handle get agent by ID."""
-        agent = self.registry.get(agent_id)
-        if agent:
-            self._send_json_response(agent.to_dict())
-        else:
-            self._send_error_response("Agent not found", 404)
+        handle_get_agent(self, self.registry, agent_id)
 
     def _handle_list_agents(self) -> None:
         """Handle list all agents."""
-        agents = self.registry.list_all()
-        self._send_json_response({"agents": [agent.to_dict() for agent in agents]})
+        handle_list_agents(self, self.registry)
 
     def _handle_stop_agent(self, agent_id: str) -> None:
         """Handle stop agent request."""
-        logger.debug(f"Received stop request for agent: {agent_id}")
-
-        data = self._read_json_body() or {}
-        exit_code = data.get("exit_code", 0)
-        logger.debug(f"Stop request data: exit_code={exit_code}")
-
-        success = self.registry.mark_stopped(agent_id, exit_code)
-        if success:
-            logger.info(f"Agent stopped successfully: {agent_id} (exit_code={exit_code})")
-            self._send_json_response({"status": "stopped"})
-        else:
-            logger.warning(f"Stop failed - agent not found: {agent_id}")
-            self._send_error_response("Agent not found", 404)
+        handle_stop_agent(self, self.registry, agent_id)
 
     def _handle_telegram_status(self) -> None:
         """Handle telegram service status request."""
-        status = self.telegram_manager.get_status()
-        self._send_json_response(status)
+        handle_telegram_status(self, self.telegram_manager)
 
     def _handle_telegram_start(self) -> None:
         """Handle telegram service start request."""
-        logger.debug("Received telegram start request")
-
-        data = self._read_json_body() or {}
-        config_path = data.get("config_path")
-        port = data.get("port")
-
-        try:
-            success = self.telegram_manager.start_service(config_path=config_path, port=port)
-            if success:
-                self._send_json_response({"status": "started"}, 201)
-            else:
-                self._send_error_response("Failed to start telegram service", 500)
-        except Exception as e:
-            logger.error(f"Error starting telegram service: {e}")
-            self._send_error_response(f"Failed to start telegram service: {e}", 500)
+        handle_telegram_start(self, self.telegram_manager)
 
     def _handle_telegram_stop(self) -> None:
         """Handle telegram service stop request."""
-        logger.debug("Received telegram stop request")
-
-        try:
-            success = self.telegram_manager.stop_service()
-            if success:
-                self._send_json_response({"status": "stopped"})
-            else:
-                self._send_error_response("Telegram service not running", 400)
-        except Exception as e:
-            logger.error(f"Error stopping telegram service: {e}")
-            self._send_error_response(f"Failed to stop telegram service: {e}", 500)
-
-
-class TelegramServiceManager:
-    """Manages telegram service lifecycle within the daemon."""
-
-    def __init__(self) -> None:
-        """Initialize telegram service manager."""
-        self.is_running = False
-        self.server_thread: threading.Thread | None = None
-        self.telegram_server: Any = None  # TelegramServer instance
-        self.asyncio_loop: asyncio.AbstractEventLoop | None = None
-        self.config: Any = None  # TelegramIntegrationConfig
-        logger.debug("TelegramServiceManager initialized")
-
-    def get_status(self) -> dict[str, Any]:
-        """Get telegram service status.
-
-        Returns:
-            Status dictionary with running state and config info
-        """
-        status: dict[str, Any] = {"running": self.is_running}
-        if self.is_running and self.config:
-            status["port"] = self.config.web.port
-            status["host"] = self.config.web.host
-            status["bot_configured"] = bool(self.config.telegram.bot_token)
-        return status
-
-    def start_service(self, config_path: str | None = None, port: int | None = None) -> bool:
-        """Start the telegram service.
-
-        Args:
-            config_path: Optional path to telegram config file
-            port: Optional port override
-
-        Returns:
-            True if started successfully, False otherwise
-        """
-        if self.is_running:
-            logger.warning("Telegram service already running")
-            return False
-
-        logger.info("Starting telegram service...")
-
-        try:
-            # Import telegram modules (lazy import to avoid dependency issues)
-            from clud.telegram.config import TelegramIntegrationConfig
-            from clud.telegram.server import TelegramServer
-
-            # Load configuration
-            self.config = TelegramIntegrationConfig.load(config_file=config_path)
-
-            # Override port if provided
-            if port is not None:
-                self.config.web.port = port
-
-            # Validate configuration
-            validation_errors = self.config.validate()
-            if validation_errors:
-                logger.error(f"Telegram configuration errors: {validation_errors}")
-                return False
-
-            # Create telegram server
-            self.telegram_server = TelegramServer(self.config)
-
-            # Start in separate thread with its own event loop
-            def run_telegram_service() -> None:
-                """Run telegram service in its own thread."""
-                import uvicorn
-
-                # Create new event loop for this thread
-                self.asyncio_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.asyncio_loop)
-
-                try:
-                    # Start telegram server (bot + web)
-                    self.asyncio_loop.run_until_complete(self.telegram_server.start())
-
-                    # Run uvicorn server
-                    if self.telegram_server.app:
-                        uvicorn_config = uvicorn.Config(
-                            self.telegram_server.app,
-                            host=self.config.web.host,
-                            port=self.config.web.port,
-                            log_level=self.config.logging.level.lower(),
-                        )
-                        uvicorn_server = uvicorn.Server(uvicorn_config)
-                        self.asyncio_loop.run_until_complete(uvicorn_server.serve())
-                except Exception as e:
-                    logger.error(f"Telegram service error: {e}", exc_info=True)
-                finally:
-                    # Cleanup
-                    if self.telegram_server:
-                        self.asyncio_loop.run_until_complete(self.telegram_server.stop())
-                    self.asyncio_loop.close()
-                    self.is_running = False
-
-            # Start thread
-            self.server_thread = threading.Thread(target=run_telegram_service, daemon=True)
-            self.server_thread.start()
-            self.is_running = True
-
-            logger.info(f"Telegram service started on {self.config.web.host}:{self.config.web.port}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to start telegram service: {e}", exc_info=True)
-            return False
-
-    def stop_service(self) -> bool:
-        """Stop the telegram service.
-
-        Returns:
-            True if stopped successfully, False if not running
-        """
-        if not self.is_running:
-            logger.warning("Telegram service not running")
-            return False
-
-        logger.info("Stopping telegram service...")
-
-        try:
-            # Signal the event loop to stop
-            if self.asyncio_loop and self.telegram_server:
-                # Schedule stop coroutine in the telegram service's event loop
-                asyncio.run_coroutine_threadsafe(self.telegram_server.stop(), self.asyncio_loop)
-
-            # Wait for thread to finish (with timeout)
-            if self.server_thread:
-                self.server_thread.join(timeout=5.0)
-
-            self.is_running = False
-            self.server_thread = None
-            self.telegram_server = None
-            self.asyncio_loop = None
-
-            logger.info("Telegram service stopped")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error stopping telegram service: {e}", exc_info=True)
-            return False
+        handle_telegram_stop(self, self.telegram_manager)
 
 
 class DaemonServer:

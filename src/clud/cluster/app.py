@@ -12,16 +12,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, status
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
-from .auth import TokenData, decode_access_token
 from .config import settings
 from .database import Database
-from .models import Agent, AgentMetrics, AgentStatus, BindingMode, Daemon, DaemonStatus, Session, SessionType, Staleness, TelegramBinding
+from .models import BindingMode, Session, SessionType, TelegramBinding
+from .routes.agents import router as agents_router
+from .routes.daemons import router as daemons_router
 
 # Initialize logging
 logging.basicConfig(
@@ -38,52 +38,6 @@ ws_manager = None
 
 # Global Telegram bot
 telegram_bot = None
-
-# Security scheme
-security = HTTPBearer(auto_error=False)
-
-
-async def get_current_token(
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> TokenData | None:
-    """
-    Extract and validate JWT token from Authorization header.
-
-    Returns None if no token or invalid token (for optional auth).
-    """
-    if not credentials:
-        return None
-
-    token_data = decode_access_token(credentials.credentials)
-    return token_data
-
-
-async def require_auth(
-    token_data: TokenData | None = Depends(get_current_token),
-) -> TokenData:
-    """
-    Require valid authentication.
-
-    Raises 401 if no valid token.
-    """
-    if not token_data:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return token_data
-
-
-async def optional_auth(
-    token_data: TokenData | None = Depends(get_current_token),
-) -> TokenData | None:
-    """
-    Optional authentication dependency.
-
-    Returns token data if present, None otherwise.
-    """
-    return token_data
 
 
 @asynccontextmanager
@@ -111,6 +65,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     ws_manager = WebSocketConnectionManager(db.get_session)
     logger.info("WebSocket connection manager initialized")
+
+    # Initialize route modules with dependencies
+    from .routes.agents import init_agents_routes
+    from .routes.daemons import init_daemons_routes
+
+    init_agents_routes(db, ws_manager)
+    logger.info("Agent routes initialized")
+
+    init_daemons_routes(db, ws_manager)
+    logger.info("Daemon routes initialized")
 
     # Initialize Telegram bot (optional)
     if settings.telegram_bot_token:
@@ -158,6 +122,10 @@ if static_dir.exists():
 else:
     logger.warning(f"Static directory not found: {static_dir}")
 
+# Include route modules
+app.include_router(agents_router)
+app.include_router(daemons_router)
+
 
 # Health check endpoint
 @app.get("/health")
@@ -190,140 +158,7 @@ async def root() -> FileResponse | dict[str, str]:
     }
 
 
-# API endpoints
-
-
-@app.get("/api/v1/agents", response_model=list[Agent])
-async def list_agents(daemon_id: str | None = None) -> list[Agent]:
-    """
-    List all agents.
-
-    Query parameters:
-    - daemon_id: Optional filter by daemon ID
-    """
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    from uuid import UUID
-
-    from .database import list_agents as db_list_agents
-
-    async with db.get_session() as session:
-        daemon_uuid = UUID(daemon_id) if daemon_id else None
-        agents_db = await db_list_agents(session, daemon_uuid)
-
-        # Convert DB models to Pydantic models
-        return [
-            Agent(
-                id=agent.id,
-                daemon_id=agent.daemon_id,
-                hostname=agent.hostname,
-                pid=agent.pid,
-                cwd=agent.cwd,
-                command=agent.command,
-                status=AgentStatus(agent.status),
-                capabilities=agent.capabilities,
-                created_at=agent.created_at,
-                updated_at=agent.updated_at,
-                last_heartbeat=agent.last_heartbeat,
-                stopped_at=agent.stopped_at,
-                staleness=Staleness(agent.staleness),
-                daemon_reported_status=agent.daemon_reported_status,
-                daemon_reported_at=agent.daemon_reported_at,
-                metrics=AgentMetrics(**agent.metrics) if isinstance(agent.metrics, dict) else agent.metrics,
-            )
-            for agent in agents_db
-        ]
-
-
-@app.get("/api/v1/agents/{agent_id}", response_model=Agent)
-async def get_agent(agent_id: str) -> Agent:
-    """Get agent details by ID."""
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    from uuid import UUID
-
-    from .database import get_agent_by_id
-
-    async with db.get_session() as session:
-        agent_db = await get_agent_by_id(session, UUID(agent_id))
-        if not agent_db:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        return Agent(
-            id=agent_db.id,
-            daemon_id=agent_db.daemon_id,
-            hostname=agent_db.hostname,
-            pid=agent_db.pid,
-            cwd=agent_db.cwd,
-            command=agent_db.command,
-            status=AgentStatus(agent_db.status),
-            capabilities=agent_db.capabilities,
-            created_at=agent_db.created_at,
-            updated_at=agent_db.updated_at,
-            last_heartbeat=agent_db.last_heartbeat,
-            stopped_at=agent_db.stopped_at,
-            staleness=Staleness(agent_db.staleness),
-            daemon_reported_status=agent_db.daemon_reported_status,
-            daemon_reported_at=agent_db.daemon_reported_at,
-            metrics=AgentMetrics(**agent_db.metrics) if isinstance(agent_db.metrics, dict) else agent_db.metrics,
-        )
-
-
-@app.get("/api/v1/daemons", response_model=list[Daemon])
-async def list_daemons() -> list[Daemon]:
-    """List all connected daemons."""
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    from .database import list_daemons as db_list_daemons
-
-    async with db.get_session() as session:
-        daemons_db = await db_list_daemons(session)
-
-        return [
-            Daemon(
-                id=daemon.id,
-                hostname=daemon.hostname,
-                platform=daemon.platform,
-                version=daemon.version,
-                bind_address=daemon.bind_address,
-                status=DaemonStatus(daemon.status),
-                agent_count=daemon.agent_count,
-                created_at=daemon.created_at,
-                last_seen=daemon.last_seen,
-            )
-            for daemon in daemons_db
-        ]
-
-
-@app.get("/api/v1/daemons/{daemon_id}", response_model=Daemon)
-async def get_daemon(daemon_id: str) -> Daemon:
-    """Get daemon details by ID."""
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    from uuid import UUID
-
-    from .database import get_daemon_by_id
-
-    async with db.get_session() as session:
-        daemon_db = await get_daemon_by_id(session, UUID(daemon_id))
-        if not daemon_db:
-            raise HTTPException(status_code=404, detail="Daemon not found")
-
-        return Daemon(
-            id=daemon_db.id,
-            hostname=daemon_db.hostname,
-            platform=daemon_db.platform,
-            version=daemon_db.version,
-            bind_address=daemon_db.bind_address,
-            status=DaemonStatus(daemon_db.status),
-            agent_count=daemon_db.agent_count,
-            created_at=daemon_db.created_at,
-            last_seen=daemon_db.last_seen,
-        )
+# API endpoints (agent routes now in routes/agents.py, daemon routes in routes/daemons.py)
 
 
 # Authentication endpoints
@@ -513,131 +348,7 @@ async def delete_telegram_binding(binding_id: str) -> dict[str, str]:
         return {"status": "deleted", "binding_id": binding_id}
 
 
-# Control endpoints
-
-
-@app.post("/api/v1/agents/{agent_id}/stop")
-async def stop_agent(
-    agent_id: str,
-    force: bool = False,
-    timeout_seconds: int = 10,
-    token: TokenData = Depends(require_auth),
-) -> dict[str, str]:
-    """
-    Stop an agent.
-
-    Sends agent_stop intent to the daemon that owns the agent.
-    Requires authentication with agent:write scope.
-    """
-    if not db or not ws_manager:
-        raise HTTPException(status_code=503, detail="Service not available")
-
-    from uuid import UUID
-
-    from .database import get_agent_by_id
-    from .models import AgentStopIntent
-
-    async with db.get_session() as session:
-        agent_db = await get_agent_by_id(session, UUID(agent_id))
-        if not agent_db:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        daemon_id = agent_db.daemon_id
-
-        try:
-            intent = AgentStopIntent(
-                agent_id=UUID(agent_id),
-                force=force,
-                timeout_seconds=timeout_seconds,
-            )
-            await ws_manager.send_control_intent(daemon_id, intent.model_dump(mode="json"))
-
-            return {"status": "sent", "message": f"Stop intent sent to daemon {daemon_id}"}
-        except ValueError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
-
-
-@app.post("/api/v1/agents/{agent_id}/exec")
-async def exec_command(
-    agent_id: str,
-    command: str,
-    cwd: str | None = None,
-    env: dict[str, str] | None = None,
-    timeout_seconds: int = 300,
-    token: TokenData = Depends(require_auth),
-) -> dict[str, str]:
-    """
-    Execute a command in the agent's working directory.
-
-    Sends agent_exec intent to the daemon.
-    Requires authentication with agent:write scope.
-    """
-    if not db or not ws_manager:
-        raise HTTPException(status_code=503, detail="Service not available")
-
-    from uuid import UUID
-
-    from .database import get_agent_by_id
-    from .models import AgentExecIntent
-
-    async with db.get_session() as session:
-        agent_db = await get_agent_by_id(session, UUID(agent_id))
-        if not agent_db:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        daemon_id = agent_db.daemon_id
-        target_cwd = cwd or agent_db.cwd
-
-        try:
-            intent = AgentExecIntent(
-                agent_id=UUID(agent_id),
-                command=command,
-                cwd=target_cwd,
-                env=env or {},
-                timeout_seconds=timeout_seconds,
-            )
-            await ws_manager.send_control_intent(daemon_id, intent.model_dump(mode="json"))
-
-            return {"status": "sent", "message": f"Exec intent sent to daemon {daemon_id}"}
-        except ValueError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
-
-
-@app.get("/api/v1/agents/{agent_id}/scrollback")
-async def get_scrollback(agent_id: str, lines: int = 1000) -> dict[str, str]:
-    """
-    Request scrollback from the agent's ring buffer.
-
-    Sends get_scrollback intent to the daemon.
-    """
-    if not db or not ws_manager:
-        raise HTTPException(status_code=503, detail="Service not available")
-
-    from uuid import UUID
-
-    from .database import get_agent_by_id
-    from .models import GetScrollbackIntent
-
-    async with db.get_session() as session:
-        agent_db = await get_agent_by_id(session, UUID(agent_id))
-        if not agent_db:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        daemon_id = agent_db.daemon_id
-
-        try:
-            intent = GetScrollbackIntent(
-                agent_id=UUID(agent_id),
-                lines=lines,
-            )
-            await ws_manager.send_control_intent(daemon_id, intent.model_dump(mode="json"))
-
-            return {
-                "status": "sent",
-                "message": f"Scrollback request sent to daemon {daemon_id}",
-            }
-        except ValueError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
+# Control endpoints (now in routes/agents.py)
 
 
 # WebSocket endpoints (handlers will be in separate modules)

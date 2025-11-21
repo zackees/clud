@@ -23,11 +23,29 @@ src/clud/              Main package source code
 │   ├── instance_manager.py   Subprocess lifecycle
 │   └── server.py      FastAPI server
 ├── webui/             Browser-based interface
-│   ├── server.py      FastAPI application
+│   ├── server.py      FastAPI application (174 lines) - Main orchestration
+│   ├── server_config.py   Configuration & port management (134 lines)
+│   ├── static_routes.py   Static file serving routes (98 lines)
+│   ├── websocket_routes.py   WebSocket endpoints (129 lines)
+│   ├── rest_routes.py   REST API endpoints (483 lines)
 │   ├── api.py         API handlers
 │   ├── pty_manager.py PTY session management
 │   ├── terminal_handler.py   Terminal I/O
 │   └── frontend/      Svelte 5 + SvelteKit UI
+├── cluster/           Cluster management server
+│   ├── app.py         FastAPI application (454 lines) - Main orchestration
+│   ├── auth_dependencies.py   Authentication dependencies (59 lines)
+│   └── routes/        API route modules
+│       ├── __init__.py    Route imports
+│       ├── agents.py  Agent management routes (215 lines)
+│       └── daemons.py Daemon management routes (92 lines)
+├── service/           Service management server
+│   ├── server.py      Main server (455 lines) - Core orchestration
+│   ├── telegram_manager.py   Telegram bot management (155 lines)
+│   └── handlers/      Request handlers
+│       ├── __init__.py    Handler exports
+│       ├── agent_routes.py   Agent operations (195 lines)
+│       └── daemon_routes.py  Daemon operations (140 lines)
 ├── telegram/          Telegram bot integration
 └── backlog/           Backlog.md parser
 
@@ -115,25 +133,136 @@ Unified API for routing messages from multiple client types to clud instances.
   - `DELETE /api/instances/{id}` - Delete instance
   - `WebSocket /ws/{instance_id}` - Real-time streaming
 
+### Cluster Management Server (`src/clud/cluster/`)
+
+Multi-tenant agent and daemon management server. **Refactored to 454 lines** (38.9% reduction from 743 lines).
+
+**Modular Architecture**:
+
+1. **`app.py` (454 lines)** - Main orchestration:
+   - FastAPI application setup
+   - CORS and middleware configuration
+   - Route registration
+   - WebSocket management
+   - Telegram bot integration
+   - Error handling
+
+2. **`auth_dependencies.py` (59 lines)** - Authentication:
+   - Token validation dependencies
+   - Security utilities
+   - Authentication helpers
+
+3. **`routes/agents.py` (215 lines)** - Agent management:
+   - `POST /agents` - Create agent instance
+   - `GET /agents` - List agents
+   - `GET /agents/{agent_id}` - Get agent details
+   - `POST /agents/{agent_id}/message` - Send message
+   - `DELETE /agents/{agent_id}` - Delete agent
+   - `POST /agents/{agent_id}/kill` - Force kill agent
+   - WebSocket streaming support
+
+4. **`routes/daemons.py` (92 lines)** - Daemon management:
+   - `POST /daemons` - Create daemon
+   - `GET /daemons` - List daemons
+   - `GET /daemons/{daemon_id}` - Get daemon details
+   - `DELETE /daemons/{daemon_id}` - Delete daemon
+
+**Key Features**:
+- Multi-user authentication with token-based auth
+- Real-time WebSocket streaming for agent output
+- Telegram bot integration per agent
+- Automatic cleanup and lifecycle management
+- Process isolation and security
+
+### Service Management Server (`src/clud/service/`)
+
+Local service for managing agent and daemon processes. **Refactored to 455 lines** (34.6% reduction from 696 lines).
+
+**Modular Architecture**:
+
+1. **`server.py` (455 lines)** - Core orchestration:
+   - FastAPI application setup
+   - Process lifecycle management
+   - Daemon coordination
+   - Event handling
+   - Server startup and shutdown
+
+2. **`telegram_manager.py` (155 lines)** - Telegram integration:
+   - Bot lifecycle management
+   - Message routing to agents
+   - Telegram webhook handling
+   - Bot registration and cleanup
+
+3. **`handlers/agent_routes.py` (195 lines)** - Agent operations:
+   - `POST /agents` - Create agent
+   - `GET /agents` - List agents
+   - `GET /agents/{agent_id}` - Get agent info
+   - `POST /agents/{agent_id}/send` - Send message
+   - `DELETE /agents/{agent_id}` - Stop agent
+   - `POST /agents/{agent_id}/kill` - Force kill
+
+4. **`handlers/daemon_routes.py` (140 lines)** - Daemon operations:
+   - `POST /daemons/start` - Start daemon
+   - `POST /daemons/stop` - Stop daemon
+   - `GET /daemons/status` - Get daemon status
+   - `GET /daemons/logs` - Get daemon logs
+   - Daemon lifecycle coordination
+
+**Key Features**:
+- Local process management without authentication
+- Integrated Telegram bot support
+- Daemon background execution
+- Process monitoring and cleanup
+- Log management
+
 ### Web UI (`src/clud/webui/`)
 
-Browser-based interface for Claude Code with real-time streaming.
+Browser-based interface for Claude Code with real-time streaming. **Refactored to 174 lines** (80.4% reduction from 886 lines).
 
-**Backend**:
-- FastAPI application with WebSocket support
-- Handler classes for chat, projects, and history
-- Cross-platform PTY session management
-- Terminal I/O streaming
+**Modular Architecture**:
+
+1. **`server.py` (174 lines)** - Main orchestration:
+   - FastAPI application initialization
+   - Route registration and module integration
+   - Lifespan management
+   - Server startup and shutdown coordination
+
+2. **`server_config.py` (134 lines)** - Configuration management:
+   - Port selection and validation
+   - Frontend path resolution (build vs. static fallback)
+   - Frontend URL generation
+   - Configuration utilities
+
+3. **`static_routes.py` (98 lines)** - Static file serving:
+   - Frontend build serving
+   - SPA routing with index.html fallback
+   - Static asset handling
+   - MIME type configuration
+
+4. **`websocket_routes.py` (129 lines)** - WebSocket endpoints:
+   - Real-time chat streaming
+   - Terminal session WebSockets
+   - Connection lifecycle management
+   - Error handling
+
+5. **`rest_routes.py` (483 lines)** - REST API endpoints:
+   - Chat operations (send, history, list)
+   - Project management
+   - History management
+   - Terminal operations
+   - Settings endpoints
+   - Health checks
+
+**Supporting Modules**:
+- `api.py` - Handler classes for chat, projects, and history
+- `pty_manager.py` - Cross-platform PTY session management
+- `terminal_handler.py` - Terminal I/O streaming
 
 **Frontend** (Svelte 5 + SvelteKit + TypeScript):
 - `frontend/src/lib/components/`: UI components (Chat, Terminal, DiffViewer, Settings, History)
 - `frontend/src/lib/stores/`: Svelte stores for state management
 - `frontend/src/lib/services/`: WebSocket and API services
 - `frontend/build/`: Production build output (served by FastAPI)
-
-**Static files served from**:
-- `src/clud/webui/frontend/build/` (production)
-- Falls back to `static/` if build missing
 
 ## Package Configuration
 
