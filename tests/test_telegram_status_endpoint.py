@@ -2,7 +2,7 @@
 
 import unittest
 
-from clud.agent_cli import save_telegram_credentials
+from clud.agent import save_telegram_credentials
 from clud.webui.telegram_api import TelegramAPIHandler
 
 

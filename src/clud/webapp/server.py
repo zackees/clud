@@ -70,7 +70,7 @@ class TelegramWebAppHandler(SimpleHTTPRequestHandler):
                     return
 
                 # Import here to avoid circular dependencies
-                from ..agent_cli import load_telegram_credentials, save_telegram_credentials
+                from ..agent import load_telegram_credentials, save_telegram_credentials
 
                 # Load existing bot token
                 bot_token, _ = load_telegram_credentials()

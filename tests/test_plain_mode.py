@@ -47,7 +47,7 @@ class TestPlainModeCommandBuilding(unittest.TestCase):
 
     def test_build_command_without_plain(self) -> None:
         """Test command building without --plain flag."""
-        from clud.agent_cli import _build_claude_command
+        from clud.agent.command_builder import _build_claude_command
 
         args = Args(
             mode=AgentMode.DEFAULT,
@@ -65,7 +65,7 @@ class TestPlainModeCommandBuilding(unittest.TestCase):
 
     def test_build_command_with_plain(self) -> None:
         """Test command building with --plain flag."""
-        from clud.agent_cli import _build_claude_command
+        from clud.agent.command_builder import _build_claude_command
 
         args = Args(
             mode=AgentMode.DEFAULT,
@@ -83,7 +83,7 @@ class TestPlainModeCommandBuilding(unittest.TestCase):
 
     def test_build_command_plain_with_continue(self) -> None:
         """Test command building with --plain and --continue."""
-        from clud.agent_cli import _build_claude_command
+        from clud.agent.command_builder import _build_claude_command
 
         args = Args(
             mode=AgentMode.DEFAULT,
@@ -103,10 +103,10 @@ class TestPlainModeCommandBuilding(unittest.TestCase):
 class TestPlainModeExecution(unittest.TestCase):
     """Test plain mode execution flow."""
 
-    @patch("clud.agent_cli._find_claude_path")
-    @patch("clud.agent_cli.get_api_key")
-    @patch("clud.agent_cli.RunningProcess")
-    @patch("clud.agent_cli.TelegramBot")
+    @patch("clud.agent.runner._find_claude_path")
+    @patch("clud.agent.runner.get_api_key")
+    @patch("clud.agent.runner.RunningProcess")
+    @patch("clud.agent.runner.TelegramBot")
     def test_plain_mode_uses_raw_streaming(
         self,
         mock_telegram: MagicMock,
@@ -115,7 +115,7 @@ class TestPlainModeExecution(unittest.TestCase):
         mock_find_claude: MagicMock,
     ) -> None:
         """Test that plain mode uses raw streaming without JSON formatter."""
-        from clud.agent_cli import run_agent
+        from clud.agent.runner import run_agent
 
         # Setup mocks
         mock_find_claude.return_value = "claude"
@@ -141,11 +141,11 @@ class TestPlainModeExecution(unittest.TestCase):
         self.assertEqual(len(call_args[0]), 1)  # Only one positional arg (cmd)
         self.assertEqual(result, 0)
 
-    @patch("clud.agent_cli._find_claude_path")
-    @patch("clud.agent_cli.get_api_key")
-    @patch("clud.agent_cli.RunningProcess")
-    @patch("clud.agent_cli.StreamJsonFormatter")
-    @patch("clud.agent_cli.TelegramBot")
+    @patch("clud.agent.runner._find_claude_path")
+    @patch("clud.agent.runner.get_api_key")
+    @patch("clud.agent.runner.RunningProcess")
+    @patch("clud.agent.runner.StreamJsonFormatter")
+    @patch("clud.agent.runner.TelegramBot")
     def test_non_plain_mode_uses_json_formatter(
         self,
         mock_telegram: MagicMock,
@@ -155,7 +155,7 @@ class TestPlainModeExecution(unittest.TestCase):
         mock_find_claude: MagicMock,
     ) -> None:
         """Test that non-plain mode uses JSON formatter."""
-        from clud.agent_cli import run_agent
+        from clud.agent.runner import run_agent
 
         # Setup mocks
         mock_find_claude.return_value = "claude"
@@ -213,7 +213,7 @@ class TestPlainModeIntegration(unittest.TestCase):
         import sys
         from io import StringIO
 
-        from clud.agent_cli import run_agent
+        from clud.agent.runner import run_agent
 
         args = Args(
             mode=AgentMode.DEFAULT,

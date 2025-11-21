@@ -570,7 +570,7 @@ def create_app(static_dir: Path) -> FastAPI:
 
             # Fall back to system keyring if not found in Web UI handler
             if not bot_token:
-                from ..agent_cli import load_telegram_credentials
+                from ..agent.config import load_telegram_credentials
 
                 bot_token, chat_id = load_telegram_credentials()
 
@@ -638,7 +638,7 @@ def create_app(static_dir: Path) -> FastAPI:
 
             # Fall back to system keyring if not found
             if not bot_token:
-                from ..agent_cli import load_telegram_credentials
+                from ..agent.config import load_telegram_credentials
 
                 bot_token, _ = load_telegram_credentials()
 

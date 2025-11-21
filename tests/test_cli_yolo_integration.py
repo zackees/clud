@@ -32,19 +32,27 @@ class TestCliYoloIntegration(unittest.TestCase):
 
     def test_cli_message_without_dry_run_mocked(self) -> None:
         """Test CLI with -m but no --dry-run (should try to run Claude, but we mock it)."""
-        # Mock _execute_command to avoid actually running Claude
-        with patch("clud.agent_cli._execute_command") as mock_execute:
+        # Mock subprocess.run to avoid actually running Claude
+        with patch("clud.agent.subprocess.subprocess.run") as mock_run:
             # Mock successful return for command execution
-            mock_execute.return_value = 0
+            mock_run.return_value.returncode = 0
 
-            # Mock shutil.which to return a fake claude path
-            # Also mock detect_git_bash to avoid subprocess calls in git-bash detection
-            with patch("clud.agent_cli.shutil.which", return_value="/fake/claude"), patch("clud.agent_cli.detect_git_bash", return_value=None):
+            # Mock _find_claude_path to return a fake claude path
+            # Mock get_api_key to avoid keyring access
+            with (
+                patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"),
+                patch("clud.agent.runner.get_api_key", return_value="fake-api-key"),
+            ):
                 result = main(["-m", "test message"])
 
         self.assertEqual(result, 0)
-        # Verify that _execute_command was called (meaning it tried to run Claude)
-        mock_execute.assert_called_once()
+        # Verify that subprocess.run was called (meaning it tried to run Claude)
+        # Note: subprocess.run is called multiple times (git-bash detection + claude execution)
+        self.assertGreaterEqual(mock_run.call_count, 1)
+        # Verify the last call was to execute claude with the message
+        last_call = mock_run.call_args_list[-1]
+        self.assertIn("claude", str(last_call))
+        self.assertIn("test message", str(last_call))
 
 
 if __name__ == "__main__":

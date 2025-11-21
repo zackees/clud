@@ -131,7 +131,7 @@ class TelegramIntegrationConfig:
 
         # Fall back to keyring if environment variable not set
         if not bot_token:
-            from ..agent_cli import load_telegram_credentials
+            from ..agent.config import load_telegram_credentials
 
             bot_token_keyring, _ = load_telegram_credentials()
             if bot_token_keyring:

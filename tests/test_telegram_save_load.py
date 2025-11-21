@@ -2,7 +2,7 @@
 
 import unittest
 
-from clud.agent_cli import load_telegram_credentials, save_telegram_credentials
+from clud.agent import load_telegram_credentials, save_telegram_credentials
 from clud.secrets import get_credential_store
 
 

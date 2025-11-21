@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from clud.agent_cli import _wrap_command_for_git_bash
+from clud.agent.command_builder import _wrap_command_for_git_bash
 
 
 class TestWrapCommandForGitBash(unittest.TestCase):
@@ -14,7 +14,7 @@ class TestWrapCommandForGitBash(unittest.TestCase):
         cmd = ["claude", "--dangerously-skip-permissions", "-p", "test"]
 
         # Mock platform.system() to return non-Windows
-        with patch("clud.agent_cli.platform.system", return_value="Linux"):
+        with patch("clud.agent.command_builder.platform.system", return_value="Linux"):
             result = _wrap_command_for_git_bash(cmd)
 
         self.assertEqual(result, cmd)
@@ -25,8 +25,8 @@ class TestWrapCommandForGitBash(unittest.TestCase):
 
         # Mock platform.system() to return Windows, but detect_git_bash to return None
         with (
-            patch("clud.agent_cli.platform.system", return_value="Windows"),
-            patch("clud.agent_cli.detect_git_bash", return_value=None),
+            patch("clud.agent.command_builder.platform.system", return_value="Windows"),
+            patch("clud.agent.command_builder.detect_git_bash", return_value=None),
         ):
             result = _wrap_command_for_git_bash(cmd)
 
@@ -44,8 +44,8 @@ class TestWrapCommandForGitBash(unittest.TestCase):
 
         # Mock platform.system() to return Windows, and detect_git_bash to return path
         with (
-            patch("clud.agent_cli.platform.system", return_value="Windows"),
-            patch("clud.agent_cli.detect_git_bash", return_value=git_bash_path),
+            patch("clud.agent.command_builder.platform.system", return_value="Windows"),
+            patch("clud.agent.command_builder.detect_git_bash", return_value=git_bash_path),
         ):
             result = _wrap_command_for_git_bash(cmd)
 
@@ -70,8 +70,8 @@ class TestWrapCommandForGitBash(unittest.TestCase):
         git_bash_path = r"C:\Program Files\Git\bin\bash.exe"
 
         with (
-            patch("clud.agent_cli.platform.system", return_value="Windows"),
-            patch("clud.agent_cli.detect_git_bash", return_value=git_bash_path),
+            patch("clud.agent.command_builder.platform.system", return_value="Windows"),
+            patch("clud.agent.command_builder.detect_git_bash", return_value=git_bash_path),
         ):
             result = _wrap_command_for_git_bash(cmd)
 
@@ -90,8 +90,8 @@ class TestWrapCommandForGitBash(unittest.TestCase):
         git_bash_path = r"C:\Program Files\Git\bin\bash.exe"
 
         with (
-            patch("clud.agent_cli.platform.system", return_value="Windows"),
-            patch("clud.agent_cli.detect_git_bash", return_value=git_bash_path),
+            patch("clud.agent.command_builder.platform.system", return_value="Windows"),
+            patch("clud.agent.command_builder.detect_git_bash", return_value=git_bash_path),
         ):
             result = _wrap_command_for_git_bash(cmd)
 
