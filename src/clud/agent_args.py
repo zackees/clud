@@ -47,6 +47,9 @@ class Args:
     help: bool = False
     track: bool = False
     hook_debug: bool = False  # For --hook-debug (verbose hook logging)
+    cron: bool = False  # For --cron (cron scheduler)
+    cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
+    cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
     # Agent-level arguments (execution)
     prompt: str | None = None
     message: str | None = None
@@ -89,6 +92,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     info = "--info" in args_copy
     track = "--track" in args_copy
     hook_debug = "--hook-debug" in args_copy
+    cron = "--cron" in args_copy
 
     # Remove --track from args_copy since it's handled by router
     if "--track" in args_copy:
@@ -97,6 +101,21 @@ def parse_args(args: list[str] | None = None) -> Args:
     # Remove --hook-debug from args_copy since it's handled by router
     if "--hook-debug" in args_copy:
         args_copy.remove("--hook-debug")
+
+    # Extract cron subcommand and arguments if present
+    cron_subcommand = None
+    cron_args: list[str] = []
+    if "--cron" in args_copy:
+        cron_idx = args_copy.index("--cron")
+        args_copy.pop(cron_idx)  # Remove --cron flag
+        # Extract all remaining args as cron subcommand and args
+        if cron_idx < len(args_copy):
+            cron_subcommand = args_copy[cron_idx]
+            args_copy.pop(cron_idx)  # Remove subcommand
+            # Remaining args are cron arguments
+            while cron_idx < len(args_copy) and not args_copy[cron_idx].startswith("--"):
+                cron_args.append(args_copy[cron_idx])
+                args_copy.pop(cron_idx)
 
     # Extract fix URL argument if present
     fix_url = None
@@ -358,6 +377,9 @@ def parse_args(args: list[str] | None = None) -> Args:
         help=help_requested,
         track=track,
         hook_debug=hook_debug,
+        cron=cron,
+        cron_subcommand=cron_subcommand,
+        cron_args=cron_args,
         # Agent-level
         prompt=known_args.prompt,
         message=known_args.message,

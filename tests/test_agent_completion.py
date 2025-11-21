@@ -19,6 +19,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
                 [
                     "uv",
                     "run",
+                    "--no-sync",
                     "python",
                     "-m",
                     "clud.cli",
@@ -50,7 +51,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
         try:
             # Use encoding handling to deal with output that might contain binary data
             result = subprocess.run(
-                ["uv", "run", "python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"],
+                ["uv", "run", "--no-sync", "python", "-m", "clud.cli", ".", "--cmd", "echo 'hello world'"],
                 capture_output=True,
                 text=True,
                 timeout=30,  # Increased timeout for process startup
@@ -74,7 +75,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
 
         try:
             result = subprocess.run(
-                ["uv", "run", "clud", "-m", "respond with hi", "--idle-timeout", "10"],
+                ["uv", "run", "--no-sync", "clud", "-m", "respond with hi", "--idle-timeout", "10"],
                 capture_output=True,
                 text=True,
                 timeout=30,  # Max timeout including Claude startup
@@ -103,7 +104,7 @@ class TestAgentCompletionIntegration(unittest.TestCase):
         # This test just verifies that -p mode works normally without idle detection
         try:
             result = subprocess.run(
-                ["uv", "run", "clud", "-p", "respond with just the word 'ok'"],
+                ["uv", "run", "--no-sync", "clud", "-p", "respond with just the word 'ok'"],
                 capture_output=True,
                 text=True,
                 timeout=20,

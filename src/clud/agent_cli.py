@@ -33,6 +33,7 @@ from .claude_installer import (
     is_claude_installed_locally,
     prompt_install_claude,
 )
+from .cron.cli_handler import handle_cron_command
 from .hooks import HookContext, HookEvent, get_hook_manager
 from .hooks.config import load_hook_config
 from .hooks.telegram import TelegramHookHandler
@@ -2292,6 +2293,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("                       Launch advanced Telegram integration server (default port: 8889)")
             print("  --webui, --ui [PORT] Launch Claude Code Web UI in browser (default port: 8888)")
             print("  --api-server [PORT]  Launch Message Handler API server (default port: 8765)")
+            print("  --cron <subcommand>  Schedule recurring tasks (use 'clud --cron help' for details)")
             print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  --track              Enable agent tracking with local daemon")
@@ -2342,6 +2344,9 @@ def main(args_list: list[str] | None = None) -> int:
 
         if args.install_claude:
             return handle_install_claude_command()
+
+        if args.cron:
+            return handle_cron_command(args.cron_subcommand, args.cron_args)
 
         # Route to appropriate mode handler
         if args.mode == AgentMode.FIX:

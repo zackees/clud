@@ -16,7 +16,7 @@ if [[ "$*" == *"--full"* ]]; then
 
     # Install Playwright browsers if not already installed
     echo "Ensuring Playwright browsers are installed..."
-    uv run playwright install chromium --with-deps
+    uv run --no-sync playwright install chromium --with-deps
 
     # Remove --full from arguments to pass to pytest
     args=("$@")
@@ -28,7 +28,7 @@ if [[ "$*" == *"--full"* ]]; then
     done
 
     # Run all tests including Playwright tests
-    uv run pytest tests/ "${new_args[@]}"
+    uv run --no-sync pytest tests/ "${new_args[@]}"
     exit 0
 fi
 
@@ -36,9 +36,9 @@ fi
 if [[ "$*" == *"tests/integration"* ]] || [[ "$PWD" == *"/tests/integration" ]]; then
     echo "Running integration tests sequentially (no parallel execution)"
     # Force sequential execution for integration tests to avoid Docker conflicts
-    uv run pytest tests/integration/ -v --tb=short --maxfail=1 "$@"
+    uv run --no-sync pytest tests/integration/ -v --tb=short --maxfail=1 "$@"
 else
     # Normal test execution (can use parallel for unit tests)
     # Exclude Playwright tests by default (they require --full flag)
-    uv run pytest tests/ --ignore=tests/test_webui_e2e.py --ignore=tests/test_terminal_e2e.py --ignore=tests/test_webui_terminal_tab_e2e.py --ignore=tests/test_diff_tab_e2e.py "$@"
+    uv run --no-sync pytest tests/ --ignore=tests/test_webui_e2e.py --ignore=tests/test_terminal_e2e.py --ignore=tests/test_webui_terminal_tab_e2e.py --ignore=tests/test_diff_tab_e2e.py "$@"
 fi
