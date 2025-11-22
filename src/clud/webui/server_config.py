@@ -1,11 +1,15 @@
 """Server configuration and initialization utilities."""
 
+import hashlib
 import logging
-import os
+import shutil
 import socket
 import subprocess
 import sys
 from pathlib import Path
+
+import appdirs
+import fasteners
 
 logger = logging.getLogger(__name__)
 
@@ -28,65 +32,148 @@ def find_available_port(start_port: int = 8888) -> int:
     raise RuntimeError(f"No available ports found starting from {start_port}")
 
 
-def ensure_frontend_built() -> bool:
-    """Ensure the frontend is built, building it if necessary.
+def _get_package_version() -> str:
+    """Get the clud package version.
 
     Returns:
-        True if the frontend build exists (either already or after building), False otherwise.
+        Version string (e.g., "1.0.34")
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("clud")
+    except Exception:
+        # Fallback if package not installed properly
+        return "dev"
+
+
+def _get_frontend_cache_dir() -> Path:
+    """Get the global cache directory for frontend builds.
+
+    Returns:
+        Path to cache directory (creates if doesn't exist)
+    """
+    cache_dir = Path(str(appdirs.user_cache_dir("clud", "clud"))) / "webui-frontend"  # type: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _get_frontend_version_hash() -> str:
+    """Get a hash of the current frontend source to detect changes.
+
+    Returns:
+        SHA256 hash of key frontend files
     """
     frontend_dir = Path(__file__).parent / "frontend"
-    build_dir = frontend_dir / "build"
-    src_dir = frontend_dir / "src"
     package_json = frontend_dir / "package.json"
 
-    # Check if frontend source exists
-    if not frontend_dir.exists() or not package_json.exists():
-        logger.debug("Frontend source directory not found - skipping auto-build")
-        return False
+    # Include package version and package.json content in hash
+    hasher = hashlib.sha256()
+    hasher.update(_get_package_version().encode())
 
-    # Check if build directory exists
-    if not build_dir.exists():
-        logger.info("Frontend build directory not found - building frontend...")
-        return _build_frontend(frontend_dir)
+    if package_json.exists():
+        hasher.update(package_json.read_bytes())
 
-    # Check if source is newer than build
-    try:
-        build_time = build_dir.stat().st_mtime
-        src_time = src_dir.stat().st_mtime if src_dir.exists() else 0
-
-        # Find newest file in src directory
-        if src_dir.exists():
-            for root, _dirs, files in os.walk(src_dir):
-                for file in files:
-                    file_path = Path(root) / file
-                    file_time = file_path.stat().st_mtime
-                    if file_time > src_time:
-                        src_time = file_time
-
-        if src_time > build_time:
-            logger.info("Frontend source is newer than build - rebuilding frontend...")
-            return _build_frontend(frontend_dir)
-    except OSError as e:
-        logger.warning("Failed to check frontend timestamps: %s", e)
-
-    # Build exists and is up-to-date
-    return True
+    return hasher.hexdigest()[:16]
 
 
-def _build_frontend(frontend_dir: Path) -> bool:
-    """Build the frontend using npm.
+def get_frontend_build_dir() -> Path | None:
+    """Get the frontend build directory, building if necessary.
 
-    Args:
-        frontend_dir: Path to the frontend directory
+    Uses a global cache location with locking to prevent concurrent builds.
+    Multiple installations can share the same cached build.
 
     Returns:
-        True if build succeeded, False otherwise.
+        Path to frontend build directory, or None if unavailable
+    """
+    frontend_dir = Path(__file__).parent / "frontend"
+    local_build_dir = frontend_dir / "build"
+
+    # Check if frontend source exists
+    if not frontend_dir.exists():
+        logger.debug("Frontend source directory not found")
+        return None
+
+    # Get global cache directory
+    cache_dir = _get_frontend_cache_dir()
+    version_hash = _get_frontend_version_hash()
+    cached_build_dir = cache_dir / version_hash / "build"
+    lock_file = cache_dir / f"{version_hash}.lock"
+
+    # Use lock to prevent concurrent builds
+    lock = fasteners.InterProcessLock(str(lock_file))
+
+    try:
+        # Try to acquire lock (wait up to 60 seconds for other builds to complete)
+        acquired = lock.acquire(blocking=True, timeout=60)
+
+        if not acquired:
+            logger.warning("Could not acquire lock for frontend build - using local build if available")
+            # Fall back to local build if it exists
+            return local_build_dir if local_build_dir.exists() else None
+
+        try:
+            # Check if cached build already exists and is valid
+            if cached_build_dir.exists() and (cached_build_dir / "index.html").exists():
+                logger.debug("Using cached frontend build: %s", cached_build_dir)
+                return cached_build_dir
+
+            # Need to build - check if we have local pre-built version
+            if local_build_dir.exists() and (local_build_dir / "index.html").exists():
+                logger.info("Copying pre-built frontend to cache...")
+                # Copy local build to cache
+                cached_build_dir.parent.mkdir(parents=True, exist_ok=True)
+                if cached_build_dir.exists():
+                    shutil.rmtree(cached_build_dir)
+                shutil.copytree(local_build_dir, cached_build_dir)
+                logger.info("Frontend cached at: %s", cached_build_dir)
+                return cached_build_dir
+
+            # No pre-built version - need to build from source
+            logger.info("Building frontend from source...")
+            if _build_frontend_to_cache(frontend_dir, cached_build_dir):
+                return cached_build_dir
+            else:
+                # Build failed - try to use local build as fallback
+                logger.warning("Frontend build failed - checking for local build")
+                return local_build_dir if local_build_dir.exists() else None
+
+        finally:
+            lock.release()
+
+    except Exception as e:
+        logger.exception("Error managing frontend cache: %s", e)
+        # Fall back to local build
+        return local_build_dir if local_build_dir.exists() else None
+
+
+def _build_frontend_to_cache(frontend_dir: Path, target_dir: Path) -> bool:
+    """Build the frontend and place it in the cache directory.
+
+    Args:
+        frontend_dir: Source frontend directory
+        target_dir: Target cache directory for build output
+
+    Returns:
+        True if build succeeded, False otherwise
     """
     try:
         print("🔨 Building frontend... (this may take a moment)")
 
-        # Check if node_modules exists, if not run npm install first
+        # Create a temporary build directory
+        temp_build_dir = frontend_dir / "build"
         node_modules = frontend_dir / "node_modules"
+
+        # Check if we can write to frontend_dir (might be read-only in site-packages)
+        try:
+            test_file = frontend_dir / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+        except (OSError, PermissionError):
+            logger.warning("Frontend directory is read-only - cannot build from source")
+            return False
+
+        # Install dependencies if needed
         if not node_modules.exists():
             logger.info("Installing frontend dependencies...")
             print("📦 Installing frontend dependencies...")
@@ -95,7 +182,7 @@ def _build_frontend(frontend_dir: Path) -> bool:
                 cwd=frontend_dir,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=300,
             )
             if result.returncode != 0:
                 logger.error("Failed to install frontend dependencies: %s", result.stderr)
@@ -109,15 +196,24 @@ def _build_frontend(frontend_dir: Path) -> bool:
             cwd=frontend_dir,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute timeout
+            timeout=300,
         )
 
-        if result.returncode == 0:
-            print("✅ Frontend build complete!")
-            return True
-        else:
+        if result.returncode != 0:
             logger.error("Frontend build failed: %s", result.stderr)
             print(f"❌ Frontend build failed:\n{result.stderr}", file=sys.stderr)
+            return False
+
+        # Copy build output to cache
+        if temp_build_dir.exists():
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            shutil.copytree(temp_build_dir, target_dir)
+            print("✅ Frontend build complete and cached!")
+            return True
+        else:
+            logger.error("Build directory not created after build")
             return False
 
     except FileNotFoundError:

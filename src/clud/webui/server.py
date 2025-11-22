@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import BacklogHandler, ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
 from .pty_manager import PTYManager
 from .rest_routes import register_rest_routes
-from .server_config import ensure_frontend_built, find_available_port, is_port_available
+from .server_config import find_available_port, get_frontend_build_dir, is_port_available
 from .static_routes import init_mime_types, register_static_routes
 from .telegram_api import TelegramAPIHandler
 from .terminal_handler import TerminalHandler
@@ -110,25 +110,24 @@ def run_server(port: int | None = None) -> int:
             else:
                 http_port = port
 
-        # Auto-build frontend if needed (only if source exists)
-        ensure_frontend_built()
+        # Get frontend build directory (uses global cache with locking)
+        frontend_build_dir = get_frontend_build_dir()
 
-        # Get static directory - prefer frontend/build over static for Svelte app
-        frontend_build_dir = Path(__file__).parent / "frontend" / "build"
-        static_dir = Path(__file__).parent / "static"
-
-        if frontend_build_dir.exists():
-            # Use new Svelte frontend
+        if frontend_build_dir and frontend_build_dir.exists():
+            # Use frontend build (from cache or local)
             serve_dir = frontend_build_dir
-            logger.info("Serving from Svelte build: %s", serve_dir)
-        elif static_dir.exists():
-            # Fall back to old static files
-            serve_dir = static_dir
-            logger.info("Serving from legacy static: %s", serve_dir)
+            logger.info("Serving from frontend build: %s", serve_dir)
         else:
-            logger.error("Neither frontend build nor static directory found")
-            print("Error: No frontend files found", file=sys.stderr)
-            return 1
+            # Fall back to legacy static files if available
+            static_dir = Path(__file__).parent / "static"
+            if static_dir.exists():
+                serve_dir = static_dir
+                logger.info("Serving from legacy static: %s", serve_dir)
+            else:
+                logger.error("No frontend files available")
+                print("Error: No frontend files found", file=sys.stderr)
+                print("Please ensure the frontend is built or Node.js is installed for auto-build.", file=sys.stderr)
+                return 1
 
         logger.info("Starting Claude Code Web UI...")
         logger.info("Port: %d", http_port)
