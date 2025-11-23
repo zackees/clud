@@ -1,0 +1,41 @@
+# FastLED Docker Build Environment
+FROM ubuntu:24.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    cmake \
+    python3 \
+    python3-pip \
+    platformio \
+    curl \
+    wget \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Arduino CLI
+RUN curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+ENV PATH="/root/bin:$PATH"
+
+# Setup Arduino cores and libraries
+RUN arduino-cli core update-index
+RUN arduino-cli core install arduino:avr
+RUN arduino-cli lib install "FastLED"
+
+# Create working directory
+WORKDIR /fastled-project
+
+# Copy project files (would contain FastLED sketches/examples)
+COPY . .
+
+# Build web interface for FastLED visualization
+RUN npm install -g http-server
+RUN mkdir -p web && echo '<!DOCTYPE html><html><head><title>FastLED Web Interface</title></head><body><h1>FastLED Visualization</h1><canvas id="led-canvas" width="800" height="600"></canvas><script>console.log("FastLED web interface loaded");</script></body></html>' > web/index.html
+
+# Expose port for web interface
+EXPOSE 8080
+
+# Start web server
+CMD ["http-server", "web", "-p", "8080", "-c-1"]
