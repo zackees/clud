@@ -13,6 +13,59 @@ from .monitor import CronMonitor
 from .scheduler import CronScheduler
 
 
+def is_cron_initialized() -> bool:
+    """Check if cron has been initialized (user has confirmed installation).
+
+    Returns:
+        True if cron has been initialized, False otherwise
+    """
+    marker_file = Path.home() / ".clud" / ".cron_initialized"
+    return marker_file.exists()
+
+
+def mark_cron_initialized() -> None:
+    """Mark cron as initialized by creating marker file."""
+    marker_file = Path.home() / ".clud" / ".cron_initialized"
+    marker_file.parent.mkdir(parents=True, exist_ok=True)
+    marker_file.touch()
+
+
+def prompt_cron_installation() -> bool:
+    """Prompt user to confirm cron installation.
+
+    Returns:
+        True if user confirmed (or default yes), False if user declined
+    """
+    print()
+    print(f"{Colors.CYAN}ℹ{Colors.RESET} {Colors.BOLD}First-time cron setup{Colors.RESET}")
+    print()
+    print("Using cron will install a service manager that runs in the background")
+    print("to execute scheduled tasks. The daemon requires minimal resources and")
+    print("can be stopped at any time with 'clud --cron stop'.")
+    print()
+
+    try:
+        response = input(f"Proceed with installation? [{Colors.GREEN}Y{Colors.RESET}/n]: ").strip().lower()
+        print()  # Add newline after input
+
+        # Default is yes (empty input or 'y')
+        if response == "" or response == "y" or response == "yes":
+            mark_cron_initialized()
+            print_success("Cron service manager initialized")
+            print()
+            return True
+        else:
+            print_warning("Cron installation cancelled")
+            print_info("You can enable cron later by running any 'clud --cron' command")
+            print()
+            return False
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print_warning("Cron installation cancelled")
+        print()
+        return False
+
+
 # ANSI color codes for terminal output
 class Colors:
     """ANSI color codes for terminal output."""
@@ -576,10 +629,15 @@ def handle_cron_command(subcommand: str | None, args: list[str]) -> int:
     Returns:
         Exit code (0 for success, non-zero for error)
     """
-    # No subcommand or help requested
+    # No subcommand or help requested - help doesn't require initialization
     if not subcommand or subcommand == "help" or subcommand == "--help" or subcommand == "-h":
         print_help()
         return 0
+
+    # Check if cron has been initialized (first-time setup prompt)
+    if not is_cron_initialized() and not prompt_cron_installation():
+        # User declined installation
+        return 1
 
     # Route to appropriate handler
     if subcommand == "add":

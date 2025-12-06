@@ -161,10 +161,16 @@ def run_agent(args: "Args") -> int:
                     # Not an integer, check if it's a file path
                     # File paths (especially .md files) get expanded to a template message
                     if args.loop_value.endswith(".md") or Path(args.loop_value).exists():
+                        # For loop files, agent will use working copy in .agent_task/
+                        # Original file remains read-only
+                        original_filename = Path(args.loop_value).name
+                        working_file_path = f".agent_task/{original_filename}"
+
                         # Expand to template message for file-based loop mode
+                        # Point agent to working copy in .agent_task/
                         loop_message = (
-                            f"Read {args.loop_value} and do the next task. "
-                            f"You are free to update {args.loop_value} with information critical "
+                            f"Read {working_file_path} and do the next task. "
+                            f"You are free to update {working_file_path} with information critical "
                             f"for the next agent and future agents as this task is worked on."
                         )
                     else:

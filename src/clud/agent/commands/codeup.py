@@ -29,6 +29,7 @@ def handle_codeup_command() -> int:
     # Now run the agent with the codeup prompt
     codeup_prompt = (
         "run the global command codeup normally through the shell (it's a global command installed on the system), "
+        "wait for the tests to complete if necessary (sometimes tests take a long time with clud up), "
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."
     )
@@ -57,6 +58,7 @@ def handle_codeup_publish_command() -> int:
     # Now run the agent with the codeup -p prompt
     codeup_publish_prompt = (
         "run the global command codeup -p normally through the shell (it's a global command installed on the system), "
+        "wait for the tests to complete if necessary (sometimes tests take a long time with clud up), "
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."
     )

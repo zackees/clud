@@ -278,7 +278,7 @@ class TestCronDaemonStart(unittest.TestCase):
     @unittest.skipIf(sys.platform != "win32", "Windows-specific test")
     @patch("subprocess.Popen")
     def test_start_windows_flags(self, mock_popen: MagicMock) -> None:
-        """Test that Windows start uses CREATE_NO_WINDOW flag."""
+        """Test that Windows start uses appropriate process creation flags."""
         mock_process = Mock()
         mock_process.pid = 12345
         mock_popen.return_value = mock_process
@@ -287,10 +287,19 @@ class TestCronDaemonStart(unittest.TestCase):
             mock_is_running.side_effect = [False, True]
             self.daemon.start()
 
-        # Verify creationflags includes CREATE_NO_WINDOW
+        # Verify creationflags includes at minimum CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        # May also include DETACHED_PROCESS (0x08) if pythonw.exe is used
+        CREATE_NO_WINDOW = 0x08000000
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+
         call_kwargs = mock_popen.call_args[1]
         self.assertIn("creationflags", call_kwargs)
-        self.assertEqual(call_kwargs["creationflags"], 0x08000000)
+
+        actual_flags = call_kwargs["creationflags"]
+        # Check that required flags are set
+        self.assertTrue(actual_flags & CREATE_NO_WINDOW, "CREATE_NO_WINDOW flag not set")
+        self.assertTrue(actual_flags & CREATE_NEW_PROCESS_GROUP, "CREATE_NEW_PROCESS_GROUP flag not set")
+        # DETACHED_PROCESS (0x08) is optional and depends on pythonw.exe availability
 
     @unittest.skipIf(sys.platform == "win32", "Unix-specific test")
     @patch("subprocess.Popen")

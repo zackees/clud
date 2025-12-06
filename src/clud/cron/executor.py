@@ -134,14 +134,26 @@ class TaskExecutor:
                 log_handle.write(f"{'=' * 60}\n\n")
                 log_handle.flush()
 
-                # Execute task
-                result = subprocess.run(
-                    cmd,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                    text=True,
-                    check=False,  # Don't raise on non-zero exit
-                )
+                # Execute task (with console hiding on Windows)
+                # On Windows, use CREATE_NO_WINDOW to prevent console window from appearing
+                if sys.platform == "win32":
+                    CREATE_NO_WINDOW = 0x08000000
+                    result = subprocess.run(
+                        cmd,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                        text=True,
+                        check=False,  # Don't raise on non-zero exit
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                else:
+                    result = subprocess.run(
+                        cmd,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                        text=True,
+                        check=False,  # Don't raise on non-zero exit
+                    )
 
                 # Write completion metadata
                 log_handle.write(f"\n{'=' * 60}\n")

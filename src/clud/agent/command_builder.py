@@ -38,6 +38,11 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             "If you must ask a question, then leave it for the next iteration to research or resolve."
         )
         parts.append("If DONE.md already exists, read it first to understand the completion status before proceeding.")
+        parts.append(
+            "CRITICAL: Long-running background processes will terminate when this iteration ends and the next iteration begins. "
+            "If you start a background task, you MUST wait for it to complete before finishing this iteration. "
+            "Wait up to 1 hour for processes making progress, or kill processes after 15 minutes if no progress is being made."
+        )
         parts.append("IMPORTANT: Maximize parallel execution - run as many independent operations in parallel as possible to improve efficiency.")
 
         injection = " ".join(parts)

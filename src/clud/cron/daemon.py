@@ -71,20 +71,50 @@ class CronDaemon:
         logger.info("Starting daemon process...")
 
         # Prepare command to run daemon loop
-        cmd = [sys.executable, "-m", "clud.cron.daemon", "run"]
+        # Use sys.executable to get the current Python interpreter (from uv's venv)
+        # On Windows, MUST use pythonw.exe to prevent console windows
+        python_exe = sys.executable
+        if sys.platform == "win32":
+            # Try to find pythonw.exe in the same directory as python.exe
+            pythonw_exe = Path(sys.executable).parent / "pythonw.exe"
+            if pythonw_exe.exists():
+                python_exe = str(pythonw_exe)
+                logger.info(f"Using pythonw.exe: {python_exe}")
+            else:
+                logger.warning(f"pythonw.exe not found at {pythonw_exe}, using python.exe (may show console)")
+
+        cmd = [python_exe, "-m", "clud.cron", "run"]
+
+        # Debug logging
+        logger.info(f"Command to execute: {cmd}")
+        logger.info(f"sys.executable: {sys.executable}")
+        logger.info(f"Python executable for daemon: {python_exe}")
+        logger.info(f"Platform: {sys.platform}")
+        logger.info(f"Log file: {self.log_file}")
+        logger.info(f"Config dir: {self.config_dir}")
 
         # Platform-specific background process creation
         if sys.platform == "win32":
-            # Windows: Use CREATE_NO_WINDOW flag
+            # Windows: Use pythonw.exe + CREATE_NO_WINDOW for no console
+            # Using pythonw.exe is critical - it's designed to run without a console window
             CREATE_NO_WINDOW = 0x08000000
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            DETACHED_PROCESS = 0x00000008
+
+            # Use DETACHED_PROCESS only if we're using pythonw.exe
+            # pythonw.exe handles file redirection properly with DETACHED_PROCESS
+            # Fallback for python.exe: don't use DETACHED_PROCESS to avoid handle issues
+            creation_flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS if "pythonw" in python_exe.lower() else CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+
+            logger.info(f"Using Windows creation flags: {creation_flags:#x}")
+
             with open(self.log_file, "a", encoding="utf-8") as log_f:
                 process = subprocess.Popen(
                     cmd,
-                    creationflags=CREATE_NO_WINDOW,
+                    creationflags=creation_flags,
                     stdout=log_f,
                     stderr=log_f,
                     stdin=subprocess.DEVNULL,
-                    cwd=str(self.config_dir),
                 )
         else:
             # Unix (Linux/macOS): Use start_new_session
@@ -95,17 +125,29 @@ class CronDaemon:
                     stdout=log_f,
                     stderr=log_f,
                     stdin=subprocess.DEVNULL,
-                    cwd=str(self.config_dir),
                 )
+
+        # Log PID immediately after spawn
+        logger.info(f"Process spawned with PID: {process.pid}")
+
+        # Check if process is still alive immediately after spawn
+        poll_result = process.poll()
+        logger.info(f"Initial process poll (None=running): {poll_result}")
 
         # Write PID file and start time
         self.pid_file.write_text(str(process.pid), encoding="utf-8")
         start_time = datetime.now(timezone.utc)
         self.start_time_file.write_text(start_time.isoformat(), encoding="utf-8")
         logger.info(f"Daemon started with PID {process.pid} at {start_time.isoformat()}")
+        logger.info(f"PID file written to: {self.pid_file}")
+        logger.info(f"Start time file written to: {self.start_time_file}")
 
         # Give the process a moment to start
         time.sleep(0.5)
+
+        # Check process status after sleep
+        poll_result_after = process.poll()
+        logger.info(f"Process poll after 0.5s (None=running): {poll_result_after}")
 
         # Verify daemon is running
         if self.is_running():
@@ -221,14 +263,20 @@ class CronDaemon:
         )
         log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 
-        # Also log to console for debugging
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        # Prepare log handlers - type as list[logging.Handler] for pyright
+        log_handlers: list[logging.Handler] = [log_handler]
+
+        # Only add console handler on non-Windows platforms to prevent console window creation
+        # On Windows, pythonw.exe + console output triggers a console window to appear
+        if sys.platform != "win32":
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            log_handlers.append(console_handler)
 
         # Configure root logger
         logging.basicConfig(
             level=logging.INFO,
-            handlers=[log_handler, console_handler],
+            handlers=log_handlers,
         )
 
         # Record start time and get process handle for profiling
@@ -523,11 +571,11 @@ class CronDaemon:
             return False
 
 
-# CLI entry point for running daemon loop
+# CLI entry point for running daemon loop (deprecated - use __main__.py instead)
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         daemon = CronDaemon()
         daemon.run_loop()
     else:
-        print("Usage: python -m clud.cron.daemon run")
+        print("Usage: python -m clud.cron run")
         sys.exit(1)
