@@ -56,8 +56,79 @@ This ensures all code changes pass ruff linting and pyright type checking.
 - **Process Execution**: Prefer `running-process` over `subprocess`; use `RunningProcess.run_streaming()` for long-running processes
 - **Test Framework**: All unit tests MUST use `unittest` framework
 - **E2E Tests**: Unique ports per test, exclude from pyright type checking
+- **Module API Pattern**: Use lazy-loading proxy pattern in `__init__.py` files (see below)
 
 See [Code Quality Standards](docs/development/code-quality.md) for complete details.
+
+### Lazy-Loading Proxy Pattern
+
+When creating public APIs in module `__init__.py` files, use the lazy-loading proxy pattern to avoid import-time issues:
+
+**Pattern Structure:**
+1. Import dependencies **inside** function bodies, not at module level
+2. Use static methods for stateless operations
+3. Export minimal API surface via `__all__`
+4. Use `@dataclass` for structured return types
+
+**Example** (from `src/clud/cron/__init__.py`):
+
+```python
+"""Cron scheduler module for clud."""
+
+from dataclasses import dataclass
+from typing import Literal
+
+@dataclass
+class DaemonStatus:
+    """Status information for the cron daemon."""
+    state: Literal["running", "stopped", "stale"]
+    pid: int | None
+
+class Daemon:
+    """Proxy class for cron daemon operations with lazy-loaded implementation."""
+
+    @staticmethod
+    def start() -> bool:
+        """Start the cron daemon in the background."""
+        from clud.cron.daemon import CronDaemon  # Import inside function body
+
+        daemon = CronDaemon()
+        return daemon.start()
+
+    @staticmethod
+    def status() -> DaemonStatus:
+        """Get the current daemon status."""
+        from clud.cron.daemon import CronDaemon  # Import inside function body
+
+        daemon = CronDaemon()
+        state, pid = daemon.status()
+        return DaemonStatus(state=state, pid=pid)
+
+__all__ = [
+    "Daemon",
+    "DaemonStatus",
+]
+```
+
+**Benefits:**
+- Avoids Python's `runpy` RuntimeWarnings about module initialization order
+- Enables proper module execution via `python -m package.module`
+- Allows minimal, clean public API surface
+- Imports only triggered when actually used
+
+**Testing Pattern:**
+When mocking proxy classes, patch at the **import location**, not the definition location:
+
+```python
+# CORRECT - Mock where it's imported and used
+@patch("clud.cron.cli_handler.Daemon")
+def test_start_daemon(self, mock_daemon):
+    mock_daemon.status.return_value = DaemonStatus(state="stopped", pid=None)
+    # Test code...
+
+# INCORRECT - Don't mock at definition location
+@patch("clud.cron.Daemon")  # This won't work!
+```
 
 ## Project Purpose
 

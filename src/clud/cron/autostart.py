@@ -27,6 +27,30 @@ AutostartMethod = Literal[
 AutostartStatus = Literal["installed", "not_installed", "unknown"]
 
 
+def _get_python_executable() -> str:
+    """
+    Get the appropriate Python executable for the current platform.
+
+    On Windows, tries to use pythonw.exe to prevent console windows.
+    On other platforms, returns sys.executable.
+
+    Returns:
+        Path to Python executable
+    """
+    python_exe = sys.executable
+
+    if sys.platform == "win32":
+        # Try to find pythonw.exe in the same directory as python.exe
+        pythonw_exe = Path(sys.executable).parent / "pythonw.exe"
+        if pythonw_exe.exists():
+            python_exe = str(pythonw_exe)
+            logger.info(f"Using pythonw.exe for Windows: {python_exe}")
+        else:
+            logger.warning(f"pythonw.exe not found at {pythonw_exe}, using python.exe (may show console)")
+
+    return python_exe
+
+
 class AutostartInstaller:
     """Cross-platform autostart configuration manager."""
 
@@ -423,8 +447,8 @@ end tell
     def _install_task_scheduler(self) -> tuple[bool, str]:
         """Install Task Scheduler task."""
         try:
-            # Get absolute paths
-            python_path = sys.executable
+            # Get absolute paths (use pythonw.exe on Windows to prevent console windows)
+            python_path = _get_python_executable()
             if not Path(python_path).exists():
                 return False, f"Python executable not found: {python_path}"
 
@@ -478,8 +502,8 @@ end tell
         try:
             import winreg
 
-            # Get absolute paths
-            python_path = sys.executable
+            # Get absolute paths (use pythonw.exe on Windows to prevent console windows)
+            python_path = _get_python_executable()
             if not Path(python_path).exists():
                 return False, f"Python executable not found: {python_path}"
 

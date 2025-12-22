@@ -7,8 +7,9 @@ from pathlib import Path
 
 from croniter import croniter
 
+from clud.cron import Daemon
+
 from .autostart import AutostartInstaller
-from .daemon import CronDaemon
 from .monitor import CronMonitor
 from .scheduler import CronScheduler
 
@@ -312,8 +313,7 @@ def handle_cron_add(cron_expr: str, task_file_str: str) -> int:
 
         # Show helpful next steps
         print()
-        daemon = CronDaemon()
-        if not daemon.is_running():
+        if not Daemon.is_running():
             print_info("Start the daemon to begin executing tasks: clud --cron start")
         else:
             print_info("Daemon is running - task will execute on schedule")
@@ -397,28 +397,26 @@ def handle_cron_start() -> int:
         Exit code (0 for success, non-zero for error)
     """
     try:
-        daemon = CronDaemon()
-
         # Check if already running
-        if daemon.is_running():
+        status = Daemon.status()
+        if status.state == "running":
             print_warning("Daemon is already running")
-            pid = daemon.get_pid()
-            if pid:
-                print_info(f"PID: {pid}")
+            if status.pid:
+                print_info(f"PID: {status.pid}")
             return 0
 
         # Start daemon with spinner
         spinner = Spinner("Starting daemon...")
         spinner.start()
-        daemon.start()
+        Daemon.start()
 
         # Give it a moment to fully start
         time.sleep(0.5)
 
         # Verify it started
-        if daemon.is_running():
-            pid = daemon.get_pid()
-            spinner.stop(success=True, final_message=f"Daemon started successfully (PID: {pid})")
+        status = Daemon.status()
+        if status.state == "running":
+            spinner.stop(success=True, final_message=f"Daemon started successfully (PID: {status.pid})")
             print_info(f"Logs: {Path.home() / '.clud' / 'logs' / 'cron-daemon.log'}")
             return 0
         else:
@@ -437,27 +435,25 @@ def handle_cron_stop() -> int:
         Exit code (0 for success, non-zero for error)
     """
     try:
-        daemon = CronDaemon()
-
         # Check if running
-        if not daemon.is_running():
+        if not Daemon.is_running():
             print_warning("Daemon is not running")
             return 0
 
         # Stop daemon
         print_info("Stopping daemon...")
-        daemon.stop()
+        Daemon.stop()
 
         # Verify it stopped
-        if not daemon.is_running():
+        status = Daemon.status()
+        if status.state != "running":
             print_success("Daemon stopped successfully")
             return 0
         else:
             print_error("Daemon failed to stop")
             print_info("You may need to manually kill the process")
-            pid = daemon.get_pid()
-            if pid:
-                print_info(f"PID: {pid}")
+            if status.pid:
+                print_info(f"PID: {status.pid}")
             return 1
     except Exception as e:
         print_error(f"Failed to stop daemon: {e}")
@@ -477,7 +473,6 @@ def handle_cron_status() -> int:
         # Daemon status with health check
         print_header("Daemon Status")
         health = monitor.check_daemon_health()
-        daemon = CronDaemon()
 
         if health["is_healthy"]:
             print(f"  Status: {Colors.GREEN}●{Colors.RESET} Running")
@@ -491,7 +486,7 @@ def handle_cron_status() -> int:
                 print(f"  Started: {start_str}")
 
             # Show resource usage if available
-            resource_usage = daemon.get_resource_usage()
+            resource_usage = health.get("resource_usage")
             if resource_usage:
                 cpu_percent, mem_mb = resource_usage
                 print(f"  CPU: {cpu_percent:.1f}%")
@@ -592,8 +587,7 @@ def handle_cron_install() -> int:
             print_info("You can check status with: clud --cron status")
 
             # Suggest starting daemon now if not running
-            daemon = CronDaemon()
-            if not daemon.is_running():
+            if not Daemon.is_running():
                 print()
                 print_info("Daemon is not currently running")
                 print_info("Start it now with: clud --cron start")

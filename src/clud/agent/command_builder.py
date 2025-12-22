@@ -30,6 +30,10 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             parts.append(f"This is iteration {iteration} of {total_iterations}.")
 
         # Add common instructions (same for all iterations)
+        parts.append(
+            "FIRST: Check if .agent_task/UPDATE.md exists and is not empty. If it does, integrate its content into .agent_task/LOOP.md, "
+            "then mark it as complete by clearing the UPDATE.md file (write an empty file or a completion marker)."
+        )
         parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
         parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .agent_task/) to halt the loop early.")
         parts.append("CRITICAL: NEVER delete or overwrite an existing DONE.md file - it is the terminal signal to halt the loop.")

@@ -50,42 +50,54 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
         print(f"\n  - DONE.md at project root ({timestamp}) ⚠️  Will halt immediately!", file=sys.stderr)
 
-    # Prompt user
+    # Prompt user - loop until valid input
     print(file=sys.stderr)
     sys.stdout.flush()
 
-    try:
-        response = input("Delete and start over? [y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\nOperation cancelled.", file=sys.stderr)
-        return False, 1
-
-    if response in ["y", "yes"]:
-        # Delete entire directory
+    while True:
         try:
-            shutil.rmtree(agent_task_dir)
-            print("✓ Previous session deleted", file=sys.stderr)
-            return True, 1
-        except Exception as e:
-            print(f"Error: Failed to delete .agent_task directory: {e}", file=sys.stderr)
+            response = input("[R]estart from the beginning or [C]ontinue: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nOperation cancelled.", file=sys.stderr)
             return False, 1
 
-    elif response in ["n", "no"]:
-        # Keep directory, determine next iteration
-        last_iteration = 0
-        for file in iteration_files:
-            # Extract number from ITERATION_N.md
-            match = re.match(r"ITERATION_(\d+)\.md", file.name)
-            if match:
-                last_iteration = max(last_iteration, int(match.group(1)))
+        if response in ["r", "restart"]:
+            # Delete entire directory and DONE.md
+            try:
+                shutil.rmtree(agent_task_dir)
+                # Also delete DONE.md if it exists
+                if done_file_root.exists():
+                    done_file_root.unlink()
+                print("✓ Previous session deleted, restarting from beginning", file=sys.stderr)
+                return True, 1
+            except Exception as e:
+                print(f"Error: Failed to delete .agent_task directory: {e}", file=sys.stderr)
+                return False, 1
 
-        next_iteration = last_iteration + 1
-        print(f"✓ Continuing from iteration {next_iteration}", file=sys.stderr)
-        return True, next_iteration
+        elif response in ["c", "continue"]:
+            # Keep directory but delete DONE.md (otherwise loop halts immediately)
+            if done_file_root.exists():
+                try:
+                    done_file_root.unlink()
+                    print("✓ Removed DONE.md to allow continuation", file=sys.stderr)
+                except Exception as e:
+                    print(f"Error: Failed to delete DONE.md: {e}", file=sys.stderr)
+                    return False, 1
 
-    else:
-        print("Invalid response. Operation cancelled.", file=sys.stderr)
-        return False, 1
+            # Determine next iteration
+            last_iteration = 0
+            for file in iteration_files:
+                # Extract number from ITERATION_N.md
+                match = re.match(r"ITERATION_(\d+)\.md", file.name)
+                if match:
+                    last_iteration = max(last_iteration, int(match.group(1)))
+
+            next_iteration = last_iteration + 1
+            print(f"✓ Continuing from iteration {next_iteration}", file=sys.stderr)
+            return True, next_iteration
+
+        else:
+            print("Unknown answer. Please enter 'R' to restart or 'C' to continue.", file=sys.stderr)
 
 
 def _print_red_banner(message: str) -> None:

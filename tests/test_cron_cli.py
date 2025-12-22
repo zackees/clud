@@ -70,6 +70,9 @@ class TestCronCLIAdd(unittest.TestCase):
         self.task_file = self.test_dir / "task.md"
         self.task_file.write_text("Test task")
 
+        # Create .cron_initialized marker to skip installation prompt
+        (self.config_dir / ".cron_initialized").touch()
+
         # Patch Path.home() to use test directory
         self.home_patcher = patch("pathlib.Path.home", return_value=self.test_dir)
         self.home_patcher.start()
@@ -196,6 +199,9 @@ class TestCronCLIRemove(unittest.TestCase):
         self.config_dir = self.test_dir / ".clud"
         self.config_dir.mkdir(parents=True)
 
+        # Create .cron_initialized marker to skip installation prompt
+        (self.config_dir / ".cron_initialized").touch()
+
         # Patch Path.home() to use test directory
         self.home_patcher = patch("pathlib.Path.home", return_value=self.test_dir)
         self.home_patcher.start()
@@ -266,13 +272,17 @@ class TestCronCLIDaemon(unittest.TestCase):
 
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    @patch("clud.cron.cli_handler.CronDaemon")
+    @patch("clud.cron.cli_handler.Daemon")
     def test_start_daemon_success(self, mock_daemon_class: Mock) -> None:
         """Test starting daemon successfully."""
-        mock_daemon = MagicMock()
-        mock_daemon.is_running.side_effect = [False, True]  # Not running, then running after start
-        mock_daemon.get_pid.return_value = 12345
-        mock_daemon_class.return_value = mock_daemon
+        from clud.cron import DaemonStatus
+
+        # Mock Daemon.status() to return running status after start
+        mock_daemon_class.status.side_effect = [
+            DaemonStatus(state="stopped", pid=None),  # First call (line 401)
+            DaemonStatus(state="running", pid=12345),  # Second call (line 417)
+        ]
+        mock_daemon_class.start.return_value = True
 
         with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
             exit_code = handle_cron_start()
@@ -280,15 +290,15 @@ class TestCronCLIDaemon(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("started successfully", output)
-        mock_daemon.start.assert_called_once()
+        mock_daemon_class.start.assert_called_once()
 
-    @patch("clud.cron.cli_handler.CronDaemon")
+    @patch("clud.cron.cli_handler.Daemon")
     def test_start_daemon_already_running(self, mock_daemon_class: Mock) -> None:
         """Test starting daemon when already running."""
-        mock_daemon = MagicMock()
-        mock_daemon.is_running.return_value = True
-        mock_daemon.get_pid.return_value = 12345
-        mock_daemon_class.return_value = mock_daemon
+        from clud.cron import DaemonStatus
+
+        # Mock Daemon.status() to return running status
+        mock_daemon_class.status.return_value = DaemonStatus(state="running", pid=12345)
 
         with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
             exit_code = handle_cron_start()
@@ -296,14 +306,17 @@ class TestCronCLIDaemon(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("already running", output)
-        mock_daemon.start.assert_not_called()
+        mock_daemon_class.start.assert_not_called()
 
-    @patch("clud.cron.cli_handler.CronDaemon")
+    @patch("clud.cron.cli_handler.Daemon")
     def test_stop_daemon_success(self, mock_daemon_class: Mock) -> None:
         """Test stopping daemon successfully."""
-        mock_daemon = MagicMock()
-        mock_daemon.is_running.side_effect = [True, False]  # Running, then stopped after stop
-        mock_daemon_class.return_value = mock_daemon
+        from clud.cron import DaemonStatus
+
+        # Mock Daemon methods
+        mock_daemon_class.is_running.return_value = True
+        mock_daemon_class.stop.return_value = True
+        mock_daemon_class.status.return_value = DaemonStatus(state="stopped", pid=None)
 
         with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
             exit_code = handle_cron_stop()
@@ -311,14 +324,13 @@ class TestCronCLIDaemon(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("stopped successfully", output)
-        mock_daemon.stop.assert_called_once()
+        mock_daemon_class.stop.assert_called_once()
 
-    @patch("clud.cron.cli_handler.CronDaemon")
+    @patch("clud.cron.cli_handler.Daemon")
     def test_stop_daemon_not_running(self, mock_daemon_class: Mock) -> None:
         """Test stopping daemon when not running."""
-        mock_daemon = MagicMock()
-        mock_daemon.is_running.return_value = False
-        mock_daemon_class.return_value = mock_daemon
+        # Mock Daemon.is_running() to return False
+        mock_daemon_class.is_running.return_value = False
 
         with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
             exit_code = handle_cron_stop()
@@ -326,7 +338,7 @@ class TestCronCLIDaemon(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("not running", output)
-        mock_daemon.stop.assert_not_called()
+        mock_daemon_class.stop.assert_not_called()
 
     @patch("clud.cron.cli_handler.CronMonitor")
     @patch("clud.cron.cli_handler.CronScheduler")
@@ -358,13 +370,22 @@ class TestCronCLIDaemon(unittest.TestCase):
         self.assertIn("Running", output)
         self.assertIn("12345", output)
 
-    @patch("clud.cron.cli_handler.CronDaemon")
+    @patch("clud.cron.cli_handler.CronMonitor")
     @patch("clud.cron.cli_handler.CronScheduler")
-    def test_status_daemon_stopped(self, mock_scheduler_class: Mock, mock_daemon_class: Mock) -> None:
+    def test_status_daemon_stopped(self, mock_scheduler_class: Mock, mock_monitor_class: Mock) -> None:
         """Test status command with daemon stopped."""
-        mock_daemon = MagicMock()
-        mock_daemon.is_running.return_value = False
-        mock_daemon_class.return_value = mock_daemon
+        # Mock CronMonitor health check for stopped daemon
+        mock_monitor = MagicMock()
+        mock_monitor.check_daemon_health.return_value = {
+            "status": "stopped",
+            "pid": None,
+            "start_time": None,
+            "uptime_seconds": None,
+            "is_healthy": False,
+            "message": "Daemon is not running",
+        }
+        mock_monitor.get_recent_activity.return_value = []
+        mock_monitor_class.return_value = mock_monitor
 
         mock_scheduler = MagicMock()
         mock_scheduler.list_tasks.return_value = []
@@ -381,9 +402,9 @@ class TestCronCLIDaemon(unittest.TestCase):
 class TestCronCLIInstall(unittest.TestCase):
     """Test install command."""
 
+    @patch("clud.cron.cli_handler.Daemon")
     @patch("clud.cron.cli_handler.AutostartInstaller")
-    @patch("clud.cron.cli_handler.CronDaemon")
-    def test_install_success(self, mock_daemon_class: Mock, mock_installer_class: Mock) -> None:
+    def test_install_success(self, mock_installer_class: Mock, mock_daemon_class: Mock) -> None:
         """Test successful autostart installation."""
         # Mock installer to return success
         mock_installer = Mock()
@@ -391,10 +412,8 @@ class TestCronCLIInstall(unittest.TestCase):
         mock_installer.install.return_value = (True, "Installed successfully", "systemd")
         mock_installer_class.return_value = mock_installer
 
-        # Mock daemon to return not running
-        mock_daemon = Mock()
-        mock_daemon.is_running.return_value = False
-        mock_daemon_class.return_value = mock_daemon
+        # Mock Daemon.is_running() to return False
+        mock_daemon_class.is_running.return_value = False
 
         with patch("sys.stdout", new_callable=StringIO) as mock_stdout:
             exit_code = handle_cron_install()
@@ -415,6 +434,9 @@ class TestCronCLIIntegration(unittest.TestCase):
         self.config_dir.mkdir(parents=True)
         self.task_file = self.test_dir / "task.md"
         self.task_file.write_text("Test task")
+
+        # Create .cron_initialized marker to skip installation prompt
+        (self.config_dir / ".cron_initialized").touch()
 
         # Patch Path.home() to use test directory
         self.home_patcher = patch("pathlib.Path.home", return_value=self.test_dir)
