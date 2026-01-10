@@ -23,6 +23,7 @@ from .command_builder import (
 )
 from .lint_runner import _find_and_run_lint_test
 from .loop_logger import LoopLogger, create_logging_formatter_callback
+from .motivation import write_motivation_file
 from .subprocess import _execute_command
 from .task_info import TaskInfo
 from .task_manager import _handle_existing_agent_task, _print_loop_banner, _print_red_banner
@@ -87,6 +88,9 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
 
     # Create .agent_task directory if it doesn't exist (may have been deleted)
     agent_task_dir.mkdir(exist_ok=True)
+
+    # Write motivation file for iterations 2+ (always overwrite to ensure fresh content)
+    write_motivation_file(str(agent_task_dir))
 
     # Handle loop file if specified (e.g., LOOP.md or custom TASK.md)
     # Extract the file path from loop_value if it's a file

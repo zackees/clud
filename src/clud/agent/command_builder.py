@@ -31,6 +31,7 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             parts.append(f"You are the first agent spawned for this task (iteration 1 of {total_iterations}).")
         else:
             parts.append(f"This is iteration {iteration} of {total_iterations}.")
+            parts.append("FIRST: Read .agent_task/MOTIVATION.md to understand what's at stake and the performance expectations.")
 
         # Add common instructions (same for all iterations)
         # Use the provided working_file or default to LOOP.md for backwards compatibility
