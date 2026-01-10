@@ -1,7 +1,7 @@
 """Loop execution logging utilities.
 
 This module provides utilities for logging all output during --loop execution
-to .agent_task/log.txt.
+to .loop/log.txt.
 """
 
 import sys
@@ -10,13 +10,13 @@ from typing import Any, TextIO
 
 
 class LoopLogger:
-    """Logger that writes all output to .agent_task/log.txt while still displaying to console."""
+    """Logger that writes all output to .loop/log.txt while still displaying to console."""
 
     def __init__(self, log_file_path: Path) -> None:
         """Initialize the loop logger.
 
         Args:
-            log_file_path: Path to the log file (.agent_task/log.txt)
+            log_file_path: Path to the log file (.loop/log.txt)
         """
         self.log_file_path = log_file_path
         self.log_file: TextIO | None = None

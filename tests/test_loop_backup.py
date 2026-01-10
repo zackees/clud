@@ -11,7 +11,7 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
     """Test cases for loop file working copy functionality."""
 
     def test_loop_file_working_copy_created(self) -> None:
-        """Test that loop file is copied to .agent_task/<name> for agent to use."""
+        """Test that loop file is copied to .loop/<name> for agent to use."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
 
@@ -37,8 +37,8 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
 
                 # Mock the necessary functions to prevent actual execution
                 # We'll test just the working copy logic by checking if file exists after setup
-                agent_task_dir = tmpdir_path / ".agent_task"
-                agent_task_dir.mkdir(exist_ok=True)
+                loop_dir = tmpdir_path / ".loop"
+                loop_dir.mkdir(exist_ok=True)
 
                 # Manually execute just the working copy logic
                 import shutil
@@ -53,7 +53,7 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
                         potential_file = Path(args.loop_value)
                         if potential_file.exists() and potential_file.is_file():
                             loop_file_path = potential_file
-                            working_loop_file = agent_task_dir / loop_file_path.name
+                            working_loop_file = loop_dir / loop_file_path.name
 
                             if not working_loop_file.exists():
                                 shutil.copy2(loop_file_path, working_loop_file)
@@ -101,8 +101,8 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
                 # Execute working copy logic
                 import shutil
 
-                agent_task_dir = tmpdir_path / ".agent_task"
-                agent_task_dir.mkdir(exist_ok=True)
+                loop_dir = tmpdir_path / ".loop"
+                loop_dir.mkdir(exist_ok=True)
 
                 loop_file_path: Path | None = None
                 working_loop_file: Path | None = None
@@ -114,13 +114,13 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
                         potential_file = Path(args.loop_value)
                         if potential_file.exists() and potential_file.is_file():
                             loop_file_path = potential_file
-                            working_loop_file = agent_task_dir / loop_file_path.name
+                            working_loop_file = loop_dir / loop_file_path.name
 
                             if not working_loop_file.exists():
                                 shutil.copy2(loop_file_path, working_loop_file)
 
                 # Verify working copy has correct name
-                expected_working_copy = agent_task_dir / "tasks.md"
+                expected_working_copy = loop_dir / "tasks.md"
                 self.assertTrue(expected_working_copy.exists(), "Working copy should exist with custom name")
             finally:
                 os.chdir(original_cwd)
@@ -145,8 +145,8 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
                 os.chdir(tmpdir_path)
 
                 # Execute working copy logic
-                agent_task_dir = tmpdir_path / ".agent_task"
-                agent_task_dir.mkdir(exist_ok=True)
+                loop_dir = tmpdir_path / ".loop"
+                loop_dir.mkdir(exist_ok=True)
 
                 loop_file_path: Path | None = None
                 working_loop_file: Path | None = None
@@ -159,14 +159,14 @@ class TestLoopFileWorkingCopy(unittest.TestCase):
                         potential_file = Path(args.loop_value)
                         if potential_file.exists() and potential_file.is_file():
                             loop_file_path = potential_file
-                            working_loop_file = agent_task_dir / loop_file_path.name
+                            working_loop_file = loop_dir / loop_file_path.name
 
                 # Verify no working copy was created (loop_file_path should be None)
                 self.assertIsNone(loop_file_path, "loop_file_path should be None for integer loop_value")
                 self.assertIsNone(working_loop_file, "working_loop_file should be None for integer loop_value")
 
-                # Verify no .md files exist in .agent_task (except for potential metadata files)
-                md_files = list(agent_task_dir.glob("*.md"))
+                # Verify no .md files exist in .loop (except for potential metadata files)
+                md_files = list(loop_dir.glob("*.md"))
                 self.assertEqual(len(md_files), 0, "No .md working copy files should exist for integer loop_value")
             finally:
                 os.chdir(original_cwd)

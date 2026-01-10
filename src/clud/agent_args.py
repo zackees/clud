@@ -60,6 +60,7 @@ class Args:
     idle_timeout: float | None = None
     loop_count: int | None = None
     loop_value: str | None = None  # Raw value from --loop for flexible parsing
+    loop_count_override: int | None = None  # Explicit override via --loop-count
     plain: bool = False  # For --plain (disable JSON formatting, enable raw text I/O)
     telegram: bool = False  # For --telegram (notification mode)
     telegram_bot_token: str | None = None
@@ -300,9 +301,15 @@ def parse_args(args: list[str] | None = None) -> Args:
         const="",  # Empty string when --loop is used without value
         dest="loop_value",
         help=(
-            "Run N times, checking for DONE.md after each. Usage: --loop 50 -p 'msg', --loop 'msg' (prompts count), "
-            "--loop 50 (prompts msg), --loop LOOP.md (expands to template), or --loop (prompts both). Uses -p."
+            "Run loop mode with a message or file path. Usage: --loop 'msg', --loop LOOP.md (expands to template), or --loop (prompts for message). Use --loop-count to specify iterations. Uses -p."
         ),
+    )
+
+    parser.add_argument(
+        "--loop-count",
+        type=int,
+        dest="loop_count_override",
+        help="Override the default loop iteration count (default: 50)",
     )
 
     # Telegram notifications (different from --telegram web app)
@@ -390,6 +397,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         idle_timeout=known_args.idle_timeout,
         loop_count=None,  # Will be parsed from loop_value in agent.py
         loop_value=known_args.loop_value,
+        loop_count_override=known_args.loop_count_override,
         plain=known_args.plain,
         telegram=telegram_enabled,
         telegram_bot_token=telegram_bot_token,

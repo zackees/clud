@@ -149,42 +149,35 @@ def run_agent(args: "Args") -> int:
 
             # Try to parse loop_value
             if args.loop_value == "":
-                # --loop with no value: prompt for both
+                # --loop with no value: prompt for message
                 pass
             else:
-                # Try parsing as integer first
-                try:
-                    loop_count = int(args.loop_value)
-                    if loop_count <= 0:
-                        print("Error: --loop count must be greater than 0", file=sys.stderr)
-                        return 1
-                except ValueError:
-                    # Not an integer, check if it's a file path
-                    # File paths (especially .md files) get expanded to a template message
-                    if args.loop_value.endswith(".md") or Path(args.loop_value).exists():
-                        # For loop files, agent will use working copy in .agent_task/
-                        # Original file remains read-only
-                        original_filename = Path(args.loop_value).name
-                        working_file_path = f".agent_task/{original_filename}"
+                # Check if it's a file path
+                # File paths (especially .md files) get expanded to a template message
+                if args.loop_value.endswith(".md") or Path(args.loop_value).exists():
+                    # For loop files, agent will use working copy in .loop/
+                    # Original file remains read-only
+                    original_filename = Path(args.loop_value).name
+                    working_file_path = f".loop/{original_filename}"
 
-                        # Expand to template message for file-based loop mode
-                        # Point agent to working copy in .agent_task/
-                        loop_message = (
-                            f"Read {working_file_path} and do the next task. "
-                            f"You are free to update {working_file_path} with information critical "
-                            f"for the next agent and future agents as this task is worked on."
-                        )
-                    else:
-                        # Not a file path, treat as regular message
-                        loop_message = args.loop_value
+                    # Expand to template message for file-based loop mode
+                    # Point agent to working copy in .loop/
+                    loop_message = (
+                        f"Read {working_file_path} and do the next task. "
+                        f"You are free to update {working_file_path} with information critical "
+                        f"for the next agent and future agents as this task is worked on."
+                    )
+                else:
+                    # Not a file path, treat as regular message
+                    loop_message = args.loop_value
 
             # Prompt for missing values
             # Check if we have a message from loop_value, -m, or -p
             if not args.prompt and not args.message and not loop_message:
                 loop_message = _prompt_for_message()
 
-            if loop_count is None:
-                loop_count = 50  # Default to 50 iterations when not specified
+            # Determine final loop count (priority: --loop-count > default)
+            loop_count = args.loop_count_override if args.loop_count_override is not None else 50
 
             # Set the prompt if we got it from loop_value (uses -p instead of -m)
             if loop_message and not args.message and not args.prompt:
@@ -229,6 +222,8 @@ def run_agent(args: "Args") -> int:
         # Execute Claude with the dangerous permissions flag
         # Use idle detection if timeout is specified
         returncode = 0  # Initialize returncode for hook triggers
+        retry_without_api_key = False  # Track if we need to retry without API key
+
         if args.idle_timeout is not None:
             # Create output filter to suppress terminal capability responses
             output_filter = OutputFilter()
@@ -259,8 +254,44 @@ def run_agent(args: "Args") -> int:
                 )
                 stdout_callback = create_formatter_callback(formatter)
                 returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+
+            # Check if command failed - might be due to invalid API key
+            # If so, retry without the environment variable (let claude use its own config)
+            if returncode != 0:
+                retry_without_api_key = True
         else:
             returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
+
+        # Retry logic for API key issues (only for -p flag)
+        if retry_without_api_key:
+            print("\nWarning: Command failed. Retrying without ANTHROPIC_API_KEY environment variable...", file=sys.stderr)
+            print("(Claude will use its own configured API key instead)", file=sys.stderr)
+
+            # Remove API key from environment
+            api_key_backup = os.environ.pop("ANTHROPIC_API_KEY", None)
+
+            # Retry the command
+            try:
+                if args.plain:
+                    returncode = RunningProcess.run_streaming(cmd)
+                else:
+                    formatter = StreamJsonFormatter(
+                        show_system=args.verbose,
+                        show_usage=True,
+                        show_cache=args.verbose,
+                        verbose=args.verbose,
+                    )
+                    stdout_callback = create_formatter_callback(formatter)
+                    returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+
+                # If retry succeeded, inform user
+                if returncode == 0:
+                    print("\nSuccess! Command completed using Claude's own API key.", file=sys.stderr)
+                    print("Note: Future runs will skip the environment variable API key.", file=sys.stderr)
+            finally:
+                # Restore API key for any cleanup code that might need it
+                if api_key_backup:
+                    os.environ["ANTHROPIC_API_KEY"] = api_key_backup
 
         # Trigger POST_EXECUTION hook after successful completion
         trigger_hook_sync(

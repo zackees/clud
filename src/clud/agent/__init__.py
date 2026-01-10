@@ -23,7 +23,7 @@ from clud.agent.config import (
 from clud.agent.exceptions import CludError, ConfigError, ValidationError
 from clud.agent.hooks import register_hooks_from_config, trigger_hook_sync
 from clud.agent.lint_runner import _check_agent_artifacts, _find_and_run_lint_test
-from clud.agent.task_manager import _handle_existing_agent_task, _print_red_banner
+from clud.agent.task_manager import _handle_existing_loop, _print_red_banner
 
 __all__ = [
     # Exceptions
@@ -48,7 +48,7 @@ __all__ = [
     "register_hooks_from_config",
     "trigger_hook_sync",
     # Task Manager
-    "_handle_existing_agent_task",
+    "_handle_existing_loop",
     "_print_red_banner",
     # Lint Runner
     "_find_and_run_lint_test",

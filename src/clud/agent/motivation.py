@@ -154,18 +154,18 @@ This file is based on the following research:
 """
 
 
-def write_motivation_file(agent_task_dir_path: str) -> None:
-    """Write the motivation content to .agent_task/MOTIVATION.md.
+def write_motivation_file(loop_dir_path: str) -> None:
+    """Write the motivation content to .loop/MOTIVATION.md.
 
     This should be called during loop initialization for iterations 2+.
 
     Args:
-        agent_task_dir_path: Path to the .agent_task directory (as string)
+        loop_dir_path: Path to the .loop directory (as string)
     """
     from pathlib import Path
 
-    agent_task_dir = Path(agent_task_dir_path)
-    motivation_file = agent_task_dir / "MOTIVATION.md"
+    loop_dir = Path(loop_dir_path)
+    motivation_file = loop_dir / "MOTIVATION.md"
 
     # Write the motivation content
     motivation_file.write_text(MOTIVATION_CONTENT, encoding="utf-8")

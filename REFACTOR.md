@@ -174,7 +174,7 @@ All credential management, API key functions, Claude path detection, command bui
 
 ### Unique to foreground.py (Port These)
 
-1. **TaskInfo Integration** - Creates `.agent_task/info.json` with session metadata and iteration history
+1. **TaskInfo Integration** - Creates `.loop/info.json` with session metadata and iteration history
 2. **Streaming JSON Callback** - `_create_streaming_json_callback()` (currently unused)
 3. **Simpler DONE.md Logic** - No lint-test validation (keep agent_cli.py's validation instead)
 
@@ -184,7 +184,7 @@ All credential management, API key functions, Claude path detection, command bui
 
 **agent_cli.py (lines 827-843)** - OLD, working prompt:
 ```python
-parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
+parts.append(f"Before finishing this iteration, create a summary file named .loop/ITERATION_{iteration}.md documenting what you accomplished.")
 ```
 
 **foreground.py (lines 341-381)** - NEW, BROKEN prompt:
@@ -193,7 +193,7 @@ ITERATION PROTOCOL:
 1. Before starting work, check for error signals...
 2. During your work: ...
 3. Before finishing this iteration:
-   - Create .agent_task/ITERATION_{iteration}.md documenting what you accomplished
+   - Create .loop/ITERATION_{iteration}.md documenting what you accomplished
 ...
 ```
 
@@ -233,7 +233,7 @@ import uuid
 
 **Add after line 1118** (after `done_file = Path("DONE.md")`):
 ```python
-info_file = agent_task_dir / "info.json"
+info_file = loop_dir / "info.json"
 
 # Initialize or load task info
 user_prompt = args.prompt if args.prompt else args.message
@@ -324,7 +324,7 @@ grep -r "agent\.foreground\|from.*foreground import\|agent/foreground" src/ test
   - [ ] ITERATION_1.md is created
   - [ ] ITERATION_2.md is created
   - [ ] ITERATION_3.md is created
-  - [ ] .agent_task/info.json is created
+  - [ ] .loop/info.json is created
 
 - [ ] **TaskInfo Content**: Verify info.json contains:
   - [ ] session_id (UUID)
@@ -362,7 +362,7 @@ grep -r "agent\.foreground\|from.*foreground import\|agent/foreground" src/ test
 
 ### Features
 - ✅ Adds TaskInfo JSON tracking to main implementation
-- ✅ Creates `.agent_task/info.json` with iteration history
+- ✅ Creates `.loop/info.json` with iteration history
 - ✅ Better debugging and progress tracking
 
 ## Files Modified

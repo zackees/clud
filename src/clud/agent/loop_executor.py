@@ -26,7 +26,7 @@ from .loop_logger import LoopLogger, create_logging_formatter_callback
 from .motivation import write_motivation_file
 from .subprocess import _execute_command
 from .task_info import TaskInfo
-from .task_manager import _handle_existing_agent_task, _print_loop_banner, _print_red_banner
+from .task_manager import _handle_existing_loop, _print_loop_banner, _print_red_banner
 from .user_input import _open_file_in_editor
 
 
@@ -79,18 +79,18 @@ def _generate_done_summary(claude_path: str, args: "Args") -> str | None:
 
 def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
     """Run Claude in a loop, checking for DONE.md after each iteration."""
-    agent_task_dir = Path(".agent_task")
+    loop_dir = Path(".loop")
 
     # Handle existing session from previous run
-    should_continue, start_iteration = _handle_existing_agent_task(agent_task_dir)
+    should_continue, start_iteration = _handle_existing_loop(loop_dir)
     if not should_continue:
         return 2  # User cancelled
 
-    # Create .agent_task directory if it doesn't exist (may have been deleted)
-    agent_task_dir.mkdir(exist_ok=True)
+    # Create .loop directory if it doesn't exist (may have been deleted)
+    loop_dir.mkdir(exist_ok=True)
 
     # Write motivation file for iterations 2+ (always overwrite to ensure fresh content)
-    write_motivation_file(str(agent_task_dir))
+    write_motivation_file(str(loop_dir))
 
     # Handle loop file if specified (e.g., LOOP.md or custom TASK.md)
     # Extract the file path from loop_value if it's a file
@@ -107,8 +107,8 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             potential_file = Path(args.loop_value)
             if potential_file.exists() and potential_file.is_file():
                 loop_file_path = potential_file
-                # Create working copy in .agent_task/ with same name
-                working_loop_file = agent_task_dir / loop_file_path.name
+                # Create working copy in .loop/ with same name
+                working_loop_file = loop_dir / loop_file_path.name
 
                 # Copy the loop file to working location (only if doesn't exist yet)
                 # This preserves the original file as read-only from agent's perspective
@@ -121,13 +121,13 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                         return 1
 
     # Initialize loop logger for appending all output to log.txt
-    log_file = agent_task_dir / "log.txt"
+    log_file = loop_dir / "log.txt"
 
-    # DONE.md lives at project root, not .agent_task/
+    # DONE.md lives at project root, not .loop/
     done_file = Path("DONE.md")
 
     # Initialize or load task info
-    info_file = agent_task_dir / "info.json"
+    info_file = loop_dir / "info.json"
     user_prompt = args.prompt if args.prompt else args.message
     task_info = TaskInfo.load(info_file)
 
@@ -155,7 +155,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             logger.print_stderr(f"\n--- Iteration {iteration_num}/{loop_count} ---")
 
             # Check if DONE.md was already validated in a previous iteration
-            done_validated_marker = agent_task_dir / "done_validated"
+            done_validated_marker = loop_dir / "done_validated"
             if done_validated_marker.exists():
                 logger.print_stderr("✅ DONE.md was already validated. Halting immediately.")
 
@@ -238,7 +238,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                 logger.print_stderr("Validating with `lint-test`...")
 
                 # Error log file for validation failures
-                error_log_file = agent_task_dir / "ERROR.log"
+                error_log_file = loop_dir / "ERROR.log"
 
                 # Run lint-test and capture output
                 try:
@@ -267,7 +267,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
 
                             # Build fix prompt referencing ERROR.log and lint-test command
                             fix_prompt = (
-                                "Read .agent_task/ERROR.log to see the linting and testing errors. "
+                                "Read .loop/ERROR.log to see the linting and testing errors."
                                 "Fix all the errors listed in ERROR.log. "
                                 "You can run the `lint-test` command yourself to validate the errors and confirm they are fixed. "
                                 "After fixing, the system will automatically re-run lint-test to verify."
@@ -343,7 +343,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                                     # FSM State: Max attempts reached → halt with warning (keep DONE.md)
                                     _print_red_banner("LINTING/TESTING ISSUES REMAIN UNRESOLVED AFTER 3 FIX ATTEMPTS")
                                     logger.print_stderr(f"\nERROR: Failed to fix lint/test errors after {max_fix_attempts} attempts.")
-                                    logger.print_stderr("Please review .agent_task/ERROR.log manually.")
+                                    logger.print_stderr("Please review .loop/ERROR.log manually.")
                                     logger.print_stderr("DONE.md is kept at project root for review.")
                                     logger.print_stderr("Halting loop - linting & testing could not pass.")
                                     # NEVER delete DONE.md - keep it along with ERROR.log for manual review
@@ -355,7 +355,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                             # FSM State: Still broken after max attempts - HALT (keep DONE.md)
                             # This prevents infinite loops and wasted API credits
                             logger.print_stderr(f"\n⚠️  Halting loop after {max_fix_attempts} failed fix attempts.")
-                            logger.print_stderr("Review DONE.md and .agent_task/ERROR.log to understand the issues.")
+                            logger.print_stderr("Review DONE.md and .loop/ERROR.log to understand the issues.")
                             break
                     else:
                         # FSM State: Validation passed on first attempt → accept DONE.md and halt
@@ -390,7 +390,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                     task_info.save(info_file)
 
                     # Create a marker file to indicate validation was attempted but failed
-                    validation_failed_marker = agent_task_dir / "done_validation_failed"
+                    validation_failed_marker = loop_dir / "done_validation_failed"
                     validation_failed_marker.write_text(
                         f"DONE.md validation failed on {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                         f"Iteration: {iteration_num}/{loop_count}\n"

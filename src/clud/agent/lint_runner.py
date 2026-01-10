@@ -53,13 +53,13 @@ def _find_and_run_lint_test() -> tuple[int, str]:
 def _check_agent_artifacts() -> bool:
     """Check for agent task artifacts before running clud up.
 
-    Checks for DONE.md, LOOP.md, and .agent_task/ directory.
+    Checks for DONE.md, LOOP.md, and .loop/ directory.
     Prompts user to delete or abort if found.
 
     Returns:
         True if should continue, False if should abort
     """
-    artifacts = ["DONE.md", "LOOP.md", ".agent_task"]
+    artifacts = ["DONE.md", "LOOP.md", ".loop"]
     found_artifacts = [name for name in artifacts if Path(name).exists()]
 
     if not found_artifacts:

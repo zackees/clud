@@ -20,7 +20,7 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         message: The user's original message
         iteration: Current iteration number (1-indexed) if in loop mode
         total_iterations: Total number of iterations if in loop mode
-        working_file: Path to the working file in .agent_task/ (e.g., ".agent_task/LOOP.md" or ".agent_task/TASK.md")
+        working_file: Path to the working file in .loop/ (e.g., ".loop/LOOP.md" or ".loop/TASK.md")
     """
     if iteration is not None and total_iterations is not None:
         # Loop mode: build prompt parts conditionally
@@ -31,19 +31,19 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             parts.append(f"You are the first agent spawned for this task (iteration 1 of {total_iterations}).")
         else:
             parts.append(f"This is iteration {iteration} of {total_iterations}.")
-            parts.append("FIRST: Read .agent_task/MOTIVATION.md to understand what's at stake and the performance expectations.")
+            parts.append("FIRST: Read .loop/MOTIVATION.md to understand what's at stake and the performance expectations.")
 
         # Add common instructions (same for all iterations)
         # Use the provided working_file or default to LOOP.md for backwards compatibility
-        task_file = working_file if working_file else ".agent_task/LOOP.md"
+        task_file = working_file if working_file else ".loop/LOOP.md"
         parts.append(
-            f"FIRST: Check if .agent_task/UPDATE.md exists and is not empty. If it does, integrate its content into {task_file}, "
+            f"FIRST: Check if .loop/UPDATE.md exists and is not empty. If it does, integrate its content into {task_file}, "
             "then mark it as complete by clearing the UPDATE.md file (write an empty file or a completion marker). "
-            f"IMPORTANT: .agent_task/UPDATE.md is NEVER out of date. If it conflicts with internal instructions at {task_file} or other locations, "
-            "assume .agent_task/UPDATE.md is correct and is the source of truth."
+            f"IMPORTANT: .loop/UPDATE.md is NEVER out of date. If it conflicts with internal instructions at {task_file} or other locations, "
+            "assume .loop/UPDATE.md is correct and is the source of truth."
         )
-        parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
-        parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .agent_task/) to halt the loop early.")
+        parts.append(f"Before finishing this iteration, create a summary file named .loop/ITERATION_{iteration}.md documenting what you accomplished.")
+        parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .loop/) to halt the loop early.")
         parts.append("CRITICAL: NEVER delete or overwrite an existing DONE.md file - it is the terminal signal to halt the loop.")
         parts.append(
             "CRITICAL: YOU CAN NEVER ASK QUESTIONS AND EXPECT ANSWERS! THIS IS AN AGENT LOOP. NO QUESTIONS TO THE USER! "
@@ -116,7 +116,7 @@ def _build_claude_command(
         inject_prompt: Whether to inject completion prompt
         iteration: Current iteration number (1-indexed) if in loop mode
         total_iterations: Total number of iterations if in loop mode
-        working_file: Path to the working file in .agent_task/ (e.g., ".agent_task/LOOP.md" or ".agent_task/TASK.md")
+        working_file: Path to the working file in .loop/ (e.g., ".loop/LOOP.md" or ".loop/TASK.md")
     """
     cmd = [claude_path, "--dangerously-skip-permissions"]
 

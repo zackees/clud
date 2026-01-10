@@ -11,22 +11,22 @@ import time
 from pathlib import Path
 
 
-def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
-    """Handle existing .agent_task directory from previous session.
+def _handle_existing_loop(loop_dir: Path) -> tuple[bool, int]:
+    """Handle existing .loop directory from previous session.
 
     Args:
-        agent_task_dir: Path to .agent_task directory
+        loop_dir: Path to .loop directory
 
     Returns:
         Tuple of (should_continue, start_iteration)
         - should_continue: False if user cancelled
         - start_iteration: Iteration number to start from (1 for fresh, N+1 for continuation)
     """
-    if not agent_task_dir.exists():
+    if not loop_dir.exists():
         return True, 1
 
     # Scan for existing files
-    iteration_files = sorted(agent_task_dir.glob("ITERATION_*.md"))
+    iteration_files = sorted(loop_dir.glob("ITERATION_*.md"))
 
     # Check for DONE.md at project root (new location)
     done_file_root = Path("DONE.md")
@@ -36,7 +36,7 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
         return True, 1
 
     # Display warning
-    print("\n⚠️  Previous agent session detected (.agent_task/ exists)", file=sys.stderr)
+    print("\n⚠️  Previous agent session detected (.loop/ exists)", file=sys.stderr)
     print("Contains:", file=sys.stderr)
 
     for file in iteration_files:
@@ -64,14 +64,14 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
         if response in ["r", "restart"]:
             # Delete entire directory and DONE.md
             try:
-                shutil.rmtree(agent_task_dir)
+                shutil.rmtree(loop_dir)
                 # Also delete DONE.md if it exists
                 if done_file_root.exists():
                     done_file_root.unlink()
                 print("✓ Previous session deleted, restarting from beginning", file=sys.stderr)
                 return True, 1
             except Exception as e:
-                print(f"Error: Failed to delete .agent_task directory: {e}", file=sys.stderr)
+                print(f"Error: Failed to delete .loop directory: {e}", file=sys.stderr)
                 return False, 1
 
         elif response in ["c", "continue"]:
@@ -110,17 +110,17 @@ def _print_loop_banner() -> None:
         border,
         "# clud --loop",
         "# files:",
-        "#   .agent_task/*.md",
+        "#   .loop/*.md",
         "#     (contains *.md files recorded by the llm)",
-        "#   .agent_task/log.txt",
+        "#   .loop/log.txt",
         "#     (all console content is logged here)",
-        "#   .agent_task/done_validated",
+        "#   .loop/done_validated",
         "#     (final testing state)",
-        "#   .agent_task/UPDATE.md",
+        "#   .loop/UPDATE.md",
         "#     (put your update information during task)",
         "#   ./DONE.md",
         "#     (when task is done information goes here)",
-        "#   ./agent_task/ERROR.md",
+        "#   .loop/ERROR.md",
         "#     (if failed to implement the task, this will tell why)",
         border,
     ]
