@@ -39,7 +39,7 @@ dependencies = [
     "pyyaml>=6.0.0",
     "croniter>=1.4.0",
 ]
-version = "1.0.35"
+version = "1.0.36"
 
 [project.optional-dependencies]
 dev = [
