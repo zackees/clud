@@ -13,13 +13,14 @@ if TYPE_CHECKING:
     from ..agent_args import Args
 
 
-def _inject_completion_prompt(message: str, iteration: int | None = None, total_iterations: int | None = None) -> str:
+def _inject_completion_prompt(message: str, iteration: int | None = None, total_iterations: int | None = None, working_file: str | None = None) -> str:
     """Inject the DONE.md completion prompt into the user's message.
 
     Args:
         message: The user's original message
         iteration: Current iteration number (1-indexed) if in loop mode
         total_iterations: Total number of iterations if in loop mode
+        working_file: Path to the working file in .agent_task/ (e.g., ".agent_task/LOOP.md" or ".agent_task/TASK.md")
     """
     if iteration is not None and total_iterations is not None:
         # Loop mode: build prompt parts conditionally
@@ -32,10 +33,12 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             parts.append(f"This is iteration {iteration} of {total_iterations}.")
 
         # Add common instructions (same for all iterations)
+        # Use the provided working_file or default to LOOP.md for backwards compatibility
+        task_file = working_file if working_file else ".agent_task/LOOP.md"
         parts.append(
-            "FIRST: Check if .agent_task/UPDATE.md exists and is not empty. If it does, integrate its content into .agent_task/LOOP.md, "
+            f"FIRST: Check if .agent_task/UPDATE.md exists and is not empty. If it does, integrate its content into {task_file}, "
             "then mark it as complete by clearing the UPDATE.md file (write an empty file or a completion marker). "
-            "IMPORTANT: .agent_task/UPDATE.md is NEVER out of date. If it conflicts with internal instructions at .agent_task/LOOP.md or other locations, "
+            f"IMPORTANT: .agent_task/UPDATE.md is NEVER out of date. If it conflicts with internal instructions at {task_file} or other locations, "
             "assume .agent_task/UPDATE.md is correct and is the source of truth."
         )
         parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
@@ -102,6 +105,7 @@ def _build_claude_command(
     inject_prompt: bool = False,
     iteration: int | None = None,
     total_iterations: int | None = None,
+    working_file: str | None = None,
 ) -> list[str]:
     """Build the Claude command with all arguments.
 
@@ -111,6 +115,7 @@ def _build_claude_command(
         inject_prompt: Whether to inject completion prompt
         iteration: Current iteration number (1-indexed) if in loop mode
         total_iterations: Total number of iterations if in loop mode
+        working_file: Path to the working file in .agent_task/ (e.g., ".agent_task/LOOP.md" or ".agent_task/TASK.md")
     """
     cmd = [claude_path, "--dangerously-skip-permissions"]
 
@@ -120,7 +125,7 @@ def _build_claude_command(
     if args.prompt:
         prompt_text = args.prompt
         if inject_prompt:
-            prompt_text = _inject_completion_prompt(prompt_text, iteration, total_iterations)
+            prompt_text = _inject_completion_prompt(prompt_text, iteration, total_iterations, working_file)
         cmd.extend(["-p", prompt_text])
         # Enable streaming JSON output for -p flag by default (unless --plain is used)
         # Note: stream-json requires --verbose when used with --print/-p
@@ -130,7 +135,7 @@ def _build_claude_command(
     if args.message:
         message_text = args.message
         if inject_prompt:
-            message_text = _inject_completion_prompt(message_text, iteration, total_iterations)
+            message_text = _inject_completion_prompt(message_text, iteration, total_iterations, working_file)
 
         # If idle timeout is set, force non-interactive mode with -p
         # to avoid TUI redraws being detected as activity

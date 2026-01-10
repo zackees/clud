@@ -1,6 +1,7 @@
 """Loop execution logic for multi-iteration agent runs."""
 
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -26,6 +27,53 @@ from .subprocess import _execute_command
 from .task_info import TaskInfo
 from .task_manager import _handle_existing_agent_task, _print_loop_banner, _print_red_banner
 from .user_input import _open_file_in_editor
+
+
+def _generate_done_summary(claude_path: str, args: "Args") -> str | None:
+    """Generate a two-sentence summary of DONE.md using Claude.
+
+    Args:
+        claude_path: Path to Claude executable
+        args: Command-line arguments (used for model preference)
+
+    Returns:
+        Summary string or None if generation failed
+    """
+    try:
+        # Build command to summarize DONE.md
+        summary_cmd = [
+            claude_path,
+            "--dangerously-skip-permissions",
+            "-p",
+            "Read DONE.md and return a two sentence summary of what was achieved.",
+        ]
+
+        # Add model flag from args if specified
+        if args.claude_args:
+            summary_cmd.extend(args.claude_args)
+
+        # Run command and capture output
+        result = subprocess.run(
+            summary_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            errors="replace",  # Replace undecodable bytes instead of raising exception
+            check=False,
+        )
+
+        if result.returncode == 0 and result.stdout:
+            # Extract the summary from stdout (strip whitespace)
+            summary = result.stdout.strip()
+            if summary:
+                return summary
+
+        return None
+
+    except Exception as e:
+        # If summary generation fails, just log and continue
+        print(f"Warning: Failed to generate DONE.md summary: {e}", file=sys.stderr)
+        return None
 
 
 def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
@@ -106,6 +154,16 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             done_validated_marker = agent_task_dir / "done_validated"
             if done_validated_marker.exists():
                 logger.print_stderr("✅ DONE.md was already validated. Halting immediately.")
+
+                # Generate and display summary before opening
+                logger.print_stderr("\n📝 Generating summary of completed work...")
+                summary = _generate_done_summary(claude_path, args)
+                if summary:
+                    logger.print_stderr("\n" + "=" * 80)
+                    logger.print_stderr("SUMMARY:")
+                    logger.print_stderr(summary)
+                    logger.print_stderr("=" * 80 + "\n")
+
                 logger.print_stderr(f"Opening {done_file}...")
                 _open_file_in_editor(done_file)
                 return 0
@@ -121,12 +179,15 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                 logger.print_stderr()  # Empty line for spacing
 
             # Build command with prompt injection, including iteration context
+            # Pass the working file path so injected instructions reference the correct file
+            working_file_str = str(working_loop_file) if working_loop_file else None
             cmd = _build_claude_command(
                 args,
                 claude_path,
                 inject_prompt=True,
                 iteration=iteration_num,
                 total_iterations=loop_count,
+                working_file=working_file_str,
             )
             # Wrap command in git-bash on Windows if available
             cmd = _wrap_command_for_git_bash(cmd)
@@ -348,6 +409,15 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
 
         # Open DONE.md if it exists
         if done_file.exists():
+            # Generate and display summary before opening
+            logger.print_stderr("\n📝 Generating summary of completed work...")
+            summary = _generate_done_summary(claude_path, args)
+            if summary:
+                logger.print_stderr("\n" + "=" * 80)
+                logger.print_stderr("SUMMARY:")
+                logger.print_stderr(summary)
+                logger.print_stderr("=" * 80 + "\n")
+
             logger.print_stderr(f"Opening {done_file}...")
             _open_file_in_editor(done_file)
 
