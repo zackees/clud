@@ -11,8 +11,6 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from clud.util import detect_git_bash
-
 logger = logging.getLogger(__name__)
 
 
@@ -403,6 +401,8 @@ class PTYManager:
             Shell command as list
         """
         if platform.system() == "Windows":
+            from clud.util import detect_git_bash
+
             # On Windows, use intelligent git-bash detection
             git_bash = detect_git_bash()
             if git_bash:

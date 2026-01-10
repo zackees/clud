@@ -1,5 +1,7 @@
 """FastAPI server for Claude Code Web UI."""
 
+from __future__ import annotations
+
 import _thread
 import asyncio
 import logging
@@ -9,26 +11,10 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-from .api import BacklogHandler, ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
-from .pty_manager import PTYManager
-from .rest_routes import register_rest_routes
-from .server_config import find_available_port, get_frontend_build_dir, is_port_available
-from .static_routes import init_mime_types, register_static_routes
-from .telegram_api import TelegramAPIHandler
-from .terminal_handler import TerminalHandler
-from .websocket_routes import register_websocket_routes
-
-# Initialize MIME types for Windows compatibility
-init_mime_types()
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 
 def create_app(static_dir: Path) -> FastAPI:
@@ -40,6 +26,17 @@ def create_app(static_dir: Path) -> FastAPI:
     Returns:
         Configured FastAPI application
     """
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from .api import BacklogHandler, ChatHandler, DiffHandler, HistoryHandler, ProjectHandler
+    from .pty_manager import PTYManager
+    from .rest_routes import register_rest_routes
+    from .static_routes import register_static_routes
+    from .telegram_api import TelegramAPIHandler
+    from .terminal_handler import TerminalHandler
+    from .websocket_routes import register_websocket_routes
+
     app = FastAPI(
         title="Claude Code Web UI",
         description="Web interface for Claude Code with real-time chat",
@@ -79,6 +76,7 @@ def create_app(static_dir: Path) -> FastAPI:
 
 def open_browser_delayed(url: str, delay: float = 2.0) -> None:
     """Open browser after a delay."""
+    logger = logging.getLogger(__name__)
     time.sleep(delay)
     logger.info("Opening browser to %s", url)
     try:
@@ -99,6 +97,18 @@ def run_server(port: int | None = None) -> int:
     Returns:
         Exit code (0 for success)
     """
+    import uvicorn
+
+    from .server_config import find_available_port, get_frontend_build_dir, is_port_available
+    from .static_routes import init_mime_types
+
+    # Initialize MIME types for Windows compatibility
+    init_mime_types()
+
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    logger = logging.getLogger(__name__)
+
     try:
         # Find available port
         if port is None:

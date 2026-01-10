@@ -53,9 +53,10 @@ class MockTelegramBotAPI(AsyncMock):
         self.start_polling = AsyncMock(return_value=None)
         self.stop_polling = AsyncMock(return_value=None)
         self.shutdown = AsyncMock(return_value=None)
-        self.add_command_handler = AsyncMock(return_value=None)
-        self.add_message_handler = AsyncMock(return_value=None)
-        self.add_error_handler = AsyncMock(return_value=None)
+        # These methods are synchronous, not async, so use Mock instead of AsyncMock
+        self.add_command_handler = Mock(return_value=None)
+        self.add_message_handler = Mock(return_value=None)
+        self.add_error_handler = Mock(return_value=None)
 
 
 def create_mock_api(**kwargs: Any) -> MockTelegramBotAPI:

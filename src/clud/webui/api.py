@@ -9,11 +9,6 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-from running_process import RunningProcess
-
-from ..backlog.parser import load_backlog
-from ..views import DiffTreeView, DiffView
-
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +97,8 @@ class ChatHandler:
 
             def run_process() -> None:
                 """Run process in thread."""
+                from running_process import RunningProcess
+
                 try:
                     RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
                 finally:
@@ -290,7 +287,7 @@ class DiffHandler:
 
     def __init__(self) -> None:
         """Initialize diff handler."""
-        self.diff_trees: dict[str, DiffTreeView] = {}  # project_path -> DiffTreeView
+        self.diff_trees: dict[str, Any] = {}  # project_path -> DiffTreeView
 
     @staticmethod
     def _normalize_path(path: str) -> str:
@@ -304,7 +301,7 @@ class DiffHandler:
         """
         return str(Path(path).resolve()).replace("\\", "/")
 
-    def get_or_create_tree(self, project_path: str) -> DiffTreeView:
+    def get_or_create_tree(self, project_path: str) -> Any:
         """Get or create a diff tree for a project.
 
         Args:
@@ -313,6 +310,8 @@ class DiffHandler:
         Returns:
             DiffTreeView instance
         """
+        from ..views import DiffTreeView
+
         normalized_path = self._normalize_path(project_path)
         if normalized_path not in self.diff_trees:
             self.diff_trees[normalized_path] = DiffTreeView(project_path)
@@ -381,6 +380,8 @@ class DiffHandler:
         Raises:
             ValueError: If no diff available
         """
+        from ..views import DiffView
+
         tree = self.get_or_create_tree(project_path)
         if file_path not in tree.modified_files:
             raise ValueError(f"No diff available for {file_path}")
@@ -488,6 +489,8 @@ class BacklogHandler:
         Returns:
             List of task dictionaries with id, title, status, description, priority, created_at, updated_at
         """
+        from ..backlog.parser import load_backlog
+
         backlog_path = Path(project_path) / "Backlog.md"
 
         try:

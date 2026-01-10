@@ -8,9 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import appdirs
-import fasteners
-
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +50,8 @@ def _get_frontend_cache_dir() -> Path:
     Returns:
         Path to cache directory (creates if doesn't exist)
     """
+    import appdirs
+
     cache_dir = Path(str(appdirs.user_cache_dir("clud", "clud"))) / "webui-frontend"  # type: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
@@ -86,6 +85,8 @@ def get_frontend_build_dir() -> Path | None:
     Returns:
         Path to frontend build directory, or None if unavailable
     """
+    import fasteners
+
     frontend_dir = Path(__file__).parent / "frontend"
     local_build_dir = frontend_dir / "build"
 

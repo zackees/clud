@@ -628,6 +628,15 @@ def handle_cron_command(subcommand: str | None, args: list[str]) -> int:
         print_help()
         return 0
 
+    # List of valid subcommands
+    valid_subcommands = ["add", "list", "remove", "start", "stop", "status", "install"]
+
+    # Check for unknown subcommands before initialization
+    if subcommand not in valid_subcommands:
+        print_error(f"Unknown subcommand: '{subcommand}'")
+        print_info("Use 'clud --cron help' to see all available subcommands")
+        return 1
+
     # Check if cron has been initialized (first-time setup prompt)
     if not is_cron_initialized() and not prompt_cron_installation():
         # User declined installation
@@ -667,7 +676,5 @@ def handle_cron_command(subcommand: str | None, args: list[str]) -> int:
     elif subcommand == "install":
         return handle_cron_install()
 
-    else:
-        print_error(f"Unknown subcommand: '{subcommand}'")
-        print_info("Use 'clud --cron help' to see all available subcommands")
-        return 1
+    # This should never be reached due to earlier validation
+    return 1
