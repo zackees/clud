@@ -29,6 +29,59 @@ from .task_info import TaskInfo
 from .task_manager import _handle_existing_loop, _print_loop_banner, _print_red_banner
 from .user_input import _open_file_in_editor
 
+# ANSI color codes for yellow warning
+YELLOW = "\033[93m"
+RESET = "\033[0m"
+
+
+def _ensure_loop_in_gitignore() -> None:
+    """
+    Check if .loop or ./.loop is in .gitignore and add it if missing.
+
+    Only performs the check if both .gitignore and .git exist in the current directory.
+    Displays a yellow warning message when adding .loop to .gitignore.
+    """
+    # Check if .git directory exists (confirming we're in a git repo)
+    git_dir = Path(".git")
+    if not git_dir.exists() or not git_dir.is_dir():
+        return
+
+    # Check if .gitignore exists
+    gitignore_path = Path(".gitignore")
+    if not gitignore_path.exists():
+        return
+
+    # Read .gitignore contents
+    try:
+        gitignore_content = gitignore_path.read_text(encoding="utf-8")
+    except Exception:
+        # If we can't read .gitignore, silently return
+        return
+
+    # Check if .loop or ./.loop is already in .gitignore
+    lines = gitignore_content.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        # Check for .loop or ./.loop (with or without leading /)
+        if stripped in (".loop", "./.loop", "/.loop"):
+            # Already present, nothing to do
+            return
+
+    # Not found - add .loop to .gitignore
+    try:
+        # Add .loop to .gitignore (with newline if file doesn't end with one)
+        if gitignore_content and not gitignore_content.endswith("\n"):
+            gitignore_content += "\n"
+        gitignore_content += ".loop\n"
+        gitignore_path.write_text(gitignore_content, encoding="utf-8")
+
+        # Print warning message in yellow
+        print(f"{YELLOW}Warning: .loop was added to .gitignore{RESET}", file=sys.stderr)
+    except Exception:
+        # If we can't write to .gitignore, silently fail
+        # This ensures we don't break the loop mode if there's a permission issue
+        pass
+
 
 def _generate_done_summary(claude_path: str, args: "Args") -> str | None:
     """Generate a two-sentence summary of DONE.md using Claude.
@@ -88,6 +141,9 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
 
     # Create .loop directory if it doesn't exist (may have been deleted)
     loop_dir.mkdir(exist_ok=True)
+
+    # Ensure .loop is in .gitignore (warn if added)
+    _ensure_loop_in_gitignore()
 
     # Write motivation file for iterations 2+ (always overwrite to ensure fresh content)
     write_motivation_file(str(loop_dir))
