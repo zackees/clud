@@ -26,15 +26,17 @@ class TaskExecutor:
     # Maximum number of consecutive failures before marking task as failing
     MAX_CONSECUTIVE_FAILURES = 3
 
-    def __init__(self, log_directory: str | None = None) -> None:
+    def __init__(self, log_directory: str | None = None, test_mode: bool = False) -> None:
         """Initialize task executor.
 
         Args:
             log_directory: Directory for storing execution logs (defaults to ~/.clud/logs/cron)
+            test_mode: If True, use minimal delays for faster testing
         """
         if log_directory is None:
             log_directory = "~/.clud/logs/cron"
         self.log_directory = Path(log_directory).expanduser()
+        self.test_mode = test_mode
 
     def execute_task(self, task: CronTask) -> tuple[int, Path]:
         """Spawn clud subprocess for task execution with retry logic.
@@ -99,6 +101,9 @@ class TaskExecutor:
             if attempt <= self.MAX_RETRIES:
                 # Calculate exponential backoff delay: 2^attempt * BASE_RETRY_DELAY
                 delay = (2 ** (attempt - 1)) * self.BASE_RETRY_DELAY
+                # In test mode, use minimal delays for faster testing
+                if self.test_mode:
+                    delay = 0.01  # 10ms delay in test mode
                 logger.warning(f"Task {task.id} failed (attempt {attempt}/{self.MAX_RETRIES + 1}, return code: {return_code}), retrying in {delay}s...")
                 time.sleep(delay)
             else:

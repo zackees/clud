@@ -222,11 +222,16 @@ class TestEnsureDaemonRunning(unittest.TestCase):
         self.assertFalse(result)
         mock_spawn.assert_called_once()
 
-    @patch("time.sleep")
+    @patch("clud.service.server.time.sleep")
+    @patch("clud.service.server.time.time")
     @patch("clud.service.server.spawn_daemon")
     @patch("clud.service.server.is_daemon_running")
-    def test_ensure_daemon_timeout(self, mock_is_running: MagicMock, mock_spawn: MagicMock, mock_sleep: MagicMock) -> None:
+    def test_ensure_daemon_timeout(self, mock_is_running: MagicMock, mock_spawn: MagicMock, mock_time: MagicMock, mock_sleep: MagicMock) -> None:
         """Test when daemon doesn't start within timeout."""
+        # Mock time.time() to simulate timeout quickly
+        # Need more values: start_time, while condition checks, and final elapsed
+        mock_time.side_effect = [0.0, 0.1, 0.2, 0.3, 0.4, 0.6, 0.6]  # Last value exceeds max_wait
+
         # Daemon never becomes running
         mock_is_running.return_value = False
         mock_spawn.return_value = True

@@ -20,7 +20,7 @@ class TestTaskExecutor(unittest.TestCase):
         # Create temporary directory for test logs
         self.test_dir = Path(tempfile.mkdtemp(prefix="test_cron_executor_"))
         self.log_dir = self.test_dir / "logs"
-        self.executor = TaskExecutor(str(self.log_dir))
+        self.executor = TaskExecutor(str(self.log_dir), test_mode=True)
 
     def tearDown(self) -> None:
         """Clean up test fixtures."""

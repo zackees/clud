@@ -46,10 +46,10 @@ class TestCronE2ECompleteWorkflow(unittest.TestCase):
             if self.daemon.is_running():
                 self.daemon.stop()
                 # Wait for daemon to stop
-                for _ in range(10):
+                for _ in range(20):
                     if not self.daemon.is_running():
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
             pass
 
@@ -58,7 +58,8 @@ class TestCronE2ECompleteWorkflow(unittest.TestCase):
 
     def test_complete_workflow(self) -> None:
         """Test complete workflow: schedule task, start daemon, verify execution, stop daemon."""
-        # Step 1: Schedule task (every minute for quick testing)
+        # Step 1: Schedule task with aggressive schedule for faster testing
+        # Use "* * * * *" to run every minute, but manipulate next_run to trigger immediately
         cron_expr = "* * * * *"  # Every minute
         task = self.scheduler.add_task(cron_expr, str(self.task_file))
         self.assertIsNotNone(task)
@@ -70,7 +71,15 @@ class TestCronE2ECompleteWorkflow(unittest.TestCase):
         self.assertEqual(len(config.tasks), 1)
         self.assertEqual(config.tasks[0].id, task.id)
 
-        # Step 2: Start daemon
+        # Step 2: Manipulate next_run to trigger immediately (faster than waiting)
+        # This tests the daemon execution logic without the 70 second wait
+        from datetime import datetime, timezone
+
+        task.next_run = datetime.now(timezone.utc).timestamp()
+        config.tasks[0] = task
+        self.config_manager.save(config)
+
+        # Step 3: Start daemon
         started = self.daemon.start()
         self.assertTrue(started, "Daemon should start successfully")
         self.assertTrue(self.daemon.is_running(), "Daemon should be running after start")
@@ -79,9 +88,9 @@ class TestCronE2ECompleteWorkflow(unittest.TestCase):
         pid_file = self.config_dir / "cron.pid"
         self.assertTrue(pid_file.exists(), "PID file should exist")
 
-        # Step 3: Wait for task to execute (up to 70 seconds to ensure one execution)
+        # Step 4: Wait for task to execute (much shorter timeout since it should trigger immediately)
         log_dir = self.config_dir / "logs" / "cron" / task.id
-        max_wait = 70  # Wait up to 70 seconds for task execution
+        max_wait = 10  # Wait up to 10 seconds (down from 70)
         executed = False
         for _ in range(max_wait):
             if log_dir.exists() and any(log_dir.iterdir()):
@@ -103,15 +112,15 @@ class TestCronE2ECompleteWorkflow(unittest.TestCase):
         log_content = log_file.read_text(encoding="utf-8")
         self.assertIn("E2E test task executed", log_content, "Log should contain task output")
 
-        # Step 4: Stop daemon
+        # Step 5: Stop daemon
         stopped = self.daemon.stop()
         self.assertTrue(stopped, "Daemon should stop successfully")
 
         # Wait for daemon to stop
-        for _ in range(10):
+        for _ in range(20):
             if not self.daemon.is_running():
                 break
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         self.assertFalse(self.daemon.is_running(), "Daemon should not be running after stop")
 
@@ -140,10 +149,10 @@ class TestCronE2EMultipleTasks(unittest.TestCase):
         try:
             if self.daemon.is_running():
                 self.daemon.stop()
-                for _ in range(10):
+                for _ in range(20):
                     if not self.daemon.is_running():
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
             pass
 
@@ -225,10 +234,10 @@ class TestCronE2EDaemonRestart(unittest.TestCase):
         try:
             if self.daemon.is_running():
                 self.daemon.stop()
-                for _ in range(10):
+                for _ in range(20):
                     if not self.daemon.is_running():
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
             pass
 
@@ -252,10 +261,10 @@ class TestCronE2EDaemonRestart(unittest.TestCase):
         self.assertTrue(stopped)
 
         # Wait for daemon to stop
-        for _ in range(10):
+        for _ in range(20):
             if not self.daemon.is_running():
                 break
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         self.assertFalse(self.daemon.is_running())
 
@@ -299,10 +308,10 @@ class TestCronE2ETaskRemoval(unittest.TestCase):
         try:
             if self.daemon.is_running():
                 self.daemon.stop()
-                for _ in range(10):
+                for _ in range(20):
                     if not self.daemon.is_running():
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
             pass
 
@@ -383,10 +392,10 @@ class TestCronE2EAutostartIntegration(unittest.TestCase):
         try:
             if self.daemon.is_running():
                 self.daemon.stop()
-                for _ in range(10):
+                for _ in range(20):
                     if not self.daemon.is_running():
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
             pass
 
@@ -468,10 +477,10 @@ class TestCronE2EErrorHandling(unittest.TestCase):
         try:
             if self.daemon.is_running():
                 self.daemon.stop()
-                for _ in range(10):
+                for _ in range(20):
                     if not self.daemon.is_running():
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.1)
         except Exception:
             pass
 

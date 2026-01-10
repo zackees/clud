@@ -27,7 +27,7 @@ if [[ "$*" == *"--full"* ]]; then
         fi
     done
 
-    # Run all tests including Playwright tests
+    # Run all tests including integration tests (Playwright E2E tests)
     uv run --no-sync pytest tests/ "${new_args[@]}"
     exit 0
 fi
@@ -39,6 +39,6 @@ if [[ "$*" == *"tests/integration"* ]] || [[ "$PWD" == *"/tests/integration" ]];
     uv run --no-sync pytest tests/integration/ -v --tb=short --maxfail=1 "$@"
 else
     # Normal test execution (can use parallel for unit tests)
-    # Exclude Playwright tests by default (they require --full flag)
-    uv run --no-sync pytest tests/ --ignore=tests/test_webui_e2e.py --ignore=tests/test_terminal_e2e.py --ignore=tests/test_webui_terminal_tab_e2e.py --ignore=tests/test_diff_tab_e2e.py "$@"
+    # Exclude integration tests by default (they require --full flag)
+    uv run --no-sync pytest tests/ --ignore=tests/integration "$@"
 fi

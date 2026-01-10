@@ -24,7 +24,7 @@ class TestTaskExecutorRetry(unittest.TestCase):
     def setUp(self) -> None:
         """Set up test fixtures."""
         self.test_dir = tempfile.mkdtemp(prefix="clud_cron_error_")
-        self.executor = TaskExecutor(log_directory=self.test_dir)
+        self.executor = TaskExecutor(log_directory=self.test_dir, test_mode=True)
         self.task = CronTask(
             cron_expression="0 9 * * *",
             task_file_path="/fake/task.md",
@@ -64,8 +64,9 @@ class TestTaskExecutorRetry(unittest.TestCase):
 
     def test_exponential_backoff_timing(self) -> None:
         """Test that retry delays follow exponential backoff pattern."""
-        # Mock subprocess to fail on first two attempts
+        # Mock time.sleep to speed up test while still verifying backoff pattern
         call_times: list[float] = []
+        sleep_delays: list[float] = []
 
         def mock_run_subprocess(cmd: list[str], log_file: Path, attempt: int = 0) -> int:
             call_times.append(time.time())
@@ -73,22 +74,26 @@ class TestTaskExecutorRetry(unittest.TestCase):
                 return 1  # Failure
             return 0  # Success
 
-        with patch.object(self.executor, "_run_subprocess", side_effect=mock_run_subprocess):
-            self.executor.execute_task(self.task)
+        def mock_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+            # Don't actually sleep, just record the delay
 
-        # Verify backoff delays (2s, 4s between attempts)
-        # Allow some tolerance for system delays
+        # Create a non-test-mode executor for this timing test
+        executor = TaskExecutor(log_directory=self.test_dir, test_mode=False)
+
+        with patch.object(executor, "_run_subprocess", side_effect=mock_run_subprocess), patch("clud.cron.executor.time.sleep", side_effect=mock_sleep):
+            executor.execute_task(self.task)
+
+        # Verify the correct number of calls
         self.assertEqual(len(call_times), 3)
-        delay1 = call_times[1] - call_times[0]
-        delay2 = call_times[2] - call_times[1]
+        self.assertEqual(len(sleep_delays), 2)
 
-        # First retry delay should be ~2s (2^0 * 2)
-        self.assertGreaterEqual(delay1, 1.8)
-        self.assertLessEqual(delay1, 2.5)
+        # Verify backoff delays are calculated correctly (2s, 4s)
+        # First retry delay should be 2s (2^0 * 2)
+        self.assertAlmostEqual(sleep_delays[0], 2.0, places=1)
 
-        # Second retry delay should be ~4s (2^1 * 2)
-        self.assertGreaterEqual(delay2, 3.8)
-        self.assertLessEqual(delay2, 4.5)
+        # Second retry delay should be 4s (2^1 * 2)
+        self.assertAlmostEqual(sleep_delays[1], 4.0, places=1)
 
     def test_no_retry_on_success(self) -> None:
         """Test that successful tasks don't trigger retries."""
