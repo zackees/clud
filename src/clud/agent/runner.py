@@ -26,6 +26,7 @@ from .command_builder import (
     _get_model_from_args,
     _print_debug_info,
     _print_error_diagnostics,
+    _print_launch_banner,
     _print_model_message,
     _wrap_command_for_git_bash,
 )
@@ -34,7 +35,7 @@ from .config import load_telegram_credentials
 from .hooks import register_hooks_from_config, trigger_hook_sync
 from .loop_executor import _run_loop
 from .subprocess import _execute_command
-from .user_input import _prompt_for_loop_count, _prompt_for_message
+from .user_input import _prompt_for_message
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ def run_agent(args: "Args") -> int:
         # Get and set API key before launching Claude (after dry-run check)
         api_key = get_api_key(args)
         os.environ["ANTHROPIC_API_KEY"] = api_key
-        os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "16000"
+        os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
 
         # No validation needed - if no input is provided and stdin is a tty,
         # Claude Code will launch in interactive mode
@@ -183,7 +184,7 @@ def run_agent(args: "Args") -> int:
                 loop_message = _prompt_for_message()
 
             if loop_count is None:
-                loop_count = _prompt_for_loop_count()
+                loop_count = 50  # Default to 50 iterations when not specified
 
             # Set the prompt if we got it from loop_value (uses -p instead of -m)
             if loop_message and not args.message and not args.prompt:
@@ -199,6 +200,13 @@ def run_agent(args: "Args") -> int:
         # Detect and print model message (for display only)
         model_flag = _get_model_from_args(args.claude_args)
         _print_model_message(model_flag)
+
+        # Print launch banner with command and environment
+        env_vars = {
+            "ANTHROPIC_API_KEY": api_key,
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+        }
+        _print_launch_banner(cmd, env_vars=env_vars)
 
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)

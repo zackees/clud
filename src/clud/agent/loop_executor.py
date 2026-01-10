@@ -24,7 +24,7 @@ from .lint_runner import _find_and_run_lint_test
 from .loop_logger import LoopLogger, create_logging_formatter_callback
 from .subprocess import _execute_command
 from .task_info import TaskInfo
-from .task_manager import _handle_existing_agent_task, _print_red_banner
+from .task_manager import _handle_existing_agent_task, _print_loop_banner, _print_red_banner
 from .user_input import _open_file_in_editor
 
 
@@ -92,6 +92,9 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
         # Update existing task info for continuation
         task_info.total_iterations = loop_count
         task_info.save(info_file)
+
+    # Print loop banner to explain file structure
+    _print_loop_banner()
 
     # Start from determined iteration (may be > 1 if continuing previous session)
     with LoopLogger(log_file) as logger:

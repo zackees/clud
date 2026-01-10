@@ -9,8 +9,6 @@ import traceback
 
 from clud.hooks import HookContext, HookEvent, get_hook_manager
 from clud.hooks.config import load_hook_config
-from clud.hooks.telegram import TelegramHookHandler
-from clud.hooks.webhook import WebhookHookHandler
 
 
 def register_hooks_from_config(hook_debug: bool = False) -> None:
@@ -35,6 +33,9 @@ def register_hooks_from_config(hook_debug: bool = False) -> None:
 
         # Register Telegram hook if enabled
         if config.telegram_enabled and config.telegram_bot_token and config.telegram_chat_id:
+            # Lazy import to avoid loading telegram/fastapi unless actually needed
+            from clud.hooks.telegram import TelegramHookHandler
+
             telegram_handler = TelegramHookHandler(
                 bot_token=config.telegram_bot_token,
                 buffer_size=config.buffer_size,
@@ -46,6 +47,9 @@ def register_hooks_from_config(hook_debug: bool = False) -> None:
 
         # Register webhook hook if enabled
         if config.webhook_enabled and config.webhook_url:
+            # Lazy import to avoid loading webhook dependencies unless actually needed
+            from clud.hooks.webhook import WebhookHookHandler
+
             webhook_handler = WebhookHookHandler(
                 webhook_url=config.webhook_url,
                 secret=config.webhook_secret,

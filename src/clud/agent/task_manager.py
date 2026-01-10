@@ -100,6 +100,35 @@ def _handle_existing_agent_task(agent_task_dir: Path) -> tuple[bool, int]:
             print("Unknown answer. Please enter 'R' to restart or 'C' to continue.", file=sys.stderr)
 
 
+def _print_loop_banner() -> None:
+    """Print informational banner for loop mode."""
+    banner_width = 80
+    border = "#" * banner_width
+
+    # Build banner lines - each line is max 80 chars including comment markers
+    lines = [
+        border,
+        "# clud --loop",
+        "# files:",
+        "#   .agent_task/*.md",
+        "#     (contains *.md files recorded by the llm)",
+        "#   .agent_task/log.txt",
+        "#     (all console content is logged here)",
+        "#   .agent_task/done_validated",
+        "#     (final testing state)",
+        "#   .agent_task/UPDATE.md",
+        "#     (put your update information during task)",
+        "#   ./DONE.md",
+        "#     (when task is done information goes here)",
+        "#   ./agent_task/ERROR.md",
+        "#     (if failed to implement the task, this will tell why)",
+        border,
+    ]
+
+    # Print banner to stderr
+    print("\n".join(lines), file=sys.stderr)
+
+
 def _print_red_banner(message: str) -> None:
     """Print a red banner message to stderr for critical warnings."""
     terminal_width = shutil.get_terminal_size((80, 20)).columns

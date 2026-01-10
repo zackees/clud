@@ -138,6 +138,15 @@ def test_start_daemon(self, mock_daemon):
 
 - `clud` → `clud.cli:main`
 
+### Environment Variables
+
+When `clud` launches Claude Code, it automatically sets the following environment variables:
+
+- **CLAUDE_CODE_MAX_OUTPUT_TOKENS** - Set to `64000` (maximum for Claude Sonnet 4.5)
+  - This prevents API errors when Claude generates long responses
+  - Default Claude Code limit is 16,000 tokens, but Claude Sonnet 4.5 supports up to 64,000 tokens
+  - Can be increased to 1 million for Tier 4 and enterprise accounts
+
 ### Key Dependencies
 
 - **keyring** - Secure credential storage

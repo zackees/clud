@@ -1,6 +1,8 @@
 """Command building and wrapping utilities for Claude Code execution."""
 
+import os
 import platform
+import subprocess
 import sys
 from typing import TYPE_CHECKING
 
@@ -32,7 +34,9 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
         # Add common instructions (same for all iterations)
         parts.append(
             "FIRST: Check if .agent_task/UPDATE.md exists and is not empty. If it does, integrate its content into .agent_task/LOOP.md, "
-            "then mark it as complete by clearing the UPDATE.md file (write an empty file or a completion marker)."
+            "then mark it as complete by clearing the UPDATE.md file (write an empty file or a completion marker). "
+            "IMPORTANT: .agent_task/UPDATE.md is NEVER out of date. If it conflicts with internal instructions at .agent_task/LOOP.md or other locations, "
+            "assume .agent_task/UPDATE.md is correct and is the source of truth."
         )
         parts.append(f"Before finishing this iteration, create a summary file named .agent_task/ITERATION_{iteration}.md documenting what you accomplished.")
         parts.append("If you determine that ALL work across ALL iterations is 100% complete, also write DONE.md at the PROJECT ROOT (not .agent_task/) to halt the loop early.")
@@ -194,6 +198,61 @@ def _wrap_command_for_git_bash(cmd: list[str]) -> list[str]:
     # Wrap in git-bash: bash -c "command"
     # Use -c flag to execute command directly
     return [git_bash, "-c", cmd_str]
+
+
+def _print_launch_banner(cmd: list[str], cwd: str | None = None, env_vars: dict[str, str] | None = None) -> None:
+    """Print formatted launch banner showing command, cwd, and environment variables.
+
+    Args:
+        cmd: Command list to be executed
+        cwd: Current working directory (defaults to os.getcwd())
+        env_vars: Dictionary of environment variables that were added (not all env vars)
+    """
+    banner_width = 80
+    header = "LAUNCHING CLAUDE"
+    border = "#" * banner_width
+
+    # Convert command to string
+    cmd_str = subprocess.list2cmdline(cmd)
+
+    # Truncate command if too long (leave room for "# command: " prefix)
+    max_cmd_width = banner_width - len("# command: ") - 2  # -2 for trailing " #"
+    if len(cmd_str) > max_cmd_width:
+        cmd_str = cmd_str[: max_cmd_width - 3] + "..."
+
+    # Use current directory if not specified
+    if cwd is None:
+        cwd = os.getcwd()
+
+    # Build banner lines
+    lines = [border]
+    # Center the header
+    padding = (banner_width - len(header) - 2) // 2
+    header_line = "#" + " " * padding + header + " " * (banner_width - padding - len(header) - 2) + "#"
+    lines.append(header_line)
+    lines.append(border)
+
+    # Add command
+    lines.append(f"# command: {cmd_str}")
+
+    # Add cwd
+    lines.append(f"# cwd: {cwd}")
+
+    # Add env vars if provided
+    if env_vars:
+        lines.append("# env:")
+        for key, value in sorted(env_vars.items()):
+            # Mask sensitive values (API keys, tokens, passwords, etc.)
+            key_upper = key.upper()
+            sensitive_keywords = ["API", "KEY", "TOKEN", "AUTH", "PASS", "PASSWORD"]
+            if any(keyword in key_upper for keyword in sensitive_keywords):
+                value = "****"
+            lines.append(f"#   {key}={value}")
+
+    lines.append(border)
+
+    # Print banner to stderr
+    print("\n".join(lines), file=sys.stderr)
 
 
 def _print_debug_info(claude_path: str | None, cmd: list[str], verbose: bool = False) -> None:
