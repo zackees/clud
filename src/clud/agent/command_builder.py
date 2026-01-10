@@ -249,9 +249,13 @@ def _print_launch_banner(cmd: list[str], cwd: str | None = None, env_vars: dict[
         lines.append("# env:")
         for key, value in sorted(env_vars.items()):
             # Mask sensitive values (API keys, tokens, passwords, etc.)
+            # Exception: CLAUDE_CODE_MAX_OUTPUT_TOKENS is not sensitive (just a number)
             key_upper = key.upper()
             sensitive_keywords = ["API", "KEY", "TOKEN", "AUTH", "PASS", "PASSWORD"]
-            if any(keyword in key_upper for keyword in sensitive_keywords):
+            is_sensitive = any(keyword in key_upper for keyword in sensitive_keywords)
+            is_max_output_tokens = key_upper == "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+
+            if is_sensitive and not is_max_output_tokens:
                 value = "****"
             lines.append(f"#   {key}={value}")
 
