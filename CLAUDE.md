@@ -146,6 +146,8 @@ When `clud` launches Claude Code, it automatically sets the following environmen
   - This prevents API errors when Claude generates long responses
   - Default Claude Code limit is 16,000 tokens, but Claude Sonnet 4.5 supports up to 64,000 tokens
   - Can be increased to 1 million for Tier 4 and enterprise accounts
+- **CLAUDE_GIT_AUTHOR** - Set to `0` to disable Claude git author attribution
+  - Prevents Claude from being added as a co-author in git commits
 
 ### Key Dependencies
 

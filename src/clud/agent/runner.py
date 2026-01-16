@@ -112,6 +112,8 @@ def run_agent(args: "Args") -> int:
 
         # Set max output tokens for Claude
         os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
+        # Disable Claude git author attribution
+        os.environ["CLAUDE_GIT_AUTHOR"] = "0"
 
         # No validation needed - if no input is provided and stdin is a tty,
         # Claude Code will launch in interactive mode
@@ -194,6 +196,7 @@ def run_agent(args: "Args") -> int:
         # Print launch banner with command and environment
         env_vars = {
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+            "CLAUDE_GIT_AUTHOR": "0",
         }
         _print_launch_banner(cmd, env_vars=env_vars)
 
