@@ -10,8 +10,8 @@ Here's the streamlined **AI Agent Directive for `clud`** with **no detach / back
 ## 🚀 Implementation Status
 
 ### ✅ Core Features Completed:
-- **CLI Interface**: Full argument parsing with all specified options (`--dangerous`, `--ssh-keys`, `--image`, `--shell`, `--profile`, `--no-firewall`, `--no-sudo`, `--env`, `--api-key-from`, etc.)
-- **API Key Management**: Required authentication with interactive prompting, validation, and secure storage in `~/.clud/*.key`
+- **CLI Interface**: Full argument parsing with all specified options (`--dangerous`, `--ssh-keys`, `--image`, `--shell`, `--profile`, `--no-firewall`, `--no-sudo`, `--env`, etc.)
+- **Authentication**: Claude Code handles its own authentication (use `claude login`)
 - **Docker Integration**: Auto-detection of `run-claude-docker` wrapper with fallback to direct `docker run`
 - **Security Defaults**: Project-only RW mount, SSH keys RO mount (optional), firewall enabled, sudo enabled by default
 - **Cross-platform**: Windows, Linux, macOS support with proper path normalization
@@ -22,12 +22,6 @@ Here's the streamlined **AI Agent Directive for `clud`** with **no detach / back
 - **Type Safety**: Strict pyright type checking with zero errors
 - **Linting**: Clean code passing all ruff checks
 - **Documentation**: Complete docstrings and clear code structure
-
-### ✅ API Key Priority Order:
-1. `--api-key-from` keyring entry (if keyring available) or config file
-2. `ANTHROPIC_API_KEY` environment variable
-3. Saved config file (`~/.clud/anthropic-api-key.key`)
-4. Interactive prompt with validation and optional save
 
 ### ✅ Usage Examples Working:
 ```bash
@@ -57,7 +51,7 @@ Create `clud` — a simple, safe Python CLI that launches a Claude-powered devel
    * **SSH keys not mounted** unless `--ssh-keys` is provided (mounted **RO**).
    * Container firewall **enabled by default**.
    * **Sudo enabled by default** inside the container; user can explicitly disable with `--no-sudo`.
-3. **API Key requirement:** `clud` will not invoke Claude unless `ANTHROPIC_API_KEY` is available. If no API key is found in environment variables or keyring, prompt the user to enter one on first run and offer to save it to the keyring.
+3. **Authentication:** Claude Code handles its own authentication. Users should run `claude login` to configure their API key.
 4. **Passthrough-first:** Prefer calling `run-claude-docker` with its supported flags; otherwise fall back to raw `docker run` for extra features.
 5. **Cross-platform:** Linux/macOS/Windows (Docker Desktop/WSL). Handle path normalization and permission quirks.
 
@@ -88,9 +82,7 @@ clud [PATH] [options]
 * `--no-sudo`
   Disable sudo privileges. By default `clud` passes `--enable-sudo` to the wrapper. Supplying `--no-sudo` omits that flag.
 * `--env KEY=VALUE` (repeatable)
-  Forward environment variables (e.g., `ANTHROPIC_API_KEY`).
-* `--api-key-from NAME`
-  (Optional) Retrieve `ANTHROPIC_API_KEY` from OS keyring entry `NAME`.
+  Forward environment variables.
 * `--help`, `--version`
   Standard CLI info.
 
@@ -138,27 +130,22 @@ When `run-claude-docker` is not found:
   * `-v <ssh_dir>:/home/dev/.ssh:ro` (if `--ssh-keys`)
   * optional `-v ~:/host-home:ro` (if `--read-only-home`)
   * `--network none` if `--no-firewall`
-  * `-e ANTHROPIC_API_KEY=...` + any `--env`
+  * any `--env` variables
   * **If `--no-sudo`:** add `--user $(id -u):$(id -g)` to drop sudo; otherwise run default user with sudo.
 * Entrypoint: launch Claude agent (e.g. `claude code`) in `/workspace`, appending skip-permissions flag if `--dangerous`.
 
 ---
 
-## 6. API Key Management
+## 6. Authentication
 
-* **Required for operation:** `clud` will not start Claude without an API key.
-* **Priority order:** Check `--api-key-from` keyring entry first, then `ANTHROPIC_API_KEY` environment variable.
-* **Interactive prompt:** If no API key found, prompt user with:
-  * "No Claude API key found. Please enter your Anthropic API key:"
-  * After entry, offer: "Save this key to keyring for future use? (y/N)"
-  * If yes, save to keyring entry "anthropic-api-key" (or user-specified name).
-* **Validation:** Basic format validation (starts with "sk-ant-", reasonable length).
+* **Claude Code authentication:** Claude Code handles its own authentication via `claude login`.
+* **No API key management in clud:** Users should configure their API key directly with Claude Code.
 
 ---
 
 ## 7. Error Handling
 
-* Clear errors for: Docker not running, bad PATH, image missing, SSH dir missing when `--ssh-keys`, missing `ANTHROPIC_API_KEY` (blocking - prompt for it).
+* Clear errors for: Docker not running, bad PATH, image missing, SSH dir missing when `--ssh-keys`.
 * Exit codes:
 
   * `0` success
@@ -174,14 +161,13 @@ When `run-claude-docker` is not found:
 * ✅ `clud . --dangerous` starts agent with skip-permissions inside container.
 * ✅ `clud . --no-sudo` disables sudo privileges.
 * ✅ `clud . --ssh-keys` mounts `~/.ssh` read-only for git push/private repos.
-* ✅ **API key enforcement:** `clud` refuses to run without `ANTHROPIC_API_KEY` and prompts user to enter one if missing.
+* ✅ **Authentication:** Claude Code handles its own authentication via `claude login`.
 * ✅ Works reliably on Linux, macOS and Windows (Docker Desktop/WSL) with correct path handling.
 
 **Additional Quality Achievements:**
 * ✅ **52 comprehensive unit tests** with 100% pass rate
 * ✅ **Strict type checking** with zero pyright errors
 * ✅ **Production-ready code quality** with full ruff linting compliance
-* ✅ **Secure API key storage** in `~/.clud/` directory with proper permissions
 
 ---
 
@@ -214,7 +200,7 @@ clud . --image ghcr.io/vendor/claude:latest --profile python
 This directive has been **fully implemented and tested**. The `clud` CLI tool is production-ready with:
 
 - ✅ **All specified functionality** working as designed
-- ✅ **API key requirement** with interactive prompting and secure storage
+- ✅ **Authentication via Claude Code** (use `claude login` to configure)
 - ✅ **Comprehensive test coverage** (52 tests, 100% pass rate)
 - ✅ **Strict type safety** (zero pyright errors in strict mode)
 - ✅ **Clean code quality** (all ruff linting checks passed)
@@ -222,6 +208,5 @@ This directive has been **fully implemented and tested**. The `clud` CLI tool is
 
 **Final rule changes implemented**:
 - **Sudo is enabled by default** (use `--no-sudo` to disable)
-- **API key is required** (prompts user if not found)
-- **Secure storage** in `~/.clud/` directory
+- **Authentication handled by Claude Code** (use `claude login`)
 - **No background/daemon mode** included

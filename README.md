@@ -265,25 +265,6 @@ clud-cluster bot                  # Run Telegram bot (requires bot extra)
 **Architecture:**
 The cluster control plane provides a unified interface for monitoring all `clud` agents running on your system. Agents register with the background service (`:7565`), which communicates with the cluster control plane to provide real-time status updates, metrics, and control capabilities.
 
-## Configuration
-
-### API Key Setup
-
-```bash
-# Interactive setup (recommended)
-clud --login
-
-# Use environment variable
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# Use command line
-clud --api-key "sk-ant-..."
-```
-
-The API key is stored securely in `~/.clud/anthropic-api-key.key` for future use.
-
-
-
 ## Command Reference
 
 ### Main Commands
@@ -292,13 +273,11 @@ clud [directory]                  # Launch in directory
 clud -p "prompt"                  # Execute with prompt
 clud -m "message"                 # Send message
 clud --continue                   # Continue conversation
-clud --api-key KEY                # Specify API key
 clud --dry-run                    # Show command without executing
 ```
 
 ### Utility Commands
 ```bash
-clud --login                      # Configure API key
 clud --task PATH                  # Process task file
 clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow

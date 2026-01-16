@@ -19,7 +19,6 @@ from ..hooks import HookContext, HookEvent
 from ..json_formatter import StreamJsonFormatter, create_formatter_callback
 from ..output_filter import OutputFilter
 from ..telegram_bot import TelegramBot
-from .api_key import get_api_key
 from .claude_finder import _find_claude_path
 from .command_builder import (
     _build_claude_command,
@@ -111,9 +110,7 @@ def run_agent(args: "Args") -> int:
             result = subprocess.run(args.cmd, shell=True)
             return result.returncode
 
-        # Get and set API key before launching Claude (after dry-run check)
-        api_key = get_api_key(args)
-        os.environ["ANTHROPIC_API_KEY"] = api_key
+        # Set max output tokens for Claude
         os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
 
         # No validation needed - if no input is provided and stdin is a tty,
@@ -196,7 +193,6 @@ def run_agent(args: "Args") -> int:
 
         # Print launch banner with command and environment
         env_vars = {
-            "ANTHROPIC_API_KEY": api_key,
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
         }
         _print_launch_banner(cmd, env_vars=env_vars)
@@ -222,7 +218,6 @@ def run_agent(args: "Args") -> int:
         # Execute Claude with the dangerous permissions flag
         # Use idle detection if timeout is specified
         returncode = 0  # Initialize returncode for hook triggers
-        retry_without_api_key = False  # Track if we need to retry without API key
 
         if args.idle_timeout is not None:
             # Create output filter to suppress terminal capability responses
@@ -254,44 +249,8 @@ def run_agent(args: "Args") -> int:
                 )
                 stdout_callback = create_formatter_callback(formatter)
                 returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
-
-            # Check if command failed - might be due to invalid API key
-            # If so, retry without the environment variable (let claude use its own config)
-            if returncode != 0:
-                retry_without_api_key = True
         else:
             returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
-
-        # Retry logic for API key issues (only for -p flag)
-        if retry_without_api_key:
-            print("\nWarning: Command failed. Retrying without ANTHROPIC_API_KEY environment variable...", file=sys.stderr)
-            print("(Claude will use its own configured API key instead)", file=sys.stderr)
-
-            # Remove API key from environment
-            api_key_backup = os.environ.pop("ANTHROPIC_API_KEY", None)
-
-            # Retry the command
-            try:
-                if args.plain:
-                    returncode = RunningProcess.run_streaming(cmd)
-                else:
-                    formatter = StreamJsonFormatter(
-                        show_system=args.verbose,
-                        show_usage=True,
-                        show_cache=args.verbose,
-                        verbose=args.verbose,
-                    )
-                    stdout_callback = create_formatter_callback(formatter)
-                    returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
-
-                # If retry succeeded, inform user
-                if returncode == 0:
-                    print("\nSuccess! Command completed using Claude's own API key.", file=sys.stderr)
-                    print("Note: Future runs will skip the environment variable API key.", file=sys.stderr)
-            finally:
-                # Restore API key for any cleanup code that might need it
-                if api_key_backup:
-                    os.environ["ANTHROPIC_API_KEY"] = api_key_backup
 
         # Trigger POST_EXECUTION hook after successful completion
         trigger_hook_sync(

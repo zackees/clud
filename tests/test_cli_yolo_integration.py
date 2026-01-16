@@ -38,11 +38,7 @@ class TestCliYoloIntegration(unittest.TestCase):
             mock_run.return_value.returncode = 0
 
             # Mock _find_claude_path to return a fake claude path
-            # Mock get_api_key to avoid keyring access
-            with (
-                patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"),
-                patch("clud.agent.runner.get_api_key", return_value="fake-api-key"),
-            ):
+            with patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"):
                 result = main(["-m", "test message"])
 
         self.assertEqual(result, 0)

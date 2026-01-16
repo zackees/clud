@@ -5,15 +5,6 @@ This package contains modularized components for agent execution,
 extracted from the monolithic agent_cli.py file.
 """
 
-from clud.agent.api_key import (
-    get_api_key,
-    get_api_key_from_keyring,
-    handle_login,
-    load_api_key_from_config,
-    prompt_for_api_key,
-    save_api_key_to_config,
-    validate_api_key,
-)
 from clud.agent.claude_finder import _find_claude_path
 from clud.agent.config import (
     get_clud_config_dir,
@@ -34,14 +25,6 @@ __all__ = [
     "get_clud_config_dir",
     "save_telegram_credentials",
     "load_telegram_credentials",
-    # API Key
-    "validate_api_key",
-    "get_api_key_from_keyring",
-    "save_api_key_to_config",
-    "load_api_key_from_config",
-    "handle_login",
-    "prompt_for_api_key",
-    "get_api_key",
     # Claude Finder
     "_find_claude_path",
     # Hooks

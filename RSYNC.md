@@ -154,11 +154,6 @@ sync_host_to_workspace() {
     fi
 }
 
-# Set up Anthropic API key if provided
-if [ -n "${ANTHROPIC_API_KEY}" ]; then
-    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}"
-    log "Anthropic API key configured"
-fi
 
 # Function to sync workspace changes back to host with safety checks
 sync_workspace_to_host() {

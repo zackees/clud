@@ -3,8 +3,6 @@
 import logging
 import sys
 
-from .agent.api_key import handle_login
-
 # Import command handlers
 from .agent.commands import (
     handle_api_server_command,
@@ -59,7 +57,6 @@ def main(args_list: list[str] | None = None) -> int:
             print("  up [-p|--publish]    Run global codeup command with auto-fix")
             print()
             print("Special commands:")
-            print("  --login              Configure API key for Claude")
             print("  --task PATH          Open task file in editor")
             print("  --code [PORT]        Launch code-server in browser (default port: 8080)")
             print("  --lint               Run lint and tests with lint-test")
@@ -82,9 +79,6 @@ def main(args_list: list[str] | None = None) -> int:
             return 0
 
         # Handle special commands that don't require agents
-        if args.login:
-            return handle_login()
-
         if args.task is not None:
             return handle_task_command(args.task)
 

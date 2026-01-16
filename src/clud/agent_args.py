@@ -22,7 +22,6 @@ class Args:
 
     # Router-level arguments (special commands)
     mode: AgentMode
-    login: bool = False
     task: str | None = None
     lint: bool = False
     test: bool = False
@@ -78,7 +77,6 @@ def parse_args(args: list[str] | None = None) -> Args:
     mode = AgentMode.DEFAULT  # Default mode
 
     # Check for special commands first (these don't need agent routing)
-    login = "--login" in args_copy
     lint = "--lint" in args_copy
     test = "--test" in args_copy
     fix = "--fix" in args_copy
@@ -359,7 +357,6 @@ def parse_args(args: list[str] | None = None) -> Args:
     return Args(
         # Router-level
         mode=mode,
-        login=login,
         task=task,
         lint=lint,
         test=test,

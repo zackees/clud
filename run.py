@@ -143,30 +143,6 @@ class TestRunner:
             "docker_version": docker_version
         }
 
-    def test_api_key_validation(self) -> Dict[str, Any]:
-        """Test API key validation logic."""
-        from clud.cli import validate_api_key
-
-        # Test valid key format
-        valid_key = "sk-ant-" + "x" * 50
-        if not validate_api_key(valid_key):
-            raise Exception("Valid API key format rejected")
-
-        # Test invalid formats
-        invalid_keys = [
-            "",
-            "invalid",
-            "sk-ant-",
-            "sk-ant-x",  # too short
-            "wrong-prefix-" + "x" * 50
-        ]
-
-        for invalid_key in invalid_keys:
-            if validate_api_key(invalid_key):
-                raise Exception(f"Invalid key accepted: {invalid_key}")
-
-        return {"valid_key_accepted": True, "invalid_keys_rejected": len(invalid_keys)}
-
     def test_port_utilities(self) -> Dict[str, Any]:
         """Test port availability checking."""
         from clud.cli import is_port_available, find_available_port
@@ -266,7 +242,6 @@ class TestRunner:
             ("CLI Argument Parser", self.test_cli_argument_parser),
             ("Path Validation", self.test_path_validation),
             ("Docker Availability", self.test_docker_availability),
-            ("API Key Validation", self.test_api_key_validation),
             ("Port Utilities", self.test_port_utilities),
             ("Config Directory", self.test_config_directory),
             ("Environment Integration", self.test_environment_integration),
@@ -304,7 +279,6 @@ class TestRunner:
             "parser": ("CLI Argument Parser", self.test_cli_argument_parser),
             "path": ("Path Validation", self.test_path_validation),
             "docker": ("Docker Availability", self.test_docker_availability),
-            "apikey": ("API Key Validation", self.test_api_key_validation),
             "port": ("Port Utilities", self.test_port_utilities),
             "config": ("Config Directory", self.test_config_directory),
             "env": ("Environment Integration", self.test_environment_integration),
@@ -338,7 +312,7 @@ class TestRunner:
             elif choice == "1":
                 self.run_all_tests()
             elif choice == "2":
-                test_name = input("Enter test name (imports/parser/path/docker/apikey/port/config/env/ui): ").strip()
+                test_name = input("Enter test name (imports/parser/path/docker/port/config/env/ui): ").strip()
                 self.run_specific_test(test_name)
             elif choice == "3":
                 self.start_ui_mode()

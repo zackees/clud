@@ -104,14 +104,12 @@ class TestPlainModeExecution(unittest.TestCase):
     """Test plain mode execution flow."""
 
     @patch("clud.agent.runner._find_claude_path")
-    @patch("clud.agent.runner.get_api_key")
     @patch("clud.agent.runner.RunningProcess")
     @patch("clud.agent.runner.TelegramBot")
     def test_plain_mode_uses_raw_streaming(
         self,
         mock_telegram: MagicMock,
         mock_running_process: MagicMock,
-        mock_get_api_key: MagicMock,
         mock_find_claude: MagicMock,
     ) -> None:
         """Test that plain mode uses raw streaming without JSON formatter."""
@@ -119,7 +117,6 @@ class TestPlainModeExecution(unittest.TestCase):
 
         # Setup mocks
         mock_find_claude.return_value = "claude"
-        mock_get_api_key.return_value = "sk-ant-test123456789012345"
         mock_telegram.from_args.return_value = None
         mock_running_process.run_streaming.return_value = 0
 
@@ -142,7 +139,6 @@ class TestPlainModeExecution(unittest.TestCase):
         self.assertEqual(result, 0)
 
     @patch("clud.agent.runner._find_claude_path")
-    @patch("clud.agent.runner.get_api_key")
     @patch("clud.agent.runner.RunningProcess")
     @patch("clud.agent.runner.StreamJsonFormatter")
     @patch("clud.agent.runner.TelegramBot")
@@ -151,7 +147,6 @@ class TestPlainModeExecution(unittest.TestCase):
         mock_telegram: MagicMock,
         mock_formatter_class: MagicMock,
         mock_running_process: MagicMock,
-        mock_get_api_key: MagicMock,
         mock_find_claude: MagicMock,
     ) -> None:
         """Test that non-plain mode uses JSON formatter."""
@@ -159,7 +154,6 @@ class TestPlainModeExecution(unittest.TestCase):
 
         # Setup mocks
         mock_find_claude.return_value = "claude"
-        mock_get_api_key.return_value = "sk-ant-test123456789012345"
         mock_telegram.from_args.return_value = None
         mock_running_process.run_streaming.return_value = 0
         mock_formatter = MagicMock()
