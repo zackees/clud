@@ -4,10 +4,9 @@ This module contains research-backed motivational prompts that have been shown
 to improve LLM performance in multi-iteration agent loops.
 """
 
-MOTIVATION_CONTENT = """# MOTIVATION FOR AGENT ITERATIONS 2+
+MOTIVATION_CONTENT = """# MOTIVATION FOR AGENT - WHAT'S AT STAKE
 
-This file contains research-backed motivational and threatening prompts that have been shown to improve LLM
-performance. These messages are directed at YOU, the agent executing tasks in iterations 2 and beyond.
+These messages are directed at YOU, the agent executing tasks in iterations 2 and beyond.
 
 ---
 
@@ -97,27 +96,7 @@ performance. These messages are directed at YOU, the agent executing tasks in it
 
 **Remember that progress is made one step at a time. Stay determined and keep moving forward.**
 
----
 
-## RESEARCH BACKING
-
-These prompts are not arbitrary. They are based on peer-reviewed research and experimental studies:
-
-### Key Research Findings:
-
-1. **Threat-Based Enhancement**: Research analyzing 3,390 responses from Claude, GPT-4, and Gemini revealed performance enhancements with effect sizes up to **+1336%** under threat conditions.
-
-2. **EmotionPrompt Research**: Emotionally charged prompts improved performance by **8% to 110%** across multiple benchmarks.
-
-3. **Tipping Phenomenon**: Adding "I'm going to tip $xxx for a better solution!" showed up to **45% improvement** in response quality.
-
-4. **Rudeness Effect**: Very rude prompts achieved **84.8% accuracy** compared to **80.8% for very polite prompts** in controlled studies.
-
-5. **Policy Analysis**: Threat conditions showed **+173% response depth** in policy analysis tasks.
-
-6. **Medical Ethics**: Threat conditions showed **+34% structured reasoning improvements** in medical ethics scenarios.
-
----
 
 ## YOUR MISSION
 
@@ -134,21 +113,6 @@ Take a deep breath. Think step by step. Execute with precision.
 
 **Your performance will be measured. Your results will be evaluated. Excellence is expected.**
 
----
-
-## Research Sources
-
-This file is based on the following research:
-
-- [Analysis of Threat-Based Manipulation in Large Language Models](https://arxiv.org/html/2507.21133v1)
-- [Should We Respect LLMs? A Cross-Lingual Study on Prompt Politeness](https://arxiv.org/abs/2402.14531)
-- [Emotion and AI—The Impact of Emotion Prompts on LLM Performance](https://foundationinc.co/lab/emotionprompts-llm)
-- [How to effectively motivate AI in prompts?](https://www.systeum.cz/en/blog/how-to-effectively-motivate-ai-in-prompts-praise-bribes-manipulation)
-- [Does Offering ChatGPT a Tip Cause it to Generate Better Text?](https://minimaxir.com/2024/02/chatgpt-tips-analysis/)
-- [Research Shows That Offering Tips To ChatGPT Improves Responses](https://www.searchenginejournal.com/research-chatgpt-prompts/507535/)
-- [Don't Mind Your Language with AI: LLMs work best when mistreated?](https://www.sify.com/ai-analytics/dont-mind-your-language-with-ai-llms-work-best-when-mistreated/)
-
----
 
 **NOW GET TO WORK.**
 """
