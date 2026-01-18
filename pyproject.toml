@@ -20,24 +20,12 @@ dependencies = [
     "running-process>=1.0.7",
     "nodeenv>=1.8.0",
     "nodejs-wheel>=22.0.0",
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.32.0",
-    "markdown2>=2.4.0",
-    "websockets>=12.0",
-    # Cluster control plane dependencies
-    "sqlalchemy>=2.0.0",
-    "aiosqlite>=0.19.0",
-    "alembic>=1.12.0",
-    "pydantic>=2.5.0",
-    "pydantic-settings>=2.1.0",
-    "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
-    "python-multipart>=0.0.6",
     "psutil>=5.9.0",
-    "python-telegram-bot>=20.0",
     "codeup>=1.0.22",
     "pyyaml>=6.0.0",
     "croniter>=1.4.0",
+    "playwright>=1.40.0",
+    "websockets>=10.0",
 ]
 version = "1.1.0"
 
@@ -59,15 +47,11 @@ posix = [
 ]
 full = [
     "zcmds_win32>=1.2.0; sys_platform == 'win32'",
-    # "clud-cluster>=0.1.0",  # Temporarily commented for Phase 1 development
 ]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
-
-[tool.setuptools.package-data]
-"clud.webui" = ["static/**/*", "frontend/build/**/*"]
 
 [tool.ruff]
 line-length = 200
@@ -76,7 +60,6 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "ANN"]
 ignore = [
-    "B008",  # Allow function calls in argument defaults (FastAPI Depends pattern)
     "ANN401",  # Allow typing.Any when necessary (e.g., __exit__ parameters)
 ]
 fixable = ["ALL"]
@@ -102,7 +85,6 @@ addopts = "--durations=0"
 include = ["src", "tests"]
 exclude = [
     "**/__pycache__",
-    "**/node_modules/**",
 ]
 
 # Type checking configuration
@@ -183,4 +165,3 @@ functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
-clud-cluster = "clud.cluster.cli:main"

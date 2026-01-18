@@ -1,8 +1,11 @@
-"""Messaging module for Claude agent notifications via Telegram."""
+"""Messaging module for Claude agent notifications.
+
+This module provides a protocol for messaging implementations.
+Note: Telegram messaging has been removed. This module remains as a
+placeholder for potential future messaging implementations.
+"""
 
 from typing import Protocol
-
-from .telegram import TelegramMessenger
 
 
 class AgentMessenger(Protocol):
@@ -60,5 +63,4 @@ class AgentMessenger(Protocol):
 
 __all__ = [
     "AgentMessenger",
-    "TelegramMessenger",
 ]

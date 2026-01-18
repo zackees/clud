@@ -141,129 +141,36 @@ clud --task task.md               # Open task file and execute autonomously
 - Continues until completion, needs feedback, or reaches 50 iterations
 - Provides final summary with status (SUCCESS, NEED FEEDBACK, or NOT DONE)
 
-### Kanban Board
+### Multi-Terminal Daemon
 
-Launch an interactive kanban board for task management:
-
-```bash
-clud --kanban                     # Launch vibe-kanban board
-```
-
-### Web UI
-
-Launch a browser-based interface for Claude Code with real-time streaming:
+Launch a Playwright browser with 8 interactive terminals in a grid layout:
 
 ```bash
-clud --webui                      # Launch Web UI on port 8888 (auto-opens browser)
-clud --webui 3000                 # Launch on custom port 3000
+clud --daemon                     # Launch 8-terminal daemon
+clud -d                           # Short alias
 ```
 
 **Features:**
-- Real-time streaming chat interface with Claude Code
-- **Integrated terminal console** with split-pane layout and xterm.js
-  - Multiple terminals with tabbed interface
-  - Full shell access with ANSI color support
-  - Cross-platform (Windows git-bash/cmd, Unix/Linux bash/zsh)
-  - Adjustable resize handle between chat and terminal panels
-- Project directory selection
-- Conversation history (last 10 messages loaded on startup)
-- Dark/light theme toggle
-- Mobile-responsive design
-- WebSocket-based streaming for instant responses
-- Runs in YOLO mode (no permission prompts)
-- Markdown rendering with code block syntax highlighting
+- 8 xterm.js terminals in a 2-column grid layout
+- All terminals start in your home directory
+- Full shell access with ANSI color support
+- Cross-platform (Windows git-bash, Unix/Linux bash/zsh)
+- Run `clud --loop` or `clud --cron` from any terminal
+- VS Code Dark+ color theme
+- Auto-resize on window resize
+- Clean shutdown when browser is closed
 
-**Architecture:**
-The Web UI is a FastAPI-based server that wraps Claude Code execution and provides a clean chat interface. It uses WebSocket for real-time streaming of Claude's responses and stores conversation history in browser localStorage. The integrated terminal uses PTY (pseudo-terminal) for full shell access with cross-platform support.
+**Use Case:**
+The daemon provides a convenient way to run multiple `clud` instances simultaneously, each in its own terminal. Perfect for parallel development workflows or monitoring multiple projects.
 
-**Security Note:** The Web UI includes full shell access through the integrated terminal. Only run on trusted localhost environments. Network deployment requires authentication and security hardening.
+### Hook System
 
-**Inspired by:** [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui) - Python/FastAPI implementation with minimal dependencies.
-
-### Advanced Telegram Integration
-
-Interact with Claude Code through Telegram with a synchronized web dashboard for monitoring conversations:
-
-```bash
-clud --telegram-server                    # Launch server on default port 8889
-clud --telegram-server 9000               # Launch on custom port
-clud --telegram-server --telegram-config telegram_config.yaml  # Use config file
-```
-
-**Features:**
-- **Telegram Bot Integration**: Send messages to your bot, get responses from Claude Code
-- **Real-time Web Dashboard**: Monitor all Telegram conversations in a web interface
-- **Multi-Session Support**: Handle multiple concurrent users with isolated sessions
-- **Message History**: Full conversation history synchronized between Telegram and web
-- **WebSocket Streaming**: Real-time updates with minimal latency
-- **SvelteKit Frontend**: Modern, responsive UI with dark/light theme support
-- **Session Management**: View active sessions, switch between users, monitor activity
-
-**Quick Setup:**
-1. Get a bot token from [@BotFather](https://t.me/BotFather) on Telegram
-2. Set your bot token: `export TELEGRAM_BOT_TOKEN="your_token_here"`
-3. Start the server: `clud --telegram-server`
-4. Message your bot on Telegram and watch responses appear on both Telegram and the web dashboard
-
-**Configuration:**
-- Environment variables: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEB_PORT`, `TELEGRAM_ALLOWED_USERS`
-- Configuration file: See `telegram_config.example.yaml` for all options
-- Example environment file: `.env.example`
-
-**Documentation:**
-- Full guide: [docs/telegram-integration.md](docs/telegram-integration.md)
-- API reference, troubleshooting, security considerations, and more
-
-**Architecture:**
-The integration uses a SessionManager to orchestrate message flow between Telegram, Claude Code instances (via InstancePool), and web clients (via WebSocket). Each Telegram user gets their own isolated session with persistent message history.
-
-### Hook System & Message Handler API
-
-Clud includes a sophisticated event-based architecture for intercepting and forwarding execution events to external systems:
+Clud includes an event-based architecture for intercepting execution events:
 
 **Hook System (`src/clud/hooks/`):**
 - Event-based interception: PRE_EXECUTION, POST_EXECUTION, OUTPUT_CHUNK, ERROR, AGENT_START, AGENT_STOP
-- Built-in handlers: TelegramHookHandler, WebhookHandler
+- Built-in handlers: WebhookHandler
 - Configuration via .clud files and environment variables
-
-**Message Handler API (`src/clud/api/`):**
-- Unified API for routing messages from multiple client types to clud instances
-- Instance pooling with session-based reuse and automatic cleanup
-- WebSocket streaming for real-time output
-- REST endpoints: `/api/message`, `/api/instances`, health checks
-- Supports concurrent sessions with configurable limits (default: 100 instances, 30-minute idle timeout)
-
-This architecture enables:
-- Telegram native clients can send messages to running clud instances with real-time output streaming
-- Web clients can interact via REST API with the same functionality
-- Multiple users can interact with separate clud instances simultaneously
-- Sessions persist across multiple messages in the same chat
-
-### Cluster Control Plane
-
-`clud` now includes a cluster control plane for monitoring and managing agents across your development environment:
-
-```bash
-clud-cluster serve                # Start cluster control plane (default port :8000)
-clud-cluster serve --host 0.0.0.0 --port 9000  # Custom host/port
-clud-cluster migrate              # Run database migrations
-clud-cluster bot                  # Run Telegram bot (requires bot extra)
-```
-
-**Features:**
-- Web-based UI for agent monitoring and management
-- Real-time WebSocket updates for agent status
-- JWT authentication for secure access
-- SQLite database for persistent storage
-- Telegram bot integration for notifications
-- RESTful API for programmatic access
-
-**Port Assignments:**
-- Background service: `:7565`
-- Cluster control plane: `:8000` (default, configurable)
-
-**Architecture:**
-The cluster control plane provides a unified interface for monitoring all `clud` agents running on your system. Agents register with the background service (`:7565`), which communicates with the cluster control plane to provide real-time status updates, metrics, and control capabilities.
 
 ## Command Reference
 
@@ -282,21 +189,9 @@ clud --task PATH                  # Process task file
 clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow
 clud --fix [URL]                  # Fix linting and tests
-clud --kanban                     # Launch kanban board
-clud --webui [PORT]               # Launch Web UI (default port: 8888)
-clud --telegram-server [PORT]     # Launch Telegram integration server (default port: 8889)
+clud --daemon                     # Launch 8-terminal daemon
+clud -d                           # Short alias for --daemon
 clud --help                       # Show help
-```
-
-### Cluster Control Plane Commands
-```bash
-clud-cluster serve                # Start cluster control plane
-clud-cluster serve --host HOST    # Specify host
-clud-cluster serve --port PORT    # Specify port
-clud-cluster serve --reload       # Enable auto-reload
-clud-cluster migrate              # Run database migrations
-clud-cluster bot                  # Run Telegram bot
-clud-cluster --help               # Show help
 ```
 
 ### Quick Mode Aliases
@@ -332,47 +227,30 @@ clud/
 │   ├── agent_cli.py      # Consolidated agent execution module
 │   ├── agent_args.py     # Unified argument parser
 │   ├── agent/            # Agent support subpackage
-│   │   ├── foreground.py      # [Legacy] Direct Claude Code execution
-│   │   ├── foreground_args.py # [Legacy] Argument parsing
-│   │   ├── completion.py      # Completion detection
-│   │   └── tracking.py        # Agent tracking
+│   │   ├── foreground.py      # Direct Claude Code execution
+│   │   ├── foreground_args.py # Argument parsing
+│   │   └── completion.py      # Completion detection
 │   ├── hooks/            # Hook system for event interception
 │   │   ├── __init__.py        # HookManager, HookEvent, HookContext
-│   │   ├── telegram.py        # TelegramHookHandler
 │   │   ├── webhook.py         # WebhookHandler
 │   │   └── config.py          # Configuration loading
-│   ├── api/              # Message Handler API
-│   │   ├── models.py          # Data models (MessageRequest, MessageResponse)
-│   │   ├── message_handler.py # Core routing logic
-│   │   ├── instance_manager.py # Instance lifecycle management
-│   │   └── server.py          # FastAPI server
-│   ├── webui/            # Web UI for browser-based interface
-│   │   ├── server.py          # FastAPI application
-│   │   ├── api.py             # Handler classes
-│   │   ├── pty_manager.py     # Cross-platform PTY session management
-│   │   ├── terminal_handler.py # WebSocket handler for terminal I/O
-│   │   └── static/            # HTML/CSS/JavaScript frontend (xterm.js)
-│   ├── service/          # Background service (formerly daemon)
-│   │   ├── server.py          # HTTP server on :7565
-│   │   ├── registry.py        # Agent registry
-│   │   ├── models.py          # Shared models
-│   │   └── central_client.py  # Connects to central
-│   ├── central/          # Cluster control plane
-│   │   ├── app.py            # FastAPI application
-│   │   ├── cli.py            # Central CLI entry point
-│   │   ├── auth.py           # JWT authentication
-│   │   ├── database.py       # SQLAlchemy models
-│   │   ├── telegram_bot.py   # Telegram integration
-│   │   ├── websocket_handlers.py # WebSocket protocol
-│   │   └── static/           # Built React UI
+│   ├── daemon/           # Multi-terminal daemon (Playwright)
+│   │   ├── __init__.py        # Daemon proxy class
+│   │   ├── playwright_daemon.py  # Main daemon orchestrator
+│   │   ├── server.py          # HTTP + WebSocket server
+│   │   ├── terminal_manager.py   # PTY session management
+│   │   ├── html_template.py   # xterm.js grid template
+│   │   └── cli_handler.py     # CLI handler for --daemon
+│   ├── cron/             # Cron scheduler
+│   │   ├── __init__.py        # Cron proxy class
+│   │   ├── daemon.py          # Background daemon
+│   │   └── ...
 │   ├── task.py           # Task management system
 │   └── ...
-├── packages/web/         # React frontend source
 ├── tests/                # Unit and integration tests
-│   ├── test_hooks.py          # Hook system tests (17 test methods)
-│   ├── test_api_models.py     # API models tests (25 test methods)
-│   ├── test_message_handler.py # Message handler tests (13 test methods)
-│   ├── test_instance_manager.py # Instance manager tests (23 test methods)
+│   ├── test_daemon.py         # Daemon unit tests (33 test methods)
+│   ├── integration/           # E2E tests
+│   │   └── test_daemon_e2e.py # Daemon E2E tests
 │   └── ...
 ├── pyproject.toml        # Package configuration
 └── ...
@@ -422,10 +300,9 @@ uv run pyright
 
 ## Entry Points
 
-The package provides two CLI entry points:
+The package provides a single CLI entry point:
 
 - `clud` - Main CLI (runs Claude Code in YOLO mode)
-- `clud-cluster` - Cluster control plane for monitoring and managing agents
 
 ## Cool Projects
 

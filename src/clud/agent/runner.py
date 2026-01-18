@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 from ..hooks import HookContext, HookEvent
 from ..json_formatter import StreamJsonFormatter, create_formatter_callback
 from ..output_filter import OutputFilter
-from ..telegram_bot import TelegramBot
 from .claude_finder import _find_claude_path
 from .command_builder import (
     _build_claude_command,
@@ -30,7 +29,6 @@ from .command_builder import (
     _wrap_command_for_git_bash,
 )
 from .completion import detect_agent_completion
-from .config import load_telegram_credentials
 from .hooks import register_hooks_from_config, trigger_hook_sync
 from .loop_executor import _run_loop
 from .subprocess import _execute_command
@@ -69,21 +67,6 @@ def run_agent(args: "Args") -> int:
 
     # Register hooks early (before any execution)
     register_hooks_from_config(hook_debug=args.hook_debug)
-
-    # Load telegram credentials from saved config if not already provided
-    if args.telegram and (not args.telegram_bot_token or not args.telegram_chat_id):
-        saved_token, saved_chat_id = load_telegram_credentials()
-        if not args.telegram_bot_token:
-            args.telegram_bot_token = saved_token
-        if not args.telegram_chat_id:
-            args.telegram_chat_id = saved_chat_id
-
-    # Initialize Telegram bot if enabled
-    telegram_bot = TelegramBot.from_args(args)
-
-    # Send invitation if telegram bot is available
-    if telegram_bot:
-        telegram_bot.send_invitation(project_path=Path.cwd(), mode="foreground")
 
     try:
         # Handle dry-run mode early (before API key check)
@@ -389,10 +372,6 @@ def run_agent(args: "Args") -> int:
         return 1
 
     finally:
-        # Send cleanup notification if telegram bot is available
-        if telegram_bot:
-            telegram_bot.send_cleanup()
-
         # Trigger AGENT_STOP hook in finally block
         trigger_hook_sync(
             HookEvent.AGENT_STOP,

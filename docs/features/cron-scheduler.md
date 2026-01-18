@@ -812,5 +812,4 @@ clud --cron start
 ## Related Documentation
 
 - [Pipe Mode](pipe-mode.md)
-- [Web UI](webui.md)
 - [Development Setup](../development/setup.md)

@@ -18,9 +18,6 @@ class HookConfig:
 
     Attributes:
         enabled: Whether hooks are enabled
-        telegram_enabled: Whether Telegram hooks are enabled
-        telegram_bot_token: Telegram bot API token
-        telegram_chat_id: Default Telegram chat ID for hooks
         webhook_enabled: Whether webhook hooks are enabled
         webhook_url: URL to send webhook notifications
         webhook_secret: Secret for webhook authentication
@@ -29,9 +26,6 @@ class HookConfig:
     """
 
     enabled: bool = False
-    telegram_enabled: bool = False
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
     webhook_enabled: bool = False
     webhook_url: str = ""
     webhook_secret: str = ""
@@ -47,12 +41,6 @@ class HookConfig:
         errors: list[str] = []
 
         if self.enabled:
-            if self.telegram_enabled:
-                if not self.telegram_bot_token:
-                    errors.append("Telegram hook enabled but telegram_bot_token not provided")
-                if not self.telegram_chat_id:
-                    errors.append("Telegram hook enabled but telegram_chat_id not provided")
-
             if self.webhook_enabled and not self.webhook_url:
                 errors.append("Webhook hook enabled but webhook_url not provided")
 
@@ -174,9 +162,6 @@ def _load_from_env(config: HookConfig) -> None:
     """
     env_mapping = {
         "CLUD_HOOKS_ENABLED": "enabled",
-        "CLUD_HOOKS_TELEGRAM_ENABLED": "telegram_enabled",
-        "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
-        "TELEGRAM_CHAT_ID": "telegram_chat_id",
         "CLUD_HOOKS_WEBHOOK_ENABLED": "webhook_enabled",
         "CLUD_HOOKS_WEBHOOK_URL": "webhook_url",
         "CLUD_HOOKS_WEBHOOK_SECRET": "webhook_secret",
@@ -201,9 +186,6 @@ def _set_config_value(config: HookConfig, key: str, value: str) -> None:
     # Map common key variations
     key_mapping = {
         "hooks_enabled": "enabled",
-        "telegram.enabled": "telegram_enabled",
-        "telegram.bot_token": "telegram_bot_token",
-        "telegram.chat_id": "telegram_chat_id",
         "webhook.enabled": "webhook_enabled",
         "webhook.url": "webhook_url",
         "webhook.secret": "webhook_secret",

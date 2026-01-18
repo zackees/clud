@@ -2,7 +2,6 @@
 """Unified argument parsing for clud CLI and agent execution."""
 
 import argparse
-import contextlib
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -28,27 +27,15 @@ class Args:
     fix: bool = False
     fix_url: str | None = None
     up_publish: bool = False  # For 'clud up -p' or 'clud up --publish'
-    kanban: bool = False
-    telegram_web: bool = False  # For --telegram/-tg (web app mode)
-    telegram_token: str | None = None  # Token for telegram web app
-    telegram_server: bool = False  # For --telegram-server (advanced integration)
-    telegram_server_port: int | None = None  # Port for telegram server
-    telegram_server_config: str | None = None  # Path to telegram config file
-    code: bool = False
-    code_port: int | None = None
-    webui: bool = False
-    webui_port: int | None = None
-    api_server: bool = False  # For --api-server (REST API mode)
-    api_port: int | None = None  # Port for API server
     init_loop: bool = False
     install_claude: bool = False
     info: bool = False
     help: bool = False
-    track: bool = False
     hook_debug: bool = False  # For --hook-debug (verbose hook logging)
     cron: bool = False  # For --cron (cron scheduler)
     cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
     cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
+    daemon: bool = False  # For --daemon (multi-terminal daemon)
     # Agent-level arguments (execution)
     prompt: str | None = None
     message: str | None = None
@@ -61,9 +48,6 @@ class Args:
     loop_value: str | None = None  # Raw value from --loop for flexible parsing
     loop_count_override: int | None = None  # Explicit override via --loop-count
     plain: bool = False  # For --plain (disable JSON formatting, enable raw text I/O)
-    telegram: bool = False  # For --telegram (notification mode)
-    telegram_bot_token: str | None = None
-    telegram_chat_id: str | None = None
     claude_args: list[str] | None = None
 
 
@@ -80,26 +64,22 @@ def parse_args(args: list[str] | None = None) -> Args:
     lint = "--lint" in args_copy
     test = "--test" in args_copy
     fix = "--fix" in args_copy
-    kanban = "--kanban" in args_copy
-    telegram_web = "--telegram" in args_copy or "-tg" in args_copy
-    telegram_server = "--telegram-server" in args_copy
-    code = "--code" in args_copy
-    webui = "--webui" in args_copy or "--ui" in args_copy
-    api_server = "--api-server" in args_copy
     init_loop = "--init-loop" in args_copy
     install_claude = "--install-claude" in args_copy
     info = "--info" in args_copy
-    track = "--track" in args_copy
     hook_debug = "--hook-debug" in args_copy
     cron = "--cron" in args_copy
-
-    # Remove --track from args_copy since it's handled by router
-    if "--track" in args_copy:
-        args_copy.remove("--track")
+    daemon = "--daemon" in args_copy or "-d" in args_copy
 
     # Remove --hook-debug from args_copy since it's handled by router
     if "--hook-debug" in args_copy:
         args_copy.remove("--hook-debug")
+
+    # Remove --daemon or -d from args_copy since it's handled by router
+    if "--daemon" in args_copy:
+        args_copy.remove("--daemon")
+    if "-d" in args_copy:
+        args_copy.remove("-d")
 
     # Extract cron subcommand and arguments if present
     cron_subcommand = None
@@ -123,79 +103,6 @@ def parse_args(args: list[str] | None = None) -> Args:
         # Check if there's a URL argument after --fix
         if fix_idx + 1 < len(args_copy) and not args_copy[fix_idx + 1].startswith("-"):
             fix_url = args_copy[fix_idx + 1]
-
-    # Extract code port argument if present
-    code_port = None
-    if "--code" in args_copy:
-        code_idx = args_copy.index("--code")
-        # Check if there's a port argument after --code
-        if code_idx + 1 < len(args_copy) and not args_copy[code_idx + 1].startswith("-"):
-            with contextlib.suppress(ValueError):
-                code_port = int(args_copy[code_idx + 1])
-
-    # Extract webui port argument if present
-    webui_port = None
-    if "--webui" in args_copy:
-        webui_idx = args_copy.index("--webui")
-        # Check if there's a port argument after --webui
-        if webui_idx + 1 < len(args_copy) and not args_copy[webui_idx + 1].startswith("-"):
-            with contextlib.suppress(ValueError):
-                webui_port = int(args_copy[webui_idx + 1])
-    elif "--ui" in args_copy:
-        ui_idx = args_copy.index("--ui")
-        # Check if there's a port argument after --ui
-        if ui_idx + 1 < len(args_copy) and not args_copy[ui_idx + 1].startswith("-"):
-            with contextlib.suppress(ValueError):
-                webui_port = int(args_copy[ui_idx + 1])
-
-    # Extract api port argument if present
-    api_port = None
-    if "--api-server" in args_copy:
-        api_idx = args_copy.index("--api-server")
-        # Check if there's a port argument after --api-server
-        if api_idx + 1 < len(args_copy) and not args_copy[api_idx + 1].startswith("-"):
-            with contextlib.suppress(ValueError):
-                api_port = int(args_copy[api_idx + 1])
-
-    # Extract telegram server port and config arguments if present
-    telegram_server_port = None
-    telegram_server_config = None
-    if "--telegram-server" in args_copy:
-        tg_server_idx = args_copy.index("--telegram-server")
-        # Check for optional port argument
-        if tg_server_idx + 1 < len(args_copy) and not args_copy[tg_server_idx + 1].startswith("-"):
-            with contextlib.suppress(ValueError):
-                telegram_server_port = int(args_copy[tg_server_idx + 1])
-        # Check for --telegram-config flag
-        if "--telegram-config" in args_copy:
-            tg_config_idx = args_copy.index("--telegram-config")
-            if tg_config_idx + 1 < len(args_copy) and not args_copy[tg_config_idx + 1].startswith("-"):
-                telegram_server_config = args_copy[tg_config_idx + 1]
-
-    # Extract telegram token argument if present
-    telegram_token = None
-    if "--telegram" in args_copy:
-        telegram_idx = args_copy.index("--telegram")
-        # Check if there's a token argument after --telegram
-        if telegram_idx + 1 < len(args_copy) and not args_copy[telegram_idx + 1].startswith("-"):
-            telegram_token = args_copy[telegram_idx + 1]
-            # Remove both the flag and its value
-            args_copy.pop(telegram_idx)  # Remove flag
-            args_copy.pop(telegram_idx)  # Remove value (now at same index)
-        else:
-            # No token argument, just remove the flag
-            args_copy.pop(telegram_idx)
-    elif "-tg" in args_copy:
-        tg_idx = args_copy.index("-tg")
-        # Check if there's a token argument after -tg
-        if tg_idx + 1 < len(args_copy) and not args_copy[tg_idx + 1].startswith("-"):
-            telegram_token = args_copy[tg_idx + 1]
-            # Remove both the flag and its value
-            args_copy.pop(tg_idx)  # Remove flag
-            args_copy.pop(tg_idx)  # Remove value (now at same index)
-        else:
-            # No token argument, just remove the flag
-            args_copy.pop(tg_idx)
 
     # Only intercept help if no mode is specified
     help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up"])
@@ -310,49 +217,15 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Override the default loop iteration count (default: 50)",
     )
 
-    # Telegram notifications (different from --telegram web app)
-    parser.add_argument(
-        "--telegram-notify",
-        action="store_true",
-        dest="telegram_notify",
-        help="Enable Telegram notifications during agent execution",
-    )
-
-    parser.add_argument(
-        "--telegram-bot-token",
-        type=str,
-        help="Telegram bot token (or use TELEGRAM_BOT_TOKEN env var)",
-    )
-
-    parser.add_argument(
-        "--telegram-chat-id",
-        type=str,
-        help="Telegram chat ID to send messages to (or use TELEGRAM_CHAT_ID env var)",
-    )
-
     parser.add_argument(
         "--plain",
         action="store_true",
         dest="plain",
-        help="Disable JSON formatting and use raw text I/O (for web/telegram integration)",
+        help="Disable JSON formatting and use raw text I/O",
     )
 
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args_copy)
-
-    # Get Telegram credentials with fallback priority:
-    # 1. Command-line args
-    # 2. Environment variables
-    # 3. Saved config file (loaded lazily in agent.py to avoid circular import)
-    import os
-
-    telegram_bot_token = known_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = known_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-
-    # Note: Saved credentials will be loaded in agent.py if needed
-    # (avoiding circular import by not importing load_telegram_credentials here)
-
-    telegram_enabled = known_args.telegram_notify or bool(telegram_bot_token) or bool(telegram_chat_id)
 
     return Args(
         # Router-level
@@ -363,27 +236,15 @@ def parse_args(args: list[str] | None = None) -> Args:
         fix=fix,
         fix_url=fix_url,
         up_publish=up_publish,
-        kanban=kanban,
-        telegram_web=telegram_web,
-        telegram_token=telegram_token,
-        telegram_server=telegram_server,
-        telegram_server_port=telegram_server_port,
-        telegram_server_config=telegram_server_config,
-        code=code,
-        code_port=code_port,
-        webui=webui,
-        webui_port=webui_port,
-        api_server=api_server,
-        api_port=api_port,
         init_loop=init_loop,
         install_claude=install_claude,
         info=info,
         help=help_requested,
-        track=track,
         hook_debug=hook_debug,
         cron=cron,
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,
+        daemon=daemon,
         # Agent-level
         prompt=known_args.prompt,
         message=known_args.message,
@@ -396,8 +257,5 @@ def parse_args(args: list[str] | None = None) -> Args:
         loop_value=known_args.loop_value,
         loop_count_override=known_args.loop_count_override,
         plain=known_args.plain,
-        telegram=telegram_enabled,
-        telegram_bot_token=telegram_bot_token,
-        telegram_chat_id=telegram_chat_id,
         claude_args=unknown_args,
     )

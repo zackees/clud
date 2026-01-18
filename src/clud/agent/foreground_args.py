@@ -19,9 +19,6 @@ class Args:
     loop_count: int | None
     loop_value: str | None  # Raw value from --loop for flexible parsing
     loop_count_override: int | None  # Explicit override via --loop-count
-    telegram: bool
-    telegram_bot_token: str | None
-    telegram_chat_id: str | None
     claude_args: list[str]
 
 
@@ -100,48 +97,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Override the default loop iteration count (default: 50)",
     )
 
-    # Telegram notifications
-    parser.add_argument(
-        "--telegram",
-        action="store_true",
-        help="Enable Telegram notifications",
-    )
-
-    parser.add_argument(
-        "--telegram-bot-token",
-        type=str,
-        help="Telegram bot token (or use TELEGRAM_BOT_TOKEN env var)",
-    )
-
-    parser.add_argument(
-        "--telegram-chat-id",
-        type=str,
-        help="Telegram chat ID to send messages to (or use TELEGRAM_CHAT_ID env var)",
-    )
-
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args)
-
-    # Get Telegram credentials with fallback priority:
-    # 1. Command-line args
-    # 2. Environment variables
-    # 3. Saved config file
-    import os
-
-    from .config import load_telegram_credentials
-
-    telegram_bot_token = known_args.telegram_bot_token or os.environ.get("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id = known_args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-
-    # Load from saved config if not found in args/env
-    if not telegram_bot_token or not telegram_chat_id:
-        saved_token, saved_chat_id = load_telegram_credentials()
-        if not telegram_bot_token:
-            telegram_bot_token = saved_token
-        if not telegram_chat_id:
-            telegram_chat_id = saved_chat_id
-
-    telegram_enabled = known_args.telegram or bool(telegram_bot_token) or bool(telegram_chat_id)
 
     return Args(
         prompt=known_args.prompt,
@@ -154,8 +111,5 @@ def parse_args(args: list[str] | None = None) -> Args:
         loop_count=None,  # Will be parsed from loop_value in agent_foreground.py
         loop_value=known_args.loop_value,
         loop_count_override=known_args.loop_count_override,
-        telegram=telegram_enabled,
-        telegram_bot_token=telegram_bot_token,
-        telegram_chat_id=telegram_chat_id,
         claude_args=unknown_args,
     )

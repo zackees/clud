@@ -1,7 +1,7 @@
 """Hook system integration for agent operations.
 
 This module provides utilities for registering and triggering hooks from the agent.
-Hooks allow external systems (Telegram, webhooks, etc.) to receive agent events.
+Hooks allow external systems (webhooks, etc.) to receive agent events.
 """
 
 import sys
@@ -30,20 +30,6 @@ def register_hooks_from_config(hook_debug: bool = False) -> None:
             return
 
         hook_manager = get_hook_manager()
-
-        # Register Telegram hook if enabled
-        if config.telegram_enabled and config.telegram_bot_token and config.telegram_chat_id:
-            # Lazy import to avoid loading telegram/fastapi unless actually needed
-            from clud.hooks.telegram import TelegramHookHandler
-
-            telegram_handler = TelegramHookHandler(
-                bot_token=config.telegram_bot_token,
-                buffer_size=config.buffer_size,
-                flush_interval=config.flush_interval,
-            )
-            hook_manager.register(telegram_handler)
-            if hook_debug:
-                print("DEBUG: Registered Telegram hook (will use session_id as chat_id)", file=sys.stderr)
 
         # Register webhook hook if enabled
         if config.webhook_enabled and config.webhook_url:

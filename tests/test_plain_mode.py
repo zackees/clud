@@ -105,10 +105,8 @@ class TestPlainModeExecution(unittest.TestCase):
 
     @patch("clud.agent.runner._find_claude_path")
     @patch("clud.agent.runner.RunningProcess")
-    @patch("clud.agent.runner.TelegramBot")
     def test_plain_mode_uses_raw_streaming(
         self,
-        mock_telegram: MagicMock,
         mock_running_process: MagicMock,
         mock_find_claude: MagicMock,
     ) -> None:
@@ -117,7 +115,6 @@ class TestPlainModeExecution(unittest.TestCase):
 
         # Setup mocks
         mock_find_claude.return_value = "claude"
-        mock_telegram.from_args.return_value = None
         mock_running_process.run_streaming.return_value = 0
 
         args = Args(
@@ -141,10 +138,8 @@ class TestPlainModeExecution(unittest.TestCase):
     @patch("clud.agent.runner._find_claude_path")
     @patch("clud.agent.runner.RunningProcess")
     @patch("clud.agent.runner.StreamJsonFormatter")
-    @patch("clud.agent.runner.TelegramBot")
     def test_non_plain_mode_uses_json_formatter(
         self,
-        mock_telegram: MagicMock,
         mock_formatter_class: MagicMock,
         mock_running_process: MagicMock,
         mock_find_claude: MagicMock,
@@ -154,7 +149,6 @@ class TestPlainModeExecution(unittest.TestCase):
 
         # Setup mocks
         mock_find_claude.return_value = "claude"
-        mock_telegram.from_args.return_value = None
         mock_running_process.run_streaming.return_value = 0
         mock_formatter = MagicMock()
         mock_formatter_class.return_value = mock_formatter
@@ -193,14 +187,6 @@ class TestPlainModeIntegration(unittest.TestCase):
         self.assertEqual(args.prompt, "hello")
         self.assertTrue(args.continue_flag)
         self.assertEqual(args.mode, AgentMode.DEFAULT)
-
-    def test_plain_mode_with_telegram_flags(self) -> None:
-        """Test plain mode with telegram notification flags."""
-        args = parse_args(["--plain", "-p", "test", "--telegram-notify"])
-
-        self.assertTrue(args.plain)
-        self.assertEqual(args.prompt, "test")
-        self.assertTrue(args.telegram)
 
     def test_dry_run_with_plain(self) -> None:
         """Test dry-run shows correct command with --plain."""

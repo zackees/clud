@@ -26,14 +26,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **[Pipe Mode](docs/features/pipe-mode.md)** - Unix-style I/O piping support
 - **[Cron Scheduler](docs/features/cron-scheduler.md)** - Automated task scheduling
-- **[Web UI](docs/features/webui.md)** - Browser-based interface
-- **[Terminal Console](docs/features/terminal.md)** - Integrated terminal in Web UI
 - **[Backlog Tab](docs/features/backlog.md)** - Task visualization from Backlog.md
+- **Multi-Terminal Daemon** (`--daemon`) - 8 xterm.js terminals in a Playwright browser
 
 ### Integration Features
 
 - **[Hooks & Message Handler API](docs/features/hooks.md)** - Event-based architecture
-- **[Telegram Bot API](docs/features/telegram-api.md)** - Telegram integration and testing
 
 ## Code Quality Standards (Summary)
 
@@ -155,8 +153,8 @@ When `clud` launches Claude Code, it automatically sets the following environmen
 - **httpx** - HTTP client for API calls
 - **pywinpty** - Windows terminal support (Windows only)
 - **running-process** - Process execution utilities
-- **fastapi** - Web framework for APIs
-- **python-telegram-bot** - Telegram bot integration
+- **playwright** - Multi-terminal daemon browser automation
+- **websockets** - WebSocket support for terminal connections
 
 ## Development Workflow
 
@@ -177,9 +175,6 @@ When `clud` launches Claude Code, it automatically sets the following environmen
 
 ## Related Resources
 
-- **Existing Documentation**:
-  - `docs/telegram-integration.md` - Telegram integration details
-  - `docs/telegram-webapp-design.md` - Telegram webapp design
 - **Example Cron Tasks**:
   - `examples/cron/daily-backup.md`
   - `examples/cron/hourly-report.md`
