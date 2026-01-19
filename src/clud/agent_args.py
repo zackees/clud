@@ -36,6 +36,7 @@ class Args:
     cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
     cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
     daemon: bool = False  # For --daemon (multi-terminal daemon)
+    num_terminals: int = 8  # Number of terminals for --daemon (default 8)
     # Agent-level arguments (execution)
     prompt: str | None = None
     message: str | None = None
@@ -80,6 +81,18 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("--daemon")
     if "-d" in args_copy:
         args_copy.remove("-d")
+
+    # Extract --num-terminals argument if present (for --daemon)
+    num_terminals = 8  # Default value
+    if "--num-terminals" in args_copy:
+        nt_idx = args_copy.index("--num-terminals")
+        args_copy.pop(nt_idx)  # Remove --num-terminals flag
+        if nt_idx < len(args_copy) and not args_copy[nt_idx].startswith("-"):
+            try:
+                num_terminals = int(args_copy[nt_idx])
+                args_copy.pop(nt_idx)  # Remove the value
+            except ValueError:
+                pass  # Keep default if value is not a valid integer
 
     # Extract cron subcommand and arguments if present
     cron_subcommand = None
@@ -245,6 +258,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,
         daemon=daemon,
+        num_terminals=num_terminals,
         # Agent-level
         prompt=known_args.prompt,
         message=known_args.message,

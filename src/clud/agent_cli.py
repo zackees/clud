@@ -59,6 +59,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --cron <subcommand>  Schedule recurring tasks (use 'clud --cron help' for details)")
             print("  --daemon, -d         Launch multi-terminal daemon with Playwright browser")
+            print("  --num-terminals N    Number of terminals for daemon mode (default: 8)")
             print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  -h, --help           Show this help")
@@ -92,7 +93,7 @@ def main(args_list: list[str] | None = None) -> int:
             return handle_cron_command(args.cron_subcommand, args.cron_args)
 
         if args.daemon:
-            return handle_daemon_command()
+            return handle_daemon_command(args.num_terminals)
 
         # Route to appropriate mode handler
         if args.mode == AgentMode.FIX:
