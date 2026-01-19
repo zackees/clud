@@ -141,17 +141,17 @@ clud --task task.md               # Open task file and execute autonomously
 - Continues until completion, needs feedback, or reaches 50 iterations
 - Provides final summary with status (SUCCESS, NEED FEEDBACK, or NOT DONE)
 
-### Multi-Terminal Daemon
+### Multi-Terminal UI
 
-Launch a Playwright browser with 8 interactive terminals in a grid layout:
+Launch a Playwright browser with 4 interactive terminals in a grid layout:
 
 ```bash
-clud --daemon                     # Launch 8-terminal daemon
+clud --ui                         # Launch 4-terminal UI
 clud -d                           # Short alias
 ```
 
 **Features:**
-- 8 xterm.js terminals in a 2-column grid layout
+- 4 xterm.js terminals in a 2-column grid layout
 - All terminals start in your home directory
 - Full shell access with ANSI color support
 - Cross-platform (Windows git-bash, Unix/Linux bash/zsh)
@@ -189,8 +189,8 @@ clud --task PATH                  # Process task file
 clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow
 clud --fix [URL]                  # Fix linting and tests
-clud --daemon                     # Launch 8-terminal daemon
-clud -d                           # Short alias for --daemon
+clud --ui                         # Launch 4-terminal UI
+clud -d                           # Short alias for --ui
 clud --help                       # Show help
 ```
 
@@ -240,7 +240,7 @@ clud/
 │   │   ├── server.py          # HTTP + WebSocket server
 │   │   ├── terminal_manager.py   # PTY session management
 │   │   ├── html_template.py   # xterm.js grid template
-│   │   └── cli_handler.py     # CLI handler for --daemon
+│   │   └── cli_handler.py     # CLI handler for --ui
 │   ├── cron/             # Cron scheduler
 │   │   ├── __init__.py        # Cron proxy class
 │   │   ├── daemon.py          # Background daemon

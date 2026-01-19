@@ -27,7 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **[Pipe Mode](docs/features/pipe-mode.md)** - Unix-style I/O piping support
 - **[Cron Scheduler](docs/features/cron-scheduler.md)** - Automated task scheduling
 - **[Backlog Tab](docs/features/backlog.md)** - Task visualization from Backlog.md
-- **Multi-Terminal Daemon** (`--daemon`) - 8 xterm.js terminals in a Playwright browser
+- **Multi-Terminal UI** (`--ui`) - 4 xterm.js terminals in a Playwright browser
 
 ### Integration Features
 

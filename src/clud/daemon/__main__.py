@@ -1,6 +1,6 @@
-"""Entry point for running the multi-terminal daemon as a module (python -m clud.daemon).
+"""Entry point for running the multi-terminal UI as a module (python -m clud.daemon).
 
-This module is invoked when the daemon is spawned as a separate process.
+This module is invoked when the UI is spawned as a separate process via `clud --ui`.
 Signal handlers are set up here to handle Ctrl+C gracefully without propagating
 to the parent process.
 """
@@ -108,7 +108,7 @@ def main() -> None:
     # Parse arguments
     parser = argparse.ArgumentParser(description="Multi-terminal daemon")
     parser.add_argument("command", choices=["run"], help="Command to run")
-    parser.add_argument("--num-terminals", type=int, default=8, help="Number of terminals")
+    parser.add_argument("--num-terminals", type=int, default=4, help="Number of terminals")
     parser.add_argument("--port", type=int, default=None, help="Port to use")
     args = parser.parse_args()
 

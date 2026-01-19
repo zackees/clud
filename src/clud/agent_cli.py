@@ -58,8 +58,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --cron <subcommand>  Schedule recurring tasks (use 'clud --cron help' for details)")
-            print("  --daemon, -d         Launch multi-terminal daemon with Playwright browser")
-            print("  --num-terminals N    Number of terminals for daemon mode (default: 8)")
+            print("  --ui, -d             Launch multi-terminal UI with Playwright browser (4 terminals)")
             print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  -h, --help           Show this help")
@@ -92,7 +91,7 @@ def main(args_list: list[str] | None = None) -> int:
         if args.cron:
             return handle_cron_command(args.cron_subcommand, args.cron_args)
 
-        if args.daemon:
+        if args.ui:
             return handle_daemon_command(args.num_terminals)
 
         # Route to appropriate mode handler

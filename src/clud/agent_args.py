@@ -35,8 +35,8 @@ class Args:
     cron: bool = False  # For --cron (cron scheduler)
     cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
     cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
-    daemon: bool = False  # For --daemon (multi-terminal daemon)
-    num_terminals: int = 8  # Number of terminals for --daemon (default 8)
+    ui: bool = False  # For --ui (multi-terminal UI with Playwright browser)
+    num_terminals: int = 4  # Number of terminals for --ui (default 4)
     # Agent-level arguments (execution)
     prompt: str | None = None
     message: str | None = None
@@ -70,29 +70,20 @@ def parse_args(args: list[str] | None = None) -> Args:
     info = "--info" in args_copy
     hook_debug = "--hook-debug" in args_copy
     cron = "--cron" in args_copy
-    daemon = "--daemon" in args_copy or "-d" in args_copy
+    ui = "--ui" in args_copy or "-d" in args_copy
 
     # Remove --hook-debug from args_copy since it's handled by router
     if "--hook-debug" in args_copy:
         args_copy.remove("--hook-debug")
 
-    # Remove --daemon or -d from args_copy since it's handled by router
-    if "--daemon" in args_copy:
-        args_copy.remove("--daemon")
+    # Remove --ui or -d from args_copy since it's handled by router
+    if "--ui" in args_copy:
+        args_copy.remove("--ui")
     if "-d" in args_copy:
         args_copy.remove("-d")
 
-    # Extract --num-terminals argument if present (for --daemon)
-    num_terminals = 8  # Default value
-    if "--num-terminals" in args_copy:
-        nt_idx = args_copy.index("--num-terminals")
-        args_copy.pop(nt_idx)  # Remove --num-terminals flag
-        if nt_idx < len(args_copy) and not args_copy[nt_idx].startswith("-"):
-            try:
-                num_terminals = int(args_copy[nt_idx])
-                args_copy.pop(nt_idx)  # Remove the value
-            except ValueError:
-                pass  # Keep default if value is not a valid integer
+    # Default number of terminals for --ui (4 terminals)
+    num_terminals = 4
 
     # Extract cron subcommand and arguments if present
     cron_subcommand = None
@@ -257,7 +248,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         cron=cron,
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,
-        daemon=daemon,
+        ui=ui,
         num_terminals=num_terminals,
         # Agent-level
         prompt=known_args.prompt,

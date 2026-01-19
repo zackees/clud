@@ -1,10 +1,10 @@
-"""CLI handler for the multi-terminal daemon command.
+"""CLI handler for the multi-terminal UI command.
 
-This module provides the command handler for `clud --daemon`, which launches
+This module provides the command handler for `clud --ui`, which launches
 a Playwright browser with multiple xterm.js terminals in a grid layout.
 
-The daemon runs in its own process space with its own signal handlers,
-ensuring Ctrl+C in the client does not propagate to the daemon.
+The UI runs in its own process space with its own signal handlers,
+ensuring Ctrl+C in the client does not propagate to the UI process.
 """
 
 from __future__ import annotations
@@ -24,21 +24,21 @@ _PID_FILE = Path.home() / ".clud" / "daemon.pid"
 _LOG_FILE = Path.home() / ".clud" / "logs" / "daemon.log"
 
 
-def handle_daemon_command(num_terminals: int = 8) -> int:
-    """Handle the --daemon command to launch multi-terminal UI.
+def handle_daemon_command(num_terminals: int = 4) -> int:
+    """Handle the --ui command to launch multi-terminal UI.
 
-    Spawns the daemon as a separate process with its own signal handlers.
-    The client monitors the daemon and exits when it stops.
+    Spawns the UI as a separate process with its own signal handlers.
+    The client monitors the UI process and exits when it stops.
 
     Args:
-        num_terminals: Number of terminals to create (default 8)
+        num_terminals: Number of terminals to create (default 4)
 
     Returns:
         Exit code (0 for success, non-zero for error)
     """
     home_dir = Path.home()
 
-    print("Starting CLUD multi-terminal daemon...")
+    print("Starting CLUD multi-terminal UI...")
     print(f"  {num_terminals} terminals will open in Playwright browser")
     print(f"  All terminals start in: {home_dir}")
     print()

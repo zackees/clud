@@ -25,7 +25,7 @@ src/clud/              Main package source code
 │   ├── server.py          HTTP + WebSocket server
 │   ├── terminal_manager.py   PTY session management
 │   ├── html_template.py   xterm.js grid template
-│   └── cli_handler.py     CLI handler for --daemon
+│   └── cli_handler.py     CLI handler for --ui
 ├── cron/              Cron scheduler
 │   ├── __init__.py        Cron proxy class
 │   ├── daemon.py          Background daemon
@@ -105,7 +105,7 @@ Event-based architecture for intercepting and forwarding execution events to ext
 
 ### Multi-Terminal Daemon (`src/clud/daemon/`)
 
-Playwright-based daemon providing 8 interactive terminals in a browser window.
+Playwright-based UI providing 4 interactive terminals in a browser window.
 
 **Components**:
 
@@ -143,7 +143,7 @@ Playwright-based daemon providing 8 interactive terminals in a browser window.
    - Async runner for event loop
 
 **Features**:
-- 8 xterm.js terminals in a flex grid
+- 4 xterm.js terminals in a flex grid
 - All terminals start in home directory
 - Full shell access (git-bash on Windows, bash/zsh on Unix)
 - WebSocket-based I/O streaming
