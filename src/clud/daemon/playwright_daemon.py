@@ -135,11 +135,24 @@ class PlaywrightDaemon:
         """Get the DaemonServer instance."""
         return self._server
 
-    async def start(self) -> DaemonInfo:
+    def is_closed(self) -> bool:
+        """Check if the browser has been closed.
+
+        Returns:
+            True if browser is closed or not started, False otherwise
+        """
+        if self._closed_event is None:
+            return True
+        return self._closed_event.is_set()
+
+    async def start(self, port: int | None = None) -> DaemonInfo:
         """Start the multi-terminal daemon with Playwright browser.
 
         Launches the HTTP/WebSocket server and opens a Chromium browser
         window displaying the terminal grid.
+
+        Args:
+            port: Optional specific port to use for HTTP server
 
         Returns:
             DaemonInfo with daemon process details
@@ -160,7 +173,7 @@ class PlaywrightDaemon:
         try:
             # Start the server first
             self._server = DaemonServer(num_terminals=self.num_terminals)
-            http_port, ws_port = await self._server.start()
+            http_port, ws_port = await self._server.start(port=port)
             self._port = http_port
 
             logger.info("Server started on HTTP port %d, WS port %d", http_port, ws_port)

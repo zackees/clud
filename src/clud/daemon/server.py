@@ -156,8 +156,11 @@ class DaemonServer:
                 continue
         raise RuntimeError(f"No free port found in range {start}-{end}")
 
-    async def start(self) -> tuple[int, int]:
+    async def start(self, port: int | None = None) -> tuple[int, int]:
         """Start the HTTP and WebSocket servers.
+
+        Args:
+            port: Optional specific port to use for HTTP server
 
         Returns:
             Tuple of (http_port, ws_port)
@@ -171,7 +174,7 @@ class DaemonServer:
 
         try:
             # Find free ports (use sequential ports for easier debugging)
-            self.http_port = self.find_free_port(8000, 9000)
+            self.http_port = port if port else self.find_free_port(8000, 9000)
             self.ws_port = self.find_free_port(self.http_port + 1, 9100)
 
             # Start terminal manager
@@ -288,7 +291,8 @@ class DaemonServer:
             self._http_server.shutdown()
             self._http_server = None
             if self._http_thread is not None:
-                self._http_thread.join(timeout=5.0)
+                # Short timeout - thread is daemon=True so it won't block exit
+                self._http_thread.join(timeout=0.5)
                 self._http_thread = None
             logger.debug("HTTP server stopped")
 
