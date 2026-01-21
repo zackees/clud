@@ -332,6 +332,10 @@ The package provides a single CLI entry point:
 - **Claude Task Runner**: Manages context isolation and focused task execution
 - **Backlog.md**: Tool for managing project collaboration between humans and AI agents in a git ecosystem - turns any folder with a Git repo into a self-contained project board using plain Markdown files with zero-config CLI
 
+## TODO / Roadmap
+
+- [ ] **Skills.sh Integration** - Integrate https://skills.sh/ functionality into clud
+
 ## License
 
 BSD 3-Clause License
