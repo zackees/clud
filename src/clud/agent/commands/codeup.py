@@ -7,7 +7,7 @@ from clud.agent.subprocess import run_clud_subprocess
 from clud.agent.task_manager import _print_red_banner
 
 
-def handle_codeup_command() -> int:
+def handle_codeup_command(commit_message: str | None = None) -> int:
     """Handle the --codeup command by running git pre-check first, then clud with a message to run the global codeup command."""
     # Check for agent task artifacts first
     if not _check_agent_artifacts():
@@ -26,9 +26,14 @@ def handle_codeup_command() -> int:
     except Exception as e:
         print(f"Warning: Error running git pre-check: {e}", file=sys.stderr)
 
+    # Build the codeup command with optional message
+    codeup_cmd = "codeup"
+    if commit_message:
+        codeup_cmd = f'codeup -m "{commit_message}"'
+
     # Now run the agent with the codeup prompt
     codeup_prompt = (
-        "run the global command codeup normally through the shell (it's a global command installed on the system), "
+        f"run the global command {codeup_cmd} normally through the shell (it's a global command installed on the system), "
         "wait for the tests to complete if necessary (sometimes tests take a long time with clud up), "
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."
@@ -36,7 +41,7 @@ def handle_codeup_command() -> int:
     return run_clud_subprocess(codeup_prompt, use_print_flag=True)
 
 
-def handle_codeup_publish_command() -> int:
+def handle_codeup_publish_command(commit_message: str | None = None) -> int:
     """Handle the --codeup-publish command by running git pre-check first, then clud with a message to run codeup -p."""
     # Check for agent task artifacts first
     if not _check_agent_artifacts():
@@ -55,9 +60,14 @@ def handle_codeup_publish_command() -> int:
     except Exception as e:
         print(f"Warning: Error running git pre-check: {e}", file=sys.stderr)
 
+    # Build the codeup command with optional message and publish flag
+    codeup_cmd = "codeup -p"
+    if commit_message:
+        codeup_cmd = f'codeup -m "{commit_message}" -p'
+
     # Now run the agent with the codeup -p prompt
     codeup_publish_prompt = (
-        "run the global command codeup -p normally through the shell (it's a global command installed on the system), "
+        f"run the global command {codeup_cmd} normally through the shell (it's a global command installed on the system), "
         "wait for the tests to complete if necessary (sometimes tests take a long time with clud up), "
         "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
         "Run upto 5 times before giving up, else halt."

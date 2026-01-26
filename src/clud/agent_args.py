@@ -27,6 +27,7 @@ class Args:
     fix: bool = False
     fix_url: str | None = None
     up_publish: bool = False  # For 'clud up -p' or 'clud up --publish'
+    up_message: str | None = None  # For 'clud up -m "message"'
     init_loop: bool = False
     install_claude: bool = False
     info: bool = False
@@ -128,6 +129,7 @@ def parse_args(args: list[str] | None = None) -> Args:
 
     # Check for mode: only fix and up are special modes now
     up_publish = False
+    up_message = None
     if args_copy and args_copy[0] in ["fix", "up"]:
         mode_str = args_copy[0]
         if mode_str == "fix":
@@ -142,6 +144,15 @@ def parse_args(args: list[str] | None = None) -> Args:
                     args_copy.remove("-p")
                 if "--publish" in args_copy:
                     args_copy.remove("--publish")
+            # Check for -m or --message flag after 'up'
+            if "-m" in args_copy or "--message" in args_copy:
+                message_flag = "-m" if "-m" in args_copy else "--message"
+                message_idx = args_copy.index(message_flag)
+                if message_idx + 1 < len(args_copy):
+                    up_message = args_copy[message_idx + 1]
+                    # Remove both the flag and its value from args_copy
+                    args_copy.pop(message_idx)  # Remove flag
+                    args_copy.pop(message_idx)  # Remove value (now at same index)
         args_copy = args_copy[1:]  # Remove the positional arg
 
     # Parse agent-level arguments using argparse
@@ -240,6 +251,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         fix=fix,
         fix_url=fix_url,
         up_publish=up_publish,
+        up_message=up_message,
         init_loop=init_loop,
         install_claude=install_claude,
         info=info,

@@ -48,8 +48,8 @@ def main(args_list: list[str] | None = None) -> int:
             print("  cat file | clud | less     Chain pipes for input and output")
             print()
             print("Special modes:")
-            print("  fix [URL]            Fix linting and test issues (with optional GitHub URL)")
-            print("  up [-p|--publish]    Run global codeup command with auto-fix")
+            print("  fix [URL]                      Fix linting and test issues (with optional GitHub URL)")
+            print("  up [-m MSG] [-p|--publish]     Run global codeup command with auto-fix")
             print()
             print("Special commands:")
             print("  --task PATH          Open task file in editor")
@@ -100,9 +100,9 @@ def main(args_list: list[str] | None = None) -> int:
         elif args.mode == AgentMode.UP:
             # Check if publish flag was provided
             if args.up_publish:
-                return handle_codeup_publish_command()
+                return handle_codeup_publish_command(args.up_message)
             else:
-                return handle_codeup_command()
+                return handle_codeup_command(args.up_message)
         else:
             # Default mode - run foreground agent
             return run_agent(args)
