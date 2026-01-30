@@ -55,6 +55,7 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
             "If you start a background task, you MUST wait for it to complete before finishing this iteration. "
             "Wait up to 1 hour for processes making progress, or kill processes after 15 minutes if no progress is being made."
         )
+        parts.append("IMPORTANT! DO NOT KILL ALL PYTHON PROCESSES DURING YOUR WORK!! YOU WILL KILL THIS AGENT LOOP! IF YOU MUST KILL A PROCESS THEN DO IT SELECTIVELY ON ONE PROCESS AT A TIME.")
         parts.append("IMPORTANT: Maximize parallel execution - run as many independent operations in parallel as possible to improve efficiency.")
 
         injection = " ".join(parts)
