@@ -72,6 +72,46 @@ def run_agent(args: "Args") -> int:
         # Handle dry-run mode early (before API key check)
         # Dry-run mode doesn't need API key since it only prints the command
         if args.dry_run:
+            # Handle loop mode dry-run
+            if args.loop_value is not None:
+                loop_count = args.loop_count_override if args.loop_count_override is not None else 50
+
+                # Determine the loop message based on loop_value type
+                working_file_path = ".loop/LOOP.md"  # Default
+                if args.loop_value == "":
+                    loop_prompt = "<would prompt for message>"
+                elif args.loop_value.endswith(".md") or Path(args.loop_value).exists():
+                    original_filename = Path(args.loop_value).name
+                    working_file_path = f".loop/{original_filename}"
+                    loop_prompt = (
+                        f"Read {working_file_path} and do the next task. "
+                        f"You are free to update {working_file_path} with information critical "
+                        f"for the next agent and future agents as this task is worked on."
+                    )
+                else:
+                    working_file_path = ".loop/LOOP.md"
+                    loop_prompt = (
+                        f"Read {working_file_path} and do the next task. "
+                        f"You are free to update {working_file_path} with information critical "
+                        f"for the next agent and future agents as this task is worked on."
+                    )
+
+                print(f"Loop mode: {loop_count} iterations")
+                print(f"Working file: {working_file_path if args.loop_value else '.loop/LOOP.md'}")
+                if args.loop_value and not args.loop_value.endswith(".md") and not Path(args.loop_value).exists():
+                    print("String prompt will be written to: .loop/LOOP.md")
+                    print(f"Original prompt: {args.loop_value}")
+                print(f"Loop prompt: {loop_prompt}")
+                print()
+                cmd_parts = ["claude", "--dangerously-skip-permissions", "-p", f'"{loop_prompt}"']
+                if not args.plain:
+                    cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
+                if args.claude_args:
+                    cmd_parts.extend(args.claude_args)
+                print("Would execute:", " ".join(cmd_parts))
+                return 0
+
+            # Handle regular (non-loop) dry-run
             cmd_parts = ["claude", "--dangerously-skip-permissions"]
             if args.continue_flag:
                 cmd_parts.append("--continue")
@@ -93,6 +133,8 @@ def run_agent(args: "Args") -> int:
             result = subprocess.run(args.cmd, shell=True)
             return result.returncode
 
+        # Set environment variable to indicate we're running inside clud
+        os.environ["IN_CLUD"] = "1"
         # Set max output tokens for Claude
         os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
         # Disable Claude git author attribution
@@ -150,8 +192,14 @@ def run_agent(args: "Args") -> int:
                         f"for the next agent and future agents as this task is worked on."
                     )
                 else:
-                    # Not a file path, treat as regular message
-                    loop_message = args.loop_value
+                    # Not a file path - will write to .loop/LOOP.md in loop_executor
+                    # Use same template message as file paths for consistency
+                    working_file_path = ".loop/LOOP.md"
+                    loop_message = (
+                        f"Read {working_file_path} and do the next task. "
+                        f"You are free to update {working_file_path} with information critical "
+                        f"for the next agent and future agents as this task is worked on."
+                    )
 
             # Prompt for missing values
             # Check if we have a message from loop_value, -m, or -p

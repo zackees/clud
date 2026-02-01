@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from .command_builder import (
     _build_claude_command,
     _get_model_from_args,
+    _inject_completion_prompt,
     _print_debug_info,
     _print_model_message,
     _wrap_command_for_git_bash,
@@ -175,6 +176,19 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                         # If copy fails, we can't proceed with loop mode
                         print(f"Error: Failed to create working copy of {loop_file_path}: {e}", file=sys.stderr)
                         return 1
+            else:
+                # String prompt (not a file) - write to .loop/LOOP.md
+                working_loop_file = loop_dir / "LOOP.md"
+
+                # Write the string prompt to .loop/LOOP.md (only if doesn't exist yet)
+                # This normalizes string prompts to behave like file paths
+                if not working_loop_file.exists():
+                    try:
+                        working_loop_file.write_text(args.loop_value, encoding="utf-8")
+                    except Exception as e:
+                        # If write fails, we can't proceed with loop mode
+                        print(f"Error: Failed to write prompt to {working_loop_file}: {e}", file=sys.stderr)
+                        return 1
 
     # Initialize loop logger for appending all output to log.txt
     log_file = loop_dir / "log.txt"
@@ -232,15 +246,22 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             task_info.start_iteration(iteration_num)
             task_info.save(info_file)
 
-            # Print the user's prompt for this iteration
+            # Build the full prompt with injection for display
             user_prompt = args.prompt if args.prompt else args.message
+            working_file_str = str(working_loop_file) if working_loop_file else None
             if user_prompt:
-                logger.print_stderr(f"Prompt: {user_prompt}")
+                # Get the full injected prompt that Claude will actually receive
+                full_prompt = _inject_completion_prompt(
+                    user_prompt,
+                    iteration=iteration_num,
+                    total_iterations=loop_count,
+                    working_file=working_file_str,
+                )
+                logger.print_stderr(f"Prompt: {full_prompt}")
                 logger.print_stderr()  # Empty line for spacing
 
             # Build command with prompt injection, including iteration context
             # Pass the working file path so injected instructions reference the correct file
-            working_file_str = str(working_loop_file) if working_loop_file else None
             cmd = _build_claude_command(
                 args,
                 claude_path,
