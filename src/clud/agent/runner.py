@@ -139,6 +139,11 @@ def run_agent(args: "Args") -> int:
         os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
         # Disable Claude git author attribution
         os.environ["CLAUDE_GIT_AUTHOR"] = "0"
+        # Disable MSYS/git-bash automatic path conversion
+        # This prevents URLs like https://github.com/... from being converted to
+        # Windows paths like https;\\github.com\... when running through git-bash
+        os.environ["MSYS_NO_PATHCONV"] = "1"
+        os.environ["MSYS2_ARG_CONV_EXCL"] = "*"
 
         # No validation needed - if no input is provided and stdin is a tty,
         # Claude Code will launch in interactive mode

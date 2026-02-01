@@ -100,6 +100,42 @@ class TestWrapCommandForGitBash(unittest.TestCase):
         # Single quotes should be escaped as '\''
         self.assertIn("'It'\\''s a test with '\\''quotes'\\'''", cmd_str)
 
+    def test_urls_in_prompt_preserved(self) -> None:
+        """Test that URLs in prompts are NOT converted to Windows paths.
+
+        This tests the MSYS path conversion issue where:
+        - /gh-debug -> C:\\Program Files\\Git\\gh-debug
+        - https://github.com/... -> https;\\\\github.com\\...
+
+        The fix is to set MSYS_NO_PATHCONV=1 in the environment.
+        """
+        # This prompt contains a URL that should NOT be path-converted
+        prompt = "/gh-debug https://github.com/FastLED/FastLED/actions/runs/123"
+        cmd = [
+            r"C:\Users\user\.clud\npm\node_modules\.bin\claude.cmd",
+            "--dangerously-skip-permissions",
+            "-p",
+            prompt,
+        ]
+        git_bash_path = r"C:\Program Files\Git\bin\bash.exe"
+
+        with (
+            patch("clud.agent.command_builder.platform.system", return_value="Windows"),
+            patch("clud.agent.command_builder.detect_git_bash", return_value=git_bash_path),
+        ):
+            result = _wrap_command_for_git_bash(cmd)
+
+        cmd_str = result[2]
+
+        # Verify the URL is preserved with forward slashes (not converted to backslashes)
+        # The prompt should contain the original URL structure
+        self.assertIn("https://github.com/FastLED/FastLED/actions/runs/123", cmd_str)
+        self.assertIn("/gh-debug", cmd_str)
+
+        # Verify the URL was NOT converted to Windows path format
+        self.assertNotIn("https;\\\\", cmd_str)  # MSYS converts :// to ;\\
+        self.assertNotIn("github.com\\", cmd_str)  # Forward slashes should remain
+
 
 if __name__ == "__main__":
     unittest.main()
