@@ -264,6 +264,18 @@ class CludLoopTUI(App[None]):
         help_label = self.query_one("#menu_help", Label)
         help_label.update(help_text)
 
+    def on_click(self, event: events.Click) -> None:
+        """Handle mouse click events.
+
+        Right-click copies any selected/highlighted text to the clipboard.
+        """
+        if event.button == 3:
+            selected_text = self.screen.get_selected_text()
+            if selected_text:
+                self.copy_to_clipboard(selected_text)
+                self.screen.clear_selection()
+                self.notify("Copied to clipboard")
+
     def on_key(self, event: events.Key) -> None:
         """Handle keyboard events."""
         if event.key in ("left", "up"):
