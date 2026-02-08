@@ -59,6 +59,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --cron <subcommand>  Schedule recurring tasks (use 'clud --cron help' for details)")
             print("  --ui, -d             Launch multi-terminal UI with Playwright browser (4 terminals)")
+            print("  --tui                Launch Textual TUI for loop mode (requires --loop)")
             print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  -h, --help           Show this help")

@@ -65,6 +65,11 @@ def run_agent(args: "Args") -> int:
         except Exception as e:
             logger.warning(f"Failed to read from stdin: {e}")
 
+    # Validate --tui requires --loop
+    if args.tui and args.loop_value is None:
+        print("Error: --tui requires --loop", file=sys.stderr)
+        return 2
+
     # Register hooks early (before any execution)
     register_hooks_from_config(hook_debug=args.hook_debug)
 
@@ -217,6 +222,11 @@ def run_agent(args: "Args") -> int:
             # Set the prompt if we got it from loop_value (uses -p instead of -m)
             if loop_message and not args.message and not args.prompt:
                 args.prompt = loop_message
+
+            if args.tui:
+                from ..loop_tui.integration import run_loop_with_tui
+
+                return run_loop_with_tui(args, claude_path, loop_count)
 
             return _run_loop(args, claude_path, loop_count)
 

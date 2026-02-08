@@ -27,12 +27,13 @@ def _handle_existing_loop(loop_dir: Path) -> tuple[bool, int]:
 
     # Scan for existing files
     iteration_files = sorted(loop_dir.glob("ITERATION_*.md"))
+    all_files = sorted(loop_dir.glob("*"))
 
     # Check for DONE.md at project root (new location)
     done_file_root = Path("DONE.md")
 
-    # If directory is empty and no root DONE.md, treat as fresh start
-    if not iteration_files and not done_file_root.exists():
+    # If directory is truly empty and no root DONE.md, treat as fresh start
+    if not all_files and not done_file_root.exists():
         return True, 1
 
     # Display warning
@@ -40,6 +41,13 @@ def _handle_existing_loop(loop_dir: Path) -> tuple[bool, int]:
     print("Contains:", file=sys.stderr)
 
     for file in iteration_files:
+        mtime = file.stat().st_mtime
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+        print(f"  - {file.name} ({timestamp})", file=sys.stderr)
+
+    # Show other files (non-iteration)
+    other_files = [f for f in all_files if f not in iteration_files and f.is_file()]
+    for file in other_files:
         mtime = file.stat().st_mtime
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
         print(f"  - {file.name} ({timestamp})", file=sys.stderr)

@@ -37,6 +37,7 @@ class Args:
     cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
     cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
     ui: bool = False  # For --ui (multi-terminal UI with Playwright browser)
+    tui: bool = False  # For --tui (Textual TUI for loop mode)
     num_terminals: int = 4  # Number of terminals for --ui (default 4)
     # Agent-level arguments (execution)
     prompt: str | None = None
@@ -72,6 +73,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     hook_debug = "--hook-debug" in args_copy
     cron = "--cron" in args_copy
     ui = "--ui" in args_copy or "-d" in args_copy
+    tui = "--tui" in args_copy
 
     # Remove --hook-debug from args_copy since it's handled by router
     if "--hook-debug" in args_copy:
@@ -82,6 +84,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("--ui")
     if "-d" in args_copy:
         args_copy.remove("-d")
+    if "--tui" in args_copy:
+        args_copy.remove("--tui")
 
     # Default number of terminals for --ui (4 terminals)
     num_terminals = 4
@@ -261,6 +265,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,
         ui=ui,
+        tui=tui,
         num_terminals=num_terminals,
         # Agent-level
         prompt=known_args.prompt,
