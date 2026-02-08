@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from clud.loop_tui.app import CludLoopTUI
+from textual.app import App
+
+from clud.loop_tui.app import CludLoopTUI, SelectableRichLog
 
 
 class TestLoopTUI(unittest.TestCase):
@@ -1524,6 +1526,221 @@ class TestLoopAutoTUI(unittest.TestCase):
 
                 # Verify split screen layout
                 _assert_split_screen_layout(self, app)
+
+        asyncio.run(run_test())
+
+
+class TestClipboardAndSelection(unittest.TestCase):
+    """Test cases for clipboard copy and text selection features."""
+
+    # --- Platform dispatch (sync) ---
+
+    @patch("clud.loop_tui.app.subprocess.run")
+    @patch("clud.loop_tui.app.sys")
+    def test_copy_to_clipboard_win32(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
+        """copy_to_clipboard uses clip.exe on Windows."""
+        mock_sys.platform = "win32"
+        app = CludLoopTUI()
+        app.copy_to_clipboard("hello")
+        mock_run.assert_called_once_with(
+            ["clip.exe"],
+            input=b"hello",
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+    @patch("clud.loop_tui.app.subprocess.run")
+    @patch("clud.loop_tui.app.sys")
+    def test_copy_to_clipboard_darwin(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
+        """copy_to_clipboard uses pbcopy on macOS."""
+        mock_sys.platform = "darwin"
+        app = CludLoopTUI()
+        app.copy_to_clipboard("hello")
+        mock_run.assert_called_once_with(
+            ["pbcopy"],
+            input=b"hello",
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+    @patch("clud.loop_tui.app.subprocess.run")
+    @patch("clud.loop_tui.app.sys")
+    def test_copy_to_clipboard_linux(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
+        """copy_to_clipboard uses xclip on Linux."""
+        mock_sys.platform = "linux"
+        app = CludLoopTUI()
+        app.copy_to_clipboard("hello")
+        mock_run.assert_called_once_with(
+            ["xclip", "-selection", "clipboard"],
+            input=b"hello",
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+
+    # --- Fallback ---
+
+    @patch("clud.loop_tui.app.subprocess.run", side_effect=FileNotFoundError("not found"))
+    @patch("clud.loop_tui.app.sys")
+    def test_copy_to_clipboard_fallback_on_failure(self, mock_sys: MagicMock, _mock_run: MagicMock) -> None:
+        """Falls back to App.copy_to_clipboard (OSC 52) when subprocess fails."""
+        mock_sys.platform = "linux"
+        tui = CludLoopTUI()
+        with patch.object(App, "copy_to_clipboard") as mock_super:
+            tui.copy_to_clipboard("hello")
+            mock_super.assert_called_once_with("hello")
+
+    # --- UTF-8 encoding ---
+
+    @patch("clud.loop_tui.app.subprocess.run")
+    @patch("clud.loop_tui.app.sys")
+    def test_copy_to_clipboard_encodes_utf8(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
+        """copy_to_clipboard encodes unicode text as UTF-8 bytes."""
+        mock_sys.platform = "win32"
+        app = CludLoopTUI()
+        text = "Hello \u2603 \u00e9\u00e8\u00ea"
+        app.copy_to_clipboard(text)
+        mock_run.assert_called_once()
+        actual_input = mock_run.call_args.kwargs["input"]
+        self.assertEqual(actual_input, text.encode("utf-8"))
+
+    # --- SelectableRichLog.get_selection ---
+
+    def test_get_selection_with_lines(self) -> None:
+        """get_selection extracts text from log lines via Selection.extract."""
+        import asyncio
+
+        from textual.selection import Selection
+
+        async def run_test() -> None:
+            app = CludLoopTUI()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.log_message("Line A")
+                app.log_message("Line B")
+                app.log_message("Line C")
+                await pilot.pause()
+
+                log = app.query_one(SelectableRichLog)
+                # Select everything
+                sel = Selection(start=None, end=None)
+                result = log.get_selection(sel)
+                self.assertIsNotNone(result)
+                assert result is not None
+                text, ending = result
+                self.assertEqual(ending, "\n")
+                # Should contain all logged lines (init message + 3 lines)
+                self.assertIn("Line A", text)
+                self.assertIn("Line B", text)
+                self.assertIn("Line C", text)
+
+        asyncio.run(run_test())
+
+    def test_get_selection_empty_log(self) -> None:
+        """get_selection returns None when log has no lines."""
+        log = SelectableRichLog()
+        sel = MagicMock()
+        result = log.get_selection(sel)
+        self.assertIsNone(result)
+
+    # --- _copy_all_output ---
+
+    def test_copy_all_output_with_content(self) -> None:
+        """_copy_all_output copies all log lines to clipboard."""
+        import asyncio
+
+        async def run_test() -> None:
+            app = CludLoopTUI()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.log_message("Output line 1")
+                app.log_message("Output line 2")
+                await pilot.pause()
+
+                with patch.object(app, "copy_to_clipboard") as mock_copy:
+                    app._copy_all_output()  # type: ignore[attr-defined]
+                    mock_copy.assert_called_once()
+                    copied_text = mock_copy.call_args[0][0]
+                    self.assertIn("Output line 1", copied_text)
+                    self.assertIn("Output line 2", copied_text)
+
+        asyncio.run(run_test())
+
+    def test_copy_all_output_empty_log(self) -> None:
+        """_copy_all_output notifies when log is empty and does not copy."""
+        import asyncio
+
+        async def run_test() -> None:
+            app = CludLoopTUI()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                # Clear all lines from the log
+                log = app.query_one(SelectableRichLog)
+                log.clear()  # type: ignore[attr-defined]
+                await pilot.pause()
+
+                with (
+                    patch.object(app, "copy_to_clipboard") as mock_copy,
+                    patch.object(app, "notify") as mock_notify,
+                ):
+                    app._copy_all_output()  # type: ignore[attr-defined]
+                    mock_copy.assert_not_called()
+                    mock_notify.assert_called_once_with("No output to copy")
+
+        asyncio.run(run_test())
+
+    # --- Ctrl+C integration ---
+
+    def test_ctrl_c_with_selected_text_copies_to_clipboard(self) -> None:
+        """Ctrl+C with selected text copies it to clipboard."""
+        import asyncio
+
+        from textual.screen import Screen
+
+        async def run_test() -> None:
+            app = CludLoopTUI()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.log_message("Some output text")
+                await pilot.pause()
+
+                with (
+                    patch.object(Screen, "get_selected_text", return_value="Some output text"),
+                    patch.object(app, "copy_to_clipboard") as mock_copy,
+                    patch.object(Screen, "clear_selection") as mock_clear,
+                ):
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+
+                    mock_copy.assert_called_with("Some output text")
+                    self.assertGreaterEqual(mock_copy.call_count, 1)
+                    mock_clear.assert_called()
+
+        asyncio.run(run_test())
+
+    def test_ctrl_c_without_selection_triggers_exit_warning(self) -> None:
+        """Ctrl+C without selection shows exit warning, does not copy."""
+        import asyncio
+
+        from textual.widgets import RichLog
+
+        async def run_test() -> None:
+            app = CludLoopTUI()
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                lines_before = len(app.query_one(RichLog).lines)
+
+                with patch.object(app, "copy_to_clipboard") as mock_copy:
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+
+                    mock_copy.assert_not_called()
+                    # Should have logged the exit warning
+                    log = app.query_one(RichLog)
+                    self.assertGreater(len(log.lines), lines_before)
 
         asyncio.run(run_test())
 

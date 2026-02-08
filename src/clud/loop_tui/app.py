@@ -1,26 +1,40 @@
 """Main TUI application for clud --loop mode."""
 
+import logging
 import os
 import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
+from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.selection import Selection
+from textual.strip import Strip
 from textual.widgets import Label, RichLog, Static
 
 
 class SelectableRichLog(RichLog):
     """RichLog subclass with proper text selection support.
 
-    The base RichLog uses the Line API for rendering, so its inherited
-    get_selection() cannot extract text (it calls _render() which returns
-    a Panel placeholder). This subclass overrides get_selection() to build
-    the full text from the stored Strip lines, enabling mouse-drag copy.
+    The base RichLog widget lacks mouse text selection because:
+    1. ``allow_select`` returns False (inherited container check)
+    2. ``render_line`` doesn't call ``apply_offsets`` (needed for mouse
+       coordinate mapping)
+    3. No selection highlighting is rendered
+
+    This subclass fixes all three so mouse-drag selection works.
     """
+
+    ALLOW_SELECT = True
+
+    @property
+    def allow_select(self) -> bool:
+        """Allow text selection regardless of container status."""
+        return True
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """Extract text from the log lines under the given selection.
@@ -36,6 +50,58 @@ class SelectableRichLog(RichLog):
         # Build full text from Strip objects stored in self.lines
         full_text = "\n".join(strip.text for strip in self.lines)
         return selection.extract(full_text), "\n"
+
+    def selection_updated(self, selection: Selection | None) -> None:
+        """Clear line cache and refresh when selection changes."""
+        self._line_cache.clear()
+        self.refresh()
+
+    def render_line(self, y: int) -> Strip:
+        """Render a line with offset metadata and selection highlighting."""
+        scroll_x, scroll_y = self.scroll_offset
+        actual_y = scroll_y + y
+        width = self.scrollable_content_region.width
+
+        if actual_y >= len(self.lines):
+            return Strip.blank(width, self.rich_style)
+
+        selection = self.text_selection
+
+        # Skip cache when selection is active (need to re-render highlights)
+        if selection is None:
+            key = (
+                actual_y + self._start_line,
+                scroll_x,
+                width,
+                self._widest_line_width,
+            )
+            if key in self._line_cache:
+                line = self._line_cache[key]
+                line = line.apply_offsets(scroll_x, actual_y)
+                return line.apply_style(self.rich_style)
+
+        line = self.lines[actual_y]
+
+        # Apply selection highlighting
+        if selection is not None:
+            span = selection.get_span(actual_y)
+            if span is not None:
+                start, end = span
+                line_text = line.text
+                if end == -1:
+                    end = len(line_text)
+                sel_style = self.screen.get_component_rich_style("screen--selection")
+                text_obj = Text(line_text, no_wrap=True)
+                text_obj.stylize(self.rich_style)
+                text_obj.stylize(sel_style, start, end)
+                console = self.app.console  # pyright: ignore[reportUnknownMemberType]
+                segments = list(text_obj.render(console))
+                line = Strip(segments)
+                line.adjust_cell_length(self._widest_line_width)
+
+        line = line.crop_extend(scroll_x, scroll_x + width, self.rich_style)
+        line = line.apply_offsets(scroll_x, actual_y)
+        return line.apply_style(self.rich_style)
 
 
 class CludLoopTUI(App[None]):
@@ -117,6 +183,35 @@ class CludLoopTUI(App[None]):
         self.on_edit_callback = on_edit
         self.update_file = update_file
         self._last_ctrl_c_time: float = 0.0
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy text to system clipboard using platform-specific tools.
+
+        Textual's built-in copy_to_clipboard() uses OSC 52 terminal escape
+        sequences which don't work in MSYS/Git Bash on Windows. This override
+        uses platform-native clipboard commands instead.
+
+        Args:
+            text: Text to copy to clipboard.
+        """
+        if sys.platform == "win32":
+            cmd = ["clip.exe"]
+        elif sys.platform == "darwin":
+            cmd = ["pbcopy"]
+        else:
+            cmd = ["xclip", "-selection", "clipboard"]
+
+        try:
+            subprocess.run(
+                cmd,
+                input=text.encode("utf-8"),
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            logging.debug("Platform clipboard command failed, falling back to OSC 52")
+            super().copy_to_clipboard(text)
 
     def compose(self) -> ComposeResult:
         """Create child widgets."""
