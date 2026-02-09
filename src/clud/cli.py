@@ -3,12 +3,31 @@
 import contextlib
 import os
 import sys
+from types import TracebackType
 
 from .agent_cli import main as agent_main
 
 
+def _silent_keyboard_interrupt_hook(
+    exc_type: type[BaseException] | None,
+    exc_value: BaseException | None,
+    exc_traceback: TracebackType | None,
+) -> None:
+    """Custom exception hook that silences KeyboardInterrupt stack traces."""
+    if exc_type is KeyboardInterrupt:
+        # Print a clean message instead of the full stack trace
+        print("\nCtrl-c pressed, exiting...", file=sys.stderr)
+        sys.exit(130)  # Standard exit code for SIGINT
+    elif exc_type is not None and exc_value is not None:
+        # For all other exceptions, use the default behavior
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
 def main(args: list[str] | None = None) -> int:
     """Main entry point - delegate to agent."""
+    # Install custom exception hook to silence KeyboardInterrupt stack traces
+    sys.excepthook = _silent_keyboard_interrupt_hook
+
     # On Windows, re-exec as 'python -m clud' to unlock the .exe file
     # This allows the package to be upgraded while clud is running
     if sys.platform == "win32" and not os.environ.get("CLUD_REEXEC_DONE"):
