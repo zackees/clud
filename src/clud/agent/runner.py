@@ -228,7 +228,14 @@ def run_agent(args: "Args") -> int:
 
                 return run_loop_with_tui(args, claude_path, loop_count)
 
-            return _run_loop(args, claude_path, loop_count)
+            # Wrap _run_loop with KeyboardInterrupt handler (matches TUI pattern)
+            # This ensures Ctrl-C is properly caught and handled at the top level
+            try:
+                return _run_loop(args, claude_path, loop_count)
+            except KeyboardInterrupt:
+                # Clean exit on Ctrl-C (cleanup already done in _run_loop)
+                print("\n⚠️  Loop interrupted by user. Session info saved to .loop/info.json", file=sys.stderr)
+                return 130
 
         # Build command
         cmd = _build_claude_command(args, claude_path)

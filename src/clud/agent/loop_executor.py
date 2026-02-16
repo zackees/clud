@@ -263,292 +263,292 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
     _print_loop_banner()
 
     # Start from determined iteration (may be > 1 if continuing previous session)
-    try:
-        with LoopLogger(log_file) as logger:
-            for i in range(start_iteration - 1, loop_count):
-                iteration_num = i + 1
-                logger.print_stderr(f"\n--- Iteration {iteration_num}/{loop_count} ---")
+    # No outer try-except needed - KeyboardInterrupt is handled in runner.py
+    with LoopLogger(log_file) as logger:
+        for i in range(start_iteration - 1, loop_count):
+            iteration_num = i + 1
+            logger.print_stderr(f"\n--- Iteration {iteration_num}/{loop_count} ---")
 
-                # Check if DONE.md was already validated in a previous iteration
-                done_validated_marker = loop_dir / "done_validated"
-                if done_validated_marker.exists():
-                    logger.print_stderr("✅ DONE.md was already validated. Halting immediately.")
+            # Check if DONE.md was already validated in a previous iteration
+            done_validated_marker = loop_dir / "done_validated"
+            if done_validated_marker.exists():
+                logger.print_stderr("✅ DONE.md was already validated. Halting immediately.")
 
-                    # Generate and display summary before opening
-                    logger.print_stderr("\n📝 Generating summary of completed work...")
-                    summary = _generate_done_summary(claude_path, args)
-                    if summary:
-                        logger.print_stderr("\n" + "=" * 80)
-                        logger.print_stderr("SUMMARY:")
-                        logger.print_stderr(summary)
-                        logger.print_stderr("=" * 80 + "\n")
+                # Generate and display summary before opening
+                logger.print_stderr("\n📝 Generating summary of completed work...")
+                summary = _generate_done_summary(claude_path, args)
+                if summary:
+                    logger.print_stderr("\n" + "=" * 80)
+                    logger.print_stderr("SUMMARY:")
+                    logger.print_stderr(summary)
+                    logger.print_stderr("=" * 80 + "\n")
 
-                    logger.print_stderr(f"Opening {done_file}...")
-                    _open_file_in_editor(done_file)
-                    return 0
+                logger.print_stderr(f"Opening {done_file}...")
+                _open_file_in_editor(done_file)
+                return 0
 
-                # Mark iteration start
-                task_info.start_iteration(iteration_num)
-                task_info.save(info_file)
+            # Mark iteration start
+            task_info.start_iteration(iteration_num)
+            task_info.save(info_file)
 
-                # Build the full prompt with injection for display
-                user_prompt = args.prompt if args.prompt else args.message
-                working_file_str = str(working_loop_file) if working_loop_file else None
-                if user_prompt:
-                    # Get the full injected prompt that Claude will actually receive
-                    full_prompt = _inject_completion_prompt(
-                        user_prompt,
-                        iteration=iteration_num,
-                        total_iterations=loop_count,
-                        working_file=working_file_str,
-                    )
-                    logger.print_stderr(f"Prompt: {full_prompt}")
-                    logger.print_stderr()  # Empty line for spacing
-
-                # Build command with prompt injection, including iteration context
-                # Pass the working file path so injected instructions reference the correct file
-                cmd = _build_claude_command(
-                    args,
-                    claude_path,
-                    inject_prompt=True,
+            # Build the full prompt with injection for display
+            user_prompt = args.prompt if args.prompt else args.message
+            working_file_str = str(working_loop_file) if working_loop_file else None
+            if user_prompt:
+                # Get the full injected prompt that Claude will actually receive
+                full_prompt = _inject_completion_prompt(
+                    user_prompt,
                     iteration=iteration_num,
                     total_iterations=loop_count,
                     working_file=working_file_str,
                 )
-                # Wrap command in git-bash on Windows if available
-                cmd = _wrap_command_for_git_bash(cmd)
+                logger.print_stderr(f"Prompt: {full_prompt}")
+                logger.print_stderr()  # Empty line for spacing
 
-                # Detect and print model message (for display only)
-                model_flag = _get_model_from_args(args.claude_args)
-                _print_model_message(model_flag)
+            # Build command with prompt injection, including iteration context
+            # Pass the working file path so injected instructions reference the correct file
+            cmd = _build_claude_command(
+                args,
+                claude_path,
+                inject_prompt=True,
+                iteration=iteration_num,
+                total_iterations=loop_count,
+                working_file=working_file_str,
+            )
+            # Wrap command in git-bash on Windows if available
+            cmd = _wrap_command_for_git_bash(cmd)
 
-                # Print debug info
-                _print_debug_info(claude_path, cmd, args.verbose)
+            # Detect and print model message (for display only)
+            model_flag = _get_model_from_args(args.claude_args)
+            _print_model_message(model_flag)
 
-                # Execute the command with streaming if prompt is present
-                try:
-                    if args.prompt:
-                        if args.plain:
-                            # Plain mode: no JSON formatting, just pass through output
-                            # TODO: Capture plain output to log file
-                            returncode = RunningProcess.run_streaming(cmd)
-                        else:
-                            # Create JSON formatter for beautiful output in loop mode
-                            formatter = StreamJsonFormatter(
-                                show_system=args.verbose,
-                                show_usage=True,
-                                show_cache=args.verbose,
-                                verbose=args.verbose,
-                            )
-                            stdout_callback = create_logging_formatter_callback(formatter, logger)
-                            returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+            # Print debug info
+            _print_debug_info(claude_path, cmd, args.verbose)
+
+            # Execute the command with streaming if prompt is present
+            try:
+                if args.prompt:
+                    if args.plain:
+                        # Plain mode: no JSON formatting, just pass through output
+                        # TODO: Capture plain output to log file
+                        returncode = RunningProcess.run_streaming(cmd)
                     else:
-                        returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
+                        # Create JSON formatter for beautiful output in loop mode
+                        formatter = StreamJsonFormatter(
+                            show_system=args.verbose,
+                            show_usage=True,
+                            show_cache=args.verbose,
+                            verbose=args.verbose,
+                        )
+                        stdout_callback = create_logging_formatter_callback(formatter, logger)
+                        returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+                else:
+                    returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
-                    # Check if subprocess exited due to interrupt
-                    if _is_interrupt_exit_code(returncode):
-                        _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, returncode)
-                        raise KeyboardInterrupt  # Re-raise to exit loop
+                # Check if subprocess exited due to interrupt
+                if _is_interrupt_exit_code(returncode):
+                    _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, returncode)
+                    raise KeyboardInterrupt  # Re-raise to exit loop
 
-                except KeyboardInterrupt:
-                    # User pressed Ctrl-C during execution
-                    _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
-                    raise  # MANDATORY: Always re-raise KeyboardInterrupt
+            except KeyboardInterrupt:
+                # User pressed Ctrl-C during execution
+                _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
+                raise  # MANDATORY: Always re-raise KeyboardInterrupt
 
-                # Mark iteration end
-                error_msg = f"Exit code: {returncode}" if returncode != 0 else None
-                task_info.end_iteration(returncode, error_msg)
-                task_info.save(info_file)
+            # Mark iteration end
+            error_msg = f"Exit code: {returncode}" if returncode != 0 else None
+            task_info.end_iteration(returncode, error_msg)
+            task_info.save(info_file)
 
-                if returncode != 0 and args.verbose:
-                    logger.print_stderr(f"Warning: Iteration {iteration_num} exited with code {returncode}")
+            if returncode != 0 and args.verbose:
+                logger.print_stderr(f"Warning: Iteration {iteration_num} exited with code {returncode}")
 
-                # Check if DONE.md was created (at project root)
-                # FSM State: DONE.md exists → enter validation/fix loop (never delete DONE.md)
-                if done_file.exists():
-                    # Validate that lint and test pass before accepting DONE.md
-                    logger.print_stderr(f"\n📋 DONE.md detected at project root after iteration {iteration_num}.")
-                    logger.print_stderr("Validating with `lint-test`...")
+            # Check if DONE.md was created (at project root)
+            # FSM State: DONE.md exists → enter validation/fix loop (never delete DONE.md)
+            if done_file.exists():
+                # Validate that lint and test pass before accepting DONE.md
+                logger.print_stderr(f"\n📋 DONE.md detected at project root after iteration {iteration_num}.")
+                logger.print_stderr("Validating with `lint-test`...")
 
-                    # Error log file for validation failures
-                    error_log_file = loop_dir / "ERROR.log"
+                # Error log file for validation failures
+                error_log_file = loop_dir / "ERROR.log"
 
-                    # Run lint-test and capture output
-                    try:
-                        # Find and run lint-test using shutil.which for validation
-                        lint_test_returncode, lint_test_output = _find_and_run_lint_test()
+                # Run lint-test and capture output
+                try:
+                    # Find and run lint-test using shutil.which for validation
+                    lint_test_returncode, lint_test_output = _find_and_run_lint_test()
 
-                        # Display output to user and log it
-                        logger.print_stdout(lint_test_output)
+                    # Display output to user and log it
+                    logger.print_stdout(lint_test_output)
 
-                        if lint_test_returncode != 0:
-                            # FSM State: Validation failed → enter fix loop (keep DONE.md)
-                            logger.print_stderr("❌ lint-test failed. Keeping DONE.md and attempting to fix...")
+                    if lint_test_returncode != 0:
+                        # FSM State: Validation failed → enter fix loop (keep DONE.md)
+                        logger.print_stderr("❌ lint-test failed. Keeping DONE.md and attempting to fix...")
 
-                            # Save full output to ERROR.log (with tee-like behavior - already printed above)
-                            error_log_file.write_text(
-                                f"# Lint-Test Validation Errors\n\nTimestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\n\n```\n{lint_test_output}\n```\n",
-                                encoding="utf-8",
-                            )
-                            logger.print_stderr(f"  Saved validation output to {error_log_file}")
-
-                            # FSM State: Fix loop (max 3 attempts, not 5)
-                            max_fix_attempts = 3
-                            retest_returncode: int = 1  # Initialize as failed
-                            for fix_attempt in range(1, max_fix_attempts + 1):
-                                logger.print_stderr(f"\n🔧 Fix attempt {fix_attempt}/{max_fix_attempts}...")
-
-                                # Build fix prompt referencing ERROR.log and lint-test command
-                                fix_prompt = (
-                                    "Read .loop/ERROR.log to see the linting and testing errors."
-                                    "Fix all the errors listed in ERROR.log. "
-                                    "You can run the `lint-test` command yourself to validate the errors and confirm they are fixed. "
-                                    "After fixing, the system will automatically re-run lint-test to verify."
-                                )
-
-                                # Build fix command (using -p flag for non-interactive)
-                                fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
-
-                                # Add model flag from args if specified (no default model)
-                                fix_model_flag = _get_model_from_args(args.claude_args)
-                                if args.claude_args:
-                                    fix_cmd.extend(args.claude_args)
-
-                                if not args.plain:
-                                    fix_cmd.extend(["--output-format", "stream-json", "--verbose"])
-
-                                # Print model message for fix attempt
-                                _print_model_message(fix_model_flag)
-
-                                # Execute fix command
-                                try:
-                                    if args.plain:
-                                        # TODO: Capture plain output to log file
-                                        fix_returncode = RunningProcess.run_streaming(fix_cmd)
-                                    else:
-                                        formatter = StreamJsonFormatter(
-                                            show_system=args.verbose,
-                                            show_usage=True,
-                                            show_cache=args.verbose,
-                                            verbose=args.verbose,
-                                        )
-                                        stdout_callback = create_logging_formatter_callback(formatter, logger)
-                                        fix_returncode = RunningProcess.run_streaming(fix_cmd, stdout_callback=stdout_callback)
-
-                                    # Check if fix was interrupted
-                                    if _is_interrupt_exit_code(fix_returncode):
-                                        logger.print_stderr(f"\n⚠️  Fix attempt {fix_attempt} interrupted by user")
-                                        _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, fix_returncode)
-                                        raise KeyboardInterrupt
-
-                                except KeyboardInterrupt:
-                                    # User pressed Ctrl-C during fix
-                                    logger.print_stderr(f"\n⚠️  Fix attempt {fix_attempt} interrupted by user")
-                                    _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
-                                    raise  # MANDATORY: Always re-raise KeyboardInterrupt
-
-                                # Re-run lint-test to check if fixed
-                                logger.print_stderr(f"\n🔍 Re-running lint-test after fix attempt {fix_attempt}...")
-                                retest_returncode, retest_output = _find_and_run_lint_test()
-
-                                # Display retest output and log it
-                                logger.print_stdout(retest_output)
-
-                                if retest_returncode == 0:
-                                    # FSM State: Validation passed → mark as complete and halt
-                                    logger.print_stderr(f"✅ lint-test passed after {fix_attempt} fix attempt(s)!")
-
-                                    # Clean up ERROR.log since validation passed
-                                    if error_log_file.exists():
-                                        error_log_file.unlink()
-                                        logger.print_stderr(f"  Removed {error_log_file}")
-
-                                    # Accept DONE.md and mark as validated
-                                    task_info.mark_completed()
-                                    task_info.save(info_file)
-                                    done_validated_marker.write_text(
-                                        f"DONE.md validated successfully on {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\nFix attempts: {fix_attempt}\n",
-                                        encoding="utf-8",
-                                    )
-                                    break
-                                else:
-                                    # FSM State: Still failing → update ERROR.log for next attempt
-                                    logger.print_stderr(f"❌ lint-test still failing after fix attempt {fix_attempt}")
-
-                                    # Update ERROR.log with latest output
-                                    error_log_file.write_text(
-                                        f"# Lint-Test Validation Errors (Attempt {fix_attempt})\n\n"
-                                        f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                                        f"Iteration: {iteration_num}/{loop_count}\n"
-                                        f"Fix Attempt: {fix_attempt}/{max_fix_attempts}\n\n"
-                                        f"```\n{retest_output}\n```\n",
-                                        encoding="utf-8",
-                                    )
-
-                                    if fix_attempt == max_fix_attempts:
-                                        # FSM State: Max attempts reached → halt with warning (keep DONE.md)
-                                        _print_red_banner("LINTING/TESTING ISSUES REMAIN UNRESOLVED AFTER 3 FIX ATTEMPTS")
-                                        logger.print_stderr(f"\nERROR: Failed to fix lint/test errors after {max_fix_attempts} attempts.")
-                                        logger.print_stderr("Please review .loop/ERROR.log manually.")
-                                        logger.print_stderr("DONE.md is kept at project root for review.")
-                                        logger.print_stderr("Halting loop - linting & testing could not pass.")
-                                        # NEVER delete DONE.md - keep it along with ERROR.log for manual review
-
-                            # If we get here and retest_returncode == 0, we fixed it successfully
-                            if retest_returncode == 0:
-                                break  # Exit main loop - validation passed
-                            else:
-                                # FSM State: Still broken after max attempts - HALT (keep DONE.md)
-                                # This prevents infinite loops and wasted API credits
-                                logger.print_stderr(f"\n⚠️  Halting loop after {max_fix_attempts} failed fix attempts.")
-                                logger.print_stderr("Review DONE.md and .loop/ERROR.log to understand the issues.")
-                                break
-                        else:
-                            # FSM State: Validation passed on first attempt → accept DONE.md and halt
-                            logger.print_stderr("✅ lint-test passed. Accepting DONE.md and halting early.")
-                            task_info.mark_completed()
-                            task_info.save(info_file)
-                            done_validated_marker.write_text(
-                                f"DONE.md validated successfully on {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\nValidated on first attempt (no fixes needed)\n",
-                                encoding="utf-8",
-                            )
-                            break
-                    except KeyboardInterrupt:
-                        raise  # Always re-raise KeyboardInterrupt
-                    except Exception as e:
-                        # Validation failed due to exception (e.g., encoding error)
-                        logger.print_stderr(f"Error during lint-test validation: {e}")
-                        _print_red_banner("DONE.md VALIDATION FAILED DUE TO ERROR")
-                        logger.print_stderr(f"Exception type: {type(e).__name__}")
-                        logger.print_stderr(f"Exception details: {e}")
-                        logger.print_stderr()
-                        logger.print_stderr("⚠️  DONE.md will be KEPT and loop will HALT to prevent infinite loop.")
-                        logger.print_stderr("Review the error above and fix the issue manually.")
-                        logger.print_stderr("Possible causes:")
-                        logger.print_stderr("  - Encoding errors in lint-test output (see BUG_CHARMAP.md)")
-                        logger.print_stderr("  - lint-test command not found or failed to execute")
-                        logger.print_stderr("  - Permission errors reading/writing files")
-                        logger.print_stderr()
-                        logger.print_stderr(f"DONE.md location: {done_file.absolute()}")
-
-                        # Mark as completed (even though validation failed) to prevent re-running
-                        task_info.mark_completed(error=f"Validation failed with exception: {e}")
-                        task_info.save(info_file)
-
-                        # Create a marker file to indicate validation was attempted but failed
-                        validation_failed_marker = loop_dir / "done_validation_failed"
-                        validation_failed_marker.write_text(
-                            f"DONE.md validation failed on {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"Iteration: {iteration_num}/{loop_count}\n"
-                            f"Exception: {type(e).__name__}: {e}\n"
-                            f"\n"
-                            f"IMPORTANT: DONE.md was KEPT to prevent infinite loop.\n"
-                            f"Fix the validation issue manually and re-run if needed.\n",
+                        # Save full output to ERROR.log (with tee-like behavior - already printed above)
+                        error_log_file.write_text(
+                            f"# Lint-Test Validation Errors\n\nTimestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\n\n```\n{lint_test_output}\n```\n",
                             encoding="utf-8",
                         )
+                        logger.print_stderr(f"  Saved validation output to {error_log_file}")
 
-                        # HALT the loop (do NOT continue to next iteration)
+                        # FSM State: Fix loop (max 3 attempts, not 5)
+                        max_fix_attempts = 3
+                        retest_returncode: int = 1  # Initialize as failed
+                        for fix_attempt in range(1, max_fix_attempts + 1):
+                            logger.print_stderr(f"\n🔧 Fix attempt {fix_attempt}/{max_fix_attempts}...")
+
+                            # Build fix prompt referencing ERROR.log and lint-test command
+                            fix_prompt = (
+                                "Read .loop/ERROR.log to see the linting and testing errors."
+                                "Fix all the errors listed in ERROR.log. "
+                                "You can run the `lint-test` command yourself to validate the errors and confirm they are fixed. "
+                                "After fixing, the system will automatically re-run lint-test to verify."
+                            )
+
+                            # Build fix command (using -p flag for non-interactive)
+                            fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
+
+                            # Add model flag from args if specified (no default model)
+                            fix_model_flag = _get_model_from_args(args.claude_args)
+                            if args.claude_args:
+                                fix_cmd.extend(args.claude_args)
+
+                            if not args.plain:
+                                fix_cmd.extend(["--output-format", "stream-json", "--verbose"])
+
+                            # Print model message for fix attempt
+                            _print_model_message(fix_model_flag)
+
+                            # Execute fix command
+                            try:
+                                if args.plain:
+                                    # TODO: Capture plain output to log file
+                                    fix_returncode = RunningProcess.run_streaming(fix_cmd)
+                                else:
+                                    formatter = StreamJsonFormatter(
+                                        show_system=args.verbose,
+                                        show_usage=True,
+                                        show_cache=args.verbose,
+                                        verbose=args.verbose,
+                                    )
+                                    stdout_callback = create_logging_formatter_callback(formatter, logger)
+                                    fix_returncode = RunningProcess.run_streaming(fix_cmd, stdout_callback=stdout_callback)
+
+                                # Check if fix was interrupted
+                                if _is_interrupt_exit_code(fix_returncode):
+                                    logger.print_stderr(f"\n⚠️  Fix attempt {fix_attempt} interrupted by user")
+                                    _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, fix_returncode)
+                                    raise KeyboardInterrupt
+
+                            except KeyboardInterrupt:
+                                # User pressed Ctrl-C during fix
+                                logger.print_stderr(f"\n⚠️  Fix attempt {fix_attempt} interrupted by user")
+                                _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
+                                raise  # MANDATORY: Always re-raise KeyboardInterrupt
+
+                            # Re-run lint-test to check if fixed
+                            logger.print_stderr(f"\n🔍 Re-running lint-test after fix attempt {fix_attempt}...")
+                            retest_returncode, retest_output = _find_and_run_lint_test()
+
+                            # Display retest output and log it
+                            logger.print_stdout(retest_output)
+
+                            if retest_returncode == 0:
+                                # FSM State: Validation passed → mark as complete and halt
+                                logger.print_stderr(f"✅ lint-test passed after {fix_attempt} fix attempt(s)!")
+
+                                # Clean up ERROR.log since validation passed
+                                if error_log_file.exists():
+                                    error_log_file.unlink()
+                                    logger.print_stderr(f"  Removed {error_log_file}")
+
+                                # Accept DONE.md and mark as validated
+                                task_info.mark_completed()
+                                task_info.save(info_file)
+                                done_validated_marker.write_text(
+                                    f"DONE.md validated successfully on {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\nFix attempts: {fix_attempt}\n",
+                                    encoding="utf-8",
+                                )
+                                break
+                            else:
+                                # FSM State: Still failing → update ERROR.log for next attempt
+                                logger.print_stderr(f"❌ lint-test still failing after fix attempt {fix_attempt}")
+
+                                # Update ERROR.log with latest output
+                                error_log_file.write_text(
+                                    f"# Lint-Test Validation Errors (Attempt {fix_attempt})\n\n"
+                                    f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                    f"Iteration: {iteration_num}/{loop_count}\n"
+                                    f"Fix Attempt: {fix_attempt}/{max_fix_attempts}\n\n"
+                                    f"```\n{retest_output}\n```\n",
+                                    encoding="utf-8",
+                                )
+
+                                if fix_attempt == max_fix_attempts:
+                                    # FSM State: Max attempts reached → halt with warning (keep DONE.md)
+                                    _print_red_banner("LINTING/TESTING ISSUES REMAIN UNRESOLVED AFTER 3 FIX ATTEMPTS")
+                                    logger.print_stderr(f"\nERROR: Failed to fix lint/test errors after {max_fix_attempts} attempts.")
+                                    logger.print_stderr("Please review .loop/ERROR.log manually.")
+                                    logger.print_stderr("DONE.md is kept at project root for review.")
+                                    logger.print_stderr("Halting loop - linting & testing could not pass.")
+                                    # NEVER delete DONE.md - keep it along with ERROR.log for manual review
+
+                        # If we get here and retest_returncode == 0, we fixed it successfully
+                        if retest_returncode == 0:
+                            break  # Exit main loop - validation passed
+                        else:
+                            # FSM State: Still broken after max attempts - HALT (keep DONE.md)
+                            # This prevents infinite loops and wasted API credits
+                            logger.print_stderr(f"\n⚠️  Halting loop after {max_fix_attempts} failed fix attempts.")
+                            logger.print_stderr("Review DONE.md and .loop/ERROR.log to understand the issues.")
+                            break
+                    else:
+                        # FSM State: Validation passed on first attempt → accept DONE.md and halt
+                        logger.print_stderr("✅ lint-test passed. Accepting DONE.md and halting early.")
+                        task_info.mark_completed()
+                        task_info.save(info_file)
+                        done_validated_marker.write_text(
+                            f"DONE.md validated successfully on {time.strftime('%Y-%m-%d %H:%M:%S')}\nIteration: {iteration_num}/{loop_count}\nValidated on first attempt (no fixes needed)\n",
+                            encoding="utf-8",
+                        )
                         break
+                except KeyboardInterrupt:
+                    raise  # Always re-raise KeyboardInterrupt
+                except Exception as e:
+                    # Validation failed due to exception (e.g., encoding error)
+                    logger.print_stderr(f"Error during lint-test validation: {e}")
+                    _print_red_banner("DONE.md VALIDATION FAILED DUE TO ERROR")
+                    logger.print_stderr(f"Exception type: {type(e).__name__}")
+                    logger.print_stderr(f"Exception details: {e}")
+                    logger.print_stderr()
+                    logger.print_stderr("⚠️  DONE.md will be KEPT and loop will HALT to prevent infinite loop.")
+                    logger.print_stderr("Review the error above and fix the issue manually.")
+                    logger.print_stderr("Possible causes:")
+                    logger.print_stderr("  - Encoding errors in lint-test output (see BUG_CHARMAP.md)")
+                    logger.print_stderr("  - lint-test command not found or failed to execute")
+                    logger.print_stderr("  - Permission errors reading/writing files")
+                    logger.print_stderr()
+                    logger.print_stderr(f"DONE.md location: {done_file.absolute()}")
+
+                    # Mark as completed (even though validation failed) to prevent re-running
+                    task_info.mark_completed(error=f"Validation failed with exception: {e}")
+                    task_info.save(info_file)
+
+                    # Create a marker file to indicate validation was attempted but failed
+                    validation_failed_marker = loop_dir / "done_validation_failed"
+                    validation_failed_marker.write_text(
+                        f"DONE.md validation failed on {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"Iteration: {iteration_num}/{loop_count}\n"
+                        f"Exception: {type(e).__name__}: {e}\n"
+                        f"\n"
+                        f"IMPORTANT: DONE.md was KEPT to prevent infinite loop.\n"
+                        f"Fix the validation issue manually and re-run if needed.\n",
+                        encoding="utf-8",
+                    )
+
+                    # HALT the loop (do NOT continue to next iteration)
+                    break
 
             logger.print_stderr("\nAll iterations complete or halted early.")
 
@@ -571,9 +571,6 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                 logger.print_stderr(f"Opening {done_file}...")
                 _open_file_in_editor(done_file)
 
-    except KeyboardInterrupt:
-        # Loop interrupted by user - outer safety net
-        print("\n⚠️  Loop interrupted by user. Session info saved to .loop/info.json", file=sys.stderr)
-        return 130  # Standard interrupt exit code
-
+    # No outer KeyboardInterrupt handler needed - runner.py handles it
+    # Inner handlers (during subprocess execution) do cleanup and re-raise
     return 0
