@@ -8,8 +8,6 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from running_process import RunningProcess
-
 from ..json_formatter import StreamJsonFormatter
 
 if TYPE_CHECKING:
@@ -25,6 +23,7 @@ from .command_builder import (
 from .lint_runner import _find_and_run_lint_test
 from .loop_logger import LoopLogger, create_logging_formatter_callback
 from .motivation import write_motivation_file
+from .process_launcher import run_claude_process
 from .subprocess import _execute_command
 from .task_info import TaskInfo
 from .task_manager import _handle_existing_loop, _print_loop_banner, _print_red_banner
@@ -326,12 +325,15 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             _print_debug_info(claude_path, cmd, args.verbose)
 
             # Execute the command with streaming if prompt is present
+            # Uses run_claude_process() for proper Ctrl-C handling on MSYS/Windows.
+            # RunningProcess.run_streaming() swallows KeyboardInterrupt by returning
+            # exit code 1 when it detects an interrupt, which _is_interrupt_exit_code()
+            # doesn't recognize, causing the loop to silently continue.
             try:
                 if args.prompt:
                     if args.plain:
                         # Plain mode: no JSON formatting, just pass through output
-                        # TODO: Capture plain output to log file
-                        returncode = RunningProcess.run_streaming(cmd)
+                        returncode = run_claude_process(cmd)
                     else:
                         # Create JSON formatter for beautiful output in loop mode
                         formatter = StreamJsonFormatter(
@@ -341,7 +343,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                             verbose=args.verbose,
                         )
                         stdout_callback = create_logging_formatter_callback(formatter, logger)
-                        returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
+                        returncode = run_claude_process(cmd, stdout_callback=stdout_callback)
                 else:
                     returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
@@ -423,8 +425,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                             # Execute fix command
                             try:
                                 if args.plain:
-                                    # TODO: Capture plain output to log file
-                                    fix_returncode = RunningProcess.run_streaming(fix_cmd)
+                                    fix_returncode = run_claude_process(fix_cmd)
                                 else:
                                     formatter = StreamJsonFormatter(
                                         show_system=args.verbose,
@@ -433,7 +434,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                                         verbose=args.verbose,
                                     )
                                     stdout_callback = create_logging_formatter_callback(formatter, logger)
-                                    fix_returncode = RunningProcess.run_streaming(fix_cmd, stdout_callback=stdout_callback)
+                                    fix_returncode = run_claude_process(fix_cmd, stdout_callback=stdout_callback)
 
                                 # Check if fix was interrupted
                                 if _is_interrupt_exit_code(fix_returncode):

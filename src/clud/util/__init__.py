@@ -5,6 +5,7 @@ import os
 import platform
 import socket
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -41,6 +42,7 @@ def download_emsdk_headers(url: str, filepath: Path) -> str | None:
 def handle_keyboard_interrupt(
     func: Callable[..., T],
     *args: object,
+    exc: KeyboardInterrupt,
     cleanup: Callable[[], None] | None = None,
     logger: logging.Logger | None = None,
     log_message: str | None = None,
@@ -48,12 +50,15 @@ def handle_keyboard_interrupt(
 ) -> T:
     """Execute a function with proper KeyboardInterrupt handling.
 
-    This utility ensures KeyboardInterrupt is ALWAYS re-raised immediately,
-    preventing unresponsive processes. It provides optional cleanup and logging.
+    This utility ensures KeyboardInterrupt is ALWAYS re-raised on the main thread.
+    On non-main threads, it performs cleanup and logging but does NOT re-raise,
+    since only the main thread receives SIGINT and re-raising on worker threads
+    can cause the interrupt to be swallowed by thread exception handlers.
 
     Args:
         func: The function to execute
         *args: Positional arguments to pass to func
+        exc: The KeyboardInterrupt exception value from the caller's except block
         cleanup: Optional cleanup function to call before re-raising KeyboardInterrupt
         logger: Optional logger for logging the interrupt
         log_message: Optional custom log message (default: "Operation interrupted by user")
@@ -63,27 +68,21 @@ def handle_keyboard_interrupt(
         The return value of func
 
     Raises:
-        KeyboardInterrupt: Always re-raised when caught
+        KeyboardInterrupt: Always re-raised when caught on the main thread.
+            On non-main threads, the exception is suppressed after cleanup.
         Exception: Any other exception from func is propagated
 
     Example:
-        >>> def risky_operation(x: int) -> int:
-        ...     return x * 2
-        >>> result = handle_keyboard_interrupt(risky_operation, 5)
-        >>> # If user presses Ctrl+C during execution, KeyboardInterrupt is re-raised
-        >>> # If operation completes, result is returned (10)
-
-        >>> # With cleanup:
-        >>> def cleanup_resources() -> None:
-        ...     print("Cleaning up...")
-        >>> result = handle_keyboard_interrupt(
-        ...     risky_operation, 5, cleanup=cleanup_resources
-        ... )
+        >>> try:
+        ...     do_work()
+        ... except KeyboardInterrupt as e:
+        ...     handle_keyboard_interrupt(lambda: None, exc=e, cleanup=cleanup_resources)
     """
+    is_main_thread = threading.current_thread() is threading.main_thread()
+
     try:
         return func(*args, **kwargs)
     except KeyboardInterrupt:
-        # Always re-raise KeyboardInterrupt - CRITICAL for responsive Ctrl+C
         if cleanup:
             try:
                 cleanup()
@@ -94,9 +93,20 @@ def handle_keyboard_interrupt(
 
         if logger:
             msg = log_message or "Operation interrupted by user"
-            logger.info(msg)
+            logger.info("%s (exc=%s)", msg, exc)
 
-        raise  # MANDATORY: Always re-raise KeyboardInterrupt
+        if is_main_thread:
+            raise  # MANDATORY: Always re-raise KeyboardInterrupt on main thread
+        else:
+            # On non-main threads, don't re-raise - the main thread handles SIGINT.
+            # Re-raising here causes the interrupt to be swallowed by thread
+            # exception handlers, making Ctrl-C unresponsive.
+            if logger:
+                logger.debug(
+                    "KeyboardInterrupt on non-main thread (%s), suppressing after cleanup",
+                    threading.current_thread().name,
+                )
+            return None  # type: ignore[return-value]
 
 
 def detect_git_bash() -> str | None:

@@ -17,7 +17,7 @@ dependencies = [
     "disklru>=0.1.0",
     "httpx>=0.24.0",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
-    "running-process>=1.0.7",
+    "running-process>=1.1.1",
     "nodeenv>=1.8.0",
     "nodejs-wheel>=22.0.0",
     "psutil>=5.9.0",
