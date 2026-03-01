@@ -13,132 +13,83 @@ from clud.util import _is_git_bash, detect_git_bash, handle_keyboard_interrupt
 class TestHandleKeyboardInterrupt(unittest.TestCase):
     """Test keyboard interrupt handling utility."""
 
-    def test_successful_execution(self) -> None:
-        """Test that function executes normally without interrupt."""
-
-        def add(x: int, y: int) -> int:
-            return x + y
-
-        result = handle_keyboard_interrupt(add, 2, 3, exc=KeyboardInterrupt())
-        self.assertEqual(result, 5)
-
-    def test_keyboard_interrupt_reraises(self) -> None:
-        """Test that KeyboardInterrupt is always re-raised."""
-
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
-
+    def test_reraises_on_main_thread(self) -> None:
+        """Test that KeyboardInterrupt is re-raised on the main thread."""
         with self.assertRaises(KeyboardInterrupt):
-            handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt())
+            handle_keyboard_interrupt(KeyboardInterrupt())
 
-    def test_cleanup_called_on_interrupt(self) -> None:
-        """Test that cleanup function is called before re-raising KeyboardInterrupt."""
+    def test_cleanup_called_before_reraise(self) -> None:
+        """Test that cleanup function is called before re-raising."""
         cleanup_called = False
 
         def cleanup() -> None:
             nonlocal cleanup_called
             cleanup_called = True
 
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
-
         with self.assertRaises(KeyboardInterrupt):
-            handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt(), cleanup=cleanup)
+            handle_keyboard_interrupt(KeyboardInterrupt(), cleanup=cleanup)
 
         self.assertTrue(cleanup_called, "Cleanup should be called before re-raising")
 
-    def test_cleanup_failure_does_not_prevent_interrupt(self) -> None:
+    def test_cleanup_failure_does_not_prevent_reraise(self) -> None:
         """Test that cleanup failures don't prevent KeyboardInterrupt propagation."""
 
         def failing_cleanup() -> None:
             raise RuntimeError("Cleanup failed!")
 
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
-
-        # Should still raise KeyboardInterrupt even if cleanup fails
         with self.assertRaises(KeyboardInterrupt):
-            handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt(), cleanup=failing_cleanup)
+            handle_keyboard_interrupt(KeyboardInterrupt(), cleanup=failing_cleanup)
 
     def test_logging_on_interrupt(self) -> None:
         """Test that interrupt is logged when logger is provided."""
-        logger = logging.getLogger("test")
-        logger.setLevel(logging.INFO)
+        test_logger = logging.getLogger("test")
+        test_logger.setLevel(logging.INFO)
         log_stream = StringIO()
         handler = logging.StreamHandler(log_stream)
-        logger.addHandler(handler)
-
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
+        test_logger.addHandler(handler)
 
         try:
             with self.assertRaises(KeyboardInterrupt):
-                handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt(), logger=logger, log_message="Test interrupted")
+                handle_keyboard_interrupt(KeyboardInterrupt(), logger=test_logger, log_message="Test interrupted")
         finally:
-            logger.removeHandler(handler)
+            test_logger.removeHandler(handler)
 
         log_output = log_stream.getvalue()
         self.assertIn("Test interrupted", log_output)
 
     def test_default_log_message(self) -> None:
         """Test that default log message is used when none provided."""
-        logger = logging.getLogger("test_default")
-        logger.setLevel(logging.INFO)
+        test_logger = logging.getLogger("test_default")
+        test_logger.setLevel(logging.INFO)
         log_stream = StringIO()
         handler = logging.StreamHandler(log_stream)
-        logger.addHandler(handler)
-
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
+        test_logger.addHandler(handler)
 
         try:
             with self.assertRaises(KeyboardInterrupt):
-                handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt(), logger=logger)
+                handle_keyboard_interrupt(KeyboardInterrupt(), logger=test_logger)
         finally:
-            logger.removeHandler(handler)
+            test_logger.removeHandler(handler)
 
         log_output = log_stream.getvalue()
         self.assertIn("Operation interrupted by user", log_output)
 
-    def test_other_exceptions_propagate(self) -> None:
-        """Test that non-KeyboardInterrupt exceptions are propagated normally."""
-
-        def raises_value_error() -> None:
-            raise ValueError("Test error")
-
-        with self.assertRaises(ValueError) as ctx:
-            handle_keyboard_interrupt(raises_value_error, exc=KeyboardInterrupt())
-
-        self.assertEqual(str(ctx.exception), "Test error")
-
-    def test_kwargs_passed_correctly(self) -> None:
-        """Test that keyword arguments are passed to the function."""
-
-        def func_with_kwargs(x: int, y: int, z: int = 0) -> int:
-            return x + y + z
-
-        result = handle_keyboard_interrupt(func_with_kwargs, 1, 2, exc=KeyboardInterrupt(), z=3)
-        self.assertEqual(result, 6)
-
     def test_cleanup_failure_logged_when_logger_provided(self) -> None:
         """Test that cleanup failures are logged when logger is available."""
-        logger = logging.getLogger("test_cleanup_failure")
-        logger.setLevel(logging.WARNING)
+        test_logger = logging.getLogger("test_cleanup_failure")
+        test_logger.setLevel(logging.WARNING)
         log_stream = StringIO()
         handler = logging.StreamHandler(log_stream)
-        logger.addHandler(handler)
+        test_logger.addHandler(handler)
 
         def failing_cleanup() -> None:
             raise RuntimeError("Cleanup explosion!")
 
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
-
         try:
             with self.assertRaises(KeyboardInterrupt):
-                handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt(), cleanup=failing_cleanup, logger=logger)
+                handle_keyboard_interrupt(KeyboardInterrupt(), cleanup=failing_cleanup, logger=test_logger)
         finally:
-            logger.removeHandler(handler)
+            test_logger.removeHandler(handler)
 
         log_output = log_stream.getvalue()
         self.assertIn("Cleanup failed during keyboard interrupt", log_output)
@@ -154,12 +105,9 @@ class TestHandleKeyboardInterrupt(unittest.TestCase):
 
         original_exc = KeyboardInterrupt("original interrupt")
 
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt("new interrupt")
-
         try:
             with self.assertRaises(KeyboardInterrupt):
-                handle_keyboard_interrupt(raises_interrupt, exc=original_exc, logger=test_logger)
+                handle_keyboard_interrupt(original_exc, logger=test_logger)
         finally:
             test_logger.removeHandler(handler)
 
@@ -168,39 +116,20 @@ class TestHandleKeyboardInterrupt(unittest.TestCase):
 
     def test_non_main_thread_does_not_reraise(self) -> None:
         """Test that KeyboardInterrupt is NOT re-raised on non-main threads."""
-        result_holder: list[object] = []
-        error_holder: list[BaseException] = []
+        reraised = False
 
         def thread_func() -> None:
+            nonlocal reraised
             try:
-
-                def raises_interrupt() -> None:
-                    raise KeyboardInterrupt()
-
-                result = handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt())
-                result_holder.append(result)
-            except KeyboardInterrupt as e:
-                error_holder.append(e)
+                handle_keyboard_interrupt(KeyboardInterrupt())
+            except KeyboardInterrupt:
+                reraised = True
 
         t = threading.Thread(target=thread_func)
         t.start()
         t.join(timeout=5)
 
-        # On non-main thread, should NOT re-raise
-        self.assertEqual(len(error_holder), 0, "KeyboardInterrupt should not be re-raised on non-main thread")
-        # Should return None instead
-        self.assertEqual(len(result_holder), 1)
-        self.assertIsNone(result_holder[0])
-
-    def test_main_thread_reraises(self) -> None:
-        """Test that KeyboardInterrupt IS re-raised on the main thread."""
-
-        # This test runs on the main thread by default
-        def raises_interrupt() -> None:
-            raise KeyboardInterrupt()
-
-        with self.assertRaises(KeyboardInterrupt):
-            handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt())
+        self.assertFalse(reraised, "KeyboardInterrupt should not be re-raised on non-main thread")
 
     def test_non_main_thread_cleanup_still_called(self) -> None:
         """Test that cleanup is called on non-main threads even though we don't re-raise."""
@@ -210,10 +139,7 @@ class TestHandleKeyboardInterrupt(unittest.TestCase):
             def cleanup() -> None:
                 cleanup_called_holder.append(True)
 
-            def raises_interrupt() -> None:
-                raise KeyboardInterrupt()
-
-            handle_keyboard_interrupt(raises_interrupt, exc=KeyboardInterrupt(), cleanup=cleanup)
+            handle_keyboard_interrupt(KeyboardInterrupt(), cleanup=cleanup)
 
         t = threading.Thread(target=thread_func)
         t.start()

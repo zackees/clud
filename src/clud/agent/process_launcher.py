@@ -23,6 +23,8 @@ from collections.abc import Callable
 
 from running_process import kill_process_tree
 
+from ..util import handle_keyboard_interrupt
+
 # Module-level tracking of the active subprocess for atexit cleanup.
 _active_process: subprocess.Popen[bytes] | None = None
 _active_process_lock = threading.Lock()
@@ -207,15 +209,17 @@ def run_claude_process(
 
         return proc.returncode
 
-    except KeyboardInterrupt:
-        # Kill child tree, then re-raise so callers can handle the interrupt.
-        if proc.poll() is None:
-            with contextlib.suppress(Exception):
-                kill_process_tree(proc.pid)
-            # Give a moment for the tree to die, then reap.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=2)
-        raise
+    except KeyboardInterrupt as e:
+
+        def _cleanup() -> None:
+            if proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    kill_process_tree(proc.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=2)
+
+        handle_keyboard_interrupt(e, cleanup=_cleanup)
+        return proc.returncode or 130  # Worker thread: suppressed
 
     finally:
         with _active_process_lock:

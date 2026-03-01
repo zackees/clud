@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+from ..util import handle_keyboard_interrupt
+
 
 def _handle_existing_loop(loop_dir: Path) -> tuple[bool, int]:
     """Handle existing .loop directory from previous session.
@@ -65,9 +67,13 @@ def _handle_existing_loop(loop_dir: Path) -> tuple[bool, int]:
     while True:
         try:
             response = input("[R]estart from the beginning or [C]ontinue: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print("\nOperation cancelled.", file=sys.stderr)
             return False, 1
+        except KeyboardInterrupt as e:
+            print("\nOperation cancelled.", file=sys.stderr)
+            handle_keyboard_interrupt(e)
+            return False, 1  # Worker thread: suppressed
 
         if response in ["r", "restart"]:
             # Delete entire directory and DONE.md

@@ -9,6 +9,7 @@ import traceback
 
 from clud.hooks import HookContext, HookEvent, get_hook_manager
 from clud.hooks.config import load_hook_config
+from clud.util import handle_keyboard_interrupt
 
 
 def register_hooks_from_config(hook_debug: bool = False) -> None:
@@ -44,8 +45,8 @@ def register_hooks_from_config(hook_debug: bool = False) -> None:
             if hook_debug:
                 print(f"DEBUG: Registered webhook hook (url={config.webhook_url})", file=sys.stderr)
 
-    except KeyboardInterrupt:
-        raise
+    except KeyboardInterrupt as e:
+        handle_keyboard_interrupt(e)
     except Exception as e:
         if hook_debug:
             print(f"DEBUG: Failed to register hooks: {e}", file=sys.stderr)
@@ -76,8 +77,8 @@ def trigger_hook_sync(event: HookEvent, context: HookContext, hook_debug: bool =
         # Trigger synchronously - just pass context (event is inside context)
         hook_manager.trigger_sync(context)
 
-    except KeyboardInterrupt:
-        raise
+    except KeyboardInterrupt as e:
+        handle_keyboard_interrupt(e)
     except Exception as e:
         if hook_debug:
             print(f"DEBUG: Hook trigger failed: {e}", file=sys.stderr)

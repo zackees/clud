@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .util import handle_keyboard_interrupt
+
 logger = logging.getLogger(__name__)
 
 
@@ -206,27 +208,26 @@ def run_vibe_kanban() -> int:
         returncode = process.wait()
         return returncode
 
-    except KeyboardInterrupt:
-        # Suppress all output during cleanup to prevent traceback spam
-        # Redirect stderr to devnull temporarily
-        old_stderr = sys.stderr
-        try:
-            with open(os.devnull, "w") as devnull:
-                sys.stderr = devnull
+    except KeyboardInterrupt as e:
 
-                if process is not None:
-                    with contextlib.suppress(Exception):
-                        process.terminate()
-                        process.wait(timeout=2)
-                    with contextlib.suppress(Exception):
-                        process.kill()
-        finally:
-            sys.stderr = old_stderr
+        def _cleanup() -> None:
+            old_stderr = sys.stderr
+            try:
+                with open(os.devnull, "w") as devnull:
+                    sys.stderr = devnull
+                    if process is not None:
+                        with contextlib.suppress(Exception):
+                            process.terminate()
+                            process.wait(timeout=2)
+                        with contextlib.suppress(Exception):
+                            process.kill()
+            finally:
+                sys.stderr = old_stderr
+            _thread.interrupt_main()
 
-        # Interrupt main thread to ensure proper cleanup
-        _thread.interrupt_main()
         print("\n\nvibe-kanban stopped by user")
-        return 0
+        handle_keyboard_interrupt(e, cleanup=_cleanup)
+        return 0  # Worker thread: suppressed
     except Exception as e:
         print(f"Error: Failed to run vibe-kanban: {e}", file=sys.stderr)
         logger.exception("vibe-kanban execution failed")

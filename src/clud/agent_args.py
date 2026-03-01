@@ -75,7 +75,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     cron = "--cron" in args_copy
     ui = "--ui" in args_copy or "-d" in args_copy
     tui = "--tui" in args_copy
-    rebase = "--rebase" in args_copy
+    rebase = False
 
     # Remove --hook-debug from args_copy since it's handled by router
     if "--hook-debug" in args_copy:
@@ -88,8 +88,6 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("-d")
     if "--tui" in args_copy:
         args_copy.remove("--tui")
-    if "--rebase" in args_copy:
-        args_copy.remove("--rebase")
 
     # Default number of terminals for --ui (4 terminals)
     num_terminals = 4
@@ -118,7 +116,7 @@ def parse_args(args: list[str] | None = None) -> Args:
             fix_url = args_copy[fix_idx + 1]
 
     # Only intercept help if no mode is specified
-    help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up"])
+    help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up", "loop", "rebase"])
 
     # Extract task argument if present
     task = None
@@ -135,10 +133,12 @@ def parse_args(args: list[str] | None = None) -> Args:
             args_copy.pop(task_idx)
             task = ""  # Empty string will trigger error in handle_task_command
 
-    # Check for mode: only fix and up are special modes now
+    # Check for mode: positional subcommands
     up_publish = False
     up_message = None
-    if args_copy and args_copy[0] in ["fix", "up"]:
+    loop_value: str | None = None
+    loop_count_override: int | None = None
+    if args_copy and args_copy[0] in ["fix", "up", "loop", "rebase"]:
         mode_str = args_copy[0]
         if mode_str == "fix":
             mode = AgentMode.FIX
@@ -161,7 +161,26 @@ def parse_args(args: list[str] | None = None) -> Args:
                     # Remove both the flag and its value from args_copy
                     args_copy.pop(message_idx)  # Remove flag
                     args_copy.pop(message_idx)  # Remove value (now at same index)
-        args_copy = args_copy[1:]  # Remove the positional arg
+        elif mode_str == "rebase":
+            rebase = True
+        elif mode_str == "loop":
+            # Extract optional loop value (message or file path) after 'loop'
+            args_copy = args_copy[1:]  # Remove 'loop'
+            # Check for --loop-count flag
+            if "--loop-count" in args_copy:
+                lc_idx = args_copy.index("--loop-count")
+                if lc_idx + 1 < len(args_copy):
+                    loop_count_override = int(args_copy[lc_idx + 1])
+                    args_copy.pop(lc_idx)  # Remove flag
+                    args_copy.pop(lc_idx)  # Remove value
+            # Next non-flag arg is the loop value
+            if args_copy and not args_copy[0].startswith("-"):
+                loop_value = args_copy[0]
+                args_copy.pop(0)
+            else:
+                loop_value = ""  # No value: prompt for message
+        if mode_str != "loop":
+            args_copy = args_copy[1:]  # Remove the positional arg (already done for loop)
 
     # Parse agent-level arguments using argparse
     parser = argparse.ArgumentParser(
@@ -223,24 +242,6 @@ def parse_args(args: list[str] | None = None) -> Args:
     )
 
     parser.add_argument(
-        "--loop",
-        type=str,
-        nargs="?",
-        const="",  # Empty string when --loop is used without value
-        dest="loop_value",
-        help=(
-            "Run loop mode with a message or file path. Usage: --loop 'msg', --loop LOOP.md (expands to template), or --loop (prompts for message). Use --loop-count to specify iterations. Uses -p."
-        ),
-    )
-
-    parser.add_argument(
-        "--loop-count",
-        type=int,
-        dest="loop_count_override",
-        help="Override the default loop iteration count (default: 50)",
-    )
-
-    parser.add_argument(
         "--plain",
         action="store_true",
         dest="plain",
@@ -281,8 +282,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         verbose=known_args.verbose,
         idle_timeout=known_args.idle_timeout,
         loop_count=None,  # Will be parsed from loop_value in agent.py
-        loop_value=known_args.loop_value,
-        loop_count_override=known_args.loop_count_override,
+        loop_value=loop_value,
+        loop_count_override=loop_count_override,
         plain=known_args.plain,
         claude_args=unknown_args,
     )

@@ -14,6 +14,8 @@ from pathlib import Path
 
 from clud.util.process import launch_detached
 
+from ..util import handle_keyboard_interrupt
+
 
 def _prompt_for_loop_count() -> int:
     """Prompt user for loop count (default: 50)."""
@@ -34,9 +36,13 @@ def _prompt_for_loop_count() -> int:
         except ValueError:
             print("Invalid input. Please enter a valid number.")
             continue
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print("\nOperation cancelled.")
             sys.exit(2)
+        except KeyboardInterrupt as e:
+            print("\nOperation cancelled.")
+            handle_keyboard_interrupt(e)
+            sys.exit(2)  # Worker thread: suppressed
 
 
 def _prompt_for_message() -> str:
@@ -51,9 +57,13 @@ def _prompt_for_message() -> str:
 
             return response
 
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print("\nOperation cancelled.")
             sys.exit(2)
+        except KeyboardInterrupt as e:
+            print("\nOperation cancelled.")
+            handle_keyboard_interrupt(e)
+            sys.exit(2)  # Worker thread: suppressed
 
 
 def _open_file_in_editor(file_path: Path) -> None:

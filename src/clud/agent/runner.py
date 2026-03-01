@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 from ..hooks import HookContext, HookEvent
 from ..json_formatter import StreamJsonFormatter, create_formatter_callback
 from ..output_filter import OutputFilter
+from ..util import handle_keyboard_interrupt
 from .claude_finder import _find_claude_path
 from .command_builder import (
     _build_claude_command,
@@ -67,7 +68,7 @@ def run_agent(args: "Args") -> int:
 
     # Validate --tui requires --loop
     if args.tui and args.loop_value is None:
-        print("Error: --tui requires --loop", file=sys.stderr)
+        print("Error: --tui requires loop subcommand", file=sys.stderr)
         return 2
 
     # Register hooks early (before any execution)
@@ -232,10 +233,11 @@ def run_agent(args: "Args") -> int:
             # This ensures Ctrl-C is properly caught and handled at the top level
             try:
                 return _run_loop(args, claude_path, loop_count)
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as e:
                 # Clean exit on Ctrl-C (cleanup already done in _run_loop)
                 print("\n⚠️  Loop interrupted by user. Session info saved to .loop/info.json", file=sys.stderr)
-                return 130
+                handle_keyboard_interrupt(e)
+                return 130  # Worker thread: suppressed
 
         # Build command
         cmd = _build_claude_command(args, claude_path)
@@ -347,7 +349,7 @@ def run_agent(args: "Args") -> int:
         )
         return 1
 
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         print("\nInterrupted by user", file=sys.stderr)
 
         # Trigger AGENT_STOP hook on interrupt
@@ -363,7 +365,8 @@ def run_agent(args: "Args") -> int:
             ),
             hook_debug=args.hook_debug,
         )
-        return 130
+        handle_keyboard_interrupt(e)
+        return 130  # Worker thread: suppressed
 
     except OSError as e:
         error_msg = f"OS error launching Claude: {e}"

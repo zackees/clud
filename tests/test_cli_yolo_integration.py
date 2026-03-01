@@ -38,12 +38,15 @@ class TestCliYoloIntegration(unittest.TestCase):
             mock_run.return_value.returncode = 0
 
             # Mock _find_claude_path to return a fake claude path
-            with patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"):
+            # Mock _wrap_command_for_git_bash to pass through (avoids subprocess calls for git-bash detection)
+            with (
+                patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"),
+                patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=lambda cmd: cmd),  # type: ignore[misc]
+            ):
                 result = main(["-m", "test message"])
 
         self.assertEqual(result, 0)
         # Verify that subprocess.run was called (meaning it tried to run Claude)
-        # Note: subprocess.run is called multiple times (git-bash detection + claude execution)
         self.assertGreaterEqual(mock_run.call_count, 1)
         # Verify the last call was to execute claude with the message
         last_call = mock_run.call_args_list[-1]

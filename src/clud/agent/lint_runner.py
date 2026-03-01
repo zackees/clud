@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ..util import handle_keyboard_interrupt
+
 
 def _find_and_run_lint_test() -> tuple[int, str]:
     """Find lint-test command using shutil.which and run it with output capture.
@@ -77,9 +79,13 @@ def _check_agent_artifacts() -> bool:
 
     try:
         response = input("Delete artifacts and continue? [y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         print("\nOperation cancelled.", file=sys.stderr)
         return False
+    except KeyboardInterrupt as e:
+        print("\nOperation cancelled.", file=sys.stderr)
+        handle_keyboard_interrupt(e)
+        return False  # Worker thread: suppressed
 
     if response in ["y", "yes"]:
         # Delete artifacts

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from textual import work
 
+from ..util import handle_keyboard_interrupt
 from .app import CludLoopTUI
 
 if TYPE_CHECKING:
@@ -302,9 +303,10 @@ class LoopWorkerApp(CludLoopTUI):
                             _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, returncode)
                             break
 
-                    except KeyboardInterrupt:
+                    except KeyboardInterrupt as e:
                         _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
-                        break
+                        handle_keyboard_interrupt(e)
+                        break  # Worker thread: suppressed
 
                     # Mark iteration end
                     error_msg = f"Exit code: {returncode}" if returncode != 0 else None
@@ -355,8 +357,9 @@ class LoopWorkerApp(CludLoopTUI):
                                 # For now, just halt
                                 break
 
-                        except KeyboardInterrupt:
-                            break
+                        except KeyboardInterrupt as e:
+                            handle_keyboard_interrupt(e)
+                            break  # Worker thread: suppressed
                         except Exception as e:
                             self.call_from_thread(self.log_message, f"Error during validation: {e}")
                             break

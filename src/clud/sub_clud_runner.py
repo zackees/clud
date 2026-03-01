@@ -10,6 +10,8 @@ import subprocess
 import sys
 from typing import Any
 
+from .util import handle_keyboard_interrupt
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,10 +185,11 @@ async def run_telegram_message_loop_async(messenger: Any, message_handler: Any =
             # No message received (timeout) - continue waiting
             logger.debug("No message received (timeout), continuing to listen...")
 
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         logger.info("Runner interrupted by user")
         print("\n\n⏹️  Stopping Telegram runner...")
-        return 0
+        handle_keyboard_interrupt(e)
+        return 0  # Worker thread: suppressed
     except Exception as e:
         logger.error(f"Error in message loop: {e}")
         print(f"Error in message loop: {e}", file=sys.stderr)

@@ -75,6 +75,8 @@ class KeyboardInterruptChecker(ast.NodeVisitor):
         "agent_cli.py",  # Top-level entry point
         "util/__init__.py",  # Defines handle_keyboard_interrupt itself
         "util.py",  # Alternative util location
+        "cron/daemon.py",  # Daemon uses signal handlers; backup catch intentionally swallows
+        "task.py",  # User-facing prompts that gracefully swallow Ctrl-C
     ]
 
     def __init__(self, file_path: str) -> None:
@@ -156,7 +158,7 @@ class KeyboardInterruptChecker(ast.NodeVisitor):
                 )
             )
 
-        # KI003: Recommend handle_keyboard_interrupt() for thread-safe handling (warning only)
+        # KI003: Require handle_keyboard_interrupt() for thread-safe handling
         if not self._is_ki003_exempt and not self._uses_handle_keyboard_interrupt(node):
             self.errors.append(
                 LintError(
@@ -166,10 +168,9 @@ class KeyboardInterruptChecker(ast.NodeVisitor):
                     code="KI003",
                     message=(
                         "KeyboardInterrupt caught without handle_keyboard_interrupt(). "
-                        "Use handle_keyboard_interrupt(func, exc=e) from clud.util for "
+                        "Use handle_keyboard_interrupt(e) from clud.util for "
                         "thread-safe interrupt handling (checks main thread before re-raising)."
                     ),
-                    level="warning",
                 )
             )
 

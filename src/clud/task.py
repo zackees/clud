@@ -503,7 +503,10 @@ def _prompt_to_create_task_file(task_path: Path) -> bool:
         response = input().strip().lower()
         # Empty response or 'y' means yes (default to yes)
         return response == "" or response == "y"
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
+        print()  # New line after interrupt
+        return False
+    except KeyboardInterrupt:
         print()  # New line after interrupt
         return False
 

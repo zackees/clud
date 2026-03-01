@@ -13,6 +13,8 @@ from pathlib import Path
 
 from running_process import RunningProcess
 
+from .util import handle_keyboard_interrupt
+
 
 def get_clud_bin_dir() -> Path:
     """Get or create the ~/.clud/bin directory for Claude Code binaries."""
@@ -405,9 +407,13 @@ def prompt_install_claude() -> bool:
             print("You can install manually with: clud --install-claude", file=sys.stderr)
             return False
 
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         print("\n\nInstallation cancelled.", file=sys.stderr)
         return False
+    except KeyboardInterrupt as e:
+        print("\n\nInstallation cancelled.", file=sys.stderr)
+        handle_keyboard_interrupt(e)
+        return False  # Worker thread: suppressed
 
 
 def get_claude_version(claude_path: str) -> str | None:

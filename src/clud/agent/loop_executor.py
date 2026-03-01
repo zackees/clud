@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..json_formatter import StreamJsonFormatter
+from ..util import handle_keyboard_interrupt
 
 if TYPE_CHECKING:
     from ..agent_args import Args
@@ -329,6 +330,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             # RunningProcess.run_streaming() swallows KeyboardInterrupt by returning
             # exit code 1 when it detects an interrupt, which _is_interrupt_exit_code()
             # doesn't recognize, causing the loop to silently continue.
+            returncode = 0
             try:
                 if args.prompt:
                     if args.plain:
@@ -352,10 +354,10 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                     _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, returncode)
                     raise KeyboardInterrupt  # Re-raise to exit loop
 
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as e:
                 # User pressed Ctrl-C during execution
                 _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
-                raise  # MANDATORY: Always re-raise KeyboardInterrupt
+                handle_keyboard_interrupt(e)
 
             # Mark iteration end
             error_msg = f"Exit code: {returncode}" if returncode != 0 else None
@@ -442,11 +444,11 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                                     _cleanup_on_interrupt(logger, task_info, info_file, iteration_num, fix_returncode)
                                     raise KeyboardInterrupt
 
-                            except KeyboardInterrupt:
+                            except KeyboardInterrupt as e:
                                 # User pressed Ctrl-C during fix
                                 logger.print_stderr(f"\n⚠️  Fix attempt {fix_attempt} interrupted by user")
                                 _cleanup_on_interrupt(logger, task_info, info_file, iteration_num)
-                                raise  # MANDATORY: Always re-raise KeyboardInterrupt
+                                handle_keyboard_interrupt(e)
 
                             # Re-run lint-test to check if fixed
                             logger.print_stderr(f"\n🔍 Re-running lint-test after fix attempt {fix_attempt}...")
@@ -514,8 +516,8 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                             encoding="utf-8",
                         )
                         break
-                except KeyboardInterrupt:
-                    raise  # Always re-raise KeyboardInterrupt
+                except KeyboardInterrupt as e:
+                    handle_keyboard_interrupt(e)
                 except Exception as e:
                     # Validation failed due to exception (e.g., encoding error)
                     logger.print_stderr(f"Error during lint-test validation: {e}")

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..output_filter import OutputFilter
+from ..util import handle_keyboard_interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -194,15 +195,16 @@ def _monitor_pty_process(process: Any, idle_timeout: float, output_callback: Out
                 return True
 
         return False  # Process exited normally
-    except KeyboardInterrupt:
-        logger.info(f"{platform} agent monitoring interrupted by user")
-        # Try to terminate the process gracefully
-        with contextlib.suppress(Exception):
-            if hasattr(process, "terminate"):
-                process.terminate()
-        # Interrupt main thread to ensure proper cleanup
-        _thread.interrupt_main()
-        raise  # Re-raise to allow CLI to handle it
+    except KeyboardInterrupt as e:
+
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                if hasattr(process, "terminate"):
+                    process.terminate()
+            _thread.interrupt_main()
+
+        handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message=f"{platform} agent monitoring interrupted by user")
+        return False  # Worker thread: suppressed
 
 
 def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeout: float, output_callback: OutputCallback) -> bool:
@@ -240,14 +242,15 @@ def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeou
                 return True
 
         return False  # Process exited normally
-    except KeyboardInterrupt:
-        logger.info("Unix agent monitoring interrupted by user")
-        # Try to terminate the process gracefully
-        with contextlib.suppress(Exception):
-            process.terminate()
-        # Interrupt main thread to ensure proper cleanup
-        _thread.interrupt_main()
-        raise  # Re-raise to allow CLI to handle it
+    except KeyboardInterrupt as e:
+
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                process.terminate()
+            _thread.interrupt_main()
+
+        handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message="Unix agent monitoring interrupted by user")
+        return False  # Worker thread: suppressed
 
 
 def _fallback_subprocess_detection(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> bool:
@@ -310,14 +313,15 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
                     break
 
             return False  # Process exited normally
-        except KeyboardInterrupt:
-            logger.info("Subprocess agent monitoring interrupted by user")
-            # Try to terminate the process gracefully
-            with contextlib.suppress(Exception):
-                process.terminate()
-            # Interrupt main thread to ensure proper cleanup
-            _thread.interrupt_main()
-            raise  # Re-raise to allow CLI to handle it
+        except KeyboardInterrupt as e:
+
+            def _cleanup() -> None:
+                with contextlib.suppress(Exception):
+                    process.terminate()
+                _thread.interrupt_main()
+
+            handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message="Subprocess agent monitoring interrupted by user")
+            return False  # Worker thread: suppressed
     except Exception as e:
         logger.error(f"Subprocess detection failed: {e}")
         return False

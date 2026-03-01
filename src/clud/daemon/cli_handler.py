@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+from clud.util import handle_keyboard_interrupt
+
 logger = logging.getLogger(__name__)
 
 # PID file location for tracking running daemon
@@ -164,11 +166,12 @@ def _monitor_daemon(pid: int) -> int:
         print("\nDaemon stopped.")
         return 0
 
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         # User pressed Ctrl+C - send signal to daemon
         print("\nStopping daemon...")
         _stop_daemon(pid)
-        return 0
+        handle_keyboard_interrupt(e)
+        return 0  # Worker thread: suppressed
 
 
 def _stop_daemon(pid: int) -> None:

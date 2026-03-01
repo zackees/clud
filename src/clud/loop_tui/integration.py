@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..util import handle_keyboard_interrupt
 from .loop_worker import LoopWorkerApp
 
 if TYPE_CHECKING:
@@ -49,9 +50,10 @@ def run_loop_with_tui(args: "Args", claude_path: str, loop_count: int) -> int:
     # the active subprocess is killed promptly.
     try:
         app.run()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as e:
         app._kill_active_subprocess()
-        return 130
+        handle_keyboard_interrupt(e)
+        return 130  # Worker thread: suppressed
 
     # Return the exit code from the loop execution
     return app._exit_code

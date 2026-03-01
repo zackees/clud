@@ -8,9 +8,6 @@ import subprocess
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
-
-T = TypeVar("T")
 
 
 def port_is_free(port: int, host: str = "localhost") -> bool:
@@ -40,73 +37,59 @@ def download_emsdk_headers(url: str, filepath: Path) -> str | None:
 
 
 def handle_keyboard_interrupt(
-    func: Callable[..., T],
-    *args: object,
     exc: KeyboardInterrupt,
     cleanup: Callable[[], None] | None = None,
     logger: logging.Logger | None = None,
     log_message: str | None = None,
-    **kwargs: object,
-) -> T:
-    """Execute a function with proper KeyboardInterrupt handling.
+) -> None:
+    """Handle a KeyboardInterrupt with proper thread-aware behaviour.
 
-    This utility ensures KeyboardInterrupt is ALWAYS re-raised on the main thread.
-    On non-main threads, it performs cleanup and logging but does NOT re-raise,
-    since only the main thread receives SIGINT and re-raising on worker threads
-    can cause the interrupt to be swallowed by thread exception handlers.
+    Call this inside an ``except KeyboardInterrupt as e:`` block.  It runs
+    optional cleanup, logs the event, and then:
+
+    * **Main thread** — re-raises ``KeyboardInterrupt`` so the process exits.
+    * **Worker thread** — returns normally (suppresses the exception) because
+      only the main thread should act on SIGINT.  Re-raising on a worker
+      thread lets the thread's exception handler swallow the interrupt,
+      making Ctrl-C unresponsive.
 
     Args:
-        func: The function to execute
-        *args: Positional arguments to pass to func
-        exc: The KeyboardInterrupt exception value from the caller's except block
-        cleanup: Optional cleanup function to call before re-raising KeyboardInterrupt
-        logger: Optional logger for logging the interrupt
-        log_message: Optional custom log message (default: "Operation interrupted by user")
-        **kwargs: Keyword arguments to pass to func
-
-    Returns:
-        The return value of func
+        exc: The KeyboardInterrupt caught by the caller.
+        cleanup: Optional cleanup function to call before re-raising.
+        logger: Optional logger for logging the interrupt.
+        log_message: Custom log message (default: "Operation interrupted by user").
 
     Raises:
-        KeyboardInterrupt: Always re-raised when caught on the main thread.
-            On non-main threads, the exception is suppressed after cleanup.
-        Exception: Any other exception from func is propagated
+        KeyboardInterrupt: Always re-raised on the main thread.
 
-    Example:
-        >>> try:
-        ...     do_work()
-        ... except KeyboardInterrupt as e:
-        ...     handle_keyboard_interrupt(lambda: None, exc=e, cleanup=cleanup_resources)
+    Example::
+
+        try:
+            do_work()
+        except KeyboardInterrupt as e:
+            handle_keyboard_interrupt(e, cleanup=cleanup_resources)
     """
     is_main_thread = threading.current_thread() is threading.main_thread()
 
-    try:
-        return func(*args, **kwargs)
-    except KeyboardInterrupt:
-        if cleanup:
-            try:
-                cleanup()
-            except Exception as cleanup_err:
-                # Don't let cleanup errors prevent KeyboardInterrupt propagation
-                if logger:
-                    logger.warning("Cleanup failed during keyboard interrupt: %s", cleanup_err)
-
-        if logger:
-            msg = log_message or "Operation interrupted by user"
-            logger.info("%s (exc=%s)", msg, exc)
-
-        if is_main_thread:
-            raise  # MANDATORY: Always re-raise KeyboardInterrupt on main thread
-        else:
-            # On non-main threads, don't re-raise - the main thread handles SIGINT.
-            # Re-raising here causes the interrupt to be swallowed by thread
-            # exception handlers, making Ctrl-C unresponsive.
+    if cleanup:
+        try:
+            cleanup()
+        except Exception as cleanup_err:
             if logger:
-                logger.debug(
-                    "KeyboardInterrupt on non-main thread (%s), suppressing after cleanup",
-                    threading.current_thread().name,
-                )
-            return None  # type: ignore[return-value]
+                logger.warning("Cleanup failed during keyboard interrupt: %s", cleanup_err)
+
+    if logger:
+        msg = log_message or "Operation interrupted by user"
+        logger.info("%s (exc=%s)", msg, exc)
+
+    if is_main_thread:
+        raise exc
+    else:
+        if logger:
+            logger.debug(
+                "KeyboardInterrupt on non-main thread (%s), suppressing after cleanup",
+                threading.current_thread().name,
+            )
 
 
 def detect_git_bash() -> str | None:

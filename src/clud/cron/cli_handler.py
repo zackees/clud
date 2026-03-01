@@ -8,6 +8,7 @@ from pathlib import Path
 from croniter import croniter
 
 from clud.cron import Daemon
+from clud.util import handle_keyboard_interrupt
 
 from .autostart import AutostartInstaller
 from .monitor import CronMonitor
@@ -60,11 +61,17 @@ def prompt_cron_installation() -> bool:
             print_info("You can enable cron later by running any 'clud --cron' command")
             print()
             return False
-    except (KeyboardInterrupt, EOFError):
+    except EOFError:
         print()
         print_warning("Cron installation cancelled")
         print()
         return False
+    except KeyboardInterrupt as e:
+        print()
+        print_warning("Cron installation cancelled")
+        print()
+        handle_keyboard_interrupt(e)
+        return False  # Worker thread: suppressed
 
 
 # ANSI color codes for terminal output
