@@ -48,7 +48,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  cat file | clud | less     Chain pipes for input and output")
             print()
             print("Special modes:")
-            print("  fix [URL]                      Fix linting and test issues (with optional GitHub URL)")
+            print("  fix [URL]                      Auto-detect and fix linting + tests (with optional GitHub URL)")
             print("  up [-m MSG] [-p|--publish]     Run global codeup command with auto-fix")
             print("  loop [msg|file] [--loop-count N]  Run loop mode (prompts if no msg given)")
             print("  rebase                         Rebase to current origin HEAD (auto-resolves conflicts)")
@@ -57,7 +57,6 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --task PATH          Open task file in editor")
             print("  --lint               Run lint and tests with lint-test")
             print("  --test               Run lint and tests with lint-test")
-            print("  --fix [URL]          Fix linting issues and run tests (optionally from GitHub URL)")
             print("  --init-loop          Create LOOP.md index from existing markdown files")
             print("  --cron <subcommand>  Schedule recurring tasks (use 'clud --cron help' for details)")
             print("  --ui, -d             Launch multi-terminal UI with Playwright browser (4 terminals)")
@@ -78,9 +77,6 @@ def main(args_list: list[str] | None = None) -> int:
 
         if args.test:
             return handle_test_command()
-
-        if args.fix:
-            return handle_fix_command(args.fix_url)
 
         if args.init_loop:
             return handle_init_loop_command()

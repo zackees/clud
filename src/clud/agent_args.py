@@ -67,7 +67,6 @@ def parse_args(args: list[str] | None = None) -> Args:
     # Check for special commands first (these don't need agent routing)
     lint = "--lint" in args_copy
     test = "--test" in args_copy
-    fix = "--fix" in args_copy
     init_loop = "--init-loop" in args_copy
     install_claude = "--install-claude" in args_copy
     info = "--info" in args_copy
@@ -107,13 +106,8 @@ def parse_args(args: list[str] | None = None) -> Args:
                 cron_args.append(args_copy[cron_idx])
                 args_copy.pop(cron_idx)
 
-    # Extract fix URL argument if present
+    # Extract fix URL argument if present (from 'clud fix <URL>' subcommand)
     fix_url = None
-    if "--fix" in args_copy:
-        fix_idx = args_copy.index("--fix")
-        # Check if there's a URL argument after --fix
-        if fix_idx + 1 < len(args_copy) and not args_copy[fix_idx + 1].startswith("-"):
-            fix_url = args_copy[fix_idx + 1]
 
     # Only intercept help if no mode is specified
     help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up", "loop", "rebase"])
@@ -142,6 +136,10 @@ def parse_args(args: list[str] | None = None) -> Args:
         mode_str = args_copy[0]
         if mode_str == "fix":
             mode = AgentMode.FIX
+            # Check if there's a URL argument after 'fix'
+            remaining = args_copy[1:]
+            if remaining and not remaining[0].startswith("-"):
+                fix_url = remaining[0]
         elif mode_str == "up":
             mode = AgentMode.UP
             # Check for -p or --publish flag after 'up'
@@ -257,7 +255,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         task=task,
         lint=lint,
         test=test,
-        fix=fix,
+        fix=False,
         fix_url=fix_url,
         up_publish=up_publish,
         up_message=up_message,

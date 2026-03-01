@@ -54,7 +54,6 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     login = "--login" in args_copy
     lint = "--lint" in args_copy
     test = "--test" in args_copy
-    fix = "--fix" in args_copy
     kanban = "--kanban" in args_copy
     telegram = "--telegram" in args_copy or "-tg" in args_copy
     code = "--code" in args_copy
@@ -66,13 +65,8 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
     if "--track" in args_copy:
         args_copy.remove("--track")
 
-    # Extract fix URL argument if present
+    # Extract fix URL argument if present (from 'clud fix <URL>' subcommand)
     fix_url = None
-    if "--fix" in args_copy:
-        fix_idx = args_copy.index("--fix")
-        # Check if there's a URL argument after --fix
-        if fix_idx + 1 < len(args_copy) and not args_copy[fix_idx + 1].startswith("-"):
-            fix_url = args_copy[fix_idx + 1]
 
     # Extract code port argument if present
     code_port = None
@@ -129,6 +123,10 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         mode_str = args_copy[0]
         if mode_str == "fix":
             mode = AgentMode.FIX
+            # Check if there's a URL argument after 'fix'
+            remaining = args_copy[1:]
+            if remaining and not remaining[0].startswith("-"):
+                fix_url = remaining[0]
         elif mode_str == "up":
             mode = AgentMode.UP
             # Check for -p or --publish flag after 'up'
@@ -148,7 +146,7 @@ def parse_router_args(args: list[str] | None = None) -> RouterArgs:
         task=task,
         lint=lint,
         test=test,
-        fix=fix,
+        fix=False,
         fix_url=fix_url,
         up_publish=up_publish,
         kanban=kanban,

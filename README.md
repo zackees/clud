@@ -188,7 +188,7 @@ clud --dry-run                    # Show command without executing
 clud --task PATH                  # Process task file
 clud --lint                       # Run linting workflow
 clud --test                       # Run testing workflow
-clud --fix [URL]                  # Fix linting and tests
+clud fix [URL]                    # Auto-detect and fix linting + tests
 clud --ui                         # Launch 4-terminal UI
 clud -d                           # Short alias for --ui
 clud --help                       # Show help
