@@ -60,6 +60,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --cron <subcommand>  Schedule recurring tasks (use 'clud --cron help' for details)")
             print("  --ui, -d             Launch multi-terminal UI with Playwright browser (4 terminals)")
             print("  --tui                Launch Textual TUI for loop mode (requires --loop)")
+            print("  --rebase             Rebase to current origin HEAD (auto-resolves conflicts)")
             print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
             print("  -h, --help           Show this help")
@@ -94,6 +95,16 @@ def main(args_list: list[str] | None = None) -> int:
 
         if args.ui:
             return handle_daemon_command(args.num_terminals)
+
+        if args.rebase:
+            args.prompt = (
+                "Rebase to the current origin head. Use the git tool to figure out"
+                " what the origin is. If there is no rebase then do a pull and attempt"
+                " to do a rebase, if it's not successful then finish the rebase line"
+                " by line, don't revert any files. After that print out a summary of"
+                ' what you did to make it work, or just say "No rebase necessary".'
+            )
+            return run_agent(args)
 
         # Route to appropriate mode handler
         if args.mode == AgentMode.FIX:
