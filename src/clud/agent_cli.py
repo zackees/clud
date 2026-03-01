@@ -17,6 +17,7 @@ from .agent.commands import (
 
 # Import from agent modules
 from .agent.exceptions import ConfigError, ValidationError
+from .agent.prompts import REBASE_PROMPT
 from .agent.runner import run_agent
 from .agent_args import AgentMode, parse_args
 from .cron.cli_handler import handle_cron_command
@@ -94,13 +95,7 @@ def main(args_list: list[str] | None = None) -> int:
             return handle_daemon_command(args.num_terminals)
 
         if args.rebase:
-            args.prompt = (
-                "Rebase to the current origin head. Use the git tool to figure out"
-                " what the origin is. If there is no rebase then do a pull and attempt"
-                " to do a rebase, if it's not successful then finish the rebase line"
-                " by line, don't revert any files. After that print out a summary of"
-                ' what you did to make it work, or just say "No rebase necessary".'
-            )
+            args.prompt = REBASE_PROMPT
             return run_agent(args)
 
         # Route to appropriate mode handler

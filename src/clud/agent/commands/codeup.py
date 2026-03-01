@@ -3,12 +3,13 @@
 import sys
 
 from clud.agent.lint_runner import _check_agent_artifacts
+from clud.agent.prompts import UP_CODEUP_STEP, UP_PROMPT
 from clud.agent.subprocess import run_clud_subprocess
 from clud.agent.task_manager import _print_red_banner
 
 
 def handle_codeup_command(commit_message: str | None = None) -> int:
-    """Handle the --codeup command by running git pre-check first, then clud with a message to run the global codeup command."""
+    """Handle the 'clud up' command by running lint, test, cleanup, and codeup."""
     # Check for agent task artifacts first
     if not _check_agent_artifacts():
         return 1  # User aborted
@@ -26,23 +27,20 @@ def handle_codeup_command(commit_message: str | None = None) -> int:
     except Exception as e:
         print(f"Warning: Error running git pre-check: {e}", file=sys.stderr)
 
-    # Build the codeup command with optional message
-    codeup_cmd = "codeup"
+    # If user provided a message, skip the auto-summary step
     if commit_message:
-        codeup_cmd = f'codeup -m "{commit_message}"'
+        prompt = UP_PROMPT.replace(
+            UP_CODEUP_STEP,
+            f'6. Once everything passes and is clean, run:\n   codeup -m "{commit_message}"\n   (codeup is a global command installed on the system)',
+        )
+    else:
+        prompt = UP_PROMPT
 
-    # Now run the agent with the codeup prompt
-    codeup_prompt = (
-        f"run the global command {codeup_cmd} normally through the shell (it's a global command installed on the system), "
-        "wait for the tests to complete if necessary (sometimes tests take a long time with clud up), "
-        "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
-        "Run upto 5 times before giving up, else halt."
-    )
-    return run_clud_subprocess(codeup_prompt, use_print_flag=True)
+    return run_clud_subprocess(prompt, use_print_flag=True)
 
 
 def handle_codeup_publish_command(commit_message: str | None = None) -> int:
-    """Handle the --codeup-publish command by running git pre-check first, then clud with a message to run codeup -p."""
+    """Handle the 'clud up -p' command by running lint, test, cleanup, and codeup -p."""
     # Check for agent task artifacts first
     if not _check_agent_artifacts():
         return 1  # User aborted
@@ -60,16 +58,12 @@ def handle_codeup_publish_command(commit_message: str | None = None) -> int:
     except Exception as e:
         print(f"Warning: Error running git pre-check: {e}", file=sys.stderr)
 
-    # Build the codeup command with optional message and publish flag
-    codeup_cmd = "codeup -p"
-    if commit_message:
-        codeup_cmd = f'codeup -m "{commit_message}" -p'
+    # Build the publish variant of the prompt
+    codeup_cmd = f'codeup -m "{commit_message}" -p' if commit_message else "codeup -p"
 
-    # Now run the agent with the codeup -p prompt
-    codeup_publish_prompt = (
-        f"run the global command {codeup_cmd} normally through the shell (it's a global command installed on the system), "
-        "wait for the tests to complete if necessary (sometimes tests take a long time with clud up), "
-        "if it returns 0, halt, if it fails then read the output logs and apply the fixes. "
-        "Run upto 5 times before giving up, else halt."
+    prompt = UP_PROMPT.replace(
+        UP_CODEUP_STEP,
+        f"6. Once everything passes and is clean, run:\n   {codeup_cmd}\n   (codeup is a global command installed on the system)",
     )
-    return run_clud_subprocess(codeup_publish_prompt)
+
+    return run_clud_subprocess(prompt, use_print_flag=True)

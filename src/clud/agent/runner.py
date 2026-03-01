@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from running_process import RunningProcess
 
 from ..claude_installer import prompt_install_claude
+from .prompts import LOOP_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
     from ..agent_args import Args
@@ -89,18 +90,10 @@ def run_agent(args: "Args") -> int:
                 elif args.loop_value.endswith(".md") or Path(args.loop_value).exists():
                     original_filename = Path(args.loop_value).name
                     working_file_path = f".loop/{original_filename}"
-                    loop_prompt = (
-                        f"Read {working_file_path} and do the next task. "
-                        f"You are free to update {working_file_path} with information critical "
-                        f"for the next agent and future agents as this task is worked on."
-                    )
+                    loop_prompt = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
                 else:
                     working_file_path = ".loop/LOOP.md"
-                    loop_prompt = (
-                        f"Read {working_file_path} and do the next task. "
-                        f"You are free to update {working_file_path} with information critical "
-                        f"for the next agent and future agents as this task is worked on."
-                    )
+                    loop_prompt = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
 
                 print(f"Loop mode: {loop_count} iterations")
                 print(f"Working file: {working_file_path if args.loop_value else '.loop/LOOP.md'}")
@@ -197,20 +190,12 @@ def run_agent(args: "Args") -> int:
 
                     # Expand to template message for file-based loop mode
                     # Point agent to working copy in .loop/
-                    loop_message = (
-                        f"Read {working_file_path} and do the next task. "
-                        f"You are free to update {working_file_path} with information critical "
-                        f"for the next agent and future agents as this task is worked on."
-                    )
+                    loop_message = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
                 else:
                     # Not a file path - will write to .loop/LOOP.md in loop_executor
                     # Use same template message as file paths for consistency
                     working_file_path = ".loop/LOOP.md"
-                    loop_message = (
-                        f"Read {working_file_path} and do the next task. "
-                        f"You are free to update {working_file_path} with information critical "
-                        f"for the next agent and future agents as this task is worked on."
-                    )
+                    loop_message = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
 
             # Prompt for missing values
             # Check if we have a message from loop_value, -m, or -p
