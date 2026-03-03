@@ -33,6 +33,7 @@ class Args:
     info: bool = False
     help: bool = False
     hook_debug: bool = False  # For --hook-debug (verbose hook logging)
+    no_stop_hook: bool = False  # For --no-stop-hook (disable AGENT_STOP hook)
     cron: bool = False  # For --cron (cron scheduler)
     cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
     cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
@@ -71,14 +72,17 @@ def parse_args(args: list[str] | None = None) -> Args:
     install_claude = "--install-claude" in args_copy
     info = "--info" in args_copy
     hook_debug = "--hook-debug" in args_copy
+    no_stop_hook = "--no-stop-hook" in args_copy
     cron = "--cron" in args_copy
     ui = "--ui" in args_copy or "-d" in args_copy
     tui = "--tui" in args_copy
     rebase = False
 
-    # Remove --hook-debug from args_copy since it's handled by router
+    # Remove --hook-debug and --no-stop-hook from args_copy since they're handled by router
     if "--hook-debug" in args_copy:
         args_copy.remove("--hook-debug")
+    if "--no-stop-hook" in args_copy:
+        args_copy.remove("--no-stop-hook")
 
     # Remove --ui or -d from args_copy since it's handled by router
     if "--ui" in args_copy:
@@ -264,6 +268,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         info=info,
         help=help_requested,
         hook_debug=hook_debug,
+        no_stop_hook=no_stop_hook,
         cron=cron,
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,

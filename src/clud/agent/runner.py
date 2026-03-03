@@ -337,19 +337,20 @@ def run_agent(args: "Args") -> int:
     except KeyboardInterrupt as e:
         print("\nInterrupted by user", file=sys.stderr)
 
-        # Trigger AGENT_STOP hook on interrupt
-        trigger_hook_sync(
-            HookEvent.AGENT_STOP,
-            HookContext(
-                event=HookEvent.AGENT_STOP,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-                metadata={"reason": "interrupted"},
-            ),
-            hook_debug=args.hook_debug,
-        )
+        # Trigger AGENT_STOP hook on interrupt (unless disabled)
+        if not args.no_stop_hook:
+            trigger_hook_sync(
+                HookEvent.AGENT_STOP,
+                HookContext(
+                    event=HookEvent.AGENT_STOP,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    metadata={"reason": "interrupted"},
+                ),
+                hook_debug=args.hook_debug,
+            )
         handle_keyboard_interrupt(e)
         return 130  # Worker thread: suppressed
 
@@ -430,15 +431,16 @@ def run_agent(args: "Args") -> int:
         return 1
 
     finally:
-        # Trigger AGENT_STOP hook in finally block
-        trigger_hook_sync(
-            HookEvent.AGENT_STOP,
-            HookContext(
-                event=HookEvent.AGENT_STOP,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-            ),
-            hook_debug=args.hook_debug,
-        )
+        # Trigger AGENT_STOP hook in finally block (unless disabled)
+        if not args.no_stop_hook:
+            trigger_hook_sync(
+                HookEvent.AGENT_STOP,
+                HookContext(
+                    event=HookEvent.AGENT_STOP,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                ),
+                hook_debug=args.hook_debug,
+            )
