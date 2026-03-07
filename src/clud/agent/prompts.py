@@ -42,7 +42,8 @@ INIT_LOOP_PROMPT = (
 )
 
 REBASE_PROMPT = (
-    "Rebase to the current origin head. Use the git tool to figure out"
+    "First, unconditionally run `git fetch` to update all remote branches. "
+    "Then rebase to the current origin head. Use the git tool to figure out"
     " what the origin is. If there is no rebase then do a pull and attempt"
     " to do a rebase, if it's not successful then finish the rebase line"
     " by line, don't revert any files. After that print out a summary of"
