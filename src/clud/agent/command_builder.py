@@ -1,9 +1,11 @@
 """Command building and wrapping utilities for Claude Code execution."""
 
+import json
 import os
 import platform
 import subprocess
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..settings_manager import get_model_preference, set_model_preference
@@ -11,6 +13,31 @@ from ..util import detect_git_bash
 
 if TYPE_CHECKING:
     from ..agent_args import Args
+
+
+def _has_attribution_setting() -> bool:
+    """Check if attribution is already configured in global or project settings.
+
+    Checks (in order):
+      1. ~/.claude/settings.json (global user settings)
+      2. .claude/settings.json (shared project settings)
+      3. .claude/settings.local.json (local project settings)
+
+    Returns True if any of these contain an "attribution" key.
+    """
+    paths = [
+        Path.home() / ".claude" / "settings.json",
+        Path(".claude") / "settings.json",
+        Path(".claude") / "settings.local.json",
+    ]
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if "attribution" in data:
+                return True
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+    return False
 
 
 def _inject_completion_prompt(message: str, iteration: int | None = None, total_iterations: int | None = None, working_file: str | None = None) -> str:
@@ -159,6 +186,10 @@ def _build_claude_command(
 
     if args.claude_args:
         cmd.extend(args.claude_args)
+
+    # Disable co-author attribution unless already configured in settings
+    if not _has_attribution_setting():
+        cmd.extend(["--settings", json.dumps({"attribution": {"commit": "", "pr": ""}})])
 
     return cmd
 

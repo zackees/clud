@@ -136,8 +136,6 @@ def run_agent(args: "Args") -> int:
         os.environ["IN_CLUD"] = "1"
         # Set max output tokens for Claude
         os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
-        # Disable Claude git author attribution
-        os.environ["CLAUDE_GIT_AUTHOR"] = "0"
         # Disable MSYS/git-bash automatic path conversion
         # This prevents URLs like https://github.com/... from being converted to
         # Windows paths like https;\\github.com\... when running through git-bash
@@ -236,7 +234,6 @@ def run_agent(args: "Args") -> int:
         # Print launch banner with command and environment
         env_vars = {
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
-            "CLAUDE_GIT_AUTHOR": "0",
         }
         _print_launch_banner(cmd, env_vars=env_vars)
 

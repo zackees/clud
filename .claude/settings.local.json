@@ -1,7 +1,4 @@
 {
-  "env": {
-    "secretsExcludeFromMask": ["CLAUDE_GIT_AUTHOR"]
-  },
   "permissions": {
     "allow": [
       "Bash(git add:*)",
