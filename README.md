@@ -12,9 +12,7 @@ The name `clud` is simply a shorter, easier-to-type version of `claude`.
 pip install clud
 ```
 
-Requires Claude Code installed separately (`npm install -g @anthropic-ai/claude-code@latest`).
-
-## Quick Start
+## Usage
 
 ```bash
 clud                              # Launch Claude Code in YOLO mode
@@ -24,9 +22,7 @@ clud -p "refactor the auth layer" # Run with a prompt
 clud -- --model opus              # Pass any flags to Claude Code
 ```
 
-## Features
-
-### `clud loop` — Multi-Iteration Agent
+## `clud loop` — The Ralph Loop
 
 Run Claude in an autonomous loop that iterates on a task until it's done (default: 50 iterations).
 
@@ -36,80 +32,33 @@ clud loop TASK.md
 clud loop TASK.md --loop-count 10
 ```
 
-Each iteration gets its own workspace in `.loop/` with task tracking, iteration summaries, and a `DONE.md` signal to halt early. The agent runs fully autonomously — no user interaction needed.
+Each iteration gets its own workspace in `.loop/` with task tracking, iteration summaries, and a `DONE.md` signal to halt early. Fully autonomous — no user interaction needed.
 
-### `clud rebase` — Auto-Rebase
+## `clud rebase` — Auto-Rebase
 
-Fetches from origin and rebases the current branch, automatically resolving conflicts line-by-line.
+Did changes happen on origin? This syncs it up — fetches from origin, rebases the current branch, and resolves conflicts line-by-line without reverts.
 
 ```bash
 clud rebase
 ```
 
-### `clud up` — Project Maintenance
+## `clud fix` — Auto-Fix
 
-Runs lint, test, cleanup, then commits via the global `codeup` command.
+Auto-detects linting and test tools in your repo, runs them, and fixes failures in a loop until everything passes.
+
+```bash
+clud fix                   # Detect and fix lint + test issues
+clud fix https://github.com/user/repo/actions/runs/123  # Fix from CI logs
+```
+
+## `clud up` — Ship It
+
+Runs lint, test, cleanup, then commits via `codeup`.
 
 ```bash
 clud up                    # Lint, test, and push
 clud up -p                 # Publish to remote
 clud up -m "commit msg"    # Custom commit message
-```
-
-### `-c` / `--continue` — Continue Conversation
-
-```bash
-clud -c
-```
-
-Continues the most recent Claude Code conversation.
-
-### `--resume` — Resume Conversation
-
-```bash
-clud --resume
-```
-
-Resumes a specific Claude Code conversation (passed through to Claude Code).
-
-### `--` — Passthrough
-
-All unknown arguments are passed directly to Claude Code:
-
-```bash
-clud -- --model opus --verbose
-clud -- --allowedTools "Bash(git*)"
-```
-
-## How It Works
-
-When you run `clud`, it launches Claude Code with:
-
-- `--dangerously-skip-permissions` — no safety prompts
-- `CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000` — max output for Sonnet
-- Git co-author attribution disabled
-- Pipe mode support (`echo "prompt" | clud | less`)
-
-## Other Commands
-
-```bash
-clud fix [URL]             # Auto-fix linting + test failures
-clud plan "prompt"         # Plan then auto-execute a task
-clud --task PATH           # Execute a task file autonomously
-clud --cron <subcommand>   # Schedule recurring tasks
-clud --ui                  # Launch multi-terminal UI (4 xterm.js terminals)
-clud --info                # Show Claude Code installation info
-clud --install-claude      # Install Claude Code to ~/.clud/npm
-clud --help                # Show all options
-```
-
-## Development
-
-```bash
-bash install               # Set up dev environment (requires uv)
-source activate            # Activate virtualenv
-bash test                  # Run unit tests
-bash lint                  # Lint (mandatory after code changes)
 ```
 
 ## License
