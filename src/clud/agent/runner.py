@@ -33,6 +33,7 @@ from .command_builder import (
 from .completion import detect_agent_completion
 from .hooks import register_hooks_from_config, trigger_hook_sync
 from .loop_executor import _run_loop
+from .process_launcher import run_claude_process
 from .subprocess import _execute_command
 from .user_input import _prompt_for_message
 
@@ -290,7 +291,11 @@ def run_agent(args: "Args") -> int:
                 stdout_callback = create_formatter_callback(formatter)
                 returncode = RunningProcess.run_streaming(cmd, stdout_callback=stdout_callback)
         else:
-            returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
+            # Use run_claude_process for interactive mode to get proper
+            # process group isolation (CREATE_NEW_PROCESS_GROUP on Windows).
+            # This prevents Ctrl-C from reaching the child process tree,
+            # avoiding ugly tracebacks from nodejs_wheel's Python wrapper.
+            returncode = run_claude_process(cmd)
 
         # Trigger POST_EXECUTION hook after successful completion
         trigger_hook_sync(

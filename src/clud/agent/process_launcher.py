@@ -69,10 +69,15 @@ def _is_msys_environment() -> bool:
     on SetConsoleCtrlHandler which requires a real Windows Console — mintty
     communicates via pipes instead.
 
+    Note: We only check MSYSTEM (set by MSYS2/git-bash shell) and not
+    MSYS_NO_PATHCONV, because clud sets MSYS_NO_PATHCONV=1 itself to prevent
+    path conversion — checking it here would always return True and defeat
+    CREATE_NEW_PROCESS_GROUP isolation.
+
     Returns:
         True if the current process is running under MSYS/git-bash.
     """
-    return bool(os.environ.get("MSYSTEM") or os.environ.get("MSYS_NO_PATHCONV"))
+    return bool(os.environ.get("MSYSTEM"))
 
 
 def run_claude_process(

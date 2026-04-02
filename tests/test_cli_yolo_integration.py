@@ -32,26 +32,23 @@ class TestCliYoloIntegration(unittest.TestCase):
 
     def test_cli_message_without_dry_run_mocked(self) -> None:
         """Test CLI with -m but no --dry-run (should try to run Claude, but we mock it)."""
-        # Mock subprocess.run to avoid actually running Claude
-        with patch("clud.agent.subprocess.subprocess.run") as mock_run:
-            # Mock successful return for command execution
-            mock_run.return_value.returncode = 0
-
-            # Mock _find_claude_path to return a fake claude path
-            # Mock _wrap_command_for_git_bash to pass through (avoids subprocess calls for git-bash detection)
-            with (
-                patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"),
-                patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=lambda cmd: cmd),  # type: ignore[misc]
-            ):
-                result = main(["-m", "test message"])
+        # Mock run_claude_process to avoid actually running Claude
+        # Interactive mode (no -p flag) uses run_claude_process for process group isolation
+        with (
+            patch("clud.agent.runner.run_claude_process", return_value=0) as mock_run,
+            patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"),
+            patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=lambda cmd: cmd),  # type: ignore[misc]
+        ):
+            result = main(["-m", "test message"])
 
         self.assertEqual(result, 0)
-        # Verify that subprocess.run was called (meaning it tried to run Claude)
-        self.assertGreaterEqual(mock_run.call_count, 1)
-        # Verify the last call was to execute claude with the message
-        last_call = mock_run.call_args_list[-1]
-        self.assertIn("claude", str(last_call))
-        self.assertIn("test message", str(last_call))
+        # Verify that run_claude_process was called (meaning it tried to run Claude)
+        self.assertEqual(mock_run.call_count, 1)
+        # Verify the call included claude and the message
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]  # First positional arg is the command list
+        self.assertIn("claude", str(cmd))
+        self.assertIn("test message", str(cmd))
 
 
 if __name__ == "__main__":
