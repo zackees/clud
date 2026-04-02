@@ -12,6 +12,7 @@ from .agent.commands import (
     handle_init_loop_command,
     handle_install_claude_command,
     handle_lint_command,
+    handle_plan_command,
     handle_test_command,
 )
 
@@ -52,6 +53,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  fix [URL]                      Auto-detect and fix linting + tests (with optional GitHub URL)")
             print("  up [-m MSG] [-p|--publish]     Run global codeup command with auto-fix")
             print("  loop [msg|file] [--loop-count N]  Run loop mode (prompts if no msg given)")
+            print('  plan "prompt"                  Plan then auto-execute a task')
             print("  rebase                         Rebase to current origin HEAD (auto-resolves conflicts)")
             print()
             print("Special commands:")
@@ -101,6 +103,8 @@ def main(args_list: list[str] | None = None) -> int:
         # Route to appropriate mode handler
         if args.mode == AgentMode.FIX:
             return handle_fix_command(args.fix_url)
+        elif args.mode == AgentMode.PLAN:
+            return handle_plan_command(args.plan_prompt)
         elif args.mode == AgentMode.UP:
             # Check if publish flag was provided
             if args.up_publish:

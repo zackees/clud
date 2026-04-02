@@ -21,7 +21,7 @@ dependencies = [
     "nodeenv>=1.8.0",
     "nodejs-wheel>=22.0.0",
     "psutil>=5.9.0",
-    "codeup>=1.0.24",
+    "codeup>=1.1.4",
     "pyyaml>=6.0.0",
     "croniter>=1.4.0",
     "playwright>=1.40.0",
@@ -29,7 +29,7 @@ dependencies = [
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
 ]
-version = "1.2.4"
+version = "1.2.5"
 
 [project.optional-dependencies]
 dev = [

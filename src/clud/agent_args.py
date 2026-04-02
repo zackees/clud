@@ -12,6 +12,7 @@ class AgentMode(Enum):
 
     FIX = "fix"
     UP = "up"
+    PLAN = "plan"
     DEFAULT = "default"
 
 
@@ -28,6 +29,7 @@ class Args:
     fix_url: str | None = None
     up_publish: bool = False  # For 'clud up -p' or 'clud up --publish'
     up_message: str | None = None  # For 'clud up -m "message"'
+    plan_prompt: str | None = None  # For 'clud plan "prompt text"'
     init_loop: bool = False
     install_claude: bool = False
     info: bool = False
@@ -114,7 +116,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     fix_url = None
 
     # Only intercept help if no mode is specified
-    help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up", "loop", "rebase"])
+    help_requested = ("--help" in args_copy or "-h" in args_copy) and not (args_copy and args_copy[0] in ["fix", "up", "loop", "rebase", "plan"])
 
     # Extract task argument if present
     task = None
@@ -136,7 +138,8 @@ def parse_args(args: list[str] | None = None) -> Args:
     up_message = None
     loop_value: str | None = None
     loop_count_override: int | None = None
-    if args_copy and args_copy[0] in ["fix", "up", "loop", "rebase"]:
+    plan_prompt = None
+    if args_copy and args_copy[0] in ["fix", "up", "loop", "rebase", "plan"]:
         mode_str = args_copy[0]
         if mode_str == "fix":
             mode = AgentMode.FIX
@@ -165,6 +168,16 @@ def parse_args(args: list[str] | None = None) -> Args:
                     args_copy.pop(message_idx)  # Remove value (now at same index)
         elif mode_str == "rebase":
             rebase = True
+        elif mode_str == "plan":
+            mode = AgentMode.PLAN
+            # Collect remaining args as the plan prompt text
+            remaining = args_copy[1:]
+            if remaining and not remaining[0].startswith("-"):
+                plan_prompt = remaining[0]
+                args_copy = args_copy[2:]  # Remove 'plan' and prompt
+            else:
+                plan_prompt = None  # Will error in handler
+                args_copy = args_copy[1:]  # Remove 'plan'
         elif mode_str == "loop":
             # Extract optional loop value (message or file path) after 'loop'
             args_copy = args_copy[1:]  # Remove 'loop'
@@ -181,8 +194,8 @@ def parse_args(args: list[str] | None = None) -> Args:
                 args_copy.pop(0)
             else:
                 loop_value = ""  # No value: prompt for message
-        if mode_str != "loop":
-            args_copy = args_copy[1:]  # Remove the positional arg (already done for loop)
+        if mode_str not in ("loop", "plan"):
+            args_copy = args_copy[1:]  # Remove the positional arg (already done for loop/plan)
 
     # Parse agent-level arguments using argparse
     parser = argparse.ArgumentParser(
@@ -263,6 +276,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         fix_url=fix_url,
         up_publish=up_publish,
         up_message=up_message,
+        plan_prompt=plan_prompt,
         init_loop=init_loop,
         install_claude=install_claude,
         info=info,

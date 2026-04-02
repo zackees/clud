@@ -13,6 +13,7 @@ from clud.agent.commands.info import handle_info_command
 from clud.agent.commands.init_loop import handle_init_loop_command
 from clud.agent.commands.install_claude import handle_install_claude_command
 from clud.agent.commands.lint import handle_lint_command
+from clud.agent.commands.plan import handle_plan_command
 from clud.agent.commands.test import handle_test_command
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "handle_init_loop_command",
     "handle_install_claude_command",
     "handle_lint_command",
+    "handle_plan_command",
     "handle_test_command",
 ]
