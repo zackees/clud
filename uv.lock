@@ -348,7 +348,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "1.2.3"
+version = "1.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "appdirs" },
@@ -393,7 +393,7 @@ posix = [
 [package.metadata]
 requires-dist = [
     { name = "appdirs", specifier = ">=1.4.4" },
-    { name = "codeup", specifier = ">=1.0.24" },
+    { name = "codeup", specifier = ">=1.1.4" },
     { name = "croniter", specifier = ">=1.4.0" },
     { name = "cryptography", marker = "extra == 'keyring-fallbacks'", specifier = ">=3.0.0" },
     { name = "disklru", specifier = ">=0.1.0" },
@@ -424,7 +424,7 @@ provides-extras = ["dev", "keyring-fallbacks", "posix", "full"]
 
 [[package]]
 name = "codeup"
-version = "1.0.24"
+version = "1.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -436,7 +436,7 @@ dependencies = [
     { name = "semi-secret" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/cb/ff5bf65983eb122088ef0211bc3bfe66a66ebbfaa3f3f77ad09e0dff370c/codeup-1.0.24-py3-none-any.whl", hash = "sha256:d15512282dfaa113b2781aa8a763674e5392bc0d504cf8c49162318bc605fb6c", size = 47489, upload-time = "2026-01-26T02:14:49.099Z" },
+    { url = "https://files.pythonhosted.org/packages/60/d0/eca7989413a12236d265c2456719e8f980283ba71cd277fb7d95e6c8b7ae/codeup-1.1.4-py3-none-any.whl", hash = "sha256:be9c4398fe5fbf65f51fb319af3939a71359ebe06258264e2fdba39e672593a2", size = 50337, upload-time = "2026-04-02T21:40:24.45Z" },
 ]
 
 [[package]]
