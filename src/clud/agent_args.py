@@ -42,6 +42,7 @@ class Args:
     ui: bool = False  # For --ui (multi-terminal UI with Playwright browser)
     tui: bool = False  # For --tui (Textual TUI for loop mode)
     rebase: bool = False  # For --rebase (auto-rebase to origin HEAD)
+    no_skills: bool = False  # For --no-skills (skip auto-install of bundled skills)
     num_terminals: int = 4  # Number of terminals for --ui (default 4)
     # Agent-level arguments (execution)
     prompt: str | None = None
@@ -75,6 +76,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     info = "--info" in args_copy
     hook_debug = "--hook-debug" in args_copy
     no_stop_hook = "--no-stop-hook" in args_copy
+    no_skills = "--no-skills" in args_copy
     cron = "--cron" in args_copy
     ui = "--ui" in args_copy or "-d" in args_copy
     tui = "--tui" in args_copy
@@ -85,6 +87,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("--hook-debug")
     if "--no-stop-hook" in args_copy:
         args_copy.remove("--no-stop-hook")
+    if "--no-skills" in args_copy:
+        args_copy.remove("--no-skills")
 
     # Remove --ui or -d from args_copy since it's handled by router
     if "--ui" in args_copy:
@@ -283,6 +287,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         help=help_requested,
         hook_debug=hook_debug,
         no_stop_hook=no_stop_hook,
+        no_skills=no_skills,
         cron=cron,
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,

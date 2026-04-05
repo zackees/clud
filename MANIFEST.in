@@ -1,5 +1,6 @@
 include pyproject.toml
 include requirements.testing.txt
 include template_python_cmd/assets/example.txt
+recursive-include src/clud/assets *.md
 recursive-include src/clud/webui/static *
 recursive-include src/clud/webui/frontend/build *

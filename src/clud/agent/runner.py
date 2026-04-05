@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from running_process import RunningProcess
 
 from ..claude_installer import prompt_install_claude
+from ..skill_installer import install_skills, needs_install
 from .prompts import LOOP_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
@@ -168,6 +169,10 @@ def run_agent(args: "Args") -> int:
                 print("  - Install later with: clud --install-claude", file=sys.stderr)
                 print("  - Download from: https://claude.ai/download", file=sys.stderr)
                 return 1
+
+        # Auto-install bundled skills/agents/rules on first run or upgrade
+        if not args.no_skills and needs_install():
+            install_skills()
 
         # Handle loop mode - parse loop_value flexibly
         if args.loop_value is not None:
