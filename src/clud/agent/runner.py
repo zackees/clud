@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -24,7 +25,9 @@ from ..util import handle_keyboard_interrupt
 from .claude_finder import _find_claude_path
 from .command_builder import (
     _build_claude_command,
+    _get_effective_backend,
     _get_model_from_args,
+    _persist_backend_selection,
     _print_debug_info,
     _print_error_diagnostics,
     _print_launch_banner,
@@ -40,6 +43,15 @@ from .user_input import _prompt_for_message
 
 # Initialize logger
 logger = logging.getLogger(__name__)
+
+
+def _find_backend_executable(backend: str) -> str | None:
+    """Find the executable for the selected backend."""
+    if backend == "claude":
+        return _find_claude_path()
+    if backend == "codex":
+        return shutil.which("codex")
+    return None
 
 
 def run_agent(args: "Args") -> int:
@@ -78,6 +90,9 @@ def run_agent(args: "Args") -> int:
     register_hooks_from_config(hook_debug=args.hook_debug)
 
     try:
+        _persist_backend_selection(args)
+        backend = _get_effective_backend(args)
+
         # Handle dry-run mode early (before API key check)
         # Dry-run mode doesn't need API key since it only prints the command
         if args.dry_run:
@@ -104,8 +119,18 @@ def run_agent(args: "Args") -> int:
                     print(f"Original prompt: {args.loop_value}")
                 print(f"Loop prompt: {loop_prompt}")
                 print()
-                cmd_parts = ["claude", "--dangerously-skip-permissions", "-p", f'"{loop_prompt}"']
-                if not args.plain:
+                if backend == "codex":
+                    cmd_parts = [
+                        "codex",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "-C",
+                        os.getcwd(),
+                        "exec",
+                        f'"{loop_prompt}"',
+                    ]
+                else:
+                    cmd_parts = ["claude", "--dangerously-skip-permissions", "-p", f'"{loop_prompt}"']
+                if backend == "claude" and not args.plain:
                     cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
                 if args.claude_args:
                     cmd_parts.extend(args.claude_args)
@@ -113,19 +138,7 @@ def run_agent(args: "Args") -> int:
                 return 0
 
             # Handle regular (non-loop) dry-run
-            cmd_parts = ["claude", "--dangerously-skip-permissions"]
-            if args.continue_flag:
-                cmd_parts.append("--continue")
-            if args.prompt:
-                cmd_parts.extend(["-p", args.prompt])
-                # Enable streaming JSON output for -p flag by default (unless --plain is used)
-                # Note: stream-json requires --verbose when used with --print/-p
-                if not args.plain:
-                    cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
-            if args.message:
-                cmd_parts.append(args.message)
-            if args.claude_args:
-                cmd_parts.extend(args.claude_args)
+            cmd_parts = _build_claude_command(args, "codex" if backend == "codex" else "claude")
             print("Would execute:", " ".join(cmd_parts))
             return 0
 
@@ -136,8 +149,8 @@ def run_agent(args: "Args") -> int:
 
         # Set environment variable to indicate we're running inside clud
         os.environ["IN_CLUD"] = "1"
-        # Set max output tokens for Claude
-        os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
+        if backend == "claude":
+            os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "64000"
         # Disable MSYS/git-bash automatic path conversion
         # This prevents URLs like https://github.com/... from being converted to
         # Windows paths like https;\\github.com\... when running through git-bash
@@ -147,27 +160,27 @@ def run_agent(args: "Args") -> int:
         # No validation needed - if no input is provided and stdin is a tty,
         # Claude Code will launch in interactive mode
 
-        # Find Claude executable
-        claude_path = _find_claude_path()
+        # Find backend executable
+        claude_path = _find_backend_executable(backend)
         if not claude_path:
-            # Claude Code not found - offer to install it locally
-            print("Error: Claude Code is not installed or not in PATH", file=sys.stderr)
+            print(f"Error: {backend.title()} is not installed or not in PATH", file=sys.stderr)
             print(file=sys.stderr)
 
-            # Offer automatic installation
-            if prompt_install_claude():
-                # Installation succeeded, try finding it again
-                claude_path = _find_claude_path()
-                if not claude_path:
-                    print("Error: Installation succeeded but claude executable still not found", file=sys.stderr)
+            if backend == "claude":
+                if prompt_install_claude():
+                    claude_path = _find_backend_executable(backend)
+                    if not claude_path:
+                        print("Error: Installation succeeded but claude executable still not found", file=sys.stderr)
+                        return 1
+                else:
+                    print(file=sys.stderr)
+                    print("You can also:", file=sys.stderr)
+                    print("  - Install globally: npm install -g @anthropic-ai/claude-code@latest", file=sys.stderr)
+                    print("  - Install later with: clud --install-claude", file=sys.stderr)
+                    print("  - Download from: https://claude.ai/download", file=sys.stderr)
                     return 1
             else:
-                # Installation declined or failed
-                print(file=sys.stderr)
-                print("You can also:", file=sys.stderr)
-                print("  - Install globally: npm install -g @anthropic-ai/claude-code@latest", file=sys.stderr)
-                print("  - Install later with: clud --install-claude", file=sys.stderr)
-                print("  - Download from: https://claude.ai/download", file=sys.stderr)
+                print("Install Codex CLI and ensure `codex` is available on PATH.", file=sys.stderr)
                 return 1
 
         # Auto-install bundled skills/agents/rules on first run or upgrade
@@ -234,14 +247,12 @@ def run_agent(args: "Args") -> int:
         cmd = _wrap_command_for_git_bash(cmd)
 
         # Detect and print model message (for display only)
-        model_flag = _get_model_from_args(args.claude_args)
-        _print_model_message(model_flag)
+        model_flag = _get_model_from_args(args.claude_args, backend=backend)
+        _print_model_message(model_flag, backend=backend)
 
         # Print launch banner with command and environment
-        env_vars = {
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
-        }
-        _print_launch_banner(cmd, env_vars=env_vars)
+        env_vars = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"} if backend == "claude" else {}
+        _print_launch_banner(cmd, env_vars=env_vars, backend=backend)
 
         # Print debug info
         _print_debug_info(claude_path, cmd, args.verbose)
@@ -282,7 +293,7 @@ def run_agent(args: "Args") -> int:
         elif args.prompt:
             # Use RunningProcess for streaming output when using -p flag
             # This ensures stream-json output is displayed line-by-line in real-time
-            if args.plain:
+            if args.plain or backend == "codex":
                 # Plain mode: no JSON formatting, just pass through output
                 returncode = RunningProcess.run_streaming(cmd)
             else:
@@ -320,7 +331,7 @@ def run_agent(args: "Args") -> int:
         return returncode
 
     except FileNotFoundError as e:
-        error_msg = f"Claude Code is not installed or not in PATH: {e}"
+        error_msg = f"Agent executable is not installed or not in PATH: {e}"
         print(f"Error: {error_msg}", file=sys.stderr)
         print("Install Claude Code from: https://claude.ai/download", file=sys.stderr)
         print(f"DEBUG: FileNotFoundError details: {e}", file=sys.stderr)
@@ -362,7 +373,7 @@ def run_agent(args: "Args") -> int:
         return 130  # Worker thread: suppressed
 
     except OSError as e:
-        error_msg = f"OS error launching Claude: {e}"
+        error_msg = f"OS error launching agent: {e}"
 
         # Try backup method with shell=True first (Windows shell script issue)
         # Only show error if backup also fails
@@ -374,7 +385,7 @@ def run_agent(args: "Args") -> int:
                 return _execute_command(cmd, use_shell=True, verbose=args.verbose)
             except Exception as shell_error:
                 # Both methods failed - now show full error details
-                print(f"Error launching Claude: {e}", file=sys.stderr)
+                print(f"Error launching agent: {e}", file=sys.stderr)
                 print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
                 _print_error_diagnostics(claude_path, cmd)
                 print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
@@ -382,7 +393,7 @@ def run_agent(args: "Args") -> int:
                 # Fall through to trigger ERROR hook and return 1
         else:
             # Can't attempt backup
-            print(f"Error launching Claude: {e}", file=sys.stderr)
+            print(f"Error launching agent: {e}", file=sys.stderr)
             print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
             _print_error_diagnostics(claude_path, cmd)
             print("\nFull stack trace from original error:", file=sys.stderr)
@@ -405,8 +416,8 @@ def run_agent(args: "Args") -> int:
         return 1
 
     except Exception as e:
-        error_msg = f"Unexpected error launching Claude: {e}"
-        print(f"Error launching Claude: {e}", file=sys.stderr)
+        error_msg = f"Unexpected error launching agent: {e}"
+        print(f"Error launching agent: {e}", file=sys.stderr)
         print(f"DEBUG: Exception type: {type(e).__name__}", file=sys.stderr)
         _print_error_diagnostics(claude_path, cmd)
 

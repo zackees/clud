@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..agent_args import Args
 from .command_builder import (
     _build_claude_command,
+    _get_effective_backend,
     _get_model_from_args,
     _inject_completion_prompt,
     _print_debug_info,
@@ -139,17 +140,11 @@ def _generate_done_summary(claude_path: str, args: "Args") -> str | None:
         Summary string or None if generation failed
     """
     try:
-        # Build command to summarize DONE.md
-        summary_cmd = [
-            claude_path,
-            "--dangerously-skip-permissions",
-            "-p",
-            "Read DONE.md and return a two sentence summary of what was achieved.",
-        ]
-
-        # Add model flag from args if specified
-        if args.claude_args:
-            summary_cmd.extend(args.claude_args)
+        summary_args = type(args)(**vars(args))
+        summary_args.prompt = "Read DONE.md and return a two sentence summary of what was achieved."
+        summary_args.message = None
+        summary_args.continue_flag = False
+        summary_cmd = _build_claude_command(summary_args, claude_path)
 
         # Run command and capture output
         result = subprocess.run(
@@ -319,8 +314,9 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             cmd = _wrap_command_for_git_bash(cmd)
 
             # Detect and print model message (for display only)
-            model_flag = _get_model_from_args(args.claude_args)
-            _print_model_message(model_flag)
+            backend = _get_effective_backend(args)
+            model_flag = _get_model_from_args(args.claude_args, backend=backend)
+            _print_model_message(model_flag, backend=backend)
 
             # Print debug info
             _print_debug_info(claude_path, cmd, args.verbose)
@@ -333,7 +329,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
             returncode = 0
             try:
                 if args.prompt:
-                    if args.plain:
+                    if args.plain or backend == "codex":
                         # Plain mode: no JSON formatting, just pass through output
                         returncode = run_claude_process(cmd)
                     else:
@@ -410,23 +406,21 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                                 "After fixing, the system will automatically re-run lint-test to verify."
                             )
 
-                            # Build fix command (using -p flag for non-interactive)
-                            fix_cmd = [claude_path, "--dangerously-skip-permissions", "-p", fix_prompt]
+                            fix_args = type(args)(**vars(args))
+                            fix_args.prompt = fix_prompt
+                            fix_args.message = None
+                            fix_args.continue_flag = False
+                            fix_cmd = _build_claude_command(fix_args, claude_path)
 
-                            # Add model flag from args if specified (no default model)
-                            fix_model_flag = _get_model_from_args(args.claude_args)
-                            if args.claude_args:
-                                fix_cmd.extend(args.claude_args)
-
-                            if not args.plain:
-                                fix_cmd.extend(["--output-format", "stream-json", "--verbose"])
+                            backend = _get_effective_backend(args)
+                            fix_model_flag = _get_model_from_args(args.claude_args, backend=backend)
 
                             # Print model message for fix attempt
-                            _print_model_message(fix_model_flag)
+                            _print_model_message(fix_model_flag, backend=backend)
 
                             # Execute fix command
                             try:
-                                if args.plain:
+                                if args.plain or backend == "codex":
                                     fix_returncode = run_claude_process(fix_cmd)
                                 else:
                                     formatter = StreamJsonFormatter(

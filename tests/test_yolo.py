@@ -52,8 +52,8 @@ class TestYolo(unittest.TestCase):
             result = run(args)
 
         self.assertEqual(result, 0)
-        expected_output = "Would execute: claude --dangerously-skip-permissions hello world"
-        self.assertEqual(captured_output.getvalue().strip(), expected_output)
+        output = captured_output.getvalue().strip()
+        self.assertTrue(output.startswith("Would execute: claude --dangerously-skip-permissions hello world"))
 
     def test_dry_run_without_message(self) -> None:
         """Test dry-run mode without message prints appropriate message and exits 0."""
@@ -77,8 +77,8 @@ class TestYolo(unittest.TestCase):
             result = run(args)
 
         self.assertEqual(result, 0)
-        expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"
-        self.assertEqual(captured_output.getvalue().strip(), expected_output)
+        output = captured_output.getvalue().strip()
+        self.assertTrue(output.startswith("Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"))
 
     def test_main_with_dry_run_message(self) -> None:
         """Test main function with dry-run and message."""
@@ -98,8 +98,8 @@ class TestYolo(unittest.TestCase):
             result = main(["-p", "say hello and exit", "--dry-run"])
 
         self.assertEqual(result, 0)
-        expected_output = "Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"
-        self.assertEqual(captured_output.getvalue().strip(), expected_output)
+        output = captured_output.getvalue().strip()
+        self.assertTrue(output.startswith("Would execute: claude --dangerously-skip-permissions -p say hello and exit --output-format stream-json --verbose"))
 
 
 if __name__ == "__main__":

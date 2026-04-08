@@ -14,7 +14,9 @@ import os
 import platform
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from ..output_filter import OutputFilter
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ class Terminal:
         self._websocket: Any = None  # websockets.WebSocketServerProtocol
         self._cols: int = 80
         self._rows: int = 24
+        # Suppress terminal capability response sequences from client input.
+        self._input_filter = OutputFilter()
 
     def start(self) -> bool:
         """Start the PTY process.
@@ -252,14 +256,23 @@ class Terminal:
             # Try to parse as JSON (resize command)
             try:
                 data = json.loads(message)
-                if data.get("type") == "resize":
-                    await self._resize(data.get("cols", 80), data.get("rows", 24))
+                if isinstance(data, dict):
+                    payload = cast(dict[str, object], data)
+                    if payload.get("type") != "resize":
+                        raise json.JSONDecodeError("not a resize control message", message, 0)
+                    cols_value = payload.get("cols", 80)
+                    rows_value = payload.get("rows", 24)
+                    cols = int(cols_value) if isinstance(cols_value, (int, str)) else 80
+                    rows = int(rows_value) if isinstance(rows_value, (int, str)) else 24
+                    await self._resize(cols, rows)
                     return
             except json.JSONDecodeError:
                 pass
 
-            # Regular input - send to PTY
-            await self._write_to_pty(message.encode("utf-8"))
+            # Regular input - strip terminal capability response sequences before forwarding.
+            filtered_message = self._input_filter.filter_terminal_responses(message)
+            if filtered_message:
+                await self._write_to_pty(filtered_message.encode("utf-8"))
         else:
             # Binary data - send directly
             await self._write_to_pty(message)

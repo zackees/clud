@@ -8,11 +8,42 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..settings_manager import get_model_preference, set_model_preference
+from ..settings_manager import get_agent_backend, get_model_preference, set_agent_backend, set_model_preference
 from ..util import detect_git_bash
 
 if TYPE_CHECKING:
     from ..agent_args import Args
+
+
+CLAUDE_MODEL_FLAGS = ["--haiku", "--sonnet", "--opus", "--claude-3-5-sonnet", "--claude-3-opus"]
+
+
+def _get_effective_backend(args: "Args") -> str:
+    """Resolve the backend for the current run."""
+    if args.session_model in {"claude", "codex"}:
+        return args.session_model
+    if args.agent_backend in {"claude", "codex"}:
+        return args.agent_backend
+    return get_agent_backend() or "claude"
+
+
+def _persist_backend_selection(args: "Args") -> None:
+    """Persist global backend selection flags."""
+    if args.agent_backend in {"claude", "codex"}:
+        set_agent_backend(args.agent_backend)
+
+
+def _extract_codex_model(agent_args: list[str] | None) -> str | None:
+    """Extract a Codex model name from passthrough arguments."""
+    if not agent_args:
+        return None
+
+    for idx, arg in enumerate(agent_args):
+        if arg.startswith("--model="):
+            return arg.split("=", 1)[1]
+        if arg in {"--model", "-m"} and idx + 1 < len(agent_args):
+            return agent_args[idx + 1]
+    return None
 
 
 def _has_attribution_setting() -> bool:
@@ -96,26 +127,30 @@ def _inject_completion_prompt(message: str, iteration: int | None = None, total_
     return message + injection
 
 
-def _get_model_from_args(claude_args: list[str] | None) -> str | None:
-    """Detect which model is being used from claude_args or saved settings.
+def _get_model_from_args(claude_args: list[str] | None, backend: str = "claude") -> str | None:
+    """Detect which model is being used from passthrough args or saved settings.
 
-    Returns the model flag (e.g., '--haiku', '--sonnet') or None if not specified.
-    Checks args first, then falls back to saved preferences.
+    Returns the internal Claude model flag or Codex model name when present.
     """
-    # Check for common model flags in provided arguments
+    if backend == "codex":
+        return _extract_codex_model(claude_args)
+
     if claude_args:
-        model_flags = ["--haiku", "--sonnet", "--opus", "--claude-3-5-sonnet", "--claude-3-opus"]
-        for flag in model_flags:
+        for flag in CLAUDE_MODEL_FLAGS:
             if flag in claude_args:
                 return flag
 
-    # Fall back to saved preference
     saved_model = get_model_preference()
     return saved_model
 
 
-def _print_model_message(model_flag: str | None) -> None:
+def _print_model_message(model_flag: str | None, backend: str = "claude") -> None:
     """Print a message about which model is being loaded."""
+    if backend == "codex":
+        if model_flag:
+            print(f"Loading Codex model {model_flag}...", file=sys.stderr)
+        return
+
     if model_flag == "--haiku":
         print("Loading Haiku 4.5...", file=sys.stderr)
     elif model_flag == "--sonnet":
@@ -128,6 +163,65 @@ def _print_model_message(model_flag: str | None) -> None:
             print(f"Loading {display_name}...", file=sys.stderr)
 
 
+def _save_claude_model_preference(claude_args: list[str] | None) -> None:
+    """Persist Claude model selection when explicitly provided."""
+    if not claude_args:
+        return
+
+    for arg in claude_args:
+        if arg in CLAUDE_MODEL_FLAGS:
+            set_model_preference(arg)
+            break
+
+
+def _build_codex_command(
+    args: "Args",
+    codex_path: str,
+    inject_prompt: bool = False,
+    iteration: int | None = None,
+    total_iterations: int | None = None,
+    working_file: str | None = None,
+) -> list[str]:
+    """Build a Codex command with full-permission execution enabled."""
+    prompt_text = args.prompt
+    message_text = args.message
+
+    if prompt_text and inject_prompt:
+        prompt_text = _inject_completion_prompt(prompt_text, iteration, total_iterations, working_file)
+    if message_text and inject_prompt:
+        message_text = _inject_completion_prompt(message_text, iteration, total_iterations, working_file)
+
+    cmd = [
+        codex_path,
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-C",
+        os.getcwd(),
+    ]
+
+    if args.continue_flag:
+        cmd.extend(["resume", "--last"])
+        if args.claude_args:
+            cmd.extend(args.claude_args)
+        if prompt_text:
+            cmd.append(prompt_text)
+        elif message_text:
+            cmd.append(message_text)
+        return cmd
+
+    if prompt_text:
+        cmd.append("exec")
+        if args.claude_args:
+            cmd.extend(args.claude_args)
+        cmd.append(prompt_text)
+        return cmd
+
+    if args.claude_args:
+        cmd.extend(args.claude_args)
+    if message_text:
+        cmd.append(message_text)
+    return cmd
+
+
 def _build_claude_command(
     args: "Args",
     claude_path: str,
@@ -136,16 +230,20 @@ def _build_claude_command(
     total_iterations: int | None = None,
     working_file: str | None = None,
 ) -> list[str]:
-    """Build the Claude command with all arguments.
+    """Build the selected agent command with all arguments.
 
     Args:
         args: Parsed command-line arguments
-        claude_path: Path to Claude executable
+        claude_path: Path to agent executable
         inject_prompt: Whether to inject completion prompt
         iteration: Current iteration number (1-indexed) if in loop mode
         total_iterations: Total number of iterations if in loop mode
         working_file: Path to the working file in .loop/ (e.g., ".loop/LOOP.md" or ".loop/TASK.md")
     """
+    backend = _get_effective_backend(args)
+    if backend == "codex":
+        return _build_codex_command(args, claude_path, inject_prompt, iteration, total_iterations, working_file)
+
     cmd = [claude_path, "--dangerously-skip-permissions"]
 
     if args.continue_flag:
@@ -177,12 +275,7 @@ def _build_claude_command(
     # These custom flags are only used for internal messaging and preferences
     # Don't append model flags to the actual Claude command
 
-    # If a model was explicitly provided in args, save it as the preference
-    if args.claude_args:
-        for arg in args.claude_args:
-            if arg in ["--haiku", "--sonnet", "--opus", "--claude-3-5-sonnet", "--claude-3-opus"]:
-                set_model_preference(arg)
-                break
+    _save_claude_model_preference(args.claude_args)
 
     if args.claude_args:
         cmd.extend(args.claude_args)
@@ -238,7 +331,7 @@ def _wrap_command_for_git_bash(cmd: list[str]) -> list[str]:
     return [git_bash, "-c", cmd_str]
 
 
-def _print_launch_banner(cmd: list[str], cwd: str | None = None, env_vars: dict[str, str] | None = None) -> None:
+def _print_launch_banner(cmd: list[str], cwd: str | None = None, env_vars: dict[str, str] | None = None, backend: str = "claude") -> None:
     """Print formatted launch banner showing command, cwd, and environment variables.
 
     Args:
@@ -247,7 +340,7 @@ def _print_launch_banner(cmd: list[str], cwd: str | None = None, env_vars: dict[
         env_vars: Dictionary of environment variables that were added (not all env vars)
     """
     banner_width = 80
-    header = "LAUNCHING CLAUDE"
+    header = f"LAUNCHING {backend.upper()}"
     border = "#" * banner_width
 
     # Convert command to string

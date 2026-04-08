@@ -20,6 +20,8 @@ class OutputFilter:
     SAVE_RESTORE_CURSOR: Pattern[str] = re.compile(r"\x1b[\[\(]?[78su]")
 
     # Terminal capability query responses (must be suppressed from stdout)
+    # DA1 (Device Attributes Primary) responses: CSI ? Pp c
+    DA1_RESPONSE: Pattern[str] = re.compile(r"\x1b\[\?[\d;]*c")
     # DA2 (Device Attributes Secondary) responses: CSI > Pp ; Pv ; Pc c
     DA2_RESPONSE: Pattern[str] = re.compile(r"\x1b\[>[\d;]*c")
     # DCS (Device Control String) sequences including XTGETTCAP responses: DCS ... ST
@@ -106,7 +108,7 @@ class OutputFilter:
             return False
 
         # Check for terminal capability query responses
-        return bool(self.DA2_RESPONSE.search(data) or self.DCS_SEQUENCE.search(data) or self.CPR_RESPONSE.search(data) or self.DSR_RESPONSE.search(data))
+        return bool(self.DA1_RESPONSE.search(data) or self.DA2_RESPONSE.search(data) or self.DCS_SEQUENCE.search(data) or self.CPR_RESPONSE.search(data) or self.DSR_RESPONSE.search(data))
 
     def filter_terminal_responses(self, data: str) -> str:
         """Remove terminal capability responses from data.
@@ -121,7 +123,8 @@ class OutputFilter:
             return data
 
         # Remove each type of terminal response
-        result = self.DA2_RESPONSE.sub("", data)
+        result = self.DA1_RESPONSE.sub("", data)
+        result = self.DA2_RESPONSE.sub("", result)
         result = self.DCS_SEQUENCE.sub("", result)
         result = self.CPR_RESPONSE.sub("", result)
         result = self.DSR_RESPONSE.sub("", result)

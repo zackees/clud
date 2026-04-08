@@ -6,10 +6,11 @@ generation.
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 class TestDaemonInfoDataclass(unittest.TestCase):
@@ -93,6 +94,57 @@ class TestTerminalCreation(unittest.TestCase):
         # This should not raise any errors
         terminal.stop()
         self.assertFalse(terminal.is_running)
+
+    def test_handle_ws_message_numeric_input_treated_as_terminal_data(self) -> None:
+        """Numeric text input should not be misparsed as JSON control data."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+
+        async def run_test() -> None:
+            with (
+                patch.object(terminal, "_write_to_pty", new_callable=AsyncMock) as mock_write,
+                patch.object(terminal, "_resize", new_callable=AsyncMock) as mock_resize,
+            ):
+                await terminal._handle_ws_message("1")
+                mock_write.assert_awaited_once_with(b"1")
+                mock_resize.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_handle_ws_message_resize_object_resizes_terminal(self) -> None:
+        """Resize control objects should still be handled as JSON messages."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+
+        async def run_test() -> None:
+            with (
+                patch.object(terminal, "_write_to_pty", new_callable=AsyncMock) as mock_write,
+                patch.object(terminal, "_resize", new_callable=AsyncMock) as mock_resize,
+            ):
+                await terminal._handle_ws_message('{"type":"resize","cols":120,"rows":40}')
+                mock_resize.assert_awaited_once_with(120, 40)
+                mock_write.assert_not_called()
+
+        asyncio.run(run_test())
+
+    def test_handle_ws_message_terminal_capability_response_is_suppressed(self) -> None:
+        """Terminal capability response sequences should not be forwarded to the shell."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+
+        async def run_test() -> None:
+            with (
+                patch.object(terminal, "_write_to_pty", new_callable=AsyncMock) as mock_write,
+                patch.object(terminal, "_resize", new_callable=AsyncMock) as mock_resize,
+            ):
+                await terminal._handle_ws_message("\x1b[?1;2c")
+                mock_write.assert_not_called()
+                mock_resize.assert_not_called()
+
+        asyncio.run(run_test())
 
 
 class TestTerminalManagerCreation(unittest.TestCase):

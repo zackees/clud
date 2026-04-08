@@ -41,7 +41,7 @@ def main(args_list: list[str] | None = None) -> int:
 
         # Handle help first
         if args.help:
-            print("clud - Claude Code in YOLO mode")
+            print("clud - agent launcher for Claude Code and Codex")
             print("Usage: clud [options...]")
             print()
             print("Pipe mode:")
@@ -66,9 +66,12 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --tui                Launch Textual TUI for loop mode (requires loop)")
             print("  --info               Show Claude Code installation information")
             print("  --install-claude     Install Claude Code to ~/.clud/npm (self-contained)")
+            print("  --claude             Persist Claude as the global backend")
+            print("  --codex              Persist Codex as the global backend")
+            print("  --session-model X    Override backend for this run only (supports: claude, codex)")
             print("  -h, --help           Show this help")
             print()
-            print("Default: Run Claude Code with --dangerously-skip-permissions")
+            print("Default: Run the selected backend with dangerous full-permission settings")
             return 0
 
         # Handle special commands that don't require agents

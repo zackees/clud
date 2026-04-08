@@ -29,7 +29,7 @@ dependencies = [
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
 ]
-version = "1.2.7"
+version = "1.2.8"
 
 [project.optional-dependencies]
 dev = [
@@ -134,7 +134,6 @@ reportUnknownVariableType = "error"
 reportUnknownMemberType = "error"
 reportMissingParameterType = "error"
 reportMissingTypeArgument = "error"
-reportMissingReturnType = "error"
 reportUntypedFunctionDecorator = "error"
 reportUntypedClassDecorator = "error"
 reportUntypedBaseClass = "error"

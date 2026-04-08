@@ -90,3 +90,18 @@ def set_model_preference(model: str) -> None:
         model: The model flag to save (e.g., '--haiku', '--sonnet')
     """
     set_setting("model", model)
+
+
+def get_agent_backend() -> str | None:
+    """Get the saved agent backend preference."""
+    backend = get_setting("agent_backend", None)
+    if backend in {"claude", "codex"}:
+        return backend
+    return None
+
+
+def set_agent_backend(backend: str) -> None:
+    """Save the agent backend preference."""
+    if backend not in {"claude", "codex"}:
+        raise ValueError(f"Unsupported agent backend: {backend}")
+    set_setting("agent_backend", backend)

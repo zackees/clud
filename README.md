@@ -15,11 +15,14 @@ pip install clud
 ## Usage
 
 ```bash
-clud                              # Launch Claude Code in YOLO mode
+clud                              # Launch the configured backend in YOLO mode
+clud --codex                      # Switch global backend to Codex
+clud --claude                     # Switch global backend to Claude
+clud --session-model=codex        # Use Codex for this run only
 clud -c                           # Continue previous conversation
 clud --resume                     # Resume a specific conversation
 clud -p "refactor the auth layer" # Run with a prompt
-clud -- --model opus              # Pass any flags to Claude Code
+clud -- --model opus              # Pass backend flags through
 ```
 
 ## `clud loop` — The Ralph Loop

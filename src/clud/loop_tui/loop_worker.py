@@ -102,6 +102,7 @@ class LoopWorkerApp(CludLoopTUI):
 
         from ..agent.command_builder import (
             _build_claude_command,
+            _get_effective_backend,
             _get_model_from_args,
             _inject_completion_prompt,
             _wrap_command_for_git_bash,
@@ -267,14 +268,15 @@ class LoopWorkerApp(CludLoopTUI):
                     cmd = _wrap_command_for_git_bash(cmd)
 
                     # Print model info
-                    model_flag = _get_model_from_args(self.args.claude_args)
+                    backend = _get_effective_backend(self.args)
+                    model_flag = _get_model_from_args(self.args.claude_args, backend=backend)
                     if model_flag:
                         self.call_from_thread(self.log_message, f"Model: {model_flag}")
 
                     # Execute command with streaming output to TUI
                     try:
                         if self.args.prompt:
-                            if self.args.plain:
+                            if self.args.plain or backend == "codex":
                                 returncode = run_claude_process(cmd)
                             else:
                                 # Create formatter and callback for TUI

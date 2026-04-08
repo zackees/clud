@@ -16,6 +16,9 @@ class AgentMode(Enum):
     DEFAULT = "default"
 
 
+VALID_BACKENDS = {"claude", "codex"}
+
+
 @dataclass
 class Args:
     """Unified arguments for CLI routing and agent execution."""
@@ -56,6 +59,8 @@ class Args:
     loop_value: str | None = None  # Raw value from --loop for flexible parsing
     loop_count_override: int | None = None  # Explicit override via --loop-count
     plain: bool = False  # For --plain (disable JSON formatting, enable raw text I/O)
+    agent_backend: str | None = None
+    session_model: str | None = None
     claude_args: list[str] | None = None
 
 
@@ -77,6 +82,11 @@ def parse_args(args: list[str] | None = None) -> Args:
     hook_debug = "--hook-debug" in args_copy
     no_stop_hook = "--no-stop-hook" in args_copy
     no_skills = "--no-skills" in args_copy
+    has_codex_flag = "--codex" in args_copy
+    has_claude_flag = "--claude" in args_copy
+    if has_codex_flag and has_claude_flag:
+        raise ValueError("Cannot specify both --codex and --claude")
+    agent_backend = "codex" if has_codex_flag else "claude" if has_claude_flag else None
     cron = "--cron" in args_copy
     ui = "--ui" in args_copy or "-d" in args_copy
     tui = "--tui" in args_copy
@@ -89,6 +99,30 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("--no-stop-hook")
     if "--no-skills" in args_copy:
         args_copy.remove("--no-skills")
+    if has_codex_flag:
+        args_copy.remove("--codex")
+    if has_claude_flag:
+        args_copy.remove("--claude")
+
+    session_model = None
+    if "--session-model" in args_copy:
+        sm_idx = args_copy.index("--session-model")
+        if sm_idx + 1 < len(args_copy):
+            session_model = args_copy[sm_idx + 1]
+            args_copy.pop(sm_idx)
+            args_copy.pop(sm_idx)
+        else:
+            args_copy.pop(sm_idx)
+            session_model = ""
+    else:
+        for i, arg in enumerate(args_copy):
+            if arg.startswith("--session-model="):
+                session_model = arg.split("=", 1)[1]
+                args_copy.pop(i)
+                break
+
+    if session_model is not None and session_model not in VALID_BACKENDS:
+        raise ValueError(f"Invalid --session-model value: {session_model}. Expected one of: claude, codex")
 
     # Remove --ui or -d from args_copy since it's handled by router
     if "--ui" in args_copy:
@@ -307,5 +341,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         loop_value=loop_value,
         loop_count_override=loop_count_override,
         plain=known_args.plain,
+        agent_backend=agent_backend,
+        session_model=session_model,
         claude_args=unknown_args,
     )
