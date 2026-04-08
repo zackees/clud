@@ -1,18 +1,26 @@
-"""Hook system integration for agent operations.
-
-This module provides utilities for registering and triggering hooks from the agent.
-Hooks allow external systems (webhooks, etc.) to receive agent events.
-"""
+"""Hook system integration for agent operations."""
 
 import sys
 import traceback
+from dataclasses import dataclass
+from pathlib import Path
 
 from clud.hooks import HookContext, HookEvent, get_hook_manager
+from clud.hooks.claude_compat import load_claude_compat_hooks
+from clud.hooks.command import CommandHookHandler
 from clud.hooks.config import load_hook_config
 from clud.util import handle_keyboard_interrupt
 
 
-def register_hooks_from_config(hook_debug: bool = False) -> None:
+@dataclass(slots=True)
+class HookRegistrationSummary:
+    """Summary of which hook families were registered."""
+
+    has_stop_hooks: bool = False
+    has_session_end_hooks: bool = False
+
+
+def register_hooks_from_config(hook_debug: bool = False, cwd: Path | None = None) -> HookRegistrationSummary:
     """Register hooks based on configuration file.
 
     Loads hook configuration from ~/.clud/hooks.json and registers
@@ -21,29 +29,48 @@ def register_hooks_from_config(hook_debug: bool = False) -> None:
     Args:
         hook_debug: Whether to print debug information
     """
+    summary = HookRegistrationSummary()
+
     try:
         # Load hook configuration
         config = load_hook_config()
 
-        if not config.enabled:
-            if hook_debug:
-                print("DEBUG: Hooks disabled in configuration", file=sys.stderr)
-            return
+        if config.enabled:
+            hook_manager = get_hook_manager()
 
-        hook_manager = get_hook_manager()
+            # Register webhook hook if enabled
+            if config.webhook_enabled and config.webhook_url:
+                # Lazy import to avoid loading webhook dependencies unless actually needed
+                from clud.hooks.webhook import WebhookHookHandler
 
-        # Register webhook hook if enabled
-        if config.webhook_enabled and config.webhook_url:
-            # Lazy import to avoid loading webhook dependencies unless actually needed
-            from clud.hooks.webhook import WebhookHookHandler
+                webhook_handler = WebhookHookHandler(
+                    webhook_url=config.webhook_url,
+                    secret=config.webhook_secret,
+                )
+                hook_manager.register(webhook_handler)
+                if hook_debug:
+                    print(f"DEBUG: Registered webhook hook (url={config.webhook_url})", file=sys.stderr)
+        elif hook_debug:
+            print("DEBUG: Hooks disabled in configuration", file=sys.stderr)
 
-            webhook_handler = WebhookHookHandler(
-                webhook_url=config.webhook_url,
-                secret=config.webhook_secret,
-            )
-            hook_manager.register(webhook_handler)
-            if hook_debug:
-                print(f"DEBUG: Registered webhook hook (url={config.webhook_url})", file=sys.stderr)
+        compat = load_claude_compat_hooks(cwd=cwd)
+        if compat.stop or compat.session_end:
+            hook_manager = get_hook_manager()
+            if compat.stop:
+                hook_manager.register(CommandHookHandler(compat.stop), [HookEvent.POST_EXECUTION])
+                summary.has_stop_hooks = True
+                if hook_debug:
+                    print(f"DEBUG: Registered {len(compat.stop)} Claude-compatible Stop hook(s)", file=sys.stderr)
+            if compat.session_end:
+                hook_manager.register(CommandHookHandler(compat.session_end), [HookEvent.AGENT_STOP])
+                summary.has_session_end_hooks = True
+                if hook_debug:
+                    print(
+                        f"DEBUG: Registered {len(compat.session_end)} Claude-compatible SessionEnd hook(s)",
+                        file=sys.stderr,
+                    )
+
+        return summary
 
     except KeyboardInterrupt as e:
         handle_keyboard_interrupt(e)
@@ -52,6 +79,7 @@ def register_hooks_from_config(hook_debug: bool = False) -> None:
             print(f"DEBUG: Failed to register hooks: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
         # Don't fail if hooks can't be registered - hooks are optional
+    return summary
 
 
 def trigger_hook_sync(event: HookEvent, context: HookContext, hook_debug: bool = False) -> None:

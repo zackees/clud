@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ..output_filter import OutputFilter
@@ -18,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 # Type alias for output callback function
 OutputCallback = Callable[[str], None] | None
+
+
+@dataclass(slots=True)
+class CompletionDetectionResult:
+    """Result from running an agent with optional idle-based shutdown."""
+
+    idle_detected: bool
+    returncode: int
 
 
 # Terminal state management
@@ -106,7 +115,11 @@ class TerminalState:
                 logger.warning(f"Could not restore Windows console state: {e}")
 
 
-def detect_agent_completion(command: list[str], idle_timeout: float = 3.0, output_callback: OutputCallback = None) -> bool:
+def detect_agent_completion(
+    command: list[str],
+    idle_timeout: float = 3.0,
+    output_callback: OutputCallback = None,
+) -> CompletionDetectionResult:
     """Detect when a command has completed based on terminal idle state.
 
     Args:
@@ -115,7 +128,7 @@ def detect_agent_completion(command: list[str], idle_timeout: float = 3.0, outpu
         output_callback: Optional callback to receive output data
 
     Returns:
-        True if command completed due to idle timeout, False if it exited normally
+        Structured information about whether idle shutdown happened and the exit code.
     """
     # Use TerminalState context manager to ensure terminal is restored on exit
     with TerminalState():
@@ -125,7 +138,7 @@ def detect_agent_completion(command: list[str], idle_timeout: float = 3.0, outpu
             return _detect_completion_unix(command, idle_timeout, output_callback)
 
 
-def _detect_completion_windows(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> bool:
+def _detect_completion_windows(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> CompletionDetectionResult:
     """Windows PTY detection using pywinpty."""
     try:
         from winpty import PtyProcess  # type: ignore[import-untyped]
@@ -142,7 +155,7 @@ def _detect_completion_windows(command: list[str], idle_timeout: float, output_c
         return _fallback_subprocess_detection(command, idle_timeout, output_callback)
 
 
-def _detect_completion_unix(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> bool:
+def _detect_completion_unix(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> CompletionDetectionResult:
     """Unix PTY detection using stdlib pty."""
     try:
         import os
@@ -165,7 +178,12 @@ def _detect_completion_unix(command: list[str], idle_timeout: float, output_call
         return _fallback_subprocess_detection(command, idle_timeout, output_callback)
 
 
-def _monitor_pty_process(process: Any, idle_timeout: float, output_callback: OutputCallback, platform: str) -> bool:
+def _monitor_pty_process(
+    process: Any,
+    idle_timeout: float,
+    output_callback: OutputCallback,
+    platform: str,
+) -> CompletionDetectionResult:
     """Monitor Windows PTY process for completion."""
     last_activity = time.time()
     output_filter = OutputFilter()
@@ -192,9 +210,10 @@ def _monitor_pty_process(process: Any, idle_timeout: float, output_callback: Out
 
             if time.time() - last_activity > idle_timeout:
                 logger.info(f"{platform} agent idle for {idle_timeout}s")
-                return True
+                _terminate_pty_process(process)
+                return CompletionDetectionResult(idle_detected=True, returncode=0)
 
-        return False  # Process exited normally
+        return CompletionDetectionResult(idle_detected=False, returncode=getattr(process, "exitstatus", 0) or 0)
     except KeyboardInterrupt as e:
 
         def _cleanup() -> None:
@@ -204,10 +223,15 @@ def _monitor_pty_process(process: Any, idle_timeout: float, output_callback: Out
             _thread.interrupt_main()
 
         handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message=f"{platform} agent monitoring interrupted by user")
-        return False  # Worker thread: suppressed
+        return CompletionDetectionResult(idle_detected=False, returncode=130)
 
 
-def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeout: float, output_callback: OutputCallback) -> bool:
+def _monitor_unix_pty(
+    master: int,
+    process: subprocess.Popen[Any],
+    idle_timeout: float,
+    output_callback: OutputCallback,
+) -> CompletionDetectionResult:
     """Monitor Unix PTY for completion."""
     import os
     import select
@@ -239,9 +263,10 @@ def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeou
 
             if time.time() - last_activity > idle_timeout:
                 logger.info(f"Unix agent idle for {idle_timeout}s")
-                return True
+                _terminate_subprocess(process)
+                return CompletionDetectionResult(idle_detected=True, returncode=0)
 
-        return False  # Process exited normally
+        return CompletionDetectionResult(idle_detected=False, returncode=process.returncode or 0)
     except KeyboardInterrupt as e:
 
         def _cleanup() -> None:
@@ -250,10 +275,14 @@ def _monitor_unix_pty(master: int, process: subprocess.Popen[bytes], idle_timeou
             _thread.interrupt_main()
 
         handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message="Unix agent monitoring interrupted by user")
-        return False  # Worker thread: suppressed
+        return CompletionDetectionResult(idle_detected=False, returncode=130)
 
 
-def _fallback_subprocess_detection(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> bool:
+def _fallback_subprocess_detection(
+    command: list[str],
+    idle_timeout: float,
+    output_callback: OutputCallback,
+) -> CompletionDetectionResult:
     """Fallback subprocess detection when PTY unavailable."""
     logger.warning("Using subprocess fallback - less reliable than PTY")
 
@@ -301,7 +330,8 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
 
                 if time.time() - last_activity > idle_timeout:
                     logger.info(f"Subprocess agent idle for {idle_timeout}s")
-                    return True
+                    _terminate_subprocess(process)
+                    return CompletionDetectionResult(idle_detected=True, returncode=0)
 
             # Process any remaining output
             while not output_queue.empty():
@@ -312,7 +342,7 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
                 except queue.Empty:
                     break
 
-            return False  # Process exited normally
+            return CompletionDetectionResult(idle_detected=False, returncode=process.returncode or 0)
         except KeyboardInterrupt as e:
 
             def _cleanup() -> None:
@@ -321,10 +351,31 @@ def _fallback_subprocess_detection(command: list[str], idle_timeout: float, outp
                 _thread.interrupt_main()
 
             handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message="Subprocess agent monitoring interrupted by user")
-            return False  # Worker thread: suppressed
+            return CompletionDetectionResult(idle_detected=False, returncode=130)
     except Exception as e:
         logger.error(f"Subprocess detection failed: {e}")
-        return False
+        return CompletionDetectionResult(idle_detected=False, returncode=1)
+
+
+def _terminate_subprocess(process: subprocess.Popen[Any], timeout: float = 2.0) -> None:
+    with contextlib.suppress(Exception):
+        process.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=timeout)
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=timeout)
+
+
+def _terminate_pty_process(process: Any) -> None:
+    with contextlib.suppress(Exception):
+        if hasattr(process, "terminate"):
+            process.terminate()
+    with contextlib.suppress(Exception):
+        if hasattr(process, "close"):
+            process.close()
 
 
 # Legacy class-based interface for compatibility
@@ -334,5 +385,5 @@ class AgentCompletionDetector:
     def __init__(self, idle_timeout: float = 3.0) -> None:
         self.idle_timeout = idle_timeout
 
-    def detect_completion(self, command: list[str], output_callback: OutputCallback = None) -> bool:
+    def detect_completion(self, command: list[str], output_callback: OutputCallback = None) -> CompletionDetectionResult:
         return detect_agent_completion(command, self.idle_timeout, output_callback)

@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"from pathlib import Path; Path('STOP_HOOK_OK.txt').write_text('stop fired\\n', encoding='utf-8')\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"from pathlib import Path; Path('SESSION_END_HOOK_OK.txt').write_text('session end fired\\n', encoding='utf-8')\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -20,6 +20,7 @@ from .prompts import LOOP_PROMPT_TEMPLATE
 if TYPE_CHECKING:
     from ..agent_args import Args
 from ..hooks import HookContext, HookEvent
+from ..hooks.claude_compat import get_codex_stop_hook_idle_timeout
 from ..json_formatter import StreamJsonFormatter, create_formatter_callback
 from ..output_filter import OutputFilter
 from ..util import handle_keyboard_interrupt
@@ -62,6 +63,7 @@ def run_agent(args: "Args") -> int:
     """
     # Initialize variables for exception handler access
     claude_path: str | None = None
+    backend: str | None = None
     cmd: list[str] = []
 
     # Generate unique instance ID for this agent run
@@ -86,7 +88,7 @@ def run_agent(args: "Args") -> int:
         return 2
 
     # Register hooks early (before any execution)
-    register_hooks_from_config(hook_debug=args.hook_debug)
+    hook_summary = register_hooks_from_config(hook_debug=args.hook_debug, cwd=Path.cwd())
 
     try:
         _persist_backend_selection(args)
@@ -287,9 +289,18 @@ def run_agent(args: "Args") -> int:
 
         # Execute Claude with the dangerous permissions flag
         # Use idle detection if timeout is specified
-        returncode = 0  # Initialize returncode for hook triggers
+        returncode = 0
+        idle_detected = False
+        stop_reason = "process_exit"
+        effective_idle_timeout = args.idle_timeout
+        if effective_idle_timeout is None and backend == "codex" and plan.interactive and hook_summary.has_stop_hooks:
+            effective_idle_timeout = get_codex_stop_hook_idle_timeout()
+            print(
+                f"Claude-compatible Stop hooks detected; using Codex idle timeout {effective_idle_timeout:.1f}s",
+                file=sys.stderr,
+            )
 
-        if args.idle_timeout is not None:
+        if effective_idle_timeout is not None:
             # Create output filter to suppress terminal capability responses
             output_filter = OutputFilter()
 
@@ -301,8 +312,11 @@ def run_agent(args: "Args") -> int:
                     sys.stdout.write(filtered_data)
                     sys.stdout.flush()
 
-            detect_agent_completion(cmd, args.idle_timeout, output_callback)
-            returncode = 0
+            detection = detect_agent_completion(cmd, effective_idle_timeout, output_callback)
+            idle_detected = detection.idle_detected
+            returncode = detection.returncode
+            if idle_detected:
+                stop_reason = "idle_detected"
         elif args.prompt:
             # Use RunningProcess for streaming output when using -p flag
             # This ensures stream-json output is displayed line-by-line in real-time
@@ -336,7 +350,13 @@ def run_agent(args: "Args") -> int:
                 client_type="cli",
                 client_id="standalone",
                 message=user_message,
-                metadata={"returncode": returncode},
+                metadata={
+                    "backend": backend,
+                    "cwd": os.getcwd(),
+                    "idle_detected": idle_detected,
+                    "reason": stop_reason,
+                    "returncode": returncode,
+                },
             ),
             hook_debug=args.hook_debug,
         )
@@ -367,22 +387,9 @@ def run_agent(args: "Args") -> int:
 
     except KeyboardInterrupt as e:
         print("\nInterrupted by user", file=sys.stderr)
-
-        # Trigger AGENT_STOP hook on interrupt (unless disabled)
-        if not args.no_stop_hook:
-            trigger_hook_sync(
-                HookEvent.AGENT_STOP,
-                HookContext(
-                    event=HookEvent.AGENT_STOP,
-                    instance_id=instance_id,
-                    session_id=session_id,
-                    client_type="cli",
-                    client_id="standalone",
-                    metadata={"reason": "interrupted"},
-                ),
-                hook_debug=args.hook_debug,
-            )
-        handle_keyboard_interrupt(e)
+        handle_keyboard_interrupt(e, reraise_on_main_thread=False)
+        stop_reason = "interrupted"
+        returncode = 130
         return 130  # Worker thread: suppressed
 
     except OSError as e:
@@ -426,6 +433,8 @@ def run_agent(args: "Args") -> int:
             ),
             hook_debug=args.hook_debug,
         )
+        stop_reason = "launch_error"
+        returncode = 1
         return 1
 
     except Exception as e:
@@ -459,6 +468,8 @@ def run_agent(args: "Args") -> int:
             ),
             hook_debug=args.hook_debug,
         )
+        stop_reason = "launch_error"
+        returncode = 1
         return 1
 
     finally:
@@ -472,6 +483,13 @@ def run_agent(args: "Args") -> int:
                     session_id=session_id,
                     client_type="cli",
                     client_id="standalone",
+                    metadata={
+                        "backend": backend,
+                        "cwd": os.getcwd(),
+                        "idle_detected": locals().get("idle_detected", False),
+                        "reason": locals().get("stop_reason", "process_exit"),
+                        "returncode": locals().get("returncode", 0),
+                    },
                 ),
                 hook_debug=args.hook_debug,
             )

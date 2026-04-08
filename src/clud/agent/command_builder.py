@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from ..settings_manager import get_agent_backend, get_model_preference, set_agent_backend, set_model_preference
 from ..util import detect_git_bash
+from ..util.json_loading import load_json_file_permissive
 
 if TYPE_CHECKING:
     from ..agent_args import Args
@@ -63,7 +64,7 @@ def _has_attribution_setting() -> bool:
     ]
     for path in paths:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = load_json_file_permissive(path)
             if "attribution" in data:
                 return True
         except (FileNotFoundError, json.JSONDecodeError, OSError):
