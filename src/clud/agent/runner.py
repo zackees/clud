@@ -311,7 +311,7 @@ def run_agent(args: "Args") -> int:
             # process group isolation (CREATE_NEW_PROCESS_GROUP on Windows).
             # This prevents Ctrl-C from reaching the child process tree,
             # avoiding ugly tracebacks from nodejs_wheel's Python wrapper.
-            returncode = run_claude_process(cmd)
+            returncode = run_claude_process(cmd, propagate_keyboard_interrupt=False)
 
         # Trigger POST_EXECUTION hook after successful completion
         trigger_hook_sync(

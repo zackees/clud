@@ -147,6 +147,22 @@ class TestHandleKeyboardInterrupt(unittest.TestCase):
 
         self.assertTrue(len(cleanup_called_holder) > 0, "Cleanup should be called on non-main thread")
 
+    def test_main_thread_can_suppress_reraise(self) -> None:
+        """Test that main-thread re-raise can be disabled for cleanup-only paths."""
+        cleanup_called = False
+
+        def cleanup() -> None:
+            nonlocal cleanup_called
+            cleanup_called = True
+
+        handle_keyboard_interrupt(
+            KeyboardInterrupt(),
+            cleanup=cleanup,
+            reraise_on_main_thread=False,
+        )
+
+        self.assertTrue(cleanup_called, "Cleanup should still run when re-raise is suppressed")
+
 
 class TestIsGitBash(unittest.TestCase):
     """Test _is_git_bash validation function."""

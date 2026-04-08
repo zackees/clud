@@ -41,13 +41,15 @@ def handle_keyboard_interrupt(
     cleanup: Callable[[], None] | None = None,
     logger: logging.Logger | None = None,
     log_message: str | None = None,
+    reraise_on_main_thread: bool = True,
 ) -> None:
     """Handle a KeyboardInterrupt with proper thread-aware behaviour.
 
     Call this inside an ``except KeyboardInterrupt as e:`` block.  It runs
     optional cleanup, logs the event, and then:
 
-    * **Main thread** — re-raises ``KeyboardInterrupt`` so the process exits.
+    * **Main thread** — re-raises ``KeyboardInterrupt`` so the process exits,
+      unless ``reraise_on_main_thread`` is ``False``.
     * **Worker thread** — returns normally (suppresses the exception) because
       only the main thread should act on SIGINT.  Re-raising on a worker
       thread lets the thread's exception handler swallow the interrupt,
@@ -58,9 +60,12 @@ def handle_keyboard_interrupt(
         cleanup: Optional cleanup function to call before re-raising.
         logger: Optional logger for logging the interrupt.
         log_message: Custom log message (default: "Operation interrupted by user").
+        reraise_on_main_thread: Whether to re-raise on the main thread after
+            cleanup/logging. Defaults to True.
 
     Raises:
-        KeyboardInterrupt: Always re-raised on the main thread.
+        KeyboardInterrupt: Re-raised on the main thread when
+            ``reraise_on_main_thread`` is True.
 
     Example::
 
@@ -82,7 +87,7 @@ def handle_keyboard_interrupt(
         msg = log_message or "Operation interrupted by user"
         logger.info("%s (exc=%s)", msg, exc)
 
-    if is_main_thread:
+    if is_main_thread and reraise_on_main_thread:
         raise exc
     else:
         if logger:

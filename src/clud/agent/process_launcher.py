@@ -84,6 +84,7 @@ def run_claude_process(
     cmd: list[str],
     stdout_callback: Callable[[str], None] | None = None,
     use_shell: bool = False,
+    propagate_keyboard_interrupt: bool = True,
 ) -> int:
     """Launch Claude in an isolated process group and wait for completion.
 
@@ -108,6 +109,9 @@ def run_claude_process(
         cmd: Command list to execute.
         stdout_callback: Optional callback receiving each stdout line.
         use_shell: Whether to run via the shell.
+        propagate_keyboard_interrupt: Whether to re-raise ``KeyboardInterrupt``
+            on the main thread after child cleanup. Interactive top-level
+            launches should pass ``False`` to exit cleanly with code 130.
 
     Returns:
         The child process exit code.
@@ -223,7 +227,11 @@ def run_claude_process(
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=2)
 
-        handle_keyboard_interrupt(e, cleanup=_cleanup)
+        handle_keyboard_interrupt(
+            e,
+            cleanup=_cleanup,
+            reraise_on_main_thread=propagate_keyboard_interrupt,
+        )
         return proc.returncode or 130  # Worker thread: suppressed
 
     finally:

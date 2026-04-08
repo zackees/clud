@@ -50,6 +50,20 @@ class TestCliYoloIntegration(unittest.TestCase):
         self.assertIn("claude", str(cmd))
         self.assertIn("test message", str(cmd))
 
+    def test_cli_interactive_uses_non_propagating_process_launcher(self) -> None:
+        """Interactive mode should suppress KeyboardInterrupt propagation from the PTY launcher."""
+        with (
+            patch("clud.agent.runner.run_claude_process", return_value=130) as mock_run,
+            patch("clud.agent.runner._find_claude_path", return_value="/fake/claude"),
+            patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=lambda cmd: cmd),  # type: ignore[misc]
+            patch("sys.stdin.isatty", return_value=True),
+        ):
+            result = main([])
+
+        self.assertEqual(result, 130)
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertFalse(mock_run.call_args.kwargs["propagate_keyboard_interrupt"])
+
 
 if __name__ == "__main__":
     unittest.main()
