@@ -5,6 +5,7 @@ from clud.api.message_handler import MessageHandler
 from clud.api.models import (
     ExecutionResult,
     InstanceInfo,
+    InvocationMode,
     MessageRequest,
     MessageResponse,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "CludInstance",
     "InstancePool",
     "MessageHandler",
+    "InvocationMode",
     "MessageRequest",
     "MessageResponse",
     "InstanceInfo",

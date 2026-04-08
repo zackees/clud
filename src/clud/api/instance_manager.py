@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from clud.api.models import ClientType, ExecutionStatus, InstanceInfo
+from clud.api.models import ClientType, ExecutionStatus, InstanceInfo, InvocationMode
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,14 @@ class CludInstance:
             self.status = ExecutionStatus.FAILED
             raise RuntimeError(f"Failed to start clud instance: {e}") from e
 
-    async def execute(self, message: str) -> dict[str, Any]:
+    async def execute(
+        self,
+        message: str,
+        *,
+        invocation_mode: InvocationMode = InvocationMode.MESSAGE,
+        session_model: str | None = None,
+        agent_args: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Execute a command/message in this instance.
 
         Args:
@@ -92,7 +99,15 @@ class CludInstance:
 
             # Route through the main CLI so the selected backend applies its
             # own dangerous-execution flags consistently.
-            cmd = [sys.executable, "-m", "clud.agent_cli", "-p", message]
+            cmd = [sys.executable, "-m", "clud.agent_cli"]
+            if session_model:
+                cmd.extend(["--session-model", session_model])
+
+            flag = "-p" if invocation_mode == InvocationMode.PROMPT else "-m"
+            cmd.extend([flag, message])
+
+            if agent_args:
+                cmd.extend(agent_args)
 
             # Add working directory if specified
             cwd = str(self.working_directory) if self.working_directory else None

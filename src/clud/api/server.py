@@ -236,6 +236,10 @@ def create_app() -> FastAPI:
                                 "session_id": session_id,
                                 "client_type": "web",
                                 "client_id": message_data.get("client_id", "websocket"),
+                                "invocation_mode": message_data.get("invocation_mode"),
+                                "session_model": message_data.get("session_model"),
+                                "agent_args": message_data.get("agent_args"),
+                                "metadata": message_data.get("metadata", {}),
                             }
                         )
 

@@ -66,8 +66,12 @@ class MessageHandler:
             logger.info(f"Handling message for session {request.session_id}, instance {instance.instance_id}, message count {instance.message_count}")
 
             # Execute the message
-            result = await instance.execute(request.message)
-
+            result = await instance.execute(
+                request.message,
+                invocation_mode=request.invocation_mode,
+                session_model=request.session_model,
+                agent_args=request.agent_args,
+            )
             # Determine status from result
             if result["status"] == "completed":
                 status = ExecutionStatus.COMPLETED

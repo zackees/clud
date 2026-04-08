@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from clud.api.message_handler import MessageHandler
-from clud.api.models import ClientType, ExecutionStatus, MessageRequest
+from clud.api.models import ClientType, ExecutionStatus, InvocationMode, MessageRequest
 
 
 class TestMessageHandler(unittest.TestCase):
@@ -47,6 +47,24 @@ class TestMessageHandler(unittest.TestCase):
             self.assertEqual(response.instance_id, "")
 
         asyncio.run(run_test())
+
+    def test_message_request_from_dict_supports_frontend_aliases(self) -> None:
+        """Frontend aliases and legacy metadata flags should normalize cleanly."""
+        request = MessageRequest.from_dict(
+            {
+                "message": "test command",
+                "session_id": "session-456",
+                "client_type": "web",
+                "client_id": "client-789",
+                "backend": "codex",
+                "claude_args": ["--model", "gpt-5.4"],
+                "metadata": {"use_print_flag": True},
+            }
+        )
+
+        self.assertEqual(request.invocation_mode, InvocationMode.PROMPT)
+        self.assertEqual(request.session_model, "codex")
+        self.assertEqual(request.agent_args, ["--model", "gpt-5.4"])
 
     @patch("clud.api.instance_manager.InstancePool.get_or_create_instance")
     def test_handle_message_creates_instance(self, mock_get_or_create: MagicMock) -> None:
@@ -149,11 +167,67 @@ class TestMessageHandler(unittest.TestCase):
             response = await self.handler.handle_message(request)
 
             # Verify execute was called with the message
-            mock_instance.execute.assert_called_once_with("echo hello")
+            mock_instance.execute.assert_called_once_with(
+                "echo hello",
+                invocation_mode=InvocationMode.MESSAGE,
+                session_model=None,
+                agent_args=[],
+            )
 
             # Verify response
             self.assertEqual(response.status, ExecutionStatus.COMPLETED)
             self.assertEqual(response.message, "command executed successfully")
+
+        asyncio.run(run_test())
+
+    @patch("clud.api.instance_manager.InstancePool.get_or_create_instance")
+    def test_handle_message_passes_invocation_backend_and_agent_args(self, mock_get_or_create: MagicMock) -> None:
+        """Frontend execution options should flow through to the subprocess layer."""
+
+        async def run_test() -> None:
+            mock_instance = MagicMock()
+            mock_instance.instance_id = "instance-123"
+            mock_instance.message_count = 1
+            mock_instance.execute = AsyncMock(
+                return_value={
+                    "status": "completed",
+                    "output": "command executed successfully",
+                    "error": None,
+                    "exit_code": 0,
+                }
+            )
+            mock_instance.to_instance_info = MagicMock(
+                return_value=MagicMock(
+                    instance_id="instance-123",
+                    session_id="session-456",
+                    client_type=ClientType.WEB,
+                    client_id="client-789",
+                    status=ExecutionStatus.RUNNING,
+                    created_at=datetime.now(),
+                    last_activity=datetime.now(),
+                )
+            )
+
+            mock_get_or_create.return_value = mock_instance
+
+            request = MessageRequest(
+                message="echo hello",
+                session_id="session-456",
+                client_type=ClientType.WEB,
+                client_id="client-789",
+                invocation_mode=InvocationMode.PROMPT,
+                session_model="codex",
+                agent_args=["--model", "gpt-5.4"],
+            )
+
+            await self.handler.handle_message(request)
+
+            mock_instance.execute.assert_called_once_with(
+                "echo hello",
+                invocation_mode=InvocationMode.PROMPT,
+                session_model="codex",
+                agent_args=["--model", "gpt-5.4"],
+            )
 
         asyncio.run(run_test())
 

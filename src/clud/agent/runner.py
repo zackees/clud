@@ -2,7 +2,6 @@
 
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import traceback
@@ -14,6 +13,8 @@ from running_process import RunningProcess
 
 from ..claude_installer import prompt_install_claude
 from ..skill_installer import install_skills, needs_install
+from .arg_translation import to_agent_args
+from .backends.registry import get_backend
 from .prompts import LOOP_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
@@ -24,14 +25,11 @@ from ..output_filter import OutputFilter
 from ..util import handle_keyboard_interrupt
 from .claude_finder import _find_claude_path
 from .command_builder import (
-    _build_claude_command,
     _get_effective_backend,
-    _get_model_from_args,
     _persist_backend_selection,
     _print_debug_info,
     _print_error_diagnostics,
     _print_launch_banner,
-    _print_model_message,
     _wrap_command_for_git_bash,
 )
 from .completion import detect_agent_completion
@@ -49,9 +47,10 @@ def _find_backend_executable(backend: str) -> str | None:
     """Find the executable for the selected backend."""
     if backend == "claude":
         return _find_claude_path()
-    if backend == "codex":
-        return shutil.which("codex")
-    return None
+    try:
+        return get_backend(backend).find_executable()
+    except KeyError:
+        return None
 
 
 def run_agent(args: "Args") -> int:
@@ -92,6 +91,8 @@ def run_agent(args: "Args") -> int:
     try:
         _persist_backend_selection(args)
         backend = _get_effective_backend(args)
+        backend_adapter = get_backend(backend)
+        agent_args = to_agent_args(args, resolved_backend=backend, cwd=os.getcwd())
 
         # Handle dry-run mode early (before API key check)
         # Dry-run mode doesn't need API key since it only prints the command
@@ -138,8 +139,8 @@ def run_agent(args: "Args") -> int:
                 return 0
 
             # Handle regular (non-loop) dry-run
-            cmd_parts = _build_claude_command(args, "codex" if backend == "codex" else "claude")
-            print("Would execute:", " ".join(cmd_parts))
+            plan = backend_adapter.build_launch_plan(agent_args)
+            print("Would execute:", " ".join([backend, *plan.argv]))
             return 0
 
         # If --cmd is provided, execute the command directly instead of launching Claude
@@ -175,12 +176,13 @@ def run_agent(args: "Args") -> int:
                 else:
                     print(file=sys.stderr)
                     print("You can also:", file=sys.stderr)
-                    print("  - Install globally: npm install -g @anthropic-ai/claude-code@latest", file=sys.stderr)
+                    for line in backend_adapter.install_help():
+                        print(f"  - {line}", file=sys.stderr)
                     print("  - Install later with: clud --install-claude", file=sys.stderr)
-                    print("  - Download from: https://claude.ai/download", file=sys.stderr)
                     return 1
             else:
-                print("Install Codex CLI and ensure `codex` is available on PATH.", file=sys.stderr)
+                for line in backend_adapter.install_help():
+                    print(line, file=sys.stderr)
                 return 1
 
         # Auto-install bundled skills/agents/rules on first run or upgrade
@@ -242,16 +244,27 @@ def run_agent(args: "Args") -> int:
                 return 130  # Worker thread: suppressed
 
         # Build command
-        cmd = _build_claude_command(args, claude_path)
+        plan = backend_adapter.build_launch_plan(agent_args)
+        plan.executable = claude_path
+        cmd = plan.command
         # Wrap command in git-bash on Windows if available
         cmd = _wrap_command_for_git_bash(cmd)
 
         # Detect and print model message (for display only)
-        model_flag = _get_model_from_args(args.claude_args, backend=backend)
-        _print_model_message(model_flag, backend=backend)
+        model_flag = plan.model_display
+        if backend == "codex":
+            if model_flag:
+                print(f"Loading Codex model {model_flag}...", file=sys.stderr)
+        elif model_flag == "--haiku" or model_flag == "haiku":
+            print("Loading Haiku 4.5...", file=sys.stderr)
+        elif model_flag == "--sonnet" or model_flag == "sonnet":
+            print("Loading Sonnet 4.5...", file=sys.stderr)
+        elif model_flag:
+            display_name = model_flag.lstrip("-").replace("-", " ").title()
+            print(f"Loading {display_name}...", file=sys.stderr)
 
         # Print launch banner with command and environment
-        env_vars = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"} if backend == "claude" else {}
+        env_vars = plan.env
         _print_launch_banner(cmd, env_vars=env_vars, backend=backend)
 
         # Print debug info

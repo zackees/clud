@@ -5,6 +5,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from typing import Final, cast
 
 
 class AgentMode(Enum):
@@ -17,6 +18,13 @@ class AgentMode(Enum):
 
 
 VALID_BACKENDS = {"claude", "codex"}
+CLAUDE_MODEL_FLAGS: Final[dict[str, str]] = {
+    "haiku": "--haiku",
+    "sonnet": "--sonnet",
+    "opus": "--opus",
+    "claude-3-5-sonnet": "--claude-3-5-sonnet",
+    "claude-3-opus": "--claude-3-opus",
+}
 
 
 @dataclass
@@ -61,6 +69,10 @@ class Args:
     loop_value: str | None = None  # Raw value from --loop for flexible parsing
     loop_count_override: int | None = None  # Explicit override via --loop-count
     plain: bool = False  # For --plain (disable JSON formatting, enable raw text I/O)
+    backend: str | None = None
+    persist_backend: bool = False
+    model: str | None = None
+    unknown_flags: list[str] | None = None
     agent_backend: str | None = None
     session_model: str | None = None
     claude_args: list[str] | None = None
@@ -88,7 +100,6 @@ def parse_args(args: list[str] | None = None) -> Args:
     has_claude_flag = "--claude" in args_copy
     if has_codex_flag and has_claude_flag:
         raise ValueError("Cannot specify both --codex and --claude")
-    agent_backend = "codex" if has_codex_flag else "claude" if has_claude_flag else None
     cron = "--cron" in args_copy
     ui = "--ui" in args_copy or "-d" in args_copy
     tui = "--tui" in args_copy
@@ -101,10 +112,52 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("--no-stop-hook")
     if "--no-skills" in args_copy:
         args_copy.remove("--no-skills")
+    persist_backend = None
     if has_codex_flag:
         args_copy.remove("--codex")
+        persist_backend = "codex"
     if has_claude_flag:
         args_copy.remove("--claude")
+        persist_backend = "claude"
+
+    if "--set-backend" in args_copy:
+        sb_idx = args_copy.index("--set-backend")
+        if sb_idx + 1 < len(args_copy):
+            set_backend_value = args_copy[sb_idx + 1]
+            args_copy.pop(sb_idx)
+            args_copy.pop(sb_idx)
+        else:
+            args_copy.pop(sb_idx)
+            set_backend_value = ""
+        if persist_backend and set_backend_value and persist_backend != set_backend_value:
+            raise ValueError("Cannot specify conflicting backend persistence flags")
+        persist_backend = set_backend_value or persist_backend
+    else:
+        for i, arg in enumerate(args_copy):
+            if arg.startswith("--set-backend="):
+                set_backend_value = arg.split("=", 1)[1]
+                if persist_backend and set_backend_value and persist_backend != set_backend_value:
+                    raise ValueError("Cannot specify conflicting backend persistence flags")
+                persist_backend = set_backend_value or persist_backend
+                args_copy.pop(i)
+                break
+
+    backend = None
+    if "--backend" in args_copy:
+        backend_idx = args_copy.index("--backend")
+        if backend_idx + 1 < len(args_copy):
+            backend = args_copy[backend_idx + 1]
+            args_copy.pop(backend_idx)
+            args_copy.pop(backend_idx)
+        else:
+            args_copy.pop(backend_idx)
+            backend = ""
+    else:
+        for i, arg in enumerate(args_copy):
+            if arg.startswith("--backend="):
+                backend = arg.split("=", 1)[1]
+                args_copy.pop(i)
+                break
 
     session_model = None
     if "--session-model" in args_copy:
@@ -123,8 +176,18 @@ def parse_args(args: list[str] | None = None) -> Args:
                 args_copy.pop(i)
                 break
 
-    if session_model is not None and session_model not in VALID_BACKENDS:
-        raise ValueError(f"Invalid --session-model value: {session_model}. Expected one of: claude, codex")
+    if backend is None:
+        backend = session_model
+    elif session_model is not None and backend != session_model:
+        raise ValueError("Cannot specify conflicting backend override flags")
+
+    if backend is not None and backend not in VALID_BACKENDS:
+        raise ValueError(f"Invalid backend value: {backend}. Expected one of: claude, codex")
+    if persist_backend is not None and persist_backend not in VALID_BACKENDS:
+        raise ValueError(f"Invalid --set-backend value: {persist_backend}. Expected one of: claude, codex")
+
+    agent_backend = persist_backend
+    session_model = backend
 
     # Remove --ui or -d from args_copy since it's handled by router
     if "--ui" in args_copy:
@@ -312,11 +375,27 @@ def parse_args(args: list[str] | None = None) -> Args:
         help="Disable JSON formatting and use raw text I/O",
     )
 
+    parser.add_argument(
+        "--model",
+        type=str,
+        dest="model",
+        help="Backend-neutral model preference",
+    )
+
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args_copy)
 
     if known_args.continue_flag and known_args.resume_value is not None:
         raise ValueError("Cannot specify both --continue and --resume")
+
+    legacy_backend_args: list[str] = list(unknown_args)
+    if known_args.model:
+        model_name = known_args.model
+        if session_model == "codex" or agent_backend == "codex":
+            legacy_backend_args = ["--model", model_name, *legacy_backend_args]
+        elif session_model == "claude" or agent_backend == "claude" or (session_model is None and agent_backend is None):
+            model_flag = cast(str, CLAUDE_MODEL_FLAGS.get(model_name, model_name))
+            legacy_backend_args = [model_flag, *legacy_backend_args]
 
     return Args(
         # Router-level
@@ -357,7 +436,11 @@ def parse_args(args: list[str] | None = None) -> Args:
         loop_value=loop_value,
         loop_count_override=loop_count_override,
         plain=known_args.plain,
+        backend=backend,
+        persist_backend=agent_backend is not None,
+        model=known_args.model,
+        unknown_flags=unknown_args,
         agent_backend=agent_backend,
         session_model=session_model,
-        claude_args=unknown_args,
+        claude_args=legacy_backend_args,
     )

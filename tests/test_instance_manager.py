@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from clud.api.instance_manager import CludInstance, InstancePool
-from clud.api.models import ClientType, ExecutionStatus
+from clud.api.models import ClientType, ExecutionStatus, InvocationMode
 
 
 class TestCludInstance(unittest.TestCase):
@@ -96,8 +96,52 @@ class TestCludInstance(unittest.TestCase):
 
             # Verify subprocess command does not hardcode backend-specific flags.
             args, _kwargs = mock_create_subprocess.call_args
-            self.assertEqual(args[:4], (sys.executable, "-m", "clud.agent_cli", "-p"))
+            self.assertEqual(args[:4], (sys.executable, "-m", "clud.agent_cli", "-m"))
             self.assertNotIn("--dangerously-skip-permissions", args)
+
+        asyncio.run(run_test())
+
+    @patch("clud.api.instance_manager.asyncio.create_subprocess_exec")
+    def test_clud_instance_execute_prompt_mode_with_backend_and_agent_args(self, mock_create_subprocess: MagicMock) -> None:
+        """Prompt mode should preserve backend selection and passthrough args."""
+
+        async def run_test() -> None:
+            mock_process = MagicMock()
+            mock_process.communicate = AsyncMock(return_value=(b"test output\n", b""))
+            mock_process.returncode = 0
+
+            mock_create_subprocess.return_value = mock_process
+
+            instance = CludInstance(
+                instance_id="test-instance",
+                session_id="test-session",
+                client_type=ClientType.API,
+                client_id="test-client",
+            )
+
+            await instance.start()
+            await instance.execute(
+                "echo test",
+                invocation_mode=InvocationMode.PROMPT,
+                session_model="codex",
+                agent_args=["--model", "gpt-5.4"],
+            )
+
+            args, _kwargs = mock_create_subprocess.call_args
+            self.assertEqual(
+                args,
+                (
+                    sys.executable,
+                    "-m",
+                    "clud.agent_cli",
+                    "--session-model",
+                    "codex",
+                    "-p",
+                    "echo test",
+                    "--model",
+                    "gpt-5.4",
+                ),
+            )
 
         asyncio.run(run_test())
 
