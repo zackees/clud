@@ -1,7 +1,8 @@
-"""Integration tests for agent completion detection."""
+"""Integration and unit tests for agent completion detection."""
 
 import os
 import subprocess
+import sys
 import time
 import unittest
 
@@ -124,6 +125,48 @@ class TestAgentCompletionIntegration(unittest.TestCase):
 
         except subprocess.TimeoutExpired:
             self.fail("Command timed out - basic Claude functionality may be broken")
+
+
+class TestAgentCompletionCapacityRetry(unittest.TestCase):
+    """Focused tests for Codex capacity retry handling."""
+
+    def test_capacity_retry_controller_waits_for_idle_then_sends_continue(self) -> None:
+        """The retry controller should defer recovery input until the PTY is quiet."""
+        from clud.agent.completion import _CapacityRetryController
+
+        controller = _CapacityRetryController(idle_timeout=3.0)
+        sent: list[str] = []
+
+        controller.observe_output("prefix\n⚠ Selected model is at capacity. Please try a different model.\n")
+
+        self.assertTrue(controller.pending_retry)
+        self.assertIsNone(controller.maybe_retry(10.0, True, lambda: sent.append("continue"), now=12.0))
+        self.assertEqual(sent, [])
+
+        retry_time = controller.maybe_retry(10.0, True, lambda: sent.append("continue"), now=13.5)
+
+        self.assertEqual(retry_time, 13.5)
+        self.assertEqual(sent, ["continue"])
+        self.assertFalse(controller.pending_retry)
+        self.assertEqual(controller.retry_count, 1)
+
+    def test_fallback_detection_injects_continue_after_capacity_marker(self) -> None:
+        """Fallback subprocess mode should recover from the Codex capacity marker."""
+        from clud.agent.completion import _fallback_subprocess_detection
+
+        script = (
+            "import sys\nprint(chr(9888) + ' Selected model is at capacity. Please try a different model.', flush=True)\nline = sys.stdin.readline().strip()\nprint('received:' + line, flush=True)\n"
+        )
+        command = [sys.executable, "-c", script]
+        output: list[str] = []
+
+        result = _fallback_subprocess_detection(command, idle_timeout=0.2, output_callback=output.append)
+
+        self.assertFalse(result.idle_detected)
+        self.assertEqual(result.returncode, 0)
+        combined_output = "".join(output)
+        self.assertIn("Selected model is at capacity", combined_output)
+        self.assertIn("received:continue", combined_output)
 
 
 if __name__ == "__main__":

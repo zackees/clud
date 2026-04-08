@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 # Type alias for output callback function
 OutputCallback = Callable[[str], None] | None
 
+CODEX_CAPACITY_MARKER = "Selected model is at capacity. Please try a different model."
+CODEX_CAPACITY_CONTINUE_INPUT = "continue\r"
+CODEX_CAPACITY_CONTINUE_LINE = "continue\n"
+CODEX_CAPACITY_MAX_RETRIES = 3
+
 
 @dataclass(slots=True)
 class CompletionDetectionResult:
@@ -27,6 +32,40 @@ class CompletionDetectionResult:
 
     idle_detected: bool
     returncode: int
+
+
+@dataclass(slots=True)
+class _CapacityRetryController:
+    """Track deferred Codex capacity retries while the PTY settles."""
+
+    idle_timeout: float
+    pending_retry: bool = False
+    retry_count: int = 0
+    max_retries: int = CODEX_CAPACITY_MAX_RETRIES
+
+    def observe_output(self, data: str) -> None:
+        """Flag a retry when Codex emits the temporary capacity marker."""
+        if CODEX_CAPACITY_MARKER in data:
+            self.pending_retry = True
+            logger.info("Detected Codex capacity marker; waiting for PTY to go idle before retrying")
+
+    def maybe_retry(self, last_activity: float, is_alive: bool, send_continue: Callable[[], None], now: float | None = None) -> float | None:
+        """Send `continue` once the PTY has been idle long enough."""
+        current_time = time.time() if now is None else now
+        if not self.pending_retry or not is_alive:
+            return None
+        if self.retry_count >= self.max_retries:
+            logger.warning("Codex capacity retry limit reached (%d)", self.max_retries)
+            self.pending_retry = False
+            return None
+        if current_time - last_activity <= self.idle_timeout:
+            return None
+
+        send_continue()
+        self.pending_retry = False
+        self.retry_count += 1
+        logger.info("Sent Codex capacity recovery input (%d/%d)", self.retry_count, self.max_retries)
+        return current_time
 
 
 # Terminal state management
@@ -187,12 +226,15 @@ def _monitor_pty_process(
     """Monitor Windows PTY process for completion."""
     last_activity = time.time()
     output_filter = OutputFilter()
+    capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
     try:
         while process.isalive():
             try:
                 data = process.read()
                 if data:
+                    capacity_retry.observe_output(data)
+
                     # Always send output to callback (user sees everything)
                     if output_callback:
                         output_callback(data)
@@ -207,6 +249,15 @@ def _monitor_pty_process(
                     time.sleep(0.1)  # No data, avoid busy loop
             except Exception:
                 time.sleep(0.1)  # Read error, continue checking
+
+            retry_time = capacity_retry.maybe_retry(
+                last_activity,
+                process.isalive(),
+                lambda: _send_continue_to_pty_process(process),
+            )
+            if retry_time is not None:
+                last_activity = retry_time
+                continue
 
             if time.time() - last_activity > idle_timeout:
                 logger.info(f"{platform} agent idle for {idle_timeout}s")
@@ -238,6 +289,7 @@ def _monitor_unix_pty(
 
     last_activity = time.time()
     output_filter = OutputFilter()
+    capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
     try:
         while process.poll() is None:
@@ -247,6 +299,7 @@ def _monitor_unix_pty(
                     data = os.read(master, 1024)
                     if data:
                         data_str = data.decode("utf-8", errors="replace")
+                        capacity_retry.observe_output(data_str)
 
                         # Always send output to callback (user sees everything)
                         if output_callback:
@@ -260,6 +313,15 @@ def _monitor_unix_pty(
                             logger.debug(f"TUI noise filtered: {repr(data_str[:50])}")
                 except OSError:
                     break  # PTY closed
+
+            retry_time = capacity_retry.maybe_retry(
+                last_activity,
+                process.poll() is None,
+                lambda: _send_continue_to_unix_pty(master),
+            )
+            if retry_time is not None:
+                last_activity = retry_time
+                continue
 
             if time.time() - last_activity > idle_timeout:
                 logger.info(f"Unix agent idle for {idle_timeout}s")
@@ -287,7 +349,14 @@ def _fallback_subprocess_detection(
     logger.warning("Using subprocess fallback - less reliable than PTY")
 
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1,
+        )
 
         output_queue: queue.Queue[str] = queue.Queue()
 
@@ -309,11 +378,13 @@ def _fallback_subprocess_detection(
         # Monitor for idle timeout
         last_activity = time.time()
         output_filter = OutputFilter()
+        capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
         try:
             while process.poll() is None:
                 try:
                     line = output_queue.get(timeout=0.1)
+                    capacity_retry.observe_output(line)
 
                     # Always send output to callback (user sees everything)
                     if output_callback:
@@ -327,6 +398,15 @@ def _fallback_subprocess_detection(
                         logger.debug(f"TUI noise filtered: {repr(line[:50])}")
                 except queue.Empty:
                     pass
+
+                retry_time = capacity_retry.maybe_retry(
+                    last_activity,
+                    process.poll() is None,
+                    lambda: _send_continue_to_subprocess(process),
+                )
+                if retry_time is not None:
+                    last_activity = retry_time
+                    continue
 
                 if time.time() - last_activity > idle_timeout:
                     logger.info(f"Subprocess agent idle for {idle_timeout}s")
@@ -376,6 +456,27 @@ def _terminate_pty_process(process: Any) -> None:
     with contextlib.suppress(Exception):
         if hasattr(process, "close"):
             process.close()
+
+
+def _send_continue_to_pty_process(process: Any) -> None:
+    """Send the Codex retry prompt into a Windows PTY-backed process."""
+    if hasattr(process, "write"):
+        process.write(CODEX_CAPACITY_CONTINUE_INPUT)
+
+
+def _send_continue_to_unix_pty(master: int) -> None:
+    """Send the Codex retry prompt into a Unix PTY."""
+    import os
+
+    os.write(master, CODEX_CAPACITY_CONTINUE_INPUT.encode("utf-8"))
+
+
+def _send_continue_to_subprocess(process: subprocess.Popen[Any]) -> None:
+    """Send the Codex retry prompt into the subprocess stdin fallback."""
+    if process.stdin is None:
+        return
+    process.stdin.write(CODEX_CAPACITY_CONTINUE_LINE)
+    process.stdin.flush()
 
 
 # Legacy class-based interface for compatibility

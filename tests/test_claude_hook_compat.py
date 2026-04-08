@@ -14,7 +14,7 @@ from clud.hooks.claude_compat import load_claude_compat_hooks
 class TestClaudeCompatHookLoading(unittest.TestCase):
     """Tests for parsing Claude-style hook settings."""
 
-    def test_loads_nested_stop_and_session_end_commands(self) -> None:
+    def test_loads_nested_start_stop_and_session_end_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             claude_dir = root / ".claude"
@@ -23,6 +23,11 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
                 """
                 {
                   "hooks": {
+                    "Start": {
+                      "hooks": [
+                        {"type": "command", "command": "echo start"}
+                      ]
+                    },
                     "Stop": [
                       {
                         "matcher": "*",
@@ -45,6 +50,7 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
 
             hooks = load_claude_compat_hooks(root)
 
+        self.assertEqual([spec.command for spec in hooks.start], ["echo start"])
         self.assertEqual([spec.command for spec in hooks.stop], ["bash lint", "bash test"])
         self.assertEqual([spec.command for spec in hooks.session_end], ["echo session-end"])
 
@@ -57,6 +63,7 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
                 """
                 {
                   "hooks": {
+                    "Start": [{"hooks": [{"type": "command", "command": "echo start"}]}],
                     "Stop": [{"hooks": [{"type": "command", "command": "bash lint"}]}],
                     "SessionEnd": [{"hooks": [{"type": "command", "command": "bash test"}]}]
                   }
@@ -71,6 +78,7 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
             finally:
                 reset_hook_manager()
 
+        self.assertTrue(summary.has_start_hooks)
         self.assertTrue(summary.has_stop_hooks)
         self.assertTrue(summary.has_session_end_hooks)
 
@@ -84,6 +92,13 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
                 {
                   // line comment
                   "hooks": {
+                    "Start": [
+                      {
+                        "hooks": [
+                          {"type": "command", "command": "echo start"},
+                        ],
+                      },
+                    ],
                     "Stop": [
                       {
                         "hooks": [
@@ -106,6 +121,7 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
 
             hooks = load_claude_compat_hooks(root)
 
+        self.assertEqual([spec.command for spec in hooks.start], ["echo start"])
         self.assertEqual([spec.command for spec in hooks.stop], ["bash lint"])
         self.assertEqual([spec.command for spec in hooks.session_end], ["bash test"])
 

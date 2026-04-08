@@ -27,8 +27,13 @@ def _command_spec_list() -> list[CommandHookSpec]:
 class ClaudeCompatHooks:
     """Normalized hook commands loaded from Claude settings files."""
 
+    start: list[CommandHookSpec] = field(default_factory=_command_spec_list)
     stop: list[CommandHookSpec] = field(default_factory=_command_spec_list)
     session_end: list[CommandHookSpec] = field(default_factory=_command_spec_list)
+
+    @property
+    def has_start(self) -> bool:
+        return bool(self.start)
 
     @property
     def has_stop(self) -> bool:
@@ -40,14 +45,19 @@ class ClaudeCompatHooks:
 
 
 def load_claude_compat_hooks(cwd: Path | None = None) -> ClaudeCompatHooks:
-    """Load Stop/SessionEnd commands from Claude settings JSON files."""
+    """Load Start/Stop/SessionEnd commands from Claude settings JSON files."""
     cwd = cwd or Path.cwd()
     hooks = ClaudeCompatHooks()
     seen: set[tuple[str, str]] = set()
 
     for path in _settings_paths(cwd):
         for event_name, commands in _load_commands_from_settings(path).items():
-            target = hooks.stop if event_name == "Stop" else hooks.session_end
+            if event_name == "Start":
+                target = hooks.start
+            elif event_name == "Stop":
+                target = hooks.stop
+            else:
+                target = hooks.session_end
             for command in commands:
                 key = (event_name, command)
                 if key in seen:
@@ -82,17 +92,18 @@ def _load_commands_from_settings(path: Path) -> dict[str, list[str]]:
     try:
         data = load_json_file_permissive(path)
     except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return {"Stop": [], "SessionEnd": []}
+        return {"Start": [], "Stop": [], "SessionEnd": []}
 
     data_dict = _as_mapping(data)
     if data_dict is None:
-        return {"Stop": [], "SessionEnd": []}
+        return {"Start": [], "Stop": [], "SessionEnd": []}
 
     raw_hooks = _as_mapping(data_dict.get("hooks"))
     if raw_hooks is None:
-        return {"Stop": [], "SessionEnd": []}
+        return {"Start": [], "Stop": [], "SessionEnd": []}
 
     return {
+        "Start": _extract_commands(raw_hooks.get("Start")),
         "Stop": _extract_commands(raw_hooks.get("Stop")),
         "SessionEnd": _extract_commands(raw_hooks.get("SessionEnd")),
     }

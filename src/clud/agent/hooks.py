@@ -16,6 +16,7 @@ from clud.util import handle_keyboard_interrupt
 class HookRegistrationSummary:
     """Summary of which hook families were registered."""
 
+    has_start_hooks: bool = False
     has_stop_hooks: bool = False
     has_session_end_hooks: bool = False
 
@@ -54,8 +55,13 @@ def register_hooks_from_config(hook_debug: bool = False, cwd: Path | None = None
             print("DEBUG: Hooks disabled in configuration", file=sys.stderr)
 
         compat = load_claude_compat_hooks(cwd=cwd)
-        if compat.stop or compat.session_end:
+        if compat.start or compat.stop or compat.session_end:
             hook_manager = get_hook_manager()
+            if compat.start:
+                hook_manager.register(CommandHookHandler(compat.start), [HookEvent.AGENT_START])
+                summary.has_start_hooks = True
+                if hook_debug:
+                    print(f"DEBUG: Registered {len(compat.start)} Claude-compatible Start hook(s)", file=sys.stderr)
             if compat.stop:
                 hook_manager.register(CommandHookHandler(compat.stop), [HookEvent.POST_EXECUTION])
                 summary.has_stop_hooks = True

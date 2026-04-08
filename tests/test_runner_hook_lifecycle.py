@@ -1,4 +1,4 @@
-"""Tests for runner lifecycle hooks and Codex stop-hook emulation."""
+"""Tests for runner lifecycle hooks and Codex Claude-hook emulation."""
 
 from __future__ import annotations
 
@@ -76,6 +76,36 @@ class TestRunnerHookLifecycle(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertAlmostEqual(mock_detect.call_args.args[1], 3.0)
+
+    def test_codex_compat_start_hooks_run_on_agent_start(self) -> None:
+        args = Args(mode=AgentMode.DEFAULT, agent_backend="codex", no_skills=True)
+        adapter = MagicMock()
+        adapter.build_launch_plan.return_value = LaunchPlan(
+            backend="codex",
+            executable="codex",
+            cwd=os.getcwd(),
+            interactive=True,
+        )
+        events: list[HookEvent] = []
+
+        def record_event(event: HookEvent, context: HookContext, hook_debug: bool = False) -> None:
+            events.append(event)
+
+        with (
+            patch(
+                "clud.agent.runner.register_hooks_from_config",
+                return_value=HookRegistrationSummary(has_start_hooks=True),
+            ),
+            patch("clud.agent.runner._find_backend_executable", return_value="codex"),
+            patch("clud.agent.runner.get_backend", return_value=adapter),
+            patch("clud.agent.runner.run_claude_process", return_value=0),
+            patch("clud.agent.runner.trigger_hook_sync", side_effect=record_event),
+            patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=self._identity_command),
+        ):
+            result = run_agent(args)
+
+        self.assertEqual(result, 0)
+        self.assertGreaterEqual(events.count(HookEvent.AGENT_START), 1)
 
 
 if __name__ == "__main__":
