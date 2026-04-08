@@ -5,6 +5,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from clud.agent.command_builder import _build_claude_command, _get_effective_backend
+from clud.agent.hooks import HookRegistrationSummary
 from clud.agent.runner import run_agent
 from clud.agent_args import AgentMode, Args, parse_args
 
@@ -213,6 +214,33 @@ class TestCodexDryRun(unittest.TestCase):
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", output)
         self.assertNotIn("--full-auto", output)
         self.assertIn("exec", output)
+
+
+class TestCodexRunnerWrapping(unittest.TestCase):
+    """Regression tests for Windows launch wrapping behavior."""
+
+    def test_codex_interactive_run_skips_git_bash_wrapper(self) -> None:
+        """Codex should launch directly so its TUI keeps terminal input working."""
+        args = Args(mode=AgentMode.DEFAULT, agent_backend="codex", no_skills=True)
+        captured_cmds: list[list[str]] = []
+
+        def record_run(cmd: list[str], propagate_keyboard_interrupt: bool = True) -> int:
+            captured_cmds.append(cmd)
+            return 0
+
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("clud.agent.runner.register_hooks_from_config", return_value=HookRegistrationSummary()),
+            patch("clud.agent.runner._find_backend_executable", return_value="codex"),
+            patch("clud.agent.runner.trigger_hook_sync"),
+            patch("clud.agent.runner.run_claude_process", side_effect=record_run),
+            patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=AssertionError("wrapper should not be used")),
+        ):
+            result = run_agent(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(captured_cmds), 1)
+        self.assertEqual(captured_cmds[0][0], "codex")
 
 
 if __name__ == "__main__":

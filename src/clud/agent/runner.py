@@ -249,8 +249,10 @@ def run_agent(args: "Args") -> int:
         plan = backend_adapter.build_launch_plan(agent_args)
         plan.executable = claude_path
         cmd = plan.command
-        # Wrap command in git-bash on Windows if available
-        cmd = _wrap_command_for_git_bash(cmd)
+        # Claude benefits from git-bash on Windows, but wrapping Codex breaks
+        # its native interactive TUI input handling.
+        if backend == "claude":
+            cmd = _wrap_command_for_git_bash(cmd)
 
         # Detect and print model message (for display only)
         model_flag = plan.model_display

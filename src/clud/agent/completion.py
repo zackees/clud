@@ -225,6 +225,7 @@ def _monitor_pty_process(
 ) -> CompletionDetectionResult:
     """Monitor Windows PTY process for completion."""
     last_activity = time.time()
+    saw_meaningful_activity = False
     output_filter = OutputFilter()
     capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
@@ -242,6 +243,7 @@ def _monitor_pty_process(
                     # Only reset idle timer on meaningful activity
                     if output_filter.is_meaningful(data):
                         last_activity = time.time()
+                        saw_meaningful_activity = True
                         logger.debug(f"Meaningful activity detected: {repr(data[:50])}")
                     else:
                         logger.debug(f"TUI noise filtered: {repr(data[:50])}")
@@ -259,7 +261,7 @@ def _monitor_pty_process(
                 last_activity = retry_time
                 continue
 
-            if time.time() - last_activity > idle_timeout:
+            if saw_meaningful_activity and time.time() - last_activity > idle_timeout:
                 logger.info(f"{platform} agent idle for {idle_timeout}s")
                 _terminate_pty_process(process)
                 return CompletionDetectionResult(idle_detected=True, returncode=0)
@@ -288,6 +290,7 @@ def _monitor_unix_pty(
     import select
 
     last_activity = time.time()
+    saw_meaningful_activity = False
     output_filter = OutputFilter()
     capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
@@ -308,6 +311,7 @@ def _monitor_unix_pty(
                         # Only reset idle timer on meaningful activity
                         if output_filter.is_meaningful(data_str):
                             last_activity = time.time()
+                            saw_meaningful_activity = True
                             logger.debug(f"Meaningful activity detected: {repr(data_str[:50])}")
                         else:
                             logger.debug(f"TUI noise filtered: {repr(data_str[:50])}")
@@ -323,7 +327,7 @@ def _monitor_unix_pty(
                 last_activity = retry_time
                 continue
 
-            if time.time() - last_activity > idle_timeout:
+            if saw_meaningful_activity and time.time() - last_activity > idle_timeout:
                 logger.info(f"Unix agent idle for {idle_timeout}s")
                 _terminate_subprocess(process)
                 return CompletionDetectionResult(idle_detected=True, returncode=0)
@@ -377,6 +381,7 @@ def _fallback_subprocess_detection(
 
         # Monitor for idle timeout
         last_activity = time.time()
+        saw_meaningful_activity = False
         output_filter = OutputFilter()
         capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
@@ -393,6 +398,7 @@ def _fallback_subprocess_detection(
                     # Only reset idle timer on meaningful activity
                     if output_filter.is_meaningful(line):
                         last_activity = time.time()
+                        saw_meaningful_activity = True
                         logger.debug(f"Meaningful activity detected: {repr(line[:50])}")
                     else:
                         logger.debug(f"TUI noise filtered: {repr(line[:50])}")
@@ -408,7 +414,7 @@ def _fallback_subprocess_detection(
                     last_activity = retry_time
                     continue
 
-                if time.time() - last_activity > idle_timeout:
+                if saw_meaningful_activity and time.time() - last_activity > idle_timeout:
                     logger.info(f"Subprocess agent idle for {idle_timeout}s")
                     _terminate_subprocess(process)
                     return CompletionDetectionResult(idle_detected=True, returncode=0)

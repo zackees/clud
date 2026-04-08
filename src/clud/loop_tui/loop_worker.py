@@ -265,10 +265,11 @@ class LoopWorkerApp(CludLoopTUI):
                         total_iterations=self.loop_count,
                         working_file=working_file_str,
                     )
-                    cmd = _wrap_command_for_git_bash(cmd)
+                    backend = _get_effective_backend(self.args)
+                    if backend == "claude":
+                        cmd = _wrap_command_for_git_bash(cmd)
 
                     # Print model info
-                    backend = _get_effective_backend(self.args)
                     model_flag = _get_model_from_args(self.args.claude_args, backend=backend)
                     if model_flag:
                         self.call_from_thread(self.log_message, f"Model: {model_flag}")

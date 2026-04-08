@@ -8,11 +8,14 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from clud.hooks import HookContext
 
 logger = logging.getLogger(__name__)
+
+POST_HOOK_FAILURE_FILENAME = "POST_HOOK_FAILURE.txt"
 
 
 @dataclass(slots=True)
@@ -22,6 +25,22 @@ class CommandHookSpec:
     event_name: str
     command: str
     source_path: str | None = None
+
+
+@dataclass(slots=True)
+class CommandHookResult:
+    """Captured result for a single hook command execution."""
+
+    spec: CommandHookSpec
+    cwd: Path
+    returncode: int
+    stdout: str
+    stderr: str
+    error_message: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error_message is not None or self.returncode != 0
 
 
 class CommandHookHandler:
@@ -36,39 +55,19 @@ class CommandHookHandler:
             await asyncio.to_thread(self._run_command, spec, context)
 
     def _run_command(self, spec: CommandHookSpec, context: HookContext) -> None:
-        cwd = self._resolve_cwd(context)
-        env = self._build_env(spec, context, cwd)
-
-        try:
-            result = subprocess.run(
-                spec.command,
-                shell=True,
-                cwd=str(cwd),
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=self._timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
-            print(
-                f"Hook `{spec.event_name}` timed out after {self._timeout_seconds:.0f}s: {spec.command}",
-                file=sys.stderr,
-            )
-            return
-        except Exception as exc:
-            print(f"Hook `{spec.event_name}` failed to start: {spec.command} ({exc})", file=sys.stderr)
-            return
+        result = run_command_hook(spec, context, timeout_seconds=self._timeout_seconds)
 
         if result.stdout:
             print(result.stdout, end="" if result.stdout.endswith("\n") else "\n", file=sys.stderr)
         if result.stderr:
             print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
 
+        if result.error_message:
+            print(result.error_message, file=sys.stderr)
+            return
+
         if result.returncode != 0:
-            print(
-                f"Hook `{spec.event_name}` exited with status {result.returncode}: {spec.command}",
-                file=sys.stderr,
-            )
+            print(f"Hook `{spec.event_name}` exited with status {result.returncode}: {spec.command}", file=sys.stderr)
 
     def _resolve_cwd(self, context: HookContext) -> Path:
         raw_cwd = context.metadata.get("cwd")
@@ -111,4 +110,78 @@ class CommandHookHandler:
         return env
 
 
-__all__ = ["CommandHookHandler", "CommandHookSpec"]
+def run_command_hook(spec: CommandHookSpec, context: HookContext, timeout_seconds: float = 1800.0) -> CommandHookResult:
+    """Execute a hook command and capture its result."""
+    handler = CommandHookHandler([], timeout_seconds=timeout_seconds)
+    cwd = handler._resolve_cwd(context)
+    env = handler._build_env(spec, context, cwd)
+
+    try:
+        completed = subprocess.run(
+            spec.command,
+            shell=True,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return CommandHookResult(
+            spec=spec,
+            cwd=cwd,
+            returncode=124,
+            stdout="",
+            stderr="",
+            error_message=f"Hook `{spec.event_name}` timed out after {timeout_seconds:.0f}s: {spec.command}",
+        )
+    except Exception as exc:
+        return CommandHookResult(
+            spec=spec,
+            cwd=cwd,
+            returncode=1,
+            stdout="",
+            stderr="",
+            error_message=f"Hook `{spec.event_name}` failed to start: {spec.command} ({exc})",
+        )
+
+    return CommandHookResult(
+        spec=spec,
+        cwd=cwd,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
+
+
+def write_failure_artifact(result: CommandHookResult, filename: str = POST_HOOK_FAILURE_FILENAME) -> Path:
+    """Persist a failed hook execution to a workspace file."""
+    output_path = result.cwd / filename
+    timestamp = datetime.now(timezone.utc).isoformat()
+    source = result.spec.source_path or "<unknown>"
+    content = (
+        "Post-edit hook failure\n"
+        f"Timestamp: {timestamp}\n"
+        f"Event: {result.spec.event_name}\n"
+        f"Command: {result.spec.command}\n"
+        f"Source: {source}\n"
+        f"Return code: {result.returncode}\n\n"
+        "STDOUT\n"
+        f"{result.stdout or '<empty>'}\n\n"
+        "STDERR\n"
+        f"{result.stderr or '<empty>'}\n"
+    )
+    if result.error_message:
+        content += f"\nERROR\n{result.error_message}\n"
+    output_path.write_text(content, encoding="utf-8")
+    return output_path
+
+
+__all__ = [
+    "CommandHookHandler",
+    "CommandHookResult",
+    "CommandHookSpec",
+    "POST_HOOK_FAILURE_FILENAME",
+    "run_command_hook",
+    "write_failure_artifact",
+]

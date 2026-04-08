@@ -169,5 +169,35 @@ class TestAgentCompletionCapacityRetry(unittest.TestCase):
         self.assertIn("received:continue", combined_output)
 
 
+class TestAgentCompletionIdleGating(unittest.TestCase):
+    """Idle shutdown should only happen after real agent activity."""
+
+    def test_fallback_detection_does_not_idle_terminate_before_any_meaningful_output(self) -> None:
+        """A silent startup period should not be mistaken for a completed Codex turn."""
+        from clud.agent.completion import _fallback_subprocess_detection
+
+        script = "import time; time.sleep(0.3)"
+        command = [sys.executable, "-c", script]
+
+        result = _fallback_subprocess_detection(command, idle_timeout=0.1, output_callback=None)
+
+        self.assertFalse(result.idle_detected)
+        self.assertEqual(result.returncode, 0)
+
+    def test_fallback_detection_can_idle_terminate_after_meaningful_output(self) -> None:
+        """Once the agent has emitted real output, quiet time can count as stop."""
+        from clud.agent.completion import _fallback_subprocess_detection
+
+        script = "import time; print('ready', flush=True); time.sleep(0.3)"
+        command = [sys.executable, "-c", script]
+        output: list[str] = []
+
+        result = _fallback_subprocess_detection(command, idle_timeout=0.1, output_callback=output.append)
+
+        self.assertTrue(result.idle_detected)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("ready", "".join(output))
+
+
 if __name__ == "__main__":
     unittest.main()

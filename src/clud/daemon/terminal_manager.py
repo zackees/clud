@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..output_filter import OutputFilter
+from .input_buffer import InputSnapshot, TerminalInputTracker
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class Terminal:
         self._rows: int = 24
         # Suppress terminal capability response sequences from client input.
         self._input_filter = OutputFilter()
+        self._input_tracker = TerminalInputTracker()
 
     def start(self) -> bool:
         """Start the PTY process.
@@ -272,10 +274,39 @@ class Terminal:
             # Regular input - strip terminal capability response sequences before forwarding.
             filtered_message = self._input_filter.filter_terminal_responses(message)
             if filtered_message:
+                self._input_tracker.observe(filtered_message)
                 await self._write_to_pty(filtered_message.encode("utf-8"))
         else:
             # Binary data - send directly
             await self._write_to_pty(message)
+
+    def get_input_snapshot(self) -> InputSnapshot:
+        """Return the latest tracked user draft state."""
+        return self._input_tracker.snapshot()
+
+    async def inject_hook_failure(
+        self,
+        failure_path: str,
+        *,
+        instructions: str | None = None,
+    ) -> bool:
+        """Inject a Codex-facing hook failure notice and restore draft input.
+
+        Returns True when the draft buffer was considered reliable enough to
+        clear and restore safely. When False, callers should fall back to plain
+        terminal output instead of rewriting the live input buffer.
+        """
+        snapshot = self._input_tracker.snapshot()
+        if not snapshot.reliable:
+            return False
+
+        notice = instructions or f"Post-edit hook failed. Read {failure_path}. Delete it when finished, then continue."
+        if snapshot.draft:
+            await self._send_synthetic_input("\x15")
+        await self._send_synthetic_input(notice + "\r")
+        if snapshot.draft:
+            await self._send_synthetic_input(snapshot.draft)
+        return True
 
     async def _resize(self, cols: int, rows: int) -> None:
         """Resize the PTY terminal.
@@ -335,6 +366,11 @@ class Terminal:
                 await self._write_to_pty_unix(data)
         except Exception as e:
             logger.error("Error writing to PTY %d: %s", self.terminal_id, e)
+
+    async def _send_synthetic_input(self, data: str) -> None:
+        """Send internally generated input while keeping draft tracking aligned."""
+        self._input_tracker.observe(data)
+        await self._write_to_pty(data.encode("utf-8"))
 
     async def _write_to_pty_windows(self, data: bytes) -> None:
         """Write data to Windows PTY."""

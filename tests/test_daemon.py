@@ -146,6 +146,78 @@ class TestTerminalCreation(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_terminal_tracks_simple_draft_input(self) -> None:
+        """Printable input plus backspace should update the tracked draft."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+
+        async def run_test() -> None:
+            with patch.object(terminal, "_write_to_pty", new_callable=AsyncMock):
+                await terminal._handle_ws_message("hello")
+                await terminal._handle_ws_message("\x7f")
+                await terminal._handle_ws_message("!")
+
+        asyncio.run(run_test())
+        snapshot = terminal.get_input_snapshot()
+        self.assertTrue(snapshot.reliable)
+        self.assertEqual(snapshot.draft, "hell!")
+
+    def test_terminal_marks_escape_sequences_unreliable(self) -> None:
+        """Cursor-motion style sequences should disable destructive draft rewrites."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+
+        async def run_test() -> None:
+            with patch.object(terminal, "_write_to_pty", new_callable=AsyncMock):
+                await terminal._handle_ws_message("hello")
+                await terminal._handle_ws_message("\x1b[D")
+
+        asyncio.run(run_test())
+        snapshot = terminal.get_input_snapshot()
+        self.assertFalse(snapshot.reliable)
+
+    def test_inject_hook_failure_clears_restores_and_preserves_draft(self) -> None:
+        """Failure injection should clear the draft, send the notice, then restore it."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+        writes: list[bytes] = []
+
+        async def fake_write(data: bytes) -> None:
+            writes.append(data)
+
+        async def run_test() -> None:
+            with patch.object(terminal, "_write_to_pty", side_effect=fake_write):
+                await terminal._handle_ws_message("draft text")
+                injected = await terminal.inject_hook_failure("POST_HOOK_FAILURE.txt")
+                self.assertTrue(injected)
+
+        asyncio.run(run_test())
+        self.assertEqual(writes[0], b"draft text")
+        self.assertEqual(writes[1], b"\x15")
+        self.assertIn(b"Post-edit hook failed. Read POST_HOOK_FAILURE.txt.", writes[2])
+        self.assertEqual(writes[3], b"draft text")
+        snapshot = terminal.get_input_snapshot()
+        self.assertEqual(snapshot.draft, "draft text")
+
+    def test_inject_hook_failure_skips_unreliable_draft(self) -> None:
+        """Unsafe draft state should not trigger terminal rewriting."""
+        from clud.daemon.terminal_manager import Terminal
+
+        terminal = Terminal(terminal_id=0)
+
+        async def run_test() -> None:
+            with patch.object(terminal, "_write_to_pty", new_callable=AsyncMock) as mock_write:
+                await terminal._handle_ws_message("draft")
+                await terminal._handle_ws_message("\x1b[D")
+                injected = await terminal.inject_hook_failure("POST_HOOK_FAILURE.txt")
+                self.assertFalse(injected)
+                self.assertEqual(mock_write.await_count, 2)
+
+        asyncio.run(run_test())
+
 
 class TestTerminalManagerCreation(unittest.TestCase):
     """Test cases for TerminalManager class initialization."""
