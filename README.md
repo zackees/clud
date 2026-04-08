@@ -63,6 +63,12 @@ clud up -p                 # Publish to remote
 clud up -m "commit msg"    # Custom commit message
 ```
 
+## Codex supported
+
+![image (1)](https://github.com/user-attachments/assets/de1e23b4-4513-4c92-ba57-3d9dcd1060b6)
+
+
+
 ## License
 
 BSD 3-Clause License
