@@ -52,6 +52,8 @@ class Args:
     message: str | None = None
     cmd: str | None = None
     continue_flag: bool = False
+    resume_flag: bool = False
+    resume_value: str | None = None
     dry_run: bool = False
     verbose: bool = False
     idle_timeout: float | None = None
@@ -269,7 +271,16 @@ def parse_args(args: list[str] | None = None) -> Args:
         "--continue",
         action="store_true",
         dest="continue_flag",
-        help="Continue previous conversation (adds --continue flag to Claude)",
+        help="Continue the most recent conversation",
+    )
+
+    parser.add_argument(
+        "-r",
+        "--resume",
+        nargs="?",
+        const="",
+        dest="resume_value",
+        help="Resume a conversation by session/search term, or open the backend picker when no value is given",
     )
 
     parser.add_argument(
@@ -304,6 +315,9 @@ def parse_args(args: list[str] | None = None) -> Args:
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args_copy)
 
+    if known_args.continue_flag and known_args.resume_value is not None:
+        raise ValueError("Cannot specify both --continue and --resume")
+
     return Args(
         # Router-level
         mode=mode,
@@ -334,6 +348,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         message=known_args.message,
         cmd=known_args.cmd,
         continue_flag=known_args.continue_flag,
+        resume_flag=known_args.resume_value is not None,
+        resume_value=known_args.resume_value,
         dry_run=known_args.dry_run,
         verbose=known_args.verbose,
         idle_timeout=known_args.idle_timeout,

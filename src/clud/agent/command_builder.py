@@ -174,6 +174,28 @@ def _save_claude_model_preference(claude_args: list[str] | None) -> None:
             break
 
 
+def _append_codex_resume_target(cmd: list[str], args: "Args") -> bool:
+    """Normalize continuation features to Codex's native resume commands.
+
+    Returns:
+        True when a resume-style command was appended and the caller should
+        treat command construction as complete.
+    """
+    if args.continue_flag:
+        cmd.extend(["resume", "--last"])
+    elif args.resume_flag:
+        cmd.append("resume")
+        if args.resume_value:
+            cmd.append(args.resume_value)
+    else:
+        return False
+
+    if args.claude_args:
+        cmd.extend(args.claude_args)
+
+    return True
+
+
 def _build_codex_command(
     args: "Args",
     codex_path: str,
@@ -198,10 +220,7 @@ def _build_codex_command(
         os.getcwd(),
     ]
 
-    if args.continue_flag:
-        cmd.extend(["resume", "--last"])
-        if args.claude_args:
-            cmd.extend(args.claude_args)
+    if _append_codex_resume_target(cmd, args):
         if prompt_text:
             cmd.append(prompt_text)
         elif message_text:
@@ -248,6 +267,11 @@ def _build_claude_command(
 
     if args.continue_flag:
         cmd.append("--continue")
+
+    if args.resume_flag:
+        cmd.append("--resume")
+        if args.resume_value:
+            cmd.append(args.resume_value)
 
     if args.prompt:
         prompt_text = args.prompt

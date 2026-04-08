@@ -1,6 +1,7 @@
 """Unit tests for instance manager."""
 
 import asyncio
+import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -92,6 +93,11 @@ class TestCludInstance(unittest.TestCase):
             self.assertEqual(instance.status, ExecutionStatus.COMPLETED)
             self.assertEqual(instance.message_count, 1)
             self.assertIsNone(instance.process)  # Process cleared after execution
+
+            # Verify subprocess command does not hardcode backend-specific flags.
+            args, _kwargs = mock_create_subprocess.call_args
+            self.assertEqual(args[:4], (sys.executable, "-m", "clud.agent_cli", "-p"))
+            self.assertNotIn("--dangerously-skip-permissions", args)
 
         asyncio.run(run_test())
 

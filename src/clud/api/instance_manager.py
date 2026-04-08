@@ -49,8 +49,8 @@ class CludInstance:
     async def start(self) -> None:
         """Start the clud subprocess.
 
-        Launches a clud process in YOLO mode (--dangerously-skip-permissions)
-        that will wait for messages to execute.
+        Initializes a clud instance that will launch backend-aware subprocesses
+        on demand with the shared dangerous-execution defaults.
 
         Raises:
             RuntimeError: If process fails to start
@@ -90,8 +90,9 @@ class CludInstance:
             self.last_activity = datetime.now()
             self.status = ExecutionStatus.RUNNING
 
-            # Build command
-            cmd = [sys.executable, "-m", "clud.agent_cli", "--dangerously-skip-permissions", "-p", message]
+            # Route through the main CLI so the selected backend applies its
+            # own dangerous-execution flags consistently.
+            cmd = [sys.executable, "-m", "clud.agent_cli", "-p", message]
 
             # Add working directory if specified
             cwd = str(self.working_directory) if self.working_directory else None

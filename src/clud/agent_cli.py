@@ -69,6 +69,8 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --claude             Persist Claude as the global backend")
             print("  --codex              Persist Codex as the global backend")
             print("  --session-model X    Override backend for this run only (supports: claude, codex)")
+            print("  -c, --continue       Continue the most recent conversation")
+            print("  -r, --resume [TERM]  Resume by picker, session ID, or search term")
             print("  -h, --help           Show this help")
             print()
             print("Default: Run the selected backend with dangerous full-permission settings")
