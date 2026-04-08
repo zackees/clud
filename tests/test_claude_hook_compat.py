@@ -79,7 +79,7 @@ class TestClaudeCompatHookLoading(unittest.TestCase):
                 reset_hook_manager()
 
         self.assertTrue(summary.has_start_hooks)
-        self.assertTrue(summary.has_stop_hooks)
+        self.assertTrue(summary.has_post_execution_hooks)
         self.assertTrue(summary.has_session_end_hooks)
 
     def test_loads_settings_with_comments_and_trailing_commas(self) -> None:

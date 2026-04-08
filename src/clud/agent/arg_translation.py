@@ -26,13 +26,14 @@ def to_agent_args(args: Args, *, resolved_backend: str | None = None, cwd: str |
         resume_target = args.resume_value
 
     unknown_flags = list(args.unknown_flags if args.unknown_flags is not None else args.claude_args or [])
-    known_flags = {
+    known_flags: dict[str, bool | float | None] = {
         "plain": args.plain,
         "verbose": args.verbose,
         "dry_run": args.dry_run,
         "idle_timeout": args.idle_timeout,
         "hook_debug": args.hook_debug,
-        "no_stop_hook": args.no_stop_hook,
+        "no_hooks": args.no_hooks,
+        "no_session_end_hook": args.no_session_end_hook,
         "no_skills": args.no_skills,
     }
 

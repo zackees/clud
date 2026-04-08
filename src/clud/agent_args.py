@@ -46,7 +46,8 @@ class Args:
     info: bool = False
     help: bool = False
     hook_debug: bool = False  # For --hook-debug (verbose hook logging)
-    no_stop_hook: bool = False  # For --no-stop-hook (disable AGENT_STOP hook)
+    no_hooks: bool = False  # For --no-hooks (disable all hooks)
+    no_session_end_hook: bool = False  # For --no-session-end-hook (disable AGENT_STOP / SessionEnd hook)
     cron: bool = False  # For --cron (cron scheduler)
     cron_subcommand: str | None = None  # Cron subcommand (add, list, remove, etc.)
     cron_args: list[str] = None  # type: ignore  # Arguments for cron subcommand
@@ -94,7 +95,8 @@ def parse_args(args: list[str] | None = None) -> Args:
     install_claude = "--install-claude" in args_copy
     info = "--info" in args_copy
     hook_debug = "--hook-debug" in args_copy
-    no_stop_hook = "--no-stop-hook" in args_copy
+    no_hooks = "--no-hooks" in args_copy
+    no_session_end_hook = "--no-session-end-hook" in args_copy or "--no-stop-hook" in args_copy
     no_skills = "--no-skills" in args_copy
     has_codex_flag = "--codex" in args_copy
     has_claude_flag = "--claude" in args_copy
@@ -105,9 +107,13 @@ def parse_args(args: list[str] | None = None) -> Args:
     tui = "--tui" in args_copy
     rebase = False
 
-    # Remove --hook-debug and --no-stop-hook from args_copy since they're handled by router
+    # Remove router-handled hook flags before passing through backend args
     if "--hook-debug" in args_copy:
         args_copy.remove("--hook-debug")
+    if "--no-hooks" in args_copy:
+        args_copy.remove("--no-hooks")
+    if "--no-session-end-hook" in args_copy:
+        args_copy.remove("--no-session-end-hook")
     if "--no-stop-hook" in args_copy:
         args_copy.remove("--no-stop-hook")
     if "--no-skills" in args_copy:
@@ -413,7 +419,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         info=info,
         help=help_requested,
         hook_debug=hook_debug,
-        no_stop_hook=no_stop_hook,
+        no_hooks=no_hooks,
+        no_session_end_hook=no_session_end_hook,
         no_skills=no_skills,
         cron=cron,
         cron_subcommand=cron_subcommand,

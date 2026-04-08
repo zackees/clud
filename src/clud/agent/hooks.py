@@ -17,8 +17,18 @@ class HookRegistrationSummary:
     """Summary of which hook families were registered."""
 
     has_start_hooks: bool = False
-    has_stop_hooks: bool = False
+    has_post_execution_hooks: bool = False
     has_session_end_hooks: bool = False
+
+    @property
+    def has_stop_hooks(self) -> bool:
+        """Backward-compatible alias for Claude-compatible Stop hooks."""
+        return self.has_post_execution_hooks
+
+    @has_stop_hooks.setter
+    def has_stop_hooks(self, value: bool) -> None:
+        """Backward-compatible alias for Claude-compatible Stop hooks."""
+        self.has_post_execution_hooks = value
 
 
 def register_hooks_from_config(hook_debug: bool = False, cwd: Path | None = None) -> HookRegistrationSummary:
@@ -64,7 +74,7 @@ def register_hooks_from_config(hook_debug: bool = False, cwd: Path | None = None
                     print(f"DEBUG: Registered {len(compat.start)} Claude-compatible Start hook(s)", file=sys.stderr)
             if compat.stop:
                 hook_manager.register(CommandHookHandler(compat.stop), [HookEvent.POST_EXECUTION])
-                summary.has_stop_hooks = True
+                summary.has_post_execution_hooks = True
                 if hook_debug:
                     print(f"DEBUG: Registered {len(compat.stop)} Claude-compatible Stop hook(s)", file=sys.stderr)
             if compat.session_end:

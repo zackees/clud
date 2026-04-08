@@ -34,7 +34,7 @@ from .command_builder import (
     _wrap_command_for_git_bash,
 )
 from .completion import detect_agent_completion
-from .hooks import register_hooks_from_config, trigger_hook_sync
+from .hooks import HookRegistrationSummary, register_hooks_from_config, trigger_hook_sync
 from .loop_executor import _run_loop
 from .process_launcher import run_claude_process
 from .subprocess import _execute_command
@@ -88,7 +88,9 @@ def run_agent(args: "Args") -> int:
         return 2
 
     # Register hooks early (before any execution)
-    hook_summary = register_hooks_from_config(hook_debug=args.hook_debug, cwd=Path.cwd())
+    hook_summary = HookRegistrationSummary()
+    if not args.no_hooks:
+        hook_summary = register_hooks_from_config(hook_debug=args.hook_debug, cwd=Path.cwd())
 
     try:
         _persist_backend_selection(args)
@@ -276,18 +278,19 @@ def run_agent(args: "Args") -> int:
 
         # Trigger AGENT_START hook
         user_message = args.prompt if args.prompt else args.message if args.message else None
-        trigger_hook_sync(
-            HookEvent.AGENT_START,
-            HookContext(
-                event=HookEvent.AGENT_START,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-                message=user_message,
-            ),
-            hook_debug=args.hook_debug,
-        )
+        if not args.no_hooks:
+            trigger_hook_sync(
+                HookEvent.AGENT_START,
+                HookContext(
+                    event=HookEvent.AGENT_START,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    message=user_message,
+                ),
+                hook_debug=args.hook_debug,
+            )
 
         # Execute Claude with the dangerous permissions flag
         # Use idle detection if timeout is specified
@@ -295,7 +298,7 @@ def run_agent(args: "Args") -> int:
         idle_detected = False
         stop_reason = "process_exit"
         effective_idle_timeout = args.idle_timeout
-        if effective_idle_timeout is None and backend == "codex" and plan.interactive and hook_summary.has_stop_hooks:
+        if effective_idle_timeout is None and backend == "codex" and plan.interactive and hook_summary.has_post_execution_hooks:
             effective_idle_timeout = get_codex_stop_hook_idle_timeout()
             print(
                 f"Claude-compatible Stop hooks detected; using Codex idle timeout {effective_idle_timeout:.1f}s",
@@ -343,25 +346,26 @@ def run_agent(args: "Args") -> int:
             returncode = run_claude_process(cmd, propagate_keyboard_interrupt=False)
 
         # Trigger POST_EXECUTION hook after successful completion
-        trigger_hook_sync(
-            HookEvent.POST_EXECUTION,
-            HookContext(
-                event=HookEvent.POST_EXECUTION,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-                message=user_message,
-                metadata={
-                    "backend": backend,
-                    "cwd": os.getcwd(),
-                    "idle_detected": idle_detected,
-                    "reason": stop_reason,
-                    "returncode": returncode,
-                },
-            ),
-            hook_debug=args.hook_debug,
-        )
+        if not args.no_hooks:
+            trigger_hook_sync(
+                HookEvent.POST_EXECUTION,
+                HookContext(
+                    event=HookEvent.POST_EXECUTION,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    message=user_message,
+                    metadata={
+                        "backend": backend,
+                        "cwd": os.getcwd(),
+                        "idle_detected": idle_detected,
+                        "reason": stop_reason,
+                        "returncode": returncode,
+                    },
+                ),
+                hook_debug=args.hook_debug,
+            )
 
         return returncode
 
@@ -373,18 +377,19 @@ def run_agent(args: "Args") -> int:
         traceback.print_exc()
 
         # Trigger ERROR hook
-        trigger_hook_sync(
-            HookEvent.ERROR,
-            HookContext(
-                event=HookEvent.ERROR,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-                error=error_msg,
-            ),
-            hook_debug=args.hook_debug,
-        )
+        if not args.no_hooks:
+            trigger_hook_sync(
+                HookEvent.ERROR,
+                HookContext(
+                    event=HookEvent.ERROR,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    error=error_msg,
+                ),
+                hook_debug=args.hook_debug,
+            )
         return 1
 
     except KeyboardInterrupt as e:
@@ -423,18 +428,19 @@ def run_agent(args: "Args") -> int:
             # Fall through to trigger ERROR hook and return 1
 
         # Trigger ERROR hook (reached when both methods fail or backup can't be attempted)
-        trigger_hook_sync(
-            HookEvent.ERROR,
-            HookContext(
-                event=HookEvent.ERROR,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-                error=error_msg,
-            ),
-            hook_debug=args.hook_debug,
-        )
+        if not args.no_hooks:
+            trigger_hook_sync(
+                HookEvent.ERROR,
+                HookContext(
+                    event=HookEvent.ERROR,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    error=error_msg,
+                ),
+                hook_debug=args.hook_debug,
+            )
         stop_reason = "launch_error"
         returncode = 1
         return 1
@@ -458,25 +464,26 @@ def run_agent(args: "Args") -> int:
         traceback.print_exc()
 
         # Trigger ERROR hook
-        trigger_hook_sync(
-            HookEvent.ERROR,
-            HookContext(
-                event=HookEvent.ERROR,
-                instance_id=instance_id,
-                session_id=session_id,
-                client_type="cli",
-                client_id="standalone",
-                error=error_msg,
-            ),
-            hook_debug=args.hook_debug,
-        )
+        if not args.no_hooks:
+            trigger_hook_sync(
+                HookEvent.ERROR,
+                HookContext(
+                    event=HookEvent.ERROR,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    error=error_msg,
+                ),
+                hook_debug=args.hook_debug,
+            )
         stop_reason = "launch_error"
         returncode = 1
         return 1
 
     finally:
         # Trigger AGENT_STOP hook in finally block (unless disabled)
-        if not args.no_stop_hook:
+        if not args.no_hooks and not args.no_session_end_hook:
             trigger_hook_sync(
                 HookEvent.AGENT_STOP,
                 HookContext(

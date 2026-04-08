@@ -1,4 +1,39 @@
 {
+  "hooks": {
+    "Start": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import os; from pathlib import Path; output = os.environ.get('CLUD_AGENT_HOOK_OUTPUT'); Path(output).write_text('event=' + os.environ.get('CLUD_HOOK_EVENT', '') + '\\ncwd=' + os.environ.get('CLUD_PROJECT_DIR', '') + '\\n', encoding='utf-8') if output else None\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import os; from pathlib import Path; output = os.environ.get('CLUD_AGENT_HOOK_OUTPUT'); Path(output).write_text('event=' + os.environ.get('CLUD_HOOK_EVENT', '') + '\\ncwd=' + os.environ.get('CLUD_PROJECT_DIR', '') + '\\n', encoding='utf-8') if output else None\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import os; from pathlib import Path; output = os.environ.get('CLUD_AGENT_HOOK_OUTPUT'); Path(output).write_text('event=' + os.environ.get('CLUD_HOOK_EVENT', '') + '\\ncwd=' + os.environ.get('CLUD_PROJECT_DIR', '') + '\\n', encoding='utf-8') if output else None\""
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(git add:*)",

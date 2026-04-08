@@ -160,16 +160,14 @@ class HookManager:
             context: The hook context containing event information
         """
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If we're already in an event loop, create a task
-                asyncio.create_task(self.trigger(context))
-            else:
-                # Otherwise run in the loop
-                loop.run_until_complete(self.trigger(context))
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No event loop exists, create a new one
+            # No event loop is currently running, so create one for this call.
             asyncio.run(self.trigger(context))
+            return
+
+        # If we're already in an event loop, schedule the hook task.
+        loop.create_task(self.trigger(context))
 
     def has_handlers(self, event: HookEvent | None = None) -> bool:
         """Check if there are any handlers registered.

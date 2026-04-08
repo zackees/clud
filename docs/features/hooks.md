@@ -19,6 +19,27 @@ The hook system provides an event-based architecture for intercepting and forwar
 - **AGENT_START**: When agent subprocess starts
 - **AGENT_STOP**: When agent subprocess stops
 
+### Claude-Compatible Mapping
+
+`clud` also understands Claude-style hook config names from `.claude/settings.json` and `.claude/settings.local.json`.
+
+| Config hook name | Internal event | Runtime meaning |
+| --- | --- | --- |
+| `Start` | `AGENT_START` | Agent session is starting |
+| `Stop` | `POST_EXECUTION` | Agent finished a normal execution turn |
+| `SessionEnd` | `AGENT_STOP` | Agent session is shutting down |
+
+This is the main source of confusion:
+
+- `Stop` does **not** map to `AGENT_STOP`
+- `SessionEnd` is the true final lifecycle hook
+
+### Hook Control Flags
+
+- `--no-hooks`: disable all hook registration and all hook execution
+- `--no-session-end-hook`: disable only the final `SessionEnd` / `AGENT_STOP` hook
+- `--no-stop-hook`: deprecated alias for `--no-session-end-hook`
+
 ### Implementation
 
 ```python

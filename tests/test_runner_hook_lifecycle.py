@@ -61,7 +61,7 @@ class TestRunnerHookLifecycle(unittest.TestCase):
         with (
             patch(
                 "clud.agent.runner.register_hooks_from_config",
-                return_value=HookRegistrationSummary(has_stop_hooks=True),
+                return_value=HookRegistrationSummary(has_post_execution_hooks=True),
             ),
             patch("clud.agent.runner._find_backend_executable", return_value="codex"),
             patch("clud.agent.runner.get_backend", return_value=adapter),
@@ -106,6 +106,54 @@ class TestRunnerHookLifecycle(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertGreaterEqual(events.count(HookEvent.AGENT_START), 1)
+
+    def test_no_hooks_skips_registration_and_triggering_for_codex(self) -> None:
+        args = Args(mode=AgentMode.DEFAULT, agent_backend="codex", no_skills=True, no_hooks=True)
+        adapter = MagicMock()
+        adapter.build_launch_plan.return_value = LaunchPlan(
+            backend="codex",
+            executable="codex",
+            cwd=os.getcwd(),
+            interactive=True,
+        )
+
+        with (
+            patch("clud.agent.runner.register_hooks_from_config") as mock_register,
+            patch("clud.agent.runner._find_backend_executable", return_value="codex"),
+            patch("clud.agent.runner.get_backend", return_value=adapter),
+            patch("clud.agent.runner.run_claude_process", return_value=0),
+            patch("clud.agent.runner.trigger_hook_sync") as mock_trigger,
+            patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=self._identity_command),
+        ):
+            result = run_agent(args)
+
+        self.assertEqual(result, 0)
+        mock_register.assert_not_called()
+        mock_trigger.assert_not_called()
+
+    def test_no_hooks_skips_registration_and_triggering_for_claude(self) -> None:
+        args = Args(mode=AgentMode.DEFAULT, agent_backend="claude", no_skills=True, no_hooks=True)
+        adapter = MagicMock()
+        adapter.build_launch_plan.return_value = LaunchPlan(
+            backend="claude",
+            executable="claude",
+            cwd=os.getcwd(),
+            interactive=True,
+        )
+
+        with (
+            patch("clud.agent.runner.register_hooks_from_config") as mock_register,
+            patch("clud.agent.runner._find_backend_executable", return_value="claude"),
+            patch("clud.agent.runner.get_backend", return_value=adapter),
+            patch("clud.agent.runner.run_claude_process", return_value=0),
+            patch("clud.agent.runner.trigger_hook_sync") as mock_trigger,
+            patch("clud.agent.runner._wrap_command_for_git_bash", side_effect=self._identity_command),
+        ):
+            result = run_agent(args)
+
+        self.assertEqual(result, 0)
+        mock_register.assert_not_called()
+        mock_trigger.assert_not_called()
 
 
 if __name__ == "__main__":
