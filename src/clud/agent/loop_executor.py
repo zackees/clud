@@ -310,11 +310,13 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                 total_iterations=loop_count,
                 working_file=working_file_str,
             )
-            # Wrap command in git-bash on Windows if available
-            cmd = _wrap_command_for_git_bash(cmd)
+            backend = _get_effective_backend(args)
+            if backend == "claude":
+                # Claude benefits from git-bash on Windows, but Codex's native
+                # interactive TUI needs a direct process launch.
+                cmd = _wrap_command_for_git_bash(cmd)
 
             # Detect and print model message (for display only)
-            backend = _get_effective_backend(args)
             model_flag = _get_model_from_args(args.claude_args, backend=backend)
             _print_model_message(model_flag, backend=backend)
 

@@ -1,9 +1,10 @@
-"""Codex app-server state for write detection and post-edit hook emulation."""
+"""Codex app-server state for post-edit hook follow-up turns."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from clud.hooks import HookContext, HookEvent
 from clud.hooks.command import CommandHookResult, CommandHookSpec, run_command_hook, write_failure_artifact
@@ -11,6 +12,10 @@ from clud.hooks.command import CommandHookResult, CommandHookSpec, run_command_h
 
 def _failure_list() -> list[PostEditHookFailure]:
     return []
+
+
+def _user_input_items(text: str) -> list[dict[str, str]]:
+    return [{"type": "text", "text": text}]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +31,6 @@ class _PendingTurnState:
     """Mutable session state for a turn."""
 
     write_requested: bool = False
-    latest_diff: str = ""
 
 
 @dataclass(slots=True)
@@ -43,9 +47,9 @@ class PostEditHookOutcome:
     """Outcome from evaluating post-edit hooks after a write-producing turn."""
 
     turn: TurnKey
-    diff: str
     hook_count: int
     failures: list[PostEditHookFailure] = field(default_factory=_failure_list)
+    follow_up_message: str | None = None
 
     @property
     def has_failures(self) -> bool:
@@ -62,13 +66,6 @@ class CodexAppServerSessionState:
         """Record that a turn requested a file change approval."""
         self._ensure_turn(thread_id, turn_id).write_requested = True
 
-    def observe_turn_diff_updated(self, thread_id: str, turn_id: str, diff: str) -> None:
-        """Record the latest aggregated diff for a turn."""
-        state = self._ensure_turn(thread_id, turn_id)
-        state.latest_diff = diff
-        if diff.strip():
-            state.write_requested = True
-
     def complete_turn(
         self,
         thread_id: str,
@@ -77,17 +74,14 @@ class CodexAppServerSessionState:
         cwd: Path,
         hook_specs: list[CommandHookSpec],
     ) -> PostEditHookOutcome | None:
-        """Finalize a turn and run post-edit hooks if it produced a diff."""
+        """Finalize a turn and run post-edit hooks if it requested file changes."""
         key = TurnKey(thread_id=thread_id, turn_id=turn_id)
         state = self._turns.pop(key, None)
-        if state is None:
-            return None
-        if not state.write_requested or not state.latest_diff.strip():
+        if state is None or not state.write_requested:
             return None
 
         outcome = PostEditHookOutcome(
             turn=key,
-            diff=state.latest_diff,
             hook_count=len(hook_specs),
         )
         if not hook_specs:
@@ -123,7 +117,32 @@ class CodexAppServerSessionState:
                     )
                 )
 
+        if outcome.failures:
+            first_failure = outcome.failures[0]
+            outcome.follow_up_message = f"Post-edit hook failed. Read {first_failure.artifact_path.name} and fix the problem before continuing."
+
         return outcome
+
+    @staticmethod
+    def build_follow_up_turn_request(
+        *,
+        thread_id: str,
+        message: str,
+        request_id: str | int,
+        cwd: Path | None = None,
+    ) -> dict[str, Any]:
+        """Build a JSON-RPC request that submits a follow-up user turn."""
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": _user_input_items(message),
+        }
+        if cwd is not None:
+            params["cwd"] = str(cwd)
+        return {
+            "id": request_id,
+            "method": "turn/start",
+            "params": params,
+        }
 
     def _ensure_turn(self, thread_id: str, turn_id: str) -> _PendingTurnState:
         key = TurnKey(thread_id=thread_id, turn_id=turn_id)

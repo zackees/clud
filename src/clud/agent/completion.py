@@ -186,7 +186,7 @@ def _detect_completion_windows(command: list[str], idle_timeout: float, output_c
         return _fallback_subprocess_detection(command, idle_timeout, output_callback)
 
     try:
-        cmd_str = " ".join(command)
+        cmd_str = subprocess.list2cmdline(command)
         process = PtyProcess.spawn(cmd_str)  # type: ignore[misc]
         return _monitor_pty_process(process, idle_timeout, output_callback, "Windows")
     except Exception as e:

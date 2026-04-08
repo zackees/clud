@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class TestAgentCompletionIntegration(unittest.TestCase):
@@ -167,6 +169,37 @@ class TestAgentCompletionCapacityRetry(unittest.TestCase):
         combined_output = "".join(output)
         self.assertIn("Selected model is at capacity", combined_output)
         self.assertIn("received:continue", combined_output)
+
+
+class TestAgentCompletionWindowsSpawn(unittest.TestCase):
+    """Windows PTY launch behavior should preserve proper command quoting."""
+
+    def test_detect_completion_windows_uses_list2cmdline(self) -> None:
+        """Prompt/path arguments with spaces should stay quoted for winpty spawn."""
+        from clud.agent.completion import _detect_completion_windows
+
+        spawned: list[str] = []
+
+        class _FakePtyProcess:
+            @staticmethod
+            def spawn(cmd: str) -> object:
+                spawned.append(cmd)
+                return object()
+
+        fake_winpty = SimpleNamespace(PtyProcess=_FakePtyProcess)
+        command = ["codex", "-C", r"C:\Users\Test User\my repo", "resume", "--last", "keep going"]
+
+        with (
+            patch.dict(sys.modules, {"winpty": fake_winpty}),
+            patch("clud.agent.completion._monitor_pty_process", return_value=SimpleNamespace(idle_detected=False, returncode=0)),
+        ):
+            result = _detect_completion_windows(command, idle_timeout=3.0, output_callback=None)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(spawned[0], subprocess.list2cmdline(command))
+        self.assertIn('"C:\\Users\\Test User\\my repo"', spawned[0])
+        self.assertIn('"keep going"', spawned[0])
 
 
 class TestAgentCompletionIdleGating(unittest.TestCase):
