@@ -27,6 +27,30 @@ clud -p "refactor the auth layer" # Run with a prompt
 clud -- --model opus              # Pass backend flags through
 ```
 
+### Universal flags
+
+These flags are handled by `clud` itself and work across supported backends.
+
+- `-p`, `--prompt`: run with a prompt and exit when complete
+- `-m`, `--message`: send a one-off message
+- `--cmd`: execute a direct command without interactive mode
+- `-c`, `--continue`: continue the most recent conversation
+- `-r`, `--resume [TERM]`: resume by picker, session ID, or search term
+- `--session-model <claude|codex>`: choose the backend for just this run
+- `--claude`: persist Claude as the global backend
+- `--codex`: persist Codex as the global backend
+- `--model <NAME>`: set a backend-neutral model preference
+- `--plain`: disable JSON formatting and use raw text I/O
+- `-v`, `--verbose`: show debug output
+- `--dry-run`: print what would run without executing it
+- `--idle-timeout <SECONDS>`: auto-quit after idle detection
+- `--hook-debug`: enable verbose hook logging
+- `--no-hooks`: disable all hooks
+- `--no-session-end-hook`: disable only the final `SessionEnd` hook
+- `--no-stop-hook`: deprecated alias for `--no-session-end-hook`
+- `--no-skills`: skip bundled skill auto-install
+- `-h`, `--help`: show help
+
 ## `clud loop` — The Ralph Loop
 
 ![image](https://github.com/user-attachments/assets/b6666429-ead7-419c-831f-db4e17b3840b)
@@ -72,6 +96,35 @@ clud up -m "commit msg"    # Custom commit message
 
 ![image (1)](https://github.com/user-attachments/assets/de1e23b4-4513-4c92-ba57-3d9dcd1060b6)
 
+### Agent hook emulation
+
+Codex now emulates the Claude-style repo hook lifecycle from `.claude/settings.json` and `.claude/settings.local.json`.
+
+```json
+{
+  "hooks": {
+    "Start": [...],
+    "Stop": [...],
+    "SessionEnd": [...]
+  }
+}
+```
+
+Hook names map like this:
+
+| Config hook | Internal event | Meaning |
+| --- | --- | --- |
+| `Start` | `AGENT_START` | Agent session is starting |
+| `Stop` | `POST_EXECUTION` | Agent finished a normal execution turn |
+| `SessionEnd` | `AGENT_STOP` | Agent session is shutting down |
+
+The important detail is that `Stop` is not the final shutdown hook. `SessionEnd` is the true end-of-session event.
+
+You can control hook execution with:
+
+- `--no-hooks` to disable all hooks
+- `--no-session-end-hook` to disable only `SessionEnd`
+- `--no-stop-hook` as a deprecated alias for `--no-session-end-hook`
 
 
 ## License

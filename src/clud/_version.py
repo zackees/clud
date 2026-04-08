@@ -4,4 +4,4 @@ Update the version here. The pyproject.toml version MUST match this value.
 Run `bash lint` to verify they are in sync.
 """
 
-__version__ = "1.2.8"
+__version__ = "1.2.9"
