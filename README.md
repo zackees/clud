@@ -24,6 +24,8 @@ clud -- --model opus              # Pass any flags to Claude Code
 
 ## `clud loop` — The Ralph Loop
 
+![image](https://github.com/user-attachments/assets/b6666429-ead7-419c-831f-db4e17b3840b)
+
 Run Claude in an autonomous loop that iterates on a task until it's done (default: 50 iterations).
 
 ```bash
