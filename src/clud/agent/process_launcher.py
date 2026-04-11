@@ -5,6 +5,10 @@ reaches the parent (clud). The parent then explicitly kills the child
 process tree on interrupt. An atexit handler guarantees cleanup of any
 lingering child processes.
 
+When available, uses ``ContainedProcessGroup`` from running-process to
+provide OS-level containment (Windows Job Objects / Unix process groups)
+that automatically kills all child processes on parent exit or crash.
+
 On MSYS/mintty (Windows git-bash), SIGINT is never delivered to native
 Windows Python because mintty lacks a Windows Console. In that environment
 we skip CREATE_NEW_PROCESS_GROUP so the child stays in the same process
@@ -14,6 +18,7 @@ monitor os.getppid() to detect when the parent (uv) is killed by SIGINT.
 
 import atexit
 import contextlib
+import logging
 import os
 import queue
 import shutil
@@ -23,6 +28,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from running_process import (
     Idle,
@@ -39,13 +45,40 @@ from running_process import (
 
 from ..util import handle_keyboard_interrupt
 
+# Try to import ContainedProcessGroup from running-process.
+# This API is provided by running-process >= 3.1 (feat/process-containment).
+# When unavailable we fall back to raw subprocess.Popen with manual cleanup.
+_HAS_CONTAINMENT: bool = False
+_ContainedProcessGroupFactory: type[Any] | None = None
+try:
+    from running_process._native import PyContainedProcessGroup as _CPG  # type: ignore[attr-defined]
+
+    _ContainedProcessGroupFactory = _CPG  # pyright: ignore[reportUnknownVariableType]
+    _HAS_CONTAINMENT = True
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
+
 # Module-level tracking of the active subprocess for atexit cleanup.
 _active_process: subprocess.Popen[bytes] | None = None
 _active_process_lock = threading.Lock()
 
+# Module-level tracking of the active containment group for atexit cleanup.
+_active_containment_group: Any = None
+_containment_group_lock = threading.Lock()
+
 
 def _cleanup_active_process() -> None:
     """Kill any active child process on interpreter exit."""
+    # Close containment group first (kills all contained children).
+    with _containment_group_lock:
+        group = _active_containment_group
+    if group is not None:
+        with contextlib.suppress(Exception):
+            group.close()
+
+    # Fallback: kill tracked process tree if no containment.
     with _active_process_lock:
         proc = _active_process
     if proc is not None and proc.poll() is None:
@@ -249,10 +282,17 @@ def run_claude_process(
     if allow_child_ctrl_c and sys.platform == "win32":
         return _run_with_child_ctrl_c(cmd, propagate_keyboard_interrupt)
 
-    global _active_process
+    global _active_process, _active_containment_group
 
     # Record parent PID so we can detect if it dies (SIGINT killed uv).
     original_ppid = os.getppid()
+
+    # ── Containment path ────────────────────────────────────────────────
+    # When ContainedProcessGroup is available (running-process >= 3.1),
+    # use OS-level containment (Windows Job Objects / Unix process groups)
+    # so that ALL child processes are killed automatically on exit/crash.
+    # The containment group is stored at module level for atexit cleanup.
+    containment_group: Any = None
 
     # Platform-specific process-group configuration.
     popen_kwargs: dict[str, object] = {}
@@ -276,6 +316,17 @@ def run_claude_process(
         cmd_arg = cmd
 
     capture = stdout_callback is not None
+
+    # Attempt to use ContainedProcessGroup for automatic child cleanup.
+    if _HAS_CONTAINMENT and _ContainedProcessGroupFactory is not None and not use_shell and not capture:
+        try:
+            containment_group = _ContainedProcessGroupFactory()
+            with _containment_group_lock:
+                _active_containment_group = containment_group
+            logger.debug("Process containment enabled via ContainedProcessGroup")
+        except Exception:
+            logger.debug("Failed to create ContainedProcessGroup, falling back to raw Popen")
+            containment_group = None
 
     proc = subprocess.Popen(
         cmd_arg,
@@ -357,6 +408,10 @@ def run_claude_process(
             traceback.print_stack(file=sys.stderr)
 
         def _cleanup() -> None:
+            # Close containment group first — kills all contained children.
+            if containment_group is not None:
+                with contextlib.suppress(Exception):
+                    containment_group.close()
             if proc.poll() is None:
                 with contextlib.suppress(Exception):
                     kill_process_tree(proc.pid)
@@ -371,6 +426,14 @@ def run_claude_process(
         return proc.returncode or 130  # Worker thread: suppressed
 
     finally:
+        # Close the containment group to kill any remaining children.
+        if containment_group is not None:
+            with contextlib.suppress(Exception):
+                containment_group.close()
+            with _containment_group_lock:
+                if _active_containment_group is containment_group:
+                    _active_containment_group = None
+
         with _active_process_lock:
             if _active_process is proc:
                 _active_process = None

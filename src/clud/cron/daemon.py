@@ -94,7 +94,13 @@ class CronDaemon:
         logger.info(f"Log file: {self.log_file}")
         logger.info(f"Config dir: {self.config_dir}")
 
-        # Platform-specific background process creation
+        # Platform-specific background process creation.
+        # NOTE: These daemons are intentionally spawned OUTSIDE of any
+        # ContainedProcessGroup.  They use DETACHED_PROCESS /
+        # CREATE_NEW_PROCESS_GROUP (Windows) or start_new_session (Unix)
+        # so they survive the parent clud session's exit.  If running-process
+        # ever adds CREATE_BREAKAWAY_FROM_JOB support, these should use it
+        # to explicitly escape any Job Object containment.
         if sys.platform == "win32":
             # Windows: Use pythonw.exe + CREATE_NO_WINDOW for no console
             # Using pythonw.exe is critical - it's designed to run without a console window

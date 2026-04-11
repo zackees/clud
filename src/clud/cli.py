@@ -3,6 +3,7 @@
 import contextlib
 import os
 import sys
+import uuid
 from types import TracebackType
 
 from .agent_cli import main as agent_main
@@ -52,6 +53,18 @@ def main(args: list[str] | None = None) -> int:
             # If execv fails, suppress the error and continue with normal execution
             with contextlib.suppress(OSError):
                 os.execv(python, new_args)
+
+    # Generate a unique session ID and propagate it to all child processes.
+    # This allows stale session detection on subsequent startups.
+    session_id = os.environ.get("CLUD_SESSION_ID") or str(uuid.uuid4())
+    os.environ["CLUD_SESSION_ID"] = session_id
+
+    # Detect and warn about stale processes from previous sessions.
+    # Import lazily to keep startup fast when no stale sessions exist.
+    with contextlib.suppress(Exception):
+        from .session_cleanup import prompt_and_cleanup_stale_sessions
+
+        prompt_and_cleanup_stale_sessions(session_id)
 
     result = agent_main(args)
     print("Clud exited", file=sys.stderr)

@@ -311,5 +311,134 @@ class TestProcessLauncher(unittest.TestCase):
         self.assertEqual(proc.writes, ["hook follow-up\r"])
 
 
+class TestContainmentGroup(unittest.TestCase):
+    """Test ContainedProcessGroup integration in process launcher."""
+
+    @patch("clud.agent.process_launcher._HAS_CONTAINMENT", True)
+    @patch("clud.agent.process_launcher._ContainedProcessGroupFactory")
+    @patch("clud.agent.process_launcher.kill_process_tree")
+    @patch("clud.agent.process_launcher.subprocess.Popen")
+    def test_containment_group_created_for_interactive(
+        self,
+        mock_popen: MagicMock,
+        mock_kill: MagicMock,
+        mock_group_cls: MagicMock,
+    ) -> None:
+        """Interactive mode should create a ContainedProcessGroup when available."""
+        group_instance = MagicMock()
+        mock_group_cls.return_value = group_instance
+
+        proc = MagicMock()
+        proc.poll.side_effect = [None, 0, 0]
+        proc.returncode = 0
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        with patch("clud.agent.process_launcher.os.getppid", return_value=1234):
+            result = run_claude_process(["claude"], propagate_keyboard_interrupt=False)
+
+        self.assertEqual(result, 0)
+        mock_group_cls.assert_called_once()
+        # Group should be closed in finally block.
+        group_instance.close.assert_called()
+
+    @patch("clud.agent.process_launcher._HAS_CONTAINMENT", True)
+    @patch("clud.agent.process_launcher._ContainedProcessGroupFactory")
+    @patch("clud.agent.process_launcher.kill_process_tree")
+    @patch("clud.agent.process_launcher.subprocess.Popen")
+    def test_containment_group_closed_on_interrupt(
+        self,
+        mock_popen: MagicMock,
+        mock_kill: MagicMock,
+        mock_group_cls: MagicMock,
+    ) -> None:
+        """ContainedProcessGroup should be closed on KeyboardInterrupt."""
+        group_instance = MagicMock()
+        mock_group_cls.return_value = group_instance
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.side_effect = [KeyboardInterrupt(), 130]
+        proc.returncode = 130
+        mock_popen.return_value = proc
+
+        with patch("clud.agent.process_launcher.os.getppid", return_value=1234):
+            result = run_claude_process(["claude"], propagate_keyboard_interrupt=False)
+
+        self.assertEqual(result, 130)
+        # Group should be closed both in cleanup and finally.
+        self.assertGreaterEqual(group_instance.close.call_count, 1)
+
+    @patch("clud.agent.process_launcher._HAS_CONTAINMENT", True)
+    @patch("clud.agent.process_launcher._ContainedProcessGroupFactory")
+    @patch("clud.agent.process_launcher.kill_process_tree")
+    @patch("clud.agent.process_launcher.subprocess.Popen")
+    def test_containment_not_used_for_capture_mode(
+        self,
+        mock_popen: MagicMock,
+        mock_kill: MagicMock,
+        mock_group_cls: MagicMock,
+    ) -> None:
+        """Capture mode (stdout_callback) should not use ContainedProcessGroup."""
+        proc = MagicMock()
+        proc.poll.side_effect = [None, 0, 0]
+        proc.returncode = 0
+        proc.wait.return_value = 0
+        proc.stdout = MagicMock()
+        proc.stdout.__iter__ = MagicMock(return_value=iter([]))
+        mock_popen.return_value = proc
+
+        lines: list[str] = []
+        with patch("clud.agent.process_launcher.os.getppid", return_value=1234):
+            run_claude_process(["claude"], stdout_callback=lines.append, propagate_keyboard_interrupt=False)
+
+        # ContainedProcessGroup should NOT be created for capture mode.
+        mock_group_cls.assert_not_called()
+
+    @patch("clud.agent.process_launcher._HAS_CONTAINMENT", False)
+    @patch("clud.agent.process_launcher.kill_process_tree")
+    @patch("clud.agent.process_launcher.subprocess.Popen")
+    def test_fallback_when_containment_unavailable(
+        self,
+        mock_popen: MagicMock,
+        mock_kill: MagicMock,
+    ) -> None:
+        """Should fall back to raw Popen when ContainedProcessGroup is unavailable."""
+        proc = MagicMock()
+        proc.poll.side_effect = [None, 0, 0]
+        proc.returncode = 0
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        with patch("clud.agent.process_launcher.os.getppid", return_value=1234):
+            result = run_claude_process(["claude"], propagate_keyboard_interrupt=False)
+
+        self.assertEqual(result, 0)
+
+    @patch("clud.agent.process_launcher._HAS_CONTAINMENT", True)
+    @patch("clud.agent.process_launcher._ContainedProcessGroupFactory")
+    @patch("clud.agent.process_launcher.kill_process_tree")
+    @patch("clud.agent.process_launcher.subprocess.Popen")
+    def test_containment_creation_failure_falls_back(
+        self,
+        mock_popen: MagicMock,
+        mock_kill: MagicMock,
+        mock_group_cls: MagicMock,
+    ) -> None:
+        """If ContainedProcessGroup() raises, fall back to raw Popen."""
+        mock_group_cls.side_effect = RuntimeError("Job Object creation failed")
+
+        proc = MagicMock()
+        proc.poll.side_effect = [None, 0, 0]
+        proc.returncode = 0
+        proc.wait.return_value = 0
+        mock_popen.return_value = proc
+
+        with patch("clud.agent.process_launcher.os.getppid", return_value=1234):
+            result = run_claude_process(["claude"], propagate_keyboard_interrupt=False)
+
+        self.assertEqual(result, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

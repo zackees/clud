@@ -108,6 +108,12 @@ def _start_daemon_process(num_terminals: int) -> int | None:
 
     logger.info("Starting daemon: %s", " ".join(cmd))
 
+    # NOTE: The UI daemon is intentionally spawned OUTSIDE of any
+    # ContainedProcessGroup.  It uses DETACHED_PROCESS /
+    # CREATE_NEW_PROCESS_GROUP (Windows) or start_new_session (Unix) so it
+    # survives the parent clud session's exit.  If running-process ever adds
+    # CREATE_BREAKAWAY_FROM_JOB support, this should use it to explicitly
+    # escape any Job Object containment.
     try:
         if sys.platform == "win32":
             # Windows: Use CREATE_NO_WINDOW + CREATE_NEW_PROCESS_GROUP
