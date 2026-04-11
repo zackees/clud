@@ -21,6 +21,7 @@ import psutil
 from clud.cron.config import CronConfigManager
 from clud.cron.executor import TaskExecutor
 from clud.cron.scheduler import CronScheduler
+from clud.util.process import run_captured
 
 logger = logging.getLogger(__name__)
 
@@ -180,10 +181,9 @@ class CronDaemon:
         try:
             if sys.platform == "win32":
                 # Windows: Use taskkill
-                subprocess.run(
+                run_captured(
                     ["taskkill", "/F", "/PID", str(pid)],
                     check=False,
-                    capture_output=True,
                 )
             else:
                 # Unix: Send SIGTERM
@@ -203,10 +203,9 @@ class CronDaemon:
             # Force kill if still running
             logger.warning("Daemon did not stop gracefully, forcing kill")
             if sys.platform == "win32":
-                subprocess.run(
+                run_captured(
                     ["taskkill", "/F", "/PID", str(pid)],
                     check=False,
-                    capture_output=True,
                 )
             else:
                 os.kill(pid, signal.SIGKILL)
@@ -556,9 +555,8 @@ class CronDaemon:
         try:
             if sys.platform == "win32":
                 # Windows: Use tasklist
-                result = subprocess.run(
+                result = run_captured(
                     ["tasklist", "/FI", f"PID eq {pid}"],
-                    capture_output=True,
                     text=True,
                     check=False,
                 )

@@ -1,9 +1,34 @@
-"""Process management utilities for launching detached processes."""
+"""Process management utilities for launching detached or isolated processes."""
 
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+from running_process import IdleWaitResult, RunningProcess
+
+
+def _normalize_running_process_command(
+    command: str | Sequence[str | Path],
+    *,
+    shell: bool,
+) -> tuple[str | list[str], bool]:
+    """Adapt Windows command shims for RunningProcess 3.x.
+
+    Windows `.cmd` and `.bat` launchers are shell scripts rather than native
+    executables. Running them directly now raises `%1 is not a valid Win32
+    application`, so route those invocations through the shell while preserving
+    normal direct execution for real binaries.
+    """
+    normalized_command: str | list[str] = command if isinstance(command, str) else [str(part) for part in command]
+    if shell or sys.platform != "win32" or isinstance(normalized_command, str) or not normalized_command:
+        return normalized_command, shell
+
+    launcher = normalized_command[0].lower()
+    if launcher.endswith((".cmd", ".bat")):
+        return subprocess.list2cmdline(normalized_command), True
+
+    return normalized_command, shell
 
 
 def launch_detached(command: Sequence[str | Path]) -> None:
@@ -59,3 +84,88 @@ def launch_detached(command: Sequence[str | Path]) -> None:
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
         )
+
+
+def run_with_input_detached(
+    command: str | Sequence[str | Path],
+    *,
+    shell: bool = False,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    text: bool = True,
+    capture_output: bool = True,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command while isolating it from the parent terminal's stdin.
+
+    This is intended for helper subprocesses such as hooks that should not be
+    able to consume or block on the user's interactive terminal input. Output
+    capture goes through ``RunningProcess.run()`` so stdout is continuously
+    drained and large outputs do not deadlock on pipe buffers.
+    """
+    normalized_command, effective_shell = _normalize_running_process_command(command, shell=shell)
+
+    process = RunningProcess(
+        command=normalized_command,
+        cwd=Path(cwd) if cwd is not None else None,
+        check=False,
+        auto_run=True,
+        shell=effective_shell,
+        timeout=int(timeout) if timeout is not None else None,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+    wait_result = process.wait()
+    returncode: int = (wait_result.returncode or 0) if isinstance(wait_result, IdleWaitResult) else wait_result
+    raw_output = process.combined_output if capture_output else None
+    stdout: str | None = str(raw_output) if isinstance(raw_output, bytes) else raw_output
+    return subprocess.CompletedProcess(
+        args=normalized_command,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=None,
+    )
+
+
+def run_captured(
+    command: str | Sequence[str | Path],
+    *,
+    shell: bool = False,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    text: bool = True,
+    timeout: float | None = None,
+    check: bool = False,
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command with robust captured output via RunningProcess.run()."""
+    normalized_command, effective_shell = _normalize_running_process_command(command, shell=shell)
+
+    process = RunningProcess(
+        command=normalized_command,
+        cwd=Path(cwd) if cwd is not None else None,
+        check=False,
+        auto_run=True,
+        shell=effective_shell,
+        timeout=int(timeout) if timeout is not None else None,
+        env=env,
+    )
+    wait_result = process.wait()
+    returncode: int = (wait_result.returncode or 0) if isinstance(wait_result, IdleWaitResult) else wait_result
+    raw_stdout = process.stdout
+    stdout: str | None = str(raw_stdout) if isinstance(raw_stdout, bytes) else raw_stdout
+    completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+        args=normalized_command,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=None,
+    )
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode=returncode,
+            cmd=normalized_command,
+            output=completed.stdout,
+            stderr=None,
+        )
+    return completed

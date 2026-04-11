@@ -41,7 +41,7 @@ These flags are handled by `clud` itself and work across supported backends.
 - `--codex`: persist Codex as the global backend
 - `--model <NAME>`: set a backend-neutral model preference
 - `--plain`: disable JSON formatting and use raw text I/O
-- `-v`, `--verbose`: show debug output
+- `-v`, `--verbose`, `--debug`: show debug output
 - `--dry-run`: print what would run without executing it
 - `--idle-timeout <SECONDS>`: auto-quit after idle detection
 - `--hook-debug`: enable verbose hook logging

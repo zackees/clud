@@ -31,7 +31,12 @@ class HookRegistrationSummary:
         self.has_post_execution_hooks = value
 
 
-def register_hooks_from_config(hook_debug: bool = False, cwd: Path | None = None) -> HookRegistrationSummary:
+def register_hooks_from_config(
+    hook_debug: bool = False,
+    cwd: Path | None = None,
+    *,
+    register_compat_stop: bool = True,
+) -> HookRegistrationSummary:
     """Register hooks based on configuration file.
 
     Loads hook configuration from ~/.clud/hooks.json and registers
@@ -72,11 +77,18 @@ def register_hooks_from_config(hook_debug: bool = False, cwd: Path | None = None
                 summary.has_start_hooks = True
                 if hook_debug:
                     print(f"DEBUG: Registered {len(compat.start)} Claude-compatible Start hook(s)", file=sys.stderr)
-            if compat.stop:
+            if compat.stop and register_compat_stop:
                 hook_manager.register(CommandHookHandler(compat.stop), [HookEvent.POST_EXECUTION])
                 summary.has_post_execution_hooks = True
                 if hook_debug:
                     print(f"DEBUG: Registered {len(compat.stop)} Claude-compatible Stop hook(s)", file=sys.stderr)
+            elif compat.stop:
+                summary.has_post_execution_hooks = True
+                if hook_debug:
+                    print(
+                        f"DEBUG: Detected {len(compat.stop)} Claude-compatible Stop hook(s) for inline Codex idle handling",
+                        file=sys.stderr,
+                    )
             if compat.session_end:
                 hook_manager.register(CommandHookHandler(compat.session_end), [HookEvent.AGENT_STOP])
                 summary.has_session_end_hooks = True

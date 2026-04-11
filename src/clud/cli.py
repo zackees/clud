@@ -6,6 +6,7 @@ import sys
 from types import TracebackType
 
 from .agent_cli import main as agent_main
+from .util import emit_keyboard_interrupt_debug
 
 
 def _silent_keyboard_interrupt_hook(
@@ -15,8 +16,13 @@ def _silent_keyboard_interrupt_hook(
 ) -> None:
     """Custom exception hook that silences KeyboardInterrupt stack traces."""
     if exc_type is KeyboardInterrupt:
+        emit_keyboard_interrupt_debug(
+            "--debug" in sys.argv[1:] or "--verbose" in sys.argv[1:] or "-v" in sys.argv[1:],
+            label="Ctrl-C caught by excepthook",
+        )
         # Print a clean message instead of the full stack trace
         print("\nCtrl-c pressed, exiting...", file=sys.stderr)
+        print("Clud exited", file=sys.stderr)
         sys.exit(130)  # Standard exit code for SIGINT
     elif exc_type is not None and exc_value is not None:
         # For all other exceptions, use the default behavior
@@ -47,7 +53,9 @@ def main(args: list[str] | None = None) -> int:
             with contextlib.suppress(OSError):
                 os.execv(python, new_args)
 
-    return agent_main(args)
+    result = agent_main(args)
+    print("Clud exited", file=sys.stderr)
+    return result
 
 
 if __name__ == "__main__":

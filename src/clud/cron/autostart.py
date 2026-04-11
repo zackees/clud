@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+from clud.util.process import run_captured
+
 logger = logging.getLogger(__name__)
 
 AutostartMethod = Literal[
@@ -158,9 +160,8 @@ WantedBy=default.target
             logger.info(f"Created systemd unit: {unit_file}")
 
             # Enable the unit
-            result = subprocess.run(
+            result = run_captured(
                 ["systemctl", "--user", "enable", "clud-cron.service"],
-                capture_output=True,
                 text=True,
                 timeout=10,
             )
@@ -170,7 +171,7 @@ WantedBy=default.target
                 logger.info(msg)
                 return True, msg
             else:
-                return False, f"Failed to enable systemd unit: {result.stderr}"
+                return False, f"Failed to enable systemd unit: {result.stdout}"
 
         except FileNotFoundError:
             return False, "systemctl command not found"
@@ -195,9 +196,8 @@ WantedBy=default.target
             crontab_entry = f"@reboot {clud_path} --cron start"
 
             # Get current crontab
-            result = subprocess.run(
+            result = run_captured(
                 ["crontab", "-l"],
-                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -210,20 +210,21 @@ WantedBy=default.target
 
             # Add entry to crontab
             new_crontab = current_crontab + f"\n{crontab_entry}\n"
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["crontab", "-"],
-                input=new_crontab,
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=5,
             )
+            stdout, stderr = process.communicate(input=new_crontab, timeout=5)
 
-            if result.returncode == 0:
+            if process.returncode == 0:
                 msg = "Crontab @reboot entry installed"
                 logger.info(msg)
                 return True, msg
             else:
-                return False, f"Failed to update crontab: {result.stderr}"
+                return False, f"Failed to update crontab: {stderr}"
 
         except FileNotFoundError:
             return False, "crontab command not found"
@@ -238,9 +239,8 @@ WantedBy=default.target
         systemd_file = Path.home() / ".config" / "systemd" / "user" / "clud-cron.service"
         if systemd_file.exists():
             try:
-                result = subprocess.run(
+                result = run_captured(
                     ["systemctl", "--user", "is-enabled", "clud-cron.service"],
-                    capture_output=True,
                     text=True,
                     timeout=5,
                 )
@@ -251,9 +251,8 @@ WantedBy=default.target
 
         # Check crontab fallback
         try:
-            result = subprocess.run(
+            result = run_captured(
                 ["crontab", "-l"],
-                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -325,9 +324,8 @@ WantedBy=default.target
             logger.info(f"Created launchd plist: {plist_file}")
 
             # Load the plist
-            result = subprocess.run(
+            result = run_captured(
                 ["launchctl", "load", str(plist_file)],
-                capture_output=True,
                 text=True,
                 timeout=10,
             )
@@ -338,15 +336,14 @@ WantedBy=default.target
                 return True, msg
             else:
                 # Load can fail if already loaded, check if it's in the list
-                list_result = subprocess.run(
+                list_result = run_captured(
                     ["launchctl", "list"],
-                    capture_output=True,
                     text=True,
                     timeout=5,
                 )
                 if "com.clud.cron" in list_result.stdout:
                     return True, f"Launchd agent already loaded: {plist_file}"
-                return False, f"Failed to load launchd agent: {result.stderr}"
+                return False, f"Failed to load launchd agent: {result.stdout}"
 
         except FileNotFoundError:
             return False, "launchctl command not found"
@@ -380,9 +377,8 @@ tell application "System Events"
     make login item at end with properties {{path:"{script_path}", hidden:false}}
 end tell
 """
-            result = subprocess.run(
+            result = run_captured(
                 ["osascript", "-e", applescript],
-                capture_output=True,
                 text=True,
                 timeout=10,
             )
@@ -392,7 +388,7 @@ end tell
                 logger.info(msg)
                 return True, msg
             else:
-                return False, f"Failed to add login item: {result.stderr}"
+                return False, f"Failed to add login item: {result.stdout}"
 
         except FileNotFoundError:
             return False, "osascript command not found"
@@ -407,9 +403,8 @@ end tell
         plist_file = Path.home() / "Library" / "LaunchAgents" / "com.clud.cron.plist"
         if plist_file.exists():
             try:
-                result = subprocess.run(
+                result = run_captured(
                     ["launchctl", "list"],
-                    capture_output=True,
                     text=True,
                     timeout=5,
                 )
@@ -457,14 +452,13 @@ end tell
             command = f'"{python_path}" -m clud.cron.daemon run'
 
             # Delete existing task if present (ignore errors)
-            subprocess.run(
+            run_captured(
                 ["schtasks", "/delete", "/tn", task_name, "/f"],
-                capture_output=True,
                 timeout=10,
             )
 
             # Create new task
-            result = subprocess.run(
+            result = run_captured(
                 [
                     "schtasks",
                     "/create",
@@ -478,7 +472,6 @@ end tell
                     "limited",
                     "/f",  # Force overwrite
                 ],
-                capture_output=True,
                 text=True,
                 timeout=10,
             )
@@ -488,7 +481,7 @@ end tell
                 logger.info(msg)
                 return True, msg
             else:
-                return False, f"Failed to create task: {result.stderr}"
+                return False, f"Failed to create task: {result.stdout}"
 
         except FileNotFoundError:
             return False, "schtasks command not found"
@@ -535,9 +528,8 @@ end tell
         """Check Windows autostart status."""
         # Check Task Scheduler first
         try:
-            result = subprocess.run(
+            result = run_captured(
                 ["schtasks", "/query", "/tn", "CludCron"],
-                capture_output=True,
                 text=True,
                 timeout=5,
             )

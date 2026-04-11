@@ -2,28 +2,26 @@
 
 import logging
 import os
+import re
 import subprocess
 import sys
 import traceback
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from running_process import RunningProcess
 
 from ..claude_installer import prompt_install_claude
+from ..hooks import HookContext, HookEvent
+from ..hooks.claude_compat import get_codex_stop_hook_idle_timeout, load_claude_compat_hooks
+from ..hooks.command import run_command_hook
+from ..json_formatter import StreamJsonFormatter, create_formatter_callback
 from ..skill_installer import install_skills, needs_install
+from ..util import handle_keyboard_interrupt
 from .arg_translation import to_agent_args
 from .backends.registry import get_backend
-from .prompts import LOOP_PROMPT_TEMPLATE
-
-if TYPE_CHECKING:
-    from ..agent_args import Args
-from ..hooks import HookContext, HookEvent
-from ..hooks.claude_compat import get_codex_stop_hook_idle_timeout
-from ..json_formatter import StreamJsonFormatter, create_formatter_callback
-from ..output_filter import OutputFilter
-from ..util import handle_keyboard_interrupt
 from .claude_finder import _find_claude_path
 from .command_builder import (
     _get_effective_backend,
@@ -33,15 +31,30 @@ from .command_builder import (
     _print_launch_banner,
     _wrap_command_for_git_bash,
 )
-from .completion import detect_agent_completion
 from .hooks import HookRegistrationSummary, register_hooks_from_config, trigger_hook_sync
 from .loop_executor import _run_loop
 from .process_launcher import run_claude_process
+from .prompts import LOOP_PROMPT_TEMPLATE
 from .subprocess import _execute_command
+
+if TYPE_CHECKING:
+    from ..agent_args import Args
+    from .backends.base import BackendAdapter
+    from .interfaces import AgentArgs
 from .user_input import _prompt_for_message
 
 # Initialize logger
 logger = logging.getLogger(__name__)
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_hook_output(text: str) -> str:
+    """Strip ANSI escape codes and control characters from hook output."""
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    text = _CONTROL_CHAR_RE.sub("", text)
+    return text.strip()
 
 
 def _find_backend_executable(backend: str) -> str | None:
@@ -52,6 +65,101 @@ def _find_backend_executable(backend: str) -> str | None:
         return get_backend(backend).find_executable()
     except KeyError:
         return None
+
+
+def _handle_dry_run(args: "Args", backend: str, backend_adapter: "BackendAdapter", agent_args: "AgentArgs") -> int:
+    """Handle --dry-run mode: print what would be executed and exit."""
+    if args.loop_value is not None:
+        loop_count = args.loop_count_override if args.loop_count_override is not None else 50
+        working_file_path = ".loop/LOOP.md"
+        if args.loop_value == "":
+            loop_prompt = "<would prompt for message>"
+        elif args.loop_value.endswith(".md") or Path(args.loop_value).exists():
+            original_filename = Path(args.loop_value).name
+            working_file_path = f".loop/{original_filename}"
+            loop_prompt = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
+        else:
+            working_file_path = ".loop/LOOP.md"
+            loop_prompt = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
+
+        print(f"Loop mode: {loop_count} iterations")
+        print(f"Working file: {working_file_path if args.loop_value else '.loop/LOOP.md'}")
+        if args.loop_value and not args.loop_value.endswith(".md") and not Path(args.loop_value).exists():
+            print("String prompt will be written to: .loop/LOOP.md")
+            print(f"Original prompt: {args.loop_value}")
+        print(f"Loop prompt: {loop_prompt}")
+        print()
+        if backend == "codex":
+            cmd_parts = [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-C",
+                os.getcwd(),
+                "exec",
+                f'"{loop_prompt}"',
+            ]
+        else:
+            cmd_parts = ["claude", "--dangerously-skip-permissions", "-p", f'"{loop_prompt}"']
+        if backend == "claude" and not args.plain:
+            cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
+        if args.claude_args:
+            cmd_parts.extend(args.claude_args)
+        print("Would execute:", " ".join(cmd_parts))
+        return 0
+
+    plan = backend_adapter.build_launch_plan(agent_args)  # type: ignore[union-attr]
+    print("Would execute:", " ".join([backend, *plan.argv]))
+    return 0
+
+
+def _handle_launch_error(
+    error: Exception,
+    cmd: list[str],
+    claude_path: str | None,
+    args: "Args",
+    instance_id: str,
+    session_id: str,
+) -> int:
+    """Handle OSError/Exception during agent launch with optional shell=True retry."""
+    error_msg = f"Error launching agent: {error}"
+    if cmd and claude_path:
+        try:
+            if args.verbose:
+                winerror = getattr(error, "winerror", "N/A")
+                errno = getattr(error, "errno", "N/A")
+                print(f"DEBUG: Error {winerror or errno}, retrying with shell=True...", file=sys.stderr)
+            return _execute_command(cmd, use_shell=True, verbose=args.verbose)
+        except Exception as shell_error:
+            print(f"Error launching agent: {error}", file=sys.stderr)
+            errno = getattr(error, "errno", "N/A")
+            winerror = getattr(error, "winerror", "N/A")
+            print(f"DEBUG: Error details - errno: {errno}, winerror: {winerror}", file=sys.stderr)
+            _print_error_diagnostics(claude_path, cmd)
+            print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
+            traceback.print_exc()
+    else:
+        print(f"Error launching agent: {error}", file=sys.stderr)
+        errno = getattr(error, "errno", "N/A")
+        winerror = getattr(error, "winerror", "N/A")
+        print(f"DEBUG: Error details - errno: {errno}, winerror: {winerror}", file=sys.stderr)
+        _print_error_diagnostics(claude_path, cmd)
+        print("\nFull stack trace from original error:", file=sys.stderr)
+        traceback.print_exc()
+
+    if not args.no_hooks:
+        trigger_hook_sync(
+            HookEvent.ERROR,
+            HookContext(
+                event=HookEvent.ERROR,
+                instance_id=instance_id,
+                session_id=session_id,
+                client_type="cli",
+                client_id="standalone",
+                error=error_msg,
+            ),
+            hook_debug=args.hook_debug,
+        )
+    return 1
 
 
 def run_agent(args: "Args") -> int:
@@ -87,10 +195,7 @@ def run_agent(args: "Args") -> int:
         print("Error: --tui requires loop subcommand", file=sys.stderr)
         return 2
 
-    # Register hooks early (before any execution)
     hook_summary = HookRegistrationSummary()
-    if not args.no_hooks:
-        hook_summary = register_hooks_from_config(hook_debug=args.hook_debug, cwd=Path.cwd())
 
     try:
         _persist_backend_selection(args)
@@ -99,53 +204,8 @@ def run_agent(args: "Args") -> int:
         agent_args = to_agent_args(args, resolved_backend=backend, cwd=os.getcwd())
 
         # Handle dry-run mode early (before API key check)
-        # Dry-run mode doesn't need API key since it only prints the command
         if args.dry_run:
-            # Handle loop mode dry-run
-            if args.loop_value is not None:
-                loop_count = args.loop_count_override if args.loop_count_override is not None else 50
-
-                # Determine the loop message based on loop_value type
-                working_file_path = ".loop/LOOP.md"  # Default
-                if args.loop_value == "":
-                    loop_prompt = "<would prompt for message>"
-                elif args.loop_value.endswith(".md") or Path(args.loop_value).exists():
-                    original_filename = Path(args.loop_value).name
-                    working_file_path = f".loop/{original_filename}"
-                    loop_prompt = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
-                else:
-                    working_file_path = ".loop/LOOP.md"
-                    loop_prompt = LOOP_PROMPT_TEMPLATE.format(working_file_path=working_file_path)
-
-                print(f"Loop mode: {loop_count} iterations")
-                print(f"Working file: {working_file_path if args.loop_value else '.loop/LOOP.md'}")
-                if args.loop_value and not args.loop_value.endswith(".md") and not Path(args.loop_value).exists():
-                    print("String prompt will be written to: .loop/LOOP.md")
-                    print(f"Original prompt: {args.loop_value}")
-                print(f"Loop prompt: {loop_prompt}")
-                print()
-                if backend == "codex":
-                    cmd_parts = [
-                        "codex",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "-C",
-                        os.getcwd(),
-                        "exec",
-                        f'"{loop_prompt}"',
-                    ]
-                else:
-                    cmd_parts = ["claude", "--dangerously-skip-permissions", "-p", f'"{loop_prompt}"']
-                if backend == "claude" and not args.plain:
-                    cmd_parts.extend(["--output-format", "stream-json", "--verbose"])
-                if args.claude_args:
-                    cmd_parts.extend(args.claude_args)
-                print("Would execute:", " ".join(cmd_parts))
-                return 0
-
-            # Handle regular (non-loop) dry-run
-            plan = backend_adapter.build_launch_plan(agent_args)
-            print("Would execute:", " ".join([backend, *plan.argv]))
-            return 0
+            return _handle_dry_run(args, backend, backend_adapter, agent_args)
 
         # If --cmd is provided, execute the command directly instead of launching Claude
         if args.cmd:
@@ -251,10 +311,45 @@ def run_agent(args: "Args") -> int:
         plan = backend_adapter.build_launch_plan(agent_args)
         plan.executable = claude_path
         cmd = plan.command
+
+        # Determine Codex interactive mode for PTY idle-timeout path
+        codex_interactive = backend == "codex" and plan.interactive
+
+        # Load compat hooks for inline stop-hook handling (Codex only)
+        compat_hooks = None
+        if codex_interactive and not args.no_hooks:
+            compat_hooks = load_claude_compat_hooks(cwd=Path.cwd())
+
+        # Register hooks (after plan so we can control inline stop-hook registration)
+        if not args.no_hooks:
+            register_compat_stop = not (codex_interactive and compat_hooks is not None and compat_hooks.has_stop)
+            hook_summary = register_hooks_from_config(
+                hook_debug=args.hook_debug,
+                cwd=Path.cwd(),
+                register_compat_stop=register_compat_stop,
+            )
+
         # Claude benefits from git-bash on Windows, but wrapping Codex breaks
         # its native interactive TUI input handling.
         if backend == "claude":
             cmd = _wrap_command_for_git_bash(cmd)
+
+        # Debug TTY diagnostics
+        if args.debug_tty:
+            print(
+                f"TTY DEBUG: stdin.isatty={sys.stdin.isatty()}, stdout.isatty={sys.stdout.isatty()}, stderr.isatty={sys.stderr.isatty()}",
+                file=sys.stderr,
+            )
+            if codex_interactive:
+                print(
+                    f"TTY DEBUG: backend={backend}, launch_mode=interactive-pty-idle-default, codex_interactive_default_pty=True, git_bash_wrap_applied=False",
+                    file=sys.stderr,
+                )
+
+        # Codex interactive requires a real terminal on stdin
+        if codex_interactive and not sys.stdin.isatty():
+            print("Error: Codex interactive mode requires a terminal on stdin", file=sys.stderr)
+            return 2
 
         # Detect and print model message (for display only)
         model_flag = plan.model_display
@@ -298,28 +393,50 @@ def run_agent(args: "Args") -> int:
         idle_detected = False
         stop_reason = "process_exit"
         effective_idle_timeout = args.idle_timeout
-        if effective_idle_timeout is None and backend == "codex" and plan.interactive and hook_summary.has_post_execution_hooks:
+        if effective_idle_timeout is None and codex_interactive:
             effective_idle_timeout = get_codex_stop_hook_idle_timeout()
-            print(
-                f"Claude-compatible Stop hooks detected; using Codex idle timeout {effective_idle_timeout:.1f}s",
-                file=sys.stderr,
-            )
+            if hook_summary.has_post_execution_hooks:
+                print(
+                    f"Claude-compatible Stop hooks detected; using Codex idle timeout {effective_idle_timeout:.1f}s",
+                    file=sys.stderr,
+                )
 
         if effective_idle_timeout is not None:
-            # Create output filter to suppress terminal capability responses
-            output_filter = OutputFilter()
+            # Build inline stop-hook callback for the PTY idle path
+            idle_callback: Callable[[], str | None] | None = None
+            if compat_hooks and compat_hooks.has_stop:
+                stop_context = HookContext(
+                    event=HookEvent.POST_EXECUTION,
+                    instance_id=instance_id,
+                    session_id=session_id,
+                    client_type="cli",
+                    client_id="standalone",
+                    message=user_message,
+                )
 
-            # Output callback to print data to stdout (with filtering)
-            def output_callback(data: str) -> None:
-                # Filter out terminal capability responses to prevent corrupting parent terminal
-                filtered_data = output_filter.filter_terminal_responses(data)
-                if filtered_data:
-                    sys.stdout.write(filtered_data)
-                    sys.stdout.flush()
+                def _run_stop_hooks() -> str | None:
+                    outputs: list[str] = []
+                    for spec in compat_hooks.stop:  # type: ignore[union-attr]
+                        hook_result = run_command_hook(spec, stop_context)
+                        if not hook_result.failed and hook_result.stdout:
+                            outputs.append(hook_result.stdout)
+                    if outputs:
+                        return _sanitize_hook_output("\n".join(outputs))
+                    return None
 
-            detection = detect_agent_completion(cmd, effective_idle_timeout, output_callback)
-            idle_detected = detection.idle_detected
-            returncode = detection.returncode
+                idle_callback = _run_stop_hooks
+
+            pty_result = run_claude_process(
+                cmd,
+                idle_timeout=effective_idle_timeout,
+                propagate_keyboard_interrupt=False,
+                on_idle=idle_callback,
+            )
+            if isinstance(pty_result, int):
+                returncode = pty_result
+            else:
+                idle_detected = pty_result.idle_detected
+                returncode = pty_result.returncode
             if idle_detected:
                 stop_reason = "idle_detected"
         elif args.prompt:
@@ -343,7 +460,8 @@ def run_agent(args: "Args") -> int:
             # process group isolation (CREATE_NEW_PROCESS_GROUP on Windows).
             # This prevents Ctrl-C from reaching the child process tree,
             # avoiding ugly tracebacks from nodejs_wheel's Python wrapper.
-            returncode = run_claude_process(cmd, propagate_keyboard_interrupt=False)
+            interactive_result = run_claude_process(cmd, propagate_keyboard_interrupt=False)
+            returncode = interactive_result if isinstance(interactive_result, int) else interactive_result.returncode
 
         # Trigger POST_EXECUTION hook after successful completion
         if not args.no_hooks:
@@ -400,86 +518,10 @@ def run_agent(args: "Args") -> int:
         return 130  # Worker thread: suppressed
 
     except OSError as e:
-        error_msg = f"OS error launching agent: {e}"
-
-        # Try backup method with shell=True first (Windows shell script issue)
-        # Only show error if backup also fails
-        if cmd and claude_path:
-            try:
-                # Silently try shell=True method first
-                if args.verbose:
-                    print(f"DEBUG: OSError {e.winerror if hasattr(e, 'winerror') else e.errno}, retrying with shell=True...", file=sys.stderr)
-                return _execute_command(cmd, use_shell=True, verbose=args.verbose)
-            except Exception as shell_error:
-                # Both methods failed - now show full error details
-                print(f"Error launching agent: {e}", file=sys.stderr)
-                print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
-                _print_error_diagnostics(claude_path, cmd)
-                print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
-                traceback.print_exc()
-                # Fall through to trigger ERROR hook and return 1
-        else:
-            # Can't attempt backup
-            print(f"Error launching agent: {e}", file=sys.stderr)
-            print(f"DEBUG: OSError details - errno: {e.errno}, winerror: {getattr(e, 'winerror', 'N/A')}", file=sys.stderr)
-            _print_error_diagnostics(claude_path, cmd)
-            print("\nFull stack trace from original error:", file=sys.stderr)
-            traceback.print_exc()
-            # Fall through to trigger ERROR hook and return 1
-
-        # Trigger ERROR hook (reached when both methods fail or backup can't be attempted)
-        if not args.no_hooks:
-            trigger_hook_sync(
-                HookEvent.ERROR,
-                HookContext(
-                    event=HookEvent.ERROR,
-                    instance_id=instance_id,
-                    session_id=session_id,
-                    client_type="cli",
-                    client_id="standalone",
-                    error=error_msg,
-                ),
-                hook_debug=args.hook_debug,
-            )
-        stop_reason = "launch_error"
-        returncode = 1
-        return 1
+        return _handle_launch_error(e, cmd, claude_path, args, instance_id, session_id)
 
     except Exception as e:
-        error_msg = f"Unexpected error launching agent: {e}"
-        print(f"Error launching agent: {e}", file=sys.stderr)
-        print(f"DEBUG: Exception type: {type(e).__name__}", file=sys.stderr)
-        _print_error_diagnostics(claude_path, cmd)
-
-        # Try backup method with shell=True
-        if cmd and claude_path:
-            try:
-                print("\nAttempting backup method (shell=True)...", file=sys.stderr)
-                return _execute_command(cmd, use_shell=True, verbose=args.verbose)
-            except Exception as shell_error:
-                print(f"\nBackup method also failed: {shell_error}", file=sys.stderr)
-                traceback.print_exc()
-
-        print("\nFull stack trace from original error:", file=sys.stderr)
-        traceback.print_exc()
-
-        # Trigger ERROR hook
-        if not args.no_hooks:
-            trigger_hook_sync(
-                HookEvent.ERROR,
-                HookContext(
-                    event=HookEvent.ERROR,
-                    instance_id=instance_id,
-                    session_id=session_id,
-                    client_type="cli",
-                    client_id="standalone",
-                    error=error_msg,
-                ),
-                hook_debug=args.hook_debug,
-            )
-        stop_reason = "launch_error"
-        returncode = 1
-        return 1
+        return _handle_launch_error(e, cmd, claude_path, args, instance_id, session_id)
 
     finally:
         # Trigger AGENT_STOP hook in finally block (unless disabled)

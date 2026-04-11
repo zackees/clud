@@ -14,6 +14,7 @@ from pathlib import Path
 from running_process import RunningProcess
 
 from .util import handle_keyboard_interrupt
+from .util.process import run_captured
 
 
 def get_clud_bin_dir() -> Path:
@@ -426,9 +427,8 @@ def get_claude_version(claude_path: str) -> str | None:
         Version string or None if unable to determine
     """
     try:
-        result = subprocess.run(
+        result = run_captured(
             [claude_path, "--version"],
-            capture_output=True,
             text=True,
             timeout=5.0,
             check=False,

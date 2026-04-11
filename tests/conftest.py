@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
 
@@ -12,7 +13,7 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture(autouse=True)  # pyright: ignore[reportUnknownMemberType, reportUntypedFunctionDecorator]
-def isolate_home_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def isolate_home_directory(monkeypatch: Any, tmp_path: Path) -> None:  # noqa: ANN401
     """Isolate HOME/USERPROFILE so tests never read or write real user settings."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -23,4 +24,4 @@ def isolate_home_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 @pytest.fixture  # pyright: ignore[reportUnknownMemberType, reportUntypedFunctionDecorator]
 def snap_compare() -> None:
     """Skip snapshot tests when the external snapshot plugin is not installed."""
-    pytest.skip("snap_compare fixture requires the snapshot test plugin, which is not installed in this environment")
+    pytest.skip("snap_compare fixture requires the snapshot test plugin, which is not installed in this environment")  # pyright: ignore[reportUnknownMemberType]

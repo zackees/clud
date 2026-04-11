@@ -5,11 +5,11 @@ checking for agent artifacts.
 """
 
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 from ..util import handle_keyboard_interrupt
+from ..util.process import run_captured
 
 
 def _find_and_run_lint_test() -> tuple[int, str]:
@@ -40,10 +40,8 @@ def _find_and_run_lint_test() -> tuple[int, str]:
     # 1. Display it to the user
     # 2. Save it to ERROR.log file
     # 3. Check the return code
-    result = subprocess.run(
+    result = run_captured(
         [lint_test_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         encoding="utf-8",
         errors="replace",  # Replace undecodable bytes with � instead of raising exception
         check=False,

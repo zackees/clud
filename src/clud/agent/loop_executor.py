@@ -1,7 +1,6 @@
 """Loop execution logic for multi-iteration agent runs."""
 
 import shutil
-import subprocess
 import sys
 import time
 import uuid
@@ -10,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from ..json_formatter import StreamJsonFormatter
 from ..util import handle_keyboard_interrupt
+from ..util.process import run_captured
 
 if TYPE_CHECKING:
     from ..agent_args import Args
@@ -34,6 +34,13 @@ from .user_input import _open_file_in_editor
 # ANSI color codes for yellow warning
 YELLOW = "\033[93m"
 RESET = "\033[0m"
+
+
+def _extract_returncode(result: int | object) -> int:
+    """Extract int returncode from run_claude_process result."""
+    if isinstance(result, int):
+        return result
+    return getattr(result, "returncode", 0)  # type: ignore[no-any-return]
 
 
 def _is_interrupt_exit_code(returncode: int) -> bool:
@@ -147,10 +154,8 @@ def _generate_done_summary(claude_path: str, args: "Args") -> str | None:
         summary_cmd = _build_claude_command(summary_args, claude_path)
 
         # Run command and capture output
-        result = subprocess.run(
+        result = run_captured(
             summary_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
             encoding="utf-8",
             errors="replace",  # Replace undecodable bytes instead of raising exception
             check=False,
@@ -333,7 +338,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                 if args.prompt:
                     if args.plain or backend == "codex":
                         # Plain mode: no JSON formatting, just pass through output
-                        returncode = run_claude_process(cmd)
+                        returncode = _extract_returncode(run_claude_process(cmd))
                     else:
                         # Create JSON formatter for beautiful output in loop mode
                         formatter = StreamJsonFormatter(
@@ -343,7 +348,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                             verbose=args.verbose,
                         )
                         stdout_callback = create_logging_formatter_callback(formatter, logger)
-                        returncode = run_claude_process(cmd, stdout_callback=stdout_callback)
+                        returncode = _extract_returncode(run_claude_process(cmd, stdout_callback=stdout_callback))
                 else:
                     returncode = _execute_command(cmd, use_shell=False, verbose=args.verbose)
 
@@ -423,7 +428,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                             # Execute fix command
                             try:
                                 if args.plain or backend == "codex":
-                                    fix_returncode = run_claude_process(fix_cmd)
+                                    fix_returncode = _extract_returncode(run_claude_process(fix_cmd))
                                 else:
                                     formatter = StreamJsonFormatter(
                                         show_system=args.verbose,
@@ -432,7 +437,7 @@ def _run_loop(args: "Args", claude_path: str, loop_count: int) -> int:
                                         verbose=args.verbose,
                                     )
                                     stdout_callback = create_logging_formatter_callback(formatter, logger)
-                                    fix_returncode = run_claude_process(fix_cmd, stdout_callback=stdout_callback)
+                                    fix_returncode = _extract_returncode(run_claude_process(fix_cmd, stdout_callback=stdout_callback))
 
                                 # Check if fix was interrupted
                                 if _is_interrupt_exit_code(fix_returncode):

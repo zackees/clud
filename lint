@@ -47,6 +47,8 @@ echo "Running pyright (type checking)"
 uv run --no-sync pyright
 echo "Running KeyboardInterrupt checker"
 uv run --no-sync python -W ignore::RuntimeWarning -m clud.lint.keyboard_interrupt_checker src/
+echo "Running subprocess.run capture checker"
+uv run --no-sync python -W ignore::RuntimeWarning -m clud.lint.subprocess_run_checker src/
 
 echo ""
 echo "🎉 All linting completed!"

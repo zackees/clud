@@ -24,6 +24,7 @@ from .agent_args import AgentMode, parse_args
 from .cron.cli_handler import handle_cron_command
 from .daemon.cli_handler import handle_daemon_command
 from .task import handle_task_command
+from .util import emit_keyboard_interrupt_debug
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ def main(args_list: list[str] | None = None) -> int:
             print("  --claude             Persist Claude as the global backend")
             print("  --codex              Persist Codex as the global backend")
             print("  --session-model X    Override backend for this run only (supports: claude, codex)")
+            print("  --debug-tty          Print terminal and launch-path diagnostics")
             print("  -c, --continue       Continue the most recent conversation")
             print("  -r, --resume [TERM]  Resume by picker, session ID, or search term")
             print("  -h, --help           Show this help")
@@ -124,6 +126,10 @@ def main(args_list: list[str] | None = None) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
+        emit_keyboard_interrupt_debug(
+            any(flag in (args_list or sys.argv[1:]) for flag in ["--debug", "--verbose", "-v"]),
+            label="Ctrl-C caught by agent CLI",
+        )
         print("\nOperation cancelled.", file=sys.stderr)
         return 2
     except Exception as e:

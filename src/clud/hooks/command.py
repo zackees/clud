@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from clud.hooks import HookContext
+from clud.util.process import run_with_input_detached
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ def run_command_hook(spec: CommandHookSpec, context: HookContext, timeout_second
     env = handler._build_env(spec, context, cwd)
 
     try:
-        completed = subprocess.run(
+        completed = run_with_input_detached(
             spec.command,
             shell=True,
             cwd=str(cwd),
@@ -149,8 +150,8 @@ def run_command_hook(spec: CommandHookSpec, context: HookContext, timeout_second
         spec=spec,
         cwd=cwd,
         returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
     )
 
 

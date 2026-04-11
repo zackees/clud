@@ -167,7 +167,7 @@ class TestHandleKeyboardInterrupt(unittest.TestCase):
 class TestIsGitBash(unittest.TestCase):
     """Test _is_git_bash validation function."""
 
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     @patch("os.path.isfile")
     def test_valid_git_bash(self, mock_isfile: MagicMock, mock_run: MagicMock) -> None:
         """Test that valid git-bash is detected correctly."""
@@ -180,7 +180,7 @@ class TestIsGitBash(unittest.TestCase):
         result = _is_git_bash(r"C:\Program Files\Git\bin\bash.exe")
         self.assertTrue(result)
 
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     def test_wsl_bash_rejected_by_path(self, mock_run: MagicMock) -> None:
         """Test that WSL bash is rejected based on path indicators."""
         # Should not even try to run --version if path contains WSL indicators
@@ -188,7 +188,7 @@ class TestIsGitBash(unittest.TestCase):
         self.assertFalse(result)
         mock_run.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     def test_wsl_bash_rejected_by_version(self, mock_run: MagicMock) -> None:
         """Test that WSL bash is rejected based on version output."""
         mock_run.return_value = MagicMock(
@@ -199,7 +199,7 @@ class TestIsGitBash(unittest.TestCase):
         result = _is_git_bash(r"C:\Users\test\bash.exe")
         self.assertFalse(result)
 
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     def test_bash_version_check_failure(self, mock_run: MagicMock) -> None:
         """Test that bash is rejected if --version fails."""
         mock_run.return_value = MagicMock(returncode=1, stdout="")
@@ -207,7 +207,7 @@ class TestIsGitBash(unittest.TestCase):
         result = _is_git_bash(r"C:\invalid\bash.exe")
         self.assertFalse(result)
 
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     def test_subprocess_error_handling(self, mock_run: MagicMock) -> None:
         """Test that subprocess errors are handled gracefully."""
         mock_run.side_effect = subprocess.SubprocessError("Test error")
@@ -227,7 +227,7 @@ class TestDetectGitBash(unittest.TestCase):
         self.assertIsNone(result)
 
     @patch("platform.system")
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     @patch("os.path.isfile")
     @patch("clud.util._is_git_bash")
     def test_finds_bash_from_where_command(self, mock_is_git_bash: MagicMock, mock_isfile: MagicMock, mock_run: MagicMock, mock_system: MagicMock) -> None:
@@ -244,7 +244,7 @@ class TestDetectGitBash(unittest.TestCase):
         self.assertEqual(result, r"C:\Program Files\Git\bin\bash.exe")
 
     @patch("platform.system")
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     @patch("os.path.isfile")
     @patch("clud.util._is_git_bash")
     def test_fallback_to_common_paths(self, mock_is_git_bash: MagicMock, mock_isfile: MagicMock, mock_run: MagicMock, mock_system: MagicMock) -> None:
@@ -264,7 +264,7 @@ class TestDetectGitBash(unittest.TestCase):
         self.assertEqual(result, r"C:\Program Files\Git\bin\bash.exe")
 
     @patch("platform.system")
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     @patch("os.path.isfile")
     @patch("clud.util._is_git_bash")
     def test_returns_none_when_not_found(self, mock_is_git_bash: MagicMock, mock_isfile: MagicMock, mock_run: MagicMock, mock_system: MagicMock) -> None:
@@ -277,7 +277,7 @@ class TestDetectGitBash(unittest.TestCase):
         self.assertIsNone(result)
 
     @patch("platform.system")
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     @patch("os.path.isfile")
     @patch("clud.util._is_git_bash")
     def test_skips_wsl_bash(self, mock_is_git_bash: MagicMock, mock_isfile: MagicMock, mock_run: MagicMock, mock_system: MagicMock) -> None:
@@ -296,7 +296,7 @@ class TestDetectGitBash(unittest.TestCase):
         self.assertEqual(result, r"C:\Program Files\Git\bin\bash.exe")
 
     @patch("platform.system")
-    @patch("subprocess.run")
+    @patch("clud.util.run_captured")
     def test_handles_subprocess_errors_gracefully(self, mock_run: MagicMock, mock_system: MagicMock) -> None:
         """Test that subprocess errors are handled gracefully."""
         mock_system.return_value = "Windows"

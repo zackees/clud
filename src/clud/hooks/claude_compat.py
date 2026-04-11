@@ -16,7 +16,7 @@ from clud.util.json_loading import load_json_file_permissive
 
 from .command import CommandHookSpec
 
-DEFAULT_CODEX_STOP_IDLE_TIMEOUT = 3.0
+DEFAULT_CODEX_STOP_IDLE_TIMEOUT = 10.0
 
 
 def _command_spec_list() -> list[CommandHookSpec]:
@@ -103,7 +103,7 @@ def _load_commands_from_settings(path: Path) -> dict[str, list[str]]:
         return {"Start": [], "Stop": [], "SessionEnd": []}
 
     return {
-        "Start": _extract_commands(raw_hooks.get("Start")),
+        "Start": _extract_commands(raw_hooks.get("Start")) + _extract_commands(raw_hooks.get("SessionStart")),
         "Stop": _extract_commands(raw_hooks.get("Stop")),
         "SessionEnd": _extract_commands(raw_hooks.get("SessionEnd")),
     }

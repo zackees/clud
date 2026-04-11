@@ -264,8 +264,8 @@ class Terminal:
                         raise json.JSONDecodeError("not a resize control message", message, 0)
                     cols_value = payload.get("cols", 80)
                     rows_value = payload.get("rows", 24)
-                    cols = int(cols_value) if isinstance(cols_value, (int, str)) else 80
-                    rows = int(rows_value) if isinstance(rows_value, (int, str)) else 24
+                    cols = int(cols_value) if isinstance(cols_value, int | str) else 80
+                    rows = int(rows_value) if isinstance(rows_value, int | str) else 24
                     await self._resize(cols, rows)
                     return
             except json.JSONDecodeError:

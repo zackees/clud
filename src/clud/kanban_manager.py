@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from .util import handle_keyboard_interrupt
+from .util.process import run_captured
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,8 @@ def get_node_version() -> str | None:
         node_exe = node_env_dir / "bin" / "node"
 
     try:
-        result = subprocess.run(
+        result = run_captured(
             [str(node_exe), "--version"],
-            capture_output=True,
             text=True,
             check=False,
         )

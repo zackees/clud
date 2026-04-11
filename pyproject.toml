@@ -17,7 +17,7 @@ dependencies = [
     "disklru>=0.1.0",
     "httpx>=0.24.0",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
-    "running-process>=1.1.1",
+    "running-process>=3.0.8",
     "nodeenv>=1.8.0",
     "nodejs-wheel>=22.0.0",
     "psutil>=5.9.0",
@@ -87,6 +87,9 @@ addopts = "--durations=0"
 include = ["src", "tests"]
 exclude = [
     "**/__pycache__",
+    "src/clud/loop_tui/**",
+    "tests/test_loop_tui.py",
+    "tests/test_loop_worker.py",
 ]
 
 # Type checking configuration
@@ -166,3 +169,5 @@ functionSignatureDisplay = "compact"
 
 [project.scripts]
 clud = "clud.cli:main"
+
+[tool.uv.sources]

@@ -1,13 +1,17 @@
 """General utilities for clud."""
 
+import inspect
 import logging
 import os
 import platform
 import socket
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
+
+from .process import run_captured
 
 
 def port_is_free(port: int, host: str = "localhost") -> bool:
@@ -97,6 +101,31 @@ def handle_keyboard_interrupt(
             )
 
 
+def emit_keyboard_interrupt_debug(enabled: bool, *, label: str = "Ctrl-C caught", stacklevel: int = 1) -> None:
+    """Print a debug trace showing where Ctrl-C/KeyboardInterrupt was caught."""
+    if not enabled:
+        return
+
+    frame = inspect.currentframe()
+    try:
+        target = frame
+        for _ in range(stacklevel):
+            if target is None:
+                break
+            target = target.f_back
+
+        if target is None:
+            print(f"DEBUG: {label} at <unknown>", file=sys.stderr)
+            return
+
+        print(
+            f"DEBUG: {label} at {target.f_code.co_filename}:{target.f_lineno} in {target.f_code.co_name}()",
+            file=sys.stderr,
+        )
+    finally:
+        del frame
+
+
 def detect_git_bash() -> str | None:
     """Detect git-bash on Windows.
 
@@ -129,9 +158,8 @@ def detect_git_bash() -> str | None:
 
     # Try 'where bash' to find bash executables
     try:
-        result = subprocess.run(
+        result = run_captured(
             ["where", "bash"],
-            capture_output=True,
             text=True,
             timeout=5,
             check=False,
@@ -140,14 +168,13 @@ def detect_git_bash() -> str | None:
             # 'where' returns multiple paths separated by newlines
             paths = result.stdout.strip().split("\n")
             candidates.extend(p.strip() for p in paths if p.strip())
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, FileNotFoundError, RuntimeError):
         pass
 
     # Try 'where git-bash' to find git-bash specifically
     try:
-        result = subprocess.run(
+        result = run_captured(
             ["where", "git-bash"],
-            capture_output=True,
             text=True,
             timeout=5,
             check=False,
@@ -155,7 +182,7 @@ def detect_git_bash() -> str | None:
         if result.returncode == 0:
             paths = result.stdout.strip().split("\n")
             candidates.extend(p.strip() for p in paths if p.strip())
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, FileNotFoundError, RuntimeError):
         pass
 
     # Add common installation paths as fallback
@@ -201,9 +228,8 @@ def _is_git_bash(bash_path: str) -> bool:
 
     # Try to run bash --version
     try:
-        result = subprocess.run(
+        result = run_captured(
             [bash_path, "--version"],
-            capture_output=True,
             text=True,
             timeout=5,
             check=False,
@@ -222,7 +248,7 @@ def _is_git_bash(bash_path: str) -> bool:
         if "linux" in version_output:
             return False
 
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+    except (subprocess.SubprocessError, FileNotFoundError, OSError, RuntimeError):
         return False
 
     return False

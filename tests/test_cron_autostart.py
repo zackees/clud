@@ -46,7 +46,7 @@ class TestLinuxAutostart(unittest.TestCase):
         self.installer = AutostartInstaller(config_dir=self.temp_dir)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("pathlib.Path.write_text")
     def test_install_systemd_success(self, mock_write: Mock, mock_run: Mock) -> None:
         """Test successful systemd installation."""
@@ -72,7 +72,7 @@ class TestLinuxAutostart(unittest.TestCase):
         mock_run.assert_called_once()
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_systemd_command_not_found(self, mock_run: Mock) -> None:
         """Test systemd installation when systemctl is not available."""
         mock_run.side_effect = FileNotFoundError()
@@ -86,7 +86,7 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertIn("systemctl command not found", message)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("pathlib.Path.write_text")
     def test_install_systemd_enable_fails(self, mock_write: Mock, mock_run: Mock) -> None:
         """Test systemd installation when enable command fails."""
@@ -106,18 +106,20 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertIn("Failed to enable systemd unit", message)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("subprocess.Popen")
+    @patch("clud.cron.autostart.run_captured")
     @patch("shutil.which")
-    def test_install_crontab_success(self, mock_which: Mock, mock_run: Mock) -> None:
+    def test_install_crontab_success(self, mock_which: Mock, mock_run: Mock, mock_popen: Mock) -> None:
         """Test successful crontab installation."""
         mock_which.return_value = "/usr/bin/clud"
 
         # Mock crontab -l (no existing entries)
         # Mock crontab - (successful write)
-        mock_run.side_effect = [
-            subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="no crontab"),
-            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
-        ]
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        mock_process = Mock()
+        mock_process.communicate.return_value = ("", "")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         self.installer.platform = "linux"
         self.installer.is_linux = True
@@ -128,7 +130,7 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertIn("Crontab @reboot entry installed", message)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("shutil.which")
     def test_install_crontab_already_exists(self, mock_which: Mock, mock_run: Mock) -> None:
         """Test crontab installation when entry already exists."""
@@ -165,8 +167,9 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertIn("clud executable not found", message)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
-    def test_install_linux_fallback_to_crontab(self, mock_run: Mock) -> None:
+    @patch("subprocess.Popen")
+    @patch("clud.cron.autostart.run_captured")
+    def test_install_linux_fallback_to_crontab(self, mock_run: Mock, mock_popen: Mock) -> None:
         """Test Linux installation falls back to crontab when systemd fails."""
         # First call: systemctl fails
         # Second call: crontab -l returns empty
@@ -174,8 +177,11 @@ class TestLinuxAutostart(unittest.TestCase):
         mock_run.side_effect = [
             FileNotFoundError(),  # systemctl not found
             subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=""),  # crontab -l empty
-            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # crontab - success
         ]
+        mock_process = Mock()
+        mock_process.communicate.return_value = ("", "")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         with patch("shutil.which", return_value="/usr/bin/clud"):
             self.installer.platform = "linux"
@@ -188,7 +194,7 @@ class TestLinuxAutostart(unittest.TestCase):
             self.assertEqual(method, "crontab")
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_status_linux_systemd_enabled(self, mock_run: Mock) -> None:
         """Test Linux status when systemd is enabled."""
         mock_run.return_value = subprocess.CompletedProcess(
@@ -219,7 +225,7 @@ class TestLinuxAutostart(unittest.TestCase):
                 systemd_file.unlink()
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_status_linux_crontab_found(self, mock_run: Mock) -> None:
         """Test Linux status when crontab entry exists."""
         # Mock crontab -l with clud entry
@@ -240,7 +246,7 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertEqual(method, "crontab")
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_status_linux_not_installed(self, mock_run: Mock) -> None:
         """Test Linux status when nothing is installed."""
         mock_run.return_value = subprocess.CompletedProcess(
@@ -269,7 +275,7 @@ class TestMacOSAutostart(unittest.TestCase):
         self.installer = AutostartInstaller(config_dir=self.temp_dir)
 
     @patch("sys.platform", "darwin")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("pathlib.Path.write_text")
     def test_install_launchd_success(self, mock_write: Mock, mock_run: Mock) -> None:
         """Test successful launchd installation."""
@@ -292,7 +298,7 @@ class TestMacOSAutostart(unittest.TestCase):
         mock_write.assert_called_once()
 
     @patch("sys.platform", "darwin")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_launchd_command_not_found(self, mock_run: Mock) -> None:
         """Test launchd installation when launchctl is not available."""
         mock_run.side_effect = FileNotFoundError()
@@ -306,7 +312,7 @@ class TestMacOSAutostart(unittest.TestCase):
         self.assertIn("launchctl command not found", message)
 
     @patch("sys.platform", "darwin")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("pathlib.Path.write_text")
     def test_install_launchd_already_loaded(self, mock_write: Mock, mock_run: Mock) -> None:
         """Test launchd installation when agent is already loaded."""
@@ -325,7 +331,7 @@ class TestMacOSAutostart(unittest.TestCase):
         self.assertIn("already loaded", message)
 
     @patch("sys.platform", "darwin")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("shutil.which")
     @patch("pathlib.Path.write_text")
     @patch("pathlib.Path.chmod")
@@ -356,7 +362,7 @@ class TestMacOSAutostart(unittest.TestCase):
         mock_chmod.assert_called_once_with(0o755)
 
     @patch("sys.platform", "darwin")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_macos_fallback_to_login_items(self, mock_run: Mock) -> None:
         """Test macOS installation falls back to Login Items when launchd fails."""
         with patch("shutil.which", return_value="/usr/local/bin/clud"), patch("pathlib.Path.write_text"), patch("pathlib.Path.chmod"):
@@ -379,7 +385,7 @@ class TestMacOSAutostart(unittest.TestCase):
             self.assertEqual(method, "login_items")
 
     @patch("sys.platform", "darwin")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_status_macos_launchd_loaded(self, mock_run: Mock) -> None:
         """Test macOS status when launchd is loaded."""
         mock_run.return_value = subprocess.CompletedProcess(
@@ -435,7 +441,7 @@ class TestWindowsAutostart(unittest.TestCase):
         self.installer = AutostartInstaller(config_dir=self.temp_dir)
 
     @patch("sys.platform", "win32")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_task_scheduler_success(self, mock_run: Mock) -> None:
         """Test successful Task Scheduler installation."""
         # First call: delete existing (ignore result)
@@ -456,7 +462,7 @@ class TestWindowsAutostart(unittest.TestCase):
         self.assertIn("Task Scheduler task installed", message)
 
     @patch("sys.platform", "win32")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_task_scheduler_command_not_found(self, mock_run: Mock) -> None:
         """Test Task Scheduler installation when schtasks is not available."""
         mock_run.side_effect = FileNotFoundError()
@@ -470,7 +476,7 @@ class TestWindowsAutostart(unittest.TestCase):
         self.assertIn("schtasks command not found", message)
 
     @patch("sys.platform", "win32")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_task_scheduler_create_fails(self, mock_run: Mock) -> None:
         """Test Task Scheduler installation when create command fails."""
         # Delete succeeds, create fails
@@ -490,7 +496,7 @@ class TestWindowsAutostart(unittest.TestCase):
     @patch("sys.platform", "win32")
     @unittest.skipUnless(sys.platform == "win32", "Windows-only test")
     @patch("sys.platform", "win32")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_install_windows_fallback_to_registry(self, mock_run: Mock) -> None:
         """Test Windows installation falls back to Registry when Task Scheduler fails."""
         with patch("clud.cron.autostart.winreg", create=True) as mock_winreg:
@@ -516,7 +522,7 @@ class TestWindowsAutostart(unittest.TestCase):
             self.assertEqual(method, "registry")
 
     @patch("sys.platform", "win32")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_status_windows_task_scheduler_found(self, mock_run: Mock) -> None:
         """Test Windows status when Task Scheduler task exists."""
         mock_run.return_value = subprocess.CompletedProcess(
@@ -536,7 +542,7 @@ class TestWindowsAutostart(unittest.TestCase):
         self.assertEqual(method, "task_scheduler")
 
     @patch("sys.platform", "win32")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("clud.cron.autostart.winreg", create=True)
     def test_status_windows_registry_found(self, mock_winreg: Mock, mock_run: Mock) -> None:
         """Test Windows status when Registry key exists."""
@@ -574,7 +580,7 @@ class TestAutostartIntegration(unittest.TestCase):
         self.installer = AutostartInstaller(config_dir=self.temp_dir)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     @patch("pathlib.Path.write_text")
     def test_install_returns_correct_format(
         self,
@@ -604,7 +610,7 @@ class TestAutostartIntegration(unittest.TestCase):
         self.assertIn(method, ["systemd", "crontab", "launchd", "login_items", "task_scheduler", "registry", None])
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.run")
+    @patch("clud.cron.autostart.run_captured")
     def test_status_returns_correct_format(self, mock_run: Mock) -> None:
         """Test that status() returns (status, message, method) tuple."""
         mock_run.return_value = subprocess.CompletedProcess(

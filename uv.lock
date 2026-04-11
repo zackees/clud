@@ -348,7 +348,7 @@ wheels = [
 
 [[package]]
 name = "clud"
-version = "1.2.8"
+version = "1.2.9"
 source = { editable = "." }
 dependencies = [
     { name = "appdirs" },
@@ -414,7 +414,7 @@ requires-dist = [
     { name = "pywinpty", marker = "sys_platform == 'win32'", specifier = ">=3.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "running-process", specifier = ">=1.1.1" },
+    { name = "running-process", specifier = ">=3.0.8" },
     { name = "uvicorn", specifier = ">=0.24.0" },
     { name = "websockets", specifier = ">=10.0" },
     { name = "zcmds-win32", marker = "sys_platform == 'win32' and extra == 'full'", specifier = ">=1.2.0" },
@@ -1589,14 +1589,16 @@ wheels = [
 
 [[package]]
 name = "running-process"
-version = "1.1.1"
+version = "3.0.8"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "psutil" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/4b/01b66654551058c4eb8127475cfef3c0be75ababd92d4029e36c59ab4994/running_process-3.0.8.tar.gz", hash = "sha256:8c99ea2cd20ae2f51fc3448c6c0de49ebe888b4e81a238e1f908570abe31e96f", size = 76011, upload-time = "2026-04-11T02:14:08.06Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/08/11/edba25d092eb4c69613b8af9b92ea9be43361bbc264a43e8ba38d949dd13/running_process-1.1.1-py3-none-any.whl", hash = "sha256:872a9f013264748475f0b03f98ea9d96f2dfe13c2bc1f1d1ad84e724afc18415", size = 29129, upload-time = "2026-02-27T01:56:47.852Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/cf/1000c41cf7502c209b9fc4ab604c49e4296147924061ec1948965955133f/running_process-3.0.8-cp311-cp311-macosx_10_12_x86_64.whl", hash = "sha256:20e2c2c39b2113c0a076ad0964df25721362325afd1ac206d16024dbd1f4350b", size = 1261574, upload-time = "2026-04-11T02:14:40.086Z" },
+    { url = "https://files.pythonhosted.org/packages/44/f8/b5100a75d917885cb8dae3f6dffe8ed8bd69acd582b56cd81dba7c7e295b/running_process-3.0.8-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:e97e4ac17c6277689b5c409727485be44134628137eaaf44d4628c27fa6d765f", size = 1217798, upload-time = "2026-04-11T02:14:44.043Z" },
+    { url = "https://files.pythonhosted.org/packages/28/58/3b2526cb274e291157240c57345db62fee5b6f4b9453643c689dc70acfb2/running_process-3.0.8-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:336177440e5870d5f5c8e85ef2de66b747d94762e512d39d95630158ab796529", size = 2502657, upload-time = "2026-04-11T02:14:26.06Z" },
+    { url = "https://files.pythonhosted.org/packages/07/e8/3044bb19617105d444f2b56174c6dbc19d1feb20eed91dd73f2be400b59e/running_process-3.0.8-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:c1a7cabe33a60fc8c01d2403bab14a3dd10d4004c025e774eafc8f9b8d09d574", size = 2591473, upload-time = "2026-04-11T02:14:14.449Z" },
+    { url = "https://files.pythonhosted.org/packages/45/59/105234861c8da4bd7fdcf9603c47c8b85f37b3b2c0600eacb8a56b4b7bf0/running_process-3.0.8-cp311-cp311-win_amd64.whl", hash = "sha256:41fce02d70493a76f777e8c0a1067686d5f7b4147943484a0ca97b5db9551b74", size = 1189302, upload-time = "2026-04-11T02:14:30.68Z" },
+    { url = "https://files.pythonhosted.org/packages/23/e5/653e59120c54cc7972a9f445ec3e5bfd3aa863e9090064c2659115bc1d9d/running_process-3.0.8-cp311-cp311-win_arm64.whl", hash = "sha256:f053312e6bca539829149e4589579e375da440b42357983469edd94dd2129ddb", size = 1119526, upload-time = "2026-04-11T02:14:35.557Z" },
 ]
 
 [[package]]

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from .util.process import run_captured
+
 
 class ShellType(Enum):
     """Supported shell types."""
@@ -56,9 +58,8 @@ class ShellLaunchConfig:
                 cygpath = shutil.which("cygpath")
                 if cygpath:
                     try:
-                        result = subprocess.run(
+                        result = run_captured(
                             [cygpath, "-u", str(path_obj)],
-                            capture_output=True,
                             text=True,
                             timeout=1.0,
                             check=False,
@@ -101,9 +102,8 @@ class ShellLaunchConfig:
         """
         try:
             # Try to launch the shell with a simple command
-            result = subprocess.run(
+            result = run_captured(
                 [shell_path, "--version"],
-                capture_output=True,
                 timeout=2.0,
                 check=False,
             )

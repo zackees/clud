@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from clud.util import handle_keyboard_interrupt
+from clud.util.process import run_captured
 
 logger = logging.getLogger(__name__)
 
@@ -183,10 +184,9 @@ def _stop_daemon(pid: int) -> None:
     try:
         if sys.platform == "win32":
             # Windows: Use taskkill
-            subprocess.run(
+            run_captured(
                 ["taskkill", "/F", "/PID", str(pid)],
                 check=False,
-                capture_output=True,
             )
         else:
             # Unix: Send SIGTERM
@@ -203,10 +203,9 @@ def _stop_daemon(pid: int) -> None:
         if _is_process_running(pid):
             logger.warning("Daemon did not stop gracefully, forcing kill")
             if sys.platform == "win32":
-                subprocess.run(
+                run_captured(
                     ["taskkill", "/F", "/PID", str(pid)],
                     check=False,
-                    capture_output=True,
                 )
             else:
                 os.kill(pid, signal.SIGKILL)
@@ -259,9 +258,8 @@ def _is_process_running(pid: int) -> bool:
     try:
         if sys.platform == "win32":
             # Windows: Use tasklist
-            result = subprocess.run(
+            result = run_captured(
                 ["tasklist", "/FI", f"PID eq {pid}"],
-                capture_output=True,
                 text=True,
                 check=False,
             )

@@ -4,6 +4,7 @@ This module provides custom lint rules specific to the clud codebase.
 
 Available checkers:
     - keyboard_interrupt_checker: Ensures daemon code uses signal handlers
+    - subprocess_run_checker: Ensures captured subprocess.run calls use RunningProcess.run
 
 Usage:
     python -m clud.lint.keyboard_interrupt_checker src/

@@ -19,9 +19,22 @@ import queue
 import subprocess
 import sys
 import threading
+import traceback
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from running_process import kill_process_tree
+from running_process import (
+    Idle,
+    IdleDetection,
+    IdleStartTrigger,
+    IdleTiming,
+    InteractiveMode,
+    PseudoTerminalProcess,
+    PtyIdleDetection,
+    RunningProcess,
+    WaitCallbackResult,
+    kill_process_tree,
+)
 
 from ..util import handle_keyboard_interrupt
 
@@ -40,6 +53,15 @@ def _cleanup_active_process() -> None:
 
 
 atexit.register(_cleanup_active_process)
+
+
+@dataclass
+class PtySessionResult:
+    """Result from a PTY session with idle detection."""
+
+    returncode: int
+    idle_detected: bool = False
+    idle_event_count: int = 0
 
 
 def _reader_thread(proc: subprocess.Popen[bytes], q: queue.Queue[str | None]) -> None:
@@ -80,12 +102,102 @@ def _is_msys_environment() -> bool:
     return bool(os.environ.get("MSYSTEM"))
 
 
+def _run_with_idle_timeout(
+    cmd: list[str],
+    idle_timeout: float,
+    on_idle: Callable[[], str | None] | None,
+    propagate_keyboard_interrupt: bool,
+) -> PtySessionResult:
+    """Run a command in a PTY with idle detection.
+
+    Creates a ``PseudoTerminalProcess`` that relays terminal I/O and arms an
+    idle detector.  When the process goes idle the optional *on_idle* callback
+    is invoked; if it returns text the text is injected as a follow-up turn.
+
+    Returns a ``PtySessionResult`` with returncode and idle event metadata.
+    """
+    pty_proc = PseudoTerminalProcess(
+        cmd,
+        capture=False,
+        relay_terminal_input=True,
+        arm_idle_timeout_on_submit=True,
+    )
+
+    idle_event_count = 0
+    idle_detected = False
+
+    def _idle_callback(_event: object, input_buffer: object) -> WaitCallbackResult:
+        nonlocal idle_event_count, idle_detected
+        idle_event_count += 1
+        idle_detected = True
+        if on_idle is not None:
+            follow_up = on_idle()
+            if follow_up is not None:
+                input_buffer.write(follow_up + "\r")  # type: ignore[union-attr]
+                return WaitCallbackResult.CONTINUE
+        return WaitCallbackResult.CONTINUE_AND_DISARM
+
+    pty_idle = PtyIdleDetection(start_trigger=IdleStartTrigger.IMMEDIATE)
+    timing = IdleTiming(timeout_seconds=idle_timeout)
+    detection = IdleDetection(timing=timing, pty=pty_idle)
+    idle_condition = Idle(detector=detection, on_callback=_idle_callback)
+
+    try:
+        wait_result = pty_proc.wait_for(idle_condition, echo_output=True)
+        pty_proc.idle_timeout_enabled = False  # type: ignore[attr-defined]
+        returncode = wait_result.returncode or 0
+        return PtySessionResult(
+            returncode=returncode,
+            idle_detected=idle_detected,
+            idle_event_count=idle_event_count,
+        )
+    except KeyboardInterrupt as e:
+        pty_proc.interrupt_and_wait()
+        returncode = pty_proc.poll() or 130
+        if propagate_keyboard_interrupt:
+            handle_keyboard_interrupt(e, reraise_on_main_thread=True)
+        return PtySessionResult(returncode=returncode)
+
+
+def _run_with_child_ctrl_c(
+    cmd: list[str],
+    propagate_keyboard_interrupt: bool,
+) -> int:
+    """Run a command using running-process console isolation.
+
+    Uses ``RunningProcess.interactive`` with ``CONSOLE_ISOLATED`` mode so the
+    child receives its own Ctrl-C independently.
+    """
+    proc = RunningProcess.interactive(cmd, mode=InteractiveMode.CONSOLE_ISOLATED)
+
+    try:
+        exit_code = proc.poll()
+        while exit_code is None:
+            exit_code = proc.poll()
+        return exit_code
+    except KeyboardInterrupt as e:
+        with contextlib.suppress(Exception):
+            proc.send_interrupt()
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        with contextlib.suppress(Exception):
+            proc.kill()
+        while proc.poll() is None:
+            pass
+        handle_keyboard_interrupt(e, reraise_on_main_thread=propagate_keyboard_interrupt)
+        return proc.poll() or 130
+
+
 def run_claude_process(
     cmd: list[str],
     stdout_callback: Callable[[str], None] | None = None,
     use_shell: bool = False,
     propagate_keyboard_interrupt: bool = True,
-) -> int:
+    idle_timeout: float | None = None,
+    on_idle: Callable[[], str | None] | None = None,
+    allow_child_ctrl_c: bool = False,
+    debug_keyboard_interrupt: bool = False,
+) -> int | PtySessionResult:
     """Launch Claude in an isolated process group and wait for completion.
 
     When *stdout_callback* is provided, stdout is captured line-by-line in a
@@ -112,10 +224,26 @@ def run_claude_process(
         propagate_keyboard_interrupt: Whether to re-raise ``KeyboardInterrupt``
             on the main thread after child cleanup. Interactive top-level
             launches should pass ``False`` to exit cleanly with code 130.
+        idle_timeout: If set, use PTY-based idle detection instead of plain
+            subprocess. Returns ``PtySessionResult`` when used.
+        on_idle: Optional callback invoked when idle is detected. If it
+            returns a string, that text is injected as a follow-up turn.
+        allow_child_ctrl_c: Use running-process console isolation so the
+            child can receive Ctrl-C independently.
+        debug_keyboard_interrupt: Print debug info when Ctrl-C is caught.
 
     Returns:
-        The child process exit code.
+        The child process exit code, or ``PtySessionResult`` when
+        *idle_timeout* is used.
     """
+    # Dispatch to PTY idle detection path.
+    if idle_timeout is not None:
+        return _run_with_idle_timeout(cmd, idle_timeout, on_idle, propagate_keyboard_interrupt)
+
+    # Dispatch to running-process console isolation path.
+    if allow_child_ctrl_c and sys.platform == "win32":
+        return _run_with_child_ctrl_c(cmd, propagate_keyboard_interrupt)
+
     global _active_process
 
     # Record parent PID so we can detect if it dies (SIGINT killed uv).
@@ -219,6 +347,9 @@ def run_claude_process(
         return proc.returncode
 
     except KeyboardInterrupt as e:
+        if debug_keyboard_interrupt:
+            print("DEBUG: Ctrl-C caught by process launcher", file=sys.stderr)
+            traceback.print_stack(file=sys.stderr)
 
         def _cleanup() -> None:
             if proc.poll() is None:

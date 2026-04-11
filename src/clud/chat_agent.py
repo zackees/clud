@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 
+from .util.process import run_captured
+
 
 def process_chat_message(message: str, chat_id: str, cwd: str) -> str:
     """Process a chat message using Claude Code agent.
@@ -28,10 +30,9 @@ def process_chat_message(message: str, chat_id: str, cwd: str) -> str:
             cmd = [sys.executable, "-m", "clud", "-p", message]
 
             # Run Claude in the original working directory
-            result = subprocess.run(
+            result = run_captured(
                 cmd,
                 cwd=cwd,
-                capture_output=True,
                 text=True,
                 timeout=60,  # 60 second timeout
             )
@@ -40,8 +41,7 @@ def process_chat_message(message: str, chat_id: str, cwd: str) -> str:
             response = result.stdout.strip()
 
             if not response:
-                # If stdout is empty, check stderr
-                response = f"Error: {result.stderr.strip()}" if result.stderr else "I processed your request but have no output to show."
+                response = "I processed your request but have no output to show."
 
             # If response is too long, truncate it
             max_length = 4000

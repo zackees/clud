@@ -61,14 +61,18 @@ class DiffView:
         """
         # Try to use diff2html CLI if available
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["diff2html", "--style", "line", "--format", "ansi"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, _stderr = process.communicate(
                 input=unified_diff.encode(),
-                capture_output=True,
                 timeout=5,
             )
-            if result.returncode == 0:
-                return result.stdout.decode()
+            if process.returncode == 0:
+                return stdout.decode()
         except (subprocess.SubprocessError, FileNotFoundError):
             # Fall back to simple ANSI coloring
             pass
@@ -121,14 +125,18 @@ class DiffView:
         """
         # Try to use diff2html CLI if available
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 ["diff2html", "--style", "side", "--format", "html"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, _stderr = process.communicate(
                 input=unified_diff.encode(),
-                capture_output=True,
                 timeout=5,
             )
-            if result.returncode == 0:
-                return result.stdout.decode()
+            if process.returncode == 0:
+                return stdout.decode()
         except (subprocess.SubprocessError, FileNotFoundError):
             logger.warning("diff2html not found, falling back to simple HTML")
 

@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from clud.util.process import run_captured
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
@@ -348,9 +349,8 @@ class PlaywrightDaemon:
             # Check if process is alive
             if sys.platform == "win32":
                 # On Windows, use tasklist
-                result = subprocess.run(
+                result = run_captured(
                     ["tasklist", "/FI", f"PID eq {pid}"],
-                    capture_output=True,
                     text=True,
                     check=False,
                 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from clud.hooks.command import (
     run_command_hook,
     write_failure_artifact,
 )
+from clud.util.process import run_with_input_detached
 
 
 class TestCommandHookHandler(unittest.IsolatedAsyncioTestCase):
@@ -40,7 +42,7 @@ class TestCommandHookHandler(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        with patch("clud.hooks.command.subprocess.run") as mock_run:
+        with patch("clud.hooks.command.run_with_input_detached") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             await handler.handle(context)
 
@@ -50,6 +52,28 @@ class TestCommandHookHandler(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["env"]["CLUD_BACKEND"], "codex")
         self.assertEqual(kwargs["env"]["CLUD_STOP_REASON"], "idle_detected")
         self.assertEqual(kwargs["env"]["CLUD_HOOK_EVENT"], "Stop")
+
+    async def test_run_with_input_detached_centralizes_devnull_stdin(self) -> None:
+        with patch("clud.util.process.RunningProcess") as mock_process_cls:
+            mock_process = MagicMock()
+            mock_process.wait.return_value = 0
+            mock_process.stdout = ""
+            mock_process_cls.return_value = mock_process
+            run_with_input_detached(
+                "python -c \"print('ok')\"",
+                shell=True,
+                cwd=Path("C:/tmp/project"),
+                env={"EXAMPLE": "1"},
+                timeout=5.0,
+            )
+
+        _, kwargs = mock_process_cls.call_args
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["shell"], True)
+        self.assertEqual(kwargs["cwd"], Path("C:/tmp/project"))
+        self.assertEqual(kwargs["env"], {"EXAMPLE": "1"})
+        self.assertEqual(kwargs["timeout"], 5)
+        mock_process.wait.assert_called_once_with()
 
     async def test_run_command_hook_captures_nonzero_result(self) -> None:
         spec = CommandHookSpec(event_name="Stop", command="python -c \"import sys; print('lint bad'); print('stderr bad', file=sys.stderr); sys.exit(7)\"")
@@ -67,7 +91,8 @@ class TestCommandHookHandler(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.returncode, 7)
         self.assertIn("lint bad", result.stdout)
-        self.assertIn("stderr bad", result.stderr)
+        self.assertIn("stderr bad", result.stdout)
+        self.assertEqual(result.stderr, "")
         self.assertTrue(result.failed)
 
     async def test_write_failure_artifact_persists_output(self) -> None:

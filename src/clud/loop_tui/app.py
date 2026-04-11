@@ -202,13 +202,15 @@ class CludLoopTUI(App[None]):
             cmd = ["xclip", "-selection", "clipboard"]
 
         try:
-            subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                input=text.encode("utf-8"),
-                check=True,
-                capture_output=True,
-                timeout=5,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            process.communicate(input=text.encode("utf-8"), timeout=5)
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd)
         except Exception:
             logging.debug("Platform clipboard command failed, falling back to OSC 52")
             super().copy_to_clipboard(text)

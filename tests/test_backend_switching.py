@@ -38,6 +38,17 @@ class TestBackendArgParsing(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_args(["--codex", "--claude"])
 
+    def test_parse_debug_alias_sets_verbose(self) -> None:
+        """`--debug` should enable the same debug mode as `--verbose`."""
+        args = parse_args(["--debug"])
+        self.assertTrue(args.verbose)
+
+    def test_parse_debug_tty_flag(self) -> None:
+        """`--debug-tty` should enable TTY diagnostics without becoming passthrough."""
+        args = parse_args(["--debug-tty"])
+        self.assertTrue(args.debug_tty)
+        self.assertEqual(args.claude_args, [])
+
     def test_parse_resume_sets_resume_flag(self) -> None:
         """`--resume` should be parsed as a known resume command, not continue-last."""
         args = parse_args(["--resume"])
@@ -66,6 +77,20 @@ class TestBackendArgParsing(unittest.TestCase):
         """Distinct resume modes should not be allowed together."""
         with self.assertRaises(ValueError):
             parse_args(["--continue", "--resume"])
+
+    def test_parse_codex_short_config_passthrough(self) -> None:
+        """Codex-native `-c key=value` should not be mistaken for continue."""
+        args = parse_args(["--session-model=codex", "-c", 'model="gpt-5.4"'])
+        self.assertFalse(args.continue_flag)
+        self.assertEqual(args.unknown_flags, ["-c", 'model="gpt-5.4"'])
+        self.assertEqual(args.claude_args, ["-c", 'model="gpt-5.4"'])
+
+    def test_parse_codex_long_config_passthrough(self) -> None:
+        """Codex-native `--config key=value` should pass through untouched."""
+        args = parse_args(["--session-model=codex", "--config", "model='gpt-5.4'"])
+        self.assertFalse(args.continue_flag)
+        self.assertEqual(args.unknown_flags, ["--config", "model='gpt-5.4'"])
+        self.assertEqual(args.claude_args, ["--config", "model='gpt-5.4'"])
 
 
 class TestBackendResolution(unittest.TestCase):
@@ -176,6 +201,22 @@ class TestCodexCommandBuilding(unittest.TestCase):
             ],
         )
 
+    def test_build_codex_config_passthrough_command(self) -> None:
+        """Codex config overrides should flow through the wrapper unchanged."""
+        args = parse_args(["--session-model=codex", "--config", "model='gpt-5.4'"])
+        cmd = _build_claude_command(args, "codex")
+        self.assertEqual(
+            cmd,
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-C",
+                "C:\\Users\\niteris\\dev\\clud",
+                "--config",
+                "model='gpt-5.4'",
+            ],
+        )
+
 
 class TestCodexDryRun(unittest.TestCase):
     """Test dry-run output for Codex backend."""
@@ -224,8 +265,20 @@ class TestCodexRunnerWrapping(unittest.TestCase):
         args = Args(mode=AgentMode.DEFAULT, agent_backend="codex", no_skills=True)
         captured_cmds: list[list[str]] = []
 
-        def record_run(cmd: list[str], propagate_keyboard_interrupt: bool = True) -> int:
+        def record_run(
+            cmd: list[str],
+            propagate_keyboard_interrupt: bool = True,
+            allow_child_ctrl_c: bool = False,
+            debug_keyboard_interrupt: bool = False,
+            idle_timeout: float | None = None,
+            on_idle: object | None = None,
+        ) -> int:
             captured_cmds.append(cmd)
+            self.assertFalse(propagate_keyboard_interrupt)
+            self.assertFalse(allow_child_ctrl_c)
+            self.assertFalse(debug_keyboard_interrupt)
+            self.assertEqual(idle_timeout, 10.0)
+            self.assertTrue(callable(on_idle))
             return 0
 
         with (

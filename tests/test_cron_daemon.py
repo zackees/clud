@@ -134,7 +134,7 @@ class TestCronDaemonProcessChecking(unittest.TestCase):
     @unittest.skipIf(sys.platform != "win32", "Windows-specific tasklist test")
     def test_is_process_running_windows_tasklist(self) -> None:
         """Test Windows process checking via tasklist."""
-        with patch("subprocess.run") as mock_run:
+        with patch("clud.cron.daemon.run_captured") as mock_run:
             # Mock tasklist output
             mock_run.return_value = Mock(stdout=f"python.exe\t{os.getpid()}")
             is_running = self.daemon._is_process_running(os.getpid())
@@ -347,7 +347,7 @@ class TestCronDaemonStop(unittest.TestCase):
         self.assertFalse(self.daemon.pid_file.exists())
 
     @unittest.skipIf(sys.platform != "win32", "Windows-specific test")
-    @patch("subprocess.run")
+    @patch("clud.cron.daemon.run_captured")
     def test_stop_windows_taskkill(self, mock_run: MagicMock) -> None:
         """Test Windows daemon stop uses taskkill."""
         self.daemon.pid_file.write_text(str(os.getpid()), encoding="utf-8")
@@ -396,7 +396,7 @@ class TestCronDaemonStop(unittest.TestCase):
             mock_is_running.return_value = True
 
             if sys.platform == "win32":
-                with patch("subprocess.run") as mock_run:
+                with patch("clud.cron.daemon.run_captured") as mock_run:
                     result = self.daemon.stop()
                     # Verify both SIGTERM and force kill were attempted
                     self.assertEqual(mock_run.call_count, 2)

@@ -55,6 +55,7 @@ class Args:
     tui: bool = False  # For --tui (Textual TUI for loop mode)
     rebase: bool = False  # For --rebase (auto-rebase to origin HEAD)
     no_skills: bool = False  # For --no-skills (skip auto-install of bundled skills)
+    debug_tty: bool = False  # For --debug-tty (print terminal/launch-path diagnostics)
     num_terminals: int = 4  # Number of terminals for --ui (default 4)
     # Agent-level arguments (execution)
     prompt: str | None = None
@@ -98,6 +99,7 @@ def parse_args(args: list[str] | None = None) -> Args:
     no_hooks = "--no-hooks" in args_copy
     no_session_end_hook = "--no-session-end-hook" in args_copy or "--no-stop-hook" in args_copy
     no_skills = "--no-skills" in args_copy
+    debug_tty = "--debug-tty" in args_copy
     has_codex_flag = "--codex" in args_copy
     has_claude_flag = "--claude" in args_copy
     if has_codex_flag and has_claude_flag:
@@ -118,6 +120,8 @@ def parse_args(args: list[str] | None = None) -> Args:
         args_copy.remove("--no-stop-hook")
     if "--no-skills" in args_copy:
         args_copy.remove("--no-skills")
+    if "--debug-tty" in args_copy:
+        args_copy.remove("--debug-tty")
     persist_backend = None
     if has_codex_flag:
         args_copy.remove("--codex")
@@ -306,6 +310,32 @@ def parse_args(args: list[str] | None = None) -> Args:
         if mode_str not in ("loop", "plan"):
             args_copy = args_copy[1:]  # Remove the positional arg (already done for loop/plan)
 
+    # Preserve Codex-native config overrides. Bare `-c` still means continue,
+    # but `-c key=value` / `--config key=value` must pass through.
+    preserved_unknown_args: list[str] = []
+    config_idx = 0
+    while config_idx < len(args_copy):
+        arg = args_copy[config_idx]
+        if arg.startswith("--config="):
+            preserved_unknown_args.append(arg)
+            args_copy.pop(config_idx)
+            continue
+        if arg == "--config":
+            preserved_unknown_args.append(arg)
+            if config_idx + 1 < len(args_copy):
+                preserved_unknown_args.append(args_copy[config_idx + 1])
+                args_copy.pop(config_idx + 1)
+            args_copy.pop(config_idx)
+            continue
+        if arg == "-c" and config_idx + 1 < len(args_copy):
+            next_arg = args_copy[config_idx + 1]
+            if not next_arg.startswith("-"):
+                preserved_unknown_args.extend([arg, next_arg])
+                args_copy.pop(config_idx + 1)
+                args_copy.pop(config_idx)
+                continue
+        config_idx += 1
+
     # Parse agent-level arguments using argparse
     parser = argparse.ArgumentParser(
         prog="clud",
@@ -360,6 +390,13 @@ def parse_args(args: list[str] | None = None) -> Args:
     )
 
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        dest="verbose",
+        help=argparse.SUPPRESS,
+    )
+
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -390,6 +427,7 @@ def parse_args(args: list[str] | None = None) -> Args:
 
     # Parse known args, allowing unknown args to be passed to Claude
     known_args, unknown_args = parser.parse_known_args(args_copy)
+    unknown_args = [*preserved_unknown_args, *unknown_args]
 
     if known_args.continue_flag and known_args.resume_value is not None:
         raise ValueError("Cannot specify both --continue and --resume")
@@ -422,6 +460,7 @@ def parse_args(args: list[str] | None = None) -> Args:
         no_hooks=no_hooks,
         no_session_end_hook=no_session_end_hook,
         no_skills=no_skills,
+        debug_tty=debug_tty,
         cron=cron,
         cron_subcommand=cron_subcommand,
         cron_args=cron_args,
