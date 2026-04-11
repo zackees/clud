@@ -200,12 +200,16 @@ class TestProcessLauncher(unittest.TestCase):
         self.assertTrue(result.idle_detected)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.idle_event_count, 1)
-        mock_pseudo_terminal.assert_called_once_with(
-            ["codex"],
-            capture=False,
-            relay_terminal_input=True,
-            arm_idle_timeout_on_submit=True,
-        )
+        call_kwargs = mock_pseudo_terminal.call_args
+        self.assertEqual(call_kwargs[0][0], ["codex"])
+        self.assertFalse(call_kwargs[1]["capture"])
+        self.assertTrue(call_kwargs[1]["relay_terminal_input"])
+        self.assertTrue(call_kwargs[1]["arm_idle_timeout_on_submit"])
+        # Terminal size should be forwarded from the host
+        self.assertIn("rows", call_kwargs[1])
+        self.assertIn("cols", call_kwargs[1])
+        self.assertGreater(call_kwargs[1]["rows"], 0)
+        self.assertGreater(call_kwargs[1]["cols"], 0)
         self.assertEqual(proc.idle_timeout_enabled, False)
         self.assertEqual(proc.wait_for_kwargs["echo_output"], True)
         mock_interactive.assert_not_called()

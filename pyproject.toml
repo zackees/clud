@@ -17,7 +17,6 @@ dependencies = [
     "disklru>=0.1.0",
     "httpx>=0.24.0",
     "pywinpty>=3.0.0; sys_platform == 'win32'",
-    "running-process>=3.0.8",
     "nodeenv>=1.8.0",
     "nodejs-wheel>=22.0.0",
     "psutil>=5.9.0",
@@ -28,6 +27,7 @@ dependencies = [
     "websockets>=10.0",
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
+    "running-process>=3.0.9",
 ]
 version = "1.2.9"
 
@@ -88,8 +88,10 @@ include = ["src", "tests"]
 exclude = [
     "**/__pycache__",
     "src/clud/loop_tui/**",
+    "src/clud/daemon/playwright_daemon.py",
     "tests/test_loop_tui.py",
     "tests/test_loop_worker.py",
+    "tests/test_daemon.py",
 ]
 
 # Type checking configuration

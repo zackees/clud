@@ -16,6 +16,7 @@ import atexit
 import contextlib
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -116,11 +117,15 @@ def _run_with_idle_timeout(
 
     Returns a ``PtySessionResult`` with returncode and idle event metadata.
     """
+    # Forward the host terminal size so the child TUI renders correctly.
+    term_size = shutil.get_terminal_size()
     pty_proc = PseudoTerminalProcess(
         cmd,
         capture=False,
         relay_terminal_input=True,
         arm_idle_timeout_on_submit=True,
+        rows=term_size.lines,
+        cols=term_size.columns,
     )
 
     idle_event_count = 0
