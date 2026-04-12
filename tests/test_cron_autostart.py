@@ -106,20 +106,17 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertIn("Failed to enable systemd unit", message)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.Popen")
+    @patch("clud.cron.autostart.RunningProcess.run")
     @patch("clud.cron.autostart.run_captured")
     @patch("shutil.which")
-    def test_install_crontab_success(self, mock_which: Mock, mock_run: Mock, mock_popen: Mock) -> None:
+    def test_install_crontab_success(self, mock_which: Mock, mock_run_captured: Mock, mock_rp_run: Mock) -> None:
         """Test successful crontab installation."""
         mock_which.return_value = "/usr/bin/clud"
 
         # Mock crontab -l (no existing entries)
-        # Mock crontab - (successful write)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
-        mock_process = Mock()
-        mock_process.communicate.return_value = ("", "")
-        mock_process.returncode = 0
-        mock_popen.return_value = mock_process
+        mock_run_captured.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        # Mock RunningProcess.run for crontab - (successful write)
+        mock_rp_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         self.installer.platform = "linux"
         self.installer.is_linux = True
@@ -167,21 +164,18 @@ class TestLinuxAutostart(unittest.TestCase):
         self.assertIn("clud executable not found", message)
 
     @patch("sys.platform", "linux")
-    @patch("subprocess.Popen")
+    @patch("clud.cron.autostart.RunningProcess.run")
     @patch("clud.cron.autostart.run_captured")
-    def test_install_linux_fallback_to_crontab(self, mock_run: Mock, mock_popen: Mock) -> None:
+    def test_install_linux_fallback_to_crontab(self, mock_run_captured: Mock, mock_rp_run: Mock) -> None:
         """Test Linux installation falls back to crontab when systemd fails."""
         # First call: systemctl fails
         # Second call: crontab -l returns empty
-        # Third call: crontab - succeeds
-        mock_run.side_effect = [
+        mock_run_captured.side_effect = [
             FileNotFoundError(),  # systemctl not found
             subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=""),  # crontab -l empty
         ]
-        mock_process = Mock()
-        mock_process.communicate.return_value = ("", "")
-        mock_process.returncode = 0
-        mock_popen.return_value = mock_process
+        # Mock RunningProcess.run for crontab - (successful write)
+        mock_rp_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
         with patch("shutil.which", return_value="/usr/bin/clud"):
             self.installer.platform = "linux"

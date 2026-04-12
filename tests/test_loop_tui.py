@@ -174,7 +174,7 @@ class TestLoopTUI(unittest.TestCase):
             app.log_message = MagicMock()
             app.suspend = MagicMock()
 
-            with patch("subprocess.run") as mock_run:
+            with patch("clud.loop_tui.app.RunningProcess.run") as mock_run:
                 mock_run.return_value = None
 
                 # Simulate opening update file
@@ -196,7 +196,7 @@ class TestLoopTUI(unittest.TestCase):
             app.log_message = MagicMock()
             app.suspend = MagicMock()
 
-            with patch("subprocess.run") as mock_run:
+            with patch("clud.loop_tui.app.RunningProcess.run") as mock_run:
                 mock_run.return_value = None
 
                 # File should not exist yet
@@ -236,7 +236,7 @@ class TestLoopTUI(unittest.TestCase):
             app.log_message = MagicMock()
             app.suspend = MagicMock()
 
-            with patch("subprocess.run") as mock_run:
+            with patch("clud.loop_tui.app.RunningProcess.run") as mock_run:
                 mock_run.side_effect = OSError("Editor not found")
 
                 # Try to open update file
@@ -327,7 +327,7 @@ class TestLoopTUI(unittest.TestCase):
             app.log_message = MagicMock()
             app.suspend = MagicMock()
 
-            with patch("subprocess.run") as mock_run:
+            with patch("clud.loop_tui.app.RunningProcess.run") as mock_run:
                 mock_run.return_value = None
 
                 # Handle selection
@@ -1535,51 +1535,39 @@ class TestClipboardAndSelection(unittest.TestCase):
 
     # --- Platform dispatch (sync) ---
 
-    @patch("clud.loop_tui.app.subprocess.Popen")
+    @patch("clud.loop_tui.app.RunningProcess.run")
     @patch("clud.loop_tui.app.sys")
-    def test_copy_to_clipboard_win32(self, mock_sys: MagicMock, mock_popen: MagicMock) -> None:
+    def test_copy_to_clipboard_win32(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
         """copy_to_clipboard uses clip.exe on Windows."""
         mock_sys.platform = "win32"
-        process = MagicMock()
-        process.communicate.return_value = (b"", b"")
-        process.returncode = 0
-        mock_popen.return_value = process
+        mock_run.return_value = MagicMock(returncode=0)
         app = CludLoopTUI()
         app.copy_to_clipboard("hello")
-        mock_popen.assert_called_once_with(["clip.exe"], stdin=-1, stdout=-1, stderr=-1)
-        process.communicate.assert_called_once_with(input=b"hello", timeout=5)
+        mock_run.assert_called_once_with(["clip.exe"], input="hello", capture_output=True, timeout=5)
 
-    @patch("clud.loop_tui.app.subprocess.Popen")
+    @patch("clud.loop_tui.app.RunningProcess.run")
     @patch("clud.loop_tui.app.sys")
-    def test_copy_to_clipboard_darwin(self, mock_sys: MagicMock, mock_popen: MagicMock) -> None:
+    def test_copy_to_clipboard_darwin(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
         """copy_to_clipboard uses pbcopy on macOS."""
         mock_sys.platform = "darwin"
-        process = MagicMock()
-        process.communicate.return_value = (b"", b"")
-        process.returncode = 0
-        mock_popen.return_value = process
+        mock_run.return_value = MagicMock(returncode=0)
         app = CludLoopTUI()
         app.copy_to_clipboard("hello")
-        mock_popen.assert_called_once_with(["pbcopy"], stdin=-1, stdout=-1, stderr=-1)
-        process.communicate.assert_called_once_with(input=b"hello", timeout=5)
+        mock_run.assert_called_once_with(["pbcopy"], input="hello", capture_output=True, timeout=5)
 
-    @patch("clud.loop_tui.app.subprocess.Popen")
+    @patch("clud.loop_tui.app.RunningProcess.run")
     @patch("clud.loop_tui.app.sys")
-    def test_copy_to_clipboard_linux(self, mock_sys: MagicMock, mock_popen: MagicMock) -> None:
+    def test_copy_to_clipboard_linux(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
         """copy_to_clipboard uses xclip on Linux."""
         mock_sys.platform = "linux"
-        process = MagicMock()
-        process.communicate.return_value = (b"", b"")
-        process.returncode = 0
-        mock_popen.return_value = process
+        mock_run.return_value = MagicMock(returncode=0)
         app = CludLoopTUI()
         app.copy_to_clipboard("hello")
-        mock_popen.assert_called_once_with(["xclip", "-selection", "clipboard"], stdin=-1, stdout=-1, stderr=-1)
-        process.communicate.assert_called_once_with(input=b"hello", timeout=5)
+        mock_run.assert_called_once_with(["xclip", "-selection", "clipboard"], input="hello", capture_output=True, timeout=5)
 
     # --- Fallback ---
 
-    @patch("clud.loop_tui.app.subprocess.Popen", side_effect=FileNotFoundError("not found"))
+    @patch("clud.loop_tui.app.RunningProcess.run", side_effect=FileNotFoundError("not found"))
     @patch("clud.loop_tui.app.sys")
     def test_copy_to_clipboard_fallback_on_failure(self, mock_sys: MagicMock, _mock_run: MagicMock) -> None:
         """Falls back to App.copy_to_clipboard (OSC 52) when subprocess fails."""
@@ -1591,21 +1579,18 @@ class TestClipboardAndSelection(unittest.TestCase):
 
     # --- UTF-8 encoding ---
 
-    @patch("clud.loop_tui.app.subprocess.Popen")
+    @patch("clud.loop_tui.app.RunningProcess.run")
     @patch("clud.loop_tui.app.sys")
-    def test_copy_to_clipboard_encodes_utf8(self, mock_sys: MagicMock, mock_popen: MagicMock) -> None:
-        """copy_to_clipboard encodes unicode text as UTF-8 bytes."""
+    def test_copy_to_clipboard_encodes_utf8(self, mock_sys: MagicMock, mock_run: MagicMock) -> None:
+        """copy_to_clipboard passes text directly to RunningProcess.run."""
         mock_sys.platform = "win32"
-        process = MagicMock()
-        process.communicate.return_value = (b"", b"")
-        process.returncode = 0
-        mock_popen.return_value = process
+        mock_run.return_value = MagicMock(returncode=0)
         app = CludLoopTUI()
         text = "Hello \u2603 \u00e9\u00e8\u00ea"
         app.copy_to_clipboard(text)
-        process.communicate.assert_called_once()
-        actual_input = process.communicate.call_args.kwargs["input"]
-        self.assertEqual(actual_input, text.encode("utf-8"))
+        mock_run.assert_called_once()
+        actual_input = mock_run.call_args.kwargs["input"]
+        self.assertEqual(actual_input, text)
 
     # --- SelectableRichLog.get_selection ---
 

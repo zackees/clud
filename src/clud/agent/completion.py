@@ -3,14 +3,13 @@
 import _thread
 import contextlib
 import logging
-import queue
-import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from running_process import PseudoTerminalProcess
 
 from ..output_filter import OutputFilter
 from ..util import handle_keyboard_interrupt
@@ -161,6 +160,9 @@ def detect_agent_completion(
 ) -> CompletionDetectionResult:
     """Detect when a command has completed based on terminal idle state.
 
+    Uses PseudoTerminalProcess from running-process for cross-platform PTY
+    support and centralized process tracking.
+
     Args:
         command: Command and arguments to execute
         idle_timeout: Number of seconds of terminal idle before considering agent complete
@@ -171,76 +173,43 @@ def detect_agent_completion(
     """
     # Use TerminalState context manager to ensure terminal is restored on exit
     with TerminalState():
-        if sys.platform.startswith("win"):
-            return _detect_completion_windows(command, idle_timeout, output_callback)
-        else:
-            return _detect_completion_unix(command, idle_timeout, output_callback)
+        return _detect_completion_pty(command, idle_timeout, output_callback)
 
 
-def _detect_completion_windows(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> CompletionDetectionResult:
-    """Windows PTY detection using pywinpty."""
-    try:
-        from winpty import PtyProcess  # type: ignore[import-untyped]
-    except ImportError as e:
-        logger.error(f"pywinpty not available: {e}")
-        return _fallback_subprocess_detection(command, idle_timeout, output_callback)
-
-    try:
-        cmd_str = subprocess.list2cmdline(command)
-        process = PtyProcess.spawn(cmd_str)  # type: ignore[misc]
-        return _monitor_pty_process(process, idle_timeout, output_callback, "Windows")
-    except Exception as e:
-        logger.error(f"Windows PTY failed: {e}")
-        return _fallback_subprocess_detection(command, idle_timeout, output_callback)
-
-
-def _detect_completion_unix(command: list[str], idle_timeout: float, output_callback: OutputCallback) -> CompletionDetectionResult:
-    """Unix PTY detection using stdlib pty."""
-    try:
-        import os
-        import pty
-    except ImportError as e:
-        logger.error(f"Unix PTY modules unavailable: {e}")
-        return _fallback_subprocess_detection(command, idle_timeout, output_callback)
-
-    try:
-        master, slave = pty.openpty()
-        process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, preexec_fn=os.setsid)
-        os.close(slave)
-
-        try:
-            return _monitor_unix_pty(master, process, idle_timeout, output_callback)
-        finally:
-            os.close(master)
-    except Exception as e:
-        logger.error(f"Unix PTY failed: {e}")
-        return _fallback_subprocess_detection(command, idle_timeout, output_callback)
-
-
-def _monitor_pty_process(
-    process: Any,
+def _detect_completion_pty(
+    command: list[str],
     idle_timeout: float,
     output_callback: OutputCallback,
-    platform: str,
 ) -> CompletionDetectionResult:
-    """Monitor Windows PTY process for completion."""
+    """PTY-based completion detection using PseudoTerminalProcess."""
+    try:
+        pty_proc = PseudoTerminalProcess(
+            command,
+            capture=True,
+            rows=24,
+            cols=80,
+            auto_run=True,
+        )
+    except Exception as e:
+        logger.error(f"PTY process creation failed: {e}")
+        return CompletionDetectionResult(idle_detected=False, returncode=1)
+
     last_activity = time.time()
     saw_meaningful_activity = False
     output_filter = OutputFilter()
     capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
 
     try:
-        while process.isalive():
+        while pty_proc.poll() is None:
             try:
-                data = process.read()
-                if data:
+                chunk = pty_proc.read_non_blocking()
+                if chunk is not None:
+                    data = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else chunk
                     capacity_retry.observe_output(data)
 
-                    # Always send output to callback (user sees everything)
                     if output_callback:
                         output_callback(data)
 
-                    # Only reset idle timer on meaningful activity
                     if output_filter.is_meaningful(data):
                         last_activity = time.time()
                         saw_meaningful_activity = True
@@ -248,241 +217,48 @@ def _monitor_pty_process(
                     else:
                         logger.debug(f"TUI noise filtered: {repr(data[:50])}")
                 else:
-                    time.sleep(0.1)  # No data, avoid busy loop
+                    time.sleep(0.1)
+            except EOFError:
+                break
             except Exception:
-                time.sleep(0.1)  # Read error, continue checking
+                time.sleep(0.1)
 
             retry_time = capacity_retry.maybe_retry(
                 last_activity,
-                process.isalive(),
-                lambda: _send_continue_to_pty_process(process),
+                pty_proc.poll() is None,
+                lambda: pty_proc.write(CODEX_CAPACITY_CONTINUE_INPUT),
             )
             if retry_time is not None:
                 last_activity = retry_time
                 continue
 
             if saw_meaningful_activity and time.time() - last_activity > idle_timeout:
-                logger.info(f"{platform} agent idle for {idle_timeout}s")
-                _terminate_pty_process(process)
-                return CompletionDetectionResult(idle_detected=True, returncode=0)
-
-        return CompletionDetectionResult(idle_detected=False, returncode=getattr(process, "exitstatus", 0) or 0)
-    except KeyboardInterrupt as e:
-
-        def _cleanup() -> None:
-            with contextlib.suppress(Exception):
-                if hasattr(process, "terminate"):
-                    process.terminate()
-            _thread.interrupt_main()
-
-        handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message=f"{platform} agent monitoring interrupted by user")
-        return CompletionDetectionResult(idle_detected=False, returncode=130)
-
-
-def _monitor_unix_pty(
-    master: int,
-    process: subprocess.Popen[Any],
-    idle_timeout: float,
-    output_callback: OutputCallback,
-) -> CompletionDetectionResult:
-    """Monitor Unix PTY for completion."""
-    import os
-    import select
-
-    last_activity = time.time()
-    saw_meaningful_activity = False
-    output_filter = OutputFilter()
-    capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
-
-    try:
-        while process.poll() is None:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    data = os.read(master, 1024)
-                    if data:
-                        data_str = data.decode("utf-8", errors="replace")
-                        capacity_retry.observe_output(data_str)
-
-                        # Always send output to callback (user sees everything)
-                        if output_callback:
-                            output_callback(data_str)
-
-                        # Only reset idle timer on meaningful activity
-                        if output_filter.is_meaningful(data_str):
-                            last_activity = time.time()
-                            saw_meaningful_activity = True
-                            logger.debug(f"Meaningful activity detected: {repr(data_str[:50])}")
-                        else:
-                            logger.debug(f"TUI noise filtered: {repr(data_str[:50])}")
-                except OSError:
-                    break  # PTY closed
-
-            retry_time = capacity_retry.maybe_retry(
-                last_activity,
-                process.poll() is None,
-                lambda: _send_continue_to_unix_pty(master),
-            )
-            if retry_time is not None:
-                last_activity = retry_time
-                continue
-
-            if saw_meaningful_activity and time.time() - last_activity > idle_timeout:
-                logger.info(f"Unix agent idle for {idle_timeout}s")
-                _terminate_subprocess(process)
-                return CompletionDetectionResult(idle_detected=True, returncode=0)
-
-        return CompletionDetectionResult(idle_detected=False, returncode=process.returncode or 0)
-    except KeyboardInterrupt as e:
-
-        def _cleanup() -> None:
-            with contextlib.suppress(Exception):
-                process.terminate()
-            _thread.interrupt_main()
-
-        handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message="Unix agent monitoring interrupted by user")
-        return CompletionDetectionResult(idle_detected=False, returncode=130)
-
-
-def _fallback_subprocess_detection(
-    command: list[str],
-    idle_timeout: float,
-    output_callback: OutputCallback,
-) -> CompletionDetectionResult:
-    """Fallback subprocess detection when PTY unavailable."""
-    logger.warning("Using subprocess fallback - less reliable than PTY")
-
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1,
-        )
-
-        output_queue: queue.Queue[str] = queue.Queue()
-
-        # Start output reader thread
-        def read_output() -> None:
-            if process.stdout:
-                try:
-                    for line in iter(process.stdout.readline, ""):
-                        output_queue.put(line)
-                except Exception as e:
-                    logger.error(f"Error reading output: {e}")
-                finally:
-                    process.stdout.close()
-
-        reader_thread = threading.Thread(target=read_output)
-        reader_thread.daemon = True
-        reader_thread.start()
-
-        # Monitor for idle timeout
-        last_activity = time.time()
-        saw_meaningful_activity = False
-        output_filter = OutputFilter()
-        capacity_retry = _CapacityRetryController(idle_timeout=idle_timeout)
-
-        try:
-            while process.poll() is None:
-                try:
-                    line = output_queue.get(timeout=0.1)
-                    capacity_retry.observe_output(line)
-
-                    # Always send output to callback (user sees everything)
-                    if output_callback:
-                        output_callback(line)
-
-                    # Only reset idle timer on meaningful activity
-                    if output_filter.is_meaningful(line):
-                        last_activity = time.time()
-                        saw_meaningful_activity = True
-                        logger.debug(f"Meaningful activity detected: {repr(line[:50])}")
-                    else:
-                        logger.debug(f"TUI noise filtered: {repr(line[:50])}")
-                except queue.Empty:
-                    pass
-
-                retry_time = capacity_retry.maybe_retry(
-                    last_activity,
-                    process.poll() is None,
-                    lambda: _send_continue_to_subprocess(process),
-                )
-                if retry_time is not None:
-                    last_activity = retry_time
-                    continue
-
-                if saw_meaningful_activity and time.time() - last_activity > idle_timeout:
-                    logger.info(f"Subprocess agent idle for {idle_timeout}s")
-                    _terminate_subprocess(process)
-                    return CompletionDetectionResult(idle_detected=True, returncode=0)
-
-            # Process any remaining output
-            while not output_queue.empty():
-                try:
-                    line = output_queue.get_nowait()
-                    if output_callback:
-                        output_callback(line)
-                except queue.Empty:
-                    break
-
-            return CompletionDetectionResult(idle_detected=False, returncode=process.returncode or 0)
-        except KeyboardInterrupt as e:
-
-            def _cleanup() -> None:
+                logger.info(f"Agent idle for {idle_timeout}s")
                 with contextlib.suppress(Exception):
-                    process.terminate()
-                _thread.interrupt_main()
+                    pty_proc.terminate()
+                with contextlib.suppress(Exception):
+                    pty_proc.close()
+                return CompletionDetectionResult(idle_detected=True, returncode=0)
 
-            handle_keyboard_interrupt(e, cleanup=_cleanup, logger=logger, log_message="Subprocess agent monitoring interrupted by user")
-            return CompletionDetectionResult(idle_detected=False, returncode=130)
-    except Exception as e:
-        logger.error(f"Subprocess detection failed: {e}")
-        return CompletionDetectionResult(idle_detected=False, returncode=1)
+        returncode = pty_proc.poll() or 0
+        return CompletionDetectionResult(idle_detected=False, returncode=returncode)
 
+    except KeyboardInterrupt as e:
 
-def _terminate_subprocess(process: subprocess.Popen[Any], timeout: float = 2.0) -> None:
-    with contextlib.suppress(Exception):
-        process.terminate()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=timeout)
-    if process.poll() is None:
-        with contextlib.suppress(Exception):
-            process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=timeout)
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                pty_proc.terminate()
+            with contextlib.suppress(Exception):
+                pty_proc.close()
+            _thread.interrupt_main()
 
-
-def _terminate_pty_process(process: Any) -> None:
-    with contextlib.suppress(Exception):
-        if hasattr(process, "terminate"):
-            process.terminate()
-    with contextlib.suppress(Exception):
-        if hasattr(process, "close"):
-            process.close()
-
-
-def _send_continue_to_pty_process(process: Any) -> None:
-    """Send the Codex retry prompt into a Windows PTY-backed process."""
-    if hasattr(process, "write"):
-        process.write(CODEX_CAPACITY_CONTINUE_INPUT)
-
-
-def _send_continue_to_unix_pty(master: int) -> None:
-    """Send the Codex retry prompt into a Unix PTY."""
-    import os
-
-    os.write(master, CODEX_CAPACITY_CONTINUE_INPUT.encode("utf-8"))
-
-
-def _send_continue_to_subprocess(process: subprocess.Popen[Any]) -> None:
-    """Send the Codex retry prompt into the subprocess stdin fallback."""
-    if process.stdin is None:
-        return
-    process.stdin.write(CODEX_CAPACITY_CONTINUE_LINE)
-    process.stdin.flush()
+        handle_keyboard_interrupt(
+            e,
+            cleanup=_cleanup,
+            logger=logger,
+            log_message="Agent monitoring interrupted by user",
+        )
+        return CompletionDetectionResult(idle_detected=False, returncode=130)
 
 
 # Legacy class-based interface for compatibility

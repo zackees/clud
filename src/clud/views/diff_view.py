@@ -2,8 +2,9 @@
 
 import difflib
 import logging
-import subprocess
 from typing import Literal
+
+from running_process import RunningProcess
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +62,15 @@ class DiffView:
         """
         # Try to use diff2html CLI if available
         try:
-            process = subprocess.Popen(
+            result = RunningProcess.run(
                 ["diff2html", "--style", "line", "--format", "ansi"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            stdout, _stderr = process.communicate(
-                input=unified_diff.encode(),
+                input=unified_diff,
+                capture_output=True,
                 timeout=5,
             )
-            if process.returncode == 0:
-                return stdout.decode()
-        except (subprocess.SubprocessError, FileNotFoundError):
+            if result.returncode == 0:
+                return result.stdout
+        except (OSError, FileNotFoundError):
             # Fall back to simple ANSI coloring
             pass
 
@@ -125,19 +122,15 @@ class DiffView:
         """
         # Try to use diff2html CLI if available
         try:
-            process = subprocess.Popen(
+            result = RunningProcess.run(
                 ["diff2html", "--style", "side", "--format", "html"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            stdout, _stderr = process.communicate(
-                input=unified_diff.encode(),
+                input=unified_diff,
+                capture_output=True,
                 timeout=5,
             )
-            if process.returncode == 0:
-                return stdout.decode()
-        except (subprocess.SubprocessError, FileNotFoundError):
+            if result.returncode == 0:
+                return result.stdout
+        except (OSError, FileNotFoundError):
             logger.warning("diff2html not found, falling back to simple HTML")
 
         # Fall back to simple HTML rendering

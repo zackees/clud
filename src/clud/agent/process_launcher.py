@@ -2,24 +2,22 @@
 
 Launches Claude subprocess in a new process group so that Ctrl-C only
 reaches the parent (clud). The parent then explicitly kills the child
-process tree on interrupt. An atexit handler guarantees cleanup of any
-lingering child processes.
+process tree on interrupt. All launched processes are centrally tracked
+by the RunningProcessManager singleton for automatic zombie cleanup.
 
 On MSYS/mintty (Windows git-bash), SIGINT is never delivered to native
 Windows Python because mintty lacks a Windows Console. In that environment
-we skip CREATE_NEW_PROCESS_GROUP so the child stays in the same process
+we skip process group isolation so the child stays in the same process
 group and receives SIGINT directly from the MSYS PTY driver. We also
 monitor os.getppid() to detect when the parent (uv) is killed by SIGINT.
 """
 
-import atexit
 import contextlib
 import os
-import queue
 import shutil
 import subprocess
 import sys
-import threading
+import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -39,22 +37,6 @@ from running_process import (
 
 from ..util import handle_keyboard_interrupt
 
-# Module-level tracking of the active subprocess for atexit cleanup.
-_active_process: subprocess.Popen[bytes] | None = None
-_active_process_lock = threading.Lock()
-
-
-def _cleanup_active_process() -> None:
-    """Kill any active child process on interpreter exit."""
-    with _active_process_lock:
-        proc = _active_process
-    if proc is not None and proc.poll() is None:
-        with contextlib.suppress(Exception):
-            kill_process_tree(proc.pid)
-
-
-atexit.register(_cleanup_active_process)
-
 
 @dataclass
 class PtySessionResult:
@@ -63,25 +45,6 @@ class PtySessionResult:
     returncode: int
     idle_detected: bool = False
     idle_event_count: int = 0
-
-
-def _reader_thread(proc: subprocess.Popen[bytes], q: queue.Queue[str | None]) -> None:
-    """Read stdout lines from the subprocess and push them to the queue.
-
-    Runs as a daemon thread. Sends None as a sentinel when EOF is reached.
-    """
-    assert proc.stdout is not None
-    try:
-        for raw_line in proc.stdout:
-            try:
-                line = raw_line.decode("utf-8", errors="replace")
-            except Exception:
-                line = repr(raw_line)
-            q.put(line)
-    except Exception:
-        pass
-    finally:
-        q.put(None)  # sentinel
 
 
 def _is_msys_environment() -> bool:
@@ -249,128 +212,113 @@ def run_claude_process(
     if allow_child_ctrl_c and sys.platform == "win32":
         return _run_with_child_ctrl_c(cmd, propagate_keyboard_interrupt)
 
-    global _active_process
-
     # Record parent PID so we can detect if it dies (SIGINT killed uv).
     original_ppid = os.getppid()
 
-    # Platform-specific process-group configuration.
-    popen_kwargs: dict[str, object] = {}
-    if sys.platform == "win32":
-        if not _is_msys_environment():
-            # Native Windows console: isolate child so Ctrl-C doesn't propagate.
-            CREATE_NEW_PROCESS_GROUP = 0x00000200
-            popen_kwargs["creationflags"] = CREATE_NEW_PROCESS_GROUP
-        # On MSYS/mintty: do NOT set CREATE_NEW_PROCESS_GROUP.
-        # SIGINT is delivered via POSIX signals, not GenerateConsoleCtrlEvent.
-        # Keeping the child in the same group lets MSYS deliver SIGINT to it
-        # directly, and _is_interrupt_exit_code() detects the resulting exit code.
-    else:
-        popen_kwargs["start_new_session"] = True
-
-    if use_shell:
-        shell_cmd = subprocess.list2cmdline(cmd)
-        popen_kwargs["shell"] = True
-        cmd_arg: str | list[str] = shell_cmd
-    else:
-        cmd_arg = cmd
-
     capture = stdout_callback is not None
 
-    proc = subprocess.Popen(
-        cmd_arg,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.STDOUT if capture else None,
-        stdin=subprocess.DEVNULL if capture else None,
-        **popen_kwargs,  # type: ignore[arg-type]
-    )
+    # On MSYS/mintty, keep child in the same process group so the MSYS
+    # PTY driver can deliver SIGINT directly. Everywhere else, isolate.
+    msys = sys.platform == "win32" and _is_msys_environment()
 
-    # Register as active process for atexit cleanup.
-    with _active_process_lock:
-        _active_process = proc
-
-    try:
-        if capture:
-            assert proc.stdout is not None
-            q: queue.Queue[str | None] = queue.Queue()
-            t = threading.Thread(target=_reader_thread, args=(proc, q), daemon=True)
-            t.start()
-
-            # Poll the queue with a short timeout to stay responsive to Ctrl-C.
-            eof = False
-            while not eof or proc.poll() is None:
-                # Detect parent death (e.g. uv killed by SIGINT on MSYS).
-                if os.getppid() != original_ppid:
-                    if proc.poll() is None:
-                        with contextlib.suppress(Exception):
-                            kill_process_tree(proc.pid)
-                        with contextlib.suppress(subprocess.TimeoutExpired):
-                            proc.wait(timeout=2)
-                    raise KeyboardInterrupt
-
-                try:
-                    line = q.get(timeout=0.1)
-                except queue.Empty:
-                    # No data yet — check if process is still alive.
-                    if proc.poll() is not None:
-                        # Drain remaining items.
-                        while True:
-                            try:
-                                line = q.get_nowait()
-                            except queue.Empty:
-                                break
-                            if line is None:
-                                break
-                            stdout_callback(line)
-                        break
-                    continue
-
-                if line is None:
-                    eof = True
-                    continue
-                stdout_callback(line)
-
-            # Wait for process to finish (should be fast since EOF was reached).
-            proc.wait()
-        else:
-            # Interactive mode: poll in 0.1 s increments.
-            while proc.poll() is None:
-                # Detect parent death (e.g. uv killed by SIGINT on MSYS).
-                if os.getppid() != original_ppid:
-                    if proc.poll() is None:
-                        with contextlib.suppress(Exception):
-                            kill_process_tree(proc.pid)
-                        with contextlib.suppress(subprocess.TimeoutExpired):
-                            proc.wait(timeout=2)
-                    raise KeyboardInterrupt
-
-                try:
-                    proc.wait(timeout=0.1)
-                except subprocess.TimeoutExpired:
-                    continue
-
-        return proc.returncode
-
-    except KeyboardInterrupt as e:
-        if debug_keyboard_interrupt:
-            print("DEBUG: Ctrl-C caught by process launcher", file=sys.stderr)
-            traceback.print_stack(file=sys.stderr)
-
-        def _cleanup() -> None:
-            if proc.poll() is None:
-                with contextlib.suppress(Exception):
-                    kill_process_tree(proc.pid)
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(timeout=2)
-
-        handle_keyboard_interrupt(
-            e,
-            cleanup=_cleanup,
-            reraise_on_main_thread=propagate_keyboard_interrupt,
+    if capture:
+        # Captured mode: RunningProcess drains stdout via internal threads;
+        # we poll drain_stdout() with a short sleep to stay responsive to
+        # Ctrl-C and to monitor parent PID.
+        cmd_arg: str | list[str] = subprocess.list2cmdline(cmd) if use_shell else cmd
+        proc = RunningProcess(
+            command=cmd_arg,
+            capture=True,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            shell=use_shell,
+            allows_child_ctrl_c_interruption=msys,
+            auto_run=True,
         )
-        return proc.returncode or 130  # Worker thread: suppressed
 
-    finally:
-        with _active_process_lock:
-            if _active_process is proc:
-                _active_process = None
+        try:
+            while True:
+                # Detect parent death (e.g. uv killed by SIGINT on MSYS).
+                if os.getppid() != original_ppid:
+                    if proc.poll() is None:
+                        with contextlib.suppress(Exception):
+                            kill_process_tree(proc.pid)  # type: ignore[arg-type]
+                    raise KeyboardInterrupt
+
+                # Drain stdout lines and pass to callback.
+                for line_value in proc.drain_stdout():
+                    line = line_value.decode("utf-8", errors="replace") if isinstance(line_value, bytes) else line_value
+                    stdout_callback(line)
+
+                code = proc.poll()
+                if code is not None:
+                    # Final drain after process exit.
+                    for line_value in proc.drain_stdout():
+                        line = line_value.decode("utf-8", errors="replace") if isinstance(line_value, bytes) else line_value
+                        stdout_callback(line)
+                    return code
+
+                time.sleep(0.01)
+
+        except KeyboardInterrupt as e:
+            if debug_keyboard_interrupt:
+                print("DEBUG: Ctrl-C caught by process launcher", file=sys.stderr)
+                traceback.print_stack(file=sys.stderr)
+
+            def _cleanup_captured() -> None:
+                if proc.poll() is None:
+                    with contextlib.suppress(Exception):
+                        kill_process_tree(proc.pid)  # type: ignore[arg-type]
+
+            handle_keyboard_interrupt(
+                e,
+                cleanup=_cleanup_captured,
+                reraise_on_main_thread=propagate_keyboard_interrupt,
+            )
+            return proc.poll() or 130  # Worker thread: suppressed
+
+    else:
+        # Interactive mode: use RunningProcess.interactive() for console
+        # isolation. CONSOLE_SHARED on MSYS lets the PTY driver deliver
+        # SIGINT; CONSOLE_ISOLATED everywhere else prevents Ctrl-C
+        # propagation to the child.
+        mode = InteractiveMode.CONSOLE_SHARED if msys else InteractiveMode.CONSOLE_ISOLATED
+        iproc = RunningProcess.interactive(
+            cmd,
+            mode=mode,
+            shell=use_shell if use_shell else None,
+        )
+
+        try:
+            while iproc.poll() is None:
+                # Detect parent death (e.g. uv killed by SIGINT on MSYS).
+                if os.getppid() != original_ppid:
+                    if iproc.poll() is None and iproc.pid is not None:
+                        with contextlib.suppress(Exception):
+                            kill_process_tree(iproc.pid)
+                    raise KeyboardInterrupt
+                time.sleep(0.1)
+
+            return iproc.poll() or 0
+
+        except KeyboardInterrupt as e:
+            if debug_keyboard_interrupt:
+                print("DEBUG: Ctrl-C caught by process launcher", file=sys.stderr)
+                traceback.print_stack(file=sys.stderr)
+
+            def _cleanup_interactive() -> None:
+                with contextlib.suppress(Exception):
+                    iproc.send_interrupt()
+                with contextlib.suppress(Exception):
+                    iproc.terminate()
+                with contextlib.suppress(Exception):
+                    iproc.kill()
+                while iproc.poll() is None:
+                    pass
+
+            handle_keyboard_interrupt(
+                e,
+                cleanup=_cleanup_interactive,
+                reraise_on_main_thread=propagate_keyboard_interrupt,
+            )
+            return iproc.poll() or 130  # Worker thread: suppressed

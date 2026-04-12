@@ -1,7 +1,7 @@
 """Terminal manager for PTY process management in multi-terminal daemon.
 
-Handles PTY process creation, communication, and lifecycle for both Windows
-(using pywinpty) and Unix (using pty/os) platforms.
+Handles PTY process creation, communication, and lifecycle using the
+running-process library's PseudoTerminalProcess for cross-platform support.
 """
 
 from __future__ import annotations
@@ -11,10 +11,11 @@ import contextlib
 import json
 import logging
 import os
-import platform
 import sys
 from pathlib import Path
 from typing import Any, cast
+
+from running_process import PseudoTerminalProcess
 
 from ..output_filter import OutputFilter
 from .input_buffer import InputSnapshot, TerminalInputTracker
@@ -46,8 +47,7 @@ class Terminal:
         self.is_running = False
 
         # PTY-related state (initialized in start())
-        self._pty_process: Any = None  # PtyProcess on Windows, pid on Unix
-        self._pty_fd: int | None = None
+        self._pty_process: PseudoTerminalProcess | None = None
         self._read_task: asyncio.Task[None] | None = None
         self._websocket: Any = None  # websockets.WebSocketServerProtocol
         self._cols: int = 80
@@ -59,8 +59,8 @@ class Terminal:
     def start(self) -> bool:
         """Start the PTY process.
 
-        Creates a new PTY process with the appropriate shell for the platform.
-        On Windows, uses pywinpty. On Unix, uses the standard pty module.
+        Creates a new PTY process using PseudoTerminalProcess from the
+        running-process library for cross-platform support.
 
         Returns:
             True if the process started successfully, False otherwise
@@ -70,93 +70,43 @@ class Terminal:
             return True
 
         try:
-            if platform.system() == "Windows":
-                return self._start_windows()
-            else:
-                return self._start_unix()
+            shell = self._get_shell()
+            logger.debug("Using shell for terminal %d: %s", self.terminal_id, shell)
+
+            self._pty_process = PseudoTerminalProcess(
+                [shell],
+                cwd=self.cwd,
+                rows=self._rows,
+                cols=self._cols,
+                capture=True,
+                auto_run=True,
+            )
+            self.is_running = True
+            logger.info("Started terminal %d with %s (pid=%s)", self.terminal_id, shell, self._pty_process.pid)
+            return True
+
         except Exception as e:
             logger.error("Failed to start terminal %d: %s", self.terminal_id, e)
             return False
 
-    def _start_windows(self) -> bool:
-        """Start PTY process on Windows using pywinpty.
+    def _get_shell(self) -> str:
+        """Detect the best shell for the current platform.
 
-        Returns:
-            True if started successfully, False otherwise
-        """
-        try:
-            # Import pywinpty - only available on Windows
-            from winpty import PtyProcess  # type: ignore[import-not-found]
-
-            # Detect shell - prefer git-bash, fallback to cmd
-            shell = self._get_windows_shell()
-            logger.debug("Using shell for terminal %d: %s", self.terminal_id, shell)
-
-            # Start PTY process - pywinpty has incomplete type stubs
-            self._pty_process = PtyProcess.spawn(  # type: ignore[reportUnknownMemberType]
-                [shell],
-                dimensions=(self._rows, self._cols),
-                cwd=self.cwd,
-            )
-            self.is_running = True
-            logger.info("Started Windows terminal %d with %s", self.terminal_id, shell)
-            return True
-
-        except ImportError as e:
-            logger.error("pywinpty not available: %s", e)
-            return False
-        except Exception as e:
-            logger.error("Failed to start Windows terminal %d: %s", self.terminal_id, e)
-            return False
-
-    def _start_unix(self) -> bool:
-        """Start PTY process on Unix using the pty module.
-
-        Returns:
-            True if started successfully, False otherwise
-        """
-        try:
-            import pty
-
-            # Get user's shell
-            shell = os.environ.get("SHELL", "/bin/sh")
-
-            # Create PTY - pty.fork() is Unix-only
-            pid, fd = pty.fork()  # type: ignore[attr-defined]
-            if pid == 0:
-                # Child process
-                os.chdir(self.cwd)
-                os.execvp(shell, [shell])
-                # If execvp fails, exit (unreachable if execvp succeeds)
-                sys.exit(1)  # pragma: no cover
-            else:
-                # Parent process
-                self._pty_fd = fd
-                self._pty_process = pid
-                self.is_running = True
-                logger.info("Started Unix terminal %d with %s (pid=%d)", self.terminal_id, shell, pid)
-                return True
-
-        except Exception as e:
-            logger.error("Failed to start Unix terminal %d: %s", self.terminal_id, e)
-            return False
-
-    def _get_windows_shell(self) -> str:
-        """Detect the best shell to use on Windows.
-
-        Prefers git-bash if available, otherwise uses cmd.exe.
+        On Windows, prefers git-bash if available, otherwise uses cmd.exe.
+        On Unix, uses the SHELL environment variable or /bin/sh.
 
         Returns:
             Path to shell executable
         """
-        from clud.util import detect_git_bash
+        if sys.platform == "win32":
+            from clud.util import detect_git_bash
 
-        git_bash = detect_git_bash()
-        if git_bash:
-            return git_bash
+            git_bash = detect_git_bash()
+            if git_bash:
+                return git_bash
+            return os.environ.get("COMSPEC", "cmd.exe")
 
-        # Fallback to cmd.exe
-        return os.environ.get("COMSPEC", "cmd.exe")
+        return os.environ.get("SHELL", "/bin/sh")
 
     def stop(self) -> None:
         """Stop the PTY process and clean up resources."""
@@ -169,47 +119,18 @@ class Terminal:
                 self._read_task.cancel()
                 self._read_task = None
 
-            if platform.system() == "Windows":
-                self._stop_windows()
-            else:
-                self._stop_unix()
+            if self._pty_process is not None:
+                with contextlib.suppress(Exception):
+                    self._pty_process.terminate()
+                with contextlib.suppress(Exception):
+                    self._pty_process.close()
 
         except Exception as e:
             logger.error("Error stopping terminal %d: %s", self.terminal_id, e)
         finally:
             self.is_running = False
             self._pty_process = None
-            self._pty_fd = None
             self._websocket = None
-
-    def _stop_windows(self) -> None:
-        """Stop Windows PTY process."""
-        if self._pty_process is not None:
-            try:
-                from winpty import PtyProcess  # type: ignore[import-not-found]
-
-                if isinstance(self._pty_process, PtyProcess):
-                    self._pty_process.terminate()
-            except Exception as e:
-                logger.warning("Error terminating Windows PTY %d: %s", self.terminal_id, e)
-
-    def _stop_unix(self) -> None:
-        """Stop Unix PTY process."""
-        import signal
-
-        # Close file descriptor
-        if self._pty_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(self._pty_fd)
-
-        # Kill child process
-        if self._pty_process is not None and isinstance(self._pty_process, int):
-            try:
-                os.kill(self._pty_process, signal.SIGTERM)
-                # Wait briefly for clean termination - WNOHANG is Unix-only
-                os.waitpid(self._pty_process, os.WNOHANG)  # type: ignore[attr-defined]
-            except (OSError, ChildProcessError):
-                pass
 
     async def handle_websocket(self, websocket: Any) -> None:
         """Handle WebSocket connection for this terminal.
@@ -318,37 +239,12 @@ class Terminal:
         self._cols = cols
         self._rows = rows
 
-        if platform.system() == "Windows":
-            await self._resize_windows(cols, rows)
-        else:
-            await self._resize_unix(cols, rows)
-
-    async def _resize_windows(self, cols: int, rows: int) -> None:
-        """Resize Windows PTY."""
         try:
             if self._pty_process is not None:
-                from winpty import PtyProcess  # type: ignore[import-not-found]
-
-                if isinstance(self._pty_process, PtyProcess):
-                    self._pty_process.setwinsize(rows, cols)  # type: ignore[reportUnknownMemberType]
-                    logger.debug("Resized Windows terminal %d to %dx%d", self.terminal_id, cols, rows)
+                self._pty_process.resize(rows, cols)
+                logger.debug("Resized terminal %d to %dx%d", self.terminal_id, cols, rows)
         except Exception as e:
-            logger.warning("Failed to resize Windows terminal %d: %s", self.terminal_id, e)
-
-    async def _resize_unix(self, cols: int, rows: int) -> None:
-        """Resize Unix PTY using TIOCSWINSZ."""
-        try:
-            import fcntl
-            import struct
-            import termios
-
-            if self._pty_fd is not None:
-                winsize = struct.pack("HHHH", rows, cols, 0, 0)
-                # fcntl.ioctl and termios.TIOCSWINSZ are Unix-only
-                fcntl.ioctl(self._pty_fd, termios.TIOCSWINSZ, winsize)  # type: ignore[attr-defined]
-                logger.debug("Resized Unix terminal %d to %dx%d", self.terminal_id, cols, rows)
-        except Exception as e:
-            logger.warning("Failed to resize Unix terminal %d: %s", self.terminal_id, e)
+            logger.warning("Failed to resize terminal %d: %s", self.terminal_id, e)
 
     async def _write_to_pty(self, data: bytes) -> None:
         """Write data to the PTY input.
@@ -356,14 +252,12 @@ class Terminal:
         Args:
             data: Bytes to write to PTY stdin
         """
-        if not self.is_running:
+        if not self.is_running or self._pty_process is None:
             return
 
         try:
-            if platform.system() == "Windows":
-                await self._write_to_pty_windows(data)
-            else:
-                await self._write_to_pty_unix(data)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._pty_process.write, data)
         except Exception as e:
             logger.error("Error writing to PTY %d: %s", self.terminal_id, e)
 
@@ -371,23 +265,6 @@ class Terminal:
         """Send internally generated input while keeping draft tracking aligned."""
         self._input_tracker.observe(data)
         await self._write_to_pty(data.encode("utf-8"))
-
-    async def _write_to_pty_windows(self, data: bytes) -> None:
-        """Write data to Windows PTY."""
-        if self._pty_process is not None:
-            from winpty import PtyProcess  # type: ignore[import-not-found]
-
-            if isinstance(self._pty_process, PtyProcess):
-                # Run in executor to avoid blocking - pywinpty has incomplete type stubs
-                loop = asyncio.get_event_loop()
-                write_func: Any = self._pty_process.write  # type: ignore[reportUnknownMemberType]
-                await loop.run_in_executor(None, write_func, data.decode("utf-8", errors="replace"))
-
-    async def _write_to_pty_unix(self, data: bytes) -> None:
-        """Write data to Unix PTY."""
-        if self._pty_fd is not None:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, os.write, self._pty_fd, data)
 
     async def _read_pty_output(self) -> None:
         """Read output from PTY and send to WebSocket.
@@ -397,11 +274,7 @@ class Terminal:
         """
         try:
             while self.is_running and self._websocket:
-                if platform.system() == "Windows":
-                    data = await self._read_from_pty_windows()
-                else:
-                    data = await self._read_from_pty_unix()
-
+                data = await self._read_from_pty()
                 if data and self._websocket:
                     await self._websocket.send(data)
 
@@ -411,8 +284,8 @@ class Terminal:
             if self.is_running:
                 logger.error("Error reading from PTY %d: %s", self.terminal_id, e)
 
-    async def _read_from_pty_windows(self) -> bytes | None:
-        """Read data from Windows PTY.
+    async def _read_from_pty(self) -> bytes | None:
+        """Read data from PTY using PseudoTerminalProcess.
 
         Returns:
             Bytes read from PTY, or None if no data available
@@ -421,48 +294,20 @@ class Terminal:
             return None
 
         try:
-            from winpty import PtyProcess  # type: ignore[import-not-found]
-
-            if isinstance(self._pty_process, PtyProcess):
-                loop = asyncio.get_event_loop()
-                # Use a moderate timeout to allow shell processing while
-                # still being responsive to is_running checks
-                data = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._pty_process.read, 4096),
-                    timeout=0.5,
-                )
-                if data:
-                    return data.encode("utf-8", errors="replace")
-        except asyncio.TimeoutError:
-            pass
-        except Exception as e:
-            if self.is_running:
-                logger.debug("Read error from Windows PTY %d: %s", self.terminal_id, e)
-        return None
-
-    async def _read_from_pty_unix(self) -> bytes | None:
-        """Read data from Unix PTY.
-
-        Returns:
-            Bytes read from PTY, or None if no data available
-        """
-        if self._pty_fd is None:
-            return None
-
-        try:
             loop = asyncio.get_event_loop()
             # Use a moderate timeout to allow shell processing while
             # still being responsive to is_running checks
-            data = await asyncio.wait_for(
-                loop.run_in_executor(None, os.read, self._pty_fd, 4096),
-                timeout=0.5,
+            chunk = await asyncio.wait_for(
+                loop.run_in_executor(None, self._pty_process.read, 0.5),
+                timeout=1.0,
             )
-            return data if data else None
-        except asyncio.TimeoutError:
+            if chunk:
+                return chunk.encode("utf-8", errors="replace") if isinstance(chunk, str) else chunk
+        except (asyncio.TimeoutError, TimeoutError, EOFError):
             pass
         except Exception as e:
             if self.is_running:
-                logger.debug("Read error from Unix PTY %d: %s", self.terminal_id, e)
+                logger.debug("Read error from PTY %d: %s", self.terminal_id, e)
         return None
 
 

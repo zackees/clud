@@ -76,16 +76,12 @@ class LoopWorkerApp(CludLoopTUI):
         self.run_loop_worker()
 
     def _kill_active_subprocess(self) -> None:
-        """Kill the active Claude subprocess immediately for fast exit."""
-        from running_process import kill_process_tree
+        """Kill all active subprocesses immediately for fast exit."""
+        from running_process import RunningProcessManagerSingleton, kill_process_tree
 
-        from ..agent.process_launcher import _active_process, _active_process_lock
-
-        with _active_process_lock:
-            proc = _active_process
-        if proc is not None and proc.poll() is None:
+        for info in RunningProcessManagerSingleton.list_active():
             with contextlib.suppress(Exception):
-                kill_process_tree(proc.pid)
+                kill_process_tree(info.pid)
 
     @work(exclusive=True, thread=True)
     def run_loop_worker(self) -> None:

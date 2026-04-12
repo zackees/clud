@@ -3,7 +3,6 @@
 import logging
 import os
 import re
-import subprocess
 import sys
 import traceback
 import uuid
@@ -209,7 +208,7 @@ def run_agent(args: "Args") -> int:
 
         # If --cmd is provided, execute the command directly instead of launching Claude
         if args.cmd:
-            result = subprocess.run(args.cmd, shell=True)
+            result = RunningProcess.run(args.cmd, shell=True)
             return result.returncode
 
         # Set environment variable to indicate we're running inside clud
