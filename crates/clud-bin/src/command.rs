@@ -334,14 +334,14 @@ mod tests {
 
     #[test]
     fn test_up_with_publish() {
-        let p = plan(&["clud", "up", "-p"]);
+        let p = plan(&["clud", "up", "--publish"]);
         let prompt = prompt_from_plan(&p);
         assert!(prompt.contains("codeup -m \"<your one-line summary>\" -p"));
     }
 
     #[test]
     fn test_up_with_message_and_publish() {
-        let p = plan(&["clud", "up", "-m", "release v2", "-p"]);
+        let p = plan(&["clud", "up", "-m", "release v2", "--publish"]);
         let prompt = prompt_from_plan(&p);
         assert!(prompt.contains("codeup -m \"release v2\" -p"));
     }

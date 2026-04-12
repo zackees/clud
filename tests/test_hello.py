@@ -115,7 +115,7 @@ def test_dry_run_up_with_message() -> None:
 
 
 def test_dry_run_up_with_publish() -> None:
-    result = _run("--dry-run", "up", "-p")
+    result = _run("--dry-run", "up", "--publish")
     assert result.returncode == 0
     data = json.loads(result.stdout)
     prompt = data["command"][-1]

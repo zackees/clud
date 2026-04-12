@@ -149,7 +149,7 @@ class TestCommandPrompts:
         assert "<your one-line summary>" not in prompt
 
     def test_up_with_publish(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
-        result = _run(clud_binary, "up", "-p", env=mock_env)
+        result = _run(clud_binary, "up", "--publish", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
         idx = report["args"].index("-p")
@@ -160,7 +160,7 @@ class TestCommandPrompts:
     def test_up_with_message_and_publish(
         self, clud_binary: Path, mock_env: dict[str, str]
     ) -> None:
-        result = _run(clud_binary, "up", "-m", "release v2", "-p", env=mock_env)
+        result = _run(clud_binary, "up", "-m", "release v2", "--publish", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
         idx = report["args"].index("-p")

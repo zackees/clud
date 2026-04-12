@@ -77,7 +77,7 @@ pub enum Command {
         message: Option<String>,
 
         /// Publish (push) after committing.
-        #[arg(short = 'p', long = "publish")]
+        #[arg(long = "publish")]
         publish: bool,
     },
 
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_up_with_publish() {
-        let args = parse(&["clud", "up", "-p"]);
+        let args = parse(&["clud", "up", "--publish"]);
         match args.command {
             Some(Command::Up {
                 ref message,
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_up_with_message_and_publish() {
-        let args = parse(&["clud", "up", "-m", "release", "-p"]);
+        let args = parse(&["clud", "up", "-m", "release", "--publish"]);
         match args.command {
             Some(Command::Up {
                 ref message,
