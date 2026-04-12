@@ -7,4 +7,4 @@ jobs:
   call:
     uses: ./.github/workflows/_unit-test.yml
     with:
-      runs-on: macos-14
+      runs-on: macos-15

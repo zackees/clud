@@ -7,6 +7,6 @@ jobs:
   call:
     uses: ./.github/workflows/_build.yml
     with:
-      runs-on: macos-14
+      runs-on: macos-15
       artifact-name: wheels-macos-arm
       build-mode: dev
