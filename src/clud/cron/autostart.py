@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+from running_process import RunningProcess
+
 from clud.util.process import run_captured
 
 logger = logging.getLogger(__name__)
@@ -210,21 +212,19 @@ WantedBy=default.target
 
             # Add entry to crontab
             new_crontab = current_crontab + f"\n{crontab_entry}\n"
-            process = subprocess.Popen(
+            result = RunningProcess.run(
                 ["crontab", "-"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                input=new_crontab,
+                capture_output=True,
+                timeout=5,
             )
-            stdout, stderr = process.communicate(input=new_crontab, timeout=5)
 
-            if process.returncode == 0:
+            if result.returncode == 0:
                 msg = "Crontab @reboot entry installed"
                 logger.info(msg)
                 return True, msg
             else:
-                return False, f"Failed to update crontab: {stderr}"
+                return False, f"Failed to update crontab: {result.stderr}"
 
         except FileNotFoundError:
             return False, "crontab command not found"

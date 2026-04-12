@@ -8,6 +8,8 @@ clud subprocesses.
 import subprocess
 import sys
 
+from running_process import RunningProcess
+
 
 def run_clud_subprocess(
     prompt: str,
@@ -35,11 +37,7 @@ def run_clud_subprocess(
         if additional_args:
             cmd.extend(additional_args)
 
-        result = subprocess.run(
-            cmd,
-            check=False,  # Don't raise on non-zero exit
-            capture_output=False,  # Let output go to terminal
-        )
+        result = RunningProcess.run(cmd, check=False)
         return result.returncode
     except FileNotFoundError:
         print("Error: Python interpreter not found.", file=sys.stderr)
@@ -56,8 +54,8 @@ def _execute_command(cmd: list[str], use_shell: bool = False, verbose: bool = Fa
         cmd_str = subprocess.list2cmdline(cmd)
         if verbose:
             print(f"DEBUG: Retrying with shell=True: {cmd_str}", file=sys.stderr)
-        result = subprocess.run(cmd_str, shell=True)
+        result = RunningProcess.run(cmd_str, shell=True)
     else:
-        result = subprocess.run(cmd)
+        result = RunningProcess.run(cmd)
 
     return result.returncode

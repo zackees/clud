@@ -473,7 +473,7 @@ class TestLoopTUIE2ECallbacks(unittest.TestCase):
                 # Mock both subprocess.run and app.suspend
                 import unittest.mock
 
-                with unittest.mock.patch("subprocess.run"), unittest.mock.patch.object(app, "suspend"):
+                with unittest.mock.patch("clud.loop_tui.app.RunningProcess.run"), unittest.mock.patch.object(app, "suspend"):
                     async with app.run_test() as pilot:
                         await pilot.pause()
 
@@ -503,7 +503,7 @@ class TestLoopTUIE2EEditorIntegration(unittest.TestCase):
                 # Mock subprocess to avoid actually opening editor
                 import unittest.mock
 
-                with unittest.mock.patch("subprocess.run"):
+                with unittest.mock.patch("clud.loop_tui.app.RunningProcess.run"):
                     async with app.run_test() as pilot:
                         await pilot.pause()
 

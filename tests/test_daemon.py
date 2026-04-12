@@ -80,7 +80,6 @@ class TestTerminalCreation(unittest.TestCase):
         terminal = Terminal(terminal_id=3)
 
         self.assertIsNone(terminal._pty_process)
-        self.assertIsNone(terminal._pty_fd)
         self.assertIsNone(terminal._read_task)
         self.assertIsNone(terminal._websocket)
         self.assertEqual(terminal._cols, 80)

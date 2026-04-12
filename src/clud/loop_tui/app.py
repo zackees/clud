@@ -2,13 +2,13 @@
 
 import logging
 import os
-import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 from rich.text import Text
+from running_process import RunningProcess
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Container
@@ -202,15 +202,14 @@ class CludLoopTUI(App[None]):
             cmd = ["xclip", "-selection", "clipboard"]
 
         try:
-            process = subprocess.Popen(
+            result = RunningProcess.run(
                 cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                input=text,
+                capture_output=True,
+                timeout=5,
             )
-            process.communicate(input=text.encode("utf-8"), timeout=5)
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, cmd)
+            if result.returncode != 0:
+                raise OSError(f"Clipboard command failed with exit code {result.returncode}")
         except Exception:
             logging.debug("Platform clipboard command failed, falling back to OSC 52")
             super().copy_to_clipboard(text)
@@ -388,7 +387,7 @@ class CludLoopTUI(App[None]):
         try:
             # Suspend the app to allow the editor to take over the terminal
             with self.suspend():
-                subprocess.run([editor, str(self.update_file)])
+                RunningProcess.run([editor, str(self.update_file)])
             self.hide_loading(f"Closed {editor}")
 
             # Call the on_edit callback if provided

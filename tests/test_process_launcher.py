@@ -13,39 +13,33 @@ from clud.agent.process_launcher import PtySessionResult, run_claude_process
 class TestProcessLauncher(unittest.TestCase):
     """Test Ctrl-C handling in the process launcher."""
 
-    @patch("clud.agent.process_launcher.kill_process_tree")
-    @patch("clud.agent.process_launcher.subprocess.Popen")
+    @patch("clud.agent.process_launcher.RunningProcess.interactive")
     def test_interactive_interrupt_can_return_130_without_reraising(
         self,
-        mock_popen: MagicMock,
-        mock_kill_process_tree: MagicMock,
+        mock_interactive: MagicMock,
     ) -> None:
         """Interactive launch should return 130 when propagation is disabled."""
         proc = MagicMock()
-        proc.poll.return_value = None
-        proc.wait.side_effect = [KeyboardInterrupt(), 130]
-        proc.returncode = 130
-        mock_popen.return_value = proc
+        proc.poll.side_effect = [None, KeyboardInterrupt(), 130, 130]
+        proc.pid = 12345
+        mock_interactive.return_value = proc
 
         with patch("clud.agent.process_launcher.os.getppid", return_value=1234):
             result = run_claude_process(["codex"], propagate_keyboard_interrupt=False)
 
         self.assertEqual(result, 130)
-        mock_kill_process_tree.assert_called_once_with(proc.pid)
+        proc.send_interrupt.assert_called_once()
 
-    @patch("clud.agent.process_launcher.kill_process_tree")
-    @patch("clud.agent.process_launcher.subprocess.Popen")
+    @patch("clud.agent.process_launcher.RunningProcess.interactive")
     def test_interactive_interrupt_debug_logs_catch_site(
         self,
-        mock_popen: MagicMock,
-        mock_kill_process_tree: MagicMock,
+        mock_interactive: MagicMock,
     ) -> None:
         """Debug mode should print where the process launcher caught Ctrl-C."""
         proc = MagicMock()
-        proc.poll.return_value = None
-        proc.wait.side_effect = [KeyboardInterrupt(), 130]
-        proc.returncode = 130
-        mock_popen.return_value = proc
+        proc.poll.side_effect = [None, KeyboardInterrupt(), 130, 130]
+        proc.pid = 12345
+        mock_interactive.return_value = proc
 
         stderr = StringIO()
         with (
@@ -61,29 +55,23 @@ class TestProcessLauncher(unittest.TestCase):
         self.assertEqual(result, 130)
         self.assertIn("DEBUG: Ctrl-C caught by process launcher", stderr.getvalue())
         self.assertIn("process_launcher.py", stderr.getvalue())
-        mock_kill_process_tree.assert_called_once_with(proc.pid)
 
-    @patch("clud.agent.process_launcher.kill_process_tree")
-    @patch("clud.agent.process_launcher.subprocess.Popen")
+    @patch("clud.agent.process_launcher.RunningProcess.interactive")
     def test_interactive_interrupt_still_reraises_by_default(
         self,
-        mock_popen: MagicMock,
-        mock_kill_process_tree: MagicMock,
+        mock_interactive: MagicMock,
     ) -> None:
         """Default behavior should preserve KeyboardInterrupt propagation."""
         proc = MagicMock()
-        proc.poll.return_value = None
-        proc.wait.side_effect = [KeyboardInterrupt(), 130]
-        proc.returncode = 130
-        mock_popen.return_value = proc
+        proc.poll.side_effect = [None, KeyboardInterrupt(), 130, 130]
+        proc.pid = 12345
+        mock_interactive.return_value = proc
 
         with (
             patch("clud.agent.process_launcher.os.getppid", return_value=1234),
             self.assertRaises(KeyboardInterrupt),
         ):
             run_claude_process(["codex"])
-
-        mock_kill_process_tree.assert_called_once_with(proc.pid)
 
     @patch("clud.agent.process_launcher.RunningProcess.interactive")
     def test_windows_child_ctrl_c_mode_uses_running_process_interactive(
@@ -147,14 +135,12 @@ class TestProcessLauncher(unittest.TestCase):
         self.assertEqual(result, 130)
         self.assertGreaterEqual(proc.poll_calls, 2)
 
-    @patch("clud.agent.process_launcher.subprocess.Popen")
     @patch("clud.agent.process_launcher.RunningProcess.interactive")
     @patch("clud.agent.process_launcher.PseudoTerminalProcess")
     def test_idle_timeout_uses_pseudo_terminal_session(
         self,
         mock_pseudo_terminal: MagicMock,
         mock_interactive: MagicMock,
-        mock_popen: MagicMock,
     ) -> None:
         """Idle detection should mark a session boundary without killing the PTY."""
 
@@ -213,7 +199,6 @@ class TestProcessLauncher(unittest.TestCase):
         self.assertEqual(proc.idle_timeout_enabled, False)
         self.assertEqual(proc.wait_for_kwargs["echo_output"], True)
         mock_interactive.assert_not_called()
-        mock_popen.assert_not_called()
 
     @patch("clud.agent.process_launcher.PseudoTerminalProcess")
     def test_idle_timeout_interrupt_uses_interrupt_and_wait(
