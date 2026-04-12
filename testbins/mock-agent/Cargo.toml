@@ -1,0 +1,12 @@
+[package]
+name = "mock-agent"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "mock-agent"
+path = "src/main.rs"

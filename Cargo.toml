@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/clud-bin",
+    "testbins/mock-agent",
 ]
 
 [workspace.package]
