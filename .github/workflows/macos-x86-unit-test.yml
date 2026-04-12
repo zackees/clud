@@ -1,0 +1,10 @@
+name: macOS x86 Unit Test
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_unit-test.yml
+    with:
+      runs-on: macos-13

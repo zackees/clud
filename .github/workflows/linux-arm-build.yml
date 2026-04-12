@@ -1,0 +1,12 @@
+name: Linux ARM Build
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_build.yml
+    with:
+      runs-on: ubuntu-24.04-arm
+      artifact-name: wheels-linux-arm
+      build-mode: dev

@@ -1,0 +1,10 @@
+name: macOS ARM Lint
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_lint.yml
+    with:
+      runs-on: macos-14

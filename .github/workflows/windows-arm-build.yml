@@ -1,0 +1,12 @@
+name: Windows ARM Build
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_build.yml
+    with:
+      runs-on: windows-11-arm
+      artifact-name: wheels-windows-arm
+      build-mode: dev

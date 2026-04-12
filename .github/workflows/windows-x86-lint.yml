@@ -1,0 +1,10 @@
+name: Windows x86 Lint
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_lint.yml
+    with:
+      runs-on: windows-2025

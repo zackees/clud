@@ -1,0 +1,33 @@
+"""Lint orchestrator for clud: cargo fmt + clippy + ruff."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def run(cmd: list[str]) -> int:
+    from ci.env import clean_env
+
+    return subprocess.run(cmd, cwd=ROOT, env=clean_env()).returncode
+
+
+def main() -> int:
+    from ci.env import activate
+
+    activate()
+
+    if run(["cargo", "fmt", "--all", "--check"]) != 0:
+        return 1
+    if run(["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]) != 0:
+        return 1
+    if run([sys.executable, "-m", "ruff", "check", "src", "tests", "ci"]) != 0:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

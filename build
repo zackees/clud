@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+uv sync --frozen --group dev --no-install-project 2>/dev/null || uv sync --group dev --no-install-project
+exec uv run --no-editable -m ci.build_wheel --dev "$@"

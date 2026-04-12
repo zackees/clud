@@ -1,0 +1,12 @@
+name: macOS x86 Build
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_build.yml
+    with:
+      runs-on: macos-13
+      artifact-name: wheels-macos-x86
+      build-mode: dev

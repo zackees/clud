@@ -1,0 +1,10 @@
+name: Linux ARM Lint
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_lint.yml
+    with:
+      runs-on: ubuntu-24.04-arm

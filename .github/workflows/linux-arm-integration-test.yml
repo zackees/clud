@@ -1,0 +1,10 @@
+name: Linux ARM Integration Test
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+jobs:
+  call:
+    uses: ./.github/workflows/_integration-test.yml
+    with:
+      runs-on: ubuntu-24.04-arm

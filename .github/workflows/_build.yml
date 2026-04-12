@@ -1,0 +1,85 @@
+name: Build Template
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        required: true
+        type: string
+      artifact-name:
+        required: false
+        type: string
+        default: ""
+      build-mode:
+        required: false
+        type: string
+        default: "dev"
+      include-sdist:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Cache venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ inputs.runs-on }}-py3.11-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            venv-${{ inputs.runs-on }}-py3.11-
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+        continue-on-error: true
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+          components: clippy, rustfmt
+
+      - name: Sync
+        run: uv sync --frozen --group dev --no-install-project --python 3.11 -v
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build wheel (${{ inputs.build-mode || 'dev' }})
+        run: uv run --no-editable -m ci.build_wheel --${{ inputs.build-mode || 'dev' }}
+
+      - name: Build sdist
+        if: ${{ inputs.include-sdist }}
+        run: uv run maturin sdist --out dist
+
+      - name: Upload dist artifacts
+        if: ${{ inputs.artifact-name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-build-${{ inputs.artifact-name || inputs.runs-on }}
+          path: logs/*
+          if-no-files-found: warn
