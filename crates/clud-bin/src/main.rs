@@ -52,18 +52,18 @@ fn main() {
 }
 
 /// Build the child environment: inherit parent env + inject tracking vars.
+/// Deduplicates keys so we never pass the same var twice.
 fn child_env() -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    let originator_key = running_process_core::ORIGINATOR_ENV_VAR;
 
-    // Mark that the child is running under clud.
+    let mut env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k != "IN_CLUD" && k != originator_key)
+        .collect();
+
     env.push(("IN_CLUD".to_string(), "1".to_string()));
 
-    // Set originator so running-process can discover orphaned children.
     let originator_value = format!("CLUD:{}", std::process::id());
-    env.push((
-        running_process_core::ORIGINATOR_ENV_VAR.to_string(),
-        originator_value,
-    ));
+    env.push((originator_key.to_string(), originator_value));
 
     env
 }

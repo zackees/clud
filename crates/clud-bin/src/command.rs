@@ -95,10 +95,17 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
 
 /// If the string is a path to an existing file, read its contents.
 /// Otherwise treat it as a literal prompt string.
+/// Exits with an error if the file exists but cannot be read.
 fn read_prompt_or_literal(input: &str) -> String {
     let path = std::path::Path::new(input);
     if path.is_file() {
-        std::fs::read_to_string(path).unwrap_or_else(|_| input.to_string())
+        match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                eprintln!("error: failed to read prompt file '{}': {}", input, e);
+                std::process::exit(1);
+            }
+        }
     } else {
         input.to_string()
     }

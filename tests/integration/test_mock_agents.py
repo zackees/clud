@@ -227,3 +227,25 @@ class TestLoopMode:
         for line in lines:
             report = json.loads(line)
             assert "do stuff" in report["args"]
+
+    def test_loop_stops_on_failure(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        """Loop should stop immediately when an iteration fails."""
+        result = _run(
+            clud_binary,
+            "loop",
+            "--loop-count",
+            "5",
+            "task",
+            "--",
+            "--mock-exit-code",
+            "1",
+            env=mock_env,
+        )
+        assert result.returncode == 1
+        # Only 1 iteration should have run (first fails, loop stops).
+        lines = [
+            line for line in result.stdout.strip().splitlines() if line.strip()
+        ]
+        assert len(lines) == 1
