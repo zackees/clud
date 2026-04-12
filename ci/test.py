@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# pytest exit code 5 = no tests collected (all deselected by marker).
+# This is acceptable when no integration tests exist yet.
+_PYTEST_NO_TESTS_COLLECTED = 5
+
+
+def _pytest_ok(returncode: int) -> bool:
+    return returncode in (0, _PYTEST_NO_TESTS_COLLECTED)
 
 
 def run(cmd: list[str]) -> int:
@@ -36,19 +43,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Python unit tests (skip integration by default)
     pytest_cmd = [sys.executable, "-m", "pytest", "-m", "not integration", *pytest_args]
-    if run(pytest_cmd) != 0:
+    if not _pytest_ok(run(pytest_cmd)):
         return 1
 
     # Integration tests (only when requested)
     if run_integration:
-        env_override = os.environ.copy()
-        env_override["CLUD_INTEGRATION_TESTS"] = "1"
         from ci.env import clean_env
 
         env = clean_env()
         env["CLUD_INTEGRATION_TESTS"] = "1"
         int_cmd = [sys.executable, "-m", "pytest", "-m", "integration", *pytest_args]
-        if subprocess.run(int_cmd, cwd=ROOT, env=env).returncode != 0:
+        rc = subprocess.run(int_cmd, cwd=ROOT, env=env).returncode
+        if not _pytest_ok(rc):
             return 1
 
     return 0
