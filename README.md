@@ -1,6 +1,10 @@
 # clud
 
-Fast Rust CLI for running Claude Code and Codex in YOLO mode.
+![hero-clud](https://github.com/user-attachments/assets/4009dfee-e703-446d-b073-80d826708a10)
+
+**A fast Rust CLI for Claude Code and Codex that runs in YOLO mode by default — no permission prompts, maximum velocity.**
+
+The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
 | Platform | Build | Lint | Unit Test | Integration Test |
 |----------|-------|------|-----------|------------------|
@@ -11,7 +15,7 @@ Fast Rust CLI for running Claude Code and Codex in YOLO mode.
 | macOS x86 | [![Build](https://github.com/zackees/clud/actions/workflows/macos-x86-build.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-x86-build.yml) | [![Lint](https://github.com/zackees/clud/actions/workflows/macos-x86-lint.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-x86-lint.yml) | [![Unit Test](https://github.com/zackees/clud/actions/workflows/macos-x86-unit-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-x86-unit-test.yml) | [![Integration Test](https://github.com/zackees/clud/actions/workflows/macos-x86-integration-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-x86-integration-test.yml) |
 | macOS ARM | [![Build](https://github.com/zackees/clud/actions/workflows/macos-arm-build.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-arm-build.yml) | [![Lint](https://github.com/zackees/clud/actions/workflows/macos-arm-lint.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-arm-lint.yml) | [![Unit Test](https://github.com/zackees/clud/actions/workflows/macos-arm-unit-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-arm-unit-test.yml) | [![Integration Test](https://github.com/zackees/clud/actions/workflows/macos-arm-integration-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/macos-arm-integration-test.yml) |
 
-## Install
+## Installation
 
 ```bash
 pip install clud
@@ -20,49 +24,85 @@ pip install clud
 ## Usage
 
 ```bash
-# Run Claude with a prompt (YOLO mode, no permission prompts)
-clud -p "fix the failing tests"
+clud                              # Launch Claude in YOLO mode (interactive)
+clud --codex                      # Use Codex as the backend
+clud --claude                     # Use Claude as the backend (default)
+clud -c                           # Continue the most recent conversation
+clud --resume                     # Resume a session
+clud --resume abc123              # Resume a specific session by ID or search term
+clud -p "refactor the auth layer" # Run with a prompt, exit when done
+clud -m "what does this do?"      # Send a one-off message
+clud --model opus -p "review PR"  # Choose a model
+clud --safe -p "drop the table"   # Disable YOLO mode (keeps permission prompts)
+clud --dry-run -p "hello"         # Print what would run without executing
+echo "explain this error" | clud  # Pipe mode: read prompt from stdin
+clud -- --verbose --debug         # Pass extra flags through to the backend
+```
 
-# Send a one-off message
-clud -m "what does this function do?"
+### Flags
 
-# Continue last session
-clud -c
+| Flag | Description |
+|------|-------------|
+| `-p`, `--prompt` | Run with a prompt, exit when complete |
+| `-m`, `--message` | Send a one-off message |
+| `-c`, `--continue` | Continue the most recent conversation |
+| `-r`, `--resume [TERM]` | Resume by session ID or search term |
+| `--claude` | Use Claude as the backend |
+| `--codex` | Use Codex as the backend |
+| `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
+| `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
+| `--dry-run` | Print what would be executed, then exit |
+| `-v`, `--verbose` | Show debug output |
+| `-h`, `--help` | Show help |
+| `-V`, `--version` | Show version |
 
-# Use Codex instead of Claude
-clud --codex -p "refactor this module"
+Unknown flags are forwarded directly to the backend agent.
 
-# Choose a model
-clud --model opus -p "review this PR"
+## `clud loop` — Autonomous Loop
 
-# Autonomous loop (50 iterations by default)
-clud loop "implement the feature described in TASK.md"
-clud loop --loop-count 5 "fix all lint errors"
+Run the backend in an autonomous loop that iterates on a task (default: 50 iterations).
 
-# Special workflows
-clud up       # lint, test, commit
-clud rebase   # rebase on main, resolve conflicts
-clud fix      # fix all lint/test errors
+```bash
+clud loop "Implement the API endpoints from the spec"
+clud loop TASK.md                     # Read prompt from a file
+clud loop --loop-count 10 "fix bugs"  # Custom iteration count
+```
 
-# Disable YOLO mode
-clud --safe -p "delete the database"
+The loop stops early if any iteration exits with a non-zero code.
 
-# See what would be executed
-clud --dry-run -p "hello"
+## `clud rebase` — Auto-Rebase
 
-# Pipe mode
-echo "explain this error" | clud
+Fetches from origin, rebases the current branch, and resolves conflicts.
+
+```bash
+clud rebase
+```
+
+## `clud fix` — Auto-Fix
+
+Detects linting and test tools in your repo, runs them, and fixes failures in a loop until everything passes.
+
+```bash
+clud fix
+```
+
+## `clud up` — Ship It
+
+Runs lint, test, cleanup, then commits.
+
+```bash
+clud up
 ```
 
 ## Development
 
 ```bash
-bash build    # Build dev wheel
-bash lint     # Lint (cargo fmt + clippy + ruff)
-bash test     # Unit tests (Rust + Python)
-bash test --integration  # Include integration tests
+bash build                  # Build dev wheel (Rust binary + Python package)
+bash lint                   # Lint (cargo fmt + clippy + ruff + banned imports)
+bash test                   # Unit tests (Rust + Python)
+bash test --integration     # Include integration tests with mock agents
 ```
 
 ## License
 
-BSD 3-Clause
+BSD 3-Clause License
