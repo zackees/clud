@@ -156,6 +156,27 @@ class TestCommandPrompts:
         assert "fix" in prompt.lower() or "lint" in prompt.lower()
 
 
+class TestEnvTracking:
+    """Verify clud injects tracking env vars into the child process."""
+
+    def test_in_clud_set(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "-p", "hello", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        assert report["env"]["IN_CLUD"] == "1"
+
+    def test_originator_set(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "-p", "hello", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        originator = report["env"]["RUNNING_PROCESS_ORIGINATOR"]
+        assert originator is not None
+        assert originator.startswith("CLUD:")
+        # The value after CLUD: should be the parent PID (a number)
+        pid_str = originator.split(":")[1]
+        assert pid_str.isdigit()
+
+
 class TestFlagForwarding:
     """Verify unknown flags are forwarded to the backend."""
 

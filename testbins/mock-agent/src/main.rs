@@ -45,12 +45,20 @@ fn main() {
         None
     };
 
+    // Capture env vars relevant for testing
+    let in_clud = std::env::var("IN_CLUD").ok();
+    let originator = std::env::var("RUNNING_PROCESS_ORIGINATOR").ok();
+
     // Output JSON report of what we received
     let report = serde_json::json!({
         "program": args[0],
         "args": filtered_args,
         "stdin": stdin_content,
         "exit_code": exit_code,
+        "env": {
+            "IN_CLUD": in_clud,
+            "RUNNING_PROCESS_ORIGINATOR": originator,
+        },
     });
     println!("{}", serde_json::to_string(&report).unwrap());
 

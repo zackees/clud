@@ -51,9 +51,29 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run_plan(plan: &command::LaunchPlan, verbose: bool) -> i32 {
-    use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+/// Build the child environment: inherit parent env + inject tracking vars.
+fn child_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
 
+    // Mark that the child is running under clud.
+    env.push(("IN_CLUD".to_string(), "1".to_string()));
+
+    // Set originator so running-process can discover orphaned children.
+    let originator_value = format!("CLUD:{}", std::process::id());
+    env.push((
+        running_process_core::ORIGINATOR_ENV_VAR.to_string(),
+        originator_value,
+    ));
+
+    env
+}
+
+fn run_plan(plan: &command::LaunchPlan, verbose: bool) -> i32 {
+    use running_process_core::{
+        CommandSpec, Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode,
+    };
+
+    let env = child_env();
     let mut last_exit = 0i32;
 
     for iteration in 0..plan.iterations {
@@ -65,18 +85,17 @@ fn run_plan(plan: &command::LaunchPlan, verbose: bool) -> i32 {
             eprintln!("[clud] exec: {}", plan.command.join(" "));
         }
 
-        let argv: Vec<String> = plan.command.clone();
         let config = ProcessConfig {
-            command: CommandSpec::Argv(argv),
+            command: CommandSpec::Argv(plan.command.clone()),
             cwd: None,
-            env: None,
+            env: Some(env.clone()),
             capture: false,
             stderr_mode: StderrMode::Stdout,
             creationflags: None,
             create_process_group: false,
             stdin_mode: StdinMode::Inherit,
             nice: None,
-            containment: None,
+            containment: Some(Containment::Contained),
         };
 
         let process = NativeProcess::new(config);
