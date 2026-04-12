@@ -132,12 +132,40 @@ class TestCommandPrompts:
         result = _run(clud_binary, "up", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
-        assert "-p" in report["args"]
-        # Find the prompt text (the arg after -p)
         idx = report["args"].index("-p")
         prompt = report["args"][idx + 1]
+        # Real UP_PROMPT contains lint, codeup, and auto-summary placeholder
         assert "lint" in prompt.lower()
-        assert "commit" in prompt.lower()
+        assert "codeup" in prompt.lower()
+        assert "<your one-line summary>" in prompt
+
+    def test_up_with_message(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "up", "-m", "bump version", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        idx = report["args"].index("-p")
+        prompt = report["args"][idx + 1]
+        assert 'codeup -m "bump version"' in prompt
+        assert "<your one-line summary>" not in prompt
+
+    def test_up_with_publish(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "up", "-p", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        idx = report["args"].index("-p")
+        prompt = report["args"][idx + 1]
+        assert "codeup" in prompt
+        assert "-p" in prompt.split("codeup")[1]
+
+    def test_up_with_message_and_publish(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        result = _run(clud_binary, "up", "-m", "release v2", "-p", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        idx = report["args"].index("-p")
+        prompt = report["args"][idx + 1]
+        assert 'codeup -m "release v2" -p' in prompt
 
     def test_rebase_command(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "rebase", env=mock_env)
@@ -145,6 +173,7 @@ class TestCommandPrompts:
         report = _parse_agent_report(result)
         idx = report["args"].index("-p")
         prompt = report["args"][idx + 1]
+        assert "git fetch" in prompt
         assert "rebase" in prompt.lower()
 
     def test_fix_command(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
@@ -153,7 +182,21 @@ class TestCommandPrompts:
         report = _parse_agent_report(result)
         idx = report["args"].index("-p")
         prompt = report["args"][idx + 1]
-        assert "fix" in prompt.lower() or "lint" in prompt.lower()
+        assert "linting" in prompt.lower()
+        assert "unit tests" in prompt.lower()
+
+    def test_fix_with_github_url(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        url = "https://github.com/user/repo/actions/runs/123"
+        result = _run(clud_binary, "fix", url, env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        idx = report["args"].index("-p")
+        prompt = report["args"][idx + 1]
+        assert url in prompt
+        assert "gh run view" in prompt
+        assert "lint-test" in prompt
 
 
 class TestEnvTracking:

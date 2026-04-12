@@ -101,14 +101,34 @@ def test_dry_run_up() -> None:
     result = _run("--dry-run", "up")
     assert result.returncode == 0
     data = json.loads(result.stdout)
-    assert "lint" in data["command"][-1].lower()
+    prompt = data["command"][-1]
+    assert "lint" in prompt.lower()
+    assert "codeup" in prompt.lower()
+
+
+def test_dry_run_up_with_message() -> None:
+    result = _run("--dry-run", "up", "-m", "bump version")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    prompt = data["command"][-1]
+    assert 'codeup -m "bump version"' in prompt
+
+
+def test_dry_run_up_with_publish() -> None:
+    result = _run("--dry-run", "up", "-p")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    prompt = data["command"][-1]
+    assert "-p" in prompt.split("codeup")[1]
 
 
 def test_dry_run_rebase() -> None:
     result = _run("--dry-run", "rebase")
     assert result.returncode == 0
     data = json.loads(result.stdout)
-    assert "rebase" in data["command"][-1].lower() or "Rebase" in data["command"][-1]
+    prompt = data["command"][-1]
+    assert "git fetch" in prompt
+    assert "rebase" in prompt.lower()
 
 
 def test_dry_run_fix() -> None:
@@ -116,7 +136,17 @@ def test_dry_run_fix() -> None:
     assert result.returncode == 0
     data = json.loads(result.stdout)
     prompt = data["command"][-1].lower()
-    assert "fix" in prompt or "lint" in prompt
+    assert "linting" in prompt
+    assert "unit tests" in prompt
+
+
+def test_dry_run_fix_with_url() -> None:
+    result = _run("--dry-run", "fix", "https://github.com/user/repo/actions/runs/123")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    prompt = data["command"][-1]
+    assert "github.com/user/repo/actions/runs/123" in prompt
+    assert "gh run view" in prompt
 
 
 def test_dry_run_loop() -> None:

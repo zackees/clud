@@ -71,13 +71,24 @@ pub enum Command {
     },
 
     /// Codeup workflow: lint, test, commit.
-    Up,
+    Up {
+        /// Custom commit message (skips auto-summary).
+        #[arg(short = 'm', long = "message")]
+        message: Option<String>,
+
+        /// Publish (push) after committing.
+        #[arg(short = 'p', long = "publish")]
+        publish: bool,
+    },
 
     /// Rebase workflow.
     Rebase,
 
     /// Auto-fix linting/test errors.
-    Fix,
+    Fix {
+        /// Optional GitHub URL to fetch logs from (e.g., actions run or PR URL).
+        url: Option<String>,
+    },
 }
 
 impl Args {
@@ -283,7 +294,52 @@ mod tests {
     #[test]
     fn test_up_subcommand() {
         let args = parse(&["clud", "up"]);
-        assert!(matches!(args.command, Some(Command::Up)));
+        assert!(matches!(args.command, Some(Command::Up { .. })));
+    }
+
+    #[test]
+    fn test_up_with_message() {
+        let args = parse(&["clud", "up", "-m", "bump version"]);
+        match args.command {
+            Some(Command::Up {
+                ref message,
+                publish,
+            }) => {
+                assert_eq!(message.as_deref(), Some("bump version"));
+                assert!(!publish);
+            }
+            _ => panic!("expected Up subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_up_with_publish() {
+        let args = parse(&["clud", "up", "-p"]);
+        match args.command {
+            Some(Command::Up {
+                ref message,
+                publish,
+            }) => {
+                assert!(message.is_none());
+                assert!(publish);
+            }
+            _ => panic!("expected Up subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_up_with_message_and_publish() {
+        let args = parse(&["clud", "up", "-m", "release", "-p"]);
+        match args.command {
+            Some(Command::Up {
+                ref message,
+                publish,
+            }) => {
+                assert_eq!(message.as_deref(), Some("release"));
+                assert!(publish);
+            }
+            _ => panic!("expected Up subcommand"),
+        }
     }
 
     #[test]
@@ -295,7 +351,25 @@ mod tests {
     #[test]
     fn test_fix_subcommand() {
         let args = parse(&["clud", "fix"]);
-        assert!(matches!(args.command, Some(Command::Fix)));
+        assert!(matches!(args.command, Some(Command::Fix { .. })));
+    }
+
+    #[test]
+    fn test_fix_with_url() {
+        let args = parse(&[
+            "clud",
+            "fix",
+            "https://github.com/user/repo/actions/runs/123",
+        ]);
+        match args.command {
+            Some(Command::Fix { ref url }) => {
+                assert_eq!(
+                    url.as_deref(),
+                    Some("https://github.com/user/repo/actions/runs/123")
+                );
+            }
+            _ => panic!("expected Fix subcommand"),
+        }
     }
 
     #[test]
