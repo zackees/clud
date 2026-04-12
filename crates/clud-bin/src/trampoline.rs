@@ -1,17 +1,17 @@
-//! Windows trampoline: copies the binary to a cache dir so pip can always
-//! overwrite the original. On Linux/macOS this is a no-op (Unix allows
-//! deleting running binaries).
+//! Windows trampoline: ensures pip can always overwrite clud.exe.
 //!
-//! Flow:
-//! 1. pip installs `clud.exe` to Scripts/ — this is the trampoline
-//! 2. On launch, trampoline hashes itself, copies to `Scripts/.clud-bin/<hash>.exe`
-//! 3. Spawns the cached copy with all args, waits, exits with its code
-//! 4. pip install can freely overwrite Scripts/clud.exe (not locked)
-//! 5. Next launch: new hash → new cached copy, old ones cleaned up
+//! Problem: On Windows, running executables are file-locked. `pip install .`
+//! fails if clud is running because it can't overwrite Scripts/clud.exe.
+//!
+//! Solution: On launch, clud renames itself (Scripts/clud.exe → clud.exe.old),
+//! copies a fresh unlocked copy back (clud.exe.old → clud.exe), then runs
+//! the real work from a cached copy in %LOCALAPPDATA%/clud/bin/<hash>.exe.
+//!
+//! Result: Scripts/clud.exe is NEVER locked. pip install always works.
+//!
+//! On Linux/macOS: no-op (Unix allows deleting running binaries).
 
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
-use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 /// Env var set on the cached copy so it knows it's already trampolined.
@@ -21,52 +21,38 @@ const TRAMPOLINE_ENV: &str = "_CLUD_TRAMPOLINED";
 /// copy (caller should exit). Returns `None` if we ARE the cached copy
 /// or trampolining is not needed (Unix).
 pub fn maybe_trampoline() -> Option<i32> {
-    // Only needed on Windows
     if !cfg!(target_os = "windows") {
         return None;
     }
 
-    // If we're already the trampolined copy, run normally
+    // Already the cached copy — run normally.
     if std::env::var(TRAMPOLINE_ENV).is_ok() {
         return None;
     }
 
-    let my_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
+    let my_exe = std::env::current_exe().ok()?;
 
-    let my_bytes = match fs::read(&my_exe) {
-        Ok(b) => b,
-        Err(_) => return None,
-    };
+    // Step 1: Rename ourselves so Scripts/clud.exe becomes unlocked.
+    unlock_self(&my_exe);
 
+    // Step 2: Copy to global cache and spawn from there.
+    let my_bytes = fs::read(&my_exe).ok()?;
     let hash = hash_bytes(&my_bytes);
-    let cache_dir = cache_dir_for(&my_exe);
+    let cache_dir = cache_dir();
+    fs::create_dir_all(&cache_dir).ok()?;
 
-    if fs::create_dir_all(&cache_dir).is_err() {
-        return None;
-    }
-
-    let ext = if cfg!(target_os = "windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    let cached_exe = cache_dir.join(format!("{hash}{ext}"));
-
-    // Copy if our hash isn't cached yet
+    let cached_exe = cache_dir.join(format!("{hash}.exe"));
     if !cached_exe.is_file() {
-        if let Err(e) = fs::copy(&my_exe, &cached_exe) {
+        if let Err(e) = fs::write(&cached_exe, &my_bytes) {
             eprintln!("[clud] trampoline: failed to cache binary: {e}");
-            return None; // Fall through to run directly
+            return None;
         }
     }
 
-    // Clean up old cached copies (best-effort, ignore locked files)
+    // Step 3: Clean up old cached copies (best-effort).
     cleanup_old(&cache_dir, &cached_exe);
 
-    // Spawn the cached copy with all our args
+    // Step 4: Spawn the cached copy with all args, wait for it.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let status = std::process::Command::new(&cached_exe)
         .args(&args)
@@ -80,20 +66,46 @@ pub fn maybe_trampoline() -> Option<i32> {
         Ok(s) => Some(s.code().unwrap_or(1)),
         Err(e) => {
             eprintln!("[clud] trampoline: failed to exec cached binary: {e}");
-            None // Fall through to run directly
+            None
         }
     }
 }
 
-/// Cache directory: `.clud-bin/` next to the executable.
-fn cache_dir_for(exe: &Path) -> PathBuf {
-    exe.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".clud-bin")
+/// Rename ourselves out of the way, then copy a fresh unlocked copy back.
+/// After this, the original path (Scripts/clud.exe) is an unlocked file
+/// that pip can freely overwrite.
+fn unlock_self(my_exe: &Path) {
+    let old_exe = my_exe.with_extension("exe.old");
+
+    // Try to remove stale .old from previous run.
+    let _ = fs::remove_file(&old_exe);
+
+    // Rename: clud.exe → clud.exe.old (works on locked files on Windows).
+    if fs::rename(my_exe, &old_exe).is_err() {
+        return; // Can't rename — maybe already handled, continue anyway.
+    }
+
+    // Copy back: clud.exe.old → clud.exe (new file, unlocked).
+    let _ = fs::copy(&old_exe, my_exe);
+
+    // Don't delete .old yet — it's the locked running process.
+    // It gets cleaned up on the next launch.
+}
+
+/// Cache directory: %LOCALAPPDATA%/clud/bin/ on Windows.
+fn cache_dir() -> PathBuf {
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        PathBuf::from(local_app_data).join("clud").join("bin")
+    } else {
+        // Fallback to temp dir.
+        std::env::temp_dir().join("clud-bin")
+    }
 }
 
 /// Fast hash of file contents.
 fn hash_bytes(bytes: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
     let mut hasher = DefaultHasher::new();
     hasher.write(bytes);
     format!("{:016x}", hasher.finish())
@@ -101,9 +113,9 @@ fn hash_bytes(bytes: &[u8]) -> String {
 
 /// Remove cached copies that aren't the current one.
 /// Silently skips locked files (still running).
-fn cleanup_old(cache_dir: &Path, keep: &Path) -> u32 {
+fn cleanup_old(dir: &Path, keep: &Path) -> u32 {
     let mut cleaned = 0u32;
-    let entries = match fs::read_dir(cache_dir) {
+    let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return 0,
     };
@@ -112,11 +124,9 @@ fn cleanup_old(cache_dir: &Path, keep: &Path) -> u32 {
         if path == keep {
             continue;
         }
-        let is_binary = path.extension().is_some_and(|e| e == "exe") || path.extension().is_none();
-        if is_binary && fs::remove_file(&path).is_ok() {
+        if fs::remove_file(&path).is_ok() {
             cleaned += 1;
         }
-        // Locked files silently skipped — cleaned up next launch
     }
     cleaned
 }
@@ -124,7 +134,6 @@ fn cleanup_old(cache_dir: &Path, keep: &Path) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_hash_deterministic() {
