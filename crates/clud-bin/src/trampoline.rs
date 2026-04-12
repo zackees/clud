@@ -111,34 +111,21 @@ fn gc_stale_files(my_exe: &Path) {
 /// After this, the original path (Scripts/clud.exe) is an unlocked file
 /// that pip can freely overwrite.
 fn unlock_self(my_exe: &Path) {
-    // Find an available .old slot. If .old is locked (previous instance
-    // still running), stack to .old.1, .old.2, etc.
-    let old_exe = find_old_slot(my_exe);
+    // Use a random name so there's never a collision with a locked .old file.
+    let rand_id: u32 = std::process::id()
+        ^ (std::time::UNIX_EPOCH
+            .elapsed()
+            .unwrap_or_default()
+            .subsec_nanos());
+    let old_exe = my_exe.with_extension(format!("exe.old.{rand_id}"));
 
-    // Rename: clud.exe → clud.exe.old (works on locked files on Windows).
+    // Rename: clud.exe → clud.exe.old.<rand> (works on locked files on Windows).
     if fs::rename(my_exe, &old_exe).is_err() {
         return; // Can't rename — maybe already handled, continue anyway.
     }
 
-    // Copy back: clud.exe.old → clud.exe (new file, unlocked).
+    // Copy back: clud.exe.old.<rand> → clud.exe (new file, unlocked).
     let _ = fs::copy(&old_exe, my_exe);
-}
-
-/// Find an available .old filename. Tries clud.exe.old, then .old.1, .old.2, etc.
-fn find_old_slot(my_exe: &Path) -> PathBuf {
-    let base = my_exe.with_extension("exe.old");
-    if !base.exists() || fs::remove_file(&base).is_ok() {
-        return base;
-    }
-    // .old exists and is locked — stack.
-    for i in 1..100 {
-        let candidate = my_exe.with_extension(format!("exe.old.{i}"));
-        if !candidate.exists() || fs::remove_file(&candidate).is_ok() {
-            return candidate;
-        }
-    }
-    // Worst case: reuse the base name (rename will fail, we'll fall through).
-    base
 }
 
 /// Cache directory: %LOCALAPPDATA%/clud/bin/ on Windows.
