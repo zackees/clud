@@ -8,6 +8,12 @@ repository.workspace = true
 homepage.workspace = true
 description = "Fast CLI for running Claude Code and Codex in YOLO mode"
 
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+which = "7"
+
 [[bin]]
 name = "clud"
 path = "src/main.rs"
