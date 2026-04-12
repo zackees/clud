@@ -1,0 +1,55 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "clud"
+version = "0.1.0"
+description = "Fast Rust CLI for running Claude Code and Codex in YOLO mode"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD 3-Clause License" }
+license-files = ["LICENSE"]
+authors = [{ name = "Zach Vorhies" }]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/zackees/clud"
+Repository = "https://github.com/zackees/clud"
+Issues = "https://github.com/zackees/clud/issues"
+
+[dependency-groups]
+dev = ["maturin[zig]>=1.7,<2", "pytest>=8.0.0", "pytest-cov>=6.0.0", "ruff>=0.8.0"]
+
+[tool.maturin]
+manifest-path = "crates/clud-bin/Cargo.toml"
+bindings = "bin"
+python-source = "src"
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.py" },
+    { file = "crates/**/*.rs" },
+    { file = "crates/**/*.toml" },
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "--strict-markers"]
+testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "PT", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["N802", "N803", "N806", "PT009", "PT027"]

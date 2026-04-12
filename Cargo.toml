@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clud-bin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "BSD-3-Clause"
+repository = "https://github.com/zackees/clud"
+homepage = "https://github.com/zackees/clud"
+
+[profile.release]
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"

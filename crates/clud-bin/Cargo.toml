@@ -1,0 +1,13 @@
+[package]
+name = "clud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Fast CLI for running Claude Code and Codex in YOLO mode"
+
+[[bin]]
+name = "clud"
+path = "src/main.rs"
