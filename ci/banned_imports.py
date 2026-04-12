@@ -67,10 +67,15 @@ def main() -> int:
         print("No crates/ directory found, skipping banned import check.", file=sys.stderr)
         return 0
 
+    # trampoline.rs is exempt — it must use std::process::Command to re-exec
+    # before running-process-core is involved.
+    exempt = {"trampoline.rs"}
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0
 
     for path in rs_files:
+        if path.name in exempt:
+            continue
         violations = scan_file(path)
         for line_num, line, reason in violations:
             rel = path.relative_to(ROOT)

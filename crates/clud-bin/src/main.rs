@@ -1,10 +1,16 @@
 mod args;
 mod backend;
 mod command;
+mod trampoline;
 
 use std::io::{self, Read};
 
 fn main() {
+    // Windows: re-exec from a cached copy so pip can always overwrite this binary.
+    if let Some(code) = trampoline::maybe_trampoline() {
+        std::process::exit(code);
+    }
+
     let mut args = args::Args::parse_with_passthrough();
 
     // Pipe mode: if stdin is not a terminal, read it as the prompt.
