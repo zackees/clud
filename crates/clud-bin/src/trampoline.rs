@@ -32,8 +32,9 @@ pub fn maybe_trampoline() -> Option<i32> {
 
     let my_exe = std::env::current_exe().ok()?;
 
-    // Step 1: GC stale .old files next to us and in the cache dir.
-    gc_stale_files(&my_exe);
+    // Step 1: GC stale .old and cached files in the background (don't block startup).
+    let gc_exe = my_exe.clone();
+    std::thread::spawn(move || gc_stale_files(&gc_exe));
 
     // Step 2: Rename ourselves so Scripts/clud.exe becomes unlocked.
     unlock_self(&my_exe);
