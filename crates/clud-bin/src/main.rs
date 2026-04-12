@@ -6,10 +6,8 @@ mod trampoline;
 use std::io::{self, Read};
 
 fn main() {
-    // Windows: re-exec from a cached copy so pip can always overwrite this binary.
-    if let Some(code) = trampoline::maybe_trampoline() {
-        std::process::exit(code);
-    }
+    // Windows: rename ourselves so pip can always overwrite clud.exe.
+    trampoline::unlock_exe();
 
     let mut args = args::Args::parse_with_passthrough();
 
