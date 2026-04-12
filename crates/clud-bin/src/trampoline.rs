@@ -32,14 +32,10 @@ pub fn maybe_trampoline() -> Option<i32> {
 
     let my_exe = std::env::current_exe().ok()?;
 
-    // Step 1: GC stale .old and cached files in the background (don't block startup).
-    let gc_exe = my_exe.clone();
-    std::thread::spawn(move || gc_stale_files(&gc_exe));
-
-    // Step 2: Rename ourselves so Scripts/clud.exe becomes unlocked.
+    // Step 1: Rename ourselves so Scripts/clud.exe becomes unlocked.
     unlock_self(&my_exe);
 
-    // Step 3: Copy to global cache and spawn from there.
+    // Step 2: Copy to global cache and spawn from there.
     let my_bytes = fs::read(&my_exe).ok()?;
     let hash = hash_bytes(&my_bytes);
     let cache_dir = cache_dir();
@@ -53,24 +49,40 @@ pub fn maybe_trampoline() -> Option<i32> {
         }
     }
 
-    // Step 4: Clean up old cached copies (best-effort).
-    cleanup_old_cached(&cache_dir, &cached_exe);
-
-    // Step 4: Spawn the cached copy with all args, wait for it.
+    // Step 3: Spawn the cached copy with all args.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let status = std::process::Command::new(&cached_exe)
+    let mut child = match std::process::Command::new(&cached_exe)
         .args(&args)
         .env(TRAMPOLINE_ENV, "1")
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .status();
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[clud] trampoline: failed to exec cached binary: {e}");
+            return None;
+        }
+    };
+
+    // Step 4: GC in background now that the child is running.
+    let gc_exe = my_exe.clone();
+    let gc_cache_dir = cache_dir.clone();
+    let gc_keep = cached_exe.clone();
+    std::thread::spawn(move || {
+        gc_stale_files(&gc_exe);
+        cleanup_old_cached(&gc_cache_dir, &gc_keep);
+    });
+
+    // Step 5: Wait for child to finish.
+    let status = child.wait();
 
     match status {
         Ok(s) => Some(s.code().unwrap_or(1)),
         Err(e) => {
-            eprintln!("[clud] trampoline: failed to exec cached binary: {e}");
-            None
+            eprintln!("[clud] trampoline: child process error: {e}");
+            Some(1)
         }
     }
 }
