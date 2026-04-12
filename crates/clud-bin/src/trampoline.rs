@@ -32,10 +32,13 @@ pub fn maybe_trampoline() -> Option<i32> {
 
     let my_exe = std::env::current_exe().ok()?;
 
-    // Step 1: Rename ourselves so Scripts/clud.exe becomes unlocked.
+    // Step 1: GC stale .old files next to us and in the cache dir.
+    gc_stale_files(&my_exe);
+
+    // Step 2: Rename ourselves so Scripts/clud.exe becomes unlocked.
     unlock_self(&my_exe);
 
-    // Step 2: Copy to global cache and spawn from there.
+    // Step 3: Copy to global cache and spawn from there.
     let my_bytes = fs::read(&my_exe).ok()?;
     let hash = hash_bytes(&my_bytes);
     let cache_dir = cache_dir();
@@ -49,8 +52,8 @@ pub fn maybe_trampoline() -> Option<i32> {
         }
     }
 
-    // Step 3: Clean up old cached copies (best-effort).
-    cleanup_old(&cache_dir, &cached_exe);
+    // Step 4: Clean up old cached copies (best-effort).
+    cleanup_old_cached(&cache_dir, &cached_exe);
 
     // Step 4: Spawn the cached copy with all args, wait for it.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,14 +74,45 @@ pub fn maybe_trampoline() -> Option<i32> {
     }
 }
 
+/// GC stale .old files next to the exe and stale cached copies.
+/// Runs before anything else so we clean up from previous launches.
+fn gc_stale_files(my_exe: &Path) {
+    // Clean .old / .old.1 / .old.2 / etc. next to the exe.
+    if let Some(parent) = my_exe.parent() {
+        if let Some(stem) = my_exe.file_name().and_then(|n| n.to_str()) {
+            if let Ok(entries) = fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with(stem) && name_str.contains(".old") {
+                        // Try to delete — silently skip if still locked.
+                        let _ = fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean stale cached copies in the global cache dir.
+    let dir = cache_dir();
+    if dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                // Try to delete everything — the current hash will be
+                // re-created moments later. Locked files silently skipped.
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// Rename ourselves out of the way, then copy a fresh unlocked copy back.
 /// After this, the original path (Scripts/clud.exe) is an unlocked file
 /// that pip can freely overwrite.
 fn unlock_self(my_exe: &Path) {
-    let old_exe = my_exe.with_extension("exe.old");
-
-    // Try to remove stale .old from previous run.
-    let _ = fs::remove_file(&old_exe);
+    // Find an available .old slot. If .old is locked (previous instance
+    // still running), stack to .old.1, .old.2, etc.
+    let old_exe = find_old_slot(my_exe);
 
     // Rename: clud.exe → clud.exe.old (works on locked files on Windows).
     if fs::rename(my_exe, &old_exe).is_err() {
@@ -87,9 +121,23 @@ fn unlock_self(my_exe: &Path) {
 
     // Copy back: clud.exe.old → clud.exe (new file, unlocked).
     let _ = fs::copy(&old_exe, my_exe);
+}
 
-    // Don't delete .old yet — it's the locked running process.
-    // It gets cleaned up on the next launch.
+/// Find an available .old filename. Tries clud.exe.old, then .old.1, .old.2, etc.
+fn find_old_slot(my_exe: &Path) -> PathBuf {
+    let base = my_exe.with_extension("exe.old");
+    if !base.exists() || fs::remove_file(&base).is_ok() {
+        return base;
+    }
+    // .old exists and is locked — stack.
+    for i in 1..100 {
+        let candidate = my_exe.with_extension(format!("exe.old.{i}"));
+        if !candidate.exists() || fs::remove_file(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    // Worst case: reuse the base name (rename will fail, we'll fall through).
+    base
 }
 
 /// Cache directory: %LOCALAPPDATA%/clud/bin/ on Windows.
@@ -113,7 +161,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
 
 /// Remove cached copies that aren't the current one.
 /// Silently skips locked files (still running).
-fn cleanup_old(dir: &Path, keep: &Path) -> u32 {
+fn cleanup_old_cached(dir: &Path, keep: &Path) -> u32 {
     let mut cleaned = 0u32;
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -162,7 +210,7 @@ mod tests {
         fs::write(&old1, b"old1").unwrap();
         fs::write(&old2, b"old2").unwrap();
 
-        let cleaned = cleanup_old(&tmp, &keep);
+        let cleaned = cleanup_old_cached(&tmp, &keep);
         assert_eq!(cleaned, 2);
         assert!(keep.is_file());
         assert!(!old1.exists());
