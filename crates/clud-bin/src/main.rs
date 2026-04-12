@@ -3,7 +3,6 @@ mod backend;
 mod command;
 
 use std::io::{self, Read};
-use std::process;
 
 fn main() {
     let mut args = args::Args::parse_with_passthrough();
@@ -25,14 +24,13 @@ fn main() {
         Some(path) => path.to_string_lossy().to_string(),
         None => {
             if args.dry_run {
-                // In dry-run mode, use the executable name even if not found.
                 backend.executable_name().to_string()
             } else {
                 eprintln!(
                     "error: {} not found on PATH. Install it or use --dry-run.",
                     backend.executable_name()
                 );
-                process::exit(1);
+                std::process::exit(1);
             }
         }
     };
@@ -46,15 +44,16 @@ fn main() {
             "backend": backend.executable_name(),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
-        process::exit(0);
+        std::process::exit(0);
     }
 
-    // Execute the command
     let exit_code = run_plan(&plan, args.verbose);
-    process::exit(exit_code);
+    std::process::exit(exit_code);
 }
 
 fn run_plan(plan: &command::LaunchPlan, verbose: bool) -> i32 {
+    use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+
     let mut last_exit = 0i32;
 
     for iteration in 0..plan.iterations {
@@ -66,13 +65,29 @@ fn run_plan(plan: &command::LaunchPlan, verbose: bool) -> i32 {
             eprintln!("[clud] exec: {}", plan.command.join(" "));
         }
 
-        let status = process::Command::new(&plan.command[0])
-            .args(&plan.command[1..])
-            .status();
+        let argv: Vec<String> = plan.command.clone();
+        let config = ProcessConfig {
+            command: CommandSpec::Argv(argv),
+            cwd: None,
+            env: None,
+            capture: false,
+            stderr_mode: StderrMode::Stdout,
+            creationflags: None,
+            create_process_group: false,
+            stdin_mode: StdinMode::Inherit,
+            nice: None,
+            containment: None,
+        };
 
-        match status {
-            Ok(s) => {
-                last_exit = s.code().unwrap_or(1);
+        let process = NativeProcess::new(config);
+        if let Err(e) = process.start() {
+            eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+            return 1;
+        }
+
+        match process.wait(None) {
+            Ok(code) => {
+                last_exit = code;
                 if last_exit != 0 && plan.iterations > 1 {
                     eprintln!(
                         "[clud] iteration {} failed with exit code {}",
@@ -83,7 +98,7 @@ fn run_plan(plan: &command::LaunchPlan, verbose: bool) -> i32 {
                 }
             }
             Err(e) => {
-                eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+                eprintln!("[clud] process error: {}", e);
                 return 1;
             }
         }

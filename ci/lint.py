@@ -1,4 +1,4 @@
-"""Lint orchestrator for clud: cargo fmt + clippy + ruff."""
+"""Lint orchestrator for clud: cargo fmt + clippy + ruff + banned imports."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ def main() -> int:
 
     activate()
 
+    from ci.banned_imports import main as check_banned_imports
+
+    if check_banned_imports() != 0:
+        return 1
     if run(["cargo", "fmt", "--all", "--check"]) != 0:
         return 1
     if run(["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]) != 0:
