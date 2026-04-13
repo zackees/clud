@@ -83,6 +83,7 @@ const UP_CODEUP_STEP_MARKER: &str =
 pub struct LaunchPlan {
     pub command: Vec<String>,
     pub iterations: u32,
+    pub backend: Backend,
 }
 
 /// Build the command to execute for the given args and backend.
@@ -153,12 +154,10 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
     // Forward unknown flags
     cmd.extend(args.passthrough.iter().cloned());
 
-    // Suppress backend name for display purposes
-    let _ = backend;
-
     LaunchPlan {
         command: cmd,
         iterations,
+        backend,
     }
 }
 

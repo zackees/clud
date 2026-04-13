@@ -56,7 +56,10 @@ fn main() {
     }
 
     let interrupted = install_ctrl_c_flag();
-    let exit_code = run_plan(&plan, args.verbose, interrupted.as_ref());
+    let exit_code = match plan.backend {
+        backend::Backend::Codex => run_plan_subprocess(&plan, args.verbose, interrupted.as_ref()),
+        backend::Backend::Claude => run_plan_pty(&plan, args.verbose, interrupted.as_ref()),
+    };
     std::process::exit(exit_code);
 }
 
@@ -98,7 +101,75 @@ fn get_terminal_size() -> (u16, u16) {
     }
 }
 
-fn run_plan(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
+fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
+    use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+
+    let env = child_env();
+    let mut last_exit = 0i32;
+
+    for iteration in 0..plan.iterations {
+        if plan.iterations > 1 {
+            eprintln!("[clud] iteration {}/{}", iteration + 1, plan.iterations);
+        }
+
+        if verbose {
+            eprintln!("[clud] exec (subprocess): {}", plan.command.join(" "));
+        }
+
+        let config = ProcessConfig {
+            command: CommandSpec::Argv(plan.command.clone()),
+            cwd: None,
+            env: Some(env.clone()),
+            capture: false,
+            stderr_mode: StderrMode::Stdout,
+            creationflags: None,
+            create_process_group: false,
+            stdin_mode: StdinMode::Inherit,
+            nice: None,
+            containment: None,
+        };
+
+        let process = NativeProcess::new(config);
+        if let Err(e) = process.start() {
+            eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+            return 1;
+        }
+
+        loop {
+            match process.poll() {
+                Ok(Some(code)) => {
+                    last_exit = code;
+                    if last_exit != 0 && plan.iterations > 1 {
+                        eprintln!(
+                            "[clud] iteration {} failed with exit code {}",
+                            iteration + 1,
+                            last_exit
+                        );
+                        return last_exit;
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    if interrupted.load(Ordering::SeqCst) {
+                        let _ = process.kill();
+                        let _ = process.wait(Some(std::time::Duration::from_secs(2)));
+                        eprintln!("[clud] interrupted via Ctrl+C");
+                        return 130;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => {
+                    eprintln!("[clud] error waiting for process: {}", e);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    last_exit
+}
+
+fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
     use running_process_core::pty::NativePtyProcess;
 
     let env = child_env();
