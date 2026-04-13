@@ -92,7 +92,10 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
 
     // YOLO mode: always inject unless --safe
     if !args.safe {
-        cmd.push("--dangerously-skip-permissions".to_string());
+        match backend {
+            Backend::Claude => cmd.push("--dangerously-skip-permissions".to_string()),
+            Backend::Codex => cmd.push("--dangerously-bypass-approvals-and-sandbox".to_string()),
+        }
     }
 
     // Model preference
@@ -274,7 +277,12 @@ mod tests {
         let p = plan(&["clud", "--codex", "-p", "hello"]);
         assert_eq!(
             p.command,
-            vec!["codex", "--dangerously-skip-permissions", "-p", "hello"]
+            vec![
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-p",
+                "hello"
+            ]
         );
     }
 

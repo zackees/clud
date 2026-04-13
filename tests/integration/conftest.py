@@ -85,6 +85,10 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     # Prevent any VIRTUAL_ENV interference
     env.pop("VIRTUAL_ENV", None)
 
+    # Enable PID logging for zombie detection
+    pid_log = tmp_path / "child_pids.log"
+    env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(pid_log)
+
     return env
 
 
@@ -92,3 +96,41 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
 def clud_binary() -> Path:
     """Return the path to the installed clud binary."""
     return _find_clud()
+
+
+def _scan_for_clud_zombies() -> list[dict]:
+    """Scan the system for orphaned CLUD-spawned processes."""
+    scan_bin = ROOT / "target" / "debug" / "examples" / "scan_zombies.exe"
+    if not scan_bin.is_file():
+        scan_bin = ROOT / "target" / "debug" / "examples" / "scan_zombies"
+    if not scan_bin.is_file():
+        return []
+    try:
+        result = subprocess.run(
+            [str(scan_bin)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        orphans = []
+        for line in result.stdout.splitlines():
+            if "ORPHAN" in line:
+                orphans.append({"line": line.strip()})
+        return orphans
+    except Exception:
+        return []
+
+
+@pytest.fixture(autouse=True)
+def _check_no_zombies_after_test():
+    """After each test, verify no orphaned CLUD processes were leaked."""
+    yield
+    import time
+
+    time.sleep(0.2)  # brief settle time for process cleanup
+    orphans = _scan_for_clud_zombies()
+    if orphans:
+        msg = "CLUD zombie processes detected after test:\n"
+        for o in orphans:
+            msg += f"  {o['line']}\n"
+        pytest.fail(msg)

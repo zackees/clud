@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import json
+import re
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 pytestmark = pytest.mark.integration
+
+# Timeout for each subprocess call (seconds).  Prevents deadlocks.
+_TIMEOUT = 15
+
+# Strip ANSI escape sequences and ConPTY control codes from PTY output.
+_ANSI_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|\][^\x07]*\x07)")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 def _run(
@@ -21,15 +36,26 @@ def _run(
         [str(clud), *args],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=_TIMEOUT,
         env=env,
         input=input_data,
     )
 
 
 def _parse_agent_report(result: subprocess.CompletedProcess[str]) -> dict:
-    """Parse the JSON report from the mock agent."""
-    return json.loads(result.stdout)
+    """Parse the JSON report from the mock agent.
+
+    PTY output may contain ANSI escape sequences around the JSON.
+    Extract the first valid JSON object from the cleaned output.
+    """
+    cleaned = _strip_ansi(result.stdout)
+    # Find JSON objects — they start with { and end with }
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    # Fallback: try parsing the whole cleaned output
+    return json.loads(cleaned)
 
 
 class TestBackendSelection:
@@ -263,11 +289,15 @@ class TestLoopMode:
         )
         assert result.returncode == 0
         # The mock agent is invoked 3 times, each prints a JSON line.
-        lines = [
-            line for line in result.stdout.strip().splitlines() if line.strip()
+        # PTY output may contain ANSI escapes; extract JSON lines.
+        cleaned = _strip_ansi(result.stdout)
+        json_lines = [
+            line.strip()
+            for line in cleaned.splitlines()
+            if line.strip().startswith("{")
         ]
-        assert len(lines) == 3
-        for line in lines:
+        assert len(json_lines) == 3
+        for line in json_lines:
             report = json.loads(line)
             assert "do stuff" in report["args"]
 
@@ -288,7 +318,60 @@ class TestLoopMode:
         )
         assert result.returncode == 1
         # Only 1 iteration should have run (first fails, loop stops).
-        lines = [
-            line for line in result.stdout.strip().splitlines() if line.strip()
+        cleaned = _strip_ansi(result.stdout)
+        json_lines = [
+            line.strip()
+            for line in cleaned.splitlines()
+            if line.strip().startswith("{")
         ]
-        assert len(lines) == 1
+        assert len(json_lines) == 1
+
+
+class TestInterruptReporting:
+    """Verify Ctrl+C reports how clud was launched."""
+
+    def test_ctrl_c_reports_pty_mode(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "-p",
+                "hello",
+                "--",
+                "--mock-sleep-ms",
+                "5000",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=mock_env,
+            **kwargs,
+        )
+
+        try:
+            time.sleep(0.5)
+            if sys.platform == "win32":
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                proc.send_signal(signal.SIGINT)
+            _stdout, stderr = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        if sys.platform == "win32":
+            # CTRL_BREAK_EVENT on Windows yields STATUS_CONTROL_C_EXIT (0xC000013A)
+            # or 130 depending on whether the ctrlc handler catches it.
+            assert proc.returncode in (130, 3221225786)
+        else:
+            assert proc.returncode == 130
+        # When the handler fires, stderr contains the interrupt message.
+        # On Windows with CTRL_BREAK the process may die before the handler runs.
+        if proc.returncode == 130:
+            assert "[clud] interrupted via Ctrl+C (pty)" in stderr

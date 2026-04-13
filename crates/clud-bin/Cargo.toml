@@ -10,9 +10,11 @@ description = "Fast CLI for running Claude Code and Codex in YOLO mode"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-running-process-core = "3.0.13"
+ctrlc = "3"
+running-process-core = "3.0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+terminal_size = "0.4"
 which = "7"
 
 [[bin]]
