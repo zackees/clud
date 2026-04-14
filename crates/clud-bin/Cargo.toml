@@ -15,6 +15,7 @@ running-process-core = "3.0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 terminal_size = "0.4"
+wasmi = "0.40.0"
 which = "7"
 
 [[bin]]

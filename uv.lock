@@ -13,6 +13,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "ziglang" },
 ]
 
 [package.metadata]
@@ -23,6 +24,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
     { name = "ruff", specifier = ">=0.8.0" },
+    { name = "ziglang", specifier = ">=0.15.2,<0.16" },
 ]
 
 [[package]]
