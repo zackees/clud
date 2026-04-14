@@ -122,6 +122,15 @@ fn get_terminal_size() -> (u16, u16) {
     }
 }
 
+fn normalize_exit_code(code: i32) -> i32 {
+    match code {
+        -2 => 130,
+        -9 => 137,
+        -15 => 143,
+        _ => code,
+    }
+}
+
 fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
     use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
@@ -164,10 +173,6 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
                         return 130;
                     }
                     last_exit = code;
-                    if interrupted.load(Ordering::SeqCst) {
-                        eprintln!("[clud] interrupted via Ctrl+C (pty)");
-                        return 130;
-                    }
                     if last_exit != 0 && plan.iterations > 1 {
                         eprintln!(
                             "[clud] iteration {} failed with exit code {}",
@@ -248,7 +253,7 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
                 Err(_) => {
                     // PTY stream closed — child exited.  Reap exit code.
                     match process.wait_impl(Some(1.0)) {
-                        Ok(code) => last_exit = code,
+                        Ok(code) => last_exit = normalize_exit_code(code),
                         Err(_) => last_exit = 1,
                     }
                     if last_exit != 0 && plan.iterations > 1 {
@@ -272,7 +277,7 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
                     eprintln!("[clud] interrupted via Ctrl+C (pty)");
                     return 130;
                 }
-                last_exit = code;
+                last_exit = normalize_exit_code(code);
                 if last_exit != 0 && plan.iterations > 1 {
                     eprintln!(
                         "[clud] iteration {} failed with exit code {}",
@@ -287,7 +292,7 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
             if interrupted.load(Ordering::SeqCst) {
                 let _ = process.send_interrupt_impl();
                 match process.wait_impl(Some(2.0)) {
-                    Ok(code) => last_exit = code,
+                    Ok(code) => last_exit = normalize_exit_code(code),
                     Err(_) => {
                         let _ = process.close_impl();
                         last_exit = 130;
