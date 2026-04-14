@@ -129,6 +129,9 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
             cmd.push("-p".to_string());
             cmd.push(prompt);
         }
+        Some(Command::Wasm { .. }) => {
+            unreachable!("wasm execution is handled directly in main")
+        }
         None => {
             // Direct flags
             if let Some(ref prompt) = args.prompt {

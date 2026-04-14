@@ -2,6 +2,7 @@ mod args;
 mod backend;
 mod command;
 mod trampoline;
+mod wasm;
 
 use std::io::{self, Read};
 use std::sync::{
@@ -24,6 +25,26 @@ fn main() {
         let mut input = String::new();
         if io::stdin().read_to_string(&mut input).is_ok() && !input.trim().is_empty() {
             args.prompt = Some(input.trim().to_string());
+        }
+    }
+
+    if let Some(args::Command::Wasm { module, invoke }) = &args.command {
+        if args.dry_run {
+            let json = serde_json::json!({
+                "mode": "wasm",
+                "module": module,
+                "invoke": invoke,
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            std::process::exit(0);
+        }
+
+        match wasm::run_file(module, invoke) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
         }
     }
 

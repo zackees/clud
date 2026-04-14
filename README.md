@@ -37,6 +37,7 @@ clud --safe -p "drop the table"   # Disable YOLO mode (keeps permission prompts)
 clud --dry-run -p "hello"         # Print what would run without executing
 echo "explain this error" | clud  # Pipe mode: read prompt from stdin
 clud -- --verbose --debug         # Pass extra flags through to the backend
+clud wasm guest.wasm              # Run a local wasm module with clud's embedded runtime
 ```
 
 ### Flags
@@ -92,6 +93,15 @@ Runs lint, test, cleanup, then commits.
 
 ```bash
 clud up
+```
+
+## `clud wasm` â€” Embedded Runtime
+
+Loads a local `.wasm` module, wires up a host logging import, and invokes an exported function.
+
+```bash
+clud wasm hello.wasm
+clud wasm hello.wasm --invoke _start
 ```
 
 ## Development

@@ -30,7 +30,13 @@ Repository = "https://github.com/zackees/clud"
 Issues = "https://github.com/zackees/clud/issues"
 
 [dependency-groups]
-dev = ["maturin[zig]>=1.7,<2", "pytest>=8.0.0", "pytest-cov>=6.0.0", "ruff>=0.8.0"]
+dev = [
+    "maturin[zig]>=1.7,<2",
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "ziglang>=0.15.2,<0.16",
+]
 
 [tool.maturin]
 manifest-path = "crates/clud-bin/Cargo.toml"

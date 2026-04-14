@@ -49,7 +49,7 @@ pub struct Args {
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
 
-    /// Subcommands: loop, up, rebase, fix.
+    /// Subcommands: loop, up, rebase, fix, wasm.
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -88,6 +88,16 @@ pub enum Command {
     Fix {
         /// Optional GitHub URL to fetch logs from (e.g., actions run or PR URL).
         url: Option<String>,
+    },
+
+    /// Execute a local wasm module using clud's embedded runtime.
+    Wasm {
+        /// Path to the `.wasm` module.
+        module: String,
+
+        /// Exported function to invoke (default: run).
+        #[arg(long = "invoke", default_value = "run")]
+        invoke: String,
     },
 }
 
@@ -138,7 +148,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
     // Known subcommands
-    let subcommands: &[&str] = &["loop", "up", "rebase", "fix"];
+    let subcommands: &[&str] = &["loop", "up", "rebase", "fix", "wasm"];
 
     // Once we hit a subcommand, everything after is known (clap handles it)
     let mut in_subcommand = false;
@@ -369,6 +379,36 @@ mod tests {
                 );
             }
             _ => panic!("expected Fix subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_wasm_subcommand() {
+        let args = parse(&["clud", "wasm", "guest.wasm"]);
+        match args.command {
+            Some(Command::Wasm {
+                ref module,
+                ref invoke,
+            }) => {
+                assert_eq!(module, "guest.wasm");
+                assert_eq!(invoke, "run");
+            }
+            _ => panic!("expected Wasm subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_wasm_subcommand_custom_entrypoint() {
+        let args = parse(&["clud", "wasm", "guest.wasm", "--invoke", "_start"]);
+        match args.command {
+            Some(Command::Wasm {
+                ref module,
+                ref invoke,
+            }) => {
+                assert_eq!(module, "guest.wasm");
+                assert_eq!(invoke, "_start");
+            }
+            _ => panic!("expected Wasm subcommand"),
         }
     }
 
