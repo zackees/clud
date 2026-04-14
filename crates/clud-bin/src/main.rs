@@ -159,7 +159,15 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
         loop {
             match process.poll() {
                 Ok(Some(code)) => {
+                    if interrupted.load(Ordering::SeqCst) {
+                        eprintln!("[clud] interrupted via Ctrl+C");
+                        return 130;
+                    }
                     last_exit = code;
+                    if interrupted.load(Ordering::SeqCst) {
+                        eprintln!("[clud] interrupted via Ctrl+C (pty)");
+                        return 130;
+                    }
                     if last_exit != 0 && plan.iterations > 1 {
                         eprintln!(
                             "[clud] iteration {} failed with exit code {}",
@@ -260,6 +268,10 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
             if let Ok(Some(code)) =
                 running_process_core::pty::poll_pty_process(&process.handles, &process.returncode)
             {
+                if interrupted.load(Ordering::SeqCst) {
+                    eprintln!("[clud] interrupted via Ctrl+C (pty)");
+                    return 130;
+                }
                 last_exit = code;
                 if last_exit != 0 && plan.iterations > 1 {
                     eprintln!(
