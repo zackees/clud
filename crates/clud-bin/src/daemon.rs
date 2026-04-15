@@ -25,6 +25,7 @@ use crate::trampoline;
 const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
 const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 const BACKLOG_LIMIT_BYTES: usize = 256 * 1024;
+const STALE_CLIENT_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +159,7 @@ struct AttachedClient {
     id: u64,
     sender: mpsc::Sender<WorkerServerMessage>,
     shutdown: TcpStream,
+    attached_at: Instant,
 }
 
 type AttachClientResult = (
@@ -207,14 +209,21 @@ impl WorkerShared {
             .exit_code = Some(exit_code);
     }
 
-    fn attach_client(&self, shutdown: TcpStream) -> AttachClientResult {
+    fn attach_client(&self, shutdown: TcpStream) -> Result<AttachClientResult, String> {
         let mut guard = self.client.lock().expect("client mutex poisoned");
+        if guard
+            .as_ref()
+            .is_some_and(|client| client.attached_at.elapsed() < STALE_CLIENT_GRACE)
+        {
+            return Err("session already has an attached client".to_string());
+        }
         let (tx, rx) = mpsc::channel();
         let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
         let previous = guard.replace(AttachedClient {
             id: client_id,
             sender: tx,
             shutdown,
+            attached_at: Instant::now(),
         });
         drop(guard);
         if let Some(previous) = previous {
@@ -229,7 +238,7 @@ impl WorkerShared {
             .iter()
             .cloned()
             .collect();
-        (client_id, rx, snapshot, backlog)
+        Ok((client_id, rx, snapshot, backlog))
     }
 
     fn detach_client(&self, client_id: u64) {
@@ -964,7 +973,12 @@ fn handle_worker_client(
     }
 
     let shutdown_handle = stream.try_clone()?;
-    let (client_id, rx, snapshot, backlog) = shared.attach_client(shutdown_handle);
+    let (client_id, rx, snapshot, backlog) = match shared.attach_client(shutdown_handle) {
+        Ok(values) => values,
+        Err(message) => {
+            return write_json_line(&mut stream, &WorkerServerMessage::Error { message });
+        }
+    };
     let mut writer = stream.try_clone()?;
     write_json_line(
         &mut writer,
