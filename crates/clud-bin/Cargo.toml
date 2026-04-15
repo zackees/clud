@@ -24,7 +24,12 @@ which = "7"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+cpal = "0.16"
+rodio = "0.21"
+whisper-rs = "0.16"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 cpal = "0.16"
 rodio = "0.21"
 whisper-rs = "0.16"

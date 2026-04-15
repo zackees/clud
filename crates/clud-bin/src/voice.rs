@@ -1,4 +1,7 @@
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 mod enabled {
     use std::env;
     use std::io::{self, Write};
@@ -212,8 +215,8 @@ mod enabled {
             return mono;
         }
 
-        let output_len = ((mono.len() as f64) * TARGET_SAMPLE_RATE as f64 / sample_rate as f64)
-            .round() as usize;
+        let output_len =
+            ((mono.len() as f64) * TARGET_SAMPLE_RATE as f64 / sample_rate as f64).round() as usize;
         if output_len == 0 {
             return Vec::new();
         }
@@ -576,18 +579,30 @@ mod enabled {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 pub use enabled::VoiceMode;
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 pub struct VoiceMode;
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 impl VoiceMode {
     pub fn from_env() -> Self {
         Self
     }
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 impl crate::session::InteractiveHooks for VoiceMode {}

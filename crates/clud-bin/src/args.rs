@@ -146,14 +146,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
     let subcommands: &[&str] = &[
-        "loop",
-        "up",
-        "rebase",
-        "fix",
-        "wasm",
-        "attach",
-        "__daemon",
-        "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

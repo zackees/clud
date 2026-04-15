@@ -368,63 +368,120 @@ fn run_attach(session_id: &str, state_dir: &Path, interrupted: &AtomicBool) -> i
 }
 
 fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32 {
-    let mut stream = match TcpStream::connect(("127.0.0.1", session.worker_port)) {
-        Ok(stream) => stream,
-        Err(err) => {
-            eprintln!(
-                "[clud] failed to connect to daemon worker for session {}: {}",
-                session.id, err
-            );
+    let started = Instant::now();
+    let attach_retry_window = Duration::from_secs(5);
+    let (writer, mut reader) = loop {
+        let mut stream = match TcpStream::connect(("127.0.0.1", session.worker_port)) {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!(
+                    "[clud] failed to connect to daemon worker for session {}: {}",
+                    session.id, err
+                );
+                return 1;
+            }
+        };
+        if let Err(err) = write_json_line(&mut stream, &WorkerClientMessage::Attach) {
+            eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
             return 1;
         }
-    };
-    if let Err(err) = write_json_line(&mut stream, &WorkerClientMessage::Attach) {
-        eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
-        return 1;
-    }
 
-    let writer = match stream.try_clone() {
-        Ok(writer) => Arc::new(Mutex::new(writer)),
-        Err(err) => {
-            eprintln!("[clud] failed to clone session writer: {}", err);
-            return 1;
+        let writer = match stream.try_clone() {
+            Ok(writer) => Arc::new(Mutex::new(writer)),
+            Err(err) => {
+                eprintln!("[clud] failed to clone session writer: {}", err);
+                return 1;
+            }
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                eprintln!(
+                    "[clud] daemon worker closed the connection for session {}",
+                    session.id
+                );
+                return 1;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
+                return 1;
+            }
+        }
+
+        let message = match serde_json::from_str::<WorkerServerMessage>(&line) {
+            Ok(message) => message,
+            Err(err) => {
+                eprintln!(
+                    "[clud] invalid worker response for session {}: {}",
+                    session.id, err
+                );
+                return 1;
+            }
+        };
+        match message {
+            WorkerServerMessage::Attached { .. } => break (writer, reader),
+            WorkerServerMessage::Error { message }
+                if message == "session already has an attached client"
+                    && started.elapsed() < attach_retry_window =>
+            {
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            WorkerServerMessage::Error { message } => {
+                eprintln!("[clud] {}", message);
+                return 1;
+            }
+            WorkerServerMessage::Exited { exit_code } => return exit_code,
+            WorkerServerMessage::Output { data_b64 } => {
+                if let Ok(bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
+                {
+                    let _ = io::stdout().write_all(&bytes);
+                    let _ = io::stdout().flush();
+                }
+                eprintln!(
+                    "[clud] daemon worker sent output before attach handshake for session {}",
+                    session.id
+                );
+                return 1;
+            }
         }
     };
 
     let exit_code = Arc::new(Mutex::new(None));
     let reader_exit = Arc::clone(&exit_code);
-    let reader = thread::spawn(move || {
-        let mut reader = BufReader::new(stream);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let Ok(message) = serde_json::from_str::<WorkerServerMessage>(&line) else {
-                        continue;
-                    };
-                    match message {
-                        WorkerServerMessage::Attached { .. } => {}
-                        WorkerServerMessage::Output { data_b64 } => {
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD
-                                .decode(data_b64.as_bytes())
-                            {
-                                let _ = io::stdout().write_all(&bytes);
-                                let _ = io::stdout().flush();
-                            }
-                        }
-                        WorkerServerMessage::Exited { exit_code } => {
-                            *reader_exit.lock().expect("exit code mutex poisoned") =
-                                Some(exit_code);
-                            break;
-                        }
-                        WorkerServerMessage::Error { message } => {
-                            let _ = writeln!(io::stderr(), "[clud] {}", message);
+    let reader = thread::spawn(move || loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let Ok(message) = serde_json::from_str::<WorkerServerMessage>(&line) else {
+                    continue;
+                };
+                match message {
+                    WorkerServerMessage::Attached { .. } => {}
+                    WorkerServerMessage::Output { data_b64 } => {
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
+                        {
+                            let _ = io::stdout().write_all(&bytes);
+                            let _ = io::stdout().flush();
                         }
                     }
+                    WorkerServerMessage::Exited { exit_code } => {
+                        *reader_exit.lock().expect("exit code mutex poisoned") = Some(exit_code);
+                        break;
+                    }
+                    WorkerServerMessage::Error { message } => {
+                        let _ = writeln!(io::stderr(), "[clud] {}", message);
+                        *reader_exit.lock().expect("exit code mutex poisoned") = Some(1);
+                        break;
+                    }
                 }
-                Err(_) => break,
             }
+            Err(_) => break,
         }
     });
 
