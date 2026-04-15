@@ -65,11 +65,14 @@ def _wait_for_tree_pids(path: Path, minimum: int, timeout: float = 10.0) -> list
     deadline = time.time() + timeout
     while time.time() < deadline:
         if path.is_file():
-            pids = [
-                json.loads(line)["pid"]
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            pids = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    pids.append(json.loads(line)["pid"])
+                except json.JSONDecodeError:
+                    continue
             if len(pids) >= minimum:
                 return pids
         time.sleep(0.05)
