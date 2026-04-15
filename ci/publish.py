@@ -81,6 +81,19 @@ def detect_repo() -> str:
     return url.removesuffix(".git")
 
 
+def detect_publish_ref() -> str:
+    current = run_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    upstream = run_capture_allow_failure(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+    )
+    if upstream.returncode != 0:
+        return current
+    upstream_ref = upstream.stdout.strip()
+    if upstream_ref.startswith("origin/"):
+        return upstream_ref.removeprefix("origin/")
+    return current
+
+
 def check_pypi_version(name: str, version: str) -> None:
     existing = existing_pypi_files(name, version)
     if existing is None:
@@ -121,7 +134,7 @@ def ensure_clean_and_pushed() -> None:
 
 
 def trigger(repo: str, workflow_file: str) -> int:
-    branch = run_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    branch = detect_publish_ref()
     existing_raw = run_capture(
         [
             "gh",
