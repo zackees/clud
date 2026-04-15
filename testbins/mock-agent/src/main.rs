@@ -7,11 +7,12 @@
 //! - Writes received args as JSON to stdout
 //! - Reads stdin if available (for pipe mode testing)
 //! - Exits with the code specified by --mock-exit-code (default 0)
+//! - With --mock-read-stdin-ms, reads stdin for N ms (even if terminal) and reports it
 
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -19,8 +20,10 @@ fn main() {
     // Extract --mock-exit-code if present (our own flag, not forwarded by clud)
     let mut exit_code = 0i32;
     let mut sleep_ms = 0u64;
+    let mut read_stdin_ms = 0u64;
     let mut helper_role: Option<String> = None;
     let mut tree_log: Option<PathBuf> = None;
+    let mut report_file: Option<PathBuf> = None;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -42,6 +45,13 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-read-stdin-ms" {
+            if let Some(ms) = args.get(i + 1) {
+                read_stdin_ms = ms.parse().unwrap_or(0);
+            }
+            skip_next = true;
+            continue;
+        }
         if arg == "--mock-helper-role" {
             if let Some(role) = args.get(i + 1) {
                 helper_role = Some(role.clone());
@@ -52,6 +62,13 @@ fn main() {
         if arg == "--mock-spawn-tree-log" {
             if let Some(path) = args.get(i + 1) {
                 tree_log = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-report-file" {
+            if let Some(path) = args.get(i + 1) {
+                report_file = Some(PathBuf::from(path));
             }
             skip_next = true;
             continue;
@@ -69,8 +86,12 @@ fn main() {
         spawn_helper(&args[0], "child", path, sleep_ms);
     }
 
-    // Read stdin if not a terminal
-    let stdin_content = if !io::stdin().is_terminal() {
+    let stdin_is_terminal = io::stdin().is_terminal();
+
+    // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
+    let stdin_content = if read_stdin_ms > 0 {
+        read_stdin_timed(read_stdin_ms)
+    } else if !stdin_is_terminal {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf).ok();
         if buf.is_empty() {
@@ -99,17 +120,65 @@ fn main() {
         "args": filtered_args,
         "cwd": cwd,
         "stdin": stdin_content,
+        "stdin_is_terminal": stdin_is_terminal,
         "exit_code": exit_code,
         "sleep_ms": sleep_ms,
-        "cwd": cwd,
         "env": {
             "IN_CLUD": in_clud,
             "RUNNING_PROCESS_ORIGINATOR": originator,
         },
     });
-    println!("{}", serde_json::to_string(&report).unwrap());
+
+    let report_str = serde_json::to_string(&report).unwrap();
+    println!("{}", report_str);
+
+    // Also write to file if requested (useful when stdout is captured by PTY)
+    if let Some(path) = report_file {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &report_str);
+    }
 
     std::process::exit(exit_code);
+}
+
+/// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
+/// Works regardless of whether stdin is a terminal or pipe.
+fn read_stdin_timed(timeout_ms: u64) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let stdin = io::stdin();
+        loop {
+            match stdin.lock().read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(data) => collected.extend(data),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    if collected.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&collected).to_string())
+    }
 }
 
 fn run_helper(exe: &str, role: &str, tree_log: Option<&PathBuf>, sleep_ms: u64) {

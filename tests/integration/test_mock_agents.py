@@ -395,3 +395,219 @@ class TestInterruptReporting:
 
         if proc.returncode == 130:
             assert "[clud] interrupted via Ctrl+C (pty)" in stderr
+
+
+class TestStdinForwarding:
+    """Verify stdin data reaches the backend in subprocess mode.
+
+    When clud is launched with an explicit prompt (-p), the pipe-mode stdin
+    detection is skipped.  Any data written to clud's stdin should be
+    inherited by the child process (subprocess mode uses StdinMode::Inherit).
+
+    The mock agent's --mock-read-stdin-ms flag makes it read from stdin for
+    a specified duration and report what it received.
+    """
+
+    def test_subprocess_stdin_forwarding(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Data written to clud's stdin reaches the child in subprocess mode."""
+        report_file = tmp_path / "report.json"
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "-p",
+                "hello",
+                "--",
+                "--mock-read-stdin-ms",
+                "3000",
+                "--mock-report-file",
+                str(report_file),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=mock_env,
+        )
+
+        try:
+            # Give clud time to start the mock agent, then write to stdin
+            time.sleep(0.5)
+            assert proc.stdin is not None
+            proc.stdin.write("dropped-file.txt\n")
+            proc.stdin.flush()
+            proc.stdin.close()
+            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        assert proc.returncode == 0, f"stderr: {stderr}"
+
+        # Parse report from file (most reliable) or stdout
+        if report_file.exists():
+            report = json.loads(report_file.read_text())
+        else:
+            report = _parse_agent_report(
+                subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=stdout, stderr=stderr
+                )
+            )
+
+        assert report["stdin"] is not None, "mock agent received no stdin data"
+        assert "dropped-file.txt" in report["stdin"]
+
+    def test_subprocess_stdin_is_not_terminal_when_piped(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """When test pipes stdin, the child sees a pipe (not a terminal)."""
+        report_file = tmp_path / "report.json"
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "-p",
+                "hello",
+                "--",
+                "--mock-read-stdin-ms",
+                "1000",
+                "--mock-report-file",
+                str(report_file),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=mock_env,
+        )
+
+        try:
+            assert proc.stdin is not None
+            proc.stdin.close()
+            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        assert proc.returncode == 0, f"stderr: {stderr}"
+
+        if report_file.exists():
+            report = json.loads(report_file.read_text())
+        else:
+            report = _parse_agent_report(
+                subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=stdout, stderr=stderr
+                )
+            )
+
+        # With piped stdin, the child should NOT see a terminal
+        assert report["stdin_is_terminal"] is False
+
+    def test_subprocess_multiline_stdin(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Multi-line paste (simulated drag-and-drop of multiple files) works."""
+        report_file = tmp_path / "report.json"
+        payload = "file1.txt\nfile2.txt\npath/to/file3.txt\n"
+
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "-p",
+                "hello",
+                "--",
+                "--mock-read-stdin-ms",
+                "3000",
+                "--mock-report-file",
+                str(report_file),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=mock_env,
+        )
+
+        try:
+            time.sleep(0.5)
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+            proc.stdin.close()
+            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        assert proc.returncode == 0, f"stderr: {stderr}"
+
+        if report_file.exists():
+            report = json.loads(report_file.read_text())
+        else:
+            report = _parse_agent_report(
+                subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout=stdout, stderr=stderr
+                )
+            )
+
+        assert report["stdin"] is not None
+        assert "file1.txt" in report["stdin"]
+        assert "file2.txt" in report["stdin"]
+        assert "path/to/file3.txt" in report["stdin"]
+
+    def test_subprocess_bracketed_paste_forwarding(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        """Bracketed paste sequences are forwarded to the child."""
+        report_file = tmp_path / "report.json"
+        # Simulate bracketed paste: ESC[200~ ... ESC[201~
+        pasted = "\x1b[200~/path/to/dropped.txt\x1b[201~"
+
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "-p",
+                "hello",
+                "--",
+                "--mock-read-stdin-ms",
+                "3000",
+                "--mock-report-file",
+                str(report_file),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=mock_env,
+        )
+
+        try:
+            time.sleep(0.5)
+            assert proc.stdin is not None
+            proc.stdin.write(pasted.encode())
+            proc.stdin.flush()
+            proc.stdin.close()
+            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        assert proc.returncode == 0, f"stderr: {stderr}"
+
+        if report_file.exists():
+            report = json.loads(report_file.read_text())
+        else:
+            cleaned = _strip_ansi(stdout.decode() if isinstance(stdout, bytes) else stdout)
+            for line in cleaned.splitlines():
+                line = line.strip()
+                if line.startswith("{"):
+                    report = json.loads(line)
+                    break
+            else:
+                report = json.loads(cleaned)
+
+        assert report["stdin"] is not None
+        assert "/path/to/dropped.txt" in report["stdin"]
