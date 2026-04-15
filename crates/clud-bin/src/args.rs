@@ -43,6 +43,12 @@ pub struct Args {
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
+    #[arg(long = "detach", conflicts_with = "dry_run")]
+    pub detach: bool,
+
+    #[arg(long = "detachable", conflicts_with = "dry_run")]
+    pub detachable: bool,
+
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
 
@@ -81,10 +87,10 @@ pub enum Command {
         #[arg(long = "invoke", default_value = "run")]
         invoke: String,
     },
-    #[command(hide = true)]
     Attach {
-        session_id: String,
+        session_id: Option<String>,
     },
+    List,
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -139,6 +145,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--pty",
         "--safe",
         "--dry-run",
+        "--detach",
+        "--detachable",
         "--verbose",
         "--experimental-daemon-centralized",
         "--help",
@@ -146,7 +154,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "list", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
@@ -278,6 +286,20 @@ mod tests {
     fn test_dry_run() {
         let args = parse(&["clud", "--dry-run", "-p", "hello"]);
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_detach_flag() {
+        let args = parse(&["clud", "--detach", "-p", "hello"]);
+        assert!(args.detach);
+        assert!(!args.detachable);
+    }
+
+    #[test]
+    fn test_detachable_flag() {
+        let args = parse(&["clud", "--detachable", "-p", "hello"]);
+        assert!(args.detachable);
+        assert!(!args.detach);
     }
 
     #[test]
@@ -422,6 +444,34 @@ mod tests {
     }
 
     #[test]
+    fn test_attach_without_session_id() {
+        let args = parse(&["clud", "attach"]);
+        match args.command {
+            Some(Command::Attach { session_id }) => {
+                assert!(session_id.is_none());
+            }
+            _ => panic!("expected Attach subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_attach_with_session_id() {
+        let args = parse(&["clud", "attach", "sess-123"]);
+        match args.command {
+            Some(Command::Attach { session_id }) => {
+                assert_eq!(session_id.as_deref(), Some("sess-123"));
+            }
+            _ => panic!("expected Attach subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_list_subcommand() {
+        let args = parse(&["clud", "list"]);
+        assert!(matches!(args.command, Some(Command::List)));
+    }
+
+    #[test]
     fn test_unknown_flags_passthrough() {
         let args = parse(&["clud", "--some-unknown-flag", "-p", "hello"]);
         assert_eq!(args.prompt.as_deref(), Some("hello"));
@@ -453,6 +503,8 @@ mod tests {
         assert!(!args.pty);
         assert!(!args.safe);
         assert!(!args.dry_run);
+        assert!(!args.detach);
+        assert!(!args.detachable);
         assert!(args.command.is_none());
         assert!(args.passthrough.is_empty());
     }
