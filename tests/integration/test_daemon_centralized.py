@@ -29,13 +29,25 @@ def _managed_env(mock_env: dict[str, str], state_dir: Path) -> dict[str, str]:
     return env
 
 
+def _extract_session_id(line: str) -> str | None:
+    """Extract session id from various stderr formats."""
+    # "[clud] daemon session sess-XXX"
+    if "daemon session" in line:
+        return line.strip().rsplit(" ", 1)[-1]
+    # "[clud] session sess-XXX running in background"
+    if "session" in line and "running in background" in line:
+        return line.strip().split("session ", 1)[-1].split(" running")[0]
+    return None
+
+
 def _read_session_id(proc: subprocess.Popen[str], timeout: float = 10.0) -> str:
     assert proc.stderr is not None
     deadline = time.time() + timeout
     while time.time() < deadline:
         line = proc.stderr.readline()
-        if "daemon session" in line:
-            return line.strip().rsplit(" ", 1)[-1]
+        session_id = _extract_session_id(line)
+        if session_id is not None:
+            return session_id
         if proc.poll() is not None:
             raise AssertionError(f"clud exited early while waiting for session id: {line!r}")
     raise AssertionError("timed out waiting for daemon session id")
@@ -43,8 +55,9 @@ def _read_session_id(proc: subprocess.Popen[str], timeout: float = 10.0) -> str:
 
 def _read_session_id_from_text(stderr: str) -> str:
     for line in stderr.splitlines():
-        if "daemon session" in line:
-            return line.strip().rsplit(" ", 1)[-1]
+        session_id = _extract_session_id(line)
+        if session_id is not None:
+            return session_id
     raise AssertionError(f"daemon session id not found in stderr: {stderr!r}")
 
 
@@ -539,3 +552,157 @@ class TestDaemonCentralizedCleanup:
 
         _kill_process(metadata["daemon_pid"])
         _wait_for_pids_to_exit(pids)
+
+
+class TestDaemonSessionHardening:
+    def test_detach_prints_attach_hint(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "hint-test",
+            "--",
+            "--mock-sleep-ms",
+            "3000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+            stderr = proc.stderr.read() if proc.stderr else ""
+            assert "attach with: clud attach" in stderr
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_attach_no_sessions_shows_helpful_message(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        result = subprocess.run(
+            [str(clud_binary), "attach"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == 0
+        assert "No active sessions" in result.stdout
+
+    def test_attach_auto_attaches_single_session(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "auto-attach",
+            "--",
+            "--mock-sleep-ms",
+            "3000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+            attached = subprocess.run(
+                [str(clud_binary), "attach"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert attached.returncode == 0
+            report = json.loads(attached.stdout)
+            assert "auto-attach" in report["args"]
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_kill_session(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "kill-me",
+            "--",
+            "--mock-sleep-ms",
+            "30000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+            result = subprocess.run(
+                [str(clud_binary), "kill", session_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0
+            assert "killed session" in result.stderr
+
+            listed = subprocess.run(
+                [str(clud_binary), "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert session_id not in listed.stdout
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_kill_all_sessions(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        _, session_id_1 = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "kill-all-1",
+            "--",
+            "--mock-sleep-ms",
+            "30000",
+        )
+        _, session_id_2 = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "kill-all-2",
+            "--",
+            "--mock-sleep-ms",
+            "30000",
+        )
+        try:
+            result = subprocess.run(
+                [str(clud_binary), "kill", "--all"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0
+
+            listed = subprocess.run(
+                [str(clud_binary), "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert session_id_1 not in listed.stdout
+            assert session_id_2 not in listed.stdout
+        finally:
+            _kill_daemon_for_session(state_dir, session_id_1)

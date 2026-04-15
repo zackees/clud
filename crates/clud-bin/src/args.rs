@@ -90,6 +90,11 @@ pub enum Command {
     Attach {
         session_id: Option<String>,
     },
+    Kill {
+        session_id: Option<String>,
+        #[arg(long = "all")]
+        all: bool,
+    },
     List,
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
@@ -149,12 +154,13 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--detachable",
         "--verbose",
         "--experimental-daemon-centralized",
+        "--all",
         "--help",
         "--version",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "list", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
