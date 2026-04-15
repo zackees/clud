@@ -154,10 +154,23 @@ struct BacklogState {
     total_bytes: usize,
 }
 
+struct AttachedClient {
+    id: u64,
+    sender: mpsc::Sender<WorkerServerMessage>,
+}
+
+type AttachClientResult = (
+    u64,
+    mpsc::Receiver<WorkerServerMessage>,
+    SessionSnapshot,
+    Vec<Vec<u8>>,
+);
+
 struct WorkerShared {
     snapshot: Mutex<SessionSnapshot>,
     backlog: Mutex<BacklogState>,
-    client: Mutex<Option<mpsc::Sender<WorkerServerMessage>>>,
+    client: Mutex<Option<AttachedClient>>,
+    next_client_id: AtomicU64,
     stop_accepting: AtomicBool,
 }
 
@@ -167,6 +180,7 @@ impl WorkerShared {
             snapshot: Mutex::new(snapshot),
             backlog: Mutex::new(BacklogState::default()),
             client: Mutex::new(None),
+            next_client_id: AtomicU64::new(1),
             stop_accepting: AtomicBool::new(false),
         }
     }
@@ -192,22 +206,17 @@ impl WorkerShared {
             .exit_code = Some(exit_code);
     }
 
-    fn attach_client(
-        &self,
-    ) -> Result<
-        (
-            mpsc::Receiver<WorkerServerMessage>,
-            SessionSnapshot,
-            Vec<Vec<u8>>,
-        ),
-        String,
-    > {
+    fn attach_client(&self) -> Result<AttachClientResult, String> {
         let mut guard = self.client.lock().expect("client mutex poisoned");
         if guard.is_some() {
             return Err("session already has an attached client".to_string());
         }
         let (tx, rx) = mpsc::channel();
-        *guard = Some(tx);
+        let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
+        *guard = Some(AttachedClient {
+            id: client_id,
+            sender: tx,
+        });
         let snapshot = self.snapshot();
         let backlog = self
             .backlog
@@ -217,11 +226,14 @@ impl WorkerShared {
             .iter()
             .cloned()
             .collect();
-        Ok((rx, snapshot, backlog))
+        Ok((client_id, rx, snapshot, backlog))
     }
 
-    fn detach_client(&self) {
-        *self.client.lock().expect("client mutex poisoned") = None;
+    fn detach_client(&self, client_id: u64) {
+        let mut guard = self.client.lock().expect("client mutex poisoned");
+        if guard.as_ref().is_some_and(|client| client.id == client_id) {
+            *guard = None;
+        }
     }
 
     fn has_client(&self) -> bool {
@@ -253,7 +265,12 @@ impl WorkerShared {
     }
 
     fn send_to_client(&self, message: WorkerServerMessage) {
-        let sender = self.client.lock().expect("client mutex poisoned").clone();
+        let sender = self
+            .client
+            .lock()
+            .expect("client mutex poisoned")
+            .as_ref()
+            .map(|client| client.sender.clone());
         if let Some(sender) = sender {
             let _ = sender.send(message);
         }
@@ -933,7 +950,7 @@ fn handle_worker_client(
         );
     }
 
-    let (rx, snapshot, backlog) = match shared.attach_client() {
+    let (client_id, rx, snapshot, backlog) = match shared.attach_client() {
         Ok(values) => values,
         Err(message) => {
             return write_json_line(&mut stream, &WorkerServerMessage::Error { message });
@@ -956,16 +973,18 @@ fn handle_worker_client(
     }
     if let Some(exit_code) = snapshot.exit_code {
         write_json_line(&mut writer, &WorkerServerMessage::Exited { exit_code })?;
-        shared.detach_client();
+        shared.detach_client(client_id);
         return Ok(());
     }
 
+    let shared_for_writer = Arc::clone(shared);
     let writer_thread = thread::spawn(move || {
         while let Ok(message) = rx.recv() {
             if write_json_line(&mut writer, &message).is_err() {
                 break;
             }
         }
+        shared_for_writer.detach_client(client_id);
     });
 
     loop {
@@ -992,7 +1011,7 @@ fn handle_worker_client(
         }
     }
 
-    shared.detach_client();
+    shared.detach_client(client_id);
     let _ = writer_thread.join();
     Ok(())
 }
@@ -1044,7 +1063,7 @@ fn send_worker_message(
     message: &WorkerClientMessage,
 ) -> io::Result<()> {
     let mut guard = writer.lock().expect("writer mutex poisoned");
-    write_json_line(&mut *guard, message)
+    write_json_line(&mut guard, message)
 }
 
 fn persist_snapshot(

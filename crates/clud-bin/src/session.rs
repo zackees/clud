@@ -191,10 +191,7 @@ fn handle_terminal_event<H: InteractiveHooks>(
 }
 
 fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
-    match process.wait_impl(Some(1.0)) {
-        Ok(code) => code,
-        Err(_) => 1,
-    }
+    process.wait_impl(Some(1.0)).unwrap_or(1)
 }
 
 fn interrupt_pty_process(process: &NativePtyProcess) -> i32 {

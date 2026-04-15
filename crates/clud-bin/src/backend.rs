@@ -67,11 +67,9 @@ pub fn resolve_backend(_claude: bool, codex: bool) -> Backend {
 ///
 /// For now, both backends default to subprocess mode. PTY remains available as
 /// an explicit override while Claude PTY issues are being investigated.
-pub fn resolve_launch_mode(pty: bool, subprocess: bool, _backend: Backend) -> LaunchMode {
+pub fn resolve_launch_mode(pty: bool, _subprocess: bool, _backend: Backend) -> LaunchMode {
     if pty {
         LaunchMode::Pty
-    } else if subprocess {
-        LaunchMode::Subprocess
     } else {
         LaunchMode::Subprocess
     }
