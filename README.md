@@ -30,7 +30,7 @@ clud --claude                     # Use Claude as the backend (default)
 clud --pty                        # Force PTY launch mode
 clud --subprocess                 # Force subprocess launch mode
 clud --detach -p "review this PR" # Start a daemon-managed session without attaching
-clud --detachable -p "fix CI"     # Ctrl+C detaches; reattach later with clud attach
+clud --detachable -p "fix CI"     # Ctrl+C asks whether to keep the session in background
 clud -c                           # Continue the most recent conversation
 clud --resume                     # Resume a session
 clud --resume abc123              # Resume a specific session by ID or search term
@@ -41,9 +41,9 @@ clud --safe -p "drop the table"   # Disable YOLO mode (keeps permission prompts)
 clud --dry-run -p "hello"         # Print what would run without executing
 echo "explain this error" | clud  # Pipe mode: read prompt from stdin
 clud -- --verbose --debug         # Pass extra flags through to the backend
-clud attach                       # List attachable daemon-managed sessions
+clud attach                       # List background sessions you can reattach to
 clud attach sess-123              # Attach to a specific session
-clud list                         # Show attachable session IDs, PIDs, and cwd
+clud list                         # Show background session IDs, PIDs, and cwd
 clud wasm guest.wasm              # Run a local wasm module with clud's embedded runtime
 ```
 
@@ -59,8 +59,8 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--codex` | Use Codex as the backend |
 | `--subprocess` | Force subprocess launch mode |
 | `--pty` | Force PTY launch mode |
-| `--detach` | Start a daemon-managed session and exit after printing the session ID |
-| `--detachable` | Run attached under the daemon; `Ctrl+C` detaches instead of interrupting |
+| `--detach` | Start a daemon-managed session directly in the background |
+| `--detachable` | Run attached under the daemon; `Ctrl+C` prompts whether to background or end |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
 | `--dry-run` | Print what would be executed, then exit |
@@ -79,15 +79,19 @@ Use daemon-managed sessions when you want to disconnect and reattach later.
 
 ```bash
 clud --detachable --codex -p "refactor the parser"
-# press Ctrl+C to detach
+# press Ctrl+C, then press y within 5 seconds to keep it running in background
 
 clud attach
 clud attach sess-123
 clud list
 ```
 
-`clud attach` without a session ID lists live attachable sessions. `clud list`
-shows the same sessions with their root PID and current working directory.
+If you press `Ctrl+C` in a `--detachable` session, clud asks `continue session in
+the background?` with a 5-second countdown. Press `y` to background it. Press
+`Ctrl+C` again, press anything else, or do nothing to end the session instead.
+
+`clud attach` without a session ID lists background sessions. `clud list` shows
+the same sessions with their root PID and current working directory.
 
 ## Voice Mode
 

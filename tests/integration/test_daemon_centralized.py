@@ -65,11 +65,14 @@ def _wait_for_tree_pids(path: Path, minimum: int, timeout: float = 10.0) -> list
     deadline = time.time() + timeout
     while time.time() < deadline:
         if path.is_file():
-            pids = [
-                json.loads(line)["pid"]
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            pids = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    pids.append(json.loads(line)["pid"])
+                except json.JSONDecodeError:
+                    continue
             if len(pids) >= minimum:
                 return pids
         time.sleep(0.05)
@@ -80,6 +83,19 @@ def _session_metadata(state_dir: Path, session_id: str) -> dict:
     path = state_dir / "sessions" / f"{session_id}.json"
     _wait_for_file(path)
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _wait_for_session_exit(state_dir: Path, session_id: str, timeout: float = 15.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        metadata = _session_metadata(state_dir, session_id)
+        if metadata["exit_code"] is not None:
+            return metadata
+        root_pid = metadata.get("root_pid")
+        if root_pid is not None and not _pid_is_alive(root_pid):
+            return metadata
+        time.sleep(0.1)
+    raise AssertionError(f"timed out waiting for session {session_id} to exit")
 
 
 def _kill_process(pid: int) -> None:
@@ -264,7 +280,7 @@ class TestDaemonManagedSessionFlags:
         finally:
             _kill_daemon_for_session(state_dir, session_id)
 
-    def test_detachable_ctrl_c_detaches_but_keeps_session_alive(
+    def test_detachable_ctrl_c_yes_backgrounds_session(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
         state_dir = tmp_path / "daemon-state"
@@ -286,6 +302,7 @@ class TestDaemonManagedSessionFlags:
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
             text=True,
             env=env,
             **kwargs,
@@ -293,26 +310,45 @@ class TestDaemonManagedSessionFlags:
 
         try:
             session_id = _read_session_id(proc)
+            listed = subprocess.run(
+                [str(clud_binary), "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert listed.returncode == 0
+            assert session_id not in listed.stdout
+
             time.sleep(0.5)
             if sys.platform == "win32":
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
                 proc.send_signal(signal.SIGINT)
+            assert proc.stdin is not None
+            proc.stdin.write("y\n")
+            proc.stdin.flush()
             _wait_for_exit(proc, timeout=10)
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=5)
 
-        if sys.platform == "win32":
-            assert proc.returncode in (130, 3221225786)
-        else:
-            assert proc.returncode == 130
+        assert proc.returncode == 0
 
         metadata = _session_metadata(state_dir, session_id)
         assert metadata["exit_code"] is None
         assert metadata["root_pid"] is not None
         assert _pid_is_alive(metadata["root_pid"])
+        listed = subprocess.run(
+            [str(clud_binary), "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert listed.returncode == 0
+        assert session_id in listed.stdout
 
         try:
             attached = subprocess.run(
@@ -327,6 +363,65 @@ class TestDaemonManagedSessionFlags:
             assert "hello-detachable" in report["args"]
         finally:
             _kill_daemon_for_session(state_dir, session_id)
+
+    def test_detachable_ctrl_c_timeout_ends_session(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        kwargs: dict[str, object] = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "--detachable",
+                "--codex",
+                "-p",
+                "hello-timeout",
+                "--",
+                "--mock-sleep-ms",
+                "30000",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            text=True,
+            env=env,
+            **kwargs,
+        )
+
+        try:
+            session_id = _read_session_id(proc)
+            time.sleep(0.5)
+            if sys.platform == "win32":
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                proc.send_signal(signal.SIGINT)
+            _wait_for_exit(proc, timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        if sys.platform == "win32":
+            assert proc.returncode in (130, 3221225786)
+        else:
+            assert proc.returncode == 130
+
+        metadata = _wait_for_session_exit(state_dir, session_id, timeout=12.0)
+        assert metadata["exit_code"] is not None or not _pid_is_alive(metadata["root_pid"])
+
+        listed = subprocess.run(
+            [str(clud_binary), "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert listed.returncode == 0
+        assert session_id not in listed.stdout
 
 
 class TestDaemonCentralizedPersistence:
