@@ -48,6 +48,10 @@ struct SessionSnapshot {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    created_at: Option<u64>,
+    #[serde(default)]
     detachable: bool,
     #[serde(default)]
     background: bool,
@@ -62,6 +66,8 @@ struct SessionSnapshot {
 struct WorkerLaunchSpec {
     plan: LaunchPlan,
     kind: SessionKind,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     detachable: bool,
     #[serde(default)]
@@ -243,6 +249,8 @@ impl WorkerShared {
     }
 
     fn attach_client(&self, shutdown: TcpStream) -> Result<AttachClientResult, String> {
+        // First, try to evict any dead client before checking occupancy.
+        self.evict_dead_client();
         let mut guard = self.client.lock().expect("client mutex poisoned");
         if guard
             .as_ref()
@@ -296,6 +304,43 @@ impl WorkerShared {
 
     fn has_client(&self) -> bool {
         self.client.lock().expect("client mutex poisoned").is_some()
+    }
+
+    /// Check if the attached client's TCP connection is still alive.
+    /// If the peer has disconnected, evict the dead client so new attaches succeed.
+    fn evict_dead_client(&self) {
+        let mut guard = self.client.lock().expect("client mutex poisoned");
+        let should_evict = if let Some(client) = guard.as_ref() {
+            // Try a zero-byte peek to check if the connection is still alive.
+            // A connection-reset or broken-pipe error means the peer is gone.
+            let mut probe = [0u8; 1];
+            client.shutdown.set_nonblocking(true).ok();
+            let dead = match client.shutdown.peek(&mut probe) {
+                // EOF means peer closed the connection
+                Ok(0) => true,
+                // WouldBlock means the socket is alive but has no data
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => false,
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => true,
+                Err(ref e) if e.kind() == io::ErrorKind::ConnectionAborted => true,
+                // Unknown error: consider stale after 10s
+                Err(_) => client.attached_at.elapsed() > Duration::from_secs(10),
+                // Data available means socket is alive
+                Ok(_) => false,
+            };
+            client.shutdown.set_nonblocking(false).ok();
+            dead
+        } else {
+            false
+        };
+        if should_evict {
+            if let Some(old) = guard.take() {
+                let _ = old.shutdown.shutdown(Shutdown::Both);
+            }
+            drop(guard);
+            if self.snapshot().exit_code.is_none() {
+                self.set_background(true);
+            }
+        }
     }
 
     fn push_output(&self, chunk: Vec<u8>) {
@@ -382,11 +427,60 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
     match &args.command {
         Some(Command::Attach {
             session_id: Some(session_id),
+            last,
+        }) if !last => {
+            let state_dir = state_dir(args);
+            if session_id == "-" {
+                // "clud attach -" is shorthand for --last
+                match most_recent_session(&state_dir) {
+                    Some(session) => {
+                        eprintln!("[clud] attaching to most recent session: {}", session.id);
+                        Some(run_attach(&session.id, &state_dir, interrupted))
+                    }
+                    None => {
+                        println!("No active sessions.");
+                        Some(0)
+                    }
+                }
+            } else {
+                Some(run_attach(session_id, &state_dir, interrupted))
+            }
+        }
+        Some(Command::Attach { last: true, .. }) => {
+            let state_dir = state_dir(args);
+            match most_recent_session(&state_dir) {
+                Some(session) => {
+                    eprintln!("[clud] attaching to most recent session: {}", session.id);
+                    Some(run_attach(&session.id, &state_dir, interrupted))
+                }
+                None => {
+                    println!("No active sessions.");
+                    Some(0)
+                }
+            }
+        }
+        Some(Command::Attach {
+            session_id: None,
+            last: false,
         }) => {
             let state_dir = state_dir(args);
-            Some(run_attach(session_id, &state_dir, interrupted))
+            let sessions = list_attachable_sessions(&state_dir);
+            if sessions.is_empty() {
+                println!("No active sessions.");
+                println!("Start one with: clud --detach -p <prompt>");
+                Some(0)
+            } else if sessions.len() == 1 {
+                eprintln!("[clud] auto-attaching to only session: {}", sessions[0].id);
+                Some(run_attach(&sessions[0].id, &state_dir, interrupted))
+            } else {
+                Some(run_list(&state_dir))
+            }
         }
-        Some(Command::Attach { session_id: None }) | Some(Command::List) => {
+        Some(Command::Kill { session_id, all }) => {
+            let state_dir = state_dir(args);
+            Some(run_kill(&state_dir, session_id.as_deref(), *all))
+        }
+        Some(Command::List) => {
             let state_dir = state_dir(args);
             Some(run_list(&state_dir))
         }
@@ -417,6 +511,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         spec: WorkerLaunchSpec {
             plan: plan.clone(),
             kind,
+            name: args.session_name.clone(),
             detachable: args.detach || args.detachable,
             background_on_launch: args.detach,
             rows,
@@ -433,10 +528,13 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
 
     match response {
         DaemonResponse::Created { session } => {
-            eprintln!("[clud] daemon session {}", session.id);
             if args.detach {
-                0
-            } else {
+                eprintln!("[clud] session {} running in background", session.id);
+                eprintln!("[clud] attach with: clud attach {}", session.id);
+                return 0;
+            }
+            eprintln!("[clud] daemon session {}", session.id);
+            {
                 attach_to_session(&state_dir, &session, interrupted)
             }
         }
@@ -450,13 +548,21 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
 
 fn run_attach(session_id: &str, state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     if let Err(err) = ensure_daemon(state_dir) {
-        eprintln!("[clud] failed to reach daemon: {}", err);
+        eprintln!("[clud] daemon is not running: {}", err);
+        eprintln!("[clud] start a session with: clud --detach -p <prompt>");
         return 1;
     }
+    let resolved = match resolve_session_id(state_dir, session_id) {
+        Ok(id) => id,
+        Err(err) => {
+            eprintln!("[clud] {}", err);
+            return 1;
+        }
+    };
     let response = match send_daemon_request(
         state_dir,
         &DaemonRequest::Session {
-            session_id: session_id.to_string(),
+            session_id: resolved.clone(),
         },
     ) {
         Ok(response) => response,
@@ -482,10 +588,17 @@ fn attach_to_session(state_dir: &Path, session: &SessionSnapshot, interrupted: &
         let mut stream = match TcpStream::connect(("127.0.0.1", session.worker_port)) {
             Ok(stream) => stream,
             Err(err) => {
-                eprintln!(
-                    "[clud] failed to connect to daemon worker for session {}: {}",
-                    session.id, err
-                );
+                if !pid_is_alive(session.worker_pid) {
+                    eprintln!(
+                        "[clud] session {} worker has died (pid {})",
+                        session.id, session.worker_pid
+                    );
+                } else {
+                    eprintln!(
+                        "[clud] failed to connect to session {} worker on port {}: {}",
+                        session.id, session.worker_port, err
+                    );
+                }
                 return 1;
             }
         };
@@ -843,11 +956,72 @@ fn render_background_prompt(remaining: u64) {
     );
 }
 
+fn cleanup_stale_state(state_dir: &Path) {
+    // Clean stale session files: mark sessions whose worker is dead.
+    if let Ok(entries) = fs::read_dir(sessions_dir(state_dir)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(mut session) = read_json_file::<SessionSnapshot>(&path) else {
+                continue;
+            };
+            if session.exit_code.is_some() {
+                continue;
+            }
+            if !pid_is_alive(session.worker_pid) {
+                session.exit_code = Some(137);
+                session.background = false;
+                let _ = write_json_file(&path, &session);
+            }
+        }
+    }
+
+    // Clean dangling spec files: specs with no corresponding session snapshot
+    // that are older than 10 seconds (grace period for worker startup).
+    if let Ok(entries) = fs::read_dir(specs_dir(state_dir)) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let session_id = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let snapshot_path = session_snapshot_path(state_dir, session_id);
+            if snapshot_path.exists() {
+                continue;
+            }
+            // Only remove if the spec is old enough (worker may still be starting).
+            let is_stale = path
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|modified| modified.elapsed().unwrap_or_default() > Duration::from_secs(10))
+                .unwrap_or(true);
+            if is_stale {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    // Clean stale daemon.json if it refers to a dead process.
+    let daemon_path = daemon_info_path(state_dir);
+    if let Ok(info) = read_json_file::<DaemonInfo>(&daemon_path) {
+        if !pid_is_alive(info.pid) {
+            let _ = fs::remove_file(&daemon_path);
+        }
+    }
+}
+
 fn run_daemon(state_dir: &Path) -> i32 {
     if let Err(err) = fs::create_dir_all(state_dir) {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
     }
+
+    cleanup_stale_state(state_dir);
 
     let listener = match TcpListener::bind(("127.0.0.1", 0)) {
         Ok(listener) => listener,
@@ -967,22 +1141,40 @@ fn daemon_create_session(
         .map_err(|err| io::Error::other(err.to_string()))?;
 
     let started = Instant::now();
-    loop {
+    let snapshot = loop {
         match read_json_file::<SessionSnapshot>(&session_snapshot_path(state_dir, &session_id)) {
-            Ok(snapshot) => {
-                workers
-                    .lock()
-                    .expect("workers mutex poisoned")
-                    .insert(session_id.clone(), worker);
-                return Ok(snapshot);
-            }
+            Ok(snapshot) => break snapshot,
             Err(err) if started.elapsed() < Duration::from_secs(5) => {
                 let _ = err;
                 thread::sleep(Duration::from_millis(25));
             }
             Err(err) => return Err(err),
         }
+    };
+
+    // Verify the worker's TCP listener is actually accepting connections
+    // before reporting the session as ready.
+    loop {
+        if TcpStream::connect(("127.0.0.1", snapshot.worker_port)).is_ok() {
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(5) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "worker wrote snapshot but TCP port {} is not accepting connections",
+                    snapshot.worker_port
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
     }
+
+    workers
+        .lock()
+        .expect("workers mutex poisoned")
+        .insert(session_id.clone(), worker);
+    Ok(snapshot)
 }
 
 fn daemon_terminate_session(
@@ -1015,6 +1207,7 @@ fn daemon_terminate_session(
     session.background = false;
     session.exit_code = Some(130);
     write_json_file(&path, &session)?;
+    let _ = fs::remove_file(spec_path(state_dir, session_id));
     Ok(session)
 }
 
@@ -1042,10 +1235,16 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
         }
     };
 
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let snapshot = SessionSnapshot {
         id: session_id.to_string(),
         kind: spec.kind.clone(),
         cwd: spec.plan.cwd.clone(),
+        name: spec.name.clone(),
+        created_at: Some(created_at),
         detachable: spec.detachable,
         background: spec.background_on_launch,
         daemon_pid,
@@ -1096,9 +1295,24 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
                 runtime.cleanup_tree();
                 shared.broadcast_exit(137);
                 let _ = persist_snapshot(&state_dir, &session_id, &shared);
+                let _ = fs::remove_file(spec_path(&state_dir, &session_id));
                 break;
             }
             thread::sleep(Duration::from_millis(200));
+        });
+    }
+
+    // Heartbeat thread: periodically probe the attached client's TCP connection.
+    // If the peer has disconnected (e.g. terminal crash, SSH drop), evict the
+    // dead client so new attach attempts succeed immediately.
+    {
+        let shared = Arc::clone(&shared);
+        thread::spawn(move || loop {
+            if shared.stop_accepting.load(Ordering::Acquire) {
+                break;
+            }
+            shared.evict_dead_client();
+            thread::sleep(Duration::from_secs(2));
         });
     }
 
@@ -1121,6 +1335,7 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
         }
     }
     let _ = persist_snapshot(state_dir, session_id, &shared);
+    let _ = fs::remove_file(spec_path(state_dir, session_id));
     0
 }
 
@@ -1350,6 +1565,7 @@ fn read_worker_line(
 
 fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(state_dir)?;
+    cleanup_stale_state(state_dir);
     if let Ok(info) = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
         if TcpStream::connect(("127.0.0.1", info.port)).is_ok() {
             return Ok(());
@@ -1473,6 +1689,139 @@ fn spec_path(state_dir: &Path, session_id: &str) -> PathBuf {
     specs_dir(state_dir).join(format!("{session_id}.json"))
 }
 
+/// Resolve a user-provided session identifier to the canonical session ID.
+/// Tries exact match, then name match, then prefix match.
+fn resolve_session_id(state_dir: &Path, input: &str) -> Result<String, String> {
+    // Exact match
+    let exact_path = session_snapshot_path(state_dir, input);
+    if exact_path.exists() {
+        return Ok(input.to_string());
+    }
+
+    // Scan all sessions for name match or prefix match
+    let Ok(entries) = fs::read_dir(sessions_dir(state_dir)) else {
+        return Err(format!("session '{}' not found", input));
+    };
+
+    let mut name_matches = Vec::new();
+    let mut prefix_matches = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(session) = read_json_file::<SessionSnapshot>(&path) else {
+            continue;
+        };
+        if session.name.as_deref() == Some(input) {
+            name_matches.push(session.id.clone());
+        }
+        if session.id.starts_with(input) {
+            prefix_matches.push(session.id.clone());
+        }
+    }
+
+    if name_matches.len() == 1 {
+        return Ok(name_matches.into_iter().next().unwrap());
+    }
+    if name_matches.len() > 1 {
+        return Err(format!(
+            "ambiguous name '{}': matches {}",
+            input,
+            name_matches.join(", ")
+        ));
+    }
+    if prefix_matches.len() == 1 {
+        return Ok(prefix_matches.into_iter().next().unwrap());
+    }
+    if prefix_matches.len() > 1 {
+        return Err(format!(
+            "ambiguous prefix '{}': matches {}",
+            input,
+            prefix_matches.join(", ")
+        ));
+    }
+
+    Err(format!("session '{}' not found", input))
+}
+
+/// Return the most recently created active session.
+fn most_recent_session(state_dir: &Path) -> Option<SessionSnapshot> {
+    let sessions = list_attachable_sessions(state_dir);
+    sessions
+        .into_iter()
+        .max_by_key(|s| s.created_at.unwrap_or(0))
+}
+
+fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) -> i32 {
+    if let Err(err) = ensure_daemon(state_dir) {
+        eprintln!("[clud] failed to reach daemon: {}", err);
+        return 1;
+    }
+
+    if all {
+        let sessions = list_attachable_sessions(state_dir);
+        if sessions.is_empty() {
+            println!("No active sessions to kill.");
+            return 0;
+        }
+        let mut failed = 0;
+        for session in &sessions {
+            match request_session_termination(state_dir, &session.id) {
+                Ok(_) => eprintln!("[clud] killed session {}", session.id),
+                Err(err) => {
+                    eprintln!("[clud] failed to kill session {}: {}", session.id, err);
+                    failed += 1;
+                }
+            }
+        }
+        if failed > 0 {
+            return 1;
+        }
+        return 0;
+    }
+
+    let Some(input) = session_id else {
+        eprintln!("Usage: clud kill <session_id> or clud kill --all");
+        return 1;
+    };
+
+    let resolved = match resolve_session_id(state_dir, input) {
+        Ok(id) => id,
+        Err(err) => {
+            eprintln!("[clud] {}", err);
+            return 1;
+        }
+    };
+
+    match request_session_termination(state_dir, &resolved) {
+        Ok(_) => {
+            eprintln!("[clud] killed session {}", resolved);
+            0
+        }
+        Err(err) => {
+            eprintln!("[clud] failed to kill session {}: {}", resolved, err);
+            1
+        }
+    }
+}
+
+fn format_duration_short(millis: u64) -> String {
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let elapsed_secs = now_millis.saturating_sub(millis) / 1000;
+    if elapsed_secs < 60 {
+        format!("{}s", elapsed_secs)
+    } else if elapsed_secs < 3600 {
+        format!("{}m", elapsed_secs / 60)
+    } else {
+        format!("{}h{}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
+    }
+}
+
 fn run_list(state_dir: &Path) -> i32 {
     let sessions = list_attachable_sessions(state_dir);
     if sessions.is_empty() {
@@ -1480,14 +1829,23 @@ fn run_list(state_dir: &Path) -> i32 {
         return 0;
     }
 
-    println!("SESSION ID\tPID\tCWD");
+    println!("{:<30} {:<8} {:<8} CWD", "SESSION", "PID", "UPTIME");
     for session in sessions {
+        let display_name = session
+            .name
+            .as_deref()
+            .map(|n| format!("{} ({})", session.id, n))
+            .unwrap_or_else(|| session.id.clone());
         let pid = session
             .root_pid
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string());
+        let uptime = session
+            .created_at
+            .map(format_duration_short)
+            .unwrap_or_else(|| "-".to_string());
         let cwd = session.cwd.unwrap_or_else(|| "-".to_string());
-        println!("{}\t{}\t{}", session.id, pid, cwd);
+        println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
     }
     0
 }
@@ -1506,6 +1864,9 @@ fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
             continue;
         };
         if session.exit_code.is_some() || !session.background {
+            continue;
+        }
+        if !pid_is_alive(session.worker_pid) {
             continue;
         }
         if let Some(root_pid) = session.root_pid {

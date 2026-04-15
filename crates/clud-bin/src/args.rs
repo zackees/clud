@@ -49,6 +49,9 @@ pub struct Args {
     #[arg(long = "detachable", conflicts_with = "dry_run")]
     pub detachable: bool,
 
+    #[arg(long = "name")]
+    pub session_name: Option<String>,
+
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
 
@@ -89,6 +92,13 @@ pub enum Command {
     },
     Attach {
         session_id: Option<String>,
+        #[arg(long = "last", short = 'l')]
+        last: bool,
+    },
+    Kill {
+        session_id: Option<String>,
+        #[arg(long = "all")]
+        all: bool,
     },
     List,
     #[command(name = "__daemon", hide = true)]
@@ -133,6 +143,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--message",
         "--resume",
         "--model",
+        "--name",
         "--loop-count",
         "--daemon-state-dir",
     ];
@@ -149,12 +160,14 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--detachable",
         "--verbose",
         "--experimental-daemon-centralized",
+        "--all",
+        "--last",
         "--help",
         "--version",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "list", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
@@ -447,8 +460,9 @@ mod tests {
     fn test_attach_without_session_id() {
         let args = parse(&["clud", "attach"]);
         match args.command {
-            Some(Command::Attach { session_id }) => {
+            Some(Command::Attach { session_id, last }) => {
                 assert!(session_id.is_none());
+                assert!(!last);
             }
             _ => panic!("expected Attach subcommand"),
         }
@@ -458,11 +472,55 @@ mod tests {
     fn test_attach_with_session_id() {
         let args = parse(&["clud", "attach", "sess-123"]);
         match args.command {
-            Some(Command::Attach { session_id }) => {
+            Some(Command::Attach { session_id, last }) => {
                 assert_eq!(session_id.as_deref(), Some("sess-123"));
+                assert!(!last);
             }
             _ => panic!("expected Attach subcommand"),
         }
+    }
+
+    #[test]
+    fn test_attach_with_last() {
+        let args = parse(&["clud", "attach", "--last"]);
+        match args.command {
+            Some(Command::Attach { session_id, last }) => {
+                assert!(session_id.is_none());
+                assert!(last);
+            }
+            _ => panic!("expected Attach subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_kill_subcommand() {
+        let args = parse(&["clud", "kill", "sess-123"]);
+        match args.command {
+            Some(Command::Kill { session_id, all }) => {
+                assert_eq!(session_id.as_deref(), Some("sess-123"));
+                assert!(!all);
+            }
+            _ => panic!("expected Kill subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_kill_all() {
+        let args = parse(&["clud", "kill", "--all"]);
+        match args.command {
+            Some(Command::Kill { session_id, all }) => {
+                assert!(session_id.is_none());
+                assert!(all);
+            }
+            _ => panic!("expected Kill subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_name_flag() {
+        let args = parse(&["clud", "--name", "my-session", "--detach", "-p", "hello"]);
+        assert_eq!(args.session_name.as_deref(), Some("my-session"));
+        assert!(args.detach);
     }
 
     #[test]

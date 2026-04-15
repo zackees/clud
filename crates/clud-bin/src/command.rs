@@ -127,6 +127,7 @@ pub fn build_launch_plan(
             unreachable!("wasm execution is handled directly in main")
         }
         Some(Command::Attach { .. })
+        | Some(Command::Kill { .. })
         | Some(Command::List)
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}
