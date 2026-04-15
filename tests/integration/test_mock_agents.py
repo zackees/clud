@@ -17,10 +17,7 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-# Timeout for each subprocess call (seconds).  Prevents deadlocks.
 _TIMEOUT = 15
-
-# Strip ANSI escape sequences and ConPTY control codes from PTY output.
 _ANSI_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|\][^\x07]*\x07)")
 
 
@@ -56,12 +53,10 @@ def _parse_agent_report(result: subprocess.CompletedProcess[str]) -> dict:
     Extract the first valid JSON object from the cleaned output.
     """
     cleaned = _strip_ansi(result.stdout)
-    # Find JSON objects — they start with { and end with }
     for line in cleaned.splitlines():
         line = line.strip()
         if line.startswith("{"):
             return json.loads(line)
-    # Fallback: try parsing the whole cleaned output
     return json.loads(cleaned)
 
 
@@ -164,6 +159,26 @@ class TestModelSelection:
         assert "opus" in report["args"]
 
 
+class TestLaunchMode:
+    """Verify launch-mode selection and overrides."""
+
+    def test_dry_run_defaults_to_subprocess(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        result = _run(clud_binary, "--dry-run", "-p", "hello", env=mock_env)
+        assert result.returncode == 0
+        report = json.loads(result.stdout)
+        assert report["launch_mode"] == "subprocess"
+
+    def test_dry_run_pty_override(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        result = _run(clud_binary, "--dry-run", "--pty", "-p", "hello", env=mock_env)
+        assert result.returncode == 0
+        report = json.loads(result.stdout)
+        assert report["launch_mode"] == "pty"
+
+
 class TestExitCodePropagation:
     """Verify clud propagates the backend's exit code."""
 
@@ -172,8 +187,6 @@ class TestExitCodePropagation:
         assert result.returncode == 0
 
     def test_exit_code_nonzero(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
-        # The mock agent supports --mock-exit-code but clud forwards unknown flags.
-        # We need to pass it via -- separator so clud forwards it.
         result = _run(clud_binary, "-p", "hello", "--", "--mock-exit-code", "42", env=mock_env)
         assert result.returncode == 42
 
@@ -187,7 +200,6 @@ class TestCommandPrompts:
         report = _parse_agent_report(result)
         idx = report["args"].index("-p")
         prompt = report["args"][idx + 1]
-        # Real UP_PROMPT contains lint, codeup, and auto-summary placeholder
         assert "lint" in prompt.lower()
         assert "codeup" in prompt.lower()
         assert "<your one-line summary>" in prompt
@@ -268,7 +280,6 @@ class TestEnvTracking:
         originator = report["env"]["RUNNING_PROCESS_ORIGINATOR"]
         assert originator is not None
         assert originator.startswith("CLUD:")
-        # The value after CLUD: should be the parent PID (a number)
         pid_str = originator.split(":")[1]
         assert pid_str.isdigit()
 
@@ -277,9 +288,7 @@ class TestFlagForwarding:
     """Verify unknown flags are forwarded to the backend."""
 
     def test_unknown_flag(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
-        result = _run(
-            clud_binary, "--some-unknown-flag", "-p", "hello", env=mock_env
-        )
+        result = _run(clud_binary, "--some-unknown-flag", "-p", "hello", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
         assert "--some-unknown-flag" in report["args"]
@@ -311,18 +320,10 @@ class TestLoopMode:
     """Verify loop mode runs multiple iterations."""
 
     def test_loop_iterations(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
-        result = _run(
-            clud_binary, "loop", "--loop-count", "3", "do stuff", env=mock_env
-        )
+        result = _run(clud_binary, "loop", "--loop-count", "3", "do stuff", env=mock_env)
         assert result.returncode == 0
-        # The mock agent is invoked 3 times, each prints a JSON line.
-        # PTY output may contain ANSI escapes; extract JSON lines.
         cleaned = _strip_ansi(result.stdout)
-        json_lines = [
-            line.strip()
-            for line in cleaned.splitlines()
-            if line.strip().startswith("{")
-        ]
+        json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
         assert len(json_lines) == 3
         for line in json_lines:
             report = json.loads(line)
@@ -331,7 +332,6 @@ class TestLoopMode:
     def test_loop_stops_on_failure(
         self, clud_binary: Path, mock_env: dict[str, str]
     ) -> None:
-        """Loop should stop immediately when an iteration fails."""
         result = _run(
             clud_binary,
             "loop",
@@ -344,20 +344,15 @@ class TestLoopMode:
             env=mock_env,
         )
         assert result.returncode == 1
-        # Only 1 iteration should have run (first fails, loop stops).
         cleaned = _strip_ansi(result.stdout)
-        json_lines = [
-            line.strip()
-            for line in cleaned.splitlines()
-            if line.strip().startswith("{")
-        ]
+        json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
         assert len(json_lines) == 1
 
 
 class TestInterruptReporting:
     """Verify Ctrl+C reports how clud was launched."""
 
-    def test_ctrl_c_reports_pty_mode(
+    def test_ctrl_c_reports_pty_mode_when_forced(
         self, clud_binary: Path, mock_env: dict[str, str]
     ) -> None:
         kwargs: dict[str, Any] = {}
@@ -367,6 +362,7 @@ class TestInterruptReporting:
         proc = subprocess.Popen(
             [
                 str(clud_binary),
+                "--pty",
                 "-p",
                 "hello",
                 "--",
@@ -393,12 +389,9 @@ class TestInterruptReporting:
                 proc.wait(timeout=5)
 
         if sys.platform == "win32":
-            # CTRL_BREAK_EVENT on Windows yields STATUS_CONTROL_C_EXIT (0xC000013A)
-            # or 130 depending on whether the ctrlc handler catches it.
             assert proc.returncode in (130, 3221225786)
         else:
             assert proc.returncode == 130
-        # When the handler fires, stderr contains the interrupt message.
-        # On Windows with CTRL_BREAK the process may die before the handler runs.
+
         if proc.returncode == 130:
             assert "[clud] interrupted via Ctrl+C (pty)" in stderr

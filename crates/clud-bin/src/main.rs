@@ -1,7 +1,10 @@
 mod args;
 mod backend;
 mod command;
+mod daemon;
+mod session;
 mod trampoline;
+mod voice;
 mod wasm;
 
 use std::io::{self, Read};
@@ -48,7 +51,13 @@ fn main() {
         }
     }
 
+    let interrupted = install_ctrl_c_flag();
+    if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
+        std::process::exit(exit_code);
+    }
+
     let backend = backend::resolve_backend(args.claude, args.codex);
+    let launch_mode = backend::resolve_launch_mode(args.pty, args.subprocess, backend);
     let backend_path = match backend::find_backend(backend) {
         Some(path) => path.to_string_lossy().to_string(),
         None => {
@@ -64,22 +73,28 @@ fn main() {
         }
     };
 
-    let plan = command::build_launch_plan(&args, backend, &backend_path);
+    let plan = command::build_launch_plan(&args, backend, launch_mode, &backend_path);
 
     if args.dry_run {
         let json = serde_json::json!({
             "command": plan.command,
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
+            "launch_mode": plan.launch_mode.as_str(),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
         std::process::exit(0);
     }
 
-    let interrupted = install_ctrl_c_flag();
-    let exit_code = match plan.backend {
-        backend::Backend::Codex => run_plan_subprocess(&plan, args.verbose, interrupted.as_ref()),
-        backend::Backend::Claude => run_plan_pty(&plan, args.verbose, interrupted.as_ref()),
+    let exit_code = if daemon::experimental_enabled(&args) {
+        daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
+    } else {
+        match plan.launch_mode {
+            backend::LaunchMode::Subprocess => {
+                run_plan_subprocess(&plan, args.verbose, interrupted.as_ref())
+            }
+            backend::LaunchMode::Pty => run_plan_pty(&plan, args.verbose, interrupted.as_ref()),
+        }
     };
     std::process::exit(exit_code);
 }
@@ -116,7 +131,7 @@ fn get_terminal_size() -> (u16, u16) {
     if let Some((w, h)) = terminal_size::terminal_size() {
         (h.0, w.0)
     } else {
-        // No terminal (piped / test harness).  Use a wide default so
+        // No terminal (piped / test harness). Use a wide default so
         // ConPTY does not wrap output at 80 columns.
         (24, 32767)
     }
@@ -243,66 +258,21 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
             return 1;
         }
 
-        loop {
-            // Read PTY output and respond to terminal queries.  ConPTY on
-            // Windows sends \x1b[6n (cursor position query) and blocks
-            // until the host replies with \x1b[row;colR.
-            match process.read_chunk_impl(Some(0.1)) {
-                Ok(Some(chunk)) => {
-                    let _ = process.respond_to_queries_impl(&chunk);
-                }
-                Ok(None) => {} // timeout — no data yet
-                Err(_) => {
-                    // PTY stream closed — child exited.  Reap exit code.
-                    match process.wait_impl(Some(1.0)) {
-                        Ok(code) => last_exit = normalize_exit_code(code),
-                        Err(_) => last_exit = 1,
-                    }
-                    if last_exit != 0 && plan.iterations > 1 {
-                        eprintln!(
-                            "[clud] iteration {} failed with exit code {}",
-                            iteration + 1,
-                            last_exit
-                        );
-                        return last_exit;
-                    }
-                    break;
-                }
-            }
+        let exit_code = if session::terminals_are_interactive() {
+            let mut hooks = voice::VoiceMode::from_env();
+            session::run_interactive_pty_session(&process, interrupted, &mut hooks)
+        } else {
+            session::run_pty_output_loop(&process, interrupted)
+        };
+        last_exit = normalize_exit_code(exit_code);
 
-            // ConPTY may keep the reader alive after child exit.  Poll for
-            // process exit so we don't block forever waiting for stream close.
-            if let Ok(Some(code)) =
-                running_process_core::pty::poll_pty_process(&process.handles, &process.returncode)
-            {
-                if interrupted.load(Ordering::SeqCst) {
-                    eprintln!("[clud] interrupted via Ctrl+C (pty)");
-                    return 130;
-                }
-                last_exit = normalize_exit_code(code);
-                if last_exit != 0 && plan.iterations > 1 {
-                    eprintln!(
-                        "[clud] iteration {} failed with exit code {}",
-                        iteration + 1,
-                        last_exit
-                    );
-                    return last_exit;
-                }
-                break;
-            }
-
-            if interrupted.load(Ordering::SeqCst) {
-                let _ = process.send_interrupt_impl();
-                match process.wait_impl(Some(2.0)) {
-                    Ok(code) => last_exit = normalize_exit_code(code),
-                    Err(_) => {
-                        let _ = process.close_impl();
-                        last_exit = 130;
-                    }
-                }
-                eprintln!("[clud] interrupted via Ctrl+C (pty)");
-                return last_exit;
-            }
+        if last_exit != 0 && plan.iterations > 1 {
+            eprintln!(
+                "[clud] iteration {} failed with exit code {}",
+                iteration + 1,
+                last_exit
+            );
+            return last_exit;
         }
     }
 
@@ -318,8 +288,8 @@ fn atty_is_terminal() -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn launch_mode_is_pty() {
-        let launch_mode = "pty";
-        assert_eq!(launch_mode, "pty");
+    fn launch_mode_defaults_to_subprocess() {
+        let launch_mode = crate::backend::LaunchMode::Subprocess;
+        assert_eq!(launch_mode.as_str(), "subprocess");
     }
 }

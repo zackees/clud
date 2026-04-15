@@ -17,3 +17,7 @@ homepage = "https://github.com/zackees/clud"
 debug = "line-tables-only"
 split-debuginfo = "packed"
 strip = "none"
+
+[patch.crates-io]
+whisper-rs = { path = "vendor/whisper-rs" }
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }

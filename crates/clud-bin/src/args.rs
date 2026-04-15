@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 /// Fast CLI for running Claude Code and Codex in YOLO mode.
 #[derive(Parser, Debug, Clone)]
@@ -9,103 +10,100 @@ use clap::{Parser, Subcommand};
     after_help = "Unknown flags are forwarded directly to the backend agent."
 )]
 pub struct Args {
-    /// Run with prompt, exit when done.
     #[arg(short = 'p', long = "prompt")]
     pub prompt: Option<String>,
 
-    /// Send a one-off message.
     #[arg(short = 'm', long = "message")]
     pub message: Option<String>,
 
-    /// Continue the most recent session.
     #[arg(short = 'c', long = "continue")]
     pub continue_session: bool,
 
-    /// Resume a session by ID or search term.
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<Option<String>>,
 
-    /// Use Claude as the backend.
     #[arg(long = "claude", conflicts_with = "codex")]
     pub claude: bool,
 
-    /// Use Codex as the backend.
     #[arg(long = "codex", conflicts_with = "claude")]
     pub codex: bool,
 
-    /// Model preference (e.g., haiku, sonnet, opus).
+    #[arg(long = "subprocess", conflicts_with = "pty")]
+    pub subprocess: bool,
+
+    #[arg(long = "pty", conflicts_with = "subprocess")]
+    pub pty: bool,
+
     #[arg(long = "model")]
     pub model: Option<String>,
 
-    /// Disable YOLO mode (don't inject --dangerously-skip-permissions).
     #[arg(long = "safe")]
     pub safe: bool,
 
-    /// Print what would be executed, then exit.
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
-    /// Enable verbose/debug output.
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
 
-    /// Subcommands: loop, up, rebase, fix, wasm.
+    #[arg(long = "experimental-daemon-centralized", hide = true)]
+    pub experimental_daemon_centralized: bool,
+
+    #[arg(long = "daemon-state-dir", hide = true)]
+    pub daemon_state_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Unknown flags forwarded to the backend.
     #[arg(last = true, id = "BACKEND_ARGS")]
     pub passthrough: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
-    /// Run autonomous loop iterations.
     Loop {
-        /// Prompt text or path to a file (e.g., LOOP.md).
         prompt: Option<String>,
-
-        /// Number of iterations (default: 50).
         #[arg(long = "loop-count", default_value = "50")]
         loop_count: u32,
     },
-
-    /// Codeup workflow: lint, test, commit.
     Up {
-        /// Custom commit message (skips auto-summary).
         #[arg(short = 'm', long = "message")]
         message: Option<String>,
-
-        /// Publish (push) after committing.
         #[arg(long = "publish")]
         publish: bool,
     },
-
-    /// Rebase workflow.
     Rebase,
-
-    /// Auto-fix linting/test errors.
     Fix {
-        /// Optional GitHub URL to fetch logs from (e.g., actions run or PR URL).
         url: Option<String>,
     },
-
-    /// Execute a local wasm module using clud's embedded runtime.
     Wasm {
-        /// Path to the `.wasm` module.
         module: String,
-
-        /// Exported function to invoke (default: run).
         #[arg(long = "invoke", default_value = "run")]
         invoke: String,
+    },
+    #[command(hide = true)]
+    Attach {
+        session_id: String,
+    },
+    #[command(name = "__daemon", hide = true)]
+    InternalDaemon {
+        #[arg(long = "state-dir")]
+        state_dir: PathBuf,
+    },
+    #[command(name = "__worker", hide = true)]
+    InternalWorker {
+        #[arg(long = "state-dir")]
+        state_dir: PathBuf,
+        #[arg(long = "session-id")]
+        session_id: String,
+        #[arg(long = "daemon-pid")]
+        daemon_pid: u32,
+        #[arg(long = "spec-file")]
+        spec_file: PathBuf,
     },
 }
 
 impl Args {
-    /// Parse args, allowing unknown flags to be forwarded to the backend.
-    ///
-    /// Clap's `last = true` requires a `--` separator before passthrough args.
-    /// For better UX, we manually split known vs unknown args before parsing.
     pub fn parse_with_passthrough() -> Self {
         let raw: Vec<String> = std::env::args().collect();
         Self::parse_from_raw(raw)
@@ -119,45 +117,51 @@ impl Args {
     }
 }
 
-/// Split raw CLI args into (known to clap, unknown to forward).
 fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut known = vec![raw[0].clone()]; // program name
+    let mut known = vec![raw[0].clone()];
     let mut unknown = Vec::new();
     let mut i = 1;
 
-    // Known long flags that take a value
     let value_flags: &[&str] = &[
         "--prompt",
         "--message",
         "--resume",
         "--model",
         "--loop-count",
+        "--daemon-state-dir",
     ];
-    // Known short flags that take a value
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
-    // Known boolean flags (no value)
     let bool_flags: &[&str] = &[
         "--continue",
         "--claude",
         "--codex",
+        "--subprocess",
+        "--pty",
         "--safe",
         "--dry-run",
         "--verbose",
+        "--experimental-daemon-centralized",
         "--help",
         "--version",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
-    // Known subcommands
-    let subcommands: &[&str] = &["loop", "up", "rebase", "fix", "wasm"];
+    let subcommands: &[&str] = &[
+        "loop",
+        "up",
+        "rebase",
+        "fix",
+        "wasm",
+        "attach",
+        "__daemon",
+        "__worker",
+    ];
 
-    // Once we hit a subcommand, everything after is known (clap handles it)
     let mut in_subcommand = false;
 
     while i < raw.len() {
         let arg = &raw[i];
 
         if arg == "--" {
-            // Everything after -- is passthrough
             unknown.extend_from_slice(&raw[i + 1..]);
             break;
         }
@@ -181,7 +185,6 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
-        // Check for --flag=value style
         if arg.starts_with("--") {
             if let Some((prefix, _)) = arg.split_once('=') {
                 if value_flags.contains(&prefix) {
@@ -202,7 +205,6 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
             continue;
         }
 
-        // Unknown flag — forward to backend
         unknown.push(arg.clone());
         i += 1;
     }
@@ -256,6 +258,20 @@ mod tests {
     fn test_model_flag() {
         let args = parse(&["clud", "--model", "opus"]);
         assert_eq!(args.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn test_subprocess_flag() {
+        let args = parse(&["clud", "--subprocess"]);
+        assert!(args.subprocess);
+        assert!(!args.pty);
+    }
+
+    #[test]
+    fn test_pty_flag() {
+        let args = parse(&["clud", "--pty"]);
+        assert!(args.pty);
+        assert!(!args.subprocess);
     }
 
     #[test]
@@ -440,6 +456,8 @@ mod tests {
         assert!(!args.continue_session);
         assert!(!args.claude);
         assert!(!args.codex);
+        assert!(!args.subprocess);
+        assert!(!args.pty);
         assert!(!args.safe);
         assert!(!args.dry_run);
         assert!(args.command.is_none());

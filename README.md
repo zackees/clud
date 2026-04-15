@@ -24,9 +24,11 @@ pip install clud
 ## Usage
 
 ```bash
-clud                              # Launch Claude in YOLO mode (interactive)
+clud                              # Launch Claude in YOLO mode via subprocess
 clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
+clud --pty                        # Force PTY launch mode
+clud --subprocess                 # Force subprocess launch mode
 clud -c                           # Continue the most recent conversation
 clud --resume                     # Resume a session
 clud --resume abc123              # Resume a specific session by ID or search term
@@ -50,6 +52,8 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `-r`, `--resume [TERM]` | Resume by session ID or search term |
 | `--claude` | Use Claude as the backend |
 | `--codex` | Use Codex as the backend |
+| `--subprocess` | Force subprocess launch mode |
+| `--pty` | Force PTY launch mode |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
 | `--dry-run` | Print what would be executed, then exit |
@@ -58,6 +62,46 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `-V`, `--version` | Show version |
 
 Unknown flags are forwarded directly to the backend agent.
+
+`clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
+to opt back into PTY while Claude PTY issues are being investigated.
+
+## Voice Mode
+
+`clud` can capture microphone input and transcribe it into the active console prompt with
+`whisper-rs`.
+
+```bash
+# English-only small model
+export CLUD_VOICE=1
+export CLUD_WHISPER_MODEL=/path/to/ggml-small.en.bin
+
+clud
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:CLUD_VOICE = "1"
+$env:CLUD_WHISPER_MODEL = "C:\models\ggml-small.en.bin"
+
+clud
+```
+
+Behavior:
+
+- Press `F3` to start recording and play a short `ding`
+- Release `F3` to stop recording and play a short `dong`
+- The transcript is inserted into the current prompt without auto-submitting it
+- If the terminal does not emit key-release events, pressing `F3` again stops recording
+
+Optional environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `CLUD_VOICE` | Enable voice mode (`1`, `true`, `yes`, `on`) |
+| `CLUD_WHISPER_MODEL` | Path to a local `whisper.cpp` GGML model such as `ggml-small.en.bin` |
+| `CLUD_VOICE_LANGUAGE` | Force a Whisper language code such as `en` |
 
 ## `clud loop` — Autonomous Loop
 

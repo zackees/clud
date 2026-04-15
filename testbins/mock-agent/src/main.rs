@@ -9,6 +9,8 @@
 //! - Exits with the code specified by --mock-exit-code (default 0)
 
 use std::io::{self, Read};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn main() {
@@ -17,6 +19,8 @@ fn main() {
     // Extract --mock-exit-code if present (our own flag, not forwarded by clud)
     let mut exit_code = 0i32;
     let mut sleep_ms = 0u64;
+    let mut helper_role: Option<String> = None;
+    let mut tree_log: Option<PathBuf> = None;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -38,7 +42,31 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-helper-role" {
+            if let Some(role) = args.get(i + 1) {
+                helper_role = Some(role.clone());
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-spawn-tree-log" {
+            if let Some(path) = args.get(i + 1) {
+                tree_log = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
         filtered_args.push(arg.clone());
+    }
+
+    if let Some(role) = helper_role.as_deref() {
+        run_helper(&args[0], role, tree_log.as_ref(), sleep_ms);
+        return;
+    }
+
+    if let Some(path) = tree_log.as_ref() {
+        append_tree_log(path, "root");
+        spawn_helper(&args[0], "child", path, sleep_ms);
     }
 
     // Read stdin if not a terminal
@@ -69,6 +97,7 @@ fn main() {
     let report = serde_json::json!({
         "program": args[0],
         "args": filtered_args,
+        "cwd": cwd,
         "stdin": stdin_content,
         "exit_code": exit_code,
         "sleep_ms": sleep_ms,
@@ -81,6 +110,50 @@ fn main() {
     println!("{}", serde_json::to_string(&report).unwrap());
 
     std::process::exit(exit_code);
+}
+
+fn run_helper(exe: &str, role: &str, tree_log: Option<&PathBuf>, sleep_ms: u64) {
+    if let Some(path) = tree_log {
+        append_tree_log(path, role);
+        if role == "child" {
+            spawn_helper(exe, "grandchild", path, sleep_ms);
+        }
+    }
+    if sleep_ms > 0 {
+        std::thread::sleep(Duration::from_millis(sleep_ms));
+    }
+}
+
+fn spawn_helper(exe: &str, role: &str, tree_log: &PathBuf, sleep_ms: u64) {
+    let mut command = Command::new(exe);
+    command
+        .arg("--mock-helper-role")
+        .arg(role)
+        .arg("--mock-spawn-tree-log")
+        .arg(tree_log)
+        .arg("--mock-sleep-ms")
+        .arg(sleep_ms.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = command.spawn();
+}
+
+fn append_tree_log(path: &PathBuf, role: &str) {
+    let parent = path.parent().expect("tree log parent");
+    let _ = std::fs::create_dir_all(parent);
+    let line = serde_json::json!({
+        "role": role,
+        "pid": std::process::id(),
+        "ppid": std::process::id(),
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open tree log");
+    use std::io::Write;
+    writeln!(file, "{}", line).expect("write tree log");
 }
 
 use std::io::IsTerminal;

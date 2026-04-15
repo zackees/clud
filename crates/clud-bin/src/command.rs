@@ -1,9 +1,6 @@
 use crate::args::{Args, Command};
-use crate::backend::Backend;
-
-// ---------------------------------------------------------------------------
-// Prompts — ported from main branch src/clud/agent/prompts.py
-// ---------------------------------------------------------------------------
+use crate::backend::{Backend, LaunchMode};
+use serde::{Deserialize, Serialize};
 
 const FIX_PROMPT: &str = "\
 Look for linting like ./lint, or npm or python, choose the most likely one, \
@@ -70,29 +67,27 @@ and retry codeup. Repeat up to 5 times before giving up.
 
 8. If codeup succeeds (exit code 0), halt.";
 
-// The codeup step that gets replaced when -m is provided
 const UP_CODEUP_STEP_MARKER: &str =
     "6. Once everything passes and is clean, run:\n   codeup -m \"<your one-line summary>\"";
 
-// ---------------------------------------------------------------------------
-// Launch plan
-// ---------------------------------------------------------------------------
-
-/// A fully resolved command ready to execute (or print in dry-run mode).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchPlan {
     pub command: Vec<String>,
     pub iterations: u32,
     pub backend: Backend,
+    pub launch_mode: LaunchMode,
     pub cwd: Option<String>,
 }
 
-/// Build the command to execute for the given args and backend.
-pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
+pub fn build_launch_plan(
+    args: &Args,
+    backend: Backend,
+    launch_mode: LaunchMode,
+    backend_path: &str,
+) -> LaunchPlan {
     let mut cmd = vec![backend_path.to_string()];
     let mut iterations = 1u32;
 
-    // YOLO mode: always inject unless --safe
     if !args.safe {
         match backend {
             Backend::Claude => cmd.push("--dangerously-skip-permissions".to_string()),
@@ -100,13 +95,11 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         }
     }
 
-    // Model preference
     if let Some(ref model) = args.model {
         cmd.push("--model".to_string());
         cmd.push(model.clone());
     }
 
-    // Handle subcommands
     match &args.command {
         Some(Command::Loop { prompt, loop_count }) => {
             iterations = *loop_count;
@@ -133,8 +126,10 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")
         }
+        Some(Command::Attach { .. })
+        | Some(Command::InternalDaemon { .. })
+        | Some(Command::InternalWorker { .. }) => {}
         None => {
-            // Direct flags
             if let Some(ref prompt) = args.prompt {
                 cmd.push("-p".to_string());
                 cmd.push(prompt.clone());
@@ -155,28 +150,22 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         }
     }
 
-    // Forward unknown flags
     cmd.extend(args.passthrough.iter().cloned());
 
     LaunchPlan {
         command: cmd,
         iterations,
         backend,
+        launch_mode,
         cwd: std::env::current_dir()
             .ok()
             .map(|cwd| cwd.to_string_lossy().to_string()),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Prompt builders
-// ---------------------------------------------------------------------------
-
-/// Build the `up` prompt, optionally with a custom commit message and/or publish flag.
 fn build_up_prompt(message: Option<&str>, publish: bool) -> String {
     let mut prompt = UP_PROMPT.to_string();
 
-    // Replace the codeup step with a custom message/publish variant
     match (message, publish) {
         (Some(msg), true) => {
             let replacement = format!(
@@ -197,15 +186,12 @@ fn build_up_prompt(message: Option<&str>, publish: bool) -> String {
                 "6. Once everything passes and is clean, run:\n   codeup -m \"<your one-line summary>\" -p";
             prompt = prompt.replace(UP_CODEUP_STEP_MARKER, replacement);
         }
-        (None, false) => {
-            // No changes needed — use default prompt as-is
-        }
+        (None, false) => {}
     }
 
     prompt
 }
 
-/// Build the `fix` prompt, optionally with a GitHub URL.
 fn build_fix_prompt(url: Option<&str>) -> String {
     match url {
         Some(u) if is_github_url(u) => GITHUB_FIX_TEMPLATE
@@ -219,9 +205,6 @@ fn is_github_url(url: &str) -> bool {
     url.starts_with("https://github.com/") || url.starts_with("http://github.com/")
 }
 
-/// If the string is a path to an existing file, read its contents.
-/// Otherwise treat it as a literal prompt string.
-/// Exits with an error if the file exists but cannot be read.
 fn read_prompt_or_literal(input: &str) -> String {
     let path = std::path::Path::new(input);
     if path.is_file() {
@@ -237,10 +220,6 @@ fn read_prompt_or_literal(input: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +233,8 @@ mod tests {
     fn plan(raw: &[&str]) -> LaunchPlan {
         let args = parse(raw);
         let backend = crate::backend::resolve_backend(args.claude, args.codex);
-        build_launch_plan(&args, backend, backend.executable_name())
+        let launch_mode = crate::backend::resolve_launch_mode(args.pty, args.subprocess, backend);
+        build_launch_plan(&args, backend, launch_mode, backend.executable_name())
     }
 
     fn prompt_from_plan(p: &LaunchPlan) -> &str {
@@ -270,6 +250,7 @@ mod tests {
             vec!["claude", "--dangerously-skip-permissions", "-p", "hello"]
         );
         assert_eq!(p.iterations, 1);
+        assert_eq!(p.launch_mode, LaunchMode::Subprocess);
     }
 
     #[test]
@@ -326,8 +307,6 @@ mod tests {
         );
     }
 
-    // -- up command --
-
     #[test]
     fn test_up_default() {
         let p = plan(&["clud", "up"]);
@@ -360,8 +339,6 @@ mod tests {
         assert!(prompt.contains("codeup -m \"release v2\" -p"));
     }
 
-    // -- rebase command --
-
     #[test]
     fn test_rebase_command() {
         let p = plan(&["clud", "rebase"]);
@@ -369,8 +346,6 @@ mod tests {
         assert!(prompt.contains("git fetch"));
         assert!(prompt.contains("rebase"));
     }
-
-    // -- fix command --
 
     #[test]
     fn test_fix_default() {
@@ -397,12 +372,9 @@ mod tests {
     fn test_fix_with_non_github_url() {
         let p = plan(&["clud", "fix", "https://example.com/logs"]);
         let prompt = prompt_from_plan(&p);
-        // Non-GitHub URL is treated as a literal prompt (the fix prompt, not the URL)
         assert!(prompt.contains("linting"));
         assert!(!prompt.contains("example.com"));
     }
-
-    // -- loop command --
 
     #[test]
     fn test_loop_command() {
@@ -418,7 +390,11 @@ mod tests {
         assert_eq!(p.iterations, 50);
     }
 
-    // -- passthrough --
+    #[test]
+    fn test_pty_override() {
+        let p = plan(&["clud", "--pty", "-p", "hello"]);
+        assert_eq!(p.launch_mode, LaunchMode::Pty);
+    }
 
     #[test]
     fn test_passthrough_flags() {
@@ -431,8 +407,6 @@ mod tests {
         let p = plan(&["clud", "-p", "hello", "--", "--verbose"]);
         assert!(p.command.contains(&"--verbose".to_string()));
     }
-
-    // -- prompt builders --
 
     #[test]
     fn test_is_github_url() {

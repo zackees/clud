@@ -18,6 +18,40 @@
 use std::fs;
 use std::path::Path;
 
+/// Spawn the current executable as a detached background process.
+pub fn spawn_detached_self(args: &[String]) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command.args(args);
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::null());
+    command.stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let _child = command.spawn()?;
+    Ok(())
+}
+
 /// Unlock ourselves so pip can overwrite clud.exe while we're running.
 /// Call this at the very start of main(), before any real work.
 pub fn unlock_exe() {
