@@ -3,10 +3,20 @@ on:
   push:
     branches: [rust, main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      build-mode:
+        description: "Build mode"
+        required: false
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - release
 jobs:
   call:
     uses: ./.github/workflows/_build.yml
     with:
       runs-on: macos-15
       artifact-name: wheels-macos-arm
-      build-mode: dev
+      build-mode: ${{ inputs.build-mode || 'dev' }}

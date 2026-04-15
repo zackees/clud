@@ -3,10 +3,20 @@ on:
   push:
     branches: [rust, main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      build-mode:
+        description: "Build mode"
+        required: false
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - release
 jobs:
   call:
     uses: ./.github/workflows/_build.yml
     with:
       runs-on: windows-11-arm
       artifact-name: wheels-windows-arm
-      build-mode: dev
+      build-mode: ${{ inputs.build-mode || 'dev' }}
