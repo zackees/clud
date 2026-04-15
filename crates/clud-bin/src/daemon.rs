@@ -206,8 +206,11 @@ impl WorkerShared {
             .exit_code = Some(exit_code);
     }
 
-    fn attach_client(&self) -> AttachClientResult {
+    fn attach_client(&self) -> Result<AttachClientResult, String> {
         let mut guard = self.client.lock().expect("client mutex poisoned");
+        if guard.is_some() {
+            return Err("session already has an attached client".to_string());
+        }
         let (tx, rx) = mpsc::channel();
         let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
         *guard = Some(AttachedClient {
@@ -223,7 +226,7 @@ impl WorkerShared {
             .iter()
             .cloned()
             .collect();
-        (client_id, rx, snapshot, backlog)
+        Ok((client_id, rx, snapshot, backlog))
     }
 
     fn detach_client(&self, client_id: u64) {
@@ -957,7 +960,12 @@ fn handle_worker_client(
         );
     }
 
-    let (client_id, rx, snapshot, backlog) = shared.attach_client();
+    let (client_id, rx, snapshot, backlog) = match shared.attach_client() {
+        Ok(values) => values,
+        Err(message) => {
+            return write_json_line(&mut stream, &WorkerServerMessage::Error { message });
+        }
+    };
     let mut writer = stream.try_clone()?;
     write_json_line(
         &mut writer,
@@ -1039,9 +1047,24 @@ fn read_worker_line(
                 if active_client.is_some_and(|(shared, client_id)| !shared.owns_client(client_id)) {
                     return Ok(0);
                 }
+                if client_stream_closed(reader)? {
+                    return Ok(0);
+                }
             }
             Err(err) => return Err(err),
         }
+    }
+}
+
+fn client_stream_closed(reader: &mut BufReader<TcpStream>) -> io::Result<bool> {
+    let mut byte = [0_u8; 1];
+    match reader.get_mut().peek(&mut byte) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(false),
+        Err(err) if matches!(err.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {
+            Ok(false)
+        }
+        Err(err) => Err(err),
     }
 }
 
