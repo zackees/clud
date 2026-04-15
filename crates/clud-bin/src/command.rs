@@ -84,6 +84,7 @@ pub struct LaunchPlan {
     pub command: Vec<String>,
     pub iterations: u32,
     pub backend: Backend,
+    pub cwd: Option<String>,
 }
 
 /// Build the command to execute for the given args and backend.
@@ -161,6 +162,9 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         command: cmd,
         iterations,
         backend,
+        cwd: std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.to_string_lossy().to_string()),
     }
 }
 

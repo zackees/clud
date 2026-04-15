@@ -57,6 +57,9 @@ fn main() {
     // Capture env vars relevant for testing
     let in_clud = std::env::var("IN_CLUD").ok();
     let originator = std::env::var("RUNNING_PROCESS_ORIGINATOR").ok();
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string());
 
     if sleep_ms > 0 {
         std::thread::sleep(Duration::from_millis(sleep_ms));
@@ -69,6 +72,7 @@ fn main() {
         "stdin": stdin_content,
         "exit_code": exit_code,
         "sleep_ms": sleep_ms,
+        "cwd": cwd,
         "env": {
             "IN_CLUD": in_clud,
             "RUNNING_PROCESS_ORIGINATOR": originator,
