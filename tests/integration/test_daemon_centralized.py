@@ -230,7 +230,8 @@ class TestDaemonManagedSessionFlags:
         env = _managed_env(mock_env, state_dir)
         launch_cwd = tmp_path / "workspace"
         launch_cwd.mkdir()
-        proc, session_id = _launch_detached(
+        # Create two sessions so attach (no args) lists instead of auto-attaching
+        proc1, session_id = _launch_detached(
             clud_binary,
             env,
             "--codex",
@@ -238,11 +239,21 @@ class TestDaemonManagedSessionFlags:
             "list-attachable",
             "--",
             "--mock-sleep-ms",
-            "3000",
+            "5000",
             cwd=launch_cwd,
         )
+        _proc2, _session_id_2 = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "list-attachable-2",
+            "--",
+            "--mock-sleep-ms",
+            "5000",
+        )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc1, timeout=2) == 0
 
             listed = subprocess.run(
                 [str(clud_binary), "attach"],
