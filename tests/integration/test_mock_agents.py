@@ -408,54 +408,41 @@ class TestStdinForwarding:
     a specified duration and report what it received.
     """
 
+    def _parse_report(
+        self,
+        report_file: Path,
+        stdout: str,
+        stderr: str,
+    ) -> dict:
+        """Parse the mock agent report from file or stdout."""
+        if report_file.exists():
+            return json.loads(report_file.read_text())
+        return _parse_agent_report(
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=stdout, stderr=stderr
+            )
+        )
+
     def test_subprocess_stdin_forwarding(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
         """Data written to clud's stdin reaches the child in subprocess mode."""
         report_file = tmp_path / "report.json"
-        proc = subprocess.Popen(
-            [
-                str(clud_binary),
-                "-p",
-                "hello",
-                "--",
-                "--mock-read-stdin-ms",
-                "3000",
-                "--mock-report-file",
-                str(report_file),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        result = _run(
+            clud_binary,
+            "-p",
+            "hello",
+            "--",
+            "--mock-read-stdin-ms",
+            "3000",
+            "--mock-report-file",
+            str(report_file),
             env=mock_env,
+            input_data="dropped-file.txt\n",
         )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
-        try:
-            # Give clud time to start the mock agent, then write to stdin
-            time.sleep(0.5)
-            assert proc.stdin is not None
-            proc.stdin.write("dropped-file.txt\n")
-            proc.stdin.flush()
-            proc.stdin.close()
-            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-
-        assert proc.returncode == 0, f"stderr: {stderr}"
-
-        # Parse report from file (most reliable) or stdout
-        if report_file.exists():
-            report = json.loads(report_file.read_text())
-        else:
-            report = _parse_agent_report(
-                subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout=stdout, stderr=stderr
-                )
-            )
-
+        report = self._parse_report(report_file, result.stdout, result.stderr)
         assert report["stdin"] is not None, "mock agent received no stdin data"
         assert "dropped-file.txt" in report["stdin"]
 
@@ -464,44 +451,21 @@ class TestStdinForwarding:
     ) -> None:
         """When test pipes stdin, the child sees a pipe (not a terminal)."""
         report_file = tmp_path / "report.json"
-        proc = subprocess.Popen(
-            [
-                str(clud_binary),
-                "-p",
-                "hello",
-                "--",
-                "--mock-read-stdin-ms",
-                "1000",
-                "--mock-report-file",
-                str(report_file),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        result = _run(
+            clud_binary,
+            "-p",
+            "hello",
+            "--",
+            "--mock-read-stdin-ms",
+            "1000",
+            "--mock-report-file",
+            str(report_file),
             env=mock_env,
+            input_data="",
         )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
-        try:
-            assert proc.stdin is not None
-            proc.stdin.close()
-            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-
-        assert proc.returncode == 0, f"stderr: {stderr}"
-
-        if report_file.exists():
-            report = json.loads(report_file.read_text())
-        else:
-            report = _parse_agent_report(
-                subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout=stdout, stderr=stderr
-                )
-            )
-
+        report = self._parse_report(report_file, result.stdout, result.stderr)
         # With piped stdin, the child should NOT see a terminal
         assert report["stdin_is_terminal"] is False
 
@@ -512,47 +476,21 @@ class TestStdinForwarding:
         report_file = tmp_path / "report.json"
         payload = "file1.txt\nfile2.txt\npath/to/file3.txt\n"
 
-        proc = subprocess.Popen(
-            [
-                str(clud_binary),
-                "-p",
-                "hello",
-                "--",
-                "--mock-read-stdin-ms",
-                "3000",
-                "--mock-report-file",
-                str(report_file),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        result = _run(
+            clud_binary,
+            "-p",
+            "hello",
+            "--",
+            "--mock-read-stdin-ms",
+            "3000",
+            "--mock-report-file",
+            str(report_file),
             env=mock_env,
+            input_data=payload,
         )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
-        try:
-            time.sleep(0.5)
-            assert proc.stdin is not None
-            proc.stdin.write(payload)
-            proc.stdin.flush()
-            proc.stdin.close()
-            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-
-        assert proc.returncode == 0, f"stderr: {stderr}"
-
-        if report_file.exists():
-            report = json.loads(report_file.read_text())
-        else:
-            report = _parse_agent_report(
-                subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout=stdout, stderr=stderr
-                )
-            )
-
+        report = self._parse_report(report_file, result.stdout, result.stderr)
         assert report["stdin"] is not None
         assert "file1.txt" in report["stdin"]
         assert "file2.txt" in report["stdin"]
@@ -566,48 +504,20 @@ class TestStdinForwarding:
         # Simulate bracketed paste: ESC[200~ ... ESC[201~
         pasted = "\x1b[200~/path/to/dropped.txt\x1b[201~"
 
-        proc = subprocess.Popen(
-            [
-                str(clud_binary),
-                "-p",
-                "hello",
-                "--",
-                "--mock-read-stdin-ms",
-                "3000",
-                "--mock-report-file",
-                str(report_file),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        result = _run(
+            clud_binary,
+            "-p",
+            "hello",
+            "--",
+            "--mock-read-stdin-ms",
+            "3000",
+            "--mock-report-file",
+            str(report_file),
             env=mock_env,
+            input_data=pasted,
         )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
-        try:
-            time.sleep(0.5)
-            assert proc.stdin is not None
-            proc.stdin.write(pasted.encode())
-            proc.stdin.flush()
-            proc.stdin.close()
-            stdout, stderr = proc.communicate(timeout=_TIMEOUT)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-
-        assert proc.returncode == 0, f"stderr: {stderr}"
-
-        if report_file.exists():
-            report = json.loads(report_file.read_text())
-        else:
-            cleaned = _strip_ansi(stdout.decode() if isinstance(stdout, bytes) else stdout)
-            for line in cleaned.splitlines():
-                line = line.strip()
-                if line.startswith("{"):
-                    report = json.loads(line)
-                    break
-            else:
-                report = json.loads(cleaned)
-
+        report = self._parse_report(report_file, result.stdout, result.stderr)
         assert report["stdin"] is not None
         assert "/path/to/dropped.txt" in report["stdin"]
