@@ -151,6 +151,11 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
 
     use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
+    // Enable VT input on the console before launching the child.
+    // This allows ANSI sequences (including bracketed paste for drag-and-drop)
+    // to flow through to the child process via inherited stdin.
+    let _console_guard = enable_console_vt_input();
+
     let env = child_env();
     let mut last_exit = 0i32;
 
@@ -277,6 +282,94 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
     }
 
     last_exit
+}
+
+/// RAII guard that restores the original console input mode on drop.
+struct ConsoleVtGuard {
+    #[cfg(windows)]
+    original_mode: Option<u32>,
+}
+
+impl Drop for ConsoleVtGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(mode) = self.original_mode {
+            restore_console_mode(mode);
+        }
+    }
+}
+
+/// Enable `ENABLE_VIRTUAL_TERMINAL_INPUT` on the Windows console so ANSI
+/// sequences (bracketed paste, etc.) pass through to the child process.
+/// Returns a guard that restores the original mode on drop.
+/// On non-Windows platforms this is a no-op.
+fn enable_console_vt_input() -> ConsoleVtGuard {
+    #[cfg(windows)]
+    {
+        use std::io::IsTerminal;
+        if !io::stdin().is_terminal() {
+            return ConsoleVtGuard {
+                original_mode: None,
+            };
+        }
+        match set_console_vt_input(true) {
+            Some(original) => ConsoleVtGuard {
+                original_mode: Some(original),
+            },
+            None => ConsoleVtGuard {
+                original_mode: None,
+            },
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        ConsoleVtGuard {}
+    }
+}
+
+#[cfg(windows)]
+fn set_console_vt_input(enable: bool) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+
+    // Windows console mode flag for virtual terminal input processing.
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+    extern "system" {
+        fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+    }
+
+    let handle = io::stdin().as_raw_handle() as isize;
+    unsafe {
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return None;
+        }
+        let original = mode;
+        if enable {
+            mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+        } else {
+            mode &= !ENABLE_VIRTUAL_TERMINAL_INPUT;
+        }
+        if SetConsoleMode(handle, mode) == 0 {
+            return None;
+        }
+        Some(original)
+    }
+}
+
+#[cfg(windows)]
+fn restore_console_mode(mode: u32) {
+    use std::os::windows::io::AsRawHandle;
+
+    extern "system" {
+        fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+    }
+
+    let handle = io::stdin().as_raw_handle() as isize;
+    unsafe {
+        SetConsoleMode(handle, mode);
+    }
 }
 
 /// Check if stdin is a terminal (not piped).
