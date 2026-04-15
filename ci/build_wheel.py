@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+from ci.wheel_repair import repair_windows_gnu_wheel
+
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
@@ -85,6 +87,8 @@ def run_build(mode: BuildMode) -> int:
     result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
     if result.returncode != 0:
         return result.returncode
+    for wheel in built_wheels():
+        repair_windows_gnu_wheel(wheel)
     if mode != "dev":
         return 0
 

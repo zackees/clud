@@ -77,6 +77,7 @@ def test_dry_run_prompt() -> None:
     assert result.returncode == 0
     data = json.loads(result.stdout)
     assert data["backend"] == "claude"
+    assert data["launch_mode"] == "subprocess"
     assert "--dangerously-skip-permissions" in data["command"]
     assert "-p" in data["command"]
     assert "hello" in data["command"]
@@ -88,6 +89,15 @@ def test_dry_run_codex() -> None:
     assert result.returncode == 0
     data = json.loads(result.stdout)
     assert data["backend"] == "codex"
+    assert data["launch_mode"] == "subprocess"
+
+
+def test_dry_run_pty_override() -> None:
+    result = _run("--dry-run", "--pty", "-p", "hello")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    assert data["backend"] == "claude"
+    assert data["launch_mode"] == "pty"
 
 
 def test_dry_run_safe_mode() -> None:

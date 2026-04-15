@@ -59,12 +59,37 @@ def host_target_triple() -> str:
     if arch is None:
         raise RuntimeError(f"unsupported architecture: {machine}")
     if system == "Windows":
+        # This repo builds Windows artifacts with the rust-toolchain override,
+        # which points at MSVC. `cargo -Vv` can still report the ambient GNU
+        # rustup proxy host, and using that value here causes wheel builds to
+        # pick the wrong target triple.
         return f"{arch}-pc-windows-msvc"
+    detected = _cargo_host_triple()
+    if detected:
+        return detected
     if system == "Linux":
         return f"{arch}-unknown-linux-gnu"
     if system == "Darwin":
         return f"{arch}-apple-darwin"
     raise RuntimeError(f"unsupported platform: {system}")
+
+
+def _cargo_host_triple() -> str | None:
+    cargo = shutil.which("cargo")
+    if not cargo:
+        return None
+    result = subprocess.run(
+        [cargo, "-Vv"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("host: "):
+            return line.removeprefix("host: ").strip() or None
+    return None
 
 
 def toolchain_name() -> str:
@@ -128,6 +153,10 @@ def _windows_build_env() -> dict[str, str]:
         env["RUSTUP_TOOLCHAIN"] = toolchain_name()
         env["CARGO_BUILD_TARGET"] = host_target_triple()
 
+    gnu_runtime = _find_windows_gnu_runtime_bin()
+    if gnu_runtime is not None and env.get("CARGO_BUILD_TARGET", "").endswith("-gnu"):
+        env["PATH"] = str(gnu_runtime) + os.pathsep + env.get("PATH", "")
+
     vsdevcmd = _find_vsdevcmd()
     if vsdevcmd is None:
         return env
@@ -148,6 +177,19 @@ def _windows_build_env() -> dict[str, str]:
         key, value = line.split("=", 1)
         env[key] = value
     return env
+
+
+def _find_windows_gnu_runtime_bin() -> Path | None:
+    candidates = [
+        Path(r"C:\msys64\ucrt64\bin"),
+        Path(r"C:\msys64\mingw64\bin"),
+        Path(r"C:\Qt\Tools\mingw1120_64\bin"),
+        Path(r"C:\MinGW\bin"),
+    ]
+    for candidate in candidates:
+        if (candidate / "libstdc++-6.dll").is_file():
+            return candidate
+    return None
 
 
 def activate() -> None:
