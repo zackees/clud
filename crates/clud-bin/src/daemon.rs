@@ -44,6 +44,10 @@ struct DaemonInfo {
 struct SessionSnapshot {
     id: String,
     kind: SessionKind,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    detachable: bool,
     daemon_pid: u32,
     worker_pid: u32,
     worker_port: u16,
@@ -55,6 +59,8 @@ struct SessionSnapshot {
 struct WorkerLaunchSpec {
     plan: LaunchPlan,
     kind: SessionKind,
+    #[serde(default)]
+    detachable: bool,
     rows: u16,
     cols: u16,
 }
@@ -313,7 +319,9 @@ impl Drop for RawTerminalGuard {
 }
 
 pub fn experimental_enabled(args: &Args) -> bool {
-    args.experimental_daemon_centralized
+    args.detach
+        || args.detachable
+        || args.experimental_daemon_centralized
         || std::env::var(ENV_FEATURE_FLAG)
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
@@ -321,9 +329,15 @@ pub fn experimental_enabled(args: &Args) -> bool {
 
 pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i32> {
     match &args.command {
-        Some(Command::Attach { session_id }) => {
+        Some(Command::Attach {
+            session_id: Some(session_id),
+        }) => {
             let state_dir = state_dir(args);
             Some(run_attach(session_id, &state_dir, interrupted))
+        }
+        Some(Command::Attach { session_id: None }) | Some(Command::List) => {
+            let state_dir = state_dir(args);
+            Some(run_list(&state_dir))
         }
         Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir)),
         Some(Command::InternalWorker {
@@ -352,6 +366,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         spec: WorkerLaunchSpec {
             plan: plan.clone(),
             kind,
+            detachable: args.detach || args.detachable,
             rows,
             cols,
         },
@@ -367,7 +382,11 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
     match response {
         DaemonResponse::Created { session } => {
             eprintln!("[clud] daemon session {}", session.id);
-            attach_to_session(&session, interrupted)
+            if args.detach {
+                0
+            } else {
+                attach_to_session(&session, interrupted)
+            }
         }
         DaemonResponse::Error { message } => {
             eprintln!("[clud] daemon error: {}", message);
@@ -526,7 +545,7 @@ fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
     {
-        run_remote_interactive(Arc::clone(&writer), interrupted)
+        run_remote_interactive(Arc::clone(&writer), interrupted, session.detachable)
     } else {
         while !interrupted.load(Ordering::SeqCst)
             && exit_code
@@ -537,13 +556,18 @@ fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32
             thread::sleep(Duration::from_millis(25));
         }
         if interrupted.load(Ordering::SeqCst) {
-            let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
+            if !session.detachable {
+                let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
+            }
             130
         } else {
             0
         }
     };
 
+    if session.detachable && local_result == 130 {
+        let _ = shutdown_worker_connection(&writer);
+    }
     let _ = reader.join();
     let final_exit_code = exit_code
         .lock()
@@ -552,7 +576,11 @@ fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32
     final_exit_code
 }
 
-fn run_remote_interactive(writer: Arc<Mutex<TcpStream>>, interrupted: &AtomicBool) -> i32 {
+fn run_remote_interactive(
+    writer: Arc<Mutex<TcpStream>>,
+    interrupted: &AtomicBool,
+    detachable: bool,
+) -> i32 {
     let _guard = match RawTerminalGuard::enter() {
         Ok(guard) => guard,
         Err(err) => {
@@ -565,7 +593,9 @@ fn run_remote_interactive(writer: Arc<Mutex<TcpStream>>, interrupted: &AtomicBoo
     };
     loop {
         if interrupted.load(Ordering::SeqCst) {
-            let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
+            if !detachable {
+                let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
+            }
             return 130;
         }
         match event::poll(Duration::from_millis(25)) {
@@ -582,6 +612,9 @@ fn run_remote_interactive(writer: Arc<Mutex<TcpStream>>, interrupted: &AtomicBoo
                         );
                     }
                     KeyAction::Interrupt => {
+                        if detachable {
+                            return 130;
+                        }
                         let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
                     }
                     KeyAction::Ignore => {}
@@ -770,6 +803,8 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
     let snapshot = SessionSnapshot {
         id: session_id.to_string(),
         kind: spec.kind.clone(),
+        cwd: spec.plan.cwd.clone(),
+        detachable: spec.detachable,
         daemon_pid,
         worker_pid: std::process::id(),
         worker_port,
@@ -1116,6 +1151,11 @@ fn send_worker_message(
     write_json_line(&mut guard, message)
 }
 
+fn shutdown_worker_connection(writer: &Arc<Mutex<TcpStream>>) -> io::Result<()> {
+    let guard = writer.lock().expect("writer mutex poisoned");
+    guard.shutdown(Shutdown::Both)
+}
+
 fn persist_snapshot(
     state_dir: &Path,
     session_id: &str,
@@ -1168,6 +1208,52 @@ fn session_snapshot_path(state_dir: &Path, session_id: &str) -> PathBuf {
 
 fn spec_path(state_dir: &Path, session_id: &str) -> PathBuf {
     specs_dir(state_dir).join(format!("{session_id}.json"))
+}
+
+fn run_list(state_dir: &Path) -> i32 {
+    let sessions = list_attachable_sessions(state_dir);
+    if sessions.is_empty() {
+        println!("No attachable sessions.");
+        return 0;
+    }
+
+    println!("SESSION ID\tPID\tCWD");
+    for session in sessions {
+        let pid = session
+            .root_pid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let cwd = session.cwd.unwrap_or_else(|| "-".to_string());
+        println!("{}\t{}\t{}", session.id, pid, cwd);
+    }
+    0
+}
+
+fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
+    let Ok(entries) = fs::read_dir(sessions_dir(state_dir)) else {
+        return Vec::new();
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(session) = read_json_file::<SessionSnapshot>(&path) else {
+            continue;
+        };
+        if session.exit_code.is_some() {
+            continue;
+        }
+        if let Some(root_pid) = session.root_pid {
+            if !pid_is_alive(root_pid) {
+                continue;
+            }
+        }
+        sessions.push(session);
+    }
+    sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    sessions
 }
 
 fn write_json_line<T: Serialize>(writer: &mut TcpStream, value: &T) -> io::Result<()> {

@@ -29,6 +29,8 @@ clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
 clud --pty                        # Force PTY launch mode
 clud --subprocess                 # Force subprocess launch mode
+clud --detach -p "review this PR" # Start a daemon-managed session without attaching
+clud --detachable -p "fix CI"     # Ctrl+C detaches; reattach later with clud attach
 clud -c                           # Continue the most recent conversation
 clud --resume                     # Resume a session
 clud --resume abc123              # Resume a specific session by ID or search term
@@ -39,6 +41,9 @@ clud --safe -p "drop the table"   # Disable YOLO mode (keeps permission prompts)
 clud --dry-run -p "hello"         # Print what would run without executing
 echo "explain this error" | clud  # Pipe mode: read prompt from stdin
 clud -- --verbose --debug         # Pass extra flags through to the backend
+clud attach                       # List attachable daemon-managed sessions
+clud attach sess-123              # Attach to a specific session
+clud list                         # Show attachable session IDs, PIDs, and cwd
 clud wasm guest.wasm              # Run a local wasm module with clud's embedded runtime
 ```
 
@@ -54,6 +59,8 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--codex` | Use Codex as the backend |
 | `--subprocess` | Force subprocess launch mode |
 | `--pty` | Force PTY launch mode |
+| `--detach` | Start a daemon-managed session and exit after printing the session ID |
+| `--detachable` | Run attached under the daemon; `Ctrl+C` detaches instead of interrupting |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
 | `--dry-run` | Print what would be executed, then exit |
@@ -65,6 +72,22 @@ Unknown flags are forwarded directly to the backend agent.
 
 `clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
 to opt back into PTY while Claude PTY issues are being investigated.
+
+## Detached Sessions
+
+Use daemon-managed sessions when you want to disconnect and reattach later.
+
+```bash
+clud --detachable --codex -p "refactor the parser"
+# press Ctrl+C to detach
+
+clud attach
+clud attach sess-123
+clud list
+```
+
+`clud attach` without a session ID lists live attachable sessions. `clud list`
+shows the same sessions with their root PID and current working directory.
 
 ## Voice Mode
 
