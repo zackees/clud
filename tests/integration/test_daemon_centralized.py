@@ -706,3 +706,177 @@ class TestDaemonSessionHardening:
             assert session_id_2 not in listed.stdout
         finally:
             _kill_daemon_for_session(state_dir, session_id_1)
+
+    def test_named_session_attach_by_name(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--name",
+            "my-refactor",
+            "--codex",
+            "-p",
+            "named-test",
+            "--",
+            "--mock-sleep-ms",
+            "3000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+
+            # Attach by name instead of ID
+            attached = subprocess.run(
+                [str(clud_binary), "attach", "my-refactor"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert attached.returncode == 0
+            report = json.loads(attached.stdout)
+            assert "named-test" in report["args"]
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_named_session_shows_in_list(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--name",
+            "my-task",
+            "--codex",
+            "-p",
+            "list-name",
+            "--",
+            "--mock-sleep-ms",
+            "3000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+            listed = subprocess.run(
+                [str(clud_binary), "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert listed.returncode == 0
+            assert "my-task" in listed.stdout
+            assert session_id in listed.stdout
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_prefix_matching_attach(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "prefix-test",
+            "--",
+            "--mock-sleep-ms",
+            "3000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+            # Use first 10 chars of session_id as prefix
+            prefix = session_id[:10]
+            attached = subprocess.run(
+                [str(clud_binary), "attach", prefix],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert attached.returncode == 0
+            report = json.loads(attached.stdout)
+            assert "prefix-test" in report["args"]
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_kill_by_name(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--name",
+            "kill-by-name",
+            "--codex",
+            "-p",
+            "kill-name-test",
+            "--",
+            "--mock-sleep-ms",
+            "30000",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=2) == 0
+            result = subprocess.run(
+                [str(clud_binary), "kill", "kill-by-name"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0
+            assert "killed session" in result.stderr
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_attach_last(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        # Create first session
+        proc1, session_id_1 = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "first-session",
+            "--",
+            "--mock-sleep-ms",
+            "5000",
+        )
+        assert _wait_for_exit(proc1, timeout=2) == 0
+        time.sleep(0.2)
+        # Create second session (most recent)
+        proc2, _session_id_2 = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "second-session",
+            "--",
+            "--mock-sleep-ms",
+            "3000",
+        )
+        assert _wait_for_exit(proc2, timeout=2) == 0
+        try:
+            # attach --last should get the second session
+            attached = subprocess.run(
+                [str(clud_binary), "attach", "--last"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert attached.returncode == 0
+            report = json.loads(attached.stdout)
+            assert "second-session" in report["args"]
+        finally:
+            _kill_daemon_for_session(state_dir, session_id_1)
