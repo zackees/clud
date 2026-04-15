@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,6 +26,7 @@ const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
 const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 const BACKLOG_LIMIT_BYTES: usize = 256 * 1024;
 const STALE_CLIENT_GRACE: Duration = Duration::from_secs(1);
+const BACKGROUND_PROMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +49,8 @@ struct SessionSnapshot {
     cwd: Option<String>,
     #[serde(default)]
     detachable: bool,
+    #[serde(default)]
+    background: bool,
     daemon_pid: u32,
     worker_pid: u32,
     worker_port: u16,
@@ -61,6 +64,8 @@ struct WorkerLaunchSpec {
     kind: SessionKind,
     #[serde(default)]
     detachable: bool,
+    #[serde(default)]
+    background_on_launch: bool,
     rows: u16,
     cols: u16,
 }
@@ -70,6 +75,7 @@ struct WorkerLaunchSpec {
 enum DaemonRequest {
     Create { spec: WorkerLaunchSpec },
     Session { session_id: String },
+    Terminate { session_id: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +83,7 @@ enum DaemonRequest {
 enum DaemonResponse {
     Created { session: SessionSnapshot },
     Session { session: SessionSnapshot },
+    Terminated { session: SessionSnapshot },
     Error { message: String },
 }
 
@@ -176,6 +183,8 @@ type AttachClientResult = (
 );
 
 struct WorkerShared {
+    state_dir: PathBuf,
+    session_id: String,
     snapshot: Mutex<SessionSnapshot>,
     backlog: Mutex<BacklogState>,
     client: Mutex<Option<AttachedClient>>,
@@ -184,8 +193,10 @@ struct WorkerShared {
 }
 
 impl WorkerShared {
-    fn new(snapshot: SessionSnapshot) -> Self {
+    fn new(state_dir: PathBuf, session_id: String, snapshot: SessionSnapshot) -> Self {
         Self {
+            state_dir,
+            session_id,
             snapshot: Mutex::new(snapshot),
             backlog: Mutex::new(BacklogState::default()),
             client: Mutex::new(None),
@@ -202,17 +213,33 @@ impl WorkerShared {
     }
 
     fn set_root_pid(&self, root_pid: Option<u32>) {
-        self.snapshot
-            .lock()
-            .expect("snapshot mutex poisoned")
-            .root_pid = root_pid;
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            guard.root_pid = root_pid;
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
     }
 
     fn set_exit_code(&self, exit_code: i32) {
-        self.snapshot
-            .lock()
-            .expect("snapshot mutex poisoned")
-            .exit_code = Some(exit_code);
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            guard.exit_code = Some(exit_code);
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
+    }
+
+    fn set_background(&self, background: bool) {
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            if guard.background == background {
+                return;
+            }
+            guard.background = background;
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
     }
 
     fn attach_client(&self, shutdown: TcpStream) -> Result<AttachClientResult, String> {
@@ -235,6 +262,7 @@ impl WorkerShared {
         if let Some(previous) = previous {
             let _ = previous.shutdown.shutdown(Shutdown::Both);
         }
+        self.set_background(false);
         let snapshot = self.snapshot();
         let backlog = self
             .backlog
@@ -251,6 +279,10 @@ impl WorkerShared {
         let mut guard = self.client.lock().expect("client mutex poisoned");
         if guard.as_ref().is_some_and(|client| client.id == client_id) {
             *guard = None;
+        }
+        drop(guard);
+        if self.snapshot().exit_code.is_none() {
+            self.set_background(true);
         }
     }
 
@@ -301,6 +333,25 @@ impl WorkerShared {
             let _ = sender.send(message);
         }
     }
+
+    fn persist_snapshot(&self, snapshot: &SessionSnapshot) -> io::Result<()> {
+        write_json_file(
+            &session_snapshot_path(&self.state_dir, &self.session_id),
+            snapshot,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAttachResult {
+    Completed(i32),
+    InterruptRequested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundPromptDecision {
+    ContinueInBackground,
+    EndSession,
 }
 
 struct RawTerminalGuard;
@@ -367,6 +418,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             plan: plan.clone(),
             kind,
             detachable: args.detach || args.detachable,
+            background_on_launch: args.detach,
             rows,
             cols,
         },
@@ -385,14 +437,14 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             if args.detach {
                 0
             } else {
-                attach_to_session(&session, interrupted)
+                attach_to_session(&state_dir, &session, interrupted)
             }
         }
         DaemonResponse::Error { message } => {
             eprintln!("[clud] daemon error: {}", message);
             1
         }
-        DaemonResponse::Session { .. } => 1,
+        DaemonResponse::Session { .. } | DaemonResponse::Terminated { .. } => 1,
     }
 }
 
@@ -414,16 +466,16 @@ fn run_attach(session_id: &str, state_dir: &Path, interrupted: &AtomicBool) -> i
         }
     };
     match response {
-        DaemonResponse::Session { session } => attach_to_session(&session, interrupted),
+        DaemonResponse::Session { session } => attach_to_session(state_dir, &session, interrupted),
         DaemonResponse::Error { message } => {
             eprintln!("[clud] daemon error: {}", message);
             1
         }
-        DaemonResponse::Created { .. } => 1,
+        DaemonResponse::Created { .. } | DaemonResponse::Terminated { .. } => 1,
     }
 }
 
-fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32 {
+fn attach_to_session(state_dir: &Path, session: &SessionSnapshot, interrupted: &AtomicBool) -> i32 {
     let started = Instant::now();
     let attach_retry_window = Duration::from_secs(5);
     let (writer, mut reader) = loop {
@@ -547,28 +599,43 @@ fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32
     {
         run_remote_interactive(Arc::clone(&writer), interrupted, session.detachable)
     } else {
-        while !interrupted.load(Ordering::SeqCst)
-            && exit_code
-                .lock()
-                .expect("exit code mutex poisoned")
-                .is_none()
-        {
-            thread::sleep(Duration::from_millis(25));
-        }
-        if interrupted.load(Ordering::SeqCst) {
-            if !session.detachable {
+        wait_for_remote_or_interrupt(&exit_code, interrupted)
+    };
+
+    let (local_result, backgrounded) = match local_result {
+        LocalAttachResult::Completed(code) => (code, false),
+        LocalAttachResult::InterruptRequested => {
+            interrupted.store(false, Ordering::SeqCst);
+            if session.detachable {
+                match prompt_continue_in_background(interrupted) {
+                    BackgroundPromptDecision::ContinueInBackground => {
+                        let _ = shutdown_worker_connection(&writer);
+                        eprintln!("[clud] session {} continues in the background", session.id);
+                        (0, true)
+                    }
+                    BackgroundPromptDecision::EndSession => {
+                        eprintln!("[clud] ending session {}", session.id);
+                        let _ = request_session_termination(state_dir, &session.id);
+                        let _ = shutdown_worker_connection(&writer);
+                        (130, false)
+                    }
+                }
+            } else {
                 let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
+                wait_for_remote_exit(&exit_code, Duration::from_secs(5));
+                let _ = shutdown_worker_connection(&writer);
+                (130, false)
             }
-            130
-        } else {
-            0
         }
     };
 
-    if session.detachable && local_result == 130 {
+    if backgrounded {
         let _ = shutdown_worker_connection(&writer);
     }
     let _ = reader.join();
+    if local_result == 130 {
+        return 130;
+    }
     let final_exit_code = exit_code
         .lock()
         .expect("exit code mutex poisoned")
@@ -579,8 +646,8 @@ fn attach_to_session(session: &SessionSnapshot, interrupted: &AtomicBool) -> i32
 fn run_remote_interactive(
     writer: Arc<Mutex<TcpStream>>,
     interrupted: &AtomicBool,
-    detachable: bool,
-) -> i32 {
+    _detachable: bool,
+) -> LocalAttachResult {
     let _guard = match RawTerminalGuard::enter() {
         Ok(guard) => guard,
         Err(err) => {
@@ -588,15 +655,12 @@ fn run_remote_interactive(
                 "[clud] warning: failed to enable raw terminal mode: {}",
                 err
             );
-            return 1;
+            return LocalAttachResult::Completed(1);
         }
     };
     loop {
         if interrupted.load(Ordering::SeqCst) {
-            if !detachable {
-                let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
-            }
-            return 130;
+            return LocalAttachResult::InterruptRequested;
         }
         match event::poll(Duration::from_millis(25)) {
             Ok(true) => match event::read() {
@@ -612,10 +676,7 @@ fn run_remote_interactive(
                         );
                     }
                     KeyAction::Interrupt => {
-                        if detachable {
-                            return 130;
-                        }
-                        let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
+                        return LocalAttachResult::InterruptRequested;
                     }
                     KeyAction::Ignore => {}
                 },
@@ -634,12 +695,152 @@ fn run_remote_interactive(
                         send_worker_message(&writer, &WorkerClientMessage::Resize { rows, cols });
                 }
                 Ok(_) => {}
-                Err(_) => return 1,
+                Err(_) => return LocalAttachResult::Completed(1),
             },
             Ok(false) => {}
-            Err(_) => return 1,
+            Err(_) => return LocalAttachResult::Completed(1),
         }
     }
+}
+
+fn wait_for_remote_or_interrupt(
+    exit_code: &Arc<Mutex<Option<i32>>>,
+    interrupted: &AtomicBool,
+) -> LocalAttachResult {
+    while !interrupted.load(Ordering::SeqCst)
+        && exit_code
+            .lock()
+            .expect("exit code mutex poisoned")
+            .is_none()
+    {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if interrupted.load(Ordering::SeqCst) {
+        LocalAttachResult::InterruptRequested
+    } else {
+        LocalAttachResult::Completed(0)
+    }
+}
+
+fn wait_for_remote_exit(exit_code: &Arc<Mutex<Option<i32>>>, timeout: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if exit_code
+            .lock()
+            .expect("exit code mutex poisoned")
+            .is_some()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn prompt_continue_in_background(interrupted: &AtomicBool) -> BackgroundPromptDecision {
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        prompt_continue_in_background_terminal(interrupted)
+    } else {
+        prompt_continue_in_background_stream(interrupted)
+    }
+}
+
+fn prompt_continue_in_background_terminal(interrupted: &AtomicBool) -> BackgroundPromptDecision {
+    let _guard = match RawTerminalGuard::enter() {
+        Ok(guard) => guard,
+        Err(_) => return BackgroundPromptDecision::EndSession,
+    };
+    let started = Instant::now();
+    let mut displayed_remaining = u64::MAX;
+    loop {
+        let remaining = BACKGROUND_PROMPT_TIMEOUT
+            .as_secs()
+            .saturating_sub(started.elapsed().as_secs());
+        if remaining != displayed_remaining {
+            displayed_remaining = remaining;
+            render_background_prompt(remaining);
+        }
+        if remaining == 0 {
+            eprintln!();
+            return BackgroundPromptDecision::EndSession;
+        }
+        if interrupted.swap(false, Ordering::SeqCst) {
+            eprintln!();
+            return BackgroundPromptDecision::EndSession;
+        }
+        match event::poll(Duration::from_millis(100)) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(key)) => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        eprintln!();
+                        return BackgroundPromptDecision::ContinueInBackground;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        eprintln!();
+                        return BackgroundPromptDecision::EndSession;
+                    }
+                    KeyCode::Enter | KeyCode::Esc => {
+                        eprintln!();
+                        return BackgroundPromptDecision::EndSession;
+                    }
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(_) => {
+                    eprintln!();
+                    return BackgroundPromptDecision::EndSession;
+                }
+            },
+            Ok(false) => {}
+            Err(_) => {
+                eprintln!();
+                return BackgroundPromptDecision::EndSession;
+            }
+        }
+    }
+}
+
+fn prompt_continue_in_background_stream(interrupted: &AtomicBool) -> BackgroundPromptDecision {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut buf = [0u8; 1];
+        if stdin.read(&mut buf).ok().is_some_and(|read| read > 0) {
+            let _ = tx.send(buf[0]);
+        }
+    });
+
+    let started = Instant::now();
+    let mut displayed_remaining = u64::MAX;
+    loop {
+        let remaining = BACKGROUND_PROMPT_TIMEOUT
+            .as_secs()
+            .saturating_sub(started.elapsed().as_secs());
+        if remaining != displayed_remaining {
+            displayed_remaining = remaining;
+            render_background_prompt(remaining);
+        }
+        if remaining == 0 {
+            return BackgroundPromptDecision::EndSession;
+        }
+        if interrupted.swap(false, Ordering::SeqCst) {
+            return BackgroundPromptDecision::EndSession;
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(b'y') | Ok(b'Y') => return BackgroundPromptDecision::ContinueInBackground,
+            Ok(_) => return BackgroundPromptDecision::EndSession,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return BackgroundPromptDecision::EndSession
+            }
+        }
+    }
+}
+
+fn render_background_prompt(remaining: u64) {
+    eprintln!(
+        "[clud] continue session in the background? [y/N] auto-ending in {}s",
+        remaining
+    );
 }
 
 fn run_daemon(state_dir: &Path) -> i32 {
@@ -713,6 +914,14 @@ fn handle_daemon_connection(
                 },
             }
         }
+        DaemonRequest::Terminate { session_id } => {
+            match daemon_terminate_session(state_dir, workers, &session_id) {
+                Ok(session) => DaemonResponse::Terminated { session },
+                Err(err) => DaemonResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
     };
     write_json_line(&mut stream, &response)
 }
@@ -776,6 +985,39 @@ fn daemon_create_session(
     }
 }
 
+fn daemon_terminate_session(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    session_id: &str,
+) -> io::Result<SessionSnapshot> {
+    let path = session_snapshot_path(state_dir, session_id);
+    let mut session = read_json_file::<SessionSnapshot>(&path)?;
+
+    if let Some(root_pid) = session.root_pid {
+        signal_process_tree(root_pid, Signal::Term);
+        thread::sleep(Duration::from_millis(150));
+        signal_process_tree(root_pid, Signal::Kill);
+    }
+
+    if let Some(worker) = workers
+        .lock()
+        .expect("workers mutex poisoned")
+        .remove(session_id)
+    {
+        let _ = worker.kill();
+        let _ = worker.wait(Some(Duration::from_secs(2)));
+    } else if pid_is_alive(session.worker_pid) {
+        signal_process_tree(session.worker_pid, Signal::Term);
+        thread::sleep(Duration::from_millis(150));
+        signal_process_tree(session.worker_pid, Signal::Kill);
+    }
+
+    session.background = false;
+    session.exit_code = Some(130);
+    write_json_file(&path, &session)?;
+    Ok(session)
+}
+
 fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &Path) -> i32 {
     let spec = match read_json_file::<WorkerLaunchSpec>(spec_file) {
         Ok(spec) => spec,
@@ -805,13 +1047,18 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
         kind: spec.kind.clone(),
         cwd: spec.plan.cwd.clone(),
         detachable: spec.detachable,
+        background: spec.background_on_launch,
         daemon_pid,
         worker_pid: std::process::id(),
         worker_port,
         root_pid: None,
         exit_code: None,
     };
-    let shared = Arc::new(WorkerShared::new(snapshot));
+    let shared = Arc::new(WorkerShared::new(
+        state_dir.to_path_buf(),
+        session_id.to_string(),
+        snapshot,
+    ));
 
     let runtime = match spec.kind {
         SessionKind::Subprocess => match start_subprocess_session(&spec, &shared) {
@@ -1143,6 +1390,22 @@ fn send_daemon_request(state_dir: &Path, request: &DaemonRequest) -> io::Result<
     serde_json::from_str(&line).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
+fn request_session_termination(state_dir: &Path, session_id: &str) -> io::Result<SessionSnapshot> {
+    match send_daemon_request(
+        state_dir,
+        &DaemonRequest::Terminate {
+            session_id: session_id.to_string(),
+        },
+    )? {
+        DaemonResponse::Terminated { session } => Ok(session),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
 fn send_worker_message(
     writer: &Arc<Mutex<TcpStream>>,
     message: &WorkerClientMessage,
@@ -1213,7 +1476,7 @@ fn spec_path(state_dir: &Path, session_id: &str) -> PathBuf {
 fn run_list(state_dir: &Path) -> i32 {
     let sessions = list_attachable_sessions(state_dir);
     if sessions.is_empty() {
-        println!("No attachable sessions.");
+        println!("No background sessions.");
         return 0;
     }
 
@@ -1242,7 +1505,7 @@ fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
         let Ok(session) = read_json_file::<SessionSnapshot>(&path) else {
             continue;
         };
-        if session.exit_code.is_some() {
+        if session.exit_code.is_some() || !session.background {
             continue;
         }
         if let Some(root_pid) = session.root_pid {
