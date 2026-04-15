@@ -269,6 +269,7 @@ dependencies = [
  "cpal",
  "crossterm",
  "ctrlc",
+ "libc",
  "rodio",
  "running-process-core",
  "serde",
