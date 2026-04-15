@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -157,6 +157,7 @@ struct BacklogState {
 struct AttachedClient {
     id: u64,
     sender: mpsc::Sender<WorkerServerMessage>,
+    shutdown: TcpStream,
 }
 
 type AttachClientResult = (
@@ -206,17 +207,19 @@ impl WorkerShared {
             .exit_code = Some(exit_code);
     }
 
-    fn attach_client(&self) -> Result<AttachClientResult, String> {
+    fn attach_client(&self, shutdown: TcpStream) -> AttachClientResult {
         let mut guard = self.client.lock().expect("client mutex poisoned");
-        if guard.is_some() {
-            return Err("session already has an attached client".to_string());
-        }
         let (tx, rx) = mpsc::channel();
         let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
-        *guard = Some(AttachedClient {
+        let previous = guard.replace(AttachedClient {
             id: client_id,
             sender: tx,
+            shutdown,
         });
+        drop(guard);
+        if let Some(previous) = previous {
+            let _ = previous.shutdown.shutdown(Shutdown::Both);
+        }
         let snapshot = self.snapshot();
         let backlog = self
             .backlog
@@ -226,7 +229,7 @@ impl WorkerShared {
             .iter()
             .cloned()
             .collect();
-        Ok((client_id, rx, snapshot, backlog))
+        (client_id, rx, snapshot, backlog)
     }
 
     fn detach_client(&self, client_id: u64) {
@@ -960,12 +963,8 @@ fn handle_worker_client(
         );
     }
 
-    let (client_id, rx, snapshot, backlog) = match shared.attach_client() {
-        Ok(values) => values,
-        Err(message) => {
-            return write_json_line(&mut stream, &WorkerServerMessage::Error { message });
-        }
-    };
+    let shutdown_handle = stream.try_clone()?;
+    let (client_id, rx, snapshot, backlog) = shared.attach_client(shutdown_handle);
     let mut writer = stream.try_clone()?;
     write_json_line(
         &mut writer,
@@ -1047,24 +1046,9 @@ fn read_worker_line(
                 if active_client.is_some_and(|(shared, client_id)| !shared.owns_client(client_id)) {
                     return Ok(0);
                 }
-                if client_stream_closed(reader)? {
-                    return Ok(0);
-                }
             }
             Err(err) => return Err(err),
         }
-    }
-}
-
-fn client_stream_closed(reader: &mut BufReader<TcpStream>) -> io::Result<bool> {
-    let mut byte = [0_u8; 1];
-    match reader.get_mut().peek(&mut byte) {
-        Ok(0) => Ok(true),
-        Ok(_) => Ok(false),
-        Err(err) if matches!(err.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {
-            Ok(false)
-        }
-        Err(err) => Err(err),
     }
 }
 
