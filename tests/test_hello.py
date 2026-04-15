@@ -3,34 +3,57 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 def _clud_binary() -> str:
-    """Find the clud binary in the venv."""
-    venv = Path(sys.executable).parent
-    if sys.platform == "win32":
-        candidate = venv / "clud.exe"
-    else:
-        candidate = venv / "clud"
-    if candidate.is_file():
-        return str(candidate)
-    return "clud"
+    """Build the current repo's clud binary and return its path."""
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        ["cargo", "build", "-p", "clud", "--message-format=json"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to build clud:\n{result.stderr}")
+
+    for line in result.stdout.splitlines():
+        msg = json.loads(line)
+        if (
+            msg.get("reason") == "compiler-artifact"
+            and msg.get("target", {}).get("name") == "clud"
+            and msg.get("executable")
+        ):
+            return msg["executable"]
+
+    ext = ".exe" if sys.platform == "win32" else ""
+    fallback = root / "target" / "debug" / f"clud{ext}"
+    if fallback.is_file():
+        return str(fallback)
+    raise RuntimeError("clud binary not found after build")
 
 
 CLUD = _clud_binary()
 
 
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [CLUD, *args],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        input=input_data,
-    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = Path(temp_dir) / source.name
+        shutil.copy2(source, launch)
+        return subprocess.run(
+            [str(launch), *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            input=input_data,
+        )
 
 
 def test_help() -> None:
@@ -46,7 +69,7 @@ def test_version() -> None:
     result = _run("--version")
     assert result.returncode == 0
     assert "clud" in result.stdout
-    assert "2.0.0" in result.stdout
+    assert "2.0.1" in result.stdout
 
 
 def test_dry_run_prompt() -> None:

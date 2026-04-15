@@ -15,13 +15,32 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _find_clud() -> Path:
-    """Find the clud binary in the venv."""
-    venv = Path(sys.executable).parent
-    name = "clud.exe" if sys.platform == "win32" else "clud"
-    candidate = venv / name
-    if candidate.is_file():
-        return candidate
-    raise FileNotFoundError(f"clud binary not found at {candidate}")
+    """Build the current repo's clud binary and return its path."""
+    result = subprocess.run(
+        ["cargo", "build", "-p", "clud", "--message-format=json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to build clud:\n{result.stderr}")
+
+    import json
+
+    for line in result.stdout.splitlines():
+        msg = json.loads(line)
+        if (
+            msg.get("reason") == "compiler-artifact"
+            and msg.get("target", {}).get("name") == "clud"
+            and msg.get("executable")
+        ):
+            return Path(msg["executable"])
+
+    ext = ".exe" if sys.platform == "win32" else ""
+    fallback = ROOT / "target" / "debug" / f"clud{ext}"
+    if fallback.is_file():
+        return fallback
+    raise RuntimeError("clud binary not found after build")
 
 
 def _build_mock_agent() -> Path:
@@ -94,7 +113,7 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
 
 @pytest.fixture
 def clud_binary() -> Path:
-    """Return the path to the installed clud binary."""
+    """Return the path to the current repo's clud binary."""
     return _find_clud()
 
 

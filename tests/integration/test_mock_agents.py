@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -31,15 +33,20 @@ def _run(
     *args: str,
     env: dict[str, str],
     input_data: str | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(clud), *args],
-        capture_output=True,
-        text=True,
-        timeout=_TIMEOUT,
-        env=env,
-        input=input_data,
-    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        launch = Path(temp_dir) / clud.name
+        shutil.copy2(clud, launch)
+        return subprocess.run(
+            [str(launch), *args],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT,
+            env=env,
+            input=input_data,
+            cwd=cwd,
+        )
 
 
 def _parse_agent_report(result: subprocess.CompletedProcess[str]) -> dict:
@@ -78,6 +85,26 @@ class TestBackendSelection:
         assert result.returncode == 0
         report = _parse_agent_report(result)
         assert "claude" in report["program"].lower()
+
+    def test_codex_preserves_cwd(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "--codex", "-p", "hello", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        assert report["cwd"] == str(Path.cwd())
+
+    def test_claude_preserves_cwd(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "--claude", "-p", "hello", env=mock_env)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        assert report["cwd"] == str(Path.cwd())
+
+    def test_claude_preserves_explicit_launch_cwd(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        result = _run(clud_binary, "--claude", "-p", "hello", env=mock_env, cwd=tmp_path)
+        assert result.returncode == 0
+        report = _parse_agent_report(result)
+        assert report["cwd"] == str(tmp_path)
 
 
 class TestYoloMode:

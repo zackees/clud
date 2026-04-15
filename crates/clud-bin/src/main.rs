@@ -102,6 +102,8 @@ fn get_terminal_size() -> (u16, u16) {
 }
 
 fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
+    use std::path::PathBuf;
+
     use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
     let env = child_env();
@@ -118,7 +120,7 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
 
         let config = ProcessConfig {
             command: CommandSpec::Argv(plan.command.clone()),
-            cwd: None,
+            cwd: plan.cwd.as_ref().map(PathBuf::from),
             env: Some(env.clone()),
             capture: false,
             stderr_mode: StderrMode::Stdout,
@@ -187,7 +189,7 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
 
         let process = match NativePtyProcess::new(
             plan.command.clone(),
-            None,
+            plan.cwd.clone(),
             Some(env.clone()),
             rows,
             cols,
