@@ -206,11 +206,8 @@ impl WorkerShared {
             .exit_code = Some(exit_code);
     }
 
-    fn attach_client(&self) -> Result<AttachClientResult, String> {
+    fn attach_client(&self) -> AttachClientResult {
         let mut guard = self.client.lock().expect("client mutex poisoned");
-        if guard.is_some() {
-            return Err("session already has an attached client".to_string());
-        }
         let (tx, rx) = mpsc::channel();
         let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
         *guard = Some(AttachedClient {
@@ -226,7 +223,7 @@ impl WorkerShared {
             .iter()
             .cloned()
             .collect();
-        Ok((client_id, rx, snapshot, backlog))
+        (client_id, rx, snapshot, backlog)
     }
 
     fn detach_client(&self, client_id: u64) {
@@ -234,6 +231,14 @@ impl WorkerShared {
         if guard.as_ref().is_some_and(|client| client.id == client_id) {
             *guard = None;
         }
+    }
+
+    fn owns_client(&self, client_id: u64) -> bool {
+        self.client
+            .lock()
+            .expect("client mutex poisoned")
+            .as_ref()
+            .is_some_and(|client| client.id == client_id)
     }
 
     fn has_client(&self) -> bool {
@@ -934,9 +939,11 @@ fn handle_worker_client(
     shared: &Arc<WorkerShared>,
     runtime: &SessionRuntime,
 ) -> io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let reader_stream = stream.try_clone()?;
+    reader_stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+    let mut reader = BufReader::new(reader_stream);
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    if read_worker_line(&mut reader, &mut line, None)? == 0 {
         return Ok(());
     }
     let message: WorkerClientMessage = serde_json::from_str(&line)
@@ -950,12 +957,7 @@ fn handle_worker_client(
         );
     }
 
-    let (client_id, rx, snapshot, backlog) = match shared.attach_client() {
-        Ok(values) => values,
-        Err(message) => {
-            return write_json_line(&mut stream, &WorkerServerMessage::Error { message });
-        }
-    };
+    let (client_id, rx, snapshot, backlog) = shared.attach_client();
     let mut writer = stream.try_clone()?;
     write_json_line(
         &mut writer,
@@ -989,14 +991,17 @@ fn handle_worker_client(
 
     loop {
         let mut line = String::new();
-        match reader.read_line(&mut line)? {
+        match read_worker_line(&mut reader, &mut line, Some((shared, client_id)))? {
             0 => break,
             _ => {
+                if !shared.owns_client(client_id) {
+                    break;
+                }
                 let Ok(message) = serde_json::from_str::<WorkerClientMessage>(&line) else {
                     continue;
                 };
                 match message {
-                    WorkerClientMessage::Attach => {}
+                    WorkerClientMessage::Attach => break,
                     WorkerClientMessage::Input { data_b64, submit } => {
                         if let Ok(data) =
                             base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
@@ -1014,6 +1019,30 @@ fn handle_worker_client(
     shared.detach_client(client_id);
     let _ = writer_thread.join();
     Ok(())
+}
+
+fn read_worker_line(
+    reader: &mut BufReader<TcpStream>,
+    line: &mut String,
+    active_client: Option<(&Arc<WorkerShared>, u64)>,
+) -> io::Result<usize> {
+    loop {
+        line.clear();
+        match reader.read_line(line) {
+            Ok(read) => return Ok(read),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if active_client.is_some_and(|(shared, client_id)| !shared.owns_client(client_id)) {
+                    return Ok(0);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
