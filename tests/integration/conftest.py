@@ -13,14 +13,54 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
+# Make ci.env importable so we can reuse its MSVC-forcing env on Windows.
+sys.path.insert(0, str(ROOT))
+
+
+def _cargo_argv(subcommand: list[str]) -> list[str]:
+    """Return the cargo argv, preferring `soldr cargo` on Windows.
+
+    Windows rustc installations from chocolatey ship a GNU-host rustc which
+    links C++ deps (whisper-rs) against MinGW runtime DLLs
+    (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll). Those DLLs
+    aren't present on stock Windows, so the resulting debug binary fails
+    with STATUS_ENTRYPOINT_NOT_FOUND when launched as a subprocess.
+
+    `soldr cargo ...` forces the MSVC target, which links against
+    VCRUNTIME140.dll / MSVCP140.dll — both ship with Windows 10+.
+    """
+    if sys.platform == "win32":
+        soldr = shutil.which("soldr")
+        if soldr:
+            return [soldr, "cargo", *subcommand]
+    return ["cargo", *subcommand]
+
+
+def _cargo_build_env() -> dict[str, str]:
+    """Return the env used for building clud/mock-agent in tests.
+
+    On Windows, reuse ci.env.build_env() which pins RUSTUP_TOOLCHAIN and
+    CARGO_BUILD_TARGET to the MSVC variants — the same env the wheel build
+    uses. This is a fallback for systems without `soldr`.
+    """
+    if sys.platform != "win32":
+        return os.environ.copy()
+    try:
+        from ci.env import build_env  # type: ignore[import-not-found]
+
+        return build_env()
+    except Exception:
+        return os.environ.copy()
+
 
 def _find_clud() -> Path:
     """Build the current repo's clud binary and return its path."""
     result = subprocess.run(
-        ["cargo", "build", "-p", "clud", "--message-format=json"],
+        _cargo_argv(["build", "-p", "clud", "--message-format=json"]),
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=_cargo_build_env(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to build clud:\n{result.stderr}")
@@ -28,7 +68,10 @@ def _find_clud() -> Path:
     import json
 
     for line in result.stdout.splitlines():
-        msg = json.loads(line)
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if (
             msg.get("reason") == "compiler-artifact"
             and msg.get("target", {}).get("name") == "clud"
@@ -46,10 +89,11 @@ def _find_clud() -> Path:
 def _build_mock_agent() -> Path:
     """Build the mock-agent binary and return its path."""
     result = subprocess.run(
-        ["cargo", "build", "-p", "mock-agent", "--message-format=json"],
+        _cargo_argv(["build", "-p", "mock-agent", "--message-format=json"]),
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=_cargo_build_env(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to build mock-agent:\n{result.stderr}")
@@ -57,7 +101,10 @@ def _build_mock_agent() -> Path:
     import json
 
     for line in result.stdout.splitlines():
-        msg = json.loads(line)
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
         if (
             msg.get("reason") == "compiler-artifact"
             and msg.get("target", {}).get("name") == "mock-agent"
@@ -119,10 +166,19 @@ def clud_binary() -> Path:
 
 def _scan_for_clud_zombies() -> list[dict]:
     """Scan the system for orphaned CLUD-spawned processes."""
-    scan_bin = ROOT / "target" / "debug" / "examples" / "scan_zombies.exe"
-    if not scan_bin.is_file():
-        scan_bin = ROOT / "target" / "debug" / "examples" / "scan_zombies"
-    if not scan_bin.is_file():
+    ext = ".exe" if sys.platform == "win32" else ""
+    candidates = [
+        # soldr / explicit --target put artifacts under target/<triple>/debug.
+        ROOT
+        / "target"
+        / "x86_64-pc-windows-msvc"
+        / "debug"
+        / "examples"
+        / f"scan_zombies{ext}",
+        ROOT / "target" / "debug" / "examples" / f"scan_zombies{ext}",
+    ]
+    scan_bin = next((p for p in candidates if p.is_file()), None)
+    if scan_bin is None:
         return []
     try:
         result = subprocess.run(
