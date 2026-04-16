@@ -65,13 +65,27 @@ pub fn resolve_backend(_claude: bool, codex: bool) -> Backend {
 
 /// Resolve how the backend should be launched.
 ///
-/// For now, both backends default to subprocess mode. PTY remains available as
-/// an explicit override while Claude PTY issues are being investigated.
-pub fn resolve_launch_mode(pty: bool, _subprocess: bool, _backend: Backend) -> LaunchMode {
+/// Explicit `--pty` / `--subprocess` always wins. Otherwise:
+/// - Claude defaults to subprocess while PTY issues are being investigated.
+/// - Codex defaults to PTY for interactive TUI runs (Ink requires a real
+///   pseudo-console to receive keyboard input) and subprocess for
+///   non-interactive `codex exec` runs.
+pub fn resolve_launch_mode(
+    pty: bool,
+    subprocess: bool,
+    backend: Backend,
+    codex_uses_exec: bool,
+) -> LaunchMode {
     if pty {
-        LaunchMode::Pty
-    } else {
-        LaunchMode::Subprocess
+        return LaunchMode::Pty;
+    }
+    if subprocess {
+        return LaunchMode::Subprocess;
+    }
+    match backend {
+        Backend::Claude => LaunchMode::Subprocess,
+        Backend::Codex if codex_uses_exec => LaunchMode::Subprocess,
+        Backend::Codex => LaunchMode::Pty,
     }
 }
 
@@ -101,13 +115,31 @@ mod tests {
     }
 
     #[test]
-    fn test_launch_mode_defaults_to_subprocess() {
+    fn test_claude_defaults_to_subprocess() {
         assert_eq!(
-            resolve_launch_mode(false, false, Backend::Claude),
+            resolve_launch_mode(false, false, Backend::Claude, false),
             LaunchMode::Subprocess
         );
         assert_eq!(
-            resolve_launch_mode(false, false, Backend::Codex),
+            resolve_launch_mode(false, false, Backend::Claude, true),
+            LaunchMode::Subprocess
+        );
+    }
+
+    #[test]
+    fn test_codex_interactive_defaults_to_pty() {
+        // `clud --codex` with no prompt -> interactive TUI -> needs a pseudo-console.
+        assert_eq!(
+            resolve_launch_mode(false, false, Backend::Codex, false),
+            LaunchMode::Pty
+        );
+    }
+
+    #[test]
+    fn test_codex_exec_defaults_to_subprocess() {
+        // `clud --codex -p "..."` -> `codex exec` -> non-interactive, pipeable.
+        assert_eq!(
+            resolve_launch_mode(false, false, Backend::Codex, true),
             LaunchMode::Subprocess
         );
     }
@@ -115,7 +147,11 @@ mod tests {
     #[test]
     fn test_launch_mode_pty_override() {
         assert_eq!(
-            resolve_launch_mode(true, false, Backend::Claude),
+            resolve_launch_mode(true, false, Backend::Claude, false),
+            LaunchMode::Pty
+        );
+        assert_eq!(
+            resolve_launch_mode(true, false, Backend::Codex, true),
             LaunchMode::Pty
         );
     }
@@ -123,7 +159,11 @@ mod tests {
     #[test]
     fn test_launch_mode_subprocess_override() {
         assert_eq!(
-            resolve_launch_mode(false, true, Backend::Claude),
+            resolve_launch_mode(false, true, Backend::Claude, false),
+            LaunchMode::Subprocess
+        );
+        assert_eq!(
+            resolve_launch_mode(false, true, Backend::Codex, false),
             LaunchMode::Subprocess
         );
     }

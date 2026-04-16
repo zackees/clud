@@ -57,7 +57,6 @@ fn main() {
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);
-    let launch_mode = backend::resolve_launch_mode(args.pty, args.subprocess, backend);
     let backend_path = match backend::find_backend(backend) {
         Some(path) => path.to_string_lossy().to_string(),
         None => {
@@ -73,7 +72,7 @@ fn main() {
         }
     };
 
-    let plan = command::build_launch_plan(&args, backend, launch_mode, &backend_path);
+    let plan = command::build_launch_plan(&args, backend, &backend_path);
 
     if args.dry_run {
         let json = serde_json::json!({

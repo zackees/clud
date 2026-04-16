@@ -79,14 +79,33 @@ pub struct LaunchPlan {
     pub cwd: Option<String>,
 }
 
-pub fn build_launch_plan(
-    args: &Args,
-    backend: Backend,
-    launch_mode: LaunchMode,
-    backend_path: &str,
-) -> LaunchPlan {
+/// Returns true if `args` carries a prompt that should run non-interactively
+/// (via `codex exec <prompt>` on the codex backend).
+pub fn has_noninteractive_prompt(args: &Args) -> bool {
+    args.prompt.is_some()
+        || matches!(
+            args.command,
+            Some(Command::Loop { .. })
+                | Some(Command::Up { .. })
+                | Some(Command::Rebase)
+                | Some(Command::Fix { .. })
+        )
+}
+
+pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
     let mut cmd = vec![backend_path.to_string()];
     let mut iterations = 1u32;
+
+    let codex_uses_exec = matches!(backend, Backend::Codex) && has_noninteractive_prompt(args);
+    let codex_uses_resume = matches!(backend, Backend::Codex)
+        && !codex_uses_exec
+        && (args.continue_session || args.resume.is_some());
+
+    if codex_uses_exec {
+        cmd.push("exec".to_string());
+    } else if codex_uses_resume {
+        cmd.push("resume".to_string());
+    }
 
     if !args.safe {
         match backend {
@@ -96,8 +115,21 @@ pub fn build_launch_plan(
     }
 
     if let Some(ref model) = args.model {
-        cmd.push("--model".to_string());
-        cmd.push(model.clone());
+        match backend {
+            Backend::Claude => {
+                cmd.push("--model".to_string());
+                cmd.push(model.clone());
+            }
+            Backend::Codex => {
+                cmd.push("-m".to_string());
+                cmd.push(model.clone());
+            }
+        }
+    }
+
+    // Codex `resume` subcommand: emit `--last` when the user passed `-c` (continue).
+    if codex_uses_resume && args.continue_session {
+        cmd.push("--last".to_string());
     }
 
     match &args.command {
@@ -105,23 +137,19 @@ pub fn build_launch_plan(
             iterations = *loop_count;
             if let Some(ref p) = prompt {
                 let prompt_text = read_prompt_or_literal(p);
-                cmd.push("-p".to_string());
-                cmd.push(prompt_text);
+                push_prompt(&mut cmd, backend, prompt_text);
             }
         }
         Some(Command::Up { message, publish }) => {
             let prompt = build_up_prompt(message.as_deref(), *publish);
-            cmd.push("-p".to_string());
-            cmd.push(prompt);
+            push_prompt(&mut cmd, backend, prompt);
         }
         Some(Command::Rebase) => {
-            cmd.push("-p".to_string());
-            cmd.push(REBASE_PROMPT.to_string());
+            push_prompt(&mut cmd, backend, REBASE_PROMPT.to_string());
         }
         Some(Command::Fix { url }) => {
             let prompt = build_fix_prompt(url.as_deref());
-            cmd.push("-p".to_string());
-            cmd.push(prompt);
+            push_prompt(&mut cmd, backend, prompt);
         }
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")
@@ -133,26 +161,43 @@ pub fn build_launch_plan(
         | Some(Command::InternalWorker { .. }) => {}
         None => {
             if let Some(ref prompt) = args.prompt {
-                cmd.push("-p".to_string());
-                cmd.push(prompt.clone());
+                push_prompt(&mut cmd, backend, prompt.clone());
             }
             if let Some(ref message) = args.message {
-                cmd.push("-m".to_string());
-                cmd.push(message.clone());
+                // -m has no codex equivalent (codex's -m is --model, handled above).
+                // Pass through to claude; drop for codex to avoid clobbering --model.
+                if matches!(backend, Backend::Claude) {
+                    cmd.push("-m".to_string());
+                    cmd.push(message.clone());
+                }
             }
-            if args.continue_session {
+            if args.continue_session && matches!(backend, Backend::Claude) {
                 cmd.push("--continue".to_string());
             }
             if let Some(ref resume) = args.resume {
-                cmd.push("--resume".to_string());
-                if let Some(ref term) = resume {
-                    cmd.push(term.clone());
+                match backend {
+                    Backend::Claude => {
+                        cmd.push("--resume".to_string());
+                        if let Some(ref term) = resume {
+                            cmd.push(term.clone());
+                        }
+                    }
+                    Backend::Codex => {
+                        // `resume` subcommand was emitted above; the session id
+                        // (if any) goes as a positional argument.
+                        if let Some(ref term) = resume {
+                            cmd.push(term.clone());
+                        }
+                    }
                 }
             }
         }
     }
 
     cmd.extend(args.passthrough.iter().cloned());
+
+    let launch_mode =
+        crate::backend::resolve_launch_mode(args.pty, args.subprocess, backend, codex_uses_exec);
 
     LaunchPlan {
         command: cmd,
@@ -162,6 +207,21 @@ pub fn build_launch_plan(
         cwd: std::env::current_dir()
             .ok()
             .map(|cwd| cwd.to_string_lossy().to_string()),
+    }
+}
+
+/// Push a prompt into `cmd` using the right convention for the backend.
+/// Claude uses `-p <prompt>`; codex takes the prompt as a positional argument
+/// (either to `codex exec` or to the interactive TUI).
+fn push_prompt(cmd: &mut Vec<String>, backend: Backend, prompt: String) {
+    match backend {
+        Backend::Claude => {
+            cmd.push("-p".to_string());
+            cmd.push(prompt);
+        }
+        Backend::Codex => {
+            cmd.push(prompt);
+        }
     }
 }
 
@@ -235,13 +295,18 @@ mod tests {
     fn plan(raw: &[&str]) -> LaunchPlan {
         let args = parse(raw);
         let backend = crate::backend::resolve_backend(args.claude, args.codex);
-        let launch_mode = crate::backend::resolve_launch_mode(args.pty, args.subprocess, backend);
-        build_launch_plan(&args, backend, launch_mode, backend.executable_name())
+        build_launch_plan(&args, backend, backend.executable_name())
     }
 
     fn prompt_from_plan(p: &LaunchPlan) -> &str {
         let idx = p.command.iter().position(|a| a == "-p").unwrap();
         &p.command[idx + 1]
+    }
+
+    /// Find the last positional (non-flag, non-subcommand) argument of the plan.
+    /// For codex we emit the prompt positionally, so this picks it up.
+    fn last_arg(p: &LaunchPlan) -> &str {
+        p.command.last().map(String::as_str).unwrap_or("")
     }
 
     #[test]
@@ -262,17 +327,89 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_backend() {
+    fn test_codex_prompt_goes_through_exec_subcommand() {
+        // Codex's `-p` is `--profile`, not a prompt flag. Non-interactive
+        // runs must use `codex exec <prompt>` with the prompt as positional.
         let p = plan(&["clud", "--codex", "-p", "hello"]);
         assert_eq!(
             p.command,
             vec![
                 "codex",
+                "exec",
                 "--dangerously-bypass-approvals-and-sandbox",
-                "-p",
-                "hello"
+                "hello",
             ]
         );
+        // `codex exec` is non-interactive; subprocess mode is fine.
+        assert_eq!(p.launch_mode, LaunchMode::Subprocess);
+    }
+
+    #[test]
+    fn test_codex_interactive_defaults_to_pty() {
+        // `clud --codex` with no prompt launches the TUI; it needs a
+        // pseudo-console to receive keyboard input reliably.
+        let p = plan(&["clud", "--codex"]);
+        assert_eq!(
+            p.command,
+            vec!["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        );
+        assert_eq!(p.launch_mode, LaunchMode::Pty);
+    }
+
+    #[test]
+    fn test_codex_continue_uses_resume_last() {
+        // `-c` on codex maps to `codex resume --last`, not `--continue`.
+        let p = plan(&["clud", "--codex", "-c"]);
+        assert_eq!(
+            p.command,
+            vec![
+                "codex",
+                "resume",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--last",
+            ]
+        );
+        assert_eq!(p.launch_mode, LaunchMode::Pty);
+    }
+
+    #[test]
+    fn test_codex_resume_with_session_id() {
+        let p = plan(&["clud", "--codex", "-r", "sess-123"]);
+        assert_eq!(
+            p.command,
+            vec![
+                "codex",
+                "resume",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "sess-123",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_codex_model_uses_short_m() {
+        // Codex's model flag is `-m/--model`; Claude's is `--model`.
+        let p = plan(&["clud", "--codex", "--model", "gpt-5"]);
+        assert_eq!(
+            p.command,
+            vec![
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-m",
+                "gpt-5"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_codex_up_routes_through_exec() {
+        let p = plan(&["clud", "--codex", "up"]);
+        assert_eq!(p.command[0], "codex");
+        assert_eq!(p.command[1], "exec");
+        // Prompt is positional (last arg), not behind `-p`.
+        assert!(p.command.iter().all(|a| a != "-p"));
+        assert!(last_arg(&p).contains("codeup"));
+        assert_eq!(p.launch_mode, LaunchMode::Subprocess);
     }
 
     #[test]
