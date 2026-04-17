@@ -36,6 +36,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
+    "soldr>=0.7.0",
     "ziglang>=0.15.2,<0.16",
 ]
 
