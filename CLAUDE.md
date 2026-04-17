@@ -10,6 +10,7 @@ This file provides guidance to Claude Code when working with this repository.
 - **Lint**: `bash lint` - Run cargo fmt, clippy, and ruff (**MANDATORY** after code changes)
 - **Test**: `bash test` - Run Rust unit tests + Python unit tests
 - **Test (Full)**: `bash test --integration` - Include integration tests with mock agents
+- **Wrong toolchain?**: use `./_cargo`, `./_rustc`, `./_rustfmt` — these route through [soldr](https://github.com/zackees/soldr) (pulled via dev deps) which resolves the rustup-managed toolchain via `rustup which`. Handy on Windows where chocolatey cargo or other stale shims can take precedence on PATH. `soldr cargo ...` works directly too.
 
 ### Architecture
 
