@@ -48,9 +48,11 @@ This runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`.
 
 ### Test Coverage
 
-- **34 Rust unit tests**: arg parsing, command building, backend resolution
-- **15 Python unit tests**: CLI output via `--dry-run` subprocess calls
-- **18 Python integration tests**: end-to-end with mock claude/codex agents
+- **104 Rust unit tests**: arg parsing, command building, backend resolution,
+  loop-spec (URL classification, GH-JSON parsing, marker files)
+- **21 Python unit tests**: CLI output via `--dry-run` subprocess calls
+- **Python integration tests**: end-to-end with mock claude/codex agents,
+  including the `clud loop` DONE/BLOCKED marker contract
 
 ### CI Matrix
 

@@ -10,7 +10,7 @@
 //! - With --mock-read-stdin-ms, reads stdin for N ms (even if terminal) and reports it
 
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,11 @@ fn main() {
     let mut helper_role: Option<String> = None;
     let mut tree_log: Option<PathBuf> = None;
     let mut report_file: Option<PathBuf> = None;
+    let mut write_done_at: Option<PathBuf> = None;
+    let mut write_done_body = String::from("mock-done");
+    let mut write_blocked_at: Option<PathBuf> = None;
+    let mut write_blocked_body = String::from("mock-blocked");
+    let mut write_marker_on_iter: u32 = 0;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -34,6 +39,41 @@ fn main() {
         if arg == "--mock-exit-code" {
             if let Some(code) = args.get(i + 1) {
                 exit_code = code.parse().unwrap_or(0);
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-write-done" {
+            if let Some(path) = args.get(i + 1) {
+                write_done_at = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-write-done-body" {
+            if let Some(body) = args.get(i + 1) {
+                write_done_body = body.clone();
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-write-blocked" {
+            if let Some(path) = args.get(i + 1) {
+                write_blocked_at = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-write-blocked-body" {
+            if let Some(body) = args.get(i + 1) {
+                write_blocked_body = body.clone();
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-write-marker-on-iter" {
+            if let Some(n) = args.get(i + 1) {
+                write_marker_on_iter = n.parse().unwrap_or(0);
             }
             skip_next = true;
             continue;
@@ -79,6 +119,30 @@ fn main() {
     if let Some(role) = helper_role.as_deref() {
         run_helper(&args[0], role, tree_log.as_ref(), sleep_ms);
         return;
+    }
+
+    // Track which iteration we're on by reading/bumping a counter file whose
+    // path is shared by all three marker flags. We compute that path as the
+    // parent of the first marker path, suffixed with ".iter-count".
+    let counter_path = write_done_at
+        .as_ref()
+        .or(write_blocked_at.as_ref())
+        .map(|p| p.with_file_name("iter-count"));
+    let iteration = bump_iter_counter(counter_path.as_deref());
+
+    if write_marker_on_iter > 0 && iteration >= write_marker_on_iter {
+        if let Some(path) = write_done_at.as_ref() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, &write_done_body);
+        }
+        if let Some(path) = write_blocked_at.as_ref() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, &write_blocked_body);
+        }
     }
 
     if let Some(path) = tree_log.as_ref() {
@@ -179,6 +243,23 @@ fn read_stdin_timed(timeout_ms: u64) -> Option<String> {
     } else {
         Some(String::from_utf8_lossy(&collected).to_string())
     }
+}
+
+fn bump_iter_counter(path: Option<&Path>) -> u32 {
+    let path = match path {
+        Some(p) => p,
+        None => return 1,
+    };
+    let cur: u32 = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let next = cur + 1;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, next.to_string());
+    next
 }
 
 fn run_helper(exe: &str, role: &str, tree_log: Option<&PathBuf>, sleep_ms: u64) {

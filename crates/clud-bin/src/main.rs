@@ -2,6 +2,7 @@ mod args;
 mod backend;
 mod command;
 mod daemon;
+mod loop_spec;
 mod session;
 mod trampoline;
 mod voice;
@@ -80,9 +81,16 @@ fn main() {
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
             "launch_mode": plan.launch_mode.as_str(),
+            "loop_markers": plan.loop_markers.as_ref().map(|m| &m.git_root),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
         std::process::exit(0);
+    }
+
+    // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
+    // short-circuit on iteration 1. See loop_spec for semantics.
+    if let Some(ref markers) = plan.loop_markers {
+        loop_spec::clear_markers(std::path::Path::new(&markers.git_root));
     }
 
     let exit_code = if daemon::experimental_enabled(&args) {
@@ -219,6 +227,14 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
                 }
             }
         }
+
+        if let Some(code) = check_loop_markers(plan, iteration + 1) {
+            return code;
+        }
+    }
+
+    if let Some(code) = loop_unconverged_exit(plan) {
+        return code;
     }
 
     last_exit
@@ -278,9 +294,57 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
             );
             return last_exit;
         }
+
+        if let Some(code) = check_loop_markers(plan, iteration + 1) {
+            return code;
+        }
+    }
+
+    if let Some(code) = loop_unconverged_exit(plan) {
+        return code;
     }
 
     last_exit
+}
+
+/// Check for DONE/BLOCKED markers after an iteration finishes. Returns a
+/// terminal exit code to return from the runner, or `None` to continue.
+fn check_loop_markers(plan: &command::LaunchPlan, iteration: u32) -> Option<i32> {
+    let markers = plan.loop_markers.as_ref()?;
+    let root = std::path::Path::new(&markers.git_root);
+    match loop_spec::read_markers(root) {
+        loop_spec::MarkerState::Done(summary) => {
+            if summary.is_empty() {
+                eprintln!(
+                    "[clud loop] DONE marker detected at iteration {iteration}; task resolved."
+                );
+            } else {
+                eprintln!("[clud loop] DONE at iteration {iteration}: {summary}");
+            }
+            Some(0)
+        }
+        loop_spec::MarkerState::Blocked(reason) => {
+            if reason.is_empty() {
+                eprintln!("[clud loop] BLOCKED marker detected at iteration {iteration}; halting.");
+            } else {
+                eprintln!("[clud loop] BLOCKED at iteration {iteration}: {reason}");
+            }
+            Some(3)
+        }
+        loop_spec::MarkerState::None => None,
+    }
+}
+
+/// Called after the iteration count is exhausted without a DONE/BLOCKED
+/// marker. Only returns an override exit code when loop markers are active.
+fn loop_unconverged_exit(plan: &command::LaunchPlan) -> Option<i32> {
+    plan.loop_markers.as_ref().map(|_| {
+        eprintln!(
+            "[clud loop] iteration count ({}) exhausted without a DONE marker; task did not converge.",
+            plan.iterations
+        );
+        2
+    })
 }
 
 /// RAII guard that restores the original console input mode on drop.

@@ -1,5 +1,9 @@
 use crate::args::{Args, Command};
 use crate::backend::{Backend, LaunchMode};
+use crate::loop_spec::{
+    self, cache_path, classify, ensure_loop_dir, fetch_via_gh, git_root_from, render_cache,
+    resolve_current_repo, GhKind, TaskSpec, DONE_MARKER_CONTRACT,
+};
 use serde::{Deserialize, Serialize};
 
 const FIX_PROMPT: &str = "\
@@ -77,6 +81,16 @@ pub struct LaunchPlan {
     pub backend: Backend,
     pub launch_mode: LaunchMode,
     pub cwd: Option<String>,
+    /// When set, the outer loop should poll for DONE/BLOCKED marker files
+    /// under `<git_root>/.clud/loop/` after each iteration and terminate
+    /// accordingly.
+    #[serde(default)]
+    pub loop_markers: Option<LoopMarkers>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopMarkers {
+    pub git_root: String,
 }
 
 /// Returns true if `args` carries a prompt that should run non-interactively
@@ -132,12 +146,30 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         cmd.push("--last".to_string());
     }
 
+    let mut loop_markers: Option<LoopMarkers> = None;
     match &args.command {
-        Some(Command::Loop { prompt, loop_count }) => {
+        Some(Command::Loop {
+            task,
+            loop_count,
+            refresh,
+            no_done_marker,
+        }) => {
             iterations = *loop_count;
-            if let Some(ref p) = prompt {
-                let prompt_text = read_prompt_or_literal(p);
-                push_prompt(&mut cmd, backend, prompt_text);
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let git_root = git_root_from(&cwd);
+            if let Some(ref t) = task {
+                let prompt_text = resolve_loop_task(t, &git_root, *refresh);
+                let final_prompt = if *no_done_marker {
+                    prompt_text
+                } else {
+                    format!("{}{}", prompt_text, DONE_MARKER_CONTRACT)
+                };
+                push_prompt(&mut cmd, backend, final_prompt);
+            }
+            if !*no_done_marker {
+                loop_markers = Some(LoopMarkers {
+                    git_root: git_root.to_string_lossy().to_string(),
+                });
             }
         }
         Some(Command::Up { message, publish }) => {
@@ -207,7 +239,139 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         cwd: std::env::current_dir()
             .ok()
             .map(|cwd| cwd.to_string_lossy().to_string()),
+        loop_markers,
     }
+}
+
+/// Resolve the `clud loop` positional to an actual prompt body.
+///
+/// - GH issue/PR URL → fetch via `gh`, cache, return rendered body.
+/// - Short-form `#42` → resolve owner/repo via `gh repo view`, then fetch.
+/// - Local file path → read contents.
+/// - Literal string → return as-is.
+fn resolve_loop_task(task: &str, git_root: &std::path::Path, refresh: bool) -> String {
+    match classify(task) {
+        TaskSpec::GhIssue {
+            owner,
+            repo,
+            kind,
+            number,
+        } => fetch_and_cache_or_die(git_root, &owner, &repo, kind, number, refresh),
+        TaskSpec::ShortForm(number) => {
+            let (owner, repo) = resolve_current_repo().unwrap_or_else(|e| {
+                eprintln!("error: `{task}` requires a GH remote; could not resolve via `gh`: {e}");
+                std::process::exit(1);
+            });
+            fetch_and_cache_or_die(git_root, &owner, &repo, GhKind::Issue, number, refresh)
+        }
+        TaskSpec::File(path) => match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                eprintln!(
+                    "error: failed to read task file '{}': {}",
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        },
+        TaskSpec::Literal(s) => s,
+    }
+}
+
+fn fetch_and_cache_or_die(
+    git_root: &std::path::Path,
+    owner: &str,
+    repo: &str,
+    kind: GhKind,
+    number: u32,
+    refresh: bool,
+) -> String {
+    let cache = cache_path(git_root, owner, repo, kind, number);
+    if !refresh {
+        if let Ok(existing) = std::fs::read_to_string(&cache) {
+            eprintln!("[clud loop] using cached {}", cache.display());
+            return strip_frontmatter(&existing);
+        }
+    }
+    match fetch_via_gh(owner, repo, kind, number) {
+        Ok(doc) => {
+            let fetched_at = chrono_like_now();
+            let rendered = render_cache(&doc, &fetched_at);
+            if let Err(e) = ensure_loop_dir(git_root) {
+                eprintln!(
+                    "[clud loop] warning: could not create {}: {}",
+                    loop_spec::LOOP_DIR,
+                    e
+                );
+            }
+            if let Err(e) = std::fs::write(&cache, &rendered) {
+                eprintln!(
+                    "[clud loop] warning: could not write cache {}: {}",
+                    cache.display(),
+                    e
+                );
+            } else {
+                eprintln!("[clud loop] cached {}", cache.display());
+            }
+            strip_frontmatter(&rendered)
+        }
+        Err(e) => {
+            eprintln!(
+                "error: failed to fetch GH {} {}/{} #{}: {}",
+                match kind {
+                    GhKind::Issue => "issue",
+                    GhKind::Pr => "pull request",
+                },
+                owner,
+                repo,
+                number,
+                e
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Strip a leading `---\n...\n---\n\n` frontmatter block.
+fn strip_frontmatter(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---\n") {
+            let after = &rest[end + "\n---\n".len()..];
+            return after.trim_start_matches('\n').to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// ISO-8601 UTC timestamp via system time; avoids pulling chrono.
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (y, mo, d, h, mi, se) = unix_to_ymd_hms(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z")
+}
+
+fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let se = (secs % 60) as u32;
+    let mi = ((secs / 60) % 60) as u32;
+    let h = ((secs / 3600) % 24) as u32;
+    let days = secs / 86_400;
+    // Civil-from-days: Howard Hinnant.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y } as u32;
+    (y, mo as u32, d as u32, h, mi, se)
 }
 
 /// Push a prompt into `cmd` using the right convention for the backend.
@@ -265,21 +429,6 @@ fn build_fix_prompt(url: Option<&str>) -> String {
 
 fn is_github_url(url: &str) -> bool {
     url.starts_with("https://github.com/") || url.starts_with("http://github.com/")
-}
-
-fn read_prompt_or_literal(input: &str) -> String {
-    let path = std::path::Path::new(input);
-    if path.is_file() {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(e) => {
-                eprintln!("error: failed to read prompt file '{}': {}", input, e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        input.to_string()
-    }
 }
 
 #[cfg(test)]
@@ -520,13 +669,25 @@ mod tests {
         let p = plan(&["clud", "loop", "--loop-count", "5", "do stuff"]);
         assert_eq!(p.iterations, 5);
         assert!(p.command.contains(&"-p".to_string()));
-        assert!(p.command.contains(&"do stuff".to_string()));
+        let prompt = prompt_from_plan(&p);
+        assert!(prompt.starts_with("do stuff"));
+        assert!(prompt.contains(".clud/loop/DONE"));
+        assert!(prompt.contains(".clud/loop/BLOCKED"));
+        assert!(p.loop_markers.is_some());
     }
 
     #[test]
     fn test_loop_default_count() {
         let p = plan(&["clud", "loop", "task"]);
         assert_eq!(p.iterations, 50);
+    }
+
+    #[test]
+    fn test_loop_no_done_marker_omits_contract() {
+        let p = plan(&["clud", "loop", "--no-done-marker", "task"]);
+        let prompt = prompt_from_plan(&p);
+        assert_eq!(prompt, "task");
+        assert!(p.loop_markers.is_none());
     }
 
     #[test]

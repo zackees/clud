@@ -45,3 +45,6 @@ coverage-*.xml
 # Temp
 .tmp/
 *.log
+
+# clud loop state (GH issue cache, DONE/BLOCKED markers)
+.clud/

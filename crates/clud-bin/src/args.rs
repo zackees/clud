@@ -71,9 +71,16 @@ pub struct Args {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     Loop {
-        prompt: Option<String>,
+        /// Prompt text, path to a local file, or a GH issue/PR URL.
+        task: Option<String>,
         #[arg(long = "loop-count", default_value = "50")]
         loop_count: u32,
+        /// Force re-fetch of a cached GH issue/PR body.
+        #[arg(long = "refresh")]
+        refresh: bool,
+        /// Do not inject the DONE/BLOCKED marker contract into the prompt.
+        #[arg(long = "no-done-marker")]
+        no_done_marker: bool,
     },
     Up {
         #[arg(short = 'm', long = "message")]
@@ -162,6 +169,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--experimental-daemon-centralized",
         "--all",
         "--last",
+        "--refresh",
+        "--no-done-marker",
         "--help",
         "--version",
     ];
@@ -320,11 +329,15 @@ mod tests {
         let args = parse(&["clud", "loop", "do the task"]);
         match args.command {
             Some(Command::Loop {
-                ref prompt,
+                ref task,
                 loop_count,
+                refresh,
+                no_done_marker,
             }) => {
-                assert_eq!(prompt.as_deref(), Some("do the task"));
+                assert_eq!(task.as_deref(), Some("do the task"));
                 assert_eq!(loop_count, 50);
+                assert!(!refresh);
+                assert!(!no_done_marker);
             }
             _ => panic!("expected Loop subcommand"),
         }
@@ -335,11 +348,46 @@ mod tests {
         let args = parse(&["clud", "loop", "--loop-count", "5", "task"]);
         match args.command {
             Some(Command::Loop {
-                ref prompt,
+                ref task,
                 loop_count,
+                ..
             }) => {
-                assert_eq!(prompt.as_deref(), Some("task"));
+                assert_eq!(task.as_deref(), Some("task"));
                 assert_eq!(loop_count, 5);
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_loop_refresh_flag() {
+        let args = parse(&[
+            "clud",
+            "loop",
+            "--refresh",
+            "https://github.com/o/r/issues/42",
+        ]);
+        match args.command {
+            Some(Command::Loop {
+                ref task,
+                refresh,
+                no_done_marker,
+                ..
+            }) => {
+                assert_eq!(task.as_deref(), Some("https://github.com/o/r/issues/42"));
+                assert!(refresh);
+                assert!(!no_done_marker);
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_loop_no_done_marker_flag() {
+        let args = parse(&["clud", "loop", "--no-done-marker", "task"]);
+        match args.command {
+            Some(Command::Loop { no_done_marker, .. }) => {
+                assert!(no_done_marker);
             }
             _ => panic!("expected Loop subcommand"),
         }

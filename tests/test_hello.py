@@ -187,7 +187,21 @@ def test_dry_run_loop() -> None:
     assert result.returncode == 0
     data = json.loads(result.stdout)
     assert data["iterations"] == 5
-    assert "do stuff" in data["command"]
+    # Prompt is the last arg (Claude's `-p <prompt>`), with the DONE-marker
+    # contract appended. Original task is preserved at the start.
+    prompt = data["command"][-1]
+    assert prompt.startswith("do stuff")
+    assert ".clud/loop/DONE" in prompt
+    assert ".clud/loop/BLOCKED" in prompt
+    assert data["loop_markers"] is not None
+
+
+def test_dry_run_loop_no_done_marker() -> None:
+    result = _run("--dry-run", "loop", "--no-done-marker", "do stuff")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    assert data["command"][-1] == "do stuff"
+    assert data["loop_markers"] is None
 
 
 def test_dry_run_loop_default_count() -> None:

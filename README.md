@@ -132,15 +132,44 @@ Optional environment variables:
 
 ## `clud loop` — Autonomous Loop
 
-Run the backend in an autonomous loop that iterates on a task (default: 50 iterations).
+Run the backend in a **ralph loop**: iterate on a task until the agent signals
+it's done, or until the iteration count runs out.
 
 ```bash
 clud loop "Implement the API endpoints from the spec"
-clud loop TASK.md                     # Read prompt from a file
-clud loop --loop-count 10 "fix bugs"  # Custom iteration count
+clud loop TASK.md                                  # Read prompt from a file
+clud loop https://github.com/org/repo/issues/42    # Fetch & iterate on a GH issue
+clud loop --loop-count 10 "fix bugs"               # Custom iteration count
 ```
 
-The loop stops early if any iteration exits with a non-zero code.
+### Task input modes
+
+The positional argument is classified in this order:
+
+1. **GH issue / PR URL** — the issue body is fetched via `gh` and cached to
+   `<git-root>/.clud/loop/<owner>__<repo>__issue-<n>.md`. Subsequent runs
+   reuse the cache; pass `--refresh` to force a re-fetch.
+2. **Short form `#42`** — resolves `owner/repo` via `gh repo view`.
+3. **Local file path** — read as the prompt.
+4. **Literal string** — used as-is.
+
+### Completion signal (DONE / BLOCKED marker files)
+
+`clud loop` injects a short contract into the prompt asking the agent to write
+one of two marker files under `<git-root>/.clud/loop/`:
+
+| Marker    | Meaning                                    | Exit code |
+|-----------|--------------------------------------------|-----------|
+| `DONE`    | Task resolved (one-line summary inside)    | 0         |
+| `BLOCKED` | Agent can't proceed (reason inside)        | 3         |
+| (neither) | Iteration count exhausted                  | 2         |
+| non-zero backend exit | Infra failure                  | propagate |
+
+Stale `DONE` / `BLOCKED` files from a prior run are cleared at start so the
+loop can't short-circuit on iteration 1.
+
+Opt out with `--no-done-marker` to restore the old "run N times unless the
+backend fails" behavior.
 
 ## `clud rebase` — Auto-Rebase
 

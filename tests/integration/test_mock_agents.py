@@ -320,7 +320,18 @@ class TestLoopMode:
     """Verify loop mode runs multiple iterations."""
 
     def test_loop_iterations(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
-        result = _run(clud_binary, "loop", "--loop-count", "3", "do stuff", env=mock_env)
+        # --no-done-marker: this test only verifies the loop runs N times;
+        # without it, the DONE-marker contract would make exit code 2 (not
+        # converged) the expected outcome when no marker is written.
+        result = _run(
+            clud_binary,
+            "loop",
+            "--loop-count",
+            "3",
+            "--no-done-marker",
+            "do stuff",
+            env=mock_env,
+        )
         assert result.returncode == 0
         cleaned = _strip_ansi(result.stdout)
         json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
