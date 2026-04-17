@@ -816,6 +816,7 @@ name = "mock-agent"
 version = "2.0.5"
 dependencies = [
  "serde_json",
+ "terminal_size",
 ]
 
 [[package]]

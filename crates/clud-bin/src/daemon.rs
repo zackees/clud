@@ -1420,7 +1420,7 @@ fn start_pty_session(
         thread::spawn(move || loop {
             match process.read_chunk_impl(Some(0.1)) {
                 Ok(Some(chunk)) => {
-                    let _ = process.respond_to_queries_impl(&chunk);
+                    // DSR auto-reply intentionally skipped — see issue #31 T1.
                     shared.push_output(chunk);
                 }
                 Ok(None) => {

@@ -135,12 +135,20 @@ fn install_ctrl_c_flag() -> Arc<AtomicBool> {
 }
 
 fn get_terminal_size() -> (u16, u16) {
-    if let Some((w, h)) = terminal_size::terminal_size() {
-        (h.0, w.0)
-    } else {
-        // No terminal (piped / test harness). Use a wide default so
-        // ConPTY does not wrap output at 80 columns.
-        (24, 32767)
+    let probe = terminal_size::terminal_size().map(|(w, h)| (w.0, h.0));
+    resolve_terminal_size(probe)
+}
+
+/// Translate a `(cols, rows)` probe result into a `(rows, cols)` size to hand
+/// to the PTY. `None` means no real terminal — return a safe fallback.
+/// 200 cols is wide enough that typical codex/claude output doesn't wrap
+/// awkwardly, but stays within the range real terminal emulators actually
+/// exercise — passing 32767 to ConPTY pushes layout math into corners that
+/// trigger cursor drift in ratatui/Ink-based TUIs (issue #31, T3).
+fn resolve_terminal_size(probe: Option<(u16, u16)>) -> (u16, u16) {
+    match probe {
+        Some((cols, rows)) => (rows, cols),
+        None => (24, 200),
     }
 }
 
@@ -443,9 +451,29 @@ fn atty_is_terminal() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_terminal_size;
+
     #[test]
     fn launch_mode_defaults_to_subprocess() {
         let launch_mode = crate::backend::LaunchMode::Subprocess;
         assert_eq!(launch_mode.as_str(), "subprocess");
+    }
+
+    #[test]
+    fn resolve_terminal_size_uses_probe_when_present() {
+        // Input is (cols, rows) from the terminal_size crate. Output is the
+        // (rows, cols) pair we pass to NativePtyProcess::new.
+        assert_eq!(resolve_terminal_size(Some((120, 40))), (40, 120));
+    }
+
+    #[test]
+    fn resolve_terminal_size_caps_fallback_at_200_cols() {
+        // Issue #31 T3: the previous `(24, 32767)` fallback blew up ratatui
+        // layout math inside the child. The cap keeps us in normal terminal
+        // territory.
+        let (rows, cols) = resolve_terminal_size(None);
+        assert_eq!(rows, 24);
+        assert_eq!(cols, 200);
+        assert!(cols <= 1024, "fallback cols must stay sane: {}", cols);
     }
 }

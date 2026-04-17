@@ -24,6 +24,10 @@ which = "7"
 [dev-dependencies]
 tempfile = "3"
 
+[[test]]
+name = "pty_behavior"
+path = "tests/pty_behavior.rs"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
