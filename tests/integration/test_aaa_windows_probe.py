@@ -23,11 +23,31 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-def test_probe_version_completes_quickly(clud_binary: Path) -> None:
-    """`clud --version` is a pure stdout write — any Windows hang here means
-    the binary itself is wedged before main() finishes, not a daemon bug."""
+def test_probe_version_exits_cleanly_no_pipes(clud_binary: Path) -> None:
+    """Run clud --version with **no** stdout/stderr pipes — just check that
+    the binary exits with code 0 within the timeout.
+
+    If THIS passes but `test_probe_version_completes_quickly` still hangs,
+    the problem isn't clud's exit behavior but Python's subprocess pipe
+    reader threads on Windows CI (handles still held by *something*).
+    """
     result = subprocess.run(
         [str(clud_binary), "--version"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    )
+    assert result.returncode == 0, f"clud --version rc={result.returncode}"
+
+
+def test_probe_version_completes_quickly(clud_binary: Path) -> None:
+    """`clud --version` is a pure stdout write — any Windows hang here means
+    the binary itself is wedged before main() finishes, or the stdio pipes
+    never close. Explicit stdin=DEVNULL guards against pipe-mode reading."""
+    result = subprocess.run(
+        [str(clud_binary), "--version"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -43,6 +63,7 @@ def test_probe_help_completes_quickly(clud_binary: Path) -> None:
     """clap help rendering — exercises argument parsing only."""
     result = subprocess.run(
         [str(clud_binary), "--help"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -60,6 +81,7 @@ def test_probe_list_with_no_daemon_state(
     env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "empty-state")
     result = subprocess.run(
         [str(clud_binary), "list"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -78,6 +100,7 @@ def test_probe_logs_with_no_sessions(
     env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "empty-state")
     result = subprocess.run(
         [str(clud_binary), "logs"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -94,6 +117,7 @@ def test_probe_dry_run_emits_json(clud_binary: Path) -> None:
     or the plan builder."""
     result = subprocess.run(
         [str(clud_binary), "--dry-run", "-p", "probe"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
