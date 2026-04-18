@@ -53,6 +53,24 @@ def _cargo_build_env() -> dict[str, str]:
         return os.environ.copy()
 
 
+def _build_env_without_sccache() -> dict[str, str]:
+    """Cargo build env with sccache disabled.
+
+    Why: when RUSTC_WRAPPER=sccache (CI default), cargo invokes rustc via
+    sccache, which lazily starts a persistent server daemon. That server
+    **inherits the subprocess stdio pipe handles** and keeps them open for
+    its whole idle lifetime — so `capture_output=True` never sees EOF and
+    `communicate()` hangs indefinitely on Windows runners. Stripping the
+    wrapper for the fixture's cargo call avoids the inheritance entirely.
+    The outer workflow's `Dev build` step already warmed the cache; this
+    fixture call is usually a no-op incremental build anyway. See #37.
+    """
+    env = _cargo_build_env()
+    env.pop("RUSTC_WRAPPER", None)
+    env.pop("SCCACHE_GHA_ENABLED", None)
+    return env
+
+
 def _find_clud() -> Path:
     """Build the current repo's clud binary and return its path."""
     result = subprocess.run(
@@ -60,7 +78,7 @@ def _find_clud() -> Path:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env=_cargo_build_env(),
+        env=_build_env_without_sccache(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to build clud:\n{result.stderr}")
@@ -93,7 +111,7 @@ def _build_mock_agent() -> Path:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env=_cargo_build_env(),
+        env=_build_env_without_sccache(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to build mock-agent:\n{result.stderr}")
