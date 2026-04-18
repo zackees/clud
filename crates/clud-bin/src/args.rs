@@ -108,6 +108,20 @@ pub enum Command {
         all: bool,
     },
     List,
+    /// pm2-style log viewer: dump or tail a session's captured output.
+    ///
+    /// With no session id, lists all sessions that have log files and prints
+    /// the last line of each. With an id, prints the log (last `--lines` or
+    /// all) and optionally keeps following new output via `--follow`.
+    Logs {
+        session_id: Option<String>,
+        /// Keep watching the file and print new output as it arrives.
+        #[arg(long = "follow", short = 'f')]
+        follow: bool,
+        /// Print only the last N lines from the file. Default: all.
+        #[arg(long = "lines", short = 'n')]
+        lines: Option<usize>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -176,7 +190,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "__daemon",
+        "__worker",
     ];
 
     let mut in_subcommand = false;

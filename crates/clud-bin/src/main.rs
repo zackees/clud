@@ -1,5 +1,6 @@
 mod args;
 mod backend;
+mod capture;
 mod command;
 mod daemon;
 mod loop_spec;

@@ -19,6 +19,7 @@ use sysinfo::{Pid, Signal, System};
 
 use crate::args::{Args, Command};
 use crate::backend::LaunchMode;
+use crate::capture::TerminalCapture;
 use crate::command::LaunchPlan;
 use crate::trampoline;
 
@@ -188,11 +189,29 @@ type AttachClientResult = (
     Vec<Vec<u8>>,
 );
 
+/// pm2-style per-session log file. Soft cap at 10 MiB; exceeding rolls the
+/// current file to `<id>.log.1` (overwriting any prior backup). Keeping only
+/// one backup is deliberate — clud sessions are ephemeral and the on-disk
+/// footprint shouldn't grow unboundedly for a stale session nobody
+/// reattaches to.
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+
 struct WorkerShared {
     state_dir: PathBuf,
     session_id: String,
     snapshot: Mutex<SessionSnapshot>,
     backlog: Mutex<BacklogState>,
+    /// Server-side terminal emulator for PTY sessions. `Some` when the session
+    /// kind is `Pty` and issue #34 attach-replay is active. The parser tracks
+    /// grid + cursor + alt-screen state so a mid-session attach can emit a
+    /// synthesized repaint instead of a raw byte dump, which would leave a
+    /// TUI-attached client staring at a garbled frame.
+    capture: Mutex<Option<TerminalCapture>>,
+    /// Append-only log file for this session. Every output chunk is written
+    /// here in addition to the in-memory backlog, so `clud logs <id>` can
+    /// pm2-style tail / follow output that has scrolled off the 256 KiB
+    /// backlog or from sessions that have fully exited.
+    log_file: Mutex<Option<fs::File>>,
     client: Mutex<Option<AttachedClient>>,
     next_client_id: AtomicU64,
     stop_accepting: AtomicBool,
@@ -205,9 +224,89 @@ impl WorkerShared {
             session_id,
             snapshot: Mutex::new(snapshot),
             backlog: Mutex::new(BacklogState::default()),
+            capture: Mutex::new(None),
+            log_file: Mutex::new(None),
             client: Mutex::new(None),
             next_client_id: AtomicU64::new(1),
             stop_accepting: AtomicBool::new(false),
+        }
+    }
+
+    /// Open the session's log file for append. Called once during worker
+    /// startup. A failure here is non-fatal: we log a warning and continue
+    /// without a log file rather than killing the session.
+    fn init_log_file(&self) {
+        let path = session_log_path(&self.state_dir, &self.session_id);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => {
+                *self.log_file.lock().expect("log_file mutex poisoned") = Some(file);
+            }
+            Err(err) => {
+                eprintln!(
+                    "[clud] warning: cannot open session log {}: {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    /// Append `chunk` to the session log, rotating at the soft size cap.
+    fn append_log(&self, chunk: &[u8]) {
+        let mut guard = self.log_file.lock().expect("log_file mutex poisoned");
+        let Some(file) = guard.as_mut() else { return };
+        if file.write_all(chunk).is_err() {
+            return;
+        }
+        let _ = file.flush();
+        if let Ok(meta) = file.metadata() {
+            if meta.len() >= LOG_ROTATE_BYTES {
+                drop(guard);
+                self.rotate_log();
+            }
+        }
+    }
+
+    fn rotate_log(&self) {
+        let primary = session_log_path(&self.state_dir, &self.session_id);
+        let backup = primary.with_extension("log.1");
+        // Close the current handle first so Windows lets us rename it.
+        {
+            let mut guard = self.log_file.lock().expect("log_file mutex poisoned");
+            *guard = None;
+        }
+        let _ = fs::remove_file(&backup);
+        if fs::rename(&primary, &backup).is_err() {
+            // Rename failed (file in use, etc.) — reopen primary anyway.
+        }
+        if let Ok(file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&primary)
+        {
+            *self.log_file.lock().expect("log_file mutex poisoned") = Some(file);
+        }
+    }
+
+    /// Activate terminal capture for a PTY session. No-op for subprocess
+    /// sessions, whose output is line-oriented and doesn't benefit from grid
+    /// replay (and would pay parser cost for nothing).
+    fn init_capture(&self, rows: u16, cols: u16) {
+        *self.capture.lock().expect("capture mutex poisoned") =
+            Some(TerminalCapture::new(rows, cols));
+    }
+
+    fn resize_capture(&self, rows: u16, cols: u16) {
+        if let Some(capture) = self
+            .capture
+            .lock()
+            .expect("capture mutex poisoned")
+            .as_mut()
+        {
+            capture.resize(rows, cols);
         }
     }
 
@@ -272,15 +371,30 @@ impl WorkerShared {
         }
         self.set_background(false);
         let snapshot = self.snapshot();
-        let backlog = self
-            .backlog
-            .lock()
-            .expect("backlog mutex poisoned")
-            .chunks
-            .iter()
-            .cloned()
-            .collect();
-        Ok((client_id, rx, snapshot, backlog))
+        // For PTY sessions with terminal capture, emit a single synthesized
+        // repaint — cells + cursor + alt-screen + mode flags — that reproduces
+        // the current display on a fresh terminal. Raw backlog cannot do this
+        // for TUIs because cursor moves and partial redraws stack into garbage
+        // when played from the middle of a session. See issue #34.
+        //
+        // For subprocess (line-oriented) sessions we keep the raw-backlog
+        // replay: each line is complete on its own and a history dump is
+        // what a user attaching mid-run actually wants to see.
+        let replay = {
+            let capture = self.capture.lock().expect("capture mutex poisoned");
+            if let Some(capture) = capture.as_ref() {
+                vec![capture.snapshot_bytes()]
+            } else {
+                self.backlog
+                    .lock()
+                    .expect("backlog mutex poisoned")
+                    .chunks
+                    .iter()
+                    .cloned()
+                    .collect()
+            }
+        };
+        Ok((client_id, rx, snapshot, replay))
     }
 
     fn detach_client(&self, client_id: u64) {
@@ -356,6 +470,22 @@ impl WorkerShared {
                 }
             }
         }
+        // Feed the server-side terminal emulator so the grid stays in sync
+        // with what the backend is rendering. Cheap enough to do on the hot
+        // path (vt100 is a streaming VTE-based parser); the expensive part,
+        // snapshot synthesis, only runs on attach.
+        if let Some(capture) = self
+            .capture
+            .lock()
+            .expect("capture mutex poisoned")
+            .as_mut()
+        {
+            capture.feed(&chunk);
+        }
+        // pm2-style persistent log: every byte that the session produces gets
+        // appended to `<state_dir>/logs/<session_id>.log`, so `clud logs` can
+        // show output that scrolled off the 256 KiB in-memory backlog.
+        self.append_log(&chunk);
         self.send_to_client(WorkerServerMessage::Output {
             data_b64: base64::engine::general_purpose::STANDARD.encode(chunk),
         });
@@ -483,6 +613,20 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
         Some(Command::List) => {
             let state_dir = state_dir(args);
             Some(run_list(&state_dir))
+        }
+        Some(Command::Logs {
+            session_id,
+            follow,
+            lines,
+        }) => {
+            let state_dir = state_dir(args);
+            Some(run_logs(
+                &state_dir,
+                session_id.as_deref(),
+                *follow,
+                *lines,
+                interrupted,
+            ))
         }
         Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir)),
         Some(Command::InternalWorker {
@@ -1258,6 +1402,7 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
         session_id.to_string(),
         snapshot,
     ));
+    shared.init_log_file();
 
     let runtime = match spec.kind {
         SessionKind::Subprocess => match start_subprocess_session(&spec, &shared) {
@@ -1410,6 +1555,11 @@ fn start_pty_session(
         .map_err(|err| io::Error::other(err.to_string()))?,
     );
     process.set_echo(false);
+    // Start the terminal emulator at the same dims as the PTY so early output
+    // (launch banners, first frame of a TUI) lands in the grid from byte 0.
+    // Without this, a client that attaches before any resize happens would
+    // see a repaint of an empty 0x0 grid.
+    shared.init_capture(spec.rows, spec.cols);
     process
         .start_impl()
         .map_err(|err| io::Error::other(err.to_string()))?;
@@ -1527,7 +1677,10 @@ fn handle_worker_client(
                             runtime.write(&data, submit);
                         }
                     }
-                    WorkerClientMessage::Resize { rows, cols } => runtime.resize(rows, cols),
+                    WorkerClientMessage::Resize { rows, cols } => {
+                        runtime.resize(rows, cols);
+                        shared.resize_capture(rows, cols);
+                    }
                     WorkerClientMessage::Interrupt => runtime.interrupt(),
                 }
             }
@@ -1683,6 +1836,14 @@ fn specs_dir(state_dir: &Path) -> PathBuf {
 
 fn session_snapshot_path(state_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir(state_dir).join(format!("{session_id}.json"))
+}
+
+fn logs_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("logs")
+}
+
+pub(crate) fn session_log_path(state_dir: &Path, session_id: &str) -> PathBuf {
+    logs_dir(state_dir).join(format!("{session_id}.log"))
 }
 
 fn spec_path(state_dir: &Path, session_id: &str) -> PathBuf {
@@ -1848,6 +2009,179 @@ fn run_list(state_dir: &Path) -> i32 {
         println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
     }
     0
+}
+
+/// pm2-style log viewer. No id → list sessions with their last log line.
+/// With an id → dump the log, then optionally follow.
+fn run_logs(
+    state_dir: &Path,
+    session_id: Option<&str>,
+    follow: bool,
+    lines: Option<usize>,
+    interrupted: &AtomicBool,
+) -> i32 {
+    let Some(input) = session_id else {
+        return run_logs_summary(state_dir);
+    };
+    let resolved = match resolve_session_id(state_dir, input) {
+        Ok(id) => id,
+        Err(_) => {
+            // Allow viewing logs for sessions whose snapshot file has been
+            // cleaned up but whose .log remains on disk. If a raw .log exists
+            // at the given name, use that.
+            let raw = session_log_path(state_dir, input);
+            if raw.is_file() {
+                input.to_string()
+            } else {
+                eprintln!("[clud] no session or log found for {}", input);
+                return 1;
+            }
+        }
+    };
+    let path = session_log_path(state_dir, &resolved);
+    if !path.exists() {
+        eprintln!(
+            "[clud] no log file for session {}: {}",
+            resolved,
+            path.display()
+        );
+        return 1;
+    }
+    let mut offset = match print_log_tail(&path, lines) {
+        Ok(offset) => offset,
+        Err(err) => {
+            eprintln!("[clud] failed to read log {}: {}", path.display(), err);
+            return 1;
+        }
+    };
+    if !follow {
+        return 0;
+    }
+    // pm2-style follow: poll for new bytes at the last known offset. A
+    // short sleep on "no new data" keeps CPU low without requiring a file-
+    // watch API that differs per OS.
+    loop {
+        if interrupted.load(Ordering::SeqCst) {
+            return 130;
+        }
+        match follow_read(&path, offset) {
+            Ok((new_offset, chunk)) => {
+                if !chunk.is_empty() {
+                    let _ = io::stdout().write_all(&chunk);
+                    let _ = io::stdout().flush();
+                }
+                offset = new_offset;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Rotation race: file was renamed out from under us.
+                // Sleep briefly and the rotated primary will reappear.
+            }
+            Err(err) => {
+                eprintln!("[clud] follow error: {}", err);
+                return 1;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn run_logs_summary(state_dir: &Path) -> i32 {
+    let dir = logs_dir(state_dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        println!("No log files. Start a session with: clud --detach -p <prompt>");
+        return 0;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("log"))
+        .collect();
+    if paths.is_empty() {
+        println!("No log files in {}", dir.display());
+        return 0;
+    }
+    paths.sort();
+    println!("{:<30} {:>10} LAST LINE", "SESSION", "BYTES");
+    for path in paths {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let last = last_line_of(&path).unwrap_or_default();
+        println!(
+            "{:<30} {:>10} {}",
+            stem,
+            size,
+            last.trim_end_matches(['\r', '\n'])
+        );
+    }
+    0
+}
+
+fn last_line_of(path: &Path) -> io::Result<String> {
+    // Read the tail in a modest chunk and return the last non-empty line.
+    // Cheap for typical log files; good enough for a summary listing.
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(4096);
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    Ok(text
+        .lines()
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string())
+}
+
+fn print_log_tail(path: &Path, lines: Option<usize>) -> io::Result<u64> {
+    let data = fs::read(path)?;
+    let slice: &[u8] = match lines {
+        None => &data,
+        Some(n) => {
+            let mut count = 0usize;
+            let mut split = data.len();
+            for (i, &b) in data.iter().enumerate().rev() {
+                if b == b'\n' && i + 1 != data.len() {
+                    count += 1;
+                    if count > n {
+                        split = i + 1;
+                        break;
+                    }
+                }
+            }
+            if count <= n {
+                // File has <= n lines; show the whole thing.
+                &data
+            } else {
+                &data[split..]
+            }
+        }
+    };
+    io::stdout().write_all(slice)?;
+    io::stdout().flush()?;
+    Ok(data.len() as u64)
+}
+
+fn follow_read(path: &Path, offset: u64) -> io::Result<(u64, Vec<u8>)> {
+    let meta = fs::metadata(path)?;
+    let len = meta.len();
+    if len < offset {
+        // File was truncated or rotated — start from the new beginning.
+        let data = fs::read(path)?;
+        return Ok((data.len() as u64, data));
+    }
+    if len == offset {
+        return Ok((offset, Vec::new()));
+    }
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::with_capacity((len - offset) as usize);
+    file.read_to_end(&mut buf)?;
+    Ok((len, buf))
 }
 
 fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
@@ -2038,5 +2372,230 @@ fn ctrl_char_to_byte(ch: char) -> Option<u8> {
         '^' => Some(0x1e),
         '_' => Some(0x1f),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod capture_integration_tests {
+    //! Tests that the terminal-capture layer is wired correctly through
+    //! `WorkerShared`. Complements the pure-unit tests in `capture.rs`: those
+    //! prove the parser can round-trip any given byte stream; these prove the
+    //! daemon calls `init_capture`, `feed`, `resize`, and `snapshot_bytes` at
+    //! the right points so an attach actually delivers the current screen.
+    use super::*;
+    use std::net::TcpListener;
+    use tempfile::TempDir;
+
+    fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local_addr").port();
+        let client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        (client, server)
+    }
+
+    fn test_shared(state_dir: &Path, kind: SessionKind) -> Arc<WorkerShared> {
+        let snap = SessionSnapshot {
+            id: "test-session".into(),
+            kind,
+            cwd: None,
+            name: None,
+            created_at: Some(0),
+            detachable: true,
+            background: false,
+            daemon_pid: 0,
+            worker_pid: 0,
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+        };
+        Arc::new(WorkerShared::new(
+            state_dir.to_path_buf(),
+            "test-session".into(),
+            snap,
+        ))
+    }
+
+    #[test]
+    fn pty_attach_returns_single_synthesized_snapshot() {
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        shared.init_capture(24, 80);
+        shared.push_output(b"\x1b[1;1HHEADER\x1b[5;1HFOOTER".to_vec());
+
+        let (_client, server) = loopback_pair();
+        let (_id, _rx, _snap, replay) = shared.attach_client(server).expect("attach");
+
+        assert_eq!(
+            replay.len(),
+            1,
+            "PTY attach must deliver exactly one synthesized snapshot chunk"
+        );
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(&replay[0]);
+        let contents = p.screen().contents();
+        assert!(contents.contains("HEADER"), "HEADER missing from replay");
+        assert!(contents.contains("FOOTER"), "FOOTER missing from replay");
+    }
+
+    #[test]
+    fn subprocess_attach_returns_raw_backlog_unchanged() {
+        // Back-compat guarantee: subprocess sessions are line-oriented, users
+        // attaching mid-run want history, not a repaint. `init_capture` is
+        // never called in that code path, so `attach_client` must fall back
+        // to the raw-chunk replay that pre-dated issue #34.
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Subprocess);
+        shared.push_output(b"line1\n".to_vec());
+        shared.push_output(b"line2\n".to_vec());
+
+        let (_client, server) = loopback_pair();
+        let (_id, _rx, _snap, replay) = shared.attach_client(server).expect("attach");
+        assert_eq!(replay, vec![b"line1\n".to_vec(), b"line2\n".to_vec()]);
+    }
+
+    #[test]
+    fn reattach_after_detach_delivers_current_frame() {
+        // Output arriving *between* detach and reattach must still make it
+        // into the second snapshot — the capture keeps feeding even with no
+        // client connected.
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        shared.init_capture(24, 80);
+        shared.push_output(b"\x1b[1;1HBEFORE".to_vec());
+
+        let (_c1, s1) = loopback_pair();
+        let (cid1, _, _, _) = shared.attach_client(s1).expect("first attach");
+        shared.detach_client(cid1);
+
+        shared.push_output(b"\x1b[2;1HAFTER".to_vec());
+
+        let (_c2, s2) = loopback_pair();
+        let (_, _, _, replay) = shared.attach_client(s2).expect("second attach");
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(&replay[0]);
+        let c = p.screen().contents();
+        assert!(c.contains("BEFORE"), "pre-detach content missing: {:?}", c);
+        assert!(c.contains("AFTER"), "post-detach content missing: {:?}", c);
+    }
+
+    #[test]
+    fn resize_capture_takes_effect_for_subsequent_paint() {
+        // Pre-resize the parser grid isn't wide enough to hold col 100.
+        // After resize, a paint at col 100 lands correctly and the attach
+        // replay reflects it.
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        shared.init_capture(24, 80);
+        shared.resize_capture(40, 120);
+        shared.push_output(b"\x1b[1;100HEDGE".to_vec());
+
+        let (_c, s) = loopback_pair();
+        let (_, _, _, replay) = shared.attach_client(s).expect("attach");
+
+        let mut p = vt100::Parser::new(40, 120, 0);
+        p.process(&replay[0]);
+        let cell = p.screen().cell(0, 99).expect("cell 0,99 in 120-col grid");
+        assert_eq!(
+            cell.contents(),
+            "E",
+            "'E' of EDGE should land at col 99 after resize"
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    //! Tests for the pm2-style persistent log file.
+    use super::*;
+    use tempfile::TempDir;
+
+    fn shared_with_log(tmp: &TempDir, id: &str) -> Arc<WorkerShared> {
+        let snap = SessionSnapshot {
+            id: id.into(),
+            kind: SessionKind::Subprocess,
+            cwd: None,
+            name: None,
+            created_at: Some(0),
+            detachable: true,
+            background: false,
+            daemon_pid: 0,
+            worker_pid: 0,
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+        };
+        let shared = Arc::new(WorkerShared::new(tmp.path().to_path_buf(), id.into(), snap));
+        shared.init_log_file();
+        shared
+    }
+
+    #[test]
+    fn push_output_appends_to_log_file() {
+        let tmp = TempDir::new().unwrap();
+        let shared = shared_with_log(&tmp, "s1");
+        shared.push_output(b"line one\n".to_vec());
+        shared.push_output(b"line two\n".to_vec());
+        // Drop so the file flushes / releases on Windows.
+        drop(shared);
+
+        let path = session_log_path(tmp.path(), "s1");
+        let contents = fs::read(&path).expect("read log");
+        assert_eq!(contents, b"line one\nline two\n");
+    }
+
+    #[test]
+    fn rotation_moves_oversize_log_to_backup() {
+        let tmp = TempDir::new().unwrap();
+        let shared = shared_with_log(&tmp, "s2");
+        let chunk = vec![b'x'; (LOG_ROTATE_BYTES / 4) as usize];
+        // Push enough chunks to exceed the rotate threshold.
+        for _ in 0..6 {
+            shared.push_output(chunk.clone());
+        }
+        drop(shared);
+
+        let primary = session_log_path(tmp.path(), "s2");
+        let backup = primary.with_extension("log.1");
+        assert!(
+            backup.exists(),
+            "rotation should have produced a .log.1 backup"
+        );
+        // Primary may exist (post-rotation reopened) but be smaller than the cap.
+        if primary.exists() {
+            let len = fs::metadata(&primary).unwrap().len();
+            assert!(len < LOG_ROTATE_BYTES, "primary grew past the rotation cap");
+        }
+    }
+
+    #[test]
+    fn follow_read_returns_new_bytes_since_offset() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("x.log");
+        fs::write(&path, b"hello").unwrap();
+        let (off, new) = follow_read(&path, 0).unwrap();
+        assert_eq!(off, 5);
+        assert_eq!(new, b"hello");
+
+        // Append and re-read from offset 5; only new bytes come back.
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b" world").unwrap();
+        drop(f);
+
+        let (off2, new2) = follow_read(&path, off).unwrap();
+        assert_eq!(off2, 11);
+        assert_eq!(new2, b" world");
+    }
+
+    #[test]
+    fn follow_read_detects_truncation_and_rereads_from_zero() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("t.log");
+        fs::write(&path, b"longlong").unwrap();
+        let (off, _) = follow_read(&path, 0).unwrap();
+        fs::write(&path, b"short").unwrap();
+        let (new_off, new) = follow_read(&path, off).unwrap();
+        assert_eq!(new_off, 5);
+        assert_eq!(new, b"short");
     }
 }

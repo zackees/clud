@@ -13,7 +13,18 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-_ANSI_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|\][^\x07]*\x07)")
+_ANSI_RE = re.compile(
+    # CSI: \x1b[ + params + final letter
+    r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]"
+    # OSC: \x1b] + string + BEL or ST (\x1b\\)
+    r"|\][^\x07]*(?:\x07|\x1b\\)"
+    # Bare ESC + single printable byte. Covers RIS (\x1bc), keypad
+    # normal/application (\x1b=, \x1b>), save/restore cursor (\x1b7, \x1b8),
+    # index / reverse index / next line (\x1bD, \x1bM, \x1bE), etc.
+    # Issue #34: attach-replay snapshot emits these so the client's terminal
+    # restores full state; the test must strip them before parsing JSON.
+    r"|[\x30-\x7e])"
+)
 
 
 def _daemon_env(mock_env: dict[str, str], state_dir: Path) -> dict[str, str]:
@@ -507,6 +518,126 @@ class TestDaemonCentralizedPersistence:
         cleaned = _strip_ansi(result.stdout).strip()
         report = json.loads(cleaned.splitlines()[-1])
         assert "hello-pty" in report["args"]
+
+    def test_pty_attach_replay_paints_current_frame(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # Issue #34: mid-session attach on a PTY session must replay the
+        # current frame, not a raw byte dump. Paint a known TUI frame via
+        # mock-agent's --mock-ansi-script, detach, reattach, assert both
+        # markers are in the attach's output (they are absolute-positioned,
+        # so a working replay places them at the right cells).
+        paint_path = tmp_path / "paint.ansi"
+        paint_path.write_bytes(
+            b"\x1b[2J\x1b[1;1H__HEADER__\x1b[5;1H__FOOTER__"
+        )
+        env = _daemon_env(mock_env, tmp_path / "daemon-state")
+        proc, session_id = _launch_daemonized(
+            clud_binary,
+            env,
+            "--pty",
+            "-p",
+            "paint-test",
+            "--",
+            "--mock-ansi-script",
+            str(paint_path),
+            "--mock-sleep-ms",
+            "3000",
+        )
+        # Give the PTY worker time to ingest the paint bytes into its
+        # TerminalCapture before we disconnect. Without this, the reattach
+        # might win the race and see an empty grid.
+        time.sleep(0.5)
+        proc.kill()
+        proc.wait(timeout=10)
+
+        result = subprocess.run(
+            [str(clud_binary), "attach", session_id],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0
+        cleaned = _strip_ansi(result.stdout)
+        assert "__HEADER__" in cleaned, (
+            f"HEADER missing from attach replay: {cleaned!r}"
+        )
+        assert "__FOOTER__" in cleaned, (
+            f"FOOTER missing from attach replay: {cleaned!r}"
+        )
+
+    def test_clud_logs_dumps_session_log(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # pm2-style: after a session runs, `clud logs <id>` should print the
+        # captured output from the persistent log file, independent of
+        # whether any client is still attached.
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "logme-tag",
+            "--",
+            "--mock-sleep-ms",
+            "500",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=5) == 0
+            # Give the worker a beat to finish appending to the log file.
+            time.sleep(0.6)
+
+            result = subprocess.run(
+                [str(clud_binary), "logs", session_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            # The mock agent writes a JSON report to stdout with the args it
+            # received; our prompt-tag must appear in the captured log.
+            assert "logme-tag" in result.stdout, (
+                f"prompt tag missing from logs output: {result.stdout!r}"
+            )
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_clud_logs_with_no_id_lists_sessions(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "list-me",
+            "--",
+            "--mock-sleep-ms",
+            "400",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=5) == 0
+            time.sleep(0.5)
+
+            result = subprocess.run(
+                [str(clud_binary), "logs"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            assert session_id in result.stdout, (
+                f"session id missing from summary: {result.stdout!r}"
+            )
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
 
 
 class TestDaemonCentralizedCleanup:

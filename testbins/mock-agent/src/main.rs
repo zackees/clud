@@ -37,6 +37,7 @@ fn main() {
     let mut pty_size_report_to: Option<PathBuf> = None;
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
+    let mut ansi_script: Option<PathBuf> = None;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -149,7 +150,25 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-ansi-script" {
+            if let Some(path) = args.get(i + 1) {
+                ansi_script = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
         filtered_args.push(arg.clone());
+    }
+
+    // Emit scripted ANSI bytes before everything else so they land in the
+    // PTY / terminal capture first. Used by the attach-replay integration
+    // test to paint a known frame whose presence we can verify in a
+    // post-detach reattach's snapshot.
+    if let Some(path) = ansi_script.as_ref() {
+        if let Ok(bytes) = std::fs::read(path) {
+            let _ = io::stdout().write_all(&bytes);
+            let _ = io::stdout().flush();
+        }
     }
 
     if let Some(path) = pty_size_report_to.as_ref() {
