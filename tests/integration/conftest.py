@@ -71,71 +71,68 @@ def _build_env_without_sccache() -> dict[str, str]:
     return env
 
 
-def _find_clud() -> Path:
-    """Build the current repo's clud binary and return its path."""
+def _target_search_dirs() -> list[Path]:
+    """Directories where a built binary might land, ordered by preference."""
+    ext = ".exe" if sys.platform == "win32" else ""
+    dirs = []
+    if sys.platform == "win32":
+        dirs.extend(
+            [
+                ROOT / "target" / "x86_64-pc-windows-msvc" / "debug",
+                ROOT / "target" / "aarch64-pc-windows-msvc" / "debug",
+            ]
+        )
+    dirs.append(ROOT / "target" / "debug")
+    return [d for d in dirs if (d / f"probe{ext}") or d.is_dir()]
+
+
+def _find_built_binary(name: str) -> Path | None:
+    ext = ".exe" if sys.platform == "win32" else ""
+    for d in _target_search_dirs():
+        candidate = d / f"{name}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _cargo_build_inherit_stdio(package: str) -> None:
+    """Build a workspace package, streaming cargo output to our own stdout
+    and stderr rather than capturing via pipes.
+
+    Capturing cargo's output through pipes on Windows GHA runners caused an
+    indefinite hang (#37): `communicate()` waited for pipe EOF but a
+    grand-child sccache server daemon — or some other long-lived descendant
+    — kept the inheritable pipe handles open. Letting cargo's output go
+    straight to the CI log sidesteps the issue entirely and still produces
+    the artifacts at a deterministic path.
+    """
     result = subprocess.run(
-        _cargo_argv(["build", "-p", "clud", "--message-format=json"]),
+        _cargo_argv(["build", "-p", package]),
         cwd=ROOT,
-        capture_output=True,
-        text=True,
         env=_build_env_without_sccache(),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to build clud:\n{result.stderr}")
+        raise RuntimeError(
+            f"cargo build -p {package} exited with code {result.returncode}"
+        )
 
-    import json
 
-    for line in result.stdout.splitlines():
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if (
-            msg.get("reason") == "compiler-artifact"
-            and msg.get("target", {}).get("name") == "clud"
-            and msg.get("executable")
-        ):
-            return Path(msg["executable"])
-
-    ext = ".exe" if sys.platform == "win32" else ""
-    fallback = ROOT / "target" / "debug" / f"clud{ext}"
-    if fallback.is_file():
-        return fallback
-    raise RuntimeError("clud binary not found after build")
+def _find_clud() -> Path:
+    """Build the current repo's clud binary and return its path."""
+    _cargo_build_inherit_stdio("clud")
+    binary = _find_built_binary("clud")
+    if binary is None:
+        raise RuntimeError("clud binary not found after build")
+    return binary
 
 
 def _build_mock_agent() -> Path:
     """Build the mock-agent binary and return its path."""
-    result = subprocess.run(
-        _cargo_argv(["build", "-p", "mock-agent", "--message-format=json"]),
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env=_build_env_without_sccache(),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to build mock-agent:\n{result.stderr}")
-
-    import json
-
-    for line in result.stdout.splitlines():
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if (
-            msg.get("reason") == "compiler-artifact"
-            and msg.get("target", {}).get("name") == "mock-agent"
-            and msg.get("executable")
-        ):
-            return Path(msg["executable"])
-
-    # Fallback: look in target/debug
-    ext = ".exe" if sys.platform == "win32" else ""
-    fallback = ROOT / "target" / "debug" / f"mock-agent{ext}"
-    if fallback.is_file():
-        return fallback
-    raise RuntimeError("mock-agent binary not found after build")
+    _cargo_build_inherit_stdio("mock-agent")
+    binary = _find_built_binary("mock-agent")
+    if binary is None:
+        raise RuntimeError("mock-agent binary not found after build")
+    return binary
 
 
 @pytest.fixture(scope="session")
