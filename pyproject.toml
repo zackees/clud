@@ -35,6 +35,7 @@ dev = [
     "maturin[zig]>=1.7,<2",
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.8.0",
     "soldr>=0.7.0",
     "ziglang>=0.15.2,<0.16",
@@ -59,6 +60,14 @@ cache-keys = [
 minversion = "8.0"
 addopts = ["-ra", "--strict-markers"]
 testpaths = ["tests"]
+# Any single test that runs longer than this is considered hung; pytest-timeout
+# will interrupt it and dump a stack trace pointing at the exact line. Without
+# this, a stuck subprocess call (e.g. stderr.readline() on Windows when the
+# child never writes) causes GHA to cancel the whole workflow at 45 minutes
+# with no actionable log. The thread method works on Windows where SIGALRM
+# isn't available.
+timeout = 90
+timeout_method = "thread"
 markers = [
     "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
 ]

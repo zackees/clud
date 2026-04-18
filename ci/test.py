@@ -46,13 +46,23 @@ def main(argv: list[str] | None = None) -> int:
     if not _pytest_ok(run(pytest_cmd)):
         return 1
 
-    # Integration tests (only when requested)
+    # Integration tests (only when requested). `-v` prints each test name
+    # before it runs so a hang in CI is pinned to the exact test rather than
+    # appearing as silent dead air.
     if run_integration:
         from ci.env import clean_env
 
         env = clean_env()
         env["CLUD_INTEGRATION_TESTS"] = "1"
-        int_cmd = [sys.executable, "-m", "pytest", "-m", "integration", *pytest_args]
+        int_cmd = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-m",
+            "integration",
+            "-v",
+            *pytest_args,
+        ]
         rc = subprocess.run(int_cmd, cwd=ROOT, env=env).returncode
         if not _pytest_ok(rc):
             return 1
