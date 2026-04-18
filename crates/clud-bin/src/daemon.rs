@@ -19,6 +19,7 @@ use sysinfo::{Pid, Signal, System};
 
 use crate::args::{Args, Command};
 use crate::backend::LaunchMode;
+use crate::capture::TerminalCapture;
 use crate::command::LaunchPlan;
 use crate::trampoline;
 
@@ -193,6 +194,12 @@ struct WorkerShared {
     session_id: String,
     snapshot: Mutex<SessionSnapshot>,
     backlog: Mutex<BacklogState>,
+    /// Server-side terminal emulator for PTY sessions. `Some` when the session
+    /// kind is `Pty` and issue #34 attach-replay is active. The parser tracks
+    /// grid + cursor + alt-screen state so a mid-session attach can emit a
+    /// synthesized repaint instead of a raw byte dump, which would leave a
+    /// TUI-attached client staring at a garbled frame.
+    capture: Mutex<Option<TerminalCapture>>,
     client: Mutex<Option<AttachedClient>>,
     next_client_id: AtomicU64,
     stop_accepting: AtomicBool,
@@ -205,9 +212,29 @@ impl WorkerShared {
             session_id,
             snapshot: Mutex::new(snapshot),
             backlog: Mutex::new(BacklogState::default()),
+            capture: Mutex::new(None),
             client: Mutex::new(None),
             next_client_id: AtomicU64::new(1),
             stop_accepting: AtomicBool::new(false),
+        }
+    }
+
+    /// Activate terminal capture for a PTY session. No-op for subprocess
+    /// sessions, whose output is line-oriented and doesn't benefit from grid
+    /// replay (and would pay parser cost for nothing).
+    fn init_capture(&self, rows: u16, cols: u16) {
+        *self.capture.lock().expect("capture mutex poisoned") =
+            Some(TerminalCapture::new(rows, cols));
+    }
+
+    fn resize_capture(&self, rows: u16, cols: u16) {
+        if let Some(capture) = self
+            .capture
+            .lock()
+            .expect("capture mutex poisoned")
+            .as_mut()
+        {
+            capture.resize(rows, cols);
         }
     }
 
@@ -272,15 +299,30 @@ impl WorkerShared {
         }
         self.set_background(false);
         let snapshot = self.snapshot();
-        let backlog = self
-            .backlog
-            .lock()
-            .expect("backlog mutex poisoned")
-            .chunks
-            .iter()
-            .cloned()
-            .collect();
-        Ok((client_id, rx, snapshot, backlog))
+        // For PTY sessions with terminal capture, emit a single synthesized
+        // repaint — cells + cursor + alt-screen + mode flags — that reproduces
+        // the current display on a fresh terminal. Raw backlog cannot do this
+        // for TUIs because cursor moves and partial redraws stack into garbage
+        // when played from the middle of a session. See issue #34.
+        //
+        // For subprocess (line-oriented) sessions we keep the raw-backlog
+        // replay: each line is complete on its own and a history dump is
+        // what a user attaching mid-run actually wants to see.
+        let replay = {
+            let capture = self.capture.lock().expect("capture mutex poisoned");
+            if let Some(capture) = capture.as_ref() {
+                vec![capture.snapshot_bytes()]
+            } else {
+                self.backlog
+                    .lock()
+                    .expect("backlog mutex poisoned")
+                    .chunks
+                    .iter()
+                    .cloned()
+                    .collect()
+            }
+        };
+        Ok((client_id, rx, snapshot, replay))
     }
 
     fn detach_client(&self, client_id: u64) {
@@ -355,6 +397,18 @@ impl WorkerShared {
                     break;
                 }
             }
+        }
+        // Feed the server-side terminal emulator so the grid stays in sync
+        // with what the backend is rendering. Cheap enough to do on the hot
+        // path (vt100 is a streaming VTE-based parser); the expensive part,
+        // snapshot synthesis, only runs on attach.
+        if let Some(capture) = self
+            .capture
+            .lock()
+            .expect("capture mutex poisoned")
+            .as_mut()
+        {
+            capture.feed(&chunk);
         }
         self.send_to_client(WorkerServerMessage::Output {
             data_b64: base64::engine::general_purpose::STANDARD.encode(chunk),
@@ -1410,6 +1464,11 @@ fn start_pty_session(
         .map_err(|err| io::Error::other(err.to_string()))?,
     );
     process.set_echo(false);
+    // Start the terminal emulator at the same dims as the PTY so early output
+    // (launch banners, first frame of a TUI) lands in the grid from byte 0.
+    // Without this, a client that attaches before any resize happens would
+    // see a repaint of an empty 0x0 grid.
+    shared.init_capture(spec.rows, spec.cols);
     process
         .start_impl()
         .map_err(|err| io::Error::other(err.to_string()))?;
@@ -1527,7 +1586,10 @@ fn handle_worker_client(
                             runtime.write(&data, submit);
                         }
                     }
-                    WorkerClientMessage::Resize { rows, cols } => runtime.resize(rows, cols),
+                    WorkerClientMessage::Resize { rows, cols } => {
+                        runtime.resize(rows, cols);
+                        shared.resize_capture(rows, cols);
+                    }
                     WorkerClientMessage::Interrupt => runtime.interrupt(),
                 }
             }
