@@ -54,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
 
         env = clean_env()
         env["CLUD_INTEGRATION_TESTS"] = "1"
+        # Disable the Windows exe-unlock dance for every clud subprocess
+        # spawned by tests. See #37: the rename+copy+GC pattern appears to
+        # keep stdout/stderr pipe handles alive on Windows CI, which wedges
+        # subprocess.run in a pipe-EOF wait. Tests don't need hot-reload
+        # protection, so this is strictly safer for the test harness.
+        env["CLUD_NO_UNLOCK"] = "1"
         int_cmd = [
             sys.executable,
             "-m",

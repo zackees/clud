@@ -155,6 +155,14 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     pid_log = tmp_path / "child_pids.log"
     env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(pid_log)
 
+    # Skip the Windows exe-unlock dance (rename+copy+GC on every start).
+    # The unlock path is under investigation in #37 as the suspected cause
+    # of a pipe-EOF hang on Windows CI where subprocess.run cannot flush
+    # stdout/stderr of a `clud --version` subprocess. Tests don't need the
+    # hot-reload safety net anyway; the repo isn't pip-installing over a
+    # running clud during tests.
+    env["CLUD_NO_UNLOCK"] = "1"
+
     return env
 
 
