@@ -13,7 +13,18 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-_ANSI_RE = re.compile(r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]|\][^\x07]*\x07)")
+_ANSI_RE = re.compile(
+    # CSI: \x1b[ + params + final letter
+    r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]"
+    # OSC: \x1b] + string + BEL or ST (\x1b\\)
+    r"|\][^\x07]*(?:\x07|\x1b\\)"
+    # Bare ESC + single printable byte. Covers RIS (\x1bc), keypad
+    # normal/application (\x1b=, \x1b>), save/restore cursor (\x1b7, \x1b8),
+    # index / reverse index / next line (\x1bD, \x1bM, \x1bE), etc.
+    # Issue #34: attach-replay snapshot emits these so the client's terminal
+    # restores full state; the test must strip them before parsing JSON.
+    r"|[\x30-\x7e])"
+)
 
 
 def _daemon_env(mock_env: dict[str, str], state_dir: Path) -> dict[str, str]:
