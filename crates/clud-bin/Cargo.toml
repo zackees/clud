@@ -19,6 +19,7 @@ serde_json = "1"
 sysinfo = "0.37"
 terminal_size = "0.4"
 vt100 = "0.16"
+vte = "0.15"
 wasmi = "0.40.0"
 which = "7"
 

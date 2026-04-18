@@ -278,6 +278,7 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "vt100",
+ "vte",
  "wasmi",
  "which",
  "whisper-rs",
