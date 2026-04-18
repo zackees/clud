@@ -8,8 +8,12 @@
 //! - Reads stdin if available (for pipe mode testing)
 //! - Exits with the code specified by --mock-exit-code (default 0)
 //! - With --mock-read-stdin-ms, reads stdin for N ms (even if terminal) and reports it
+//! - With --mock-stdin-raw-to, writes captured stdin bytes (pre-JSON) to a file
+//!   using Rust byte-literal escaping (e.g., `\x1b`) so binary input is preserved.
+//! - With --mock-report-pty-size, polls and reports host/PTY dimensions via the
+//!   `terminal_size` crate to a JSON file for the resize-propagation test.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,6 +33,10 @@ fn main() {
     let mut write_blocked_at: Option<PathBuf> = None;
     let mut write_blocked_body = String::from("mock-blocked");
     let mut write_marker_on_iter: u32 = 0;
+    let mut stdin_raw_to: Option<PathBuf> = None;
+    let mut pty_size_report_to: Option<PathBuf> = None;
+    let mut pty_size_samples: u32 = 0;
+    let mut pty_size_interval_ms: u64 = 100;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -113,7 +121,40 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-stdin-raw-to" {
+            if let Some(path) = args.get(i + 1) {
+                stdin_raw_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-report-pty-size" {
+            if let Some(path) = args.get(i + 1) {
+                pty_size_report_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-pty-size-samples" {
+            if let Some(n) = args.get(i + 1) {
+                pty_size_samples = n.parse().unwrap_or(0);
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-pty-size-interval-ms" {
+            if let Some(n) = args.get(i + 1) {
+                pty_size_interval_ms = n.parse().unwrap_or(100);
+            }
+            skip_next = true;
+            continue;
+        }
         filtered_args.push(arg.clone());
+    }
+
+    if let Some(path) = pty_size_report_to.as_ref() {
+        run_pty_size_probe(path, pty_size_samples.max(1), pty_size_interval_ms);
+        std::process::exit(exit_code);
     }
 
     if let Some(role) = helper_role.as_deref() {
@@ -153,11 +194,11 @@ fn main() {
     let stdin_is_terminal = io::stdin().is_terminal();
 
     // Read stdin: either timed read (--mock-read-stdin-ms) or pipe-mode read
-    let stdin_content = if read_stdin_ms > 0 {
+    let stdin_bytes: Option<Vec<u8>> = if read_stdin_ms > 0 {
         read_stdin_timed(read_stdin_ms)
     } else if !stdin_is_terminal {
-        let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).ok();
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf).ok();
         if buf.is_empty() {
             None
         } else {
@@ -166,6 +207,17 @@ fn main() {
     } else {
         None
     };
+
+    if let (Some(path), Some(bytes)) = (stdin_raw_to.as_ref(), stdin_bytes.as_ref()) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, bytes);
+    }
+
+    let stdin_content: Option<String> = stdin_bytes
+        .as_ref()
+        .map(|b| String::from_utf8_lossy(b).into_owned());
 
     // Capture env vars relevant for testing
     let in_clud = std::env::var("IN_CLUD").ok();
@@ -209,7 +261,7 @@ fn main() {
 
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
-fn read_stdin_timed(timeout_ms: u64) -> Option<String> {
+fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -241,7 +293,34 @@ fn read_stdin_timed(timeout_ms: u64) -> Option<String> {
     if collected.is_empty() {
         None
     } else {
-        Some(String::from_utf8_lossy(&collected).to_string())
+        Some(collected)
+    }
+}
+
+/// Poll `terminal_size::terminal_size()` `samples` times, sleeping
+/// `interval_ms` between each poll, and write a JSON array of `(cols, rows)`
+/// pairs (nullable when no terminal is detected) to `path`. Also emits a
+/// marker line to stdout after each sample so the test harness can drive
+/// a mid-run resize between samples.
+fn run_pty_size_probe(path: &Path, samples: u32, interval_ms: u64) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut out = Vec::new();
+    for i in 0..samples {
+        let size = terminal_size::terminal_size();
+        let entry = match size {
+            Some((w, h)) => serde_json::json!({ "cols": w.0, "rows": h.0 }),
+            None => serde_json::json!({ "cols": null, "rows": null }),
+        };
+        out.push(entry.clone());
+        let _ = std::fs::write(path, serde_json::to_string(&out).unwrap());
+        let line = format!("PTY_SIZE_SAMPLE {} {}\n", i + 1, entry);
+        let _ = io::stdout().write_all(line.as_bytes());
+        let _ = io::stdout().flush();
+        if i + 1 < samples {
+            std::thread::sleep(Duration::from_millis(interval_ms));
+        }
     }
 }
 

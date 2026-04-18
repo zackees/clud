@@ -7,7 +7,48 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
+use running_process_core::pty::reexports::portable_pty::PtySize;
 use running_process_core::pty::NativePtyProcess;
+
+/// Resize the PTY. On Windows, `running_process_core::pty::NativePtyProcess::resize_impl`
+/// is a deliberate no-op (see that crate's `pty/mod.rs:730-737`), so reaching
+/// the underlying master's `resize()` directly is the only way to honor a
+/// `SIGWINCH`/`Event::Resize`. On POSIX the library's implementation does the
+/// right thing, so delegate. Issue #31, theory T2.
+pub fn resize_pty(process: &NativePtyProcess, rows: u16, cols: u16) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let guard = process
+            .handles
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        if let Some(handles) = guard.as_ref() {
+            handles
+                .master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        // PtySize is used on Windows only; silence unused-import warnings.
+        let _ = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        process
+            .resize_impl(rows, cols)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+}
 
 pub trait InteractiveHooks {
     fn intercept_f3(&self) -> bool {
@@ -90,8 +131,13 @@ pub fn run_interactive_pty_session<H: InteractiveHooks>(
 
     loop {
         match process.read_chunk_impl(Some(0.01)) {
-            Ok(Some(chunk)) => {
-                let _ = process.respond_to_queries_impl(&chunk);
+            Ok(Some(_chunk)) => {
+                // Do NOT call `respond_to_queries_impl`. On Windows the library
+                // stubs every `\x1b[6n` DSR query with a hardcoded `\x1b[1;1R`
+                // regardless of the true cursor position (issue #31, T1); that
+                // lie corrupts ratatui/Ink cursor math inside the child TUI.
+                // ConPTY already answers DSR natively. On POSIX the call is a
+                // no-op anyway — so we drop it on both platforms.
             }
             Ok(None) => {}
             Err(_) => return reap_pty_exit(process),
@@ -134,8 +180,9 @@ pub fn run_interactive_pty_session<H: InteractiveHooks>(
 pub fn run_pty_output_loop(process: &NativePtyProcess, interrupted: &AtomicBool) -> i32 {
     loop {
         match process.read_chunk_impl(Some(0.1)) {
-            Ok(Some(chunk)) => {
-                let _ = process.respond_to_queries_impl(&chunk);
+            Ok(Some(_chunk)) => {
+                // See `run_interactive_pty_session` — the stubbed DSR reply
+                // does more harm than good. Skip it here too.
             }
             Ok(None) => {}
             Err(_) => return reap_pty_exit(process),
@@ -181,9 +228,7 @@ fn handle_terminal_event<H: InteractiveHooks>(
                 .map_err(|err| io::Error::other(err.to_string()))?;
         }
         Event::Resize(cols, rows) => {
-            process
-                .resize_impl(rows, cols)
-                .map_err(|err| io::Error::other(err.to_string()))?;
+            resize_pty(process, rows, cols)?;
         }
         Event::FocusGained | Event::FocusLost | Event::Mouse(_) => {}
     }
@@ -308,6 +353,71 @@ fn translate_function_key(n: u8) -> KeyAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spawn a short-lived sleep-like command in a PTY so we have a live
+    /// master handle to test resize_pty against. Returns `None` if the
+    /// host environment can't allocate a PTY (nested Windows shells where
+    /// ConPTY spawn silently no-ops; see issue #31 notes).
+    fn spawn_idle_pty(rows: u16, cols: u16) -> Option<NativePtyProcess> {
+        let argv: Vec<String> = if cfg!(windows) {
+            // `ping -n 3 127.0.0.1` keeps the child alive ~2s without needing
+            // a console for stdout, which is enough for a resize roundtrip.
+            vec![
+                "cmd.exe".into(),
+                "/c".into(),
+                "ping -n 3 127.0.0.1 > NUL".into(),
+            ]
+        } else {
+            vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()]
+        };
+        let process = NativePtyProcess::new(argv, None, None, rows, cols, None).ok()?;
+        process.set_echo(false);
+        process.start_impl().ok()?;
+        Some(process)
+    }
+
+    /// resize_pty should change the master's reported size on every platform,
+    /// including Windows (where the library's own `resize_impl` is a no-op).
+    /// Issue #31, theory T2.
+    #[test]
+    fn resize_pty_updates_master_size_on_all_platforms() {
+        let Some(process) = spawn_idle_pty(20, 80) else {
+            eprintln!(
+                "resize_pty_updates_master_size_on_all_platforms: SKIP (PTY spawn unavailable)"
+            );
+            return;
+        };
+
+        // Sanity: the master reports the initial size we requested.
+        {
+            let guard = process.handles.lock().expect("handles");
+            let handles = guard.as_ref().expect("handles present");
+            let before = handles.master.get_size().expect("get_size");
+            assert_eq!(
+                (before.rows, before.cols),
+                (20, 80),
+                "initial master size wrong: {:?}",
+                before
+            );
+        }
+
+        // Resize via the helper and verify the master advances.
+        resize_pty(&process, 40, 120).expect("resize_pty");
+
+        {
+            let guard = process.handles.lock().expect("handles");
+            let handles = guard.as_ref().expect("handles present");
+            let after = handles.master.get_size().expect("get_size");
+            assert_eq!(
+                (after.rows, after.cols),
+                (40, 120),
+                "resize_pty did not propagate to master: {:?}",
+                after
+            );
+        }
+
+        let _ = process.close_impl();
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 serde_json = "1"
+terminal_size = "0.4"
 
 [[bin]]
 name = "mock-agent"
