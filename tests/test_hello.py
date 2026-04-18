@@ -69,7 +69,7 @@ def test_version() -> None:
     result = _run("--version")
     assert result.returncode == 0
     assert "clud" in result.stdout
-    assert "2.0.6" in result.stdout
+    assert "2.0.7" in result.stdout
 
 
 def test_dry_run_prompt() -> None:
