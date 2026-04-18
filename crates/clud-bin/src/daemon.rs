@@ -2102,3 +2102,132 @@ fn ctrl_char_to_byte(ch: char) -> Option<u8> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod capture_integration_tests {
+    //! Tests that the terminal-capture layer is wired correctly through
+    //! `WorkerShared`. Complements the pure-unit tests in `capture.rs`: those
+    //! prove the parser can round-trip any given byte stream; these prove the
+    //! daemon calls `init_capture`, `feed`, `resize`, and `snapshot_bytes` at
+    //! the right points so an attach actually delivers the current screen.
+    use super::*;
+    use std::net::TcpListener;
+    use tempfile::TempDir;
+
+    fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local_addr").port();
+        let client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        (client, server)
+    }
+
+    fn test_shared(state_dir: &Path, kind: SessionKind) -> Arc<WorkerShared> {
+        let snap = SessionSnapshot {
+            id: "test-session".into(),
+            kind,
+            cwd: None,
+            name: None,
+            created_at: Some(0),
+            detachable: true,
+            background: false,
+            daemon_pid: 0,
+            worker_pid: 0,
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+        };
+        Arc::new(WorkerShared::new(
+            state_dir.to_path_buf(),
+            "test-session".into(),
+            snap,
+        ))
+    }
+
+    #[test]
+    fn pty_attach_returns_single_synthesized_snapshot() {
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        shared.init_capture(24, 80);
+        shared.push_output(b"\x1b[1;1HHEADER\x1b[5;1HFOOTER".to_vec());
+
+        let (_client, server) = loopback_pair();
+        let (_id, _rx, _snap, replay) = shared.attach_client(server).expect("attach");
+
+        assert_eq!(
+            replay.len(),
+            1,
+            "PTY attach must deliver exactly one synthesized snapshot chunk"
+        );
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(&replay[0]);
+        let contents = p.screen().contents();
+        assert!(contents.contains("HEADER"), "HEADER missing from replay");
+        assert!(contents.contains("FOOTER"), "FOOTER missing from replay");
+    }
+
+    #[test]
+    fn subprocess_attach_returns_raw_backlog_unchanged() {
+        // Back-compat guarantee: subprocess sessions are line-oriented, users
+        // attaching mid-run want history, not a repaint. `init_capture` is
+        // never called in that code path, so `attach_client` must fall back
+        // to the raw-chunk replay that pre-dated issue #34.
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Subprocess);
+        shared.push_output(b"line1\n".to_vec());
+        shared.push_output(b"line2\n".to_vec());
+
+        let (_client, server) = loopback_pair();
+        let (_id, _rx, _snap, replay) = shared.attach_client(server).expect("attach");
+        assert_eq!(replay, vec![b"line1\n".to_vec(), b"line2\n".to_vec()]);
+    }
+
+    #[test]
+    fn reattach_after_detach_delivers_current_frame() {
+        // Output arriving *between* detach and reattach must still make it
+        // into the second snapshot — the capture keeps feeding even with no
+        // client connected.
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        shared.init_capture(24, 80);
+        shared.push_output(b"\x1b[1;1HBEFORE".to_vec());
+
+        let (_c1, s1) = loopback_pair();
+        let (cid1, _, _, _) = shared.attach_client(s1).expect("first attach");
+        shared.detach_client(cid1);
+
+        shared.push_output(b"\x1b[2;1HAFTER".to_vec());
+
+        let (_c2, s2) = loopback_pair();
+        let (_, _, _, replay) = shared.attach_client(s2).expect("second attach");
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(&replay[0]);
+        let c = p.screen().contents();
+        assert!(c.contains("BEFORE"), "pre-detach content missing: {:?}", c);
+        assert!(c.contains("AFTER"), "post-detach content missing: {:?}", c);
+    }
+
+    #[test]
+    fn resize_capture_takes_effect_for_subsequent_paint() {
+        // Pre-resize the parser grid isn't wide enough to hold col 100.
+        // After resize, a paint at col 100 lands correctly and the attach
+        // replay reflects it.
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        shared.init_capture(24, 80);
+        shared.resize_capture(40, 120);
+        shared.push_output(b"\x1b[1;100HEDGE".to_vec());
+
+        let (_c, s) = loopback_pair();
+        let (_, _, _, replay) = shared.attach_client(s).expect("attach");
+
+        let mut p = vt100::Parser::new(40, 120, 0);
+        p.process(&replay[0]);
+        let cell = p.screen().cell(0, 99).expect("cell 0,99 in 120-col grid");
+        assert_eq!(
+            cell.contents(),
+            "E",
+            "'E' of EDGE should land at col 99 after resize"
+        );
+    }
+}

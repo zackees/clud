@@ -508,6 +508,54 @@ class TestDaemonCentralizedPersistence:
         report = json.loads(cleaned.splitlines()[-1])
         assert "hello-pty" in report["args"]
 
+    def test_pty_attach_replay_paints_current_frame(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # Issue #34: mid-session attach on a PTY session must replay the
+        # current frame, not a raw byte dump. Paint a known TUI frame via
+        # mock-agent's --mock-ansi-script, detach, reattach, assert both
+        # markers are in the attach's output (they are absolute-positioned,
+        # so a working replay places them at the right cells).
+        paint_path = tmp_path / "paint.ansi"
+        paint_path.write_bytes(
+            b"\x1b[2J\x1b[1;1H__HEADER__\x1b[5;1H__FOOTER__"
+        )
+        env = _daemon_env(mock_env, tmp_path / "daemon-state")
+        proc, session_id = _launch_daemonized(
+            clud_binary,
+            env,
+            "--pty",
+            "-p",
+            "paint-test",
+            "--",
+            "--mock-ansi-script",
+            str(paint_path),
+            "--mock-sleep-ms",
+            "3000",
+        )
+        # Give the PTY worker time to ingest the paint bytes into its
+        # TerminalCapture before we disconnect. Without this, the reattach
+        # might win the race and see an empty grid.
+        time.sleep(0.5)
+        proc.kill()
+        proc.wait(timeout=10)
+
+        result = subprocess.run(
+            [str(clud_binary), "attach", session_id],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0
+        cleaned = _strip_ansi(result.stdout)
+        assert "__HEADER__" in cleaned, (
+            f"HEADER missing from attach replay: {cleaned!r}"
+        )
+        assert "__FOOTER__" in cleaned, (
+            f"FOOTER missing from attach replay: {cleaned!r}"
+        )
+
 
 class TestDaemonCentralizedCleanup:
     def test_subprocess_tree_dies_when_daemon_dies(

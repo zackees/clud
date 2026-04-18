@@ -213,6 +213,49 @@ mod tests {
     }
 
     #[test]
+    fn replay_round_trip_utf8_multibyte() {
+        // Box-drawing + emoji. A raw-byte replay would be fine here, but the
+        // grid path has to keep UTF-8 sequences intact across parser state.
+        let script = "\x1b[1;1H┌─┐\n│ai│\n└─┘\x1b[5;1H🚀 launch".as_bytes();
+        assert_replay_equivalent(24, 80, script);
+    }
+
+    #[test]
+    fn replay_round_trip_extended_sgr() {
+        // Bold, italic, underline, inverse, and a 256-color background.
+        let script = b"\x1b[1;1H\
+            \x1b[1mBOLD\x1b[0m \
+            \x1b[3mitalic\x1b[0m \
+            \x1b[4munder\x1b[0m \
+            \x1b[7minv\x1b[0m \
+            \x1b[48;5;27mbg256\x1b[0m\
+            \x1b[2;1H\x1b[38;2;255;128;0mtruecolor\x1b[0m";
+        assert_replay_equivalent(24, 80, script);
+    }
+
+    #[test]
+    fn replay_round_trip_scroll_region() {
+        // DECSTBM: set scroll region to rows 2-5, write, scroll.
+        let script = b"\x1b[2;5r\x1b[2;1Ha\n\x1b[3;1Hb\n\x1b[4;1Hc\n\x1b[5;1Hd\n";
+        assert_replay_equivalent(24, 80, script);
+    }
+
+    #[test]
+    fn replay_round_trip_byte_by_byte_feed() {
+        // Pathological case: one byte at a time, including through the middle
+        // of multi-byte UTF-8 and CSI sequences. The parser is a streaming
+        // VTE, so this must be equivalent to a single feed.
+        let script = "\x1b[31m重要: \x1b[1;4mheads\x1b[0m ok".as_bytes();
+        let mut whole = TerminalCapture::new(24, 80);
+        whole.feed(script);
+        let mut drip = TerminalCapture::new(24, 80);
+        for b in script {
+            drip.feed(std::slice::from_ref(b));
+        }
+        assert_eq!(whole.snapshot_bytes(), drip.snapshot_bytes());
+    }
+
+    #[test]
     fn replay_round_trip_partial_clear_and_redraw() {
         // Simulate a TUI doing a partial redraw: fill, clear a region,
         // repaint part of it. A raw-byte replay would show all three stages
