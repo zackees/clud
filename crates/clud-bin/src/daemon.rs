@@ -189,6 +189,13 @@ type AttachClientResult = (
     Vec<Vec<u8>>,
 );
 
+/// pm2-style per-session log file. Soft cap at 10 MiB; exceeding rolls the
+/// current file to `<id>.log.1` (overwriting any prior backup). Keeping only
+/// one backup is deliberate — clud sessions are ephemeral and the on-disk
+/// footprint shouldn't grow unboundedly for a stale session nobody
+/// reattaches to.
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+
 struct WorkerShared {
     state_dir: PathBuf,
     session_id: String,
@@ -200,6 +207,11 @@ struct WorkerShared {
     /// synthesized repaint instead of a raw byte dump, which would leave a
     /// TUI-attached client staring at a garbled frame.
     capture: Mutex<Option<TerminalCapture>>,
+    /// Append-only log file for this session. Every output chunk is written
+    /// here in addition to the in-memory backlog, so `clud logs <id>` can
+    /// pm2-style tail / follow output that has scrolled off the 256 KiB
+    /// backlog or from sessions that have fully exited.
+    log_file: Mutex<Option<fs::File>>,
     client: Mutex<Option<AttachedClient>>,
     next_client_id: AtomicU64,
     stop_accepting: AtomicBool,
@@ -213,9 +225,69 @@ impl WorkerShared {
             snapshot: Mutex::new(snapshot),
             backlog: Mutex::new(BacklogState::default()),
             capture: Mutex::new(None),
+            log_file: Mutex::new(None),
             client: Mutex::new(None),
             next_client_id: AtomicU64::new(1),
             stop_accepting: AtomicBool::new(false),
+        }
+    }
+
+    /// Open the session's log file for append. Called once during worker
+    /// startup. A failure here is non-fatal: we log a warning and continue
+    /// without a log file rather than killing the session.
+    fn init_log_file(&self) {
+        let path = session_log_path(&self.state_dir, &self.session_id);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => {
+                *self.log_file.lock().expect("log_file mutex poisoned") = Some(file);
+            }
+            Err(err) => {
+                eprintln!(
+                    "[clud] warning: cannot open session log {}: {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    /// Append `chunk` to the session log, rotating at the soft size cap.
+    fn append_log(&self, chunk: &[u8]) {
+        let mut guard = self.log_file.lock().expect("log_file mutex poisoned");
+        let Some(file) = guard.as_mut() else { return };
+        if file.write_all(chunk).is_err() {
+            return;
+        }
+        let _ = file.flush();
+        if let Ok(meta) = file.metadata() {
+            if meta.len() >= LOG_ROTATE_BYTES {
+                drop(guard);
+                self.rotate_log();
+            }
+        }
+    }
+
+    fn rotate_log(&self) {
+        let primary = session_log_path(&self.state_dir, &self.session_id);
+        let backup = primary.with_extension("log.1");
+        // Close the current handle first so Windows lets us rename it.
+        {
+            let mut guard = self.log_file.lock().expect("log_file mutex poisoned");
+            *guard = None;
+        }
+        let _ = fs::remove_file(&backup);
+        if fs::rename(&primary, &backup).is_err() {
+            // Rename failed (file in use, etc.) — reopen primary anyway.
+        }
+        if let Ok(file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&primary)
+        {
+            *self.log_file.lock().expect("log_file mutex poisoned") = Some(file);
         }
     }
 
@@ -410,6 +482,10 @@ impl WorkerShared {
         {
             capture.feed(&chunk);
         }
+        // pm2-style persistent log: every byte that the session produces gets
+        // appended to `<state_dir>/logs/<session_id>.log`, so `clud logs` can
+        // show output that scrolled off the 256 KiB in-memory backlog.
+        self.append_log(&chunk);
         self.send_to_client(WorkerServerMessage::Output {
             data_b64: base64::engine::general_purpose::STANDARD.encode(chunk),
         });
@@ -537,6 +613,20 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
         Some(Command::List) => {
             let state_dir = state_dir(args);
             Some(run_list(&state_dir))
+        }
+        Some(Command::Logs {
+            session_id,
+            follow,
+            lines,
+        }) => {
+            let state_dir = state_dir(args);
+            Some(run_logs(
+                &state_dir,
+                session_id.as_deref(),
+                *follow,
+                *lines,
+                interrupted,
+            ))
         }
         Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir)),
         Some(Command::InternalWorker {
@@ -1312,6 +1402,7 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
         session_id.to_string(),
         snapshot,
     ));
+    shared.init_log_file();
 
     let runtime = match spec.kind {
         SessionKind::Subprocess => match start_subprocess_session(&spec, &shared) {
@@ -1747,6 +1838,14 @@ fn session_snapshot_path(state_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir(state_dir).join(format!("{session_id}.json"))
 }
 
+fn logs_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("logs")
+}
+
+pub(crate) fn session_log_path(state_dir: &Path, session_id: &str) -> PathBuf {
+    logs_dir(state_dir).join(format!("{session_id}.log"))
+}
+
 fn spec_path(state_dir: &Path, session_id: &str) -> PathBuf {
     specs_dir(state_dir).join(format!("{session_id}.json"))
 }
@@ -1910,6 +2009,179 @@ fn run_list(state_dir: &Path) -> i32 {
         println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
     }
     0
+}
+
+/// pm2-style log viewer. No id → list sessions with their last log line.
+/// With an id → dump the log, then optionally follow.
+fn run_logs(
+    state_dir: &Path,
+    session_id: Option<&str>,
+    follow: bool,
+    lines: Option<usize>,
+    interrupted: &AtomicBool,
+) -> i32 {
+    let Some(input) = session_id else {
+        return run_logs_summary(state_dir);
+    };
+    let resolved = match resolve_session_id(state_dir, input) {
+        Ok(id) => id,
+        Err(_) => {
+            // Allow viewing logs for sessions whose snapshot file has been
+            // cleaned up but whose .log remains on disk. If a raw .log exists
+            // at the given name, use that.
+            let raw = session_log_path(state_dir, input);
+            if raw.is_file() {
+                input.to_string()
+            } else {
+                eprintln!("[clud] no session or log found for {}", input);
+                return 1;
+            }
+        }
+    };
+    let path = session_log_path(state_dir, &resolved);
+    if !path.exists() {
+        eprintln!(
+            "[clud] no log file for session {}: {}",
+            resolved,
+            path.display()
+        );
+        return 1;
+    }
+    let mut offset = match print_log_tail(&path, lines) {
+        Ok(offset) => offset,
+        Err(err) => {
+            eprintln!("[clud] failed to read log {}: {}", path.display(), err);
+            return 1;
+        }
+    };
+    if !follow {
+        return 0;
+    }
+    // pm2-style follow: poll for new bytes at the last known offset. A
+    // short sleep on "no new data" keeps CPU low without requiring a file-
+    // watch API that differs per OS.
+    loop {
+        if interrupted.load(Ordering::SeqCst) {
+            return 130;
+        }
+        match follow_read(&path, offset) {
+            Ok((new_offset, chunk)) => {
+                if !chunk.is_empty() {
+                    let _ = io::stdout().write_all(&chunk);
+                    let _ = io::stdout().flush();
+                }
+                offset = new_offset;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Rotation race: file was renamed out from under us.
+                // Sleep briefly and the rotated primary will reappear.
+            }
+            Err(err) => {
+                eprintln!("[clud] follow error: {}", err);
+                return 1;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn run_logs_summary(state_dir: &Path) -> i32 {
+    let dir = logs_dir(state_dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        println!("No log files. Start a session with: clud --detach -p <prompt>");
+        return 0;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("log"))
+        .collect();
+    if paths.is_empty() {
+        println!("No log files in {}", dir.display());
+        return 0;
+    }
+    paths.sort();
+    println!("{:<30} {:>10} LAST LINE", "SESSION", "BYTES");
+    for path in paths {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let last = last_line_of(&path).unwrap_or_default();
+        println!(
+            "{:<30} {:>10} {}",
+            stem,
+            size,
+            last.trim_end_matches(['\r', '\n'])
+        );
+    }
+    0
+}
+
+fn last_line_of(path: &Path) -> io::Result<String> {
+    // Read the tail in a modest chunk and return the last non-empty line.
+    // Cheap for typical log files; good enough for a summary listing.
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(4096);
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    Ok(text
+        .lines()
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string())
+}
+
+fn print_log_tail(path: &Path, lines: Option<usize>) -> io::Result<u64> {
+    let data = fs::read(path)?;
+    let slice: &[u8] = match lines {
+        None => &data,
+        Some(n) => {
+            let mut count = 0usize;
+            let mut split = data.len();
+            for (i, &b) in data.iter().enumerate().rev() {
+                if b == b'\n' && i + 1 != data.len() {
+                    count += 1;
+                    if count > n {
+                        split = i + 1;
+                        break;
+                    }
+                }
+            }
+            if count <= n {
+                // File has <= n lines; show the whole thing.
+                &data
+            } else {
+                &data[split..]
+            }
+        }
+    };
+    io::stdout().write_all(slice)?;
+    io::stdout().flush()?;
+    Ok(data.len() as u64)
+}
+
+fn follow_read(path: &Path, offset: u64) -> io::Result<(u64, Vec<u8>)> {
+    let meta = fs::metadata(path)?;
+    let len = meta.len();
+    if len < offset {
+        // File was truncated or rotated — start from the new beginning.
+        let data = fs::read(path)?;
+        return Ok((data.len() as u64, data));
+    }
+    if len == offset {
+        return Ok((offset, Vec::new()));
+    }
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::with_capacity((len - offset) as usize);
+    file.read_to_end(&mut buf)?;
+    Ok((len, buf))
 }
 
 fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
@@ -2229,5 +2501,101 @@ mod capture_integration_tests {
             "E",
             "'E' of EDGE should land at col 99 after resize"
         );
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    //! Tests for the pm2-style persistent log file.
+    use super::*;
+    use tempfile::TempDir;
+
+    fn shared_with_log(tmp: &TempDir, id: &str) -> Arc<WorkerShared> {
+        let snap = SessionSnapshot {
+            id: id.into(),
+            kind: SessionKind::Subprocess,
+            cwd: None,
+            name: None,
+            created_at: Some(0),
+            detachable: true,
+            background: false,
+            daemon_pid: 0,
+            worker_pid: 0,
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+        };
+        let shared = Arc::new(WorkerShared::new(tmp.path().to_path_buf(), id.into(), snap));
+        shared.init_log_file();
+        shared
+    }
+
+    #[test]
+    fn push_output_appends_to_log_file() {
+        let tmp = TempDir::new().unwrap();
+        let shared = shared_with_log(&tmp, "s1");
+        shared.push_output(b"line one\n".to_vec());
+        shared.push_output(b"line two\n".to_vec());
+        // Drop so the file flushes / releases on Windows.
+        drop(shared);
+
+        let path = session_log_path(tmp.path(), "s1");
+        let contents = fs::read(&path).expect("read log");
+        assert_eq!(contents, b"line one\nline two\n");
+    }
+
+    #[test]
+    fn rotation_moves_oversize_log_to_backup() {
+        let tmp = TempDir::new().unwrap();
+        let shared = shared_with_log(&tmp, "s2");
+        let chunk = vec![b'x'; (LOG_ROTATE_BYTES / 4) as usize];
+        // Push enough chunks to exceed the rotate threshold.
+        for _ in 0..6 {
+            shared.push_output(chunk.clone());
+        }
+        drop(shared);
+
+        let primary = session_log_path(tmp.path(), "s2");
+        let backup = primary.with_extension("log.1");
+        assert!(
+            backup.exists(),
+            "rotation should have produced a .log.1 backup"
+        );
+        // Primary may exist (post-rotation reopened) but be smaller than the cap.
+        if primary.exists() {
+            let len = fs::metadata(&primary).unwrap().len();
+            assert!(len < LOG_ROTATE_BYTES, "primary grew past the rotation cap");
+        }
+    }
+
+    #[test]
+    fn follow_read_returns_new_bytes_since_offset() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("x.log");
+        fs::write(&path, b"hello").unwrap();
+        let (off, new) = follow_read(&path, 0).unwrap();
+        assert_eq!(off, 5);
+        assert_eq!(new, b"hello");
+
+        // Append and re-read from offset 5; only new bytes come back.
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b" world").unwrap();
+        drop(f);
+
+        let (off2, new2) = follow_read(&path, off).unwrap();
+        assert_eq!(off2, 11);
+        assert_eq!(new2, b" world");
+    }
+
+    #[test]
+    fn follow_read_detects_truncation_and_rereads_from_zero() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("t.log");
+        fs::write(&path, b"longlong").unwrap();
+        let (off, _) = follow_read(&path, 0).unwrap();
+        fs::write(&path, b"short").unwrap();
+        let (new_off, new) = follow_read(&path, off).unwrap();
+        assert_eq!(new_off, 5);
+        assert_eq!(new, b"short");
     }
 }

@@ -567,6 +567,78 @@ class TestDaemonCentralizedPersistence:
             f"FOOTER missing from attach replay: {cleaned!r}"
         )
 
+    def test_clud_logs_dumps_session_log(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # pm2-style: after a session runs, `clud logs <id>` should print the
+        # captured output from the persistent log file, independent of
+        # whether any client is still attached.
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "logme-tag",
+            "--",
+            "--mock-sleep-ms",
+            "500",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=5) == 0
+            # Give the worker a beat to finish appending to the log file.
+            time.sleep(0.6)
+
+            result = subprocess.run(
+                [str(clud_binary), "logs", session_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            # The mock agent writes a JSON report to stdout with the args it
+            # received; our prompt-tag must appear in the captured log.
+            assert "logme-tag" in result.stdout, (
+                f"prompt tag missing from logs output: {result.stdout!r}"
+            )
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_clud_logs_with_no_id_lists_sessions(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "list-me",
+            "--",
+            "--mock-sleep-ms",
+            "400",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=5) == 0
+            time.sleep(0.5)
+
+            result = subprocess.run(
+                [str(clud_binary), "logs"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            assert session_id in result.stdout, (
+                f"session id missing from summary: {result.stdout!r}"
+            )
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
 
 class TestDaemonCentralizedCleanup:
     def test_subprocess_tree_dies_when_daemon_dies(
