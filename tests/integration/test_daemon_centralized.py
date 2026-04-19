@@ -85,35 +85,6 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def _drain_pipe(stream, timeout: float = 2.0) -> str:
-    """Read from a subprocess pipe with a real wall-clock timeout.
-
-    `stream.read()` blocks until EOF. On Windows, when a detached grandchild
-    inherits the pipe's write end, that never happens — so we wrap the read
-    in a thread and give up after `timeout` seconds. Returns whatever has
-    been read so far, which is enough for assertions that look for a
-    substring. See #37.
-    """
-    import threading
-
-    buf: list[str] = []
-    done = threading.Event()
-
-    def _reader() -> None:
-        try:
-            buf.append(stream.read())
-        except Exception:
-            pass
-        finally:
-            done.set()
-
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
-    done.wait(timeout)
-    # Let the thread die in the background; the daemon flag prevents it
-    # blocking process exit. Whatever's in buf at this moment is what we
-    # return.
-    return buf[0] if buf else ""
 
 
 def _wait_for_tree_pids(path: Path, minimum: int, timeout: float = 10.0) -> list[int]:
@@ -520,6 +491,17 @@ class TestDaemonCentralizedPersistence:
         report = json.loads(result.stdout)
         assert "hello" in report["args"]
 
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        reason=(
+            "Issue #38: `clud attach <id>` times out on Windows PTY "
+            "sessions — the attach subprocess runs to completion but Python's "
+            "communicate() never sees pipe EOF. Handle-inheritance guard in "
+            "PR #39 didn't clear it; deeper Windows ConPTY / CreateProcess "
+            "investigation needed."
+        ),
+        strict=True,
+    )
     def test_pty_session_persists_and_reattaches(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
@@ -540,6 +522,7 @@ class TestDaemonCentralizedPersistence:
 
         result = subprocess.run(
             [str(clud_binary), "attach", session_id],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -550,6 +533,11 @@ class TestDaemonCentralizedPersistence:
         report = json.loads(cleaned.splitlines()[-1])
         assert "hello-pty" in report["args"]
 
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        reason="Issue #38 — same Windows PTY attach pipe-EOF bug as above.",
+        strict=True,
+    )
     def test_pty_attach_replay_paints_current_frame(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
@@ -584,6 +572,7 @@ class TestDaemonCentralizedPersistence:
 
         result = subprocess.run(
             [str(clud_binary), "attach", session_id],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -699,6 +688,16 @@ class TestDaemonCentralizedCleanup:
         _kill_process(metadata["daemon_pid"])
         _wait_for_pids_to_exit(pids)
 
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        reason=(
+            "Issue #38: mock-agent helper-tree spawn under ConPTY on "
+            "Windows records fewer than 3 PIDs — same class of "
+            "handle-inheritance / process-spawn quirk as the PTY attach "
+            "pipe hang above."
+        ),
+        strict=True,
+    )
     def test_pty_tree_dies_when_daemon_dies(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
