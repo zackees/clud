@@ -59,6 +59,15 @@ pub fn unlock_exe() {
         return;
     }
 
+    // Escape hatch for CI / test harnesses that spawn many short-lived clud
+    // invocations: the rename+copy+GC dance on every start costs real time
+    // and, under investigation in #37, appears to keep stdout/stderr pipe
+    // handles open on Windows GHA runners so Python's subprocess.run never
+    // sees EOF. Set `CLUD_NO_UNLOCK=1` to disable.
+    if std::env::var_os("CLUD_NO_UNLOCK").is_some() {
+        return;
+    }
+
     let my_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,

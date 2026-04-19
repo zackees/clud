@@ -46,13 +46,29 @@ def main(argv: list[str] | None = None) -> int:
     if not _pytest_ok(run(pytest_cmd)):
         return 1
 
-    # Integration tests (only when requested)
+    # Integration tests (only when requested). `-v` prints each test name
+    # before it runs so a hang in CI is pinned to the exact test rather than
+    # appearing as silent dead air.
     if run_integration:
         from ci.env import clean_env
 
         env = clean_env()
         env["CLUD_INTEGRATION_TESTS"] = "1"
-        int_cmd = [sys.executable, "-m", "pytest", "-m", "integration", *pytest_args]
+        # Disable the Windows exe-unlock dance for every clud subprocess
+        # spawned by tests. See #37: the rename+copy+GC pattern appears to
+        # keep stdout/stderr pipe handles alive on Windows CI, which wedges
+        # subprocess.run in a pipe-EOF wait. Tests don't need hot-reload
+        # protection, so this is strictly safer for the test harness.
+        env["CLUD_NO_UNLOCK"] = "1"
+        int_cmd = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-m",
+            "integration",
+            "-v",
+            *pytest_args,
+        ]
         rc = subprocess.run(int_cmd, cwd=ROOT, env=env).returncode
         if not _pytest_ok(rc):
             return 1

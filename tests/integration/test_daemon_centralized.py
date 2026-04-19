@@ -85,6 +85,37 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _drain_pipe(stream, timeout: float = 2.0) -> str:
+    """Read from a subprocess pipe with a real wall-clock timeout.
+
+    `stream.read()` blocks until EOF. On Windows, when a detached grandchild
+    inherits the pipe's write end, that never happens — so we wrap the read
+    in a thread and give up after `timeout` seconds. Returns whatever has
+    been read so far, which is enough for assertions that look for a
+    substring. See #37.
+    """
+    import threading
+
+    buf: list[str] = []
+    done = threading.Event()
+
+    def _reader() -> None:
+        try:
+            buf.append(stream.read())
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    done.wait(timeout)
+    # Let the thread die in the background; the daemon flag prevents it
+    # blocking process exit. Whatever's in buf at this moment is what we
+    # return.
+    return buf[0] if buf else ""
+
+
 def _wait_for_tree_pids(path: Path, minimum: int, timeout: float = 10.0) -> list[int]:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -714,8 +745,15 @@ class TestDaemonSessionHardening:
         )
         try:
             assert _wait_for_exit(proc, timeout=2) == 0
-            stderr = proc.stderr.read() if proc.stderr else ""
-            assert "attach with: clud attach" in stderr
+            # `_read_session_id` already consumed the "session ... running
+            # in background" line. The "attach with: clud attach <id>" line
+            # follows it, terminated by \n. `readline()` reads until \n so
+            # it returns promptly even though the pipe's writer-end is
+            # still held open by the detached daemon grandchild (#37). A
+            # naive `.read()` would wait forever for EOF.
+            assert proc.stderr is not None
+            hint_line = proc.stderr.readline()
+            assert "attach with: clud attach" in hint_line, f"got: {hint_line!r}"
         finally:
             _kill_daemon_for_session(state_dir, session_id)
 
