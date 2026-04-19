@@ -229,8 +229,14 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
 
     cmd.extend(args.passthrough.iter().cloned());
 
-    let launch_mode =
-        crate::backend::resolve_launch_mode(args.pty, args.subprocess, backend, codex_uses_exec);
+    let is_loop = loop_markers.is_some();
+    let launch_mode = crate::backend::resolve_launch_mode(
+        args.pty,
+        args.subprocess,
+        backend,
+        codex_uses_exec,
+        is_loop,
+    );
 
     LaunchPlan {
         command: cmd,
