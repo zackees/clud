@@ -67,10 +67,12 @@ pub fn resolve_backend(_claude: bool, codex: bool) -> Backend {
 ///
 /// Explicit `--pty` / `--subprocess` always wins. Otherwise:
 /// - Claude defaults to subprocess while PTY issues are being investigated,
-///   **except** in `clud loop` mode where we use PTY so the user sees live
-///   token streaming. Loop iterations take long enough that the
-///   subprocess-default's silent-until-EOF buffering makes it impossible to
-///   tell if the agent is working or hung — see #32.
+///   **except** in `clud loop` mode on non-Windows where we use PTY so the
+///   user sees live token streaming. Loop iterations take long enough that
+///   the subprocess-default's silent-until-EOF buffering makes it impossible
+///   to tell if the agent is working or hung — see #32. Windows stays on
+///   subprocess for now because ConPTY handle-inheritance under loops still
+///   hangs (see #38); once that's fixed, the gate can be removed.
 /// - Codex defaults to PTY for interactive TUI runs (Ink requires a real
 ///   pseudo-console to receive keyboard input) and subprocess for
 ///   non-interactive `codex exec` runs.
@@ -88,7 +90,7 @@ pub fn resolve_launch_mode(
         return LaunchMode::Subprocess;
     }
     match backend {
-        Backend::Claude if is_loop => LaunchMode::Pty,
+        Backend::Claude if is_loop && !cfg!(target_os = "windows") => LaunchMode::Pty,
         Backend::Claude => LaunchMode::Subprocess,
         Backend::Codex if codex_uses_exec => LaunchMode::Subprocess,
         Backend::Codex => LaunchMode::Pty,
@@ -136,10 +138,16 @@ mod tests {
     fn test_claude_loop_uses_pty_for_streaming() {
         // #32: subprocess silence during long loop iterations makes it
         // impossible to tell if claude is working or hung. Loop mode opts
-        // into PTY so token output streams live.
+        // into PTY so token output streams live. Gated to non-Windows
+        // until #38's Windows ConPTY handle-inheritance is fixed.
+        let expected = if cfg!(target_os = "windows") {
+            LaunchMode::Subprocess
+        } else {
+            LaunchMode::Pty
+        };
         assert_eq!(
             resolve_launch_mode(false, false, Backend::Claude, false, true),
-            LaunchMode::Pty
+            expected
         );
     }
 
