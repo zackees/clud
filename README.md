@@ -130,10 +130,13 @@ Optional environment variables:
 | `CLUD_WHISPER_MODEL` | Path to a local `whisper.cpp` GGML model such as `ggml-small.en.bin` |
 | `CLUD_VOICE_LANGUAGE` | Force a Whisper language code such as `en` |
 
-## `clud loop` — Autonomous Loop
+## `clud loop` — The Ralph Loop
+
+![clud-loop-ralph](https://github.com/user-attachments/assets/b6666429-ead7-419c-831f-db4e17b3840b)
 
 Run the backend in a **ralph loop**: iterate on a task until the agent signals
-it's done, or until the iteration count runs out.
+it's done, or until the iteration count runs out. Fully autonomous — no user
+interaction between iterations.
 
 ```bash
 clud loop "Implement the API endpoints from the spec"
