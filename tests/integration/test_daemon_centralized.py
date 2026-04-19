@@ -540,6 +540,7 @@ class TestDaemonCentralizedPersistence:
 
         result = subprocess.run(
             [str(clud_binary), "attach", session_id],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
@@ -584,6 +585,7 @@ class TestDaemonCentralizedPersistence:
 
         result = subprocess.run(
             [str(clud_binary), "attach", session_id],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=15,
