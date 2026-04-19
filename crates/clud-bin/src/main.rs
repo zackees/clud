@@ -165,7 +165,9 @@ fn normalize_exit_code(code: i32) -> i32 {
 fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
     use std::path::PathBuf;
 
-    use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+    use running_process_core::{
+        CommandSpec, Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode,
+    };
 
     // Enable VT input on the console before launching the child.
     // This allows ANSI sequences (including bracketed paste for drag-and-drop)
@@ -194,7 +196,14 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
             create_process_group: false,
             stdin_mode: StdinMode::Inherit,
             nice: None,
-            containment: None,
+            // Issue #9: Claude/Codex spawn tool subprocesses (cargo test,
+            // npm test, long builds) that leak as zombies when a clud
+            // session dies abnormally (crash, terminal close, Task Manager
+            // kill). `Containment::Contained` binds the child tree's
+            // lifetime to ours: PR_SET_PDEATHSIG(SIGKILL) on Linux, a
+            // kill-on-close Job Object on Windows. The daemon path already
+            // sets this (daemon.rs); direct subprocess runs now do too.
+            containment: Some(Containment::Contained),
         };
 
         let process = NativeProcess::new(config);
