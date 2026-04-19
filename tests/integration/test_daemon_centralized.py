@@ -745,13 +745,15 @@ class TestDaemonSessionHardening:
         )
         try:
             assert _wait_for_exit(proc, timeout=2) == 0
-            # Drain remaining stderr with a short bounded loop. A naive
-            # `proc.stderr.read()` hangs on Windows when the detached daemon
-            # grandchild inherited the stderr pipe and keeps it alive
-            # (#37). `_read_session_id` already consumed most of the output;
-            # we just want whatever's left without blocking for EOF.
-            stderr = _drain_pipe(proc.stderr, timeout=2.0) if proc.stderr else ""
-            assert "attach with: clud attach" in stderr
+            # `_read_session_id` already consumed the "session ... running
+            # in background" line. The "attach with: clud attach <id>" line
+            # follows it, terminated by \n. `readline()` reads until \n so
+            # it returns promptly even though the pipe's writer-end is
+            # still held open by the detached daemon grandchild (#37). A
+            # naive `.read()` would wait forever for EOF.
+            assert proc.stderr is not None
+            hint_line = proc.stderr.readline()
+            assert "attach with: clud attach" in hint_line, f"got: {hint_line!r}"
         finally:
             _kill_daemon_for_session(state_dir, session_id)
 
