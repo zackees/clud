@@ -702,6 +702,89 @@ mod tests {
         assert!(p.loop_markers.is_none());
     }
 
+    // ---- Issue #48: `clud --codex loop "..."` must drive codex the same ----
+    // way `clud loop` drives claude: exec subcommand, positional prompt,
+    // DONE/BLOCKED contract appended, loop_markers populated, and the
+    // non-interactive launch mode (subprocess) selected.
+
+    #[test]
+    fn test_codex_loop_routes_through_exec() {
+        let p = plan(&["clud", "--codex", "loop", "--loop-count", "5", "do stuff"]);
+        assert_eq!(p.command[0], "codex");
+        assert_eq!(p.command[1], "exec");
+        assert!(p
+            .command
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert_eq!(p.iterations, 5);
+        assert_eq!(p.backend, Backend::Codex);
+    }
+
+    #[test]
+    fn test_codex_loop_prompt_is_positional_not_dash_p() {
+        // Codex's `-p` is `--profile`; the prompt must be the final positional.
+        let p = plan(&["clud", "--codex", "loop", "do stuff"]);
+        assert!(
+            p.command.iter().all(|a| a != "-p"),
+            "codex must not emit -p for the prompt; cmd={:?}",
+            p.command
+        );
+        let last = last_arg(&p);
+        assert!(
+            last.starts_with("do stuff"),
+            "codex prompt must be the last positional arg; got: {last:?}"
+        );
+    }
+
+    #[test]
+    fn test_codex_loop_appends_done_marker_contract() {
+        let p = plan(&["clud", "--codex", "loop", "do stuff"]);
+        let prompt = last_arg(&p);
+        assert!(prompt.contains(".clud/loop/DONE"));
+        assert!(prompt.contains(".clud/loop/BLOCKED"));
+        assert!(p.loop_markers.is_some());
+    }
+
+    #[test]
+    fn test_codex_loop_default_count() {
+        let p = plan(&["clud", "--codex", "loop", "task"]);
+        assert_eq!(p.iterations, 50);
+    }
+
+    #[test]
+    fn test_codex_loop_no_done_marker_omits_contract() {
+        let p = plan(&["clud", "--codex", "loop", "--no-done-marker", "task"]);
+        let prompt = last_arg(&p);
+        assert_eq!(prompt, "task");
+        assert!(p.loop_markers.is_none());
+    }
+
+    #[test]
+    fn test_codex_loop_uses_subprocess_launch_mode() {
+        // `codex exec` is non-interactive → subprocess (pipe-friendly),
+        // just like `clud --codex -p "..."`.
+        let p = plan(&["clud", "--codex", "loop", "task"]);
+        assert_eq!(p.launch_mode, LaunchMode::Subprocess);
+    }
+
+    #[test]
+    fn test_codex_loop_safe_mode_omits_bypass_flag() {
+        let p = plan(&["clud", "--codex", "--safe", "loop", "task"]);
+        assert!(!p
+            .command
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert_eq!(p.command[0], "codex");
+        assert_eq!(p.command[1], "exec");
+    }
+
+    #[test]
+    fn test_codex_loop_forwards_passthrough_flags() {
+        // `clud --codex loop "task" -- --verbose` must keep the passthrough
+        // flag so the test harness can inject mock-agent flags the same way
+        // it does for the claude path.
+        let p = plan(&["clud", "--codex", "loop", "task", "--", "--verbose"]);
+        assert!(p.command.contains(&"--verbose".to_string()));
+    }
+
     #[test]
     fn test_pty_override() {
         let p = plan(&["clud", "--pty", "-p", "hello"]);

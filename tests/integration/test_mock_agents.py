@@ -359,6 +359,62 @@ class TestLoopMode:
         json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
         assert len(json_lines) == 1
 
+    # ---- Issue #48: `clud --codex loop "..."` must work against codex ----
+
+    def test_codex_loop_iterations(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        """`clud --codex loop ...` drives the codex backend for N iterations."""
+        result = _run(
+            clud_binary,
+            "--codex",
+            "loop",
+            "--loop-count",
+            "3",
+            "--no-done-marker",
+            "do stuff",
+            env=mock_env,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        cleaned = _strip_ansi(result.stdout)
+        json_lines = [
+            line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")
+        ]
+        assert len(json_lines) == 3
+        for line in json_lines:
+            report = json.loads(line)
+            # Each iteration invoked the codex mock agent.
+            assert "codex" in report["program"].lower()
+            # Codex uses `exec` subcommand + positional prompt (no `-p` flag).
+            assert "exec" in report["args"]
+            assert "-p" not in report["args"]
+            assert "--dangerously-bypass-approvals-and-sandbox" in report["args"]
+            # The prompt appears as a positional arg somewhere in the args.
+            assert any("do stuff" in a for a in report["args"])
+
+    def test_codex_loop_dry_run(
+        self, clud_binary: Path, mock_env: dict[str, str]
+    ) -> None:
+        """`clud --codex --dry-run loop ...` emits the codex command."""
+        result = _run(
+            clud_binary,
+            "--codex",
+            "--dry-run",
+            "loop",
+            "task",
+            env=mock_env,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        report = json.loads(result.stdout)
+        assert report["backend"] == "codex"
+        assert report["launch_mode"] == "subprocess"
+        assert report["loop_markers"] is not None
+        assert report["iterations"] == 50
+        cmd = report["command"]
+        assert cmd[1] == "exec"
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert "-p" not in cmd
+
 
 class TestInterruptReporting:
     """Verify Ctrl+C reports how clud was launched."""
