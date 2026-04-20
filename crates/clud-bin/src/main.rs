@@ -252,6 +252,14 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
 fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
     use running_process_core::pty::NativePtyProcess;
 
+    // Enable VT input on the Windows console for the whole PTY session.
+    // Without ENABLE_VIRTUAL_TERMINAL_INPUT, ReadConsoleW delivers Backspace
+    // as 0x08 (BS) instead of 0x7f (DEL) that xterm-convention TUIs (codex
+    // on Ink) expect, so backspace silently does nothing inside the child.
+    // Paired with `run_plan_subprocess`'s call — the raw byte pump depends
+    // on the console delivering VT sequences. No-op on non-Windows.
+    let _console_guard = enable_console_vt_input();
+
     let env = child_env();
     let mut last_exit = 0i32;
     let (rows, cols) = get_terminal_size();
@@ -474,5 +482,93 @@ mod tests {
         assert_eq!(rows, 24);
         assert_eq!(cols, 200);
         assert!(cols <= 1024, "fallback cols must stay sane: {}", cols);
+    }
+
+    /// Windows: `enable_console_vt_input()` must actually set the
+    /// `ENABLE_VIRTUAL_TERMINAL_INPUT` bit (0x0200) on the console input
+    /// handle, and restore the original mode on drop. Without this bit,
+    /// `ReadConsoleW` delivers Backspace as 0x08 instead of the xterm 0x7f
+    /// that Ink-based TUIs (codex) expect, which manifests as "Backspace
+    /// doesn't delete anything" inside `clud --codex`.
+    ///
+    /// Skipped when stdin is not a real console (piped `cargo test`,
+    /// CI boxes without an attached TTY).
+    #[cfg(windows)]
+    #[test]
+    fn enable_console_vt_input_sets_and_restores_bit() {
+        use super::enable_console_vt_input;
+        use std::io::IsTerminal;
+        use std::os::windows::io::AsRawHandle;
+
+        const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+        extern "system" {
+            fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+            fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+        }
+
+        if !std::io::stdin().is_terminal() {
+            eprintln!(
+                "enable_console_vt_input_sets_and_restores_bit: SKIP \
+                 (stdin not a real console in this test runner)"
+            );
+            return;
+        }
+
+        let handle = std::io::stdin().as_raw_handle() as isize;
+        let saved: u32 = unsafe {
+            let mut mode: u32 = 0;
+            assert_ne!(GetConsoleMode(handle, &mut mode), 0, "GetConsoleMode");
+            mode
+        };
+        // Clear the VT-input bit so we're starting from a known state.
+        unsafe {
+            assert_ne!(
+                SetConsoleMode(handle, saved & !ENABLE_VIRTUAL_TERMINAL_INPUT),
+                0,
+                "clear VT input bit"
+            );
+        }
+
+        let before: u32 = unsafe {
+            let mut mode: u32 = 0;
+            assert_ne!(GetConsoleMode(handle, &mut mode), 0);
+            mode
+        };
+        assert_eq!(
+            before & ENABLE_VIRTUAL_TERMINAL_INPUT,
+            0,
+            "VT input bit should be cleared at start of test"
+        );
+
+        {
+            let _guard = enable_console_vt_input();
+            let during: u32 = unsafe {
+                let mut mode: u32 = 0;
+                assert_ne!(GetConsoleMode(handle, &mut mode), 0);
+                mode
+            };
+            assert_ne!(
+                during & ENABLE_VIRTUAL_TERMINAL_INPUT,
+                0,
+                "enable_console_vt_input must set ENABLE_VIRTUAL_TERMINAL_INPUT"
+            );
+        }
+
+        let after: u32 = unsafe {
+            let mut mode: u32 = 0;
+            assert_ne!(GetConsoleMode(handle, &mut mode), 0);
+            mode
+        };
+        assert_eq!(
+            after & ENABLE_VIRTUAL_TERMINAL_INPUT,
+            0,
+            "guard must restore the original (cleared) VT input state on drop"
+        );
+
+        // Restore the truly-original mode we saved at the top.
+        unsafe {
+            SetConsoleMode(handle, saved);
+        }
     }
 }

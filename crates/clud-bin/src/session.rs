@@ -1,5 +1,5 @@
 use std::io::{self, IsTerminal};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -188,8 +188,18 @@ pub fn terminals_are_interactive() -> bool {
 /// write those queries on startup and wait for a reply. See issue #46.
 ///
 /// Current scope: stdin forwarding + F3 observation + hook ticks +
-/// Ctrl+C + child-exit detection. Resize handling (SIGWINCH on Unix,
-/// `ReadConsoleInputW` on Windows) is added in Steps 9/10.
+/// child-exit detection, plus resize handling (SIGWINCH on Unix, polled
+/// `terminal_size::terminal_size()` on Windows).
+///
+/// Ctrl-C is *not* intercepted here on purpose. The raw 0x03 byte flows
+/// to the child via normal stdin forwarding (terminal is in raw mode, so
+/// the OS hands us 0x03 directly), and the child TUI handles the cancel
+/// prompt itself. The old code also escalated the `interrupted` flag to
+/// `send_interrupt_impl`, which on Windows wrote a *second* 0x03 to the
+/// PTY, and Ink-based TUIs interpreted the duplicate as "Ctrl-C twice =
+/// exit". The `ctrlc` handler installation in main.rs keeps clud itself
+/// from dying on Ctrl-C; the `interrupted` parameter remains to allow
+/// future callers to observe shutdown intent without breaking the ABI.
 pub fn run_raw_pty_pump<H, R>(
     process: &NativePtyProcess,
     interrupted: &AtomicBool,
@@ -332,10 +342,6 @@ where
                     }
                 }
             }
-
-            if interrupted.load(Ordering::SeqCst) {
-                return interrupt_pty_process(process);
-            }
         }
 
         if let Err(err) = hooks.on_tick(process) {
@@ -348,35 +354,16 @@ where
             return code;
         }
 
-        if interrupted.load(Ordering::SeqCst) {
-            return interrupt_pty_process(process);
-        }
+        // NOTE: the `interrupted` flag is intentionally NOT escalated to a
+        // child kill here. The raw 0x03 byte is already forwarded through
+        // the stdin path above, and the child TUI handles Ctrl-C itself.
+        // See the pump doc comment for why.
+        let _ = interrupted;
     }
 }
 
 fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
     process.wait_impl(Some(1.0)).unwrap_or(1)
-}
-
-fn interrupt_pty_process(process: &NativePtyProcess) -> i32 {
-    match process.send_interrupt_impl() {
-        Ok(()) => match process.wait_impl(Some(2.0)) {
-            Ok(code) => {
-                eprintln!("[clud] interrupted via Ctrl+C (pty)");
-                code
-            }
-            Err(_) => {
-                let _ = process.close_impl();
-                eprintln!("[clud] interrupted via Ctrl+C (pty)");
-                130
-            }
-        },
-        Err(_) => {
-            let _ = process.close_impl();
-            eprintln!("[clud] interrupted via Ctrl+C (pty)");
-            130
-        }
-    }
 }
 
 #[cfg(test)]
