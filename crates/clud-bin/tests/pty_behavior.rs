@@ -801,10 +801,11 @@ fn raw_pump_calls_on_tick_during_idle() {
 
 /// Flipping the shared `interrupted` flag while the pump is running with
 /// a long-lived child must cause the pump to return within a couple of
-/// seconds with the Ctrl+C exit code path (130 on POSIX; on Windows the
-/// helper returns whatever the child's signal produces, which
-/// `normalize_exit_code` in main.rs later maps to 130 — here we just
-/// assert the pump returned promptly without hanging on the child).
+/// seconds. On POSIX this is `send_interrupt_impl` sending SIGINT to
+/// the child's pgroup; on Windows it's `close_impl` tearing the PTY
+/// down (the Windows `send_interrupt_impl` is intentionally skipped to
+/// avoid duplicating the 0x03 byte that stdin already forwarded — see
+/// `interrupt_pty_process` for the rationale).
 #[test]
 fn raw_pump_honors_ctrlc_flag() {
     require_pty_or_skip!("raw_pump_honors_ctrlc_flag");

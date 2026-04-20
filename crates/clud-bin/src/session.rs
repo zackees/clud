@@ -189,7 +189,18 @@ pub fn terminals_are_interactive() -> bool {
 ///
 /// Current scope: stdin forwarding + F3 observation + hook ticks +
 /// Ctrl+C + child-exit detection. Resize handling (SIGWINCH on Unix,
-/// `ReadConsoleInputW` on Windows) is added in Steps 9/10.
+/// polled `terminal_size::terminal_size()` on Windows).
+///
+/// Ctrl-C flow: the raw 0x03 byte is forwarded to the child via normal
+/// stdin (terminal is in raw mode). The `ctrlc` handler also fires and
+/// sets the `interrupted` flag, which the pump escalates via
+/// `interrupt_pty_process`. On POSIX this sends SIGINT to the child's
+/// pgroup and waits up to 2s for exit — this is what lets `clud --pty`
+/// act as a clean kill on Ctrl-C for arbitrary children. On Windows the
+/// escalation closes the PTY directly (no extra 0x03 write), because
+/// the underlying `send_interrupt_impl` duplicates the byte that stdin
+/// already forwarded and makes Ink-based TUIs see a single press as
+/// "Ctrl-C twice = exit".
 pub fn run_raw_pty_pump<H, R>(
     process: &NativePtyProcess,
     interrupted: &AtomicBool,
@@ -358,7 +369,20 @@ fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
     process.wait_impl(Some(1.0)).unwrap_or(1)
 }
 
+/// Escalate the `interrupted` flag to a real child-kill. Called once the
+/// pump has observed the flag. Platform-split because `send_interrupt_impl`
+/// is a byte-write on Windows (duplicates the 0x03 already forwarded via
+/// raw-mode stdin) and a pgroup-SIGINT on POSIX (cooperative, no duplicate).
 fn interrupt_pty_process(process: &NativePtyProcess) -> i32 {
+    #[cfg(windows)]
+    {
+        // Closing the PTY triggers ConPTY's CTRL_CLOSE_EVENT path and
+        // tears the child down without writing a second 0x03 byte.
+        let _ = process.close_impl();
+        eprintln!("[clud] interrupted via Ctrl+C (pty)");
+        130
+    }
+    #[cfg(not(windows))]
     match process.send_interrupt_impl() {
         Ok(()) => match process.wait_impl(Some(2.0)) {
             Ok(code) => {
