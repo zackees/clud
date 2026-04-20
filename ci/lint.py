@@ -15,6 +15,13 @@ def run(cmd: list[str]) -> int:
     return subprocess.run(cmd, cwd=ROOT, env=clean_env()).returncode
 
 
+def _cargo(subcommand: list[str]) -> list[str]:
+    """Return the cargo argv, preferring `soldr cargo` on Windows (issue #27)."""
+    from ci.env import cargo_argv, clean_env
+
+    return cargo_argv(subcommand, env=clean_env())
+
+
 def main() -> int:
     from ci.env import activate
 
@@ -24,9 +31,9 @@ def main() -> int:
 
     if check_banned_imports() != 0:
         return 1
-    if run(["cargo", "fmt", "--all", "--check"]) != 0:
+    if run(_cargo(["fmt", "--all", "--check"])) != 0:
         return 1
-    if run(["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]) != 0:
+    if run(_cargo(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])) != 0:
         return 1
     if run([sys.executable, "-m", "ruff", "check", "src", "tests", "ci"]) != 0:
         return 1

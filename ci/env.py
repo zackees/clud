@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import tomllib
@@ -235,3 +236,50 @@ def clean_env() -> dict[str, str]:
 
 def build_env() -> dict[str, str]:
     return clean_env()
+
+
+def soldr_path(env: dict[str, str] | None = None) -> str | None:
+    """Return the path to the soldr binary, or None if not available.
+
+    soldr (https://github.com/zackees/soldr) is pulled in as a dev dependency
+    and proxies cargo/rustc/maturin invocations through the rustup-managed
+    toolchain (via `rustup which`). On Windows, developer machines that have
+    a chocolatey-installed GNU-host cargo first on PATH produce binaries
+    that link MinGW runtime DLLs (libstdc++-6.dll etc.), which fail to load
+    on stock Windows. CI runners today happen to have the MSVC rustup
+    toolchain first on PATH, but that's luck — this helper pins the
+    behavior by making every cargo/maturin CI call go through soldr.
+    """
+    path = None if env is None else env.get("PATH")
+    return shutil.which("soldr", path=path)
+
+
+def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
+    """Return the cargo argv, preferring `soldr cargo` on Windows.
+
+    Issue #27: see `soldr_path` for the rationale. On non-Windows platforms,
+    or when soldr isn't installed (local dev without the dev deps), fall
+    back to bare `cargo`, matching `tests/integration/conftest.py::_cargo_argv`.
+    """
+    if platform.system() == "Windows":
+        soldr = soldr_path(env)
+        if soldr:
+            return [soldr, "cargo", *subcommand]
+    return ["cargo", *subcommand]
+
+
+def maturin_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
+    """Return the maturin argv, preferring `soldr maturin` on Windows.
+
+    Mirrors `cargo_argv` — see issue #27. maturin invokes cargo under the
+    hood, so the same MSVC-pinning concern applies. soldr passes the
+    subcommand through to maturin via `rustup which maturin`, which
+    resolves to the dev-venv install.
+    """
+    if platform.system() == "Windows":
+        soldr = soldr_path(env)
+        if soldr:
+            return [soldr, "maturin", *subcommand]
+    # Fall back to `python -m maturin` so the dev-venv install is used
+    # on non-Windows platforms regardless of PATH state.
+    return [sys.executable, "-m", "maturin", *subcommand]

@@ -48,6 +48,10 @@ jobs:
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11 -v
 
+      - name: Verify soldr is installed (Windows, issue #27)
+        if: ${{ runner.os == 'Windows' }}
+        run: uv run soldr --version
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Dev build

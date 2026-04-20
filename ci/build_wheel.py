@@ -18,11 +18,10 @@ DIST = ROOT / "dist"
 BuildMode = Literal["dev", "release"]
 
 
-def build_command(mode: BuildMode) -> list[str]:
-    cmd = [
-        sys.executable,
-        "-m",
-        "maturin",
+def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[str]:
+    from ci.env import maturin_argv
+
+    subcommand = [
         "build",
         "--interpreter",
         sys.executable,
@@ -30,14 +29,17 @@ def build_command(mode: BuildMode) -> list[str]:
         str(DIST),
     ]
     if mode == "dev":
-        cmd.extend(["--profile", "dev"])
+        subcommand.extend(["--profile", "dev"])
     else:
-        cmd.append("--release")
+        subcommand.append("--release")
         if platform.system() == "Linux":
-            cmd.extend(["--zig", "--compatibility", "manylinux2014"])
+            subcommand.extend(["--zig", "--compatibility", "manylinux2014"])
         else:
-            cmd.extend(["--compatibility", "pypi"])
-    return cmd
+            subcommand.extend(["--compatibility", "pypi"])
+    # Route maturin through `soldr maturin ...` on Windows (issue #27) so the
+    # underlying cargo invocation uses the MSVC rustup toolchain, not whatever
+    # GNU-host cargo happens to be first on PATH.
+    return maturin_argv(subcommand, env=env)
 
 
 def built_wheels() -> list[Path]:
@@ -82,7 +84,7 @@ def run_build(mode: BuildMode) -> int:
     env = build_env()
     DIST.mkdir(parents=True, exist_ok=True)
     before = {path.name for path in built_wheels()}
-    cmd = build_command(mode)
+    cmd = build_command(mode, env=env)
     print(f"build mode: {mode}", file=sys.stderr, flush=True)
     result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
     if result.returncode != 0:

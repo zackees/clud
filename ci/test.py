@@ -23,6 +23,13 @@ def run(cmd: list[str]) -> int:
     return subprocess.run(cmd, cwd=ROOT, env=clean_env()).returncode
 
 
+def _cargo(subcommand: list[str]) -> list[str]:
+    """Return the cargo argv, preferring `soldr cargo` on Windows (issue #27)."""
+    from ci.env import cargo_argv, clean_env
+
+    return cargo_argv(subcommand, env=clean_env())
+
+
 def main(argv: list[str] | None = None) -> int:
     from ci.env import activate
 
@@ -33,9 +40,9 @@ def main(argv: list[str] | None = None) -> int:
     pytest_args = [a for a in argv if a not in ("--integration", "--full")]
 
     # Rust tests
-    if run(["cargo", "test", "--workspace", "--no-run"]) != 0:
+    if run(_cargo(["test", "--workspace", "--no-run"])) != 0:
         return 1
-    cargo_test = ["cargo", "test", "--workspace"]
+    cargo_test = _cargo(["test", "--workspace"])
     if sys.platform == "win32":
         cargo_test += ["--", "--test-threads=1"]
     if run(cargo_test) != 0:

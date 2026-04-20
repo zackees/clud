@@ -180,3 +180,34 @@ def test_loop_dry_run_includes_loop_markers(
     assert data["loop_markers"] is not None
     # git-root-from walks up; without .git anywhere, it returns the cwd.
     assert str(tmp_path).replace("\\", "/") in data["loop_markers"].replace("\\", "/")
+
+
+def test_codex_loop_stops_on_done_marker(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+) -> None:
+    """Codex loop honors the DONE marker contract just like claude."""
+    loop_dir = _marker_dir(tmp_path)
+    done = loop_dir / "DONE"
+
+    result = _run(
+        clud_binary,
+        "--codex",
+        "loop",
+        "--loop-count",
+        "10",
+        "resolve the task",
+        "--",
+        "--mock-write-done",
+        str(done),
+        "--mock-write-done-body",
+        "codex task resolved",
+        "--mock-write-marker-on-iter",
+        "2",
+        env=mock_env,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert "iteration 2" in result.stderr
+    assert "DONE" in result.stderr
+    assert done.is_file()
+    assert done.read_text().strip() == "codex task resolved"
