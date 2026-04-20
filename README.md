@@ -73,6 +73,14 @@ Unknown flags are forwarded directly to the backend agent.
 `clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
 to opt back into PTY while Claude PTY issues are being investigated.
 
+## Codex Support
+
+![codex-supported](https://github.com/user-attachments/assets/de1e23b4-4513-4c92-ba57-3d9dcd1060b6)
+
+The Rust version of `clud` supports Codex directly. Use `--codex` to switch
+backends for interactive runs, prompt-driven execution, resume flows, and
+detachable sessions.
+
 ## Detached Sessions
 
 Use daemon-managed sessions when you want to disconnect and reattach later.
@@ -215,6 +223,8 @@ bash lint                   # Lint (cargo fmt + clippy + ruff + banned imports)
 bash test                   # Unit tests (Rust + Python)
 bash test --integration     # Include integration tests with mock agents
 ```
+
+<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
 
 ## License
 
