@@ -230,12 +230,14 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
     cmd.extend(args.passthrough.iter().cloned());
 
     let is_loop = loop_markers.is_some();
+    let parent_has_tty = crate::session::terminals_are_interactive();
     let launch_mode = crate::backend::resolve_launch_mode(
         args.pty,
         args.subprocess,
         backend,
         codex_uses_exec,
         is_loop,
+        parent_has_tty,
     );
 
     LaunchPlan {
@@ -501,9 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_interactive_defaults_to_pty() {
-        // `clud --codex` with no prompt launches the TUI; it needs a
-        // pseudo-console to receive keyboard input reliably.
+    fn test_codex_interactive_defaults_to_pty_without_tty() {
+        // Under `cargo test` there is no controlling terminal, so
+        // `parent_has_tty` is false and the interactive TUI gets a PTY.
+        // With a real TTY (normal user invocation), codex runs as a
+        // subprocess that inherits the terminal directly — see
+        // `backend::test_codex_interactive_with_tty_uses_subprocess`.
         let p = plan(&["clud", "--codex"]);
         assert_eq!(
             p.command,

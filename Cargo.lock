@@ -274,6 +274,7 @@ dependencies = [
  "running-process-core",
  "serde",
  "serde_json",
+ "signal-hook",
  "sysinfo 0.37.2",
  "tempfile",
  "terminal_size",

@@ -1,13 +1,4 @@
-mod args;
-mod backend;
-mod capture;
-mod command;
-mod daemon;
-mod loop_spec;
-mod session;
-mod trampoline;
-mod voice;
-mod wasm;
+use clud::{args, backend, command, daemon, loop_spec, session, trampoline, voice, wasm};
 
 use std::io::{self, Read};
 use std::sync::{
@@ -296,12 +287,10 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
             return 1;
         }
 
-        let exit_code = if session::terminals_are_interactive() {
-            let mut hooks = voice::VoiceMode::from_env();
-            session::run_interactive_pty_session(&process, interrupted, &mut hooks)
-        } else {
-            session::run_pty_output_loop(&process, interrupted)
-        };
+        let mut hooks = voice::VoiceMode::from_env();
+        let _raw_guard = session::enter_raw_mode_if_tty();
+        let exit_code = session::run_raw_pty_pump(&process, interrupted, &mut hooks, io::stdin());
+        drop(_raw_guard);
         last_exit = normalize_exit_code(exit_code);
 
         if last_exit != 0 && plan.iterations > 1 {

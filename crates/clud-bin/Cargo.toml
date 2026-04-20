@@ -26,12 +26,17 @@ which = "7"
 [dev-dependencies]
 tempfile = "3"
 
+[lib]
+name = "clud"
+path = "src/lib.rs"
+
 [[test]]
 name = "pty_behavior"
 path = "tests/pty_behavior.rs"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+signal-hook = "0.3"
 
 [target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
 cpal = "0.16"
