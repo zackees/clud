@@ -316,15 +316,15 @@ where
             }
         }
 
-        // Drain anything the stdin thread has for us. `try_recv` is
-        // non-blocking so the main loop stays responsive to child exit
-        // and ctrlc.
-        while let Ok(chunk) = stdin_rx.try_recv() {
+        // Drain one chunk of stdin per iteration — draining unbounded
+        // can wedge shutdown: `write_impl` shares a lock with
+        // `poll_pty_process` and blocks on a full PTY input buffer, so
+        // a large pending stdin backlog stops us from noticing that the
+        // child has exited. One chunk per loop keeps the cadence even.
+        if let Ok(chunk) = stdin_rx.try_recv() {
             if let Err(err) = process.write_impl(&chunk, false) {
                 eprintln!("[clud] warning: failed to forward stdin to pty: {}", err);
-                break;
-            }
-            if hooks.intercept_f3() {
+            } else if hooks.intercept_f3() {
                 let presses = observer.observe(&chunk);
                 for _ in 0..presses {
                     if let Err(err) = hooks.on_f3_press(process) {

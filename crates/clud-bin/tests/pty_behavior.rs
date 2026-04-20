@@ -706,10 +706,13 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
     process.start_impl().expect("start");
     std::thread::sleep(Duration::from_millis(150));
 
-    // Three F3 presses embedded in surrounding text. With intercept enabled,
-    // the hook should fire 3 times; without, it would fire zero even though
-    // bytes still flow.
-    let payload: &[u8] = b"a\x1bORb\x1bORc\x1bORd";
+    // Three F3 presses embedded in surrounding text. Trailing `\n` is
+    // important: the PTY slave defaults to canonical (line) mode, so the
+    // kernel holds input until it sees a newline. Without it, the
+    // mock-agent's `stdin.read()` never returns and we'd assert on an
+    // empty file. Real usage isn't affected — child TUIs like codex put
+    // their own slave into raw mode before reading.
+    let payload: &[u8] = b"a\x1bORb\x1bORc\x1bORd\n";
     let interrupted = AtomicBool::new(false);
     let hooks = CountingHooks::new(true); // intercept_f3 == true
     let presses = std::sync::Arc::clone(&hooks.f3_presses);
