@@ -39,7 +39,15 @@ def main(argv: list[str] | None = None) -> int:
     run_integration = "--integration" in argv or "--full" in argv
     pytest_args = [a for a in argv if a not in ("--integration", "--full")]
 
-    # Rust tests
+    # Rust tests. The pty_behavior integration tests need the `mock-agent`
+    # binary on disk at `target/.../debug/mock-agent`, but `cargo test --no-run`
+    # only compiles test binaries, not workspace bins. Without an explicit
+    # pre-build the test falls back to a self-issued `cargo build -p mock-agent`
+    # whose `--message-format json` parsing has been seen to flake under
+    # sccache (issue: macos-x86 unit-test job, run 24694769083). Build the
+    # bin up front so the test path that needs it always finds it.
+    if run(_cargo(["build", "-p", "mock-agent"])) != 0:
+        return 1
     if run(_cargo(["test", "--workspace", "--no-run"])) != 0:
         return 1
     cargo_test = _cargo(["test", "--workspace"])
