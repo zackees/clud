@@ -746,8 +746,12 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
 /// Voice mode drains a background transcription worker through this hook;
 /// gating it behind stdin activity would leave transcripts stuck whenever
 /// the user stops typing. Here: an empty stdin source, a 400ms child.
-/// Expect at least ~20 ticks (loop cadence is bounded by the 10ms
-/// `read_chunk_impl` timeout).
+/// Threshold is intentionally loose — the 10ms `read_chunk_impl`
+/// timeout is a lower bound, but CI scheduler granularity (and an
+/// occasional stall waiting for the child to finish start-up I/O)
+/// can stretch each iteration to 60–100ms. We just need to prove
+/// the tick isn't gated on stdin, not measure loop cadence. Anything
+/// above zero would do; 3 gives headroom for truly slow runners.
 #[test]
 fn raw_pump_calls_on_tick_during_idle() {
     require_pty_or_skip!("raw_pump_calls_on_tick_during_idle");
@@ -789,8 +793,8 @@ fn raw_pump_calls_on_tick_during_idle() {
 
     let tick_count = ticks.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        tick_count >= 10,
-        "expected >=10 ticks during 400ms idle child, got {}",
+        tick_count >= 3,
+        "expected >=3 ticks during 400ms idle child, got {}",
         tick_count
     );
 }
