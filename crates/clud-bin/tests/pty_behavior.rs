@@ -799,32 +799,27 @@ fn raw_pump_calls_on_tick_during_idle() {
     );
 }
 
-/// Flipping the shared `interrupted` flag while the pump is running must
-/// NOT cause the pump to kill the child. Codex (and other TUIs) handle
-/// Ctrl-C themselves as "cancel current turn"; the pump's job is to
-/// forward the byte, not to yank the process out from under the user.
-///
-/// Previously the pump called `interrupt_pty_process` on any observed
-/// flag, which races with the 0x03 byte we already forward via raw stdin
-/// and manifested to users as "Ctrl-C kills codex instead of cancelling".
-/// See zackees/clud fix/codex-pty-backspace-ctrlc.
-///
-/// Contract: on flag flip, the pump keeps running and lets the child
-/// finish on its own terms. We verify this by using a child that runs
-/// for a known duration and asserting the pump doesn't short-circuit.
+/// Flipping the shared `interrupted` flag while the pump is running with
+/// a long-lived child must cause the pump to return within a couple of
+/// seconds. On POSIX this is `send_interrupt_impl` sending SIGINT to
+/// the child's pgroup; on Windows it's `close_impl` tearing the PTY
+/// down (the Windows `send_interrupt_impl` is intentionally skipped to
+/// avoid duplicating the 0x03 byte that stdin already forwarded — see
+/// `interrupt_pty_process` for the rationale).
 #[test]
-fn raw_pump_does_not_kill_child_on_ctrlc_flag() {
-    require_pty_or_skip!("raw_pump_does_not_kill_child_on_ctrlc_flag");
+fn raw_pump_honors_ctrlc_flag() {
+    require_pty_or_skip!("raw_pump_honors_ctrlc_flag");
 
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
     let raw_stdin = tmp.path().join("stdin_raw.bin");
 
-    // Child reads stdin for 600ms then exits on its own.
+    // Long-lived: 5 seconds of blocking stdin read — gives us headroom to
+    // observe the interrupt without racing against child exit.
     let argv = vec![
         agent.to_string_lossy().to_string(),
         "--mock-read-stdin-ms".to_string(),
-        "600".to_string(),
+        "5000".to_string(),
         "--mock-stdin-raw-to".to_string(),
         raw_stdin.to_string_lossy().to_string(),
     ];
@@ -837,13 +832,10 @@ fn raw_pump_does_not_kill_child_on_ctrlc_flag() {
     let interrupted = std::sync::Arc::new(AtomicBool::new(false));
     let mut hooks = CountingHooks::new(false);
 
-    // Trip the flag 100ms after the pump starts. If the pump kills the
-    // child on flag flip, `_exit` returns almost immediately (well under
-    // 400ms). If the pump forwards the byte and lets the child run, it
-    // returns only after the child's ~600ms read window elapses.
+    // Trip the flag 200ms after the pump starts running.
     let flag = std::sync::Arc::clone(&interrupted);
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(200));
         flag.store(true, std::sync::atomic::Ordering::SeqCst);
     });
 
@@ -859,8 +851,8 @@ fn raw_pump_does_not_kill_child_on_ctrlc_flag() {
     let _ = process.close_impl();
 
     assert!(
-        elapsed >= Duration::from_millis(400),
-        "pump must NOT kill child on ctrlc flag — codex handles 0x03 itself. elapsed={:?}",
+        elapsed < Duration::from_millis(2500),
+        "pump must return within 2.5s of ctrlc flag flip, took {:?}",
         elapsed
     );
 }
