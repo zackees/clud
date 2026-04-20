@@ -924,13 +924,25 @@ fn raw_pump_applies_resize_from_channel() {
     let _ = process.close_impl();
 }
 
-/// When the child exits, the pump must return promptly — it can't wedge
-/// waiting on a blocked `stdin().read()` in the reader thread. Detached
-/// threads guarantee this: the main loop observes child exit via
-/// `poll_pty_process` and returns regardless of reader state.
+/// When the child exits, the pump must return promptly even if the
+/// stdin reader thread is blocked in `read()`. Real `io::stdin()` blocks
+/// waiting for the next keystroke — never returning EOF. We simulate
+/// that with a `Read` impl that parks forever. The detached reader
+/// thread is fine to leave blocked; the main loop's `poll_pty_process`
+/// is what drives shutdown.
 #[test]
 fn raw_pump_exits_promptly_when_child_exits() {
     require_pty_or_skip!("raw_pump_exits_promptly_when_child_exits");
+
+    struct BlockingReader;
+    impl std::io::Read for BlockingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            // Mimics `io::stdin()` with no pending input: block indefinitely.
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+    }
 
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -949,17 +961,11 @@ fn raw_pump_exits_promptly_when_child_exits() {
     process.set_echo(false);
     process.start_impl().expect("start");
 
-    // Supply a very long stdin source so the reader thread stays blocked
-    // in `read()` even after the child exits. This simulates a real user
-    // session where stdin is a terminal that never EOFs.
-    let huge = vec![b' '; 16 * 1024 * 1024];
-    let stdin_src = std::io::Cursor::new(huge);
-
     let interrupted = AtomicBool::new(false);
     let mut hooks = CountingHooks::new(false);
 
     let start = Instant::now();
-    let _exit = clud::session::run_raw_pty_pump(&process, &interrupted, &mut hooks, stdin_src);
+    let _exit = clud::session::run_raw_pty_pump(&process, &interrupted, &mut hooks, BlockingReader);
     let elapsed = start.elapsed();
 
     let _ = process.close_impl();
