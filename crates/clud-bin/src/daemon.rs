@@ -596,9 +596,14 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
             let state_dir = state_dir(args);
             let sessions = list_attachable_sessions(&state_dir);
             if sessions.is_empty() {
-                println!("No active sessions.");
-                println!("Start one with: clud --detach -p <prompt>");
-                Some(0)
+                // Issue #24: `clud attach` with no sessions used to print a
+                // bare "No active sessions." to stdout with exit 0, which
+                // made it look like success. Route the message through
+                // stderr with the `[clud]` prefix used elsewhere, point the
+                // user at the fix, and exit non-zero so scripts notice.
+                eprintln!("[clud] no active sessions");
+                eprintln!("[clud] start one with: clud --detach -p \"your prompt\"");
+                Some(1)
             } else if sessions.len() == 1 {
                 eprintln!("[clud] auto-attaching to only session: {}", sessions[0].id);
                 Some(run_attach(&sessions[0].id, &state_dir, interrupted))
@@ -673,8 +678,14 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
     match response {
         DaemonResponse::Created { session } => {
             if args.detach {
-                eprintln!("[clud] session {} running in background", session.id);
+                // Issue #24: make the detach handoff action-oriented so the
+                // user immediately knows the backend started AND how to get
+                // back to it. Followup lines surface the three commands
+                // they're most likely to want next (attach / list / logs).
+                eprintln!("[clud] session {} started in background", session.id);
                 eprintln!("[clud] attach with: clud attach {}", session.id);
+                eprintln!("[clud] list sessions: clud list");
+                eprintln!("[clud] view logs:     clud logs {}", session.id);
                 return 0;
             }
             eprintln!("[clud] daemon session {}", session.id);

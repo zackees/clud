@@ -45,9 +45,16 @@ def _extract_session_id(line: str) -> str | None:
     # "[clud] daemon session sess-XXX"
     if "daemon session" in line:
         return line.strip().rsplit(" ", 1)[-1]
-    # "[clud] session sess-XXX running in background"
-    if "session" in line and "running in background" in line:
-        return line.strip().split("session ", 1)[-1].split(" running")[0]
+    # Issue #24: `--detach` handoff changed from "running in background" to
+    # "started in background" for a more action-oriented message. Accept
+    # both so this helper is robust across wording tweaks.
+    if "session" in line and (
+        "started in background" in line or "running in background" in line
+    ):
+        marker = "started" if "started in background" in line else "running"
+        return (
+            line.strip().split("session ", 1)[-1].split(f" {marker}")[0]
+        )
     return None
 
 
@@ -744,21 +751,88 @@ class TestDaemonSessionHardening:
         )
         try:
             assert _wait_for_exit(proc, timeout=2) == 0
-            # `_read_session_id` already consumed the "session ... running
-            # in background" line. The "attach with: clud attach <id>" line
-            # follows it, terminated by \n. `readline()` reads until \n so
-            # it returns promptly even though the pipe's writer-end is
-            # still held open by the detached daemon grandchild (#37). A
-            # naive `.read()` would wait forever for EOF.
+            # `_read_session_id` already consumed the "session ... started
+            # in background" line. The follow-up hint lines (attach / list
+            # / logs) are each terminated by \n, and the detached daemon
+            # grandchild (#37) still holds the pipe writer open, so we
+            # have to use `readline()` rather than `read()` to avoid a
+            # hang waiting for EOF.
             assert proc.stderr is not None
-            hint_line = proc.stderr.readline()
-            assert "attach with: clud attach" in hint_line, f"got: {hint_line!r}"
+            hint_lines: list[str] = []
+            for _ in range(3):
+                hint_lines.append(proc.stderr.readline())
+            combined = "".join(hint_lines)
+            assert (
+                f"attach with: clud attach {session_id}" in combined
+            ), f"got: {combined!r}"
+            assert "list sessions: clud list" in combined, (
+                f"got: {combined!r}"
+            )
+            assert f"view logs:     clud logs {session_id}" in combined, (
+                f"got: {combined!r}"
+            )
         finally:
             _kill_daemon_for_session(state_dir, session_id)
+
+    def test_detach_banner_says_started_in_background(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # Issue #24: the first detach line is the user's primary signal
+        # that the backend really launched. Assert the action-oriented
+        # wording ("started in background") and the `[clud]` prefix.
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "--detach",
+                "--codex",
+                "-p",
+                "banner-test",
+                "--",
+                "--mock-sleep-ms",
+                "2000",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            assert proc.stderr is not None
+            first_line = proc.stderr.readline()
+            assert "[clud] session " in first_line, f"got: {first_line!r}"
+            assert "started in background" in first_line, (
+                f"got: {first_line!r}"
+            )
+            assert _wait_for_exit(proc, timeout=5) == 0
+            session_id = _extract_session_id(first_line)
+            assert session_id is not None, (
+                f"could not parse session id from: {first_line!r}"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            try:
+                sid = _extract_session_id(first_line)
+            except Exception:
+                sid = None
+            if sid:
+                try:
+                    _kill_daemon_for_session(state_dir, sid)
+                except Exception:
+                    pass
 
     def test_attach_no_sessions_shows_helpful_message(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
+        # Issue #24: `clud attach` with no active sessions should route the
+        # message through stderr (stdout is reserved for real session output
+        # and machine-readable listings), use the `[clud]` prefix that the
+        # rest of the CLI uses, point the user at the concrete recovery
+        # command, and exit non-zero so shell pipelines don't silently
+        # proceed as if an attach succeeded.
         state_dir = tmp_path / "daemon-state"
         env = _managed_env(mock_env, state_dir)
         result = subprocess.run(
@@ -768,8 +842,11 @@ class TestDaemonSessionHardening:
             timeout=10,
             env=env,
         )
-        assert result.returncode == 0
-        assert "No active sessions" in result.stdout
+        assert result.returncode == 1
+        assert "[clud] no active sessions" in result.stderr
+        assert 'clud --detach -p "your prompt"' in result.stderr
+        # Nothing should leak to stdout for the empty case.
+        assert result.stdout == ""
 
     def test_attach_auto_attaches_single_session(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
