@@ -34,7 +34,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use running_process_core::pty::NativePtyProcess;
-use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use running_process_core::{
+    CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
+};
 use serde_json::Value;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -95,8 +97,8 @@ fn mock_agent_path() -> PathBuf {
         return path.clone();
     }
 
-    // Fall back: invoke cargo to build mock-agent. Goes through NativeProcess
-    // per the workspace ban on `std::process::Command` (ci/banned_imports.py).
+    // Fall back: ask Cargo to build `mock-agent` and report the exact
+    // executable path it produced, instead of guessing target-dir layouts.
     let cargo_exe: String = std::env::var_os("CARGO")
         .map(|v| v.to_string_lossy().into_owned())
         .unwrap_or_else(|| "cargo".into());
@@ -106,27 +108,41 @@ fn mock_agent_path() -> PathBuf {
             "build".into(),
             "-p".into(),
             "mock-agent".into(),
+            "--message-format".into(),
+            "json".into(),
         ]),
         cwd: None,
         env: None,
-        capture: false,
+        capture: true,
         stderr_mode: StderrMode::Stdout,
         creationflags: None,
         create_process_group: false,
-        stdin_mode: StdinMode::Inherit,
+        stdin_mode: StdinMode::Null,
         nice: None,
         containment: None,
     };
     let process = NativeProcess::new(config);
     process.start().expect("spawn cargo build -p mock-agent");
+    let mut output = String::new();
     let code = loop {
+        match process.read_combined(Some(Duration::from_millis(50))) {
+            ReadStatus::Line(event) => {
+                output.push_str(&String::from_utf8_lossy(&event.line));
+                output.push('\n');
+            }
+            ReadStatus::Timeout | ReadStatus::Eof => {}
+        }
         match process.poll() {
             Ok(Some(code)) => break code,
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {}
             Err(err) => panic!("cargo build -p mock-agent poll failed: {}", err),
         }
     };
     assert_eq!(code, 0, "cargo build -p mock-agent exited with {}", code);
+
+    if let Some(path) = cargo_built_executable_path(&output) {
+        return path;
+    }
 
     candidates
         .iter()
@@ -134,6 +150,46 @@ fn mock_agent_path() -> PathBuf {
         .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         .cloned()
         .expect("mock-agent binary not found after build")
+}
+
+fn cargo_built_executable_path(output: &str) -> Option<PathBuf> {
+    output.lines().find_map(|line| {
+        let value: Value = serde_json::from_str(line).ok()?;
+        let reason = value.get("reason")?.as_str()?;
+        if reason != "compiler-artifact" {
+            return None;
+        }
+        let target = value.get("target")?;
+        let name = target.get("name")?.as_str()?;
+        let kind = target.get("kind")?.as_array()?;
+        let is_bin = kind.iter().any(|entry| entry.as_str() == Some("bin"));
+        if name != "mock-agent" || !is_bin {
+            return None;
+        }
+        value
+            .get("executable")
+            .and_then(|entry| entry.as_str())
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+    })
+}
+
+#[test]
+fn cargo_build_output_reports_mock_agent_executable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let exe = tmp.path().join(if cfg!(windows) {
+        "mock-agent.exe"
+    } else {
+        "mock-agent"
+    });
+    std::fs::write(&exe, b"binary").expect("write mock binary");
+
+    let output = format!(
+        "{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"mock-agent\",\"kind\":[\"bin\"]}},\"executable\":{}}}\n",
+        serde_json::to_string(&exe.to_string_lossy().to_string()).expect("json string")
+    );
+
+    assert_eq!(cargo_built_executable_path(&output), Some(exe));
 }
 
 /// Wait up to `timeout` for `f` to return `true`, sleeping 50ms between polls.
