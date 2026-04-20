@@ -59,13 +59,21 @@ jobs:
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11 -v
 
+      - name: Verify soldr is installed (Windows, issue #27)
+        if: ${{ runner.os == 'Windows' }}
+        run: uv run soldr --version
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build wheel (${{ inputs.build-mode || 'dev' }})
         run: uv run --no-editable -m ci.build_wheel --${{ inputs.build-mode || 'dev' }}
 
+      - name: Build sdist (Windows, via soldr)
+        if: ${{ inputs.include-sdist && runner.os == 'Windows' }}
+        run: uv run soldr maturin sdist --out dist
+
       - name: Build sdist
-        if: ${{ inputs.include-sdist }}
+        if: ${{ inputs.include-sdist && runner.os != 'Windows' }}
         run: uv run maturin sdist --out dist
 
       - name: Verify Windows wheel has no MinGW runtime imports

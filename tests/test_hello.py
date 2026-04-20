@@ -10,11 +10,29 @@ import tempfile
 from pathlib import Path
 
 
+def _cargo_argv(subcommand: list[str]) -> list[str]:
+    """Return the cargo argv, preferring `soldr cargo` on Windows (issue #27).
+
+    Windows rustc installations from chocolatey ship a GNU-host rustc which
+    links C/C++ deps against MinGW runtime DLLs (libstdc++-6.dll,
+    libgcc_s_seh-1.dll, libwinpthread-1.dll). Those DLLs aren't on stock
+    Windows, so a test that launches the resulting binary fails with
+    STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139). `soldr cargo ...` forces the
+    MSVC target via the rustup-managed toolchain. Mirrors
+    `tests/integration/conftest.py::_cargo_argv`.
+    """
+    if sys.platform == "win32":
+        soldr = shutil.which("soldr")
+        if soldr:
+            return [soldr, "cargo", *subcommand]
+    return ["cargo", *subcommand]
+
+
 def _clud_binary() -> str:
     """Build the current repo's clud binary and return its path."""
     root = Path(__file__).resolve().parent.parent
     result = subprocess.run(
-        ["cargo", "build", "-p", "clud", "--message-format=json"],
+        _cargo_argv(["build", "-p", "clud", "--message-format=json"]),
         cwd=root,
         capture_output=True,
         text=True,
@@ -33,9 +51,15 @@ def _clud_binary() -> str:
             return msg["executable"]
 
     ext = ".exe" if sys.platform == "win32" else ""
-    fallback = root / "target" / "debug" / f"clud{ext}"
-    if fallback.is_file():
-        return str(fallback)
+    # soldr / `--target x86_64-pc-windows-msvc` lands artifacts in a
+    # triple-qualified subdir; bare cargo lands in target/debug. Check both.
+    for fallback in (
+        root / "target" / "x86_64-pc-windows-msvc" / "debug" / f"clud{ext}",
+        root / "target" / "aarch64-pc-windows-msvc" / "debug" / f"clud{ext}",
+        root / "target" / "debug" / f"clud{ext}",
+    ):
+        if fallback.is_file():
+            return str(fallback)
     raise RuntimeError("clud binary not found after build")
 
 
