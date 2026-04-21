@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -27,7 +27,6 @@ const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
 const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 const ENV_BACKLOG_BYTES: &str = "CLUD_BACKLOG_BYTES";
 const DEFAULT_BACKLOG_LIMIT_BYTES: usize = 256 * 1024;
-const STALE_CLIENT_GRACE: Duration = Duration::from_secs(1);
 const BACKGROUND_PROMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,24 +368,18 @@ impl WorkerShared {
         // First, try to evict any dead client before checking occupancy.
         self.evict_dead_client();
         let mut guard = self.client.lock().expect("client mutex poisoned");
-        if guard
-            .as_ref()
-            .is_some_and(|client| client.attached_at.elapsed() < STALE_CLIENT_GRACE)
-        {
+        if guard.is_some() {
             return Err("session already has an attached client".to_string());
         }
         let (tx, rx) = mpsc::channel();
         let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
-        let previous = guard.replace(AttachedClient {
+        guard.replace(AttachedClient {
             id: client_id,
             sender: tx,
             shutdown,
             attached_at: Instant::now(),
         });
         drop(guard);
-        if let Some(previous) = previous {
-            let _ = previous.shutdown.shutdown(Shutdown::Both);
-        }
         self.set_background(false);
         let snapshot = self.snapshot();
         // For PTY sessions with terminal capture, emit a single synthesized
@@ -1017,7 +1010,7 @@ fn prompt_continue_in_background(interrupted: &AtomicBool) -> BackgroundPromptDe
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
         prompt_continue_in_background_terminal(interrupted)
     } else {
-        prompt_continue_in_background_stream(interrupted)
+        prompt_continue_in_background_noninteractive()
     }
 }
 
@@ -1076,44 +1069,9 @@ fn prompt_continue_in_background_terminal(interrupted: &AtomicBool) -> Backgroun
     }
 }
 
-fn prompt_continue_in_background_stream(interrupted: &AtomicBool) -> BackgroundPromptDecision {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut stdin = io::stdin();
-        let mut buf = [0u8; 1];
-        if stdin.read(&mut buf).ok().is_some_and(|read| read > 0) {
-            let _ = tx.send(buf[0]);
-        }
-    });
-
-    let started = Instant::now();
-    let mut displayed_remaining = u64::MAX;
-    loop {
-        let remaining = BACKGROUND_PROMPT_TIMEOUT
-            .as_secs()
-            .saturating_sub(started.elapsed().as_secs());
-        if remaining != displayed_remaining {
-            displayed_remaining = remaining;
-            render_background_prompt(remaining);
-        }
-        if remaining == 0 {
-            return BackgroundPromptDecision::ContinueInBackground;
-        }
-        if interrupted.swap(false, Ordering::SeqCst) {
-            return BackgroundPromptDecision::EndSession;
-        }
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(b'y') | Ok(b'Y') | Ok(b'\r') | Ok(b'\n') => {
-                return BackgroundPromptDecision::ContinueInBackground
-            }
-            Ok(b'n') | Ok(b'N') => return BackgroundPromptDecision::EndSession,
-            Ok(_) => return BackgroundPromptDecision::ContinueInBackground,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return BackgroundPromptDecision::ContinueInBackground
-            }
-        }
-    }
+fn prompt_continue_in_background_noninteractive() -> BackgroundPromptDecision {
+    eprintln!("[clud] non-interactive attach interrupted; session continues in the background");
+    BackgroundPromptDecision::ContinueInBackground
 }
 
 fn render_background_prompt(remaining: u64) {
@@ -1340,8 +1298,26 @@ fn daemon_create_session(
     workers
         .lock()
         .expect("workers mutex poisoned")
-        .insert(session_id.clone(), worker);
+        .insert(session_id.clone(), Arc::clone(&worker));
+    reap_worker_when_done(Arc::clone(workers), session_id.clone(), worker);
     Ok(snapshot)
+}
+
+fn reap_worker_when_done(
+    workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    session_id: String,
+    worker: Arc<NativeProcess>,
+) {
+    thread::spawn(move || {
+        let _ = worker.wait(None);
+        let mut guard = workers.lock().expect("workers mutex poisoned");
+        if guard
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &worker))
+        {
+            guard.remove(&session_id);
+        }
+    });
 }
 
 fn daemon_terminate_session(
@@ -2554,6 +2530,42 @@ mod capture_integration_tests {
         let c = p.screen().contents();
         assert!(c.contains("BEFORE"), "pre-detach content missing: {:?}", c);
         assert!(c.contains("AFTER"), "post-detach content missing: {:?}", c);
+    }
+
+    #[test]
+    fn live_attached_client_blocks_second_attach() {
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Subprocess);
+
+        let (_client1, server1) = loopback_pair();
+        let (_cid1, _, _, _) = shared.attach_client(server1).expect("first attach");
+        thread::sleep(Duration::from_millis(1050));
+
+        let (_client2, server2) = loopback_pair();
+        let err = shared.attach_client(server2).expect_err("second attach");
+        assert_eq!(err, "session already has an attached client");
+    }
+
+    #[test]
+    fn dead_attached_client_is_evicted_on_next_attach() {
+        let tmp = TempDir::new().expect("tempdir");
+        let shared = test_shared(tmp.path(), SessionKind::Subprocess);
+
+        let (client1, server1) = loopback_pair();
+        let (_cid1, _, _, _) = shared.attach_client(server1).expect("first attach");
+        drop(client1);
+        thread::sleep(Duration::from_millis(50));
+
+        let (_client2, server2) = loopback_pair();
+        shared.attach_client(server2).expect("reattach");
+    }
+
+    #[test]
+    fn noninteractive_background_prompt_always_backgrounds() {
+        assert_eq!(
+            prompt_continue_in_background_noninteractive(),
+            BackgroundPromptDecision::ContinueInBackground
+        );
     }
 
     #[test]
