@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Don't use tomllib: it's py311-only and `requires-python = ">=3.10"` promises
+# py310 works. A regex is sufficient for the trivial `version = "x.y.z"` line
+# in [project] and avoids the tomli backport dep.
+_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
+
 
 def _project_version() -> str:
-    with (ROOT / "pyproject.toml").open("rb") as handle:
-        data = tomllib.load(handle)
-    version = data.get("project", {}).get("version")
-    if not isinstance(version, str) or not version:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = _VERSION_RE.search(text)
+    if match is None:
         raise RuntimeError("project.version missing from pyproject.toml")
-    return version
+    return match.group(1)
 
 
 def _cargo_argv(subcommand: list[str]) -> list[str]:
