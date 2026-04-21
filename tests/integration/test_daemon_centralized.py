@@ -401,9 +401,13 @@ class TestDaemonManagedSessionFlags:
         finally:
             _kill_daemon_for_session(state_dir, session_id)
 
-    def test_detachable_ctrl_c_timeout_ends_session(
+    def test_detachable_ctrl_c_timeout_backgrounds_session(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
+        # Issue #25: `--detachable` Ctrl+C countdown now defaults to
+        # *backgrounding* on timeout (user opted in), not ending. This test
+        # replaces the earlier `..._ends_session` variant that encoded the old
+        # default.
         state_dir = tmp_path / "daemon-state"
         env = _managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
@@ -436,6 +440,77 @@ class TestDaemonManagedSessionFlags:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
                 proc.send_signal(signal.SIGINT)
+            _wait_for_exit(proc, timeout=15)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+        # Timeout now backgrounds, so the CLI should exit 0.
+        stderr_tail = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode == 0, (
+            f"expected 0 (backgrounded) got {proc.returncode}; stderr={stderr_tail}"
+        )
+
+        # Session metadata must still reflect a live worker.
+        metadata = _session_metadata(state_dir, session_id)
+        assert metadata["exit_code"] is None
+        assert metadata["root_pid"] is not None
+        assert _pid_is_alive(metadata["root_pid"])
+
+        # `clud list` must show the backgrounded session.
+        listed = subprocess.run(
+            [str(clud_binary), "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert listed.returncode == 0
+        assert session_id in listed.stdout
+
+        _kill_daemon_for_session(state_dir, session_id)
+
+    def test_detachable_ctrl_c_explicit_n_ends_session(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # Issue #25: explicit 'n' at the background prompt still ends the
+        # session (so users who want the old default can opt into it).
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        kwargs: dict[str, object] = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                "--detachable",
+                "--codex",
+                "-p",
+                "hello-explicit-no",
+                "--",
+                "--mock-sleep-ms",
+                "30000",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            text=True,
+            env=env,
+            **kwargs,
+        )
+
+        try:
+            session_id = _read_session_id(proc)
+            time.sleep(0.5)
+            if sys.platform == "win32":
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                proc.send_signal(signal.SIGINT)
+            assert proc.stdin is not None
+            proc.stdin.write("n\n")
+            proc.stdin.flush()
             _wait_for_exit(proc, timeout=15)
         finally:
             if proc.poll() is None:
