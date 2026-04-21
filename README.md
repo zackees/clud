@@ -138,6 +138,28 @@ Optional environment variables:
 | `CLUD_WHISPER_MODEL` | Path to a local `whisper.cpp` GGML model such as `ggml-small.en.bin` |
 | `CLUD_VOICE_LANGUAGE` | Force a Whisper language code such as `en` |
 
+### Phase 0 / early Phase 1 note for issue #13
+
+Current state in this repo:
+
+- `crates/clud-bin/src/voice.rs` already contains a local microphone capture + `whisper-rs` transcription path, cue playback, and prompt insertion into the PTY.
+- `crates/clud-bin/src/session.rs` already owns raw-byte PTY forwarding and F3 press observation.
+- `crates/clud-bin/src/main.rs` wires `VoiceMode` into interactive PTY sessions.
+- The voice implementation is target-gated today: it compiles only for Windows x86_64 and macOS aarch64, not the full six-platform matrix from issue #13.
+
+What is still missing relative to the issue:
+
+- `session.rs` does not currently drive a real release-event path into `VoiceMode`; the pump observes F3 press bytes, but release handling is not yet part of the terminal loop.
+- There is no documented model download/cache flow, only a required `CLUD_WHISPER_MODEL` path.
+- Cross-platform viability is not yet proven for the full support matrix.
+
+First implementation slice to unblock Phase 1:
+
+1. Confirm the supported terminal/key semantics for F3 press and release on every target we care about.
+2. Confirm `cpal`, `rodio`, and `whisper-rs` build and open devices on the full matrix.
+3. Decide whether F3 release stays a local terminal event or needs a fallback when the terminal does not emit release events.
+4. Keep transcript insertion as PTY byte writes only; do not add a second prompt editor.
+
 ## `clud loop` — The Ralph Loop
 
 ![clud-loop-ralph](https://github.com/user-attachments/assets/b6666429-ead7-419c-831f-db4e17b3840b)
