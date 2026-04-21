@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# Don't use tomllib: it's py311-only and `requires-python = ">=3.10"` promises
+# py310 works. A regex is sufficient for the trivial `version = "x.y.z"` line
+# in [project] and avoids the tomli backport dep.
+_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
+
+
+def _project_version() -> str:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = _VERSION_RE.search(text)
+    if match is None:
+        raise RuntimeError("project.version missing from pyproject.toml")
+    return match.group(1)
 
 
 def _cargo_argv(subcommand: list[str]) -> list[str]:
@@ -30,10 +46,9 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
 
 def _clud_binary() -> str:
     """Build the current repo's clud binary and return its path."""
-    root = Path(__file__).resolve().parent.parent
     result = subprocess.run(
         _cargo_argv(["build", "-p", "clud", "--message-format=json"]),
-        cwd=root,
+        cwd=ROOT,
         capture_output=True,
         text=True,
         timeout=120,
@@ -54,9 +69,9 @@ def _clud_binary() -> str:
     # soldr / `--target x86_64-pc-windows-msvc` lands artifacts in a
     # triple-qualified subdir; bare cargo lands in target/debug. Check both.
     for fallback in (
-        root / "target" / "x86_64-pc-windows-msvc" / "debug" / f"clud{ext}",
-        root / "target" / "aarch64-pc-windows-msvc" / "debug" / f"clud{ext}",
-        root / "target" / "debug" / f"clud{ext}",
+        ROOT / "target" / "x86_64-pc-windows-msvc" / "debug" / f"clud{ext}",
+        ROOT / "target" / "aarch64-pc-windows-msvc" / "debug" / f"clud{ext}",
+        ROOT / "target" / "debug" / f"clud{ext}",
     ):
         if fallback.is_file():
             return str(fallback)
@@ -64,6 +79,7 @@ def _clud_binary() -> str:
 
 
 CLUD = _clud_binary()
+PROJECT_VERSION = _project_version()
 
 
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -92,8 +108,7 @@ def test_help() -> None:
 def test_version() -> None:
     result = _run("--version")
     assert result.returncode == 0
-    assert "clud" in result.stdout
-    assert "2.0.8" in result.stdout
+    assert result.stdout.strip() == f"clud {PROJECT_VERSION}"
 
 
 def test_dry_run_prompt() -> None:
