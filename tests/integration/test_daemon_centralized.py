@@ -526,11 +526,12 @@ class TestDaemonManagedSessionFlags:
                 first_attach.wait(timeout=5)
             _kill_daemon_for_session(state_dir, session_id)
 
-    def test_detachable_ctrl_c_explicit_n_ends_session(
+    def test_detachable_noninteractive_ctrl_c_ignores_piped_n(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
-        # Issue #25: explicit 'n' at the background prompt still ends the
-        # session (so users who want the old default can opt into it).
+        # Issue #25: there is no safe prompt surface when stdin/stderr are
+        # pipes, so piped bytes must not be interpreted as background-prompt
+        # answers. Even a queued "n" should detach/background immediately.
         state_dir = tmp_path / "daemon-state"
         env = _managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
@@ -572,13 +573,16 @@ class TestDaemonManagedSessionFlags:
                 proc.kill()
                 proc.wait(timeout=5)
 
-        if sys.platform == "win32":
-            assert proc.returncode in (130, 3221225786)
-        else:
-            assert proc.returncode == 130
+        stderr_tail = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode == 0, (
+            f"expected 0 (backgrounded) got {proc.returncode}; stderr={stderr_tail}"
+        )
+        assert "non-interactive attach interrupted" in stderr_tail
 
-        metadata = _wait_for_session_exit(state_dir, session_id, timeout=12.0)
-        assert metadata["exit_code"] is not None or not _pid_is_alive(metadata["root_pid"])
+        metadata = _session_metadata(state_dir, session_id)
+        assert metadata["exit_code"] is None
+        assert metadata["root_pid"] is not None
+        assert _pid_is_alive(metadata["root_pid"])
 
         listed = subprocess.run(
             [str(clud_binary), "list"],
@@ -588,7 +592,9 @@ class TestDaemonManagedSessionFlags:
             env=env,
         )
         assert listed.returncode == 0
-        assert session_id not in listed.stdout
+        assert session_id in listed.stdout
+
+        _kill_daemon_for_session(state_dir, session_id)
 
 
 class TestDaemonCentralizedPersistence:
