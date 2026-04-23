@@ -171,7 +171,7 @@ pub fn terminals_are_interactive() -> bool {
 
 /// Raw-byte pump replacing the crossterm event loop on the PTY path.
 ///
-/// Bytes from `stdin_source` flow verbatim into the child's PTY via
+/// Bytes from `stdin_source` flow into the child's PTY via
 /// `write_impl`. An `F3Observer` watches the byte stream and — when
 /// `hooks.intercept_f3()` is true — counts `\x1bOR` sequences, firing
 /// `on_f3_press` once per observed press. The bytes are NOT consumed:
@@ -179,6 +179,12 @@ pub fn terminals_are_interactive() -> bool {
 /// wants to. `on_tick` runs every loop iteration regardless of stdin
 /// activity so hooks that poll background state (e.g. voice transcripts)
 /// still make progress during idle.
+///
+/// For interactive Windows console input only, the reader normalizes BS
+/// (`0x08`) to DEL (`0x7f`) before forwarding. That keeps Backspace aligned
+/// with xterm-style TUI expectations even when the console does not emit VT
+/// input bytes despite PTY mode requesting them. Non-interactive sources used
+/// by tests and pipes are still forwarded unchanged.
 ///
 /// This replaces the old `run_interactive_pty_session` /
 /// `run_pty_output_loop` split. The event-loop approach parsed stdin
@@ -191,16 +197,15 @@ pub fn terminals_are_interactive() -> bool {
 /// Ctrl+C + child-exit detection. Resize handling (SIGWINCH on Unix,
 /// polled `terminal_size::terminal_size()` on Windows).
 ///
-/// Ctrl-C flow: the raw 0x03 byte is forwarded to the child via normal
-/// stdin (terminal is in raw mode). The `ctrlc` handler also fires and
-/// sets the `interrupted` flag, which the pump escalates via
-/// `interrupt_pty_process`. On POSIX this sends SIGINT to the child's
-/// pgroup and waits up to 2s for exit — this is what lets `clud --pty`
-/// act as a clean kill on Ctrl-C for arbitrary children. On Windows the
-/// escalation closes the PTY directly (no extra 0x03 write), because
-/// the underlying `send_interrupt_impl` duplicates the byte that stdin
-/// already forwarded and makes Ink-based TUIs see a single press as
-/// "Ctrl-C twice = exit".
+/// Ctrl-C flow: raw mode turns the keyboard chord into byte `0x03` instead
+/// of a terminal signal. For interactive stdin, the pump forwards that byte
+/// once, then escalates via `interrupt_pty_process`. On POSIX this sends
+/// SIGINT to the child's pgroup and waits up to 2s for exit. On Windows the
+/// escalation closes the PTY directly (no extra 0x03 write), because the
+/// underlying `send_interrupt_impl` duplicates the byte that stdin already
+/// forwarded and makes Ink-based TUIs see a single press as
+/// "Ctrl-C twice = exit". The external `interrupted` flag is still honored
+/// for non-keyboard interrupts such as OS signals or tests.
 pub fn run_raw_pty_pump<H, R>(
     process: &NativePtyProcess,
     interrupted: &AtomicBool,
@@ -287,6 +292,10 @@ where
     use std::sync::mpsc;
 
     let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
+    let interactive_real_stdin = stdin_source_is_real_stdin::<R>() && terminals_are_interactive();
+    let normalize_console_stdin =
+        should_normalize_interactive_console_stdin(interactive_real_stdin);
+    let interrupt_on_ctrl_c_byte = interactive_real_stdin;
 
     // Detached reader: pumps `stdin_source` → channel until EOF or error.
     // Detached (not joined) so a blocked `read()` on real stdin doesn't
@@ -299,7 +308,11 @@ where
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    if stdin_tx.send(buf[..n].to_vec()).is_err() {
+                    let mut chunk = buf[..n].to_vec();
+                    if normalize_console_stdin {
+                        normalize_interactive_console_stdin_chunk(&mut chunk);
+                    }
+                    if stdin_tx.send(chunk).is_err() {
                         break; // Main thread dropped the receiver → exit.
                     }
                 }
@@ -333,6 +346,8 @@ where
         // a large pending stdin backlog stops us from noticing that the
         // child has exited. One chunk per loop keeps the cadence even.
         if let Ok(chunk) = stdin_rx.try_recv() {
+            let requested_interrupt =
+                interrupt_on_ctrl_c_byte && stdin_chunk_requests_interrupt(&chunk);
             if let Err(err) = process.write_impl(&chunk, false) {
                 eprintln!("[clud] warning: failed to forward stdin to pty: {}", err);
             } else if hooks.intercept_f3() {
@@ -344,7 +359,7 @@ where
                 }
             }
 
-            if interrupted.load(Ordering::SeqCst) {
+            if requested_interrupt || interrupted.load(Ordering::SeqCst) {
                 return interrupt_pty_process(process);
             }
         }
@@ -363,6 +378,29 @@ where
             return interrupt_pty_process(process);
         }
     }
+}
+
+fn stdin_source_is_real_stdin<R: 'static>() -> bool {
+    std::any::TypeId::of::<R>() == std::any::TypeId::of::<std::io::Stdin>()
+}
+
+fn should_normalize_interactive_console_stdin(interactive_real_stdin: bool) -> bool {
+    cfg!(windows) && interactive_real_stdin
+}
+
+fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
+    if !cfg!(windows) {
+        return;
+    }
+    for byte in chunk {
+        if *byte == 0x08 {
+            *byte = 0x7f;
+        }
+    }
+}
+
+fn stdin_chunk_requests_interrupt(chunk: &[u8]) -> bool {
+    chunk.contains(&0x03)
 }
 
 fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
@@ -538,5 +576,28 @@ mod tests {
             1,
             "valid F3 after a bogus SS3 prefix should still count"
         );
+    }
+
+    #[test]
+    fn console_stdin_normalization_is_windows_only() {
+        let mut chunk = vec![b'a', 0x08, 0x7f, b'z'];
+        normalize_interactive_console_stdin_chunk(&mut chunk);
+        if cfg!(windows) {
+            assert_eq!(chunk, vec![b'a', 0x7f, 0x7f, b'z']);
+        } else {
+            assert_eq!(chunk, vec![b'a', 0x08, 0x7f, b'z']);
+        }
+    }
+
+    #[test]
+    fn ctrl_c_byte_requests_interrupt() {
+        assert!(!stdin_chunk_requests_interrupt(b"abc"));
+        assert!(stdin_chunk_requests_interrupt(b"a\x03c"));
+    }
+
+    #[test]
+    fn only_real_stdin_gets_interactive_console_policy() {
+        assert!(stdin_source_is_real_stdin::<std::io::Stdin>());
+        assert!(!stdin_source_is_real_stdin::<std::io::Cursor<Vec<u8>>>());
     }
 }

@@ -160,11 +160,6 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
         CommandSpec, Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode,
     };
 
-    // Enable VT input on the console before launching the child.
-    // This allows ANSI sequences (including bracketed paste for drag-and-drop)
-    // to flow through to the child process via inherited stdin.
-    let _console_guard = enable_console_vt_input();
-
     let env = child_env();
     let mut last_exit = 0i32;
 
@@ -253,11 +248,10 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
     use running_process_core::pty::NativePtyProcess;
 
     // Enable VT input on the Windows console for the whole PTY session.
-    // Without ENABLE_VIRTUAL_TERMINAL_INPUT, ReadConsoleW delivers Backspace
-    // as 0x08 (BS) instead of 0x7f (DEL) that xterm-convention TUIs (codex
-    // on Ink) expect, so backspace silently does nothing inside the child.
-    // Paired with `run_plan_subprocess`'s call — the raw byte pump depends
-    // on the console delivering VT sequences. No-op on non-Windows.
+    // The raw byte pump reads from clud's stdin, so PTY mode needs the
+    // console to emit terminal-style bytes. In subprocess mode the child
+    // inherits the console directly and must be allowed to configure input
+    // modes itself.
     let _console_guard = enable_console_vt_input();
 
     let env = child_env();
