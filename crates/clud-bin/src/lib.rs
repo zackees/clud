@@ -9,6 +9,7 @@ pub mod backend;
 pub mod capture;
 pub mod command;
 pub mod daemon;
+pub mod dnd;
 pub mod loop_spec;
 pub mod session;
 pub mod subprocess;
