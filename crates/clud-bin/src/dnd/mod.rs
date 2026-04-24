@@ -23,6 +23,14 @@
 //! The heuristics here are conservative: strings that do not look like a
 //! dragged path are returned unchanged, so it is safe to call this on
 //! arbitrary user input.
+//!
+//! ## Submodules
+//!
+//! - [`dropfiles`] — pure-byte parser for the Win32 OLE `DROPFILES`
+//!   structure. Used by the (Windows-only) `IDropTarget` adapter that
+//!   intercepts drops before conhost can refuse them. See issue #66.
+
+pub mod dropfiles;
 
 /// Normalize a single dragged-path payload emitted by a terminal into a
 /// plain filesystem path.
