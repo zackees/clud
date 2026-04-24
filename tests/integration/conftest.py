@@ -229,6 +229,35 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
 
 
 @pytest.fixture
+def mock_env_codex_cmd(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
+    """Windows-only env where `codex` resolves to a `.cmd` wrapper.
+
+    Reproduces the npm-installed Codex layout: a `codex.cmd` launcher that
+    shells out to a real executable with `%*`.
+    """
+    if sys.platform != "win32":
+        pytest.skip("Windows-only codex.cmd wrapper fixture")
+
+    mock_agent_name = f"mock-agent{'.exe' if sys.platform == 'win32' else ''}"
+    mock_agent_path = tmp_path / mock_agent_name
+    shutil.copy2(mock_agent_binary, mock_agent_path)
+
+    codex_wrapper = tmp_path / "codex.cmd"
+    codex_wrapper.write_text(
+        "@echo off\r\n"
+        "\"%~dp0mock-agent.exe\" %*\r\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
+    env.pop("VIRTUAL_ENV", None)
+    env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(tmp_path / "child_pids.log")
+    env["CLUD_NO_UNLOCK"] = "1"
+    return env
+
+
+@pytest.fixture
 def clud_binary() -> Path:
     """Return the path to the current repo's clud binary."""
     return _find_clud()

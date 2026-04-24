@@ -1,10 +1,11 @@
 use crate::args::{Args, Command};
 use crate::backend::{Backend, LaunchMode};
 use crate::loop_spec::{
-    self, cache_path, classify, ensure_loop_dir, fetch_via_gh, git_root_from, render_cache,
-    resolve_current_repo, GhKind, TaskSpec, DONE_MARKER_CONTRACT,
+    self, blocked_path_from_done, cache_path, classify, done_marker_contract, ensure_loop_dir,
+    fetch_via_gh, git_root_from, render_cache, resolve_current_repo, GhKind, MarkerPaths, TaskSpec,
 };
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 const FIX_PROMPT: &str = "\
 Look for linting like ./lint, or npm or python, choose the most likely one, \
@@ -81,16 +82,25 @@ pub struct LaunchPlan {
     pub backend: Backend,
     pub launch_mode: LaunchMode,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub repeat_schedule: Option<RepeatSchedule>,
+    #[serde(default)]
+    pub task_summary: Option<String>,
     /// When set, the outer loop should poll for DONE/BLOCKED marker files
-    /// under `<git_root>/.clud/loop/` after each iteration and terminate
-    /// accordingly.
+    /// after each iteration and terminate accordingly.
     #[serde(default)]
     pub loop_markers: Option<LoopMarkers>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopMarkers {
-    pub git_root: String,
+    pub done_path: String,
+    pub blocked_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepeatSchedule {
+    pub interval_secs: u64,
 }
 
 /// Returns true if `args` carries a prompt that should run non-interactively
@@ -109,6 +119,8 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
 pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
     let mut cmd = vec![backend_path.to_string()];
     let mut iterations = 1u32;
+    let mut repeat_schedule: Option<RepeatSchedule> = None;
+    let mut task_summary: Option<String> = None;
 
     let codex_uses_exec = matches!(backend, Backend::Codex) && has_noninteractive_prompt(args);
     let codex_uses_resume = matches!(backend, Backend::Codex)
@@ -152,23 +164,49 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
             task,
             loop_count,
             refresh,
-            no_done_marker,
+            no_done,
+            done,
+            repeat,
         }) => {
             iterations = *loop_count;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let git_root = git_root_from(&cwd);
+            let repeat_interval_secs = repeat
+                .as_deref()
+                .map(parse_repeat_interval)
+                .transpose()
+                .unwrap_or_else(|err| {
+                    eprintln!("error: invalid --repeat value: {err}");
+                    std::process::exit(1);
+                });
+            repeat_schedule =
+                repeat_interval_secs.map(|interval_secs| RepeatSchedule { interval_secs });
+            let use_done_markers = done.is_some() || (!*no_done && repeat_schedule.is_none());
+            let marker_paths = if use_done_markers {
+                Some(resolve_marker_paths(&cwd, &git_root, done.as_deref()))
+            } else {
+                None
+            };
             if let Some(ref t) = task {
                 let prompt_text = resolve_loop_task(t, &git_root, *refresh);
-                let final_prompt = if *no_done_marker {
-                    prompt_text
-                } else {
-                    format!("{}{}", prompt_text, DONE_MARKER_CONTRACT)
-                };
+                task_summary = Some(summarize_task_name(&prompt_text, 50));
+                let final_prompt =
+                    if let Some((markers, display_done, display_blocked)) = marker_paths.as_ref() {
+                        let _ = markers;
+                        format!(
+                            "{}{}",
+                            prompt_text,
+                            done_marker_contract(display_done, display_blocked)
+                        )
+                    } else {
+                        prompt_text
+                    };
                 push_prompt(&mut cmd, backend, final_prompt);
             }
-            if !*no_done_marker {
+            if let Some((markers, _, _)) = marker_paths {
                 loop_markers = Some(LoopMarkers {
-                    git_root: git_root.to_string_lossy().to_string(),
+                    done_path: markers.done.to_string_lossy().to_string(),
+                    blocked_path: markers.blocked.to_string_lossy().to_string(),
                 });
             }
         }
@@ -229,7 +267,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
 
     cmd.extend(args.passthrough.iter().cloned());
 
-    let is_loop = loop_markers.is_some();
+    let is_loop = loop_markers.is_some() && repeat_schedule.is_none();
     let parent_has_tty = crate::session::terminals_are_interactive();
     let launch_mode = crate::backend::resolve_launch_mode(
         args.pty,
@@ -248,8 +286,75 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         cwd: std::env::current_dir()
             .ok()
             .map(|cwd| cwd.to_string_lossy().to_string()),
+        repeat_schedule,
+        task_summary,
         loop_markers,
     }
+}
+
+fn resolve_marker_paths(
+    cwd: &Path,
+    git_root: &Path,
+    done_override: Option<&str>,
+) -> (MarkerPaths, String, String) {
+    match done_override {
+        Some(raw) => {
+            let display_done = raw.to_string();
+            let display_blocked = blocked_path_from_done(Path::new(raw))
+                .to_string_lossy()
+                .to_string();
+            let done = cwd.join(raw);
+            let blocked = blocked_path_from_done(&done);
+            (MarkerPaths { done, blocked }, display_done, display_blocked)
+        }
+        None => {
+            let markers = loop_spec::default_marker_paths(git_root);
+            (
+                markers,
+                ".clud/loop/DONE".to_string(),
+                ".clud/loop/BLOCKED".to_string(),
+            )
+        }
+    }
+}
+
+fn parse_repeat_interval(raw: &str) -> Result<u64, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+    let split_at = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| "duration must include a unit like s, m, or h".to_string())?;
+    if split_at == 0 {
+        return Err("duration must start with a positive integer".to_string());
+    }
+    let (num_part, unit_part) = trimmed.split_at(split_at);
+    let n: u64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid duration value: {num_part}"))?;
+    if n == 0 {
+        return Err("duration must be greater than zero".to_string());
+    }
+    let unit = unit_part.trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        _ => return Err(format!("unsupported duration unit: {unit_part}")),
+    };
+    n.checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_string())
+}
+
+pub fn summarize_task_name(input: &str, max_chars: usize) -> String {
+    let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() || normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let keep = max_chars.saturating_sub(3);
+    let prefix: String = normalized.chars().take(keep).collect();
+    format!("{prefix}...")
 }
 
 /// Resolve the `clud loop` positional to an actual prompt body.
@@ -695,11 +800,37 @@ mod tests {
     }
 
     #[test]
-    fn test_loop_no_done_marker_omits_contract() {
-        let p = plan(&["clud", "loop", "--no-done-marker", "task"]);
+    fn test_loop_no_done_omits_contract() {
+        let p = plan(&["clud", "loop", "--no-done", "task"]);
         let prompt = prompt_from_plan(&p);
         assert_eq!(prompt, "task");
         assert!(p.loop_markers.is_none());
+    }
+
+    #[test]
+    fn test_loop_repeat_implies_no_done_contract() {
+        let p = plan(&["clud", "loop", "--repeat", "1h", "task"]);
+        let prompt = prompt_from_plan(&p);
+        assert_eq!(prompt, "task");
+        assert!(p.loop_markers.is_none());
+        assert_eq!(
+            p.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            Some(3600)
+        );
+    }
+
+    #[test]
+    fn test_loop_repeat_with_done_override_restores_contract() {
+        let p = plan(&[
+            "clud", "loop", "--repeat", "1h", "--done", "DONE.md", "task",
+        ]);
+        let prompt = prompt_from_plan(&p);
+        assert!(prompt.contains("DONE.md"));
+        assert!(prompt.contains("BLOCKED.md"));
+        assert!(p.loop_markers.is_some());
+        let markers = p.loop_markers.unwrap();
+        assert!(markers.done_path.ends_with("DONE.md"));
+        assert!(markers.blocked_path.ends_with("BLOCKED.md"));
     }
 
     // ---- Issue #48: `clud --codex loop "..."` must drive codex the same ----
@@ -751,8 +882,8 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_loop_no_done_marker_omits_contract() {
-        let p = plan(&["clud", "--codex", "loop", "--no-done-marker", "task"]);
+    fn test_codex_loop_no_done_omits_contract() {
+        let p = plan(&["clud", "--codex", "loop", "--no-done", "task"]);
         let prompt = last_arg(&p);
         assert_eq!(prompt, "task");
         assert!(p.loop_markers.is_none());

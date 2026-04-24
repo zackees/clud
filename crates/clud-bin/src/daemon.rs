@@ -21,6 +21,7 @@ use crate::args::{Args, Command};
 use crate::backend::LaunchMode;
 use crate::capture::TerminalCapture;
 use crate::command::LaunchPlan;
+use crate::subprocess;
 use crate::trampoline;
 
 const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
@@ -28,6 +29,10 @@ const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 const ENV_BACKLOG_BYTES: &str = "CLUD_BACKLOG_BYTES";
 const DEFAULT_BACKLOG_LIMIT_BYTES: usize = 256 * 1024;
 const BACKGROUND_PROMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn default_attachable() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +61,14 @@ struct SessionSnapshot {
     detachable: bool,
     #[serde(default)]
     background: bool,
+    #[serde(default = "default_attachable")]
+    attachable: bool,
+    #[serde(default)]
+    repeat_interval_secs: Option<u64>,
+    #[serde(default)]
+    repeat_next_run_at: Option<u64>,
+    #[serde(default)]
+    repeat_running: bool,
     daemon_pid: u32,
     worker_pid: u32,
     worker_port: u16,
@@ -73,8 +86,14 @@ struct WorkerLaunchSpec {
     detachable: bool,
     #[serde(default)]
     background_on_launch: bool,
+    #[serde(default = "default_attachable")]
+    attachable: bool,
     rows: u16,
     cols: u16,
+    #[serde(default)]
+    repeat_interval_secs: Option<u64>,
+    #[serde(default)]
+    repeat_run_command: Option<Vec<String>>,
     /// In-memory attach-replay backlog cap. `None` uses the compiled default
     /// (`DEFAULT_BACKLOG_LIMIT_BYTES`). Optional for wire compatibility with
     /// spec files written by older clud versions.
@@ -85,7 +104,7 @@ struct WorkerLaunchSpec {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum DaemonRequest {
-    Create { spec: WorkerLaunchSpec },
+    Create { spec: Box<WorkerLaunchSpec> },
     Session { session_id: String },
     Terminate { session_id: String },
 }
@@ -364,6 +383,16 @@ impl WorkerShared {
         let _ = self.persist_snapshot(&snapshot);
     }
 
+    fn set_repeat_state(&self, running: bool, next_run_at: Option<u64>) {
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            guard.repeat_running = running;
+            guard.repeat_next_run_at = next_run_at;
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
+    }
+
     fn attach_client(&self, shutdown: TcpStream) -> Result<AttachClientResult, String> {
         // First, try to evict any dead client before checking occupancy.
         self.evict_dead_client();
@@ -556,8 +585,16 @@ impl Drop for RawTerminalGuard {
 }
 
 pub fn experimental_enabled(args: &Args) -> bool {
+    let repeat_enabled = matches!(
+        args.command,
+        Some(Command::Loop {
+            repeat: Some(_),
+            ..
+        })
+    );
     args.detach
         || args.detachable
+        || repeat_enabled
         || args.experimental_daemon_centralized
         || std::env::var(ENV_FEATURE_FLAG)
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -657,23 +694,46 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         return 1;
     }
 
-    let kind = match plan.launch_mode {
-        LaunchMode::Subprocess => SessionKind::Subprocess,
-        LaunchMode::Pty => SessionKind::Pty,
+    let repeat_enabled = plan.repeat_schedule.is_some();
+    let kind = if repeat_enabled {
+        SessionKind::Subprocess
+    } else {
+        match plan.launch_mode {
+            LaunchMode::Subprocess => SessionKind::Subprocess,
+            LaunchMode::Pty => SessionKind::Pty,
+        }
     };
     let (rows, cols) = terminal_dimensions();
     let backlog_bytes = resolve_backlog_bytes(args.backlog_size.as_deref());
+    let name = args
+        .session_name
+        .clone()
+        .or_else(|| repeat_enabled.then(|| plan.task_summary.clone()).flatten());
+    let repeat_run_command = if repeat_enabled {
+        match build_repeat_once_command(args) {
+            Ok(command) => Some(command),
+            Err(err) => {
+                eprintln!("[clud] failed to build repeat command: {}", err);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
     let request = DaemonRequest::Create {
-        spec: WorkerLaunchSpec {
+        spec: Box::new(WorkerLaunchSpec {
             plan: plan.clone(),
             kind,
-            name: args.session_name.clone(),
+            name,
             detachable: args.detach || args.detachable,
-            background_on_launch: args.detach,
+            background_on_launch: args.detach || repeat_enabled,
+            attachable: !repeat_enabled,
             rows,
             cols,
+            repeat_interval_secs: plan.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            repeat_run_command,
             backlog_bytes,
-        },
+        }),
     };
     let response = match send_daemon_request(&state_dir, &request) {
         Ok(response) => response,
@@ -685,6 +745,11 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
 
     match response {
         DaemonResponse::Created { session } => {
+            if repeat_enabled {
+                eprintln!("[clud] repeat job {} running in background", session.id);
+                eprintln!("[clud] list jobs with: clud list");
+                return 0;
+            }
             if args.detach {
                 eprintln!("[clud] session {} running in background", session.id);
                 eprintln!("[clud] attach with: clud attach {}", session.id);
@@ -701,6 +766,63 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         }
         DaemonResponse::Session { .. } | DaemonResponse::Terminated { .. } => 1,
     }
+}
+
+fn build_repeat_once_command(args: &Args) -> io::Result<Vec<String>> {
+    let exe = std::env::current_exe()?;
+    let mut command = vec![exe.to_string_lossy().to_string()];
+    if args.codex {
+        command.push("--codex".to_string());
+    } else if args.claude {
+        command.push("--claude".to_string());
+    }
+    if args.safe {
+        command.push("--safe".to_string());
+    }
+    if args.subprocess {
+        command.push("--subprocess".to_string());
+    }
+    if args.pty {
+        command.push("--pty".to_string());
+    }
+    if args.verbose {
+        command.push("--verbose".to_string());
+    }
+    if let Some(model) = args.model.as_deref() {
+        command.push("--model".to_string());
+        command.push(model.to_string());
+    }
+    command.push("loop".to_string());
+    if let Some(Command::Loop {
+        task,
+        loop_count,
+        refresh,
+        no_done,
+        done,
+        ..
+    }) = &args.command
+    {
+        command.push("--loop-count".to_string());
+        command.push(loop_count.to_string());
+        if *refresh {
+            command.push("--refresh".to_string());
+        }
+        if *no_done || done.is_none() {
+            command.push("--no-done".to_string());
+        }
+        if let Some(path) = done.as_deref() {
+            command.push("--done".to_string());
+            command.push(path.to_string());
+        }
+        if let Some(task) = task.as_deref() {
+            command.push(task.to_string());
+        }
+    }
+    if !args.passthrough.is_empty() {
+        command.push("--".to_string());
+        command.extend(args.passthrough.iter().cloned());
+    }
+    Ok(command)
 }
 
 fn run_attach(session_id: &str, state_dir: &Path, interrupted: &AtomicBool) -> i32 {
@@ -729,7 +851,16 @@ fn run_attach(session_id: &str, state_dir: &Path, interrupted: &AtomicBool) -> i
         }
     };
     match response {
-        DaemonResponse::Session { session } => attach_to_session(state_dir, &session, interrupted),
+        DaemonResponse::Session { session } => {
+            if !session.attachable {
+                eprintln!(
+                    "[clud] session {} is a repeat job and cannot be attached",
+                    session.id
+                );
+                return 1;
+            }
+            attach_to_session(state_dir, &session, interrupted)
+        }
         DaemonResponse::Error { message } => {
             eprintln!("[clud] daemon error: {}", message);
             1
@@ -1198,7 +1329,7 @@ fn handle_daemon_connection(
     let request: DaemonRequest = serde_json::from_str(&line)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
     let response = match request {
-        DaemonRequest::Create { spec } => match daemon_create_session(state_dir, workers, spec) {
+        DaemonRequest::Create { spec } => match daemon_create_session(state_dir, workers, *spec) {
             Ok(session) => DaemonResponse::Created { session },
             Err(err) => DaemonResponse::Error {
                 message: err.to_string(),
@@ -1278,21 +1409,24 @@ fn daemon_create_session(
     };
 
     // Verify the worker's TCP listener is actually accepting connections
-    // before reporting the session as ready.
-    loop {
-        if TcpStream::connect(("127.0.0.1", snapshot.worker_port)).is_ok() {
-            break;
+    // before reporting the session as ready. Repeat jobs intentionally don't
+    // expose an attach port, so `worker_port == 0` is valid there.
+    if snapshot.attachable {
+        loop {
+            if TcpStream::connect(("127.0.0.1", snapshot.worker_port)).is_ok() {
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(5) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "worker wrote snapshot but TCP port {} is not accepting connections",
+                        snapshot.worker_port
+                    ),
+                ));
+            }
+            thread::sleep(Duration::from_millis(25));
         }
-        if started.elapsed() >= Duration::from_secs(5) {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "worker wrote snapshot but TCP port {} is not accepting connections",
-                    snapshot.worker_port
-                ),
-            ));
-        }
-        thread::sleep(Duration::from_millis(25));
     }
 
     workers
@@ -1362,6 +1496,9 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
             return 1;
         }
     };
+    if spec.repeat_run_command.is_some() {
+        return run_repeat_worker(state_dir, session_id, daemon_pid, &spec);
+    }
     let listener = match TcpListener::bind(("127.0.0.1", 0)) {
         Ok(listener) => listener,
         Err(err) => {
@@ -1390,6 +1527,10 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
         created_at: Some(created_at),
         detachable: spec.detachable,
         background: spec.background_on_launch,
+        attachable: spec.attachable,
+        repeat_interval_secs: spec.repeat_interval_secs,
+        repeat_next_run_at: None,
+        repeat_running: spec.repeat_interval_secs.is_some(),
         daemon_pid,
         worker_pid: std::process::id(),
         worker_port,
@@ -1485,6 +1626,142 @@ fn run_worker(state_dir: &Path, session_id: &str, daemon_pid: u32, spec_file: &P
     0
 }
 
+fn run_repeat_worker(
+    state_dir: &Path,
+    session_id: &str,
+    daemon_pid: u32,
+    spec: &WorkerLaunchSpec,
+) -> i32 {
+    let repeat_interval_secs = spec.repeat_interval_secs.unwrap_or(0);
+    let repeat_run_command = spec.repeat_run_command.clone().unwrap_or_default();
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let snapshot = SessionSnapshot {
+        id: session_id.to_string(),
+        kind: SessionKind::Subprocess,
+        cwd: spec.plan.cwd.clone(),
+        name: spec.name.clone(),
+        created_at: Some(created_at),
+        detachable: false,
+        background: true,
+        attachable: false,
+        repeat_interval_secs: Some(repeat_interval_secs),
+        repeat_next_run_at: None,
+        repeat_running: true,
+        daemon_pid,
+        worker_pid: std::process::id(),
+        worker_port: 0,
+        root_pid: None,
+        exit_code: None,
+    };
+    let shared = Arc::new(WorkerShared::new_with_backlog(
+        state_dir.to_path_buf(),
+        session_id.to_string(),
+        snapshot,
+        spec.backlog_bytes.unwrap_or(DEFAULT_BACKLOG_LIMIT_BYTES),
+    ));
+    shared.init_log_file();
+    if let Err(err) = persist_snapshot(state_dir, session_id, &shared) {
+        eprintln!("[clud] failed to write repeat session metadata: {}", err);
+        return 1;
+    }
+
+    loop {
+        if !pid_is_alive(daemon_pid) {
+            shared.set_exit_code(137);
+            let _ = persist_snapshot(state_dir, session_id, &shared);
+            let _ = fs::remove_file(spec_path(state_dir, session_id));
+            return 0;
+        }
+
+        shared.set_repeat_state(true, None);
+        if !run_repeat_once(&repeat_run_command, spec, daemon_pid, &shared) {
+            let _ = persist_snapshot(state_dir, session_id, &shared);
+            let _ = fs::remove_file(spec_path(state_dir, session_id));
+            return 0;
+        }
+        shared.set_root_pid(None);
+
+        let next_run_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            + repeat_interval_secs.saturating_mul(1000);
+        shared.set_repeat_state(false, Some(next_run_at));
+
+        while (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64)
+            < next_run_at
+        {
+            if !pid_is_alive(daemon_pid) {
+                shared.set_exit_code(137);
+                let _ = persist_snapshot(state_dir, session_id, &shared);
+                let _ = fs::remove_file(spec_path(state_dir, session_id));
+                return 0;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+fn run_repeat_once(
+    command: &[String],
+    spec: &WorkerLaunchSpec,
+    daemon_pid: u32,
+    shared: &Arc<WorkerShared>,
+) -> bool {
+    let process = Arc::new(NativeProcess::new(ProcessConfig {
+        command: subprocess::command_spec_for_subprocess(command.to_vec()),
+        cwd: spec.plan.cwd.as_ref().map(PathBuf::from),
+        env: Some(child_env()),
+        capture: true,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: None,
+        create_process_group: false,
+        stdin_mode: StdinMode::Null,
+        nice: None,
+        containment: Some(Containment::Contained),
+    }));
+    if let Err(err) = process.start() {
+        shared
+            .push_output(format!("[clud repeat] failed to start child run: {err}\n").into_bytes());
+        return true;
+    }
+    shared.set_root_pid(process.pid());
+
+    loop {
+        if !pid_is_alive(daemon_pid) {
+            let _ = process.kill();
+            let _ = process.wait(Some(Duration::from_secs(2)));
+            shared.set_exit_code(137);
+            return false;
+        }
+        match process.read_combined(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(event) => {
+                let mut chunk = event.line;
+                chunk.push(b'\n');
+                shared.push_output(chunk);
+            }
+            ReadStatus::Timeout => {
+                if process.returncode().is_some() {
+                    break;
+                }
+            }
+            ReadStatus::Eof => {
+                if process.returncode().is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = process.wait(Some(Duration::from_secs(2)));
+    true
+}
+
 fn start_subprocess_session(
     spec: &WorkerLaunchSpec,
     shared: &Arc<WorkerShared>,
@@ -1492,7 +1769,7 @@ fn start_subprocess_session(
     use std::path::PathBuf;
 
     let process = Arc::new(NativeProcess::new(ProcessConfig {
-        command: CommandSpec::Argv(spec.plan.command.clone()),
+        command: subprocess::command_spec_for_subprocess(spec.plan.command.clone()),
         cwd: spec.plan.cwd.as_ref().map(PathBuf::from),
         env: Some(child_env()),
         capture: true,
@@ -1922,7 +2199,7 @@ fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) -> i32 {
     }
 
     if all {
-        let sessions = list_attachable_sessions(state_dir);
+        let sessions = list_background_sessions(state_dir);
         if sessions.is_empty() {
             println!("No active sessions to kill.");
             return 0;
@@ -1984,31 +2261,78 @@ fn format_duration_short(millis: u64) -> String {
 }
 
 fn run_list(state_dir: &Path) -> i32 {
-    let sessions = list_attachable_sessions(state_dir);
+    let sessions = list_background_sessions(state_dir);
     if sessions.is_empty() {
         println!("No background sessions.");
         return 0;
     }
 
-    println!("{:<30} {:<8} {:<8} CWD", "SESSION", "PID", "UPTIME");
-    for session in sessions {
-        let display_name = session
-            .name
-            .as_deref()
-            .map(|n| format!("{} ({})", session.id, n))
-            .unwrap_or_else(|| session.id.clone());
-        let pid = session
-            .root_pid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let uptime = session
-            .created_at
-            .map(format_duration_short)
-            .unwrap_or_else(|| "-".to_string());
-        let cwd = session.cwd.unwrap_or_else(|| "-".to_string());
-        println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
+    let (repeat_jobs, attachable_sessions): (Vec<_>, Vec<_>) = sessions
+        .into_iter()
+        .partition(|session| session.repeat_interval_secs.is_some());
+
+    if !repeat_jobs.is_empty() {
+        println!("{:<53} {:<10} {:<18} ID", "TASK", "STATUS", "NEXT RUN");
+        for session in &repeat_jobs {
+            let task = session.name.clone().unwrap_or_else(|| session.id.clone());
+            let status = if session.repeat_running {
+                "running".to_string()
+            } else {
+                "sleeping".to_string()
+            };
+            let next_run = session
+                .repeat_next_run_at
+                .map(format_next_run_short)
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "{:<53} {:<10} {:<18} {}",
+                task, status, next_run, session.id
+            );
+        }
+    }
+
+    if !attachable_sessions.is_empty() {
+        if !repeat_jobs.is_empty() {
+            println!();
+        }
+        println!("{:<30} {:<8} {:<8} CWD", "SESSION", "PID", "UPTIME");
+        for session in attachable_sessions {
+            let display_name = session
+                .name
+                .as_deref()
+                .map(|n| format!("{} ({})", session.id, n))
+                .unwrap_or_else(|| session.id.clone());
+            let pid = session
+                .root_pid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let uptime = session
+                .created_at
+                .map(format_duration_short)
+                .unwrap_or_else(|| "-".to_string());
+            let cwd = session.cwd.unwrap_or_else(|| "-".to_string());
+            println!("{:<30} {:<8} {:<8} {}", display_name, pid, uptime, cwd);
+        }
     }
     0
+}
+
+fn format_next_run_short(run_at_millis: u64) -> String {
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if run_at_millis <= now_millis {
+        return "now".to_string();
+    }
+    let secs = (run_at_millis - now_millis) / 1000;
+    if secs < 60 {
+        format!("in {}s", secs)
+    } else if secs < 3600 {
+        format!("in {}m", secs / 60)
+    } else {
+        format!("in {}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 /// pm2-style log viewer. No id → list sessions with their last log line.
@@ -2184,7 +2508,7 @@ fn follow_read(path: &Path, offset: u64) -> io::Result<(u64, Vec<u8>)> {
     Ok((len, buf))
 }
 
-fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
+fn list_background_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
     let Ok(entries) = fs::read_dir(sessions_dir(state_dir)) else {
         return Vec::new();
     };
@@ -2212,6 +2536,13 @@ fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
     }
     sessions.sort_by(|left, right| left.id.cmp(&right.id));
     sessions
+}
+
+fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
+    list_background_sessions(state_dir)
+        .into_iter()
+        .filter(|session| session.attachable)
+        .collect()
 }
 
 fn write_json_line<T: Serialize>(writer: &mut TcpStream, value: &T) -> io::Result<()> {
@@ -2456,6 +2787,10 @@ mod capture_integration_tests {
             created_at: Some(0),
             detachable: true,
             background: false,
+            attachable: true,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
             daemon_pid: 0,
             worker_pid: 0,
             worker_port: 0,
@@ -2608,6 +2943,10 @@ mod log_tests {
             created_at: Some(0),
             detachable: true,
             background: false,
+            attachable: true,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
             daemon_pid: 0,
             worker_pid: 0,
             worker_port: 0,
@@ -2767,6 +3106,10 @@ mod backlog_size_tests {
             created_at: Some(0),
             detachable: false,
             background: false,
+            attachable: true,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
             daemon_pid: 0,
             worker_pid: 0,
             worker_port: 0,

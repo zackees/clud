@@ -14,13 +14,19 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use running_process_core::{
-    CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
-};
+use running_process_core::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+
+use crate::subprocess;
 
 pub const LOOP_DIR: &str = ".clud/loop";
 pub const DONE_MARKER: &str = "DONE";
 pub const BLOCKED_MARKER: &str = "BLOCKED";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerPaths {
+    pub done: PathBuf,
+    pub blocked: PathBuf,
+}
 
 /// How to interpret the positional argument passed to `clud loop`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +148,26 @@ pub fn blocked_path(git_root: &Path) -> PathBuf {
     loop_dir(git_root).join(BLOCKED_MARKER)
 }
 
+/// Derive the BLOCKED marker path from a custom DONE marker path.
+///
+/// `DONE.md` becomes `BLOCKED.md`; `DONE` becomes `BLOCKED`.
+pub fn blocked_path_from_done(done: &Path) -> PathBuf {
+    let parent = done.parent().unwrap_or_else(|| Path::new("."));
+    let ext = done.extension().and_then(|s| s.to_str());
+    let file_name = match ext {
+        Some(ext) if !ext.is_empty() => format!("{BLOCKED_MARKER}.{ext}"),
+        _ => BLOCKED_MARKER.to_string(),
+    };
+    parent.join(file_name)
+}
+
+pub fn default_marker_paths(git_root: &Path) -> MarkerPaths {
+    MarkerPaths {
+        done: done_path(git_root),
+        blocked: blocked_path(git_root),
+    }
+}
+
 /// Marker state observed after an iteration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkerState {
@@ -153,14 +179,17 @@ pub enum MarkerState {
 /// Read the marker state from `<git-root>/.clud/loop/`. DONE wins if both
 /// exist (the agent's last word that the task resolved).
 pub fn read_markers(git_root: &Path) -> MarkerState {
-    let done = done_path(git_root);
-    if done.is_file() {
-        let body = std::fs::read_to_string(&done).unwrap_or_default();
+    let paths = default_marker_paths(git_root);
+    read_markers_at(&paths)
+}
+
+pub fn read_markers_at(paths: &MarkerPaths) -> MarkerState {
+    if paths.done.is_file() {
+        let body = std::fs::read_to_string(&paths.done).unwrap_or_default();
         return MarkerState::Done(body.trim().to_string());
     }
-    let blocked = blocked_path(git_root);
-    if blocked.is_file() {
-        let body = std::fs::read_to_string(&blocked).unwrap_or_default();
+    if paths.blocked.is_file() {
+        let body = std::fs::read_to_string(&paths.blocked).unwrap_or_default();
         return MarkerState::Blocked(body.trim().to_string());
     }
     MarkerState::None
@@ -168,8 +197,13 @@ pub fn read_markers(git_root: &Path) -> MarkerState {
 
 /// Remove stale DONE/BLOCKED markers so we start from a clean slate.
 pub fn clear_markers(git_root: &Path) {
-    let _ = std::fs::remove_file(done_path(git_root));
-    let _ = std::fs::remove_file(blocked_path(git_root));
+    let paths = default_marker_paths(git_root);
+    clear_markers_at(&paths);
+}
+
+pub fn clear_markers_at(paths: &MarkerPaths) {
+    let _ = std::fs::remove_file(&paths.done);
+    let _ = std::fs::remove_file(&paths.blocked);
 }
 
 /// Ensure the `.clud/loop/` dir exists under the given git root.
@@ -282,7 +316,7 @@ fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
     let mut argv = vec!["gh".to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let config = ProcessConfig {
-        command: CommandSpec::Argv(argv),
+        command: subprocess::command_spec_for_subprocess(argv),
         cwd: None,
         env: None,
         capture: true,
@@ -436,19 +470,23 @@ pub fn render_cache(doc: &IssueDoc, fetched_at: &str) -> String {
 
 /// Default prompt instructions appended to every loop-driven task when the
 /// DONE/BLOCKED marker contract is active.
-pub const DONE_MARKER_CONTRACT: &str = "\n\n---\n\
+pub fn done_marker_contract(done_path: &str, blocked_path: &str) -> String {
+    format!(
+        "\n\n---\n\
 You are running in a ralph loop. The loop will re-invoke you up to N times \
 with the same task until you complete it.\n\
 \n\
 When the task is fully resolved and verified (tests pass, lint clean where \
-applicable), write `.clud/loop/DONE` with a one-line summary of what you \
+applicable), write `{done_path}` with a one-line summary of what you \
 did. Do not write DONE prematurely — only after you are confident the work \
 is complete.\n\
 \n\
 If you cannot make progress (missing info, external dependency, needs \
-human input), write `.clud/loop/BLOCKED` with a one-line reason and stop.\n\
+human input), write `{blocked_path}` with a one-line reason and stop.\n\
 \n\
-Otherwise, continue working — you will be re-invoked.\n";
+Otherwise, continue working — you will be re-invoked.\n"
+    )
+}
 
 #[cfg(test)]
 mod tests {

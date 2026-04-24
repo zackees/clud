@@ -87,6 +87,23 @@ class TestBackendSelection:
         report = _parse_agent_report(result)
         assert report["cwd"] == str(Path.cwd())
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only codex.cmd repro")
+    def test_codex_cmd_wrapper_launches_noninteractive_exec(
+        self, clud_binary: Path, mock_env_codex_cmd: dict[str, str]
+    ) -> None:
+        result = _run(
+            clud_binary,
+            "--codex",
+            "-p",
+            "hello from codex.cmd",
+            env=mock_env_codex_cmd,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        report = _parse_agent_report(result)
+        assert "exec" in report["args"]
+        assert "--dangerously-bypass-approvals-and-sandbox" in report["args"]
+        assert "hello from codex.cmd" in report["args"]
+
     def test_claude_preserves_cwd(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "--claude", "-p", "hello", env=mock_env)
         assert result.returncode == 0
@@ -320,7 +337,7 @@ class TestLoopMode:
     """Verify loop mode runs multiple iterations."""
 
     def test_loop_iterations(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
-        # --no-done-marker: this test only verifies the loop runs N times;
+        # --no-done: this test only verifies the loop runs N times;
         # without it, the DONE-marker contract would make exit code 2 (not
         # converged) the expected outcome when no marker is written.
         result = _run(
@@ -328,7 +345,7 @@ class TestLoopMode:
             "loop",
             "--loop-count",
             "3",
-            "--no-done-marker",
+            "--no-done",
             "do stuff",
             env=mock_env,
         )
@@ -371,7 +388,7 @@ class TestLoopMode:
             "loop",
             "--loop-count",
             "3",
-            "--no-done-marker",
+            "--no-done",
             "do stuff",
             env=mock_env,
         )
@@ -409,11 +426,38 @@ class TestLoopMode:
         assert report["backend"] == "codex"
         assert report["launch_mode"] == "subprocess"
         assert report["loop_markers"] is not None
+        assert report["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
         assert report["iterations"] == 50
         cmd = report["command"]
         assert cmd[1] == "exec"
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
         assert "-p" not in cmd
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only codex.cmd repro")
+    def test_codex_loop_with_cmd_wrapper(
+        self, clud_binary: Path, mock_env_codex_cmd: dict[str, str]
+    ) -> None:
+        result = _run(
+            clud_binary,
+            "--codex",
+            "loop",
+            "--loop-count",
+            "2",
+            "--no-done",
+            "batch wrapper loop",
+            env=mock_env_codex_cmd,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        cleaned = _strip_ansi(result.stdout)
+        json_lines = [
+            line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")
+        ]
+        assert len(json_lines) == 2
+        for line in json_lines:
+            report = json.loads(line)
+            assert "exec" in report["args"]
+            assert "--dangerously-bypass-approvals-and-sandbox" in report["args"]
+            assert any("batch wrapper loop" in arg for arg in report["args"])
 
 
 class TestInterruptReporting:
