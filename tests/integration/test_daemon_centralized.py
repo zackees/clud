@@ -136,6 +136,18 @@ def _kill_process(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+def _kill_process_only(pid: int) -> None:
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
 def _pid_is_alive(pid: int) -> bool:
     if sys.platform == "win32":
         result = subprocess.run(
@@ -401,13 +413,12 @@ class TestDaemonManagedSessionFlags:
         finally:
             _kill_daemon_for_session(state_dir, session_id)
 
-    def test_detachable_ctrl_c_timeout_backgrounds_session(
+    def test_detachable_noninteractive_ctrl_c_backgrounds_session(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
-        # Issue #25: `--detachable` Ctrl+C countdown now defaults to
-        # *backgrounding* on timeout (user opted in), not ending. This test
-        # replaces the earlier `..._ends_session` variant that encoded the old
-        # default.
+        # Issue #25: a non-interactive attach has no safe prompt surface.
+        # Ctrl+C should detach/background immediately instead of treating
+        # arbitrary piped stdin as a yes/no answer.
         state_dir = tmp_path / "daemon-state"
         env = _managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
@@ -446,11 +457,11 @@ class TestDaemonManagedSessionFlags:
                 proc.kill()
                 proc.wait(timeout=5)
 
-        # Timeout now backgrounds, so the CLI should exit 0.
         stderr_tail = proc.stderr.read() if proc.stderr else ""
         assert proc.returncode == 0, (
             f"expected 0 (backgrounded) got {proc.returncode}; stderr={stderr_tail}"
         )
+        assert "non-interactive attach interrupted" in stderr_tail
 
         # Session metadata must still reflect a live worker.
         metadata = _session_metadata(state_dir, session_id)
@@ -471,11 +482,56 @@ class TestDaemonManagedSessionFlags:
 
         _kill_daemon_for_session(state_dir, session_id)
 
-    def test_detachable_ctrl_c_explicit_n_ends_session(
+    def test_concurrent_attach_attempt_is_rejected(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
-        # Issue #25: explicit 'n' at the background prompt still ends the
-        # session (so users who want the old default can opt into it).
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "concurrent-attach",
+            "--",
+            "--mock-sleep-ms",
+            "30000",
+        )
+
+        first_attach = subprocess.Popen(
+            [str(clud_binary), "attach", session_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+
+        try:
+            _wait_for_exit(proc, timeout=10)
+            time.sleep(1.0)
+            assert first_attach.poll() is None
+
+            second_attach = subprocess.run(
+                [str(clud_binary), "attach", session_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert second_attach.returncode != 0
+            assert "session already has an attached client" in second_attach.stderr
+        finally:
+            if first_attach.poll() is None:
+                first_attach.kill()
+                first_attach.wait(timeout=5)
+            _kill_daemon_for_session(state_dir, session_id)
+
+    def test_detachable_noninteractive_ctrl_c_ignores_piped_n(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # Issue #25: there is no safe prompt surface when stdin/stderr are
+        # pipes, so piped bytes must not be interpreted as background-prompt
+        # answers. Even a queued "n" should detach/background immediately.
         state_dir = tmp_path / "daemon-state"
         env = _managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
@@ -517,13 +573,16 @@ class TestDaemonManagedSessionFlags:
                 proc.kill()
                 proc.wait(timeout=5)
 
-        if sys.platform == "win32":
-            assert proc.returncode in (130, 3221225786)
-        else:
-            assert proc.returncode == 130
+        stderr_tail = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode == 0, (
+            f"expected 0 (backgrounded) got {proc.returncode}; stderr={stderr_tail}"
+        )
+        assert "non-interactive attach interrupted" in stderr_tail
 
-        metadata = _wait_for_session_exit(state_dir, session_id, timeout=12.0)
-        assert metadata["exit_code"] is not None or not _pid_is_alive(metadata["root_pid"])
+        metadata = _session_metadata(state_dir, session_id)
+        assert metadata["exit_code"] is None
+        assert metadata["root_pid"] is not None
+        assert _pid_is_alive(metadata["root_pid"])
 
         listed = subprocess.run(
             [str(clud_binary), "list"],
@@ -533,10 +592,38 @@ class TestDaemonManagedSessionFlags:
             env=env,
         )
         assert listed.returncode == 0
-        assert session_id not in listed.stdout
+        assert session_id in listed.stdout
+
+        _kill_daemon_for_session(state_dir, session_id)
 
 
 class TestDaemonCentralizedPersistence:
+    def test_daemon_crash_recovery_kills_worker_and_backend(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "daemon-crash-recovery",
+            "--",
+            "--mock-sleep-ms",
+            "30000",
+        )
+
+        _wait_for_exit(proc, timeout=10)
+        metadata = _session_metadata(state_dir, session_id)
+        daemon_pid = metadata["daemon_pid"]
+        worker_pid = metadata["worker_pid"]
+        root_pid = metadata["root_pid"]
+        assert root_pid is not None
+
+        _kill_process_only(daemon_pid)
+        _wait_for_pids_to_exit([worker_pid, root_pid], timeout=15)
+
     def test_subprocess_session_persists_and_reattaches(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
