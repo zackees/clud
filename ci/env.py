@@ -255,31 +255,29 @@ def soldr_path(env: dict[str, str] | None = None) -> str | None:
 
 
 def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
-    """Return the cargo argv, preferring `soldr cargo` on Windows.
+    """Return the cargo argv, preferring `soldr cargo` on every platform.
 
-    Issue #27: see `soldr_path` for the rationale. On non-Windows platforms,
-    or when soldr isn't installed (local dev without the dev deps), fall
-    back to bare `cargo`, matching `tests/integration/conftest.py::_cargo_argv`.
+    Issue #27 pinned this on Windows; issue #68 extends it to all platforms
+    so that local dev and CI (via `zackees/setup-soldr@v0`) go through the
+    same rustup-resolved toolchain. Falls back to bare `cargo` when soldr
+    isn't on PATH — matches `tests/integration/conftest.py::_cargo_argv`.
     """
-    if platform.system() == "Windows":
-        soldr = soldr_path(env)
-        if soldr:
-            return [soldr, "cargo", *subcommand]
+    soldr = soldr_path(env)
+    if soldr:
+        return [soldr, "cargo", *subcommand]
     return ["cargo", *subcommand]
 
 
 def maturin_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
-    """Return the maturin argv, preferring `soldr maturin` on Windows.
+    """Return the maturin argv, preferring `soldr maturin` on every platform.
 
-    Mirrors `cargo_argv` — see issue #27. maturin invokes cargo under the
-    hood, so the same MSVC-pinning concern applies. soldr passes the
-    subcommand through to maturin via `rustup which maturin`, which
-    resolves to the dev-venv install.
+    Mirrors `cargo_argv` — see issues #27 and #68. maturin invokes cargo
+    under the hood, so routing through soldr keeps the MSVC pin on Windows
+    and makes the cargo cache lineage uniform across CI platforms. soldr
+    resolves `maturin` via `rustup which maturin`, which points at the
+    dev-venv install.
     """
-    if platform.system() == "Windows":
-        soldr = soldr_path(env)
-        if soldr:
-            return [soldr, "maturin", *subcommand]
-    # Fall back to `python -m maturin` so the dev-venv install is used
-    # on non-Windows platforms regardless of PATH state.
+    soldr = soldr_path(env)
+    if soldr:
+        return [soldr, "maturin", *subcommand]
     return [sys.executable, "-m", "maturin", *subcommand]
