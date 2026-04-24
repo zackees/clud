@@ -11,6 +11,7 @@ pub mod command;
 pub mod daemon;
 pub mod loop_spec;
 pub mod session;
+pub mod subprocess;
 pub mod trampoline;
 pub mod voice;
 pub mod wasm;

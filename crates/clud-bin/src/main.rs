@@ -1,4 +1,6 @@
-use clud::{args, backend, command, daemon, loop_spec, session, trampoline, voice, wasm};
+use clud::{
+    args, backend, command, daemon, loop_spec, session, subprocess, trampoline, voice, wasm,
+};
 
 use std::io::{self, Read};
 use std::sync::{
@@ -44,6 +46,18 @@ fn main() {
         }
     }
 
+    if let Some(args::Command::Loop {
+        repeat: Some(_),
+        done: None,
+        no_done: false,
+        ..
+    }) = &args.command
+    {
+        eprintln!(
+            "[clud] warning: `--repeat` implies `--no-done`; DONE marker injection/checking is disabled."
+        );
+    }
+
     let interrupted = install_ctrl_c_flag();
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
         std::process::exit(exit_code);
@@ -73,7 +87,11 @@ fn main() {
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
             "launch_mode": plan.launch_mode.as_str(),
-            "loop_markers": plan.loop_markers.as_ref().map(|m| &m.git_root),
+            "repeat_interval_secs": plan.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({
+                "done_path": m.done_path,
+                "blocked_path": m.blocked_path,
+            })),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
         std::process::exit(0);
@@ -82,7 +100,10 @@ fn main() {
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
     // short-circuit on iteration 1. See loop_spec for semantics.
     if let Some(ref markers) = plan.loop_markers {
-        loop_spec::clear_markers(std::path::Path::new(&markers.git_root));
+        loop_spec::clear_markers_at(&loop_spec::MarkerPaths {
+            done: std::path::PathBuf::from(&markers.done_path),
+            blocked: std::path::PathBuf::from(&markers.blocked_path),
+        });
     }
 
     let exit_code = if daemon::experimental_enabled(&args) {
@@ -156,9 +177,7 @@ fn normalize_exit_code(code: i32) -> i32 {
 fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
     use std::path::PathBuf;
 
-    use running_process_core::{
-        CommandSpec, Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode,
-    };
+    use running_process_core::{Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
     let env = child_env();
     let mut last_exit = 0i32;
@@ -173,7 +192,7 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
         }
 
         let config = ProcessConfig {
-            command: CommandSpec::Argv(plan.command.clone()),
+            command: subprocess::command_spec_for_subprocess(plan.command.clone()),
             cwd: plan.cwd.as_ref().map(PathBuf::from),
             env: Some(env.clone()),
             capture: false,
@@ -320,8 +339,10 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
 /// terminal exit code to return from the runner, or `None` to continue.
 fn check_loop_markers(plan: &command::LaunchPlan, iteration: u32) -> Option<i32> {
     let markers = plan.loop_markers.as_ref()?;
-    let root = std::path::Path::new(&markers.git_root);
-    match loop_spec::read_markers(root) {
+    match loop_spec::read_markers_at(&loop_spec::MarkerPaths {
+        done: std::path::PathBuf::from(&markers.done_path),
+        blocked: std::path::PathBuf::from(&markers.blocked_path),
+    }) {
         loop_spec::MarkerState::Done(summary) => {
             if summary.is_empty() {
                 eprintln!(

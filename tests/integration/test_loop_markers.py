@@ -111,10 +111,10 @@ def test_loop_no_markers_exhausts_iterations(
     assert "iteration 3" in result.stderr
 
 
-def test_loop_no_done_marker_flag_keeps_old_semantics(
+def test_loop_no_done_flag_keeps_old_semantics(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
 ) -> None:
-    """With --no-done-marker the loop runs all iterations and exits 0.
+    """With --no-done the loop runs all iterations and exits 0.
 
     This preserves pre-marker behavior for scripts that don't want the
     DONE-marker contract injected.
@@ -124,7 +124,7 @@ def test_loop_no_done_marker_flag_keeps_old_semantics(
         "loop",
         "--loop-count",
         "2",
-        "--no-done-marker",
+        "--no-done",
         "task",
         env=mock_env,
         cwd=tmp_path,
@@ -164,7 +164,7 @@ def test_loop_clears_stale_done_marker(
 def test_loop_dry_run_includes_loop_markers(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
 ) -> None:
-    """--dry-run output reports the loop_markers git root when active."""
+    """--dry-run output reports the active DONE/BLOCKED marker paths."""
     import json
 
     result = _run(
@@ -178,8 +178,8 @@ def test_loop_dry_run_includes_loop_markers(
     assert result.returncode == 0
     data = json.loads(result.stdout)
     assert data["loop_markers"] is not None
-    # git-root-from walks up; without .git anywhere, it returns the cwd.
-    assert str(tmp_path).replace("\\", "/") in data["loop_markers"].replace("\\", "/")
+    assert data["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
+    assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith(".clud/loop/BLOCKED")
 
 
 def test_codex_loop_stops_on_done_marker(

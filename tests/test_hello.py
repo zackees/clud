@@ -233,14 +233,38 @@ def test_dry_run_loop() -> None:
     assert ".clud/loop/DONE" in prompt
     assert ".clud/loop/BLOCKED" in prompt
     assert data["loop_markers"] is not None
+    assert data["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
+    assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith(
+        ".clud/loop/BLOCKED"
+    )
 
 
-def test_dry_run_loop_no_done_marker() -> None:
-    result = _run("--dry-run", "loop", "--no-done-marker", "do stuff")
+def test_dry_run_loop_no_done() -> None:
+    result = _run("--dry-run", "loop", "--no-done", "do stuff")
     assert result.returncode == 0
     data = json.loads(result.stdout)
     assert data["command"][-1] == "do stuff"
     assert data["loop_markers"] is None
+
+
+def test_dry_run_loop_repeat_implies_no_done() -> None:
+    result = _run("--dry-run", "loop", "--repeat", "1h", "do stuff")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    assert data["command"][-1] == "do stuff"
+    assert data["loop_markers"] is None
+    assert data["repeat_interval_secs"] == 3600
+
+
+def test_dry_run_loop_repeat_with_done_override() -> None:
+    result = _run("--dry-run", "loop", "--repeat", "1h", "--done", "DONE.md", "do stuff")
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    prompt = data["command"][-1]
+    assert "DONE.md" in prompt
+    assert "BLOCKED.md" in prompt
+    assert data["loop_markers"]["done_path"].replace("\\", "/").endswith("DONE.md")
+    assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith("BLOCKED.md")
 
 
 def test_dry_run_loop_default_count() -> None:

@@ -85,8 +85,15 @@ pub enum Command {
         #[arg(long = "refresh")]
         refresh: bool,
         /// Do not inject the DONE/BLOCKED marker contract into the prompt.
-        #[arg(long = "no-done-marker")]
-        no_done_marker: bool,
+        #[arg(long = "no-done", alias = "no-done-marker", conflicts_with = "done")]
+        no_done: bool,
+        /// Re-enable the DONE/BLOCKED contract using a custom DONE marker path.
+        #[arg(long = "done", conflicts_with = "no_done")]
+        done: Option<String>,
+        /// Re-run the loop after it completes, sleeping for the given duration
+        /// between runs (for example `30s`, `5m`, `1h`).
+        #[arg(long = "repeat")]
+        repeat: Option<String>,
     },
     Up {
         #[arg(short = 'm', long = "message")]
@@ -173,6 +180,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--name",
         "--backlog-size",
         "--loop-count",
+        "--done",
+        "--repeat",
         "--daemon-state-dir",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
@@ -191,6 +200,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--all",
         "--last",
         "--refresh",
+        "--no-done",
         "--no-done-marker",
         "--help",
         "--version",
@@ -354,12 +364,16 @@ mod tests {
                 ref task,
                 loop_count,
                 refresh,
-                no_done_marker,
+                no_done,
+                ref done,
+                ref repeat,
             }) => {
                 assert_eq!(task.as_deref(), Some("do the task"));
                 assert_eq!(loop_count, 50);
                 assert!(!refresh);
-                assert!(!no_done_marker);
+                assert!(!no_done);
+                assert!(done.is_none());
+                assert!(repeat.is_none());
             }
             _ => panic!("expected Loop subcommand"),
         }
@@ -393,23 +407,63 @@ mod tests {
             Some(Command::Loop {
                 ref task,
                 refresh,
-                no_done_marker,
+                no_done,
+                ref done,
+                ref repeat,
                 ..
             }) => {
                 assert_eq!(task.as_deref(), Some("https://github.com/o/r/issues/42"));
                 assert!(refresh);
-                assert!(!no_done_marker);
+                assert!(!no_done);
+                assert!(done.is_none());
+                assert!(repeat.is_none());
             }
             _ => panic!("expected Loop subcommand"),
         }
     }
 
     #[test]
-    fn test_loop_no_done_marker_flag() {
+    fn test_loop_no_done_flag() {
+        let args = parse(&["clud", "loop", "--no-done", "task"]);
+        match args.command {
+            Some(Command::Loop { no_done, .. }) => {
+                assert!(no_done);
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_loop_no_done_marker_compat_alias() {
         let args = parse(&["clud", "loop", "--no-done-marker", "task"]);
         match args.command {
-            Some(Command::Loop { no_done_marker, .. }) => {
-                assert!(no_done_marker);
+            Some(Command::Loop { no_done, .. }) => {
+                assert!(no_done);
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_loop_done_path() {
+        let args = parse(&["clud", "loop", "--done", "DONE.md", "task"]);
+        match args.command {
+            Some(Command::Loop {
+                ref done, no_done, ..
+            }) => {
+                assert_eq!(done.as_deref(), Some("DONE.md"));
+                assert!(!no_done);
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_loop_repeat() {
+        let args = parse(&["clud", "loop", "--repeat", "1h", "task"]);
+        match args.command {
+            Some(Command::Loop { ref repeat, .. }) => {
+                assert_eq!(repeat.as_deref(), Some("1h"));
             }
             _ => panic!("expected Loop subcommand"),
         }

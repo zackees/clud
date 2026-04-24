@@ -48,6 +48,9 @@ def _extract_session_id(line: str) -> str | None:
     # "[clud] session sess-XXX running in background"
     if "session" in line and "running in background" in line:
         return line.strip().split("session ", 1)[-1].split(" running")[0]
+    # "[clud] repeat job sess-XXX running in background"
+    if "repeat job" in line and "running in background" in line:
+        return line.strip().split("repeat job ", 1)[-1].split(" running")[0]
     return None
 
 
@@ -479,6 +482,58 @@ class TestDaemonManagedSessionFlags:
         )
         assert listed.returncode == 0
         assert session_id in listed.stdout
+
+        _kill_daemon_for_session(state_dir, session_id)
+
+    def test_loop_repeat_registers_background_job_and_lists_status(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+
+        result = subprocess.run(
+            [
+                str(clud_binary),
+                "loop",
+                "--loop-count",
+                "1",
+                "--repeat",
+                "1s",
+                "repeat background task",
+                "--",
+                "--mock-sleep-ms",
+                "50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        session_id = _read_session_id_from_text(result.stderr)
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            metadata = _session_metadata(state_dir, session_id)
+            if metadata["repeat_interval_secs"] == 1:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"repeat metadata not populated: {metadata}")
+
+        listed = subprocess.run(
+            [str(clud_binary), "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            cwd=tmp_path,
+        )
+        assert listed.returncode == 0, f"stderr: {listed.stderr}"
+        assert session_id in listed.stdout
+        assert "repeat background task" in listed.stdout
+        assert ("running" in listed.stdout) or ("sleeping" in listed.stdout)
 
         _kill_daemon_for_session(state_dir, session_id)
 
