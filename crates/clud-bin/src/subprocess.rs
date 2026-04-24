@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use std::path::Path;
 
 use running_process_core::CommandSpec;
