@@ -246,7 +246,6 @@ bash test                   # Unit tests (Rust + Python)
 bash test --integration     # Include integration tests with mock agents
 ```
 
-<img width="556" height="500" alt="image" src="https://github.com/user-attachments/assets/520f6131-5409-4b29-927a-2b946c4ecb79" />
 
 ## License
 
