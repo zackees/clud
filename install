@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Install the soldr binary used by build/lint/test to route Rust toolchain
+# calls through `rustup which`. soldr is intentionally NOT a Python dep —
+# it ships as a standalone binary published to GitHub Releases.
+#
+# Default: install into this repo's .venv ({Scripts,bin}/soldr[.exe]).
+# With --global: install into ~/.cargo/bin (or ~/.local/bin if absent).
+
+set -euo pipefail
+
+VERSION="${SOLDR_VERSION:-0.7.11}"
+GLOBAL=0
+
+usage() {
+    cat <<EOF
+Usage: ./install [--global] [--version=VERSION]
+
+Installs soldr (https://github.com/zackees/soldr) — a thin wrapper around
+the rustup-managed cargo/rustc/rustfmt that this repo's build scripts
+expect on PATH.
+
+Options:
+  --global              Install to ~/.cargo/bin (or ~/.local/bin) instead
+                        of the local .venv. Useful if you work across
+                        multiple Rust repos.
+  --version=VERSION     Pin a specific soldr version (default: ${VERSION}).
+  -h, --help            Show this message.
+
+Environment:
+  SOLDR_VERSION         Same as --version.
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --global) GLOBAL=1 ;;
+        --version=*) VERSION="${arg#--version=}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown arg: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+uname_s=$(uname -s)
+uname_m=$(uname -m)
+
+case "$uname_m" in
+    x86_64|amd64) arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    *) echo "unsupported architecture: $uname_m" >&2; exit 1 ;;
+esac
+
+case "$uname_s" in
+    Linux*)   triple="${arch}-unknown-linux-gnu"; ext=tar.gz ;;
+    Darwin*)  triple="${arch}-apple-darwin";      ext=tar.gz ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+              triple="${arch}-pc-windows-msvc";   ext=zip ;;
+    *) echo "unsupported OS: $uname_s" >&2; exit 1 ;;
+esac
+
+asset="soldr-v${VERSION}-${triple}.${ext}"
+url="https://github.com/zackees/soldr/releases/download/v${VERSION}/${asset}"
+binary="soldr"
+[[ "$ext" == "zip" ]] && binary="soldr.exe"
+
+repo_root="$(cd "$(dirname "$0")" && pwd)"
+
+if (( GLOBAL )); then
+    if [[ -d "${HOME}/.cargo/bin" ]]; then
+        target_dir="${HOME}/.cargo/bin"
+    else
+        target_dir="${HOME}/.local/bin"
+        mkdir -p "$target_dir"
+    fi
+else
+    if [[ -d "${repo_root}/.venv/Scripts" ]]; then
+        target_dir="${repo_root}/.venv/Scripts"
+    elif [[ -d "${repo_root}/.venv/bin" ]]; then
+        target_dir="${repo_root}/.venv/bin"
+    else
+        echo "no .venv at ${repo_root}/.venv — run 'uv sync --group dev' first, or pass --global" >&2
+        exit 1
+    fi
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+echo "Downloading $url"
+curl -fSL "$url" -o "$tmp/$asset"
+
+if [[ "$ext" == "zip" ]]; then
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q "$tmp/$asset" -d "$tmp"
+    else
+        python -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+            "$tmp/$asset" "$tmp"
+    fi
+else
+    tar -xzf "$tmp/$asset" -C "$tmp"
+fi
+
+src=$(find "$tmp" -type f -name "$binary" | head -n1)
+if [[ -z "$src" ]]; then
+    echo "binary $binary not found in $asset" >&2
+    exit 1
+fi
+
+cp "$src" "$target_dir/$binary"
+chmod +x "$target_dir/$binary"
+echo "Installed soldr ${VERSION} -> $target_dir/$binary"
+"$target_dir/$binary" --version

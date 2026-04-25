@@ -1,7 +1,0 @@
-#!/bin/bash
-# Optional trampoline for developers who hit wrong-toolchain issues
-# (chocolatey cargo on Windows, stale system rust on Linux, etc.).
-# Routes through soldr so `rustup which` picks the rustup-managed
-# toolchain. `--no-cache` keeps soldr's RUSTC_WRAPPER / zccache path
-# off so this matches bare-cargo semantics.
-exec uv run soldr --no-cache cargo "$@"
