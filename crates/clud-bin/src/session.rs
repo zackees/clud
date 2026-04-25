@@ -8,6 +8,8 @@ use crossterm::execute;
 use running_process_core::pty::reexports::portable_pty::PtySize;
 use running_process_core::pty::NativePtyProcess;
 
+use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
+
 /// Resize the PTY. On Windows, `running_process_core::pty::NativePtyProcess::resize_impl`
 /// is a deliberate no-op (see that crate's `pty/mod.rs:730-737`), so reaching
 /// the underlying master's `resize()` directly is the only way to honor a
@@ -216,9 +218,38 @@ where
     H: InteractiveHooks,
     R: std::io::Read + Send + 'static,
 {
+    run_raw_pty_pump_with_extra_rx(process, interrupted, hooks, stdin_source, None)
+}
+
+/// Production pump entry that wires a side channel for IDropTarget
+/// callbacks (issue #79). Constructs the platform-native resize watcher
+/// internally and passes through to `run_raw_pty_pump_full`.
+///
+/// `extra_rx` chunks are interleaved with stdin chunks and forwarded to
+/// the PTY exactly like real stdin, EXCEPT they bypass the
+/// bracketed-paste normalizer (the OLE/IDropTarget callback already
+/// hands us a normalized, newline-joined path).
+pub fn run_raw_pty_pump_with_extra_rx<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
     let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
     spawn_os_resize_watcher(resize_tx);
-    run_raw_pty_pump_with_resize_rx(process, interrupted, hooks, stdin_source, resize_rx)
+    run_raw_pty_pump_full(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        resize_rx,
+        extra_rx,
+    )
 }
 
 /// Spawn the platform-native resize-watcher thread that feeds
@@ -289,6 +320,23 @@ where
     H: InteractiveHooks,
     R: std::io::Read + Send + 'static,
 {
+    run_raw_pty_pump_full(process, interrupted, hooks, stdin_source, resize_rx, None)
+}
+
+/// Most-general pump entry. See `run_raw_pty_pump_with_extra_rx` for
+/// the public-facing version that constructs the resize receiver.
+pub fn run_raw_pty_pump_full<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
     use std::sync::mpsc;
 
     let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
@@ -322,6 +370,12 @@ where
     });
 
     let mut observer = F3Observer::new();
+    // Issue #63 / #79: bracketed-paste passes through the PTY pump as
+    // raw bytes. When the user drags a file onto the terminal, the
+    // terminal emits `\x1b[200~ <path-shaped string> \x1b[201~`. We
+    // normalize that path BEFORE forwarding so all backends see a
+    // canonical form, regardless of which terminal produced the drop.
+    let mut paste = BracketedPasteNormalizer::new();
 
     loop {
         // Child output → our stdout is handled by the library's PTY plumbing;
@@ -345,12 +399,35 @@ where
         // `poll_pty_process` and blocks on a full PTY input buffer, so
         // a large pending stdin backlog stops us from noticing that the
         // child has exited. One chunk per loop keeps the cadence even.
+        // Drain one chunk from the side channel (drag-drop OLE
+        // callback) — these are pre-normalized path bytes that should
+        // bypass the bracketed-paste detector and go straight to the
+        // PTY.
+        if let Some(ref rx) = extra_rx {
+            if let Ok(chunk) = rx.try_recv() {
+                if let Err(err) = process.write_impl(&chunk, false) {
+                    eprintln!(
+                        "[clud] warning: failed to forward dropped paths to pty: {}",
+                        err
+                    );
+                }
+            }
+        }
+
         if let Ok(chunk) = stdin_rx.try_recv() {
             let requested_interrupt =
                 interrupt_on_ctrl_c_byte && stdin_chunk_requests_interrupt(&chunk);
-            if let Err(err) = process.write_impl(&chunk, false) {
+            // Run the bracketed-paste normalizer over the chunk BEFORE
+            // forwarding to the PTY. Non-paste bytes pass through with
+            // O(1) state cost (just a 6-byte prefix matcher); paste
+            // bodies are buffered and rewritten in place.
+            let outgoing = paste.process(&chunk);
+            if let Err(err) = process.write_impl(&outgoing, false) {
                 eprintln!("[clud] warning: failed to forward stdin to pty: {}", err);
             } else if hooks.intercept_f3() {
+                // F3 detection still runs over the ORIGINAL chunk: a
+                // press inside a paste body is unusual but we want
+                // detection symmetry with raw byte forwarding.
                 let presses = observer.observe(&chunk);
                 for _ in 0..presses {
                     if let Err(err) = hooks.on_f3_press(process) {
@@ -401,6 +478,142 @@ fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
 
 fn stdin_chunk_requests_interrupt(chunk: &[u8]) -> bool {
     chunk.contains(&0x03)
+}
+
+/// Bracketed-paste byte sequence emitted by xterm-class terminals when
+/// the user pastes (or drags-and-drops) text.
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Stream-resumable bracketed-paste detector that, on each completed
+/// paste, runs the buffered inner content through
+/// [`looks_like_dropped_path`] / [`normalize_dropped_path`] to canonicalize
+/// terminal-specific drop encodings (issue #63 / #79).
+///
+/// Behavior:
+/// - Bytes outside any paste pass through unchanged.
+/// - Bytes inside a bracketed paste are buffered. On `\x1b[201~`:
+///     - If `looks_like_dropped_path(inner)` returns true, emit
+///       `\x1b[200~` + `normalize_dropped_path(inner)` + `\x1b[201~`.
+///     - Otherwise, emit the original `\x1b[200~ inner \x1b[201~` verbatim.
+/// - The detector survives across chunks: a paste split across reads is
+///   reassembled correctly.
+///
+/// The PASS-IT-VERBATIM rule on non-path content is essential — a
+/// multi-line code paste must not be mutated, even if its first line
+/// happens to start with `/`.
+pub struct BracketedPasteNormalizer {
+    /// How many bytes of `PASTE_START` we've matched while outside a
+    /// paste. 0..PASTE_START.len().
+    start_match: usize,
+    /// `Some(buf)` while we are inside a paste body. The buffer holds
+    /// the *inner* paste content (no `\x1b[200~` prefix and no terminal
+    /// `\x1b[201~`).
+    inside: Option<Vec<u8>>,
+    /// How many bytes of `PASTE_END` we've matched while inside a paste.
+    end_match: usize,
+}
+
+impl BracketedPasteNormalizer {
+    pub fn new() -> Self {
+        Self {
+            start_match: 0,
+            inside: None,
+            end_match: 0,
+        }
+    }
+
+    /// Process a chunk, returning the byte stream that should be
+    /// forwarded downstream (PTY master, in production).
+    pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(chunk.len());
+        for &b in chunk {
+            if let Some(buf) = self.inside.as_mut() {
+                // We are inside a paste body. Look for PASTE_END.
+                if b == PASTE_END[self.end_match] {
+                    self.end_match += 1;
+                    if self.end_match == PASTE_END.len() {
+                        // Complete: emit normalized form and reset.
+                        let inner = std::mem::take(buf);
+                        self.inside = None;
+                        self.end_match = 0;
+                        emit_paste_block(&mut out, &inner);
+                    }
+                    continue;
+                }
+
+                // PASTE_END prefix broke. Flush any partial-end bytes
+                // back into the inner buffer, then this byte too.
+                if self.end_match > 0 {
+                    buf.extend_from_slice(&PASTE_END[..self.end_match]);
+                    // The byte that broke the prefix may itself start a
+                    // new PASTE_END match.
+                    self.end_match = if b == PASTE_END[0] { 1 } else { 0 };
+                    if self.end_match == 0 {
+                        buf.push(b);
+                    }
+                } else {
+                    buf.push(b);
+                }
+            } else {
+                // We are outside a paste. Look for PASTE_START.
+                if b == PASTE_START[self.start_match] {
+                    self.start_match += 1;
+                    if self.start_match == PASTE_START.len() {
+                        // Complete: enter paste body.
+                        self.start_match = 0;
+                        self.end_match = 0;
+                        self.inside = Some(Vec::new());
+                    }
+                    continue;
+                }
+
+                // PASTE_START prefix broke. Flush partial bytes verbatim.
+                if self.start_match > 0 {
+                    out.extend_from_slice(&PASTE_START[..self.start_match]);
+                    self.start_match = if b == PASTE_START[0] { 1 } else { 0 };
+                    if self.start_match == 0 {
+                        out.push(b);
+                    }
+                } else {
+                    out.push(b);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Default for BracketedPasteNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Helper for `BracketedPasteNormalizer::process` — given a captured
+/// inner paste body, emit the wrapped (and possibly path-normalized)
+/// bracketed-paste block to `out`.
+fn emit_paste_block(out: &mut Vec<u8>, inner: &[u8]) {
+    out.extend_from_slice(PASTE_START);
+    // Decide path-rewrite on the WHOLE buffer, not per-line: a
+    // multi-line code paste with a path-shaped first line must remain
+    // verbatim. `looks_like_dropped_path` is conservative — it requires
+    // the entire trimmed string to look like a single path token.
+    let s = match std::str::from_utf8(inner) {
+        Ok(s) => s,
+        Err(_) => {
+            out.extend_from_slice(inner);
+            out.extend_from_slice(PASTE_END);
+            return;
+        }
+    };
+    if looks_like_dropped_path(s) {
+        let normalized = normalize_dropped_path(s);
+        out.extend_from_slice(normalized.as_bytes());
+    } else {
+        out.extend_from_slice(inner);
+    }
+    out.extend_from_slice(PASTE_END);
 }
 
 fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
@@ -599,5 +812,95 @@ mod tests {
     fn only_real_stdin_gets_interactive_console_policy() {
         assert!(stdin_source_is_real_stdin::<std::io::Stdin>());
         assert!(!stdin_source_is_real_stdin::<std::io::Cursor<Vec<u8>>>());
+    }
+
+    // ─── BracketedPasteNormalizer (issue #63 / #79) ────────────────────
+
+    #[test]
+    fn paste_normalizer_passthrough_bytes_outside_paste() {
+        let mut p = BracketedPasteNormalizer::new();
+        // Plain typing — no PASTE_START seen — passes through verbatim.
+        let out = p.process(b"hello world\n");
+        assert_eq!(out, b"hello world\n");
+    }
+
+    /// session_paste_normalizes_path_on_drop — when a bracketed paste
+    /// arrives whose body looks like a dragged path, the body must be
+    /// rewritten through `normalize_dropped_path` before forwarding.
+    #[test]
+    fn session_paste_normalizes_path_on_drop() {
+        let mut p = BracketedPasteNormalizer::new();
+        // GNOME-Terminal-style file URI drop. Should canonicalize to
+        // the platform-appropriate path form.
+        let chunk = b"\x1b[200~file:///home/me/my%20file.txt\x1b[201~";
+        let out = p.process(chunk);
+        // Both POSIX and Windows must wrap output in bracketed-paste
+        // markers and percent-decode the URI.
+        assert!(out.starts_with(PASTE_START), "must keep PASTE_START");
+        assert!(out.ends_with(PASTE_END), "must keep PASTE_END");
+        let inner_start = PASTE_START.len();
+        let inner_end = out.len() - PASTE_END.len();
+        let inner = std::str::from_utf8(&out[inner_start..inner_end]).expect("utf8");
+        assert!(
+            inner.contains("my file.txt"),
+            "inner must be percent-decoded; got {inner:?}"
+        );
+        // The original URI scheme is gone (normalized form is a path,
+        // not a URI).
+        assert!(!inner.contains("file://"), "URI must be stripped");
+    }
+
+    /// session_paste_passthrough_for_non_path_text — a paste of plain
+    /// text (e.g. a code snippet) must be forwarded VERBATIM with the
+    /// PASTE_START / PASTE_END markers preserved.
+    #[test]
+    fn session_paste_passthrough_for_non_path_text() {
+        let mut p = BracketedPasteNormalizer::new();
+        let chunk = b"\x1b[200~hello world\x1b[201~";
+        let out = p.process(chunk);
+        // No path → exact passthrough.
+        assert_eq!(out, b"\x1b[200~hello world\x1b[201~");
+    }
+
+    #[test]
+    fn paste_normalizer_multiline_paste_with_path_first_line_is_passthrough() {
+        // A multi-line paste whose first line happens to look like a
+        // path must not have the path-rewrite applied. The whole-buffer
+        // `looks_like_dropped_path` check handles this — multi-line
+        // strings don't match the heuristic.
+        let mut p = BracketedPasteNormalizer::new();
+        let chunk = b"\x1b[200~/Users/me/x.txt\nlet x = 1;\x1b[201~";
+        let out = p.process(chunk);
+        assert_eq!(out, chunk);
+    }
+
+    #[test]
+    fn paste_normalizer_handles_split_chunks() {
+        // PASTE_START split across two chunks, body in a third, end in a
+        // fourth. The detector must reassemble correctly.
+        let mut p = BracketedPasteNormalizer::new();
+        let mut all = Vec::new();
+        all.extend_from_slice(&p.process(b"abc\x1b[2"));
+        all.extend_from_slice(&p.process(b"00~"));
+        all.extend_from_slice(&p.process(b"hello"));
+        all.extend_from_slice(&p.process(b"\x1b[201~tail"));
+        assert_eq!(all, b"abc\x1b[200~hello\x1b[201~tail");
+    }
+
+    #[test]
+    fn paste_normalizer_broken_start_prefix_is_flushed() {
+        // \x1b[2 then a non-matching byte — the partial prefix should
+        // be forwarded verbatim, not swallowed.
+        let mut p = BracketedPasteNormalizer::new();
+        let out = p.process(b"\x1b[2X");
+        assert_eq!(out, b"\x1b[2X");
+    }
+
+    #[test]
+    fn paste_normalizer_two_pastes_back_to_back() {
+        // Two pastes, neither path-shaped, should pass through cleanly.
+        let mut p = BracketedPasteNormalizer::new();
+        let out = p.process(b"\x1b[200~foo\x1b[201~bar\x1b[200~baz\x1b[201~");
+        assert_eq!(out, b"\x1b[200~foo\x1b[201~bar\x1b[200~baz\x1b[201~");
     }
 }
