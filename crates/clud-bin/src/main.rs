@@ -47,15 +47,17 @@ fn main() {
     }
 
     if let Some(args::Command::Loop {
-        repeat: Some(_),
-        done: None,
-        no_done: false,
+        repeat,
+        done,
+        no_done,
         ..
     }) = &args.command
     {
-        eprintln!(
-            "[clud] warning: `--repeat` implies `--no-done`; DONE marker injection/checking is disabled."
-        );
+        if let Some(msg) =
+            command::repeat_implies_no_done_warning(repeat.as_deref(), *no_done, done.as_deref())
+        {
+            eprintln!("{}", msg);
+        }
     }
 
     let interrupted = install_ctrl_c_flag();

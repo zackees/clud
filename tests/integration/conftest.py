@@ -71,14 +71,23 @@ def _build_env_without_sccache() -> dict[str, str]:
     return env
 
 
-def _add_windows_create_no_window(kwargs: dict) -> None:
-    """Force child processes to start without a visible console on Windows."""
-    if sys.platform != "win32":
-        return
-    creationflags = kwargs.get("creationflags", 0)
-    if not isinstance(creationflags, int):
-        creationflags = 0
-    kwargs["creationflags"] = creationflags | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Re-export the canonical helpers from _subprocess_helpers so the unit-test
+# file at the top of `tests/` can import the same implementation that the
+# integration suite uses — issue #55. The helpers live in a regular module
+# (rather than inline here) because pytest treats `conftest.py` as a special
+# plugin file, which is awkward to import from arbitrary tests.
+#
+# pytest puts each `conftest.py`'s directory on `sys.path` automatically, so
+# a top-level `import _subprocess_helpers` resolves to the file in this
+# directory.
+from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E402
+    add_windows_create_no_window as _add_windows_create_no_window,
+)
+from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E402
+    windows_no_window_flags,
+)
+
+__all__ = ["windows_no_window_flags"]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -86,7 +95,12 @@ def _suppress_windows_console_windows():
     """Hide console windows for integration-test subprocesses on Windows.
 
     The fixture is session-scoped so it applies to the build-time helpers as
-    well as the actual tests.
+    well as the actual tests. Issue #55: OR's CREATE_NO_WINDOW into every
+    ``subprocess.run`` / ``subprocess.Popen`` call regardless of any
+    explicit ``creationflags`` the caller passed (e.g. Ctrl+Break tests
+    that need ``CREATE_NEW_PROCESS_GROUP``). The two flags are independent
+    bits and compose; suppressing the window does not affect signal
+    delivery or process-group semantics.
     """
     if sys.platform != "win32":
         yield
@@ -98,16 +112,19 @@ def _suppress_windows_console_windows():
 
     def run(*args, **kwargs):
         kwargs = dict(kwargs)
+        # Issue #55: always add CREATE_NO_WINDOW (OR'd with any caller-set
+        # creationflags) — the previous version skipped this when
+        # creationflags was explicit, leaving Ctrl+Break test launches
+        # popping windows.
         _add_windows_create_no_window(kwargs)
         return original_run(*args, **kwargs)
 
     def popen(*args, **kwargs):
         kwargs = dict(kwargs)
-        # Keep process-group semantics intact for Ctrl+Break tests that already
-        # request CREATE_NEW_PROCESS_GROUP; only suppress the window for the
-        # ordinary noninteractive launches.
-        if "creationflags" not in kwargs:
-            _add_windows_create_no_window(kwargs)
+        # Issue #55: same fix as `run` above. CREATE_NEW_PROCESS_GROUP and
+        # CREATE_NO_WINDOW are independent bits and may be OR'd together
+        # without affecting Ctrl+Break delivery.
+        _add_windows_create_no_window(kwargs)
         return original_popen(*args, **kwargs)
 
     patch.setattr(subprocess, "run", run)
