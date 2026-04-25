@@ -1,6 +1,6 @@
 use clud::{
     args, backend, command, console_title, daemon, dnd, loop_spec, session, session_registry,
-    skills, stream_json, subprocess, trampoline, voice, wasm,
+    skill_install, skills, stream_json, subprocess, trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -37,6 +37,12 @@ fn main() {
     if let Err(e) = skills::ensure_installed() {
         eprintln!("[clud] note: could not install bundled skills: {e}");
     }
+
+    // Additionally run the narrower `skill_install` flow from PR #88 (drift
+    // detection for the single bundled `/clud-pr` skill). Redundant with the
+    // broader `skills::ensure_installed()` above, but harmless — both flows
+    // are idempotent and never overwrite existing user-edited skill files.
+    skill_install::ensure_installed();
 
     let mut args = args::Args::parse_with_passthrough();
 

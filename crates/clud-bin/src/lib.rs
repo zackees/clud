@@ -14,6 +14,7 @@ pub mod dnd;
 pub mod loop_spec;
 pub mod session;
 pub mod session_registry;
+pub mod skill_install;
 pub mod skills;
 pub mod stream_json;
 pub mod subprocess;
