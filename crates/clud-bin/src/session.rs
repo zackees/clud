@@ -8,6 +8,7 @@ use crossterm::execute;
 use running_process_core::pty::reexports::portable_pty::PtySize;
 use running_process_core::pty::NativePtyProcess;
 
+use crate::console_title::OscTitleStripper;
 use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
 
 /// Resize the PTY. On Windows, `running_process_core::pty::NativePtyProcess::resize_impl`
@@ -376,12 +377,30 @@ where
     // normalize that path BEFORE forwarding so all backends see a
     // canonical form, regardless of which terminal produced the drop.
     let mut paste = BracketedPasteNormalizer::new();
+    // Strip OSC 0/2 (window-title) sequences from the child's output
+    // before they reach the terminal. Otherwise the backend's TUI
+    // (and any tool subprocess it spawns) overwrites the title that
+    // `console_title::set_for_current_cwd` stamped at startup.
+    // `main.rs` set `process.set_echo(false)` so the library's
+    // built-in stdout writer is silent — we own forwarding now.
+    let mut osc_strip = OscTitleStripper::new();
 
     loop {
-        // Child output → our stdout is handled by the library's PTY plumbing;
-        // reading here just drains the master and keeps the child unblocked.
+        // Drain a chunk of child output, run it through the OSC title
+        // stripper, and write the result to our stdout. The library
+        // also keeps a copy in its `chunks` queue (used by callers like
+        // capture/replay) — that copy still contains OSC 0/2, but only
+        // the bytes we write here actually reach the user's terminal.
         match process.read_chunk_impl(Some(0.01)) {
-            Ok(Some(_chunk)) => {}
+            Ok(Some(chunk)) => {
+                let filtered = osc_strip.process(&chunk);
+                if !filtered.is_empty() {
+                    use std::io::Write;
+                    let mut out = io::stdout().lock();
+                    let _ = out.write_all(&filtered);
+                    let _ = out.flush();
+                }
+            }
             Ok(None) => {}
             Err(_) => return reap_pty_exit(process),
         }

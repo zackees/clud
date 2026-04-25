@@ -16,7 +16,17 @@ fn main() {
     // Stamp the console title with `clud <cwd-name>` so the active
     // window is identifiable at a glance. Windows-only effective; a
     // no-op on POSIX (out of scope per the originating request).
+    //
+    // The one-shot stamp gets overwritten as soon as the backend (and
+    // its tool subprocesses) emit OSC 0/2 sequences, so we also kick
+    // off a background keeper that re-applies the title whenever it
+    // drifts. PTY mode additionally strips the OSC sequences upstream
+    // (see session.rs) so the keeper rarely fires and the title doesn't
+    // visibly flicker. In subprocess mode (the default Claude path on
+    // Windows) the child inherits stdio directly, so the keeper is the
+    // only way to defend the title.
     console_title::set_for_current_cwd();
+    console_title::keep_setting_in_background();
 
     let mut args = args::Args::parse_with_passthrough();
 
@@ -495,7 +505,13 @@ fn run_plan_pty(
             }
         };
 
-        process.set_echo(true);
+        // Echo off: the running-process-core PTY reader thread would
+        // otherwise auto-write child output to our stdout via
+        // `std::io::stdout().write_all`, bypassing our OSC filter. We
+        // take chunks from `read_chunk_impl` inside the pump and run
+        // them through `OscTitleStripper` before writing to stdout
+        // ourselves.
+        process.set_echo(false);
 
         if let Err(e) = process.start_impl() {
             eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
