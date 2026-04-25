@@ -318,7 +318,23 @@ fn resolve_marker_paths(
     }
 }
 
-fn parse_repeat_interval(raw: &str) -> Result<u64, String> {
+/// Parse a `--repeat` duration string into seconds.
+///
+/// Accepted forms (issue #61): `30s`, `5m`, `1h`, `24h`. The unit is the
+/// only recognized suffix; anything more elaborate (compound durations,
+/// fractional units, ISO-8601 etc.) is intentionally out of scope.
+///
+/// Errors when:
+/// - input is empty or whitespace-only
+/// - integer part is missing (e.g. `s`)
+/// - unit part is missing (e.g. `30`)
+/// - integer is `0` (a zero interval would busy-loop)
+/// - fractional values (`1.5h`) — the `.` makes integer parsing fail
+/// - negative values (`-1h`) — the leading `-` is treated as the unit
+///   start, which fails the empty-integer check
+/// - unsupported units (`30d`, `1y`)
+/// - the multiplied result would overflow `u64` seconds
+pub(crate) fn parse_repeat_interval(raw: &str) -> Result<u64, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("duration cannot be empty".to_string());
@@ -345,6 +361,47 @@ fn parse_repeat_interval(raw: &str) -> Result<u64, String> {
     };
     n.checked_mul(multiplier)
         .ok_or_else(|| "duration is too large".to_string())
+}
+
+/// Decide whether `clud loop` flags imply that done-marker injection should
+/// be disabled for this invocation. Issue #61.
+///
+/// Truth table (`repeat`, `no_done`, `done`):
+/// - (Some, false, None)  → warn + disable (the `--repeat` implies `--no-done` case)
+/// - (Some, true,  None)  → user already passed `--no-done`, no warning
+/// - (Some, _,    Some)   → `--done <path>` overrides; no warning, contract on
+/// - (None, _,    _)      → no `--repeat`, no warning emitted by this helper
+///
+/// Returns `Some(message)` to be printed to stderr when the warning should
+/// fire, otherwise `None`.
+pub fn repeat_implies_no_done_warning(
+    repeat: Option<&str>,
+    no_done: bool,
+    done: Option<&str>,
+) -> Option<&'static str> {
+    if repeat.is_some() && !no_done && done.is_none() {
+        Some(
+            "[clud] warning: `--repeat` implies `--no-done`; \
+             DONE marker injection/checking is disabled.",
+        )
+    } else {
+        None
+    }
+}
+
+/// Compute the wall-clock millis at which the next repeat run should fire,
+/// given the millis at which the previous run *completed*. Issue #61.
+///
+/// This is the load-bearing "no-overlap" invariant: the next run is
+/// scheduled **after the previous run completes**, not after the previous
+/// run started. So a run that takes longer than the repeat interval simply
+/// pushes the next run further into the future — runs serialize, never
+/// overlap.
+///
+/// Saturates at `u64::MAX` rather than panicking, mirroring the daemon's
+/// `saturating_mul` on the seconds→millis conversion.
+pub fn next_run_at_millis(completed_at_millis: u64, interval_secs: u64) -> u64 {
+    completed_at_millis.saturating_add(interval_secs.saturating_mul(1000))
 }
 
 pub fn summarize_task_name(input: &str, max_chars: usize) -> String {
@@ -973,5 +1030,398 @@ mod tests {
     fn test_build_up_prompt_publish() {
         let prompt = build_up_prompt(None, true);
         assert!(prompt.contains("-p"));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #61: --repeat scheduling tests
+    // -----------------------------------------------------------------
+    //
+    // These cover three areas:
+    //   1. parse_repeat_interval: every accepted form + the rejection
+    //      cases the issue calls out (negative, fractional, unknown
+    //      unit, overflow, empty, zero, missing unit, missing value).
+    //   2. repeat_implies_no_done_warning: the precedence ladder
+    //      (--repeat alone fires; explicit --no-done suppresses;
+    //      --done <path> suppresses + restores contract).
+    //   3. next_run_at_millis: the no-overlap invariant. The next run
+    //      time is always derived from *completion*, so a long-running
+    //      iteration pushes the schedule out instead of overlapping.
+
+    #[test]
+    fn test_parse_repeat_interval_accepted_forms() {
+        // The four forms the issue explicitly calls out.
+        assert_eq!(parse_repeat_interval("30s").unwrap(), 30);
+        assert_eq!(parse_repeat_interval("5m").unwrap(), 5 * 60);
+        assert_eq!(parse_repeat_interval("1h").unwrap(), 60 * 60);
+        assert_eq!(parse_repeat_interval("24h").unwrap(), 24 * 60 * 60);
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_accepts_uppercase_unit() {
+        // Case-insensitivity is a small kindness; matches argparse-style ergonomics
+        // and the spec doesn't forbid it.
+        assert_eq!(parse_repeat_interval("30S").unwrap(), 30);
+        assert_eq!(parse_repeat_interval("2H").unwrap(), 7200);
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_trims_surrounding_whitespace() {
+        assert_eq!(parse_repeat_interval("  1h  ").unwrap(), 3600);
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_empty() {
+        let err = parse_repeat_interval("").unwrap_err();
+        assert!(err.contains("empty"), "expected empty-error, got: {err}");
+        let err = parse_repeat_interval("   ").unwrap_err();
+        assert!(err.contains("empty"), "expected empty-error, got: {err}");
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_zero() {
+        // A zero interval would busy-loop the scheduler.
+        let err = parse_repeat_interval("0s").unwrap_err();
+        assert!(
+            err.contains("greater than zero"),
+            "expected zero-error, got: {err}"
+        );
+        let err = parse_repeat_interval("0h").unwrap_err();
+        assert!(err.contains("greater than zero"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_missing_unit() {
+        let err = parse_repeat_interval("30").unwrap_err();
+        assert!(
+            err.to_lowercase().contains("unit"),
+            "expected unit-error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_missing_value() {
+        // "s" alone — split point at index 0 → leading-non-digit error.
+        let err = parse_repeat_interval("s").unwrap_err();
+        assert!(
+            err.contains("positive integer"),
+            "expected leading-digit error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_negative() {
+        // The leading `-` is non-digit; trips the "must start with positive integer"
+        // branch. We don't accept negatives at all.
+        let err = parse_repeat_interval("-1h").unwrap_err();
+        assert!(
+            err.contains("positive integer"),
+            "expected leading-digit error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_fractional() {
+        // "1.5h" — the `.` is non-digit, so we split into "1" + ".5h" and the
+        // unit ".5h" doesn't match s/m/h.
+        let err = parse_repeat_interval("1.5h").unwrap_err();
+        assert!(
+            err.to_lowercase().contains("unit"),
+            "expected unit-error for fractional input, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_unknown_unit() {
+        for bad in &["30d", "1y", "1w", "30sec", "1hr", "10ms"] {
+            let err = parse_repeat_interval(bad).unwrap_err();
+            assert!(
+                err.to_lowercase().contains("unit") || err.to_lowercase().contains("unsupported"),
+                "expected unit-error for {bad:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_overflow() {
+        // u64::MAX seconds * 3600 obviously overflows; we should bubble that up
+        // as a clean "too large" error, not panic.
+        let err = parse_repeat_interval("18446744073709551615h").unwrap_err();
+        assert!(
+            err.contains("too large") || err.contains("invalid"),
+            "expected overflow-error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_repeat_interval_rejects_garbage() {
+        for bad in &["abc", "1h2m", "h1", "1 h", " ", "0"] {
+            assert!(
+                parse_repeat_interval(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    // ---- Flag-precedence: repeat_implies_no_done_warning ----
+
+    #[test]
+    fn test_warning_fires_when_repeat_alone() {
+        // --repeat 1h with neither --no-done nor --done: warning + contract OFF.
+        let msg = repeat_implies_no_done_warning(Some("1h"), false, None);
+        assert!(msg.is_some(), "expected warning when --repeat is alone");
+        let text = msg.unwrap();
+        assert!(text.contains("--repeat"));
+        assert!(text.contains("--no-done"));
+        assert!(text.contains("DONE marker"));
+    }
+
+    #[test]
+    fn test_warning_suppressed_when_no_done_explicit() {
+        // User already opted out — no need to warn them.
+        let msg = repeat_implies_no_done_warning(Some("1h"), true, None);
+        assert!(
+            msg.is_none(),
+            "explicit --no-done must suppress the warning, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn test_warning_suppressed_when_done_path_provided() {
+        // --done <path> overrides --repeat's implicit --no-done; no warning.
+        let msg = repeat_implies_no_done_warning(Some("1h"), false, Some("DONE.md"));
+        assert!(
+            msg.is_none(),
+            "--done <path> must suppress the warning, got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn test_warning_silent_without_repeat() {
+        // Plain `clud loop "task"` without --repeat: helper never warns.
+        let msg = repeat_implies_no_done_warning(None, false, None);
+        assert!(msg.is_none());
+        let msg = repeat_implies_no_done_warning(None, true, None);
+        assert!(msg.is_none());
+        let msg = repeat_implies_no_done_warning(None, false, Some("DONE.md"));
+        assert!(msg.is_none());
+    }
+
+    // ---- Flag-precedence: contract / loop_markers behavior in plan ----
+
+    #[test]
+    fn test_loop_explicit_no_done_honored_without_repeat() {
+        // Without --repeat, --no-done still suppresses the contract — this is
+        // the original #2 behavior preserved. Already covered by
+        // test_loop_no_done_omits_contract above; we add an explicit assert
+        // that loop_markers is None to make the contract crystal clear.
+        let p = plan(&["clud", "loop", "--no-done", "task"]);
+        assert!(p.loop_markers.is_none());
+        assert!(p.repeat_schedule.is_none());
+        let prompt = prompt_from_plan(&p);
+        assert!(!prompt.contains("DONE"));
+        assert!(!prompt.contains("BLOCKED"));
+    }
+
+    #[test]
+    fn test_loop_repeat_with_explicit_no_done_still_omits_contract() {
+        // Belt-and-suspenders: passing both --repeat and --no-done is
+        // idempotent — no contract injection, no markers.
+        let p = plan(&["clud", "loop", "--repeat", "30m", "--no-done", "task"]);
+        assert!(p.loop_markers.is_none());
+        assert_eq!(
+            p.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            Some(30 * 60)
+        );
+        let prompt = prompt_from_plan(&p);
+        assert_eq!(prompt, "task");
+    }
+
+    #[test]
+    fn test_loop_done_path_uses_supplied_path_in_prompt() {
+        // --done <path> must thread the *supplied* path into the prompt
+        // contract, not the default `.clud/loop/DONE`.
+        let p = plan(&["clud", "loop", "--done", "custom/DONE.txt", "task"]);
+        let prompt = prompt_from_plan(&p);
+        assert!(
+            prompt.contains("custom/DONE.txt"),
+            "prompt missing custom DONE path: {prompt}"
+        );
+        // BLOCKED is derived from the DONE filename's extension (issue #61).
+        assert!(prompt.contains("custom/BLOCKED.txt"));
+        assert!(p.loop_markers.is_some());
+        let markers = p.loop_markers.unwrap();
+        assert!(markers.done_path.ends_with("DONE.txt"));
+        assert!(markers.blocked_path.ends_with("BLOCKED.txt"));
+    }
+
+    #[test]
+    fn test_loop_repeat_30s_parses() {
+        let p = plan(&["clud", "loop", "--repeat", "30s", "task"]);
+        assert_eq!(
+            p.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn test_loop_repeat_5m_parses() {
+        let p = plan(&["clud", "loop", "--repeat", "5m", "task"]);
+        assert_eq!(
+            p.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            Some(5 * 60)
+        );
+    }
+
+    #[test]
+    fn test_loop_repeat_24h_parses() {
+        let p = plan(&["clud", "loop", "--repeat", "24h", "task"]);
+        assert_eq!(
+            p.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            Some(24 * 60 * 60)
+        );
+    }
+
+    // ---- Scheduler: next-run computation + no-overlap invariant ----
+
+    #[test]
+    fn test_next_run_at_millis_basic() {
+        // Run completed at t=10000 ms with a 30s interval → next run at t=40000 ms.
+        assert_eq!(next_run_at_millis(10_000, 30), 40_000);
+        assert_eq!(next_run_at_millis(0, 1), 1_000);
+        assert_eq!(next_run_at_millis(0, 3600), 3_600_000);
+    }
+
+    #[test]
+    fn test_next_run_at_millis_long_run_pushes_schedule_out() {
+        // The no-overlap invariant in numerical form: if a run that started at
+        // t=0 takes 10 minutes (600_000 ms) and the interval is 1 minute
+        // (60 s), the next run is scheduled at completion + interval = 660_000 ms,
+        // *not* at 60_000 ms. Runs serialize; they never overlap.
+        let started_at = 0u64;
+        let duration_ms = 10 * 60 * 1000; // 10-minute run
+        let interval_secs = 60; // 1-minute repeat
+        let completed_at = started_at + duration_ms;
+        let next = next_run_at_millis(completed_at, interval_secs);
+        assert_eq!(
+            next,
+            completed_at + 60_000,
+            "next run must be `interval` after completion, never overlapping the previous run"
+        );
+        assert!(
+            next > started_at + (interval_secs * 1000),
+            "long-running iteration must push the schedule past the original interval"
+        );
+    }
+
+    #[test]
+    fn test_next_run_at_millis_short_run_respects_full_interval() {
+        // A 1-second run with a 60-second repeat still waits the full minute
+        // after completion before re-running.
+        let completed_at = 1_000u64;
+        let next = next_run_at_millis(completed_at, 60);
+        assert_eq!(next, 61_000);
+    }
+
+    #[test]
+    fn test_next_run_at_millis_saturates_on_overflow() {
+        // Pathological inputs must not panic — the daemon uses saturating
+        // arithmetic so we mirror it here.
+        assert_eq!(next_run_at_millis(u64::MAX, 1), u64::MAX);
+        assert_eq!(next_run_at_millis(u64::MAX - 1, 3600), u64::MAX);
+        assert_eq!(next_run_at_millis(0, u64::MAX), u64::MAX);
+    }
+
+    /// Higher-level scheduler simulation. Models the inner loop of
+    /// `run_repeat_worker` with synthetic clocks: the scheduler issues a
+    /// single run at a time, only sleeping between completions. This is a
+    /// pure-Rust simulation — we never spawn a real process — but it
+    /// exercises the same arithmetic the daemon uses.
+    fn simulate_repeat(
+        start_ms: u64,
+        run_durations_ms: &[u64],
+        interval_secs: u64,
+    ) -> Vec<(u64, u64)> {
+        // Returns Vec<(start_ms, end_ms)> for each iteration.
+        let mut now = start_ms;
+        let mut runs = Vec::new();
+        for &dur in run_durations_ms {
+            let started = now;
+            let ended = started + dur;
+            runs.push((started, ended));
+            now = next_run_at_millis(ended, interval_secs);
+        }
+        runs
+    }
+
+    #[test]
+    fn test_scheduler_first_run_is_immediate() {
+        let runs = simulate_repeat(1_000, &[5_000], 60);
+        // First run starts at start_ms exactly — no pre-sleep.
+        assert_eq!(runs[0].0, 1_000);
+        assert_eq!(runs[0].1, 6_000);
+    }
+
+    #[test]
+    fn test_scheduler_second_run_starts_interval_after_first_completes() {
+        // Two short runs, 60s interval — second must start at first.end + 60s.
+        let runs = simulate_repeat(0, &[1_000, 1_000], 60);
+        assert_eq!(runs.len(), 2);
+        let (first_start, first_end) = runs[0];
+        let (second_start, _) = runs[1];
+        assert_eq!(first_start, 0);
+        assert_eq!(first_end, 1_000);
+        assert_eq!(second_start, first_end + 60_000);
+    }
+
+    #[test]
+    fn test_scheduler_long_run_delays_second_run_no_overlap() {
+        // First run takes 5 minutes; interval is 1 minute; second run must
+        // NOT have overlapped the first.
+        let interval = 60;
+        let runs = simulate_repeat(0, &[5 * 60 * 1000, 1_000], interval);
+        let (_first_start, first_end) = runs[0];
+        let (second_start, _) = runs[1];
+        assert_eq!(first_end, 5 * 60 * 1000);
+        assert_eq!(
+            second_start,
+            first_end + interval * 1000,
+            "second run start must be after first completion + interval"
+        );
+        assert!(
+            second_start >= first_end,
+            "no-overlap invariant violated: second run started before first finished"
+        );
+    }
+
+    #[test]
+    fn test_scheduler_only_one_active_run_per_job() {
+        // The simulation is inherently single-active by construction (each
+        // iteration is processed sequentially). Assert that the runs are
+        // strictly non-overlapping and strictly monotonic in time.
+        let runs = simulate_repeat(0, &[100, 200, 50, 1_000], 30);
+        for window in runs.windows(2) {
+            let (_a_start, a_end) = window[0];
+            let (b_start, _b_end) = window[1];
+            assert!(
+                b_start >= a_end,
+                "runs overlapped: {:?} into {:?}",
+                window[0],
+                window[1]
+            );
+        }
+        // And each run's own end is after its start.
+        for (start, end) in runs {
+            assert!(end >= start);
+        }
+    }
+
+    #[test]
+    fn test_scheduler_3600s_interval_matches_1h_input() {
+        // Cross-check between parse + scheduler: the seconds returned by
+        // parse_repeat_interval drop directly into next_run_at_millis.
+        let secs = parse_repeat_interval("1h").unwrap();
+        assert_eq!(secs, 3600);
+        let next = next_run_at_millis(0, secs);
+        assert_eq!(next, 3_600_000);
     }
 }

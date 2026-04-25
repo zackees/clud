@@ -469,6 +469,73 @@ mod tests {
         }
     }
 
+    /// Issue #61: --repeat + --done <path> must parse cleanly. The two flags
+    /// compose; --done overrides --repeat's implicit --no-done at the
+    /// command-builder layer, but at the args layer they're orthogonal.
+    #[test]
+    fn test_loop_repeat_with_done() {
+        let args = parse(&[
+            "clud",
+            "loop",
+            "--repeat",
+            "30m",
+            "--done",
+            "STATUS.md",
+            "task",
+        ]);
+        match args.command {
+            Some(Command::Loop {
+                ref repeat,
+                ref done,
+                no_done,
+                ..
+            }) => {
+                assert_eq!(repeat.as_deref(), Some("30m"));
+                assert_eq!(done.as_deref(), Some("STATUS.md"));
+                assert!(!no_done);
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    /// Issue #61: --repeat + --no-done must parse cleanly even though the
+    /// command-builder treats them as overlapping (both suppress the
+    /// contract). Clap should not reject the combination.
+    #[test]
+    fn test_loop_repeat_with_no_done() {
+        let args = parse(&["clud", "loop", "--repeat", "5m", "--no-done", "task"]);
+        match args.command {
+            Some(Command::Loop {
+                ref repeat,
+                no_done,
+                ref done,
+                ..
+            }) => {
+                assert_eq!(repeat.as_deref(), Some("5m"));
+                assert!(no_done);
+                assert!(done.is_none());
+            }
+            _ => panic!("expected Loop subcommand"),
+        }
+    }
+
+    /// Issue #61: --done and --no-done are mutually exclusive (clap
+    /// `conflicts_with`). Supplying both must fail — we don't pin the exact
+    /// error message because clap formatting drifts between versions, but
+    /// `try_parse_from` must return `Err`.
+    #[test]
+    fn test_loop_done_and_no_done_conflict() {
+        let argv: Vec<String> = ["clud", "loop", "--done", "DONE.md", "--no-done", "task"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = Args::try_parse_from(argv);
+        assert!(
+            result.is_err(),
+            "clap should reject simultaneous --done and --no-done"
+        );
+    }
+
     #[test]
     fn test_up_subcommand() {
         let args = parse(&["clud", "up"]);

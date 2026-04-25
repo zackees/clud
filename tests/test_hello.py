@@ -256,6 +256,37 @@ def test_dry_run_loop_repeat_implies_no_done() -> None:
     assert data["repeat_interval_secs"] == 3600
 
 
+def test_dry_run_loop_repeat_emits_warning_to_stderr() -> None:
+    # Issue #61 acceptance: when `--repeat` is supplied without `--done`, the
+    # CLI must tell the user it's auto-disabling DONE-marker injection.
+    result = _run("--dry-run", "loop", "--repeat", "1h", "do stuff")
+    assert result.returncode == 0
+    assert "--repeat" in result.stderr
+    assert "--no-done" in result.stderr
+    assert "DONE marker" in result.stderr
+
+
+def test_dry_run_loop_repeat_with_done_path_no_warning() -> None:
+    # Issue #61: --done <path> overrides the implicit --no-done; no warning.
+    result = _run("--dry-run", "loop", "--repeat", "1h", "--done", "DONE.md", "do stuff")
+    assert result.returncode == 0
+    assert "implies `--no-done`" not in result.stderr
+
+
+def test_dry_run_loop_repeat_with_explicit_no_done_no_warning() -> None:
+    # Issue #61: explicit --no-done already opted out; don't badger the user.
+    result = _run("--dry-run", "loop", "--repeat", "1h", "--no-done", "do stuff")
+    assert result.returncode == 0
+    assert "implies `--no-done`" not in result.stderr
+
+
+def test_dry_run_loop_no_repeat_no_warning() -> None:
+    # Issue #61: plain `clud loop` without --repeat must not emit the warning.
+    result = _run("--dry-run", "loop", "do stuff")
+    assert result.returncode == 0
+    assert "implies `--no-done`" not in result.stderr
+
+
 def test_dry_run_loop_repeat_with_done_override() -> None:
     result = _run("--dry-run", "loop", "--repeat", "1h", "--done", "DONE.md", "do stuff")
     assert result.returncode == 0
@@ -265,6 +296,14 @@ def test_dry_run_loop_repeat_with_done_override() -> None:
     assert "BLOCKED.md" in prompt
     assert data["loop_markers"]["done_path"].replace("\\", "/").endswith("DONE.md")
     assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith("BLOCKED.md")
+
+
+def test_dry_run_loop_repeat_invalid_duration_errors() -> None:
+    # Issue #61: bogus duration values must fail with a clear error and a
+    # non-zero exit code, not crash or silently succeed.
+    result = _run("--dry-run", "loop", "--repeat", "30d", "do stuff")
+    assert result.returncode != 0
+    assert "invalid --repeat" in result.stderr or "unsupported" in result.stderr.lower()
 
 
 def test_dry_run_loop_default_count() -> None:
