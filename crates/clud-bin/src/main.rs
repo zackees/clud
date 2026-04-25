@@ -1,5 +1,6 @@
 use clud::{
-    args, backend, command, daemon, loop_spec, session, subprocess, trampoline, voice, wasm,
+    args, backend, command, daemon, loop_spec, session, session_registry, subprocess, trampoline,
+    voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -99,6 +100,11 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Issue #73: open the SQLite session registry, GC dead siblings,
+    // refuse to launch if we're at the cap, otherwise insert our own row.
+    // Held until end-of-`main` so `Drop` removes the row on graceful exit.
+    let _registry_guard = enforce_session_cap();
+
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
     // short-circuit on iteration 1. See loop_spec for semantics.
     if let Some(ref markers) = plan.loop_markers {
@@ -118,7 +124,59 @@ fn main() {
             backend::LaunchMode::Pty => run_plan_pty(&plan, args.verbose, interrupted.as_ref()),
         }
     };
+    drop(_registry_guard);
     std::process::exit(exit_code);
+}
+
+/// Issue #73: enforce the live-session cap. On `Refuse` this calls
+/// `std::process::exit(1)` directly — we never return to the launch path.
+/// On `Warn` we print to stderr and continue. Failures to open / GC the
+/// DB are *non-fatal*: we log to stderr and skip the cap check, because
+/// breaking `clud` startup over a registry hiccup would be much worse
+/// than the rare case where the guardrail is temporarily missing.
+fn enforce_session_cap() -> Option<session_registry::SessionRegistry> {
+    let registry = match session_registry::SessionRegistry::open_default() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[clud] warning: could not open session registry: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = registry.gc_dead_sessions() {
+        eprintln!("[clud] warning: session-registry GC failed: {e}");
+    }
+    let cfg = session_registry::SessionRegistry::cap_config_from_env();
+    match registry.check_cap(&cfg) {
+        Ok(session_registry::CapDecision::Allow) => {}
+        Ok(session_registry::CapDecision::Warn(count)) => {
+            eprintln!(
+                "[clud] warning: {count} live clud sessions detected (warn threshold {warn}, cap {cap}). \
+                 Set {env_max}=0 to disable, or wind down old sessions.",
+                warn = cfg.warn,
+                cap = cfg.max,
+                env_max = session_registry::ENV_MAX_INSTANCES,
+            );
+        }
+        Ok(session_registry::CapDecision::Refuse(count)) => {
+            eprintln!(
+                "[clud] error: {count} live clud sessions exceed the cap of {cap}. \
+                 Refusing to launch (fork-bomb guardrail, issue #73). \
+                 Wind down old sessions, or override via {env_max}=<larger> / \
+                 {env_max}=0 to disable.",
+                cap = cfg.max,
+                env_max = session_registry::ENV_MAX_INSTANCES,
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("[clud] warning: session-registry cap check failed: {e}");
+        }
+    }
+    let info = session_registry::SessionInfo::for_self(None, None);
+    if let Err(e) = registry.register_self(info) {
+        eprintln!("[clud] warning: could not register session: {e}");
+    }
+    Some(registry)
 }
 
 /// Build the child environment: inherit parent env + inject tracking vars.
