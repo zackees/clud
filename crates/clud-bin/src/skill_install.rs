@@ -39,6 +39,10 @@ const BUNDLED_SKILLS: &[Skill] = &[
         name: "clud-pr-merge",
         content: include_str!("../../../skills/clud-pr-merge/SKILL.md"),
     },
+    Skill {
+        name: "clud-issue",
+        content: include_str!("../../../skills/clud-issue/SKILL.md"),
+    },
 ];
 
 /// Run the install/check for every bundled skill on launch. Cheap on the
@@ -308,14 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn bundle_includes_clud_pr_and_clud_pr_merge() {
-        // The two skills wired up so far. Adding more is fine; this test
-        // just guards against accidental removal of either.
+    fn bundle_includes_expected_skills() {
+        // The skills wired up so far. Adding more is fine; this test
+        // just guards against accidental removal of any of them.
         let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
         assert!(names.contains(&"clud-pr"), "clud-pr missing from bundle");
         assert!(
             names.contains(&"clud-pr-merge"),
             "clud-pr-merge missing from bundle"
+        );
+        assert!(
+            names.contains(&"clud-issue"),
+            "clud-issue missing from bundle"
         );
     }
 
