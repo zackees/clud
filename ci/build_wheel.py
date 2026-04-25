@@ -36,9 +36,10 @@ def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[st
             subcommand.extend(["--zig", "--compatibility", "manylinux2014"])
         else:
             subcommand.extend(["--compatibility", "pypi"])
-    # Route maturin through `soldr maturin ...` on Windows (issue #27) so the
-    # underlying cargo invocation uses the MSVC rustup toolchain, not whatever
-    # GNU-host cargo happens to be first on PATH.
+    # Use the dev-venv maturin via `python -m maturin`. The MSVC rustup-toolchain
+    # pin from issue #27 is preserved by `_windows_build_env` exporting CARGO/
+    # RUSTC/RUSTUP_TOOLCHAIN; routing maturin itself through soldr fails on
+    # Linux because PyO3/maturin only publishes musl Linux release assets.
     return maturin_argv(subcommand, env=env)
 
 

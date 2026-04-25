@@ -269,15 +269,25 @@ def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list
 
 
 def maturin_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
-    """Return the maturin argv, preferring `soldr maturin` on every platform.
+    """Return the maturin argv, always using the dev-venv install.
 
-    Mirrors `cargo_argv` — see issues #27 and #68. maturin invokes cargo
-    under the hood, so routing through soldr keeps the MSVC pin on Windows
-    and makes the cargo cache lineage uniform across CI platforms. soldr
-    resolves `maturin` via `rustup which maturin`, which points at the
-    dev-venv install.
+    Originally this routed through `soldr maturin` (issues #27, #68) on the
+    assumption that soldr would resolve maturin via the venv. In practice,
+    `soldr <tool>` always tries to fetch the tool from GitHub Releases,
+    and PyO3/maturin only publishes `x86_64-unknown-linux-musl.tar.gz` /
+    `aarch64-unknown-linux-musl.tar.gz` for Linux — there is no
+    `*-unknown-linux-gnu` asset. soldr's asset matcher rejects the musl
+    archives on GNU Linux runners (its musl→gnu fallback rule does not
+    fire here), producing `tool not found: no asset matches target
+    x86_64-unknown-linux-gnu` and breaking every Linux Build job.
+
+    maturin is already pinned in pyproject.toml dev deps and installed
+    into the uv-managed venv on every runner, so `python -m maturin`
+    works uniformly across platforms without any GitHub-Releases lookup.
+    The Windows MSVC pin from issue #27 is preserved through the cargo
+    side: `_windows_build_env` exports `CARGO`/`RUSTC`/`RUSTUP_TOOLCHAIN`
+    + prepends the MSVC toolchain bin to PATH, so when this maturin
+    invocation spawns cargo it picks up the same MSVC toolchain that
+    `soldr cargo` would have given it.
     """
-    soldr = soldr_path(env)
-    if soldr:
-        return [soldr, "maturin", *subcommand]
     return [sys.executable, "-m", "maturin", *subcommand]
