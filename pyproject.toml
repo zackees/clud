@@ -37,9 +37,11 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.0",
     "ruff>=0.8.0",
-    "soldr>=0.7.0",
     "ziglang>=0.15.2,<0.16",
 ]
+# soldr is intentionally NOT a Python dev dep — install it via ./install
+# (or `./install --global`) which fetches the binary from
+# https://github.com/zackees/soldr/releases. CI uses zackees/setup-soldr@v0.
 
 [tool.maturin]
 manifest-path = "crates/clud-bin/Cargo.toml"

@@ -49,5 +49,12 @@ coverage-*.xml
 # clud loop state (GH issue cache, DONE/BLOCKED markers)
 .clud/
 
-# Claude Code session state
-.claude/
+# Claude Code: ignore ephemeral session/cache state, keep project config
+# (settings + hooks + commands + agents + skills are checked in).
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/commands/
+!.claude/agents/
+!.claude/skills/
+.claude/settings.local.json

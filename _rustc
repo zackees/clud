@@ -1,4 +1,0 @@
-#!/bin/bash
-# Optional trampoline — routes rustc through soldr so the
-# rustup-managed toolchain is always used.
-exec uv run soldr rustc "$@"
