@@ -8,6 +8,7 @@ pub mod args;
 pub mod backend;
 pub mod capture;
 pub mod command;
+pub mod console_title;
 pub mod daemon;
 pub mod dnd;
 pub mod loop_spec;
