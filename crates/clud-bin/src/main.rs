@@ -1,6 +1,6 @@
 use clud::{
-    args, backend, command, daemon, loop_spec, session, session_registry, subprocess, trampoline,
-    voice, wasm,
+    args, backend, command, daemon, dnd, loop_spec, session, session_registry, subprocess,
+    trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -100,6 +100,26 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Issue #79 / #65 / #66: register `clud` as the IDropTarget for
+    // the console window so dropped files reach the backend. Held for
+    // the lifetime of the launch; dropped on graceful exit so the
+    // refresh worker thread joins and `RevokeDragDrop` runs. POSIX
+    // skips this — terminals there already deliver drops as stdin
+    // bytes that the #63 normalizer handles. `--no-dnd` opts out.
+    //
+    // PTY mode wires the registration *inside* `run_plan_pty` so the
+    // injector can write into the live PTY via a channel. Subprocess
+    // mode registers up-front because the `subprocess_console_injector`
+    // operates on the shared console input buffer, no per-iteration
+    // state required.
+    let _dnd_subprocess_guard = if should_register_drop_target(&args)
+        && plan.launch_mode == backend::LaunchMode::Subprocess
+    {
+        try_register_console_drop_target_subprocess()
+    } else {
+        None
+    };
+
     // Issue #73: open the SQLite session registry, GC dead siblings,
     // refuse to launch if we're at the cap, otherwise insert our own row.
     // Held until end-of-`main` so `Drop` removes the row on graceful exit.
@@ -121,11 +141,98 @@ fn main() {
             backend::LaunchMode::Subprocess => {
                 run_plan_subprocess(&plan, args.verbose, interrupted.as_ref())
             }
-            backend::LaunchMode::Pty => run_plan_pty(&plan, args.verbose, interrupted.as_ref()),
+            backend::LaunchMode::Pty => run_plan_pty(
+                &plan,
+                args.verbose,
+                interrupted.as_ref(),
+                should_register_drop_target(&args),
+            ),
         }
     };
     drop(_registry_guard);
+    drop(_dnd_subprocess_guard);
     std::process::exit(exit_code);
+}
+
+/// Issue #79: a launch should register the console IDropTarget unless
+/// the user opted out (`--no-dnd`) or the run can't possibly need a
+/// drop target (`--dry-run` returns before this is consulted, but the
+/// helper still rejects it for symmetry / explicit testability).
+///
+/// Factored out so `main.rs`'s logic can be unit-tested without
+/// touching OLE or spawning processes.
+fn should_register_drop_target(args: &args::Args) -> bool {
+    if args.no_dnd {
+        return false;
+    }
+    if args.dry_run {
+        return false;
+    }
+    cfg!(windows)
+}
+
+/// Subprocess-mode IDropTarget registration. Returns `None` on any
+/// failure (logging a one-line warning to stderr), so a registration
+/// hiccup never aborts the launch path.
+fn try_register_console_drop_target_subprocess(
+) -> Option<dnd::console_drop_target::ConsoleDropTargetGuard> {
+    #[cfg(not(windows))]
+    {
+        None
+    }
+    #[cfg(windows)]
+    {
+        use dnd::console_drop_target::{register_console_drop_target, RefreshConfig};
+        let injector = dnd::injectors::subprocess_console_injector();
+        match register_console_drop_target(injector, RefreshConfig::default_displacement()) {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                eprintln!("[clud] note: console drag-drop unavailable: {}", e);
+                None
+            }
+        }
+    }
+}
+
+/// PTY-mode IDropTarget registration. The injector writes into a
+/// channel; the pump drains it each iteration and forwards into the
+/// PTY master.
+#[cfg(windows)]
+fn try_register_console_drop_target_pty() -> (
+    Option<dnd::console_drop_target::ConsoleDropTargetGuard>,
+    Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+) {
+    use dnd::console_drop_target::{register_console_drop_target, RefreshConfig};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+    // Adapter `Write` impl: each `write_all` from the OLE callback
+    // becomes a `Vec<u8>` chunk in the channel. Send failure means the
+    // pump exited (receiver dropped) — silently drop the bytes.
+    struct ChannelWriter(mpsc::Sender<Vec<u8>>);
+    impl std::io::Write for ChannelWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let n = buf.len();
+            let _ = self.0.send(buf.to_vec());
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let writer: Box<dyn std::io::Write + Send> = Box::new(ChannelWriter(tx));
+    let master = Arc::new(Mutex::new(writer));
+    let injector = dnd::injectors::pty_master_injector(master);
+
+    match register_console_drop_target(injector, RefreshConfig::default_displacement()) {
+        Ok(guard) => (Some(guard), Some(rx)),
+        Err(e) => {
+            eprintln!("[clud] note: console drag-drop unavailable: {}", e);
+            (None, None)
+        }
+    }
 }
 
 /// Issue #73: enforce the live-session cap. On `Refuse` this calls
@@ -323,7 +430,12 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
     last_exit
 }
 
-fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
+fn run_plan_pty(
+    plan: &command::LaunchPlan,
+    verbose: bool,
+    interrupted: &AtomicBool,
+    dnd_enabled: bool,
+) -> i32 {
     use running_process_core::pty::NativePtyProcess;
 
     // Enable VT input on the Windows console for the whole PTY session.
@@ -332,6 +444,23 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
     // inherits the console directly and must be allowed to configure input
     // modes itself.
     let _console_guard = enable_console_vt_input();
+
+    // Issue #79 / #65 / #66: register the console IDropTarget for PTY
+    // launches. The injector writes into `dnd_rx` which the pump drains
+    // and forwards to the PTY master. Held for the full launch — the
+    // refresh worker thread needs to keep displacing Claude Code's
+    // own IDropTarget across iterations.
+    #[cfg(windows)]
+    let (_dnd_pty_guard, mut dnd_rx) = if dnd_enabled {
+        try_register_console_drop_target_pty()
+    } else {
+        (None, None)
+    };
+    #[cfg(not(windows))]
+    let (_dnd_pty_guard, mut dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) = {
+        let _ = dnd_enabled;
+        (None, None)
+    };
 
     let env = child_env();
     let mut last_exit = 0i32;
@@ -370,7 +499,19 @@ fn run_plan_pty(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicB
 
         let mut hooks = voice::VoiceMode::from_env();
         let _raw_guard = session::enter_raw_mode_if_tty();
-        let exit_code = session::run_raw_pty_pump(&process, interrupted, &mut hooks, io::stdin());
+        // First iteration takes ownership of the dnd_rx (if any);
+        // subsequent iterations get None. We can't clone the receiver
+        // and the OLE registration is a one-shot for the whole
+        // process anyway (see RefreshConfig — the worker thread is
+        // shared across iterations).
+        let extra_rx = if iteration == 0 { dnd_rx.take() } else { None };
+        let exit_code = session::run_raw_pty_pump_with_extra_rx(
+            &process,
+            interrupted,
+            &mut hooks,
+            io::stdin(),
+            extra_rx,
+        );
         drop(_raw_guard);
         last_exit = normalize_exit_code(exit_code);
 
@@ -533,12 +674,77 @@ fn atty_is_terminal() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_terminal_size;
+    use super::{resolve_terminal_size, should_register_drop_target};
+    use clud::args::Args;
+
+    fn args_from(argv: &[&str]) -> Args {
+        let raw: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        Args::parse_from_raw(raw)
+    }
 
     #[test]
     fn launch_mode_defaults_to_subprocess() {
         let launch_mode = crate::backend::LaunchMode::Subprocess;
         assert_eq!(launch_mode.as_str(), "subprocess");
+    }
+
+    /// Issue #79 B3: a `--dry-run` invocation must NOT trigger any
+    /// `RegisterDragDrop` side effect. We can't observe the OLE call
+    /// directly from a unit test (it would require a console window),
+    /// so we test the gating helper that `main()` consults.
+    #[test]
+    fn main_dry_run_does_not_register_drop_target() {
+        let args = args_from(&["clud", "--dry-run", "-p", "hi"]);
+        assert!(args.dry_run);
+        assert!(
+            !should_register_drop_target(&args),
+            "--dry-run must short-circuit the drop-target registration"
+        );
+    }
+
+    #[test]
+    fn main_no_dnd_flag_disables_registration() {
+        let args = args_from(&["clud", "--no-dnd"]);
+        assert!(args.no_dnd);
+        assert!(
+            !should_register_drop_target(&args),
+            "--no-dnd must opt out of drop-target registration"
+        );
+    }
+
+    #[test]
+    fn main_no_drag_drop_alias_disables_registration() {
+        let args = args_from(&["clud", "--no-drag-drop"]);
+        assert!(args.no_dnd);
+        assert!(!should_register_drop_target(&args));
+    }
+
+    /// Default invocation: registration is requested on Windows, skipped
+    /// on POSIX. The actual COM call is downstream of this gate.
+    #[test]
+    fn main_default_invocation_requests_registration_on_windows() {
+        let args = args_from(&["clud", "-p", "hi"]);
+        let want = cfg!(windows);
+        assert_eq!(should_register_drop_target(&args), want);
+    }
+
+    /// Issue #79 B3: registration failure (any `RegisterError` variant)
+    /// must NOT abort the launch path. The `try_register_console_drop_target_*`
+    /// helpers swallow errors and return `None` so the launch proceeds.
+    ///
+    /// On Windows we exercise this against the real
+    /// `register_console_drop_target` — in a unit-test process there is
+    /// typically no console window, so the registration returns
+    /// `ConsoleWindowUnavailable`, exactly the failure variant we want
+    /// to confirm is non-fatal.
+    #[cfg(windows)]
+    #[test]
+    fn main_registration_failure_does_not_abort_launch() {
+        // Subprocess injector — does no work synchronously; the OLE
+        // failure on the worker thread is what we care about. Whether
+        // it succeeds or fails, the function must return Option<Guard>
+        // (never panic, never abort the process).
+        let _result = super::try_register_console_drop_target_subprocess();
     }
 
     #[test]

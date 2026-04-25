@@ -61,6 +61,14 @@ pub struct Args {
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
 
+    /// Disable the Windows console drag-and-drop target registration.
+    /// Issue #79: by default `clud` registers an `IDropTarget` on the
+    /// console window so dragged files are forwarded to the backend.
+    /// Pass `--no-dnd` to opt out (no-op on POSIX, where drops already
+    /// arrive as bracketed-paste stdin bytes).
+    #[arg(long = "no-dnd", alias = "no-drag-drop")]
+    pub no_dnd: bool,
+
     #[arg(long = "experimental-daemon-centralized", hide = true)]
     pub experimental_daemon_centralized: bool,
 
@@ -202,6 +210,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--refresh",
         "--no-done",
         "--no-done-marker",
+        "--no-dnd",
+        "--no-drag-drop",
         "--help",
         "--version",
     ];
@@ -754,7 +764,26 @@ mod tests {
         assert!(!args.dry_run);
         assert!(!args.detach);
         assert!(!args.detachable);
+        assert!(!args.no_dnd);
         assert!(args.command.is_none());
         assert!(args.passthrough.is_empty());
+    }
+
+    #[test]
+    fn test_no_dnd_flag() {
+        let args = parse(&["clud", "--no-dnd"]);
+        assert!(args.no_dnd);
+    }
+
+    #[test]
+    fn test_no_drag_drop_alias() {
+        let args = parse(&["clud", "--no-drag-drop"]);
+        assert!(args.no_dnd);
+    }
+
+    #[test]
+    fn test_no_dnd_default_false() {
+        let args = parse(&["clud", "-p", "hello"]);
+        assert!(!args.no_dnd);
     }
 }
