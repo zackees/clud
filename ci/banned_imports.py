@@ -22,6 +22,10 @@ BANNED_PATTERNS: list[tuple[str, str]] = [
     (r"\bstd::process::Child\b", "use running_process_core::NativeProcess instead"),
     (r"\bstd::process::Output\b", "use running_process_core::NativeProcess instead"),
     (r"\buse std::process::\{", "use running_process_core instead of std::process"),
+    # Tokio's async process API is also banned — running-process-core is the
+    # single chokepoint. If async is needed, extend running-process-core.
+    (r"\btokio::process\b", "use running_process_core::NativeProcess instead"),
+    (r"\buse tokio::process\b", "use running_process_core instead of tokio::process"),
 ]
 
 # Only std::process::exit is allowed (it's not subprocess spawning)
