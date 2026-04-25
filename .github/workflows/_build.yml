@@ -64,7 +64,7 @@ jobs:
 
       - name: Build sdist
         if: ${{ inputs.include-sdist }}
-        run: uv run soldr maturin sdist --out dist
+        run: uv run python -m maturin sdist --out dist
 
       - name: Verify Windows wheel has no MinGW runtime imports
         if: ${{ runner.os == 'Windows' }}
