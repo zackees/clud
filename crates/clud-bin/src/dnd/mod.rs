@@ -30,11 +30,14 @@
 //!   structure. Used by the (Windows-only) `IDropTarget` adapter that
 //!   intercepts drops before conhost can refuse them. See issue #66.
 //! - [`console_drop_target`] — Windows-only `IDropTarget` registration
-//!   skeleton + platform-agnostic dispatch glue. Addresses issue #65
-//!   (OS-level drop refusal); see issue #66 for the design.
+//!   plus the platform-agnostic dispatch glue. See issues #65, #66, #79.
+//! - [`injectors`] — per-launch-mode byte injectors that the
+//!   `IDropTarget` callback hands the dropped paths to (subprocess via
+//!   `WriteConsoleInputW`, PTY via the master writer).
 
 pub mod console_drop_target;
 pub mod dropfiles;
+pub mod injectors;
 
 /// Normalize a single dragged-path payload emitted by a terminal into a
 /// plain filesystem path.
