@@ -13,6 +13,9 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 ctrlc = "3"
+# Issue #73: SQLite-backed session registry. `bundled` so we don't depend on
+# a system libsqlite3 (especially relevant on Windows / fresh CI runners).
+rusqlite = { version = "0.32", features = ["bundled"] }
 running-process-core = "3.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
