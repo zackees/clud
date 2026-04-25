@@ -32,7 +32,6 @@ from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E40
     windows_no_window_flags,
 )
 
-
 # ---- windows_no_window_flags ------------------------------------------------
 
 
@@ -60,7 +59,7 @@ def test_windows_no_window_flags_returns_empty_dict_on_posix() -> None:
         # purpose and easy to read in CI logs.
         import pytest
 
-        pytest.skip("Windows-only: covered by test_windows_no_window_flags_returns_create_no_window_on_windows")
+        pytest.skip("Windows-only: see returns_create_no_window_on_windows")
     assert windows_no_window_flags() == {}
 
 
@@ -74,7 +73,7 @@ def test_windows_no_window_flags_returns_create_no_window_on_windows() -> None:
     if sys.platform != "win32":
         import pytest
 
-        pytest.skip("POSIX-only: covered by test_windows_no_window_flags_returns_empty_dict_on_posix")
+        pytest.skip("POSIX-only: see returns_empty_dict_on_posix")
     flags = windows_no_window_flags()
     assert set(flags.keys()) == {"creationflags"}
     assert flags["creationflags"] == 0x0800_0000
