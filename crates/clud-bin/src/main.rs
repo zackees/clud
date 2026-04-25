@@ -1,6 +1,6 @@
 use clud::{
-    args, backend, command, daemon, dnd, loop_spec, session, session_registry, subprocess,
-    trampoline, voice, wasm,
+    args, backend, command, console_title, daemon, dnd, loop_spec, session, session_registry,
+    subprocess, trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -12,6 +12,11 @@ use std::sync::{
 fn main() {
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();
+
+    // Stamp the console title with `clud <cwd-name>` so the active
+    // window is identifiable at a glance. Windows-only effective; a
+    // no-op on POSIX (out of scope per the originating request).
+    console_title::set_for_current_cwd();
 
     let mut args = args::Args::parse_with_passthrough();
 
