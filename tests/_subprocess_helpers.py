@@ -15,7 +15,6 @@ from __future__ import annotations
 import subprocess
 import sys
 
-
 # Documented value of the Win32 ``CREATE_NO_WINDOW`` process-creation flag.
 # We hard-code it here (rather than only relying on ``subprocess.CREATE_NO_WINDOW``)
 # so the unit test can assert the *exact* bit pattern even when the test is
