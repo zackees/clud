@@ -1,6 +1,6 @@
 use clud::{
     args, backend, command, console_title, daemon, dnd, loop_spec, session, session_registry,
-    subprocess, trampoline, voice, wasm,
+    skill_install, subprocess, trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -27,6 +27,13 @@ fn main() {
     // only way to defend the title.
     console_title::set_for_current_cwd();
     console_title::keep_setting_in_background();
+
+    // Drop the bundled `/clud-pr` skill into `~/.claude/skills/clud-pr/`
+    // if it's missing, and warn (without overwriting) if the on-disk
+    // copy diverges from the one embedded in this binary. Cheap and
+    // idempotent — any failure degrades to a stderr note and never
+    // aborts the launch.
+    skill_install::ensure_installed();
 
     let mut args = args::Args::parse_with_passthrough();
 
