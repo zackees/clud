@@ -90,7 +90,10 @@ mod tests {
         // hands to running-process-core.
         assert_eq!(invisible_helper_creationflags(), Some(0x0800_0000));
         // Both helpers must agree on the bit pattern.
-        assert_eq!(invisible_helper_creationflags(), Some(invisible_helper_flags()));
+        assert_eq!(
+            invisible_helper_creationflags(),
+            Some(invisible_helper_flags())
+        );
     }
 
     #[test]

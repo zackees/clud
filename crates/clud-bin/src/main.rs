@@ -53,11 +53,9 @@ fn main() {
         ..
     }) = &args.command
     {
-        if let Some(msg) = command::repeat_implies_no_done_warning(
-            repeat.as_deref(),
-            *no_done,
-            done.as_deref(),
-        ) {
+        if let Some(msg) =
+            command::repeat_implies_no_done_warning(repeat.as_deref(), *no_done, done.as_deref())
+        {
             eprintln!("{}", msg);
         }
     }
