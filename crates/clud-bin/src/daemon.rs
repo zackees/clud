@@ -23,6 +23,7 @@ use crate::capture::TerminalCapture;
 use crate::command::LaunchPlan;
 use crate::subprocess;
 use crate::trampoline;
+use crate::win_creation_flags::invisible_helper_creationflags;
 
 const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
 const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
@@ -1386,7 +1387,11 @@ fn daemon_create_session(
         env: Some(std::env::vars().collect()),
         capture: false,
         stderr_mode: StderrMode::Stdout,
-        creationflags: None,
+        // Issue #55: daemon-helper worker spawn — invisible by design.
+        // stdio is `Null` and the user never sees this child's output
+        // directly (output is forwarded via TCP to attaching clients),
+        // so suppress the conhost window on Windows. No-op elsewhere.
+        creationflags: invisible_helper_creationflags(),
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
@@ -1720,7 +1725,12 @@ fn run_repeat_once(
         env: Some(child_env()),
         capture: true,
         stderr_mode: StderrMode::Stdout,
-        creationflags: None,
+        // Issue #55: repeat-job runs are invisible by design — stdio is
+        // captured into a TCP-broadcast log, the user never sees the
+        // child's console directly. Suppress the conhost window on
+        // Windows so each scheduled run doesn't pop a flash. No-op
+        // elsewhere.
+        creationflags: invisible_helper_creationflags(),
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
@@ -1774,7 +1784,11 @@ fn start_subprocess_session(
         env: Some(child_env()),
         capture: true,
         stderr_mode: StderrMode::Stdout,
-        creationflags: None,
+        // Issue #55: daemon-managed subprocess session — stdio is fully
+        // piped and routed via TCP to attaching clients. The child's
+        // console would never be the user's interaction surface, so
+        // suppress the conhost window on Windows. No-op elsewhere.
+        creationflags: invisible_helper_creationflags(),
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,

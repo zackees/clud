@@ -17,6 +17,7 @@ use std::time::Duration;
 use running_process_core::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
 use crate::subprocess;
+use crate::win_creation_flags::invisible_helper_creationflags;
 
 pub const LOOP_DIR: &str = ".clud/loop";
 pub const DONE_MARKER: &str = "DONE";
@@ -321,7 +322,11 @@ fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
         env: None,
         capture: true,
         stderr_mode: StderrMode::Stdout,
-        creationflags: None,
+        // Issue #55: `gh` invocation is a piped helper — output is
+        // captured and parsed; the user never interacts with this child's
+        // console. Suppress the conhost popup on Windows. No-op
+        // elsewhere.
+        creationflags: invisible_helper_creationflags(),
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
