@@ -51,55 +51,191 @@ pub fn resize_pty(process: &NativePtyProcess, rows: u16, cols: u16) -> io::Resul
     }
 }
 
-/// Byte-level observer that reports F3 presses seen in a stream, without
-/// modifying the bytes. The raw pump forwards every byte to the child
-/// verbatim, and asks this observer how many F3 press events flowed past
-/// so it can call `InteractiveHooks::on_f3_press` that many times.
-///
-/// Only the SS3 form `\x1bOR` is matched — that's what crossterm was
-/// previously decoding into `KeyCode::F(3)` press events on Windows ConPTY
-/// and most POSIX terminals without kitty keyboard protocol. Kitty's
-/// press/release CSI form is intentionally not parsed: voice mode is
-/// press-to-toggle, so release events are redundant.
-///
-/// The matcher survives across `observe` calls, so `\x1bOR` split across
-/// reads (even one byte at a time) still fires once.
-pub struct F3Observer {
-    /// How many bytes of `\x1bOR` have been matched so far. 0..=3.
-    matched: usize,
+/// Counts of F3 events observed in a stream chunk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct F3Events {
+    /// Number of F3 press events seen. Repeats (autorepeat) are intentionally
+    /// not counted as new presses — they indicate the key is still held.
+    pub presses: u32,
+    /// Number of F3 release events seen. Only fires on terminals that
+    /// implement the kitty keyboard protocol with REPORT_EVENT_TYPES.
+    pub releases: u32,
 }
 
-impl F3Observer {
-    const F3_SEQ: &'static [u8] = b"\x1bOR";
+/// Byte-level observer that reports F3 press / release events seen in a
+/// stream, without modifying the bytes. The raw pump forwards every byte
+/// to the child verbatim and asks this observer how many F3 events flowed
+/// past so it can call `InteractiveHooks::on_f3_press` / `on_f3_release`
+/// once per event.
+///
+/// Three encodings are matched, covering the cross-platform terminal
+/// matrix:
+///
+/// * Legacy SS3 form `\x1bOR` — emitted by Windows ConPTY and most POSIX
+///   terminals without kitty keyboard protocol. Press-only.
+/// * CSI tilde form `\x1b[13~` — emitted by xterm and most Linux consoles.
+///   Press-only by default; with kitty REPORT_EVENT_TYPES enabled the
+///   terminal extends it to `\x1b[13;1:3~` for release, `\x1b[13;1:2~`
+///   for repeat.
+/// * Kitty CSI u form `\x1b[13u` or `\x1b[57346u` (functional encoding) —
+///   press-only by default; the `;mod:event-type` suffix carries
+///   release/repeat the same way.
+///
+/// Issue #13 hold-to-record relies on the release branch. Terminals that
+/// don't emit release events (notably ConPTY) fall back to the
+/// VAD-silence auto-stop inside the voice module — see `voice.rs`.
+///
+/// The state machine survives across `observe` calls, so any of these
+/// sequences split across reads (even one byte at a time) still fires
+/// exactly once.
+pub struct F3Observer {
+    state: F3State,
+    /// Parameter bytes accumulated between `\x1b[` and a CSI terminator.
+    /// Capped at MAX_CSI_LEN to keep a runaway terminal from growing this
+    /// unboundedly.
+    csi_buf: Vec<u8>,
+}
 
+#[derive(Debug, Clone, Copy)]
+enum F3State {
+    Idle,
+    Esc,
+    /// Saw `\x1bO`; one more byte and we know if this is SS3-R (F3 press).
+    Ss3,
+    /// Saw `\x1b[`; accumulating parameter bytes until a CSI terminator.
+    Csi,
+}
+
+/// Max parameter-byte payload a CSI sequence can have before we abandon
+/// the match. A real F3 event tops out at ~16 bytes (`\x1b[57346;1:3u`),
+/// 64 is generous and bounds memory if the terminal is misbehaving.
+const MAX_CSI_LEN: usize = 64;
+
+impl F3Observer {
     pub fn new() -> Self {
-        Self { matched: 0 }
+        Self {
+            state: F3State::Idle,
+            csi_buf: Vec::new(),
+        }
     }
 
-    /// Scan `chunk` and return the number of F3 presses it contains.
-    /// Updates internal state so subsequent calls see continuing matches.
-    pub fn observe(&mut self, chunk: &[u8]) -> u32 {
-        let mut presses = 0u32;
+    /// Scan `chunk` and return the F3 events it contains. Updates internal
+    /// state so subsequent calls see continuing matches.
+    pub fn observe(&mut self, chunk: &[u8]) -> F3Events {
+        let mut events = F3Events::default();
         for &b in chunk {
-            if b == Self::F3_SEQ[self.matched] {
-                self.matched += 1;
-                if self.matched == Self::F3_SEQ.len() {
-                    presses += 1;
-                    self.matched = 0;
+            match self.state {
+                F3State::Idle => {
+                    if b == 0x1b {
+                        self.state = F3State::Esc;
+                    }
                 }
-            } else {
-                // Prefix broke. If this byte is itself `\x1b`, start a new
-                // match from position 1; otherwise drop to 0.
-                self.matched = if b == 0x1b { 1 } else { 0 };
+                F3State::Esc => match b {
+                    b'O' => self.state = F3State::Ss3,
+                    b'[' => {
+                        self.state = F3State::Csi;
+                        self.csi_buf.clear();
+                    }
+                    0x1b => {} // stay in Esc, a new sequence is starting
+                    _ => self.state = F3State::Idle,
+                },
+                F3State::Ss3 => match b {
+                    b'R' => {
+                        // \x1bOR — F3 press in SS3 encoding.
+                        events.presses += 1;
+                        self.state = F3State::Idle;
+                    }
+                    0x1b => self.state = F3State::Esc,
+                    _ => self.state = F3State::Idle,
+                },
+                F3State::Csi => {
+                    if is_csi_terminator(b) {
+                        if let Some(kind) = parse_f3_csi(&self.csi_buf, b) {
+                            match kind {
+                                F3Kind::Press => events.presses += 1,
+                                F3Kind::Release => events.releases += 1,
+                                // Repeat = key still held; deliberately silent.
+                                F3Kind::Repeat => {}
+                            }
+                        }
+                        self.state = F3State::Idle;
+                        self.csi_buf.clear();
+                    } else if b == 0x1b {
+                        // Nested escape — abandon this CSI, start a new sequence.
+                        self.state = F3State::Esc;
+                        self.csi_buf.clear();
+                    } else if self.csi_buf.len() < MAX_CSI_LEN {
+                        self.csi_buf.push(b);
+                    } else {
+                        // Overrun — give up on this sequence.
+                        self.state = F3State::Idle;
+                        self.csi_buf.clear();
+                    }
+                }
             }
         }
-        presses
+        events
     }
 }
 
 impl Default for F3Observer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum F3Kind {
+    Press,
+    Repeat,
+    Release,
+}
+
+/// CSI terminator bytes per ECMA-48 (`0x40..=0x7E`, "Final Byte"). We
+/// only care about a couple in practice (`u`, `~`) but accepting the
+/// full range keeps misbehaving terminals from getting us stuck inside
+/// `F3State::Csi`.
+fn is_csi_terminator(b: u8) -> bool {
+    matches!(b, 0x40..=0x7E)
+}
+
+/// Decide whether a parameter-bytes payload (e.g. `13;1:3`) plus a
+/// terminator (e.g. `~` or `u`) is an F3 event, and which kind.
+/// Returns `None` for anything that isn't F3 — different keycodes,
+/// non-keyboard CSI sequences, malformed payloads.
+fn parse_f3_csi(params: &[u8], terminator: u8) -> Option<F3Kind> {
+    if terminator != b'u' && terminator != b'~' {
+        return None;
+    }
+    let payload = std::str::from_utf8(params).ok()?;
+    let mut parts = payload.split(';');
+    let keycode_str = parts.next()?;
+
+    // First param is the keycode. F3 keycodes:
+    //   - `\x1b[13~` (CSI tilde, legacy F3 — see Linux/xterm function-key map)
+    //   - `\x1b[13u` (CSI u, F3 with disambiguation but no functional encoding)
+    //   - `\x1b[57346u` (CSI u, F3 with kitty functional encoding)
+    let is_f3 = match terminator {
+        b'~' => keycode_str == "13",
+        b'u' => keycode_str == "13" || keycode_str == "57346",
+        _ => false,
+    };
+    if !is_f3 {
+        return None;
+    }
+
+    // Second param is `modifier[:event-type[:text]]`. Event-type defaults
+    // to 1 (press) when omitted.
+    let event_type = parts
+        .next()
+        .and_then(|modifier_field| modifier_field.split(':').nth(1))
+        .and_then(|et| et.parse::<u32>().ok())
+        .unwrap_or(1);
+
+    match event_type {
+        2 => Some(F3Kind::Repeat),
+        3 => Some(F3Kind::Release),
+        _ => Some(F3Kind::Press),
     }
 }
 
@@ -447,10 +583,15 @@ where
                 // F3 detection still runs over the ORIGINAL chunk: a
                 // press inside a paste body is unusual but we want
                 // detection symmetry with raw byte forwarding.
-                let presses = observer.observe(&chunk);
-                for _ in 0..presses {
+                let events = observer.observe(&chunk);
+                for _ in 0..events.presses {
                     if let Err(err) = hooks.on_f3_press(process) {
                         eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
+                    }
+                }
+                for _ in 0..events.releases {
+                    if let Err(err) = hooks.on_f3_release(process) {
+                        eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
                     }
                 }
             }
@@ -750,25 +891,25 @@ mod tests {
     fn observer_passes_arbitrary_bytes_through_without_detecting_f3() {
         // Random bytes, DSR, paste chunks, newlines — none of these should
         // register as F3 presses. The observer doesn't modify bytes; tests
-        // here only assert the count of presses it reports.
+        // here only assert the count of events it reports.
         let mut obs = F3Observer::new();
-        assert_eq!(obs.observe(b"\x1b[6n"), 0, "DSR query is not F3");
-        assert_eq!(obs.observe(b"hello\n"), 0);
-        assert_eq!(obs.observe(b"\x03"), 0, "raw Ctrl+C byte is not F3");
+        assert_eq!(obs.observe(b"\x1b[6n").presses, 0, "DSR query is not F3");
+        assert_eq!(obs.observe(b"hello\n").presses, 0);
+        assert_eq!(obs.observe(b"\x03").presses, 0, "raw Ctrl+C byte is not F3");
         let smoke: Vec<u8> = (0..=255u8).collect();
         // The smoke vector happens to contain \x1b,O,R bytes somewhere, but
         // they are not adjacent in that order, so no press should fire.
-        assert_eq!(obs.observe(&smoke), 0);
+        assert_eq!(obs.observe(&smoke).presses, 0);
     }
 
     #[test]
     fn observer_detects_single_and_multiple_f3_presses() {
         let mut obs = F3Observer::new();
-        assert_eq!(obs.observe(b"\x1bOR"), 1);
+        assert_eq!(obs.observe(b"\x1bOR").presses, 1);
         let mut obs = F3Observer::new();
-        assert_eq!(obs.observe(b"hello\x1bORworld"), 1);
+        assert_eq!(obs.observe(b"hello\x1bORworld").presses, 1);
         let mut obs = F3Observer::new();
-        assert_eq!(obs.observe(b"\x1bOR\x1bOR\x1bOR"), 3);
+        assert_eq!(obs.observe(b"\x1bOR\x1bOR\x1bOR").presses, 3);
     }
 
     #[test]
@@ -776,38 +917,110 @@ mod tests {
         // 2-way split: \x1b | OR
         let mut obs = F3Observer::new();
         let mut total = 0;
-        total += obs.observe(b"\x1b");
-        total += obs.observe(b"OR");
+        total += obs.observe(b"\x1b").presses;
+        total += obs.observe(b"OR").presses;
         assert_eq!(total, 1, "2-way split should still detect one press");
 
         // 3-way split: \x1b | O | R
         let mut obs = F3Observer::new();
         let mut total = 0;
         for chunk in [&b"\x1b"[..], &b"O"[..], &b"R"[..]] {
-            total += obs.observe(chunk);
+            total += obs.observe(chunk).presses;
         }
         assert_eq!(total, 1, "3-way split should still detect one press");
 
         // Broken prefix then a clean press later: only the clean one counts.
         let mut obs = F3Observer::new();
         let mut total = 0;
-        total += obs.observe(b"\x1b");
-        total += obs.observe(b"XYZ"); // breaks the prefix, X is not O
-        total += obs.observe(b"\x1bOR");
+        total += obs.observe(b"\x1b").presses;
+        total += obs.observe(b"XYZ").presses; // breaks the prefix, X is not O
+        total += obs.observe(b"\x1bOR").presses;
         assert_eq!(total, 1);
     }
 
     #[test]
     fn observer_ignores_non_f3_escapes() {
         let mut obs = F3Observer::new();
-        assert_eq!(obs.observe(b"\x1b[6n"), 0, "DSR");
-        assert_eq!(obs.observe(b"\x1bOA"), 0, "SS3 up arrow");
-        assert_eq!(obs.observe(b"\x1bOP"), 0, "F1 (SS3 P)");
+        assert_eq!(obs.observe(b"\x1b[6n").presses, 0, "DSR");
+        assert_eq!(obs.observe(b"\x1bOA").presses, 0, "SS3 up arrow");
+        assert_eq!(obs.observe(b"\x1bOP").presses, 0, "F1 (SS3 P)");
         assert_eq!(
-            obs.observe(b"\x1bOX\x1bOR tail"),
+            obs.observe(b"\x1bOX\x1bOR tail").presses,
             1,
             "valid F3 after a bogus SS3 prefix should still count"
         );
+    }
+
+    // ─── Kitty keyboard-protocol release / repeat events ──────────────────
+    // Issue #13 hold-to-record uses release events when terminals support
+    // the kitty protocol. Three F3 encodings can carry release info:
+    //   * CSI tilde with event-type:    `\x1b[13;1:3~`
+    //   * CSI u (numeric):               `\x1b[13;1:3u`
+    //   * CSI u (functional encoding):   `\x1b[57346;1:3u`
+    // Repeats (event-type 2) are intentionally silent — they signal the
+    // key is still held and would otherwise spam the voice state machine.
+
+    #[test]
+    fn observer_detects_csi_tilde_f3_press() {
+        let mut obs = F3Observer::new();
+        let events = obs.observe(b"\x1b[13~");
+        assert_eq!(events.presses, 1);
+        assert_eq!(events.releases, 0);
+    }
+
+    #[test]
+    fn observer_detects_kitty_csi_u_press_and_release() {
+        // Press then release via CSI u with the keycode-13 form.
+        let mut obs = F3Observer::new();
+        let events = obs.observe(b"\x1b[13;1:1u\x1b[13;1:3u");
+        assert_eq!(events.presses, 1);
+        assert_eq!(events.releases, 1);
+    }
+
+    #[test]
+    fn observer_detects_kitty_functional_encoding_release() {
+        // F3 functional-encoding keycode is 57346 in the kitty protocol.
+        let mut obs = F3Observer::new();
+        let events = obs.observe(b"\x1b[57346;1:3u");
+        assert_eq!(events.releases, 1);
+        assert_eq!(events.presses, 0);
+    }
+
+    #[test]
+    fn observer_ignores_kitty_repeat_event() {
+        // event-type 2 = autorepeat. Must NOT be counted as a fresh press —
+        // doing so would tear down the recording the user is still holding.
+        let mut obs = F3Observer::new();
+        let events = obs.observe(b"\x1b[13;1:2~");
+        assert_eq!(events.presses, 0);
+        assert_eq!(events.releases, 0);
+    }
+
+    #[test]
+    fn observer_handles_release_split_across_reads() {
+        // Same fragmentation tolerance as the legacy SS3 path: a release
+        // sequence chopped one byte at a time must still register exactly
+        // once.
+        let mut obs = F3Observer::new();
+        let mut presses = 0;
+        let mut releases = 0;
+        for &b in b"\x1b[13;1:3~" {
+            let ev = obs.observe(&[b]);
+            presses += ev.presses;
+            releases += ev.releases;
+        }
+        assert_eq!(presses, 0);
+        assert_eq!(releases, 1);
+    }
+
+    #[test]
+    fn observer_ignores_non_f3_csi_sequences() {
+        // Other CSI sequences must not be mis-attributed to F3.
+        let mut obs = F3Observer::new();
+        assert_eq!(obs.observe(b"\x1b[1~").presses, 0, "Home (CSI 1~)");
+        assert_eq!(obs.observe(b"\x1b[15~").presses, 0, "F5 (CSI 15~)");
+        assert_eq!(obs.observe(b"\x1b[57347u").presses, 0, "F4 functional");
+        assert_eq!(obs.observe(b"\x1b[6n").presses, 0, "DSR (still no F3)");
     }
 
     #[test]

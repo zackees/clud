@@ -596,11 +596,12 @@ fn extreme_cols_does_not_crash_at_spawn() {
 // Raw PTY pump — verbatim stdin forwarding
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Counting hooks for pump integration tests. Records F3 presses, ticks,
-/// and can opt into voice interception via `intercept`.
+/// Counting hooks for pump integration tests. Records F3 presses,
+/// releases, ticks, and can opt into voice interception via `intercept`.
 struct CountingHooks {
     intercept: bool,
     f3_presses: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    f3_releases: std::sync::Arc<std::sync::atomic::AtomicU32>,
     ticks: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -609,6 +610,7 @@ impl CountingHooks {
         Self {
             intercept,
             f3_presses: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            f3_releases: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             ticks: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
@@ -620,6 +622,11 @@ impl clud::session::InteractiveHooks for CountingHooks {
     }
     fn on_f3_press(&mut self, _process: &NativePtyProcess) -> std::io::Result<()> {
         self.f3_presses
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn on_f3_release(&mut self, _process: &NativePtyProcess) -> std::io::Result<()> {
+        self.f3_releases
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
@@ -739,6 +746,69 @@ fn raw_pump_fires_voice_f3_press_while_forwarding_bytes() {
         presses.load(std::sync::atomic::Ordering::SeqCst),
         3,
         "expected 3 F3 presses; got a different count"
+    );
+}
+
+/// Issue #13 hold-to-record: terminals supporting the kitty keyboard
+/// protocol (REPORT_EVENT_TYPES) emit a release event when F3 is let go.
+/// The pump must fire `on_f3_release` exactly once per release sequence
+/// AND still forward the raw bytes to the child.
+#[test]
+fn raw_pump_fires_voice_f3_release_when_kitty_sequence_present() {
+    require_pty_or_skip!("raw_pump_fires_voice_f3_release_when_kitty_sequence_present");
+
+    let agent = mock_agent_path();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let raw_stdin = tmp.path().join("stdin_raw.bin");
+
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-read-stdin-ms".to_string(),
+        "800".to_string(),
+        "--mock-stdin-raw-to".to_string(),
+        raw_stdin.to_string_lossy().to_string(),
+    ];
+
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+    std::thread::sleep(Duration::from_millis(150));
+
+    // Kitty F3 press (CSI u, functional encoding) then release. The
+    // trailing `\n` is the canonical-mode trigger; without it the
+    // mock-agent's stdin read never returns.
+    let payload: &[u8] = b"a\x1b[57346;1:1ub\x1b[57346;1:3uc\n";
+    let interrupted = AtomicBool::new(false);
+    let hooks = CountingHooks::new(true);
+    let presses = std::sync::Arc::clone(&hooks.f3_presses);
+    let releases = std::sync::Arc::clone(&hooks.f3_releases);
+    let mut hooks = hooks;
+
+    let _exit = clud::session::run_raw_pty_pump(
+        &process,
+        &interrupted,
+        &mut hooks,
+        Cursor::new(payload.to_vec()),
+    );
+
+    let _ = process.wait_impl(Some(5.0));
+    let _ = drain_reader(&process, Duration::from_millis(300));
+    let _ = process.close_impl();
+
+    let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    assert_eq!(
+        got, payload,
+        "kitty release detection must NOT eat bytes; child should still see the full payload"
+    );
+    assert_eq!(
+        presses.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "expected exactly 1 F3 press; got a different count"
+    );
+    assert_eq!(
+        releases.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "expected exactly 1 F3 release; got a different count"
     );
 }
 

@@ -13,6 +13,21 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 ctrlc = "3"
+# Issue #13: voice-mode stack. cpal owns mic capture, rodio plays the
+# ding/dong cues, whisper-rs runs local transcription via the vendored
+# `whisper.cpp` build (see `[patch.crates-io]` in the workspace Cargo.toml).
+# These used to be gated to (windows, x86_64) and (macos, aarch64) only;
+# moved unconditional so voice mode ships on all six supported platforms.
+# Linux CI must `apt-get install libasound2-dev` so cpal can link ALSA.
+cpal = "0.16"
+rodio = "0.21"
+whisper-rs = "0.16"
+# Issue #13: model auto-downloader needs a per-OS cache dir resolver,
+# a small blocking HTTP client, and a hash verifier. `ureq` is sync and
+# avoids dragging in a tokio runtime just to fetch one file.
+dirs = "5"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 # Issue #73: SQLite-backed session registry. `bundled` so we don't depend on
 # a system libsqlite3 (especially relevant on Windows / fresh CI runners).
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -65,16 +80,6 @@ windows = { version = "0.61", features = [
 # re-exports them as `windows::core::*` but having the direct dep is
 # the documented pattern for `#[implement]` users.
 windows-core = "0.61"
-
-[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
-cpal = "0.16"
-rodio = "0.21"
-whisper-rs = "0.16"
-
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-cpal = "0.16"
-rodio = "0.21"
-whisper-rs = "0.16"
 
 [[bin]]
 name = "clud"
