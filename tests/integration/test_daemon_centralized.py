@@ -843,6 +843,67 @@ class TestDaemonCentralizedPersistence:
         finally:
             _kill_daemon_for_session(state_dir, session_id)
 
+    def test_clud_logs_last_and_follow(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        # Issue #25: `clud logs --last` must resolve to the most recent
+        # session (including exited ones) and `-f` must tail without
+        # crashing, then exit cleanly once the session is dead.
+        state_dir = tmp_path / "daemon-state"
+        env = _managed_env(mock_env, state_dir)
+        proc, session_id = _launch_detached(
+            clud_binary,
+            env,
+            "--codex",
+            "-p",
+            "tail-me-tag",
+            "--",
+            "--mock-sleep-ms",
+            "400",
+        )
+        try:
+            assert _wait_for_exit(proc, timeout=5) == 0
+            time.sleep(0.6)
+
+            # `--last` should pick the session we just ran (the only one).
+            last_result = subprocess.run(
+                [str(clud_binary), "logs", "--last"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=env,
+            )
+            assert last_result.returncode == 0, last_result.stderr
+            assert "tail-me-tag" in last_result.stdout, (
+                f"prompt tag missing from --last output: {last_result.stdout!r}"
+            )
+            assert session_id in last_result.stderr, (
+                f"--last hint should mention resolved session id: {last_result.stderr!r}"
+            )
+            # Since the session is already dead, the status line should fire.
+            assert "exited with status" in last_result.stderr, (
+                f"expected exit-status line on dead session: {last_result.stderr!r}"
+            )
+
+            # Follow mode on a dead session: prints backlog, drains, then
+            # exits 0 once it spots the recorded exit_code in the snapshot.
+            follow_result = subprocess.run(
+                [str(clud_binary), "logs", "-f", session_id],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert follow_result.returncode == 0, follow_result.stderr
+            assert "tail-me-tag" in follow_result.stdout, (
+                f"prompt tag missing from -f output: {follow_result.stdout!r}"
+            )
+            assert "exited with status" in follow_result.stderr, (
+                f"follow mode must announce exit: {follow_result.stderr!r}"
+            )
+        finally:
+            _kill_daemon_for_session(state_dir, session_id)
+
     def test_clud_logs_with_no_id_lists_sessions(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:

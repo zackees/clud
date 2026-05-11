@@ -667,11 +667,31 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
             session_id,
             follow,
             lines,
+            last,
         }) => {
             let state_dir = state_dir(args);
+            // `--last` resolves to the most recently created session,
+            // including exited ones — logs are valuable post-mortem.
+            let resolved_id: Option<String> = if *last {
+                match most_recent_session_any(&state_dir) {
+                    Some(session) => {
+                        eprintln!(
+                            "[clud] showing logs for most recent session: {}",
+                            session.id
+                        );
+                        Some(session.id)
+                    }
+                    None => {
+                        eprintln!("[clud] no sessions found");
+                        return Some(1);
+                    }
+                }
+            } else {
+                session_id.clone()
+            };
             Some(run_logs(
                 &state_dir,
-                session_id.as_deref(),
+                resolved_id.as_deref(),
                 *follow,
                 *lines,
                 interrupted,
@@ -2206,6 +2226,19 @@ fn most_recent_session(state_dir: &Path) -> Option<SessionSnapshot> {
         .max_by_key(|s| s.created_at.unwrap_or(0))
 }
 
+/// Return the most recently created session, *including exited ones*.
+/// Used by `clud logs --last`: a session's log is valuable after it dies,
+/// so we look at every snapshot on disk rather than only attachable ones.
+fn most_recent_session_any(state_dir: &Path) -> Option<SessionSnapshot> {
+    let entries = fs::read_dir(sessions_dir(state_dir)).ok()?;
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter_map(|p| read_json_file::<SessionSnapshot>(&p).ok())
+        .max_by_key(|s| s.created_at.unwrap_or(0))
+}
+
 fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) -> i32 {
     if let Err(err) = ensure_daemon(state_dir) {
         eprintln!("[clud] failed to reach daemon: {}", err);
@@ -2393,11 +2426,17 @@ fn run_logs(
         }
     };
     if !follow {
+        // If the session is already dead, print a status line so the user
+        // knows they're looking at a post-mortem rather than a live tail.
+        if let Some(code) = session_exit_code(state_dir, &resolved) {
+            eprintln!("[clud] session {} exited with status {}", resolved, code);
+        }
         return 0;
     }
     // pm2-style follow: poll for new bytes at the last known offset. A
     // short sleep on "no new data" keeps CPU low without requiring a file-
-    // watch API that differs per OS.
+    // watch API that differs per OS. Exits cleanly once the session has
+    // terminated (and any final bytes have been drained).
     loop {
         if interrupted.load(Ordering::SeqCst) {
             return 130;
@@ -2419,8 +2458,29 @@ fn run_logs(
                 return 1;
             }
         }
+        if let Some(code) = session_exit_code(state_dir, &resolved) {
+            // Drain any final bytes the worker flushed between our last
+            // follow_read and snapshot update before announcing the exit.
+            if let Ok((_, chunk)) = follow_read(&path, offset) {
+                if !chunk.is_empty() {
+                    let _ = io::stdout().write_all(&chunk);
+                    let _ = io::stdout().flush();
+                }
+            }
+            eprintln!("[clud] session {} exited with status {}", resolved, code);
+            return 0;
+        }
         thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Read the on-disk snapshot for `session_id` and return its `exit_code`
+/// if present. Returns `None` when the snapshot is missing, malformed,
+/// or the session is still running.
+fn session_exit_code(state_dir: &Path, session_id: &str) -> Option<i32> {
+    let path = session_snapshot_path(state_dir, session_id);
+    let session = read_json_file::<SessionSnapshot>(&path).ok()?;
+    session.exit_code
 }
 
 fn run_logs_summary(state_dir: &Path) -> i32 {
@@ -3194,5 +3254,70 @@ mod backlog_size_tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod logs_tests {
+    //! Issue #25: read-only session tailing via `clud logs`. These tests
+    //! poke at the on-disk-snapshot helpers that back `--last` and the
+    //! "session exited" status line so we can verify the contract without
+    //! spinning up a real daemon. End-to-end behavior is covered by the
+    //! Python integration test in `tests/integration/test_daemon_centralized.py`.
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_snapshot(state_dir: &Path, id: &str, created_at: u64, exit_code: Option<i32>) {
+        let snap = SessionSnapshot {
+            id: id.into(),
+            kind: SessionKind::Subprocess,
+            cwd: None,
+            name: None,
+            created_at: Some(created_at),
+            detachable: false,
+            background: true,
+            attachable: true,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            daemon_pid: 0,
+            worker_pid: 0,
+            worker_port: 0,
+            root_pid: None,
+            exit_code,
+        };
+        write_json_file(&session_snapshot_path(state_dir, id), &snap).unwrap();
+    }
+
+    #[test]
+    fn most_recent_session_any_returns_newest_including_exited() {
+        // `--last` must surface the most-recently-created session even if
+        // it has already exited. `most_recent_session` (the attach helper)
+        // filters exited sessions; `most_recent_session_any` does not.
+        let tmp = TempDir::new().unwrap();
+        write_snapshot(tmp.path(), "sess-old", 100, Some(0));
+        write_snapshot(tmp.path(), "sess-new", 200, Some(1));
+        let found = most_recent_session_any(tmp.path()).expect("should find a session");
+        assert_eq!(found.id, "sess-new");
+        assert_eq!(found.exit_code, Some(1));
+    }
+
+    #[test]
+    fn most_recent_session_any_none_when_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let nonexistent = tmp.path().join("does-not-exist");
+        assert!(most_recent_session_any(&nonexistent).is_none());
+    }
+
+    #[test]
+    fn session_exit_code_reads_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        write_snapshot(tmp.path(), "sess-live", 1, None);
+        write_snapshot(tmp.path(), "sess-dead", 2, Some(42));
+        assert_eq!(session_exit_code(tmp.path(), "sess-live"), None);
+        assert_eq!(session_exit_code(tmp.path(), "sess-dead"), Some(42));
+        // Missing snapshot is treated as "still running" (None) rather than
+        // an error — the follow loop polls cheaply and re-checks.
+        assert_eq!(session_exit_code(tmp.path(), "sess-missing"), None);
     }
 }
