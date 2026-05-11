@@ -90,6 +90,11 @@ pub struct LaunchPlan {
     /// after each iteration and terminate accordingly.
     #[serde(default)]
     pub loop_markers: Option<LoopMarkers>,
+    /// When set, claude is being invoked with `--output-format stream-json
+    /// --verbose` and the subprocess runner should route its captured stdout
+    /// through `stream_json::render_line` so the user sees live progress.
+    #[serde(default)]
+    pub stream_json_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +272,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
 
     cmd.extend(args.passthrough.iter().cloned());
 
+    let is_loop_cmd = matches!(&args.command, Some(Command::Loop { .. }));
     let is_loop = loop_markers.is_some() && repeat_schedule.is_none();
     let parent_has_tty = crate::session::terminals_are_interactive();
     let launch_mode = crate::backend::resolve_launch_mode(
@@ -277,6 +283,20 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         is_loop,
         parent_has_tty,
     );
+
+    // Issue: subprocess-mode loops on claude went silent until the iteration
+    // finished, because `claude -p` buffers its single final response. Inject
+    // `--output-format stream-json --verbose` so claude emits one JSON event
+    // per turn step, and let the runtime render those into progress lines.
+    // PTY-mode loops already stream the live TUI; codex doesn't expose this
+    // flag at all.
+    let stream_json_progress =
+        matches!(backend, Backend::Claude) && is_loop_cmd && launch_mode == LaunchMode::Subprocess;
+    if stream_json_progress {
+        cmd.push("--output-format".to_string());
+        cmd.push("stream-json".to_string());
+        cmd.push("--verbose".to_string());
+    }
 
     LaunchPlan {
         command: cmd,
@@ -289,6 +309,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         repeat_schedule,
         task_summary,
         loop_markers,
+        stream_json_progress,
     }
 }
 
@@ -971,6 +992,105 @@ mod tests {
         // it does for the claude path.
         let p = plan(&["clud", "--codex", "loop", "task", "--", "--verbose"]);
         assert!(p.command.contains(&"--verbose".to_string()));
+    }
+
+    // ---- Stream-JSON progress injection ----
+    //
+    // `clud loop` against claude in *subprocess* launch mode (Windows default,
+    // or anywhere `--subprocess` is forced) used to go silent for the whole
+    // iteration because `claude -p` buffers its final response. The fix is to
+    // append `--output-format stream-json --verbose` so claude streams its
+    // turn events live, and let the runtime render each event as a one-line
+    // progress update. PTY-mode loops already show the live TUI, so no
+    // injection is needed there.
+
+    /// Helper: locate the index of `needle` in `cmd`, panicking with a
+    /// readable message if missing.
+    fn expect_arg(cmd: &[String], needle: &str) -> usize {
+        cmd.iter().position(|a| a == needle).unwrap_or_else(|| {
+            panic!("expected `{needle}` in command; got {cmd:?}");
+        })
+    }
+
+    #[test]
+    fn test_claude_loop_subprocess_injects_stream_json() {
+        let p = plan(&["clud", "--subprocess", "loop", "task"]);
+        assert_eq!(p.launch_mode, LaunchMode::Subprocess);
+        let idx = expect_arg(&p.command, "stream-json");
+        assert_eq!(
+            p.command[idx - 1],
+            "--output-format",
+            "stream-json must follow --output-format; cmd={:?}",
+            p.command
+        );
+        assert!(
+            p.command.iter().any(|a| a == "--verbose"),
+            "stream-json requires --verbose per claude's CLI contract; cmd={:?}",
+            p.command
+        );
+        assert!(
+            p.stream_json_progress,
+            "LaunchPlan must signal the runtime to parse stream-json"
+        );
+    }
+
+    #[test]
+    fn test_claude_loop_pty_does_not_inject_stream_json() {
+        // PTY mode runs the live claude TUI; switching it into the
+        // non-interactive stream-json wire format would *remove* the
+        // streaming UX we already have.
+        let p = plan(&["clud", "--pty", "loop", "task"]);
+        assert_eq!(p.launch_mode, LaunchMode::Pty);
+        assert!(
+            !p.command.iter().any(|a| a == "stream-json"),
+            "pty-mode loop must NOT inject stream-json; cmd={:?}",
+            p.command
+        );
+        assert!(
+            !p.stream_json_progress,
+            "pty mode does not need the stream-json renderer"
+        );
+    }
+
+    #[test]
+    fn test_codex_loop_does_not_inject_stream_json() {
+        // codex does not accept `--output-format stream-json` — the flag is
+        // claude-only. Forcing subprocess to be explicit so the test is
+        // platform-independent.
+        let p = plan(&["clud", "--codex", "--subprocess", "loop", "task"]);
+        assert!(
+            !p.command.iter().any(|a| a == "stream-json"),
+            "codex must NOT receive --output-format stream-json; cmd={:?}",
+            p.command
+        );
+        assert!(!p.stream_json_progress);
+    }
+
+    #[test]
+    fn test_claude_plain_prompt_does_not_inject_stream_json() {
+        // Single-shot `clud -p` is short-lived and not a loop, so we keep
+        // the existing UX untouched. Stream-json injection is loop-only.
+        let p = plan(&["clud", "--subprocess", "-p", "hello"]);
+        assert!(
+            !p.command.iter().any(|a| a == "stream-json"),
+            "plain -p must NOT receive stream-json injection; cmd={:?}",
+            p.command
+        );
+        assert!(!p.stream_json_progress);
+    }
+
+    #[test]
+    fn test_claude_loop_safe_mode_still_injects_stream_json() {
+        // `--safe` only drops the YOLO permissions flag; it must not also
+        // suppress progress streaming, which is orthogonal.
+        let p = plan(&["clud", "--subprocess", "--safe", "loop", "task"]);
+        assert!(p.command.iter().any(|a| a == "stream-json"));
+        assert!(p.stream_json_progress);
+        // Sanity: --safe removed the permissions bypass.
+        assert!(!p
+            .command
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions"));
     }
 
     #[test]
