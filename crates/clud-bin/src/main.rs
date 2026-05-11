@@ -1,6 +1,6 @@
 use clud::{
     args, backend, command, console_title, daemon, dnd, loop_spec, session, session_registry,
-    subprocess, trampoline, voice, wasm,
+    skills, subprocess, trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -27,6 +27,16 @@ fn main() {
     // only way to defend the title.
     console_title::set_for_current_cwd();
     console_title::keep_setting_in_background();
+
+    // Expand bundled slash-command skills (clud-issue, clud-pr) into every
+    // backend's global skills directory that already exists
+    // (~/.claude/skills/ for Claude Code, ~/.codex/skills/ for Codex).
+    // Existing files are left alone so user edits survive. Failures are
+    // non-fatal — we log and continue, since a skills hiccup must never
+    // block a launch.
+    if let Err(e) = skills::ensure_installed() {
+        eprintln!("[clud] note: could not install bundled skills: {e}");
+    }
 
     let mut args = args::Args::parse_with_passthrough();
 
