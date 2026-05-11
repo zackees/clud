@@ -101,64 +101,69 @@ the background?` with a 5-second countdown. Press `y` to background it. Press
 `clud attach` without a session ID lists background sessions. `clud list` shows
 the same sessions with their root PID and current working directory.
 
-## Voice Mode
+## Voice Mode (F3 push-to-talk)
 
-`clud` can capture microphone input and transcribe it into the active console prompt with
-`whisper-rs`.
+`clud` captures microphone input and transcribes it directly into the active
+backend prompt using local `whisper.cpp`. Hold `F3`, speak, release `F3`, and
+the transcript appears at your cursor without auto-submitting — you can edit
+it before pressing Enter. Available on **all six** supported platforms
+(Linux x86/ARM, Windows x86/ARM, macOS x86/ARM).
+
+### Enabling it
+
+The minimum is a single env var:
 
 ```bash
-# English-only small model
 export CLUD_VOICE=1
-export CLUD_WHISPER_MODEL=/path/to/ggml-small.en.bin
-
 clud
 ```
-
-On Windows PowerShell:
 
 ```powershell
+# Windows PowerShell
 $env:CLUD_VOICE = "1"
-$env:CLUD_WHISPER_MODEL = "C:\models\ggml-small.en.bin"
-
 clud
 ```
 
-Behavior:
+On first F3 press, `clud` auto-downloads the Whisper `ggml-small.en.bin`
+model (~466 MB) into a per-OS cache directory and verifies it against a
+pinned SHA-256. The download runs in the background as soon as voice mode
+starts up, so by the time you reach for `F3` it's usually ready.
 
-- Press `F3` to start recording and play a short `ding`
-- Release `F3` to stop recording and play a short `dong`
-- The transcript is inserted into the current prompt without auto-submitting it
-- If the terminal does not emit key-release events, pressing `F3` again stops recording
+| Platform | Cache path |
+|----------|-----------|
+| Linux | `~/.cache/clud/whisper/ggml-small.en.bin` |
+| macOS | `~/Library/Caches/clud/whisper/ggml-small.en.bin` |
+| Windows | `%LOCALAPPDATA%\clud\whisper\ggml-small.en.bin` |
 
-Optional environment variables:
+If you already have a model on disk, point `CLUD_WHISPER_MODEL` at it and
+the auto-download is skipped.
 
-| Variable | Description |
-|----------|-------------|
-| `CLUD_VOICE` | Enable voice mode (`1`, `true`, `yes`, `on`) |
-| `CLUD_WHISPER_MODEL` | Path to a local `whisper.cpp` GGML model such as `ggml-small.en.bin` |
-| `CLUD_VOICE_LANGUAGE` | Force a Whisper language code such as `en` |
+### How `F3` behaves on different terminals
 
-### Phase 0 / early Phase 1 note for issue #13
+| Terminal | Behavior |
+|----------|----------|
+| Kitty-protocol terminals (kitty, Ghostty, modern iTerm2, WezTerm, Alacritty with kitty mode) | True press-and-hold: recording stops the instant you release `F3`. |
+| Everything else (Windows Terminal / ConPTY, older xterm, etc.) | Press `F3` to start; recording auto-stops after 1.5 seconds of silence (VAD) or 30 seconds maximum, whichever comes first. |
 
-Current state in this repo:
+Cues are short tones generated programmatically — `ding` on start
+(~880 Hz, 90 ms), `dong` on stop (~660 Hz, 120 ms). If the default audio
+output device is unavailable, `clud` falls back to a terminal bell.
 
-- `crates/clud-bin/src/voice.rs` already contains a local microphone capture + `whisper-rs` transcription path, cue playback, and prompt insertion into the PTY.
-- `crates/clud-bin/src/session.rs` already owns raw-byte PTY forwarding and F3 press observation.
-- `crates/clud-bin/src/main.rs` wires `VoiceMode` into interactive PTY sessions.
-- The voice implementation is target-gated today: it compiles only for Windows x86_64 and macOS aarch64, not the full six-platform matrix from issue #13.
+### Environment variables
 
-What is still missing relative to the issue:
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CLUD_VOICE` | unset | Enable voice mode (`1`, `true`, `yes`, `on`). Setting `CLUD_WHISPER_MODEL` also implicitly enables it. |
+| `CLUD_WHISPER_MODEL` | auto-managed cache path | Override the model location. Trusted as-is — no hash check on user paths. |
+| `CLUD_VOICE_LANGUAGE` | inferred (English with `small.en`) | Force a Whisper language code, e.g. `en`, `de`, `fr`. |
+| `CLUD_VOICE_TEST_TRANSCRIPT` | unset | Test-only bypass: replaces real transcription with this exact string. Used by the integration test suite. |
 
-- `session.rs` does not currently drive a real release-event path into `VoiceMode`; the pump observes F3 press bytes, but release handling is not yet part of the terminal loop.
-- There is no documented model download/cache flow, only a required `CLUD_WHISPER_MODEL` path.
-- Cross-platform viability is not yet proven for the full support matrix.
+### Troubleshooting
 
-First implementation slice to unblock Phase 1:
-
-1. Confirm the supported terminal/key semantics for F3 press and release on every target we care about.
-2. Confirm `cpal`, `rodio`, and `whisper-rs` build and open devices on the full matrix.
-3. Decide whether F3 release stays a local terminal event or needs a fallback when the terminal does not emit release events.
-4. Keep transcript insertion as PTY byte writes only; do not add a second prompt editor.
+- **Nothing happens when I press F3.** Check that `CLUD_VOICE=1` is exported in the same shell. Then verify a default input device exists (`pamixer --get-default-source` on Linux, "Sound" preferences on macOS/Windows).
+- **"voice mode is enabled but the Whisper model is not yet available"** — the auto-download hasn't finished. Watch stderr for `[clud] voice: download N% (...)` lines, or pre-seed the cache path manually with `curl -L -o <cache-path> https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin`.
+- **Recording keeps stopping mid-sentence on non-kitty terminals.** The VAD silence window is 1.5 s — pause less, or switch to a kitty-protocol terminal for true hold-to-record.
+- **Transcript is empty / garbage.** Whisper struggles on very short utterances and noisy backgrounds. The `MIN_CAPTURE_MS` floor (150 ms) silently drops sub-150 ms blips; speak for at least half a second.
 
 ## `clud loop` — The Ralph Loop
 

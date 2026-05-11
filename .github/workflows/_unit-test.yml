@@ -33,6 +33,14 @@ jobs:
           restore-keys: |
             venv-${{ inputs.runs-on }}-py3.11-
 
+      # Issue #13: cpal links against ALSA on Linux. The runner image ships
+      # the runtime lib (libasound2) but not the dev headers / static archive
+      # that whisper-rs-sys's CMake build also needs. Install before Rust
+      # setup so any cached toolchain is unaffected.
+      - name: Install Linux audio deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       # Issue #68: replace the dtolnay + sccache + rust-cache stack with soldr.
       # `build-cache-mode: thin` avoids the setup-soldr#53 pitfall where
       # ci/test.py's back-to-back cargo build / cargo test --no-run / cargo
