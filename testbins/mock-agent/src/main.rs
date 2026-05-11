@@ -38,6 +38,12 @@ fn main() {
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
     let mut ansi_script: Option<PathBuf> = None;
+    // Emit canned `--output-format stream-json` lines from a file (one line
+    // each, separated by `--mock-stream-delay-ms`). Used by integration tests
+    // that exercise clud's stream-json renderer without needing a real
+    // claude subscription key.
+    let mut stream_json_script: Option<PathBuf> = None;
+    let mut stream_delay_ms: u64 = 0;
     let mut filtered_args: Vec<String> = Vec::new();
     let mut skip_next = false;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -157,6 +163,20 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-stream-json" {
+            if let Some(path) = args.get(i + 1) {
+                stream_json_script = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
+        if arg == "--mock-stream-delay-ms" {
+            if let Some(ms) = args.get(i + 1) {
+                stream_delay_ms = ms.parse().unwrap_or(0);
+            }
+            skip_next = true;
+            continue;
+        }
         filtered_args.push(arg.clone());
     }
 
@@ -169,6 +189,26 @@ fn main() {
             let _ = io::stdout().write_all(&bytes);
             let _ = io::stdout().flush();
         }
+    }
+
+    // Emit canned stream-json events line-by-line. When the integration
+    // test wants to exercise clud's renderer, it points this at a file
+    // containing one JSON event per line; we write them with a flush
+    // between each so the parent's drain loop sees them incrementally,
+    // exactly like real claude would emit them. Then exit immediately
+    // so the test's wait completes without the usual JSON-report tail.
+    if let Some(path) = stream_json_script.as_ref() {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            for line in text.lines() {
+                let _ = io::stdout().write_all(line.as_bytes());
+                let _ = io::stdout().write_all(b"\n");
+                let _ = io::stdout().flush();
+                if stream_delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(stream_delay_ms));
+                }
+            }
+        }
+        std::process::exit(exit_code);
     }
 
     if let Some(path) = pty_size_report_to.as_ref() {

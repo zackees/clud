@@ -350,12 +350,28 @@ class TestLoopMode:
             env=mock_env,
         )
         assert result.returncode == 0
-        cleaned = _strip_ansi(result.stdout)
-        json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
-        assert len(json_lines) == 3
-        for line in json_lines:
-            report = json.loads(line)
-            assert "do stuff" in report["args"]
+        # `clud loop` against the claude backend now injects
+        # `--output-format stream-json --verbose` in subprocess mode and
+        # routes the child's stdout through the renderer, so the
+        # mock-agent's own JSON report no longer arrives on the parent's
+        # stdout verbatim. Count iterations via the `[clud] iteration N/3`
+        # banner clud itself prints on stderr, which the renderer doesn't
+        # touch.
+        cleaned_stderr = _strip_ansi(result.stderr)
+        iter_lines = [
+            line
+            for line in cleaned_stderr.splitlines()
+            # Match the start-of-iteration banner specifically (it has the
+            # form `[clud] iteration N/M`), not the per-iteration failure
+            # diagnostic (`[clud] iteration N failed with exit code X`).
+            if re.match(r"\[clud\] iteration \d+/\d+", line.strip())
+        ]
+        assert len(iter_lines) == 3, (
+            f"expected 3 iteration banners, got {len(iter_lines)}: {iter_lines!r}"
+        )
+        assert "[clud] iteration 1/3" in cleaned_stderr
+        assert "[clud] iteration 2/3" in cleaned_stderr
+        assert "[clud] iteration 3/3" in cleaned_stderr
 
     def test_loop_stops_on_failure(
         self, clud_binary: Path, mock_env: dict[str, str]
@@ -372,9 +388,22 @@ class TestLoopMode:
             env=mock_env,
         )
         assert result.returncode == 1
-        cleaned = _strip_ansi(result.stdout)
-        json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
-        assert len(json_lines) == 1
+        # Same rationale as `test_loop_iterations`: iteration banners on
+        # stderr are the post-renderer way to count iterations. We expect
+        # exactly one because the failure aborts the loop.
+        cleaned_stderr = _strip_ansi(result.stderr)
+        iter_lines = [
+            line
+            for line in cleaned_stderr.splitlines()
+            # Match the start-of-iteration banner specifically (it has the
+            # form `[clud] iteration N/M`), not the per-iteration failure
+            # diagnostic (`[clud] iteration N failed with exit code X`).
+            if re.match(r"\[clud\] iteration \d+/\d+", line.strip())
+        ]
+        assert len(iter_lines) == 1, (
+            f"expected loop to stop after iteration 1, got banners: {iter_lines!r}"
+        )
+        assert "[clud] iteration 1/5" in cleaned_stderr
 
     # ---- Issue #48: `clud --codex loop "..."` must work against codex ----
 

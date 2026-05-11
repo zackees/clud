@@ -1,6 +1,6 @@
 use clud::{
     args, backend, command, console_title, daemon, dnd, loop_spec, session, session_registry,
-    subprocess, trampoline, voice, wasm,
+    skills, stream_json, subprocess, trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -27,6 +27,16 @@ fn main() {
     // only way to defend the title.
     console_title::set_for_current_cwd();
     console_title::keep_setting_in_background();
+
+    // Expand bundled slash-command skills (clud-issue, clud-pr) into every
+    // backend's global skills directory that already exists
+    // (~/.claude/skills/ for Claude Code, ~/.codex/skills/ for Codex).
+    // Existing files are left alone so user edits survive. Failures are
+    // non-fatal — we log and continue, since a skills hiccup must never
+    // block a launch.
+    if let Err(e) = skills::ensure_installed() {
+        eprintln!("[clud] note: could not install bundled skills: {e}");
+    }
 
     let mut args = args::Args::parse_with_passthrough();
 
@@ -377,7 +387,11 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
             command: subprocess::command_spec_for_subprocess(plan.command.clone()),
             cwd: plan.cwd.as_ref().map(PathBuf::from),
             env: Some(env.clone()),
-            capture: false,
+            // When stream-json progress is on, we capture stdout so we can
+            // drain it line-by-line and route each event through the
+            // renderer. Otherwise stdio is inherited and the child writes
+            // directly to our console (preserving any TUI behavior).
+            capture: plan.stream_json_progress,
             stderr_mode: StderrMode::Stdout,
             creationflags: None,
             create_process_group: false,
@@ -399,37 +413,29 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
             return 1;
         }
 
-        loop {
-            match process.poll() {
-                Ok(Some(code)) => {
-                    if interrupted.load(Ordering::SeqCst) {
-                        eprintln!("[clud] interrupted via Ctrl+C");
-                        return 130;
-                    }
-                    last_exit = code;
-                    if last_exit != 0 && plan.iterations > 1 {
-                        eprintln!(
-                            "[clud] iteration {} failed with exit code {}",
-                            iteration + 1,
-                            last_exit
-                        );
-                        return last_exit;
-                    }
-                    break;
+        let exit_code = if plan.stream_json_progress {
+            run_with_stream_json_renderer(&process, interrupted)
+        } else {
+            run_with_inherited_stdio(&process, interrupted)
+        };
+        match exit_code {
+            ProcessOutcome::Exited(code) => {
+                last_exit = code;
+                if last_exit != 0 && plan.iterations > 1 {
+                    eprintln!(
+                        "[clud] iteration {} failed with exit code {}",
+                        iteration + 1,
+                        last_exit
+                    );
+                    return last_exit;
                 }
-                Ok(None) => {
-                    if interrupted.load(Ordering::SeqCst) {
-                        let _ = process.kill();
-                        let _ = process.wait(Some(std::time::Duration::from_secs(2)));
-                        eprintln!("[clud] interrupted via Ctrl+C");
-                        return 130;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(e) => {
-                    eprintln!("[clud] error waiting for process: {}", e);
-                    return 1;
-                }
+            }
+            ProcessOutcome::Interrupted => {
+                eprintln!("[clud] interrupted via Ctrl+C");
+                return 130;
+            }
+            ProcessOutcome::Error => {
+                return 1;
             }
         }
 
@@ -443,6 +449,110 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
     }
 
     last_exit
+}
+
+/// Outcome of one subprocess-mode iteration. Threaded through both the
+/// inherited-stdio path and the stream-json renderer path so the outer loop
+/// in `run_plan_subprocess` can stay uniform.
+enum ProcessOutcome {
+    Exited(i32),
+    Interrupted,
+    Error,
+}
+
+/// Inherited-stdio path: poll the child until it exits, kill on Ctrl+C.
+/// This is the original `run_plan_subprocess` body, extracted unchanged so
+/// the stream-json path can sit alongside it without duplicating the
+/// non-streaming control flow.
+fn run_with_inherited_stdio(
+    process: &running_process_core::NativeProcess,
+    interrupted: &AtomicBool,
+) -> ProcessOutcome {
+    loop {
+        match process.poll() {
+            Ok(Some(code)) => {
+                if interrupted.load(Ordering::SeqCst) {
+                    return ProcessOutcome::Interrupted;
+                }
+                return ProcessOutcome::Exited(code);
+            }
+            Ok(None) => {
+                if interrupted.load(Ordering::SeqCst) {
+                    let _ = process.kill();
+                    let _ = process.wait(Some(std::time::Duration::from_secs(2)));
+                    return ProcessOutcome::Interrupted;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                eprintln!("[clud] error waiting for process: {}", e);
+                return ProcessOutcome::Error;
+            }
+        }
+    }
+}
+
+/// Stream-JSON path: drain captured stdout line-by-line, pipe each line
+/// through `stream_json::render_line`, and print the rendered progress
+/// line to our own stderr (so it shows alongside the existing
+/// `[clud] iteration X/Y` banner and is easily distinguished from any
+/// real claude stdout payload).
+fn run_with_stream_json_renderer(
+    process: &running_process_core::NativeProcess,
+    interrupted: &AtomicBool,
+) -> ProcessOutcome {
+    use running_process_core::{ReadStatus, StreamKind};
+    use std::time::Duration;
+
+    let timeout = Duration::from_millis(100);
+    loop {
+        if interrupted.load(Ordering::SeqCst) {
+            let _ = process.kill();
+            let _ = process.wait(Some(Duration::from_secs(2)));
+            return ProcessOutcome::Interrupted;
+        }
+        match process.read_stream(StreamKind::Stdout, Some(timeout)) {
+            ReadStatus::Line(bytes) => {
+                emit_rendered_line(&bytes);
+            }
+            ReadStatus::Timeout => {
+                // No new data within the window; check if the child has
+                // exited so we don't spin forever after a slow turn.
+                if let Ok(Some(_)) = process.poll() {
+                    // Drain anything still queued before declaring done.
+                    drain_remaining_stdout(process);
+                    break;
+                }
+            }
+            ReadStatus::Eof => {
+                break;
+            }
+        }
+    }
+
+    match process.wait(Some(Duration::from_secs(2))) {
+        Ok(code) => ProcessOutcome::Exited(code),
+        Err(_) => match process.returncode() {
+            // EOF on the pipe doesn't imply the OS-level wait succeeded;
+            // fall back to whatever the shared returncode tracker has.
+            Some(code) => ProcessOutcome::Exited(code),
+            None => ProcessOutcome::Exited(0),
+        },
+    }
+}
+
+fn drain_remaining_stdout(process: &running_process_core::NativeProcess) {
+    use running_process_core::StreamKind;
+    for chunk in process.drain_stream(StreamKind::Stdout) {
+        emit_rendered_line(&chunk);
+    }
+}
+
+fn emit_rendered_line(bytes: &[u8]) {
+    let line = String::from_utf8_lossy(bytes);
+    if let Some(rendered) = stream_json::render_line(line.trim_end_matches(['\r', '\n'])) {
+        eprintln!("{rendered}");
+    }
 }
 
 fn run_plan_pty(
