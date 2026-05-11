@@ -180,14 +180,20 @@ impl Default for RefreshConfig {
 /// COM.
 ///
 /// Production code uses the Windows-only `OleRegistrar`; tests use a
-/// `MockRegistrar` that just counts calls.
+/// `MockRegistrar` that just counts calls. Gated to Windows + tests
+/// because non-Windows targets never wire up an `IDropTarget` and
+/// would otherwise see this trait as dead code.
+#[cfg(any(windows, test))]
 trait DragDropRegistrar: Send + Sync {
     /// Register `clud` as the drop target. Returns the raw HRESULT on
     /// failure (so the worker loop can surface it via
     /// [`RegisterError::RegisterDragDropFailed`]).
     fn register(&self) -> Result<(), i32>;
     /// Revoke our registration. Best-effort — errors are logged but
-    /// can't be surfaced from `Drop`.
+    /// can't be surfaced from `Drop`. Only invoked from the
+    /// Windows-only `OleKeepAlive::drop`; non-Windows test builds
+    /// never call this so silence the dead-code lint there.
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn revoke(&self) -> Result<(), i32>;
 }
 
@@ -197,6 +203,10 @@ struct RefreshShutdown {
 }
 
 impl RefreshShutdown {
+    /// Used only when constructing a live registration on Windows or
+    /// in unit tests; non-Windows builds never construct a
+    /// `RefreshShutdown`.
+    #[cfg(any(windows, test))]
     fn new() -> Self {
         Self {
             flag: AtomicBool::new(false),
@@ -205,6 +215,9 @@ impl RefreshShutdown {
     fn signal(&self) {
         self.flag.store(true, Ordering::SeqCst);
     }
+    /// Read by `responsive_sleep` and `run_registration_loop`, both of
+    /// which are themselves Windows-or-test only.
+    #[cfg(any(windows, test))]
     fn is_signaled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
@@ -213,6 +226,7 @@ impl RefreshShutdown {
 /// Sleep `total` in slices of at most `chunk`, exiting early if
 /// `shutdown` is signaled. Returns `true` if the sleep completed
 /// without a shutdown signal, `false` if interrupted.
+#[cfg(any(windows, test))]
 fn responsive_sleep(total: Duration, shutdown: &RefreshShutdown) -> bool {
     if shutdown.is_signaled() {
         return false;
@@ -241,6 +255,7 @@ fn responsive_sleep(total: Duration, shutdown: &RefreshShutdown) -> bool {
 /// Returns `Ok(())` after the loop exits cleanly via the shutdown
 /// signal, or `Err(hr)` if the *initial* registration failed (so the
 /// caller can surface `RegisterDragDropFailed(hr)`).
+#[cfg(any(windows, test))]
 fn run_registration_loop<R: DragDropRegistrar + ?Sized>(
     registrar: &R,
     config: RefreshConfig,
@@ -829,7 +844,6 @@ mod tests {
 
     struct MockRegistrar {
         register_calls: Arc<AtomicUsize>,
-        revoke_calls: Arc<AtomicUsize>,
         fail_initial: bool,
     }
 
@@ -842,7 +856,6 @@ mod tests {
             Ok(())
         }
         fn revoke(&self) -> Result<(), i32> {
-            self.revoke_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -851,7 +864,6 @@ mod tests {
     fn registration_loop_calls_register_once_when_refresh_disabled() {
         let registrar = MockRegistrar {
             register_calls: Arc::new(AtomicUsize::new(0)),
-            revoke_calls: Arc::new(AtomicUsize::new(0)),
             fail_initial: false,
         };
         let calls = Arc::clone(&registrar.register_calls);
@@ -865,7 +877,6 @@ mod tests {
     fn registration_loop_surfaces_initial_failure() {
         let registrar = MockRegistrar {
             register_calls: Arc::new(AtomicUsize::new(0)),
-            revoke_calls: Arc::new(AtomicUsize::new(0)),
             fail_initial: true,
         };
         let shutdown = RefreshShutdown::new();
@@ -879,7 +890,6 @@ mod tests {
     fn registration_loop_refreshes_periodically() {
         let registrar = Arc::new(MockRegistrar {
             register_calls: Arc::new(AtomicUsize::new(0)),
-            revoke_calls: Arc::new(AtomicUsize::new(0)),
             fail_initial: false,
         });
         let calls = Arc::clone(&registrar.register_calls);
@@ -914,7 +924,6 @@ mod tests {
     fn registration_loop_exits_promptly_on_shutdown_during_initial_delay() {
         let registrar = Arc::new(MockRegistrar {
             register_calls: Arc::new(AtomicUsize::new(0)),
-            revoke_calls: Arc::new(AtomicUsize::new(0)),
             fail_initial: false,
         });
         let calls = Arc::clone(&registrar.register_calls);
