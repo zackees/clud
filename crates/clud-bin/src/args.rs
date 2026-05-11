@@ -69,6 +69,27 @@ pub struct Args {
     #[arg(long = "no-dnd", alias = "no-drag-drop")]
     pub no_dnd: bool,
 
+    /// Issue #83: enumerate this repo's git worktrees and remove the
+    /// stale ones. Combine with `--dry-run` to preview, `--yes` to skip
+    /// confirmation, `--force` to also remove dirty/unpushed worktrees.
+    #[arg(long = "clean-worktrees")]
+    pub clean_worktrees: bool,
+
+    /// Issue #83: minimum age before a clean worktree is treated as stale.
+    /// Accepts `30s`, `5m`, `2h`, `1d`. Defaults to `1d`.
+    #[arg(long = "stale-after", default_value = "1d")]
+    pub stale_after: String,
+
+    /// Issue #83: skip interactive confirmation prompts (combined with
+    /// `--clean-worktrees`).
+    #[arg(long = "yes", short = 'y')]
+    pub yes: bool,
+
+    /// Issue #83: allow `--clean-worktrees` to remove dirty / unpushed
+    /// worktrees. Locked worktrees are still preserved.
+    #[arg(long = "force")]
+    pub force: bool,
+
     #[arg(long = "experimental-daemon-centralized", hide = true)]
     pub experimental_daemon_centralized: bool,
 
@@ -198,6 +219,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--done",
         "--repeat",
         "--daemon-state-dir",
+        "--stale-after",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
@@ -219,10 +241,13 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--no-done-marker",
         "--no-dnd",
         "--no-drag-drop",
+        "--clean-worktrees",
+        "--yes",
+        "--force",
         "--help",
         "--version",
     ];
-    let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V"];
+    let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "__daemon",
         "__worker",
@@ -870,6 +895,10 @@ mod tests {
         assert!(!args.detach);
         assert!(!args.detachable);
         assert!(!args.no_dnd);
+        assert!(!args.clean_worktrees);
+        assert!(!args.yes);
+        assert!(!args.force);
+        assert_eq!(args.stale_after, "1d");
         assert!(args.command.is_none());
         assert!(args.passthrough.is_empty());
     }
@@ -890,5 +919,45 @@ mod tests {
     fn test_no_dnd_default_false() {
         let args = parse(&["clud", "-p", "hello"]);
         assert!(!args.no_dnd);
+    }
+
+    /// Issue #83: top-level `--clean-worktrees` toggles the worktree-cleanup
+    /// path and accepts the surrounding flags (`--stale-after`, `--yes`,
+    /// `--force`, the existing `--dry-run`).
+    #[test]
+    fn test_clean_worktrees_flag() {
+        let args = parse(&["clud", "--clean-worktrees"]);
+        assert!(args.clean_worktrees);
+        assert_eq!(args.stale_after, "1d");
+        assert!(!args.yes);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn test_clean_worktrees_with_stale_after() {
+        let args = parse(&["clud", "--clean-worktrees", "--stale-after", "7d"]);
+        assert!(args.clean_worktrees);
+        assert_eq!(args.stale_after, "7d");
+    }
+
+    #[test]
+    fn test_clean_worktrees_with_yes_and_force() {
+        let args = parse(&["clud", "--clean-worktrees", "--yes", "--force"]);
+        assert!(args.clean_worktrees);
+        assert!(args.yes);
+        assert!(args.force);
+    }
+
+    #[test]
+    fn test_clean_worktrees_with_dry_run() {
+        let args = parse(&["clud", "--clean-worktrees", "--dry-run"]);
+        assert!(args.clean_worktrees);
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_yes_short_flag() {
+        let args = parse(&["clud", "--clean-worktrees", "-y"]);
+        assert!(args.yes);
     }
 }

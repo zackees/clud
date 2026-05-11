@@ -23,3 +23,4 @@ pub mod trampoline;
 pub mod voice;
 pub mod wasm;
 pub mod win_creation_flags;
+pub mod worktrees;
