@@ -19,7 +19,14 @@ use running_process_core::{NativeProcess, ProcessConfig, ReadStatus, StderrMode,
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
+/// Display string for the marker directory (forward slashes for the
+/// user-facing prompt). Always join the segments via `Path::join` when
+/// constructing on-disk paths so the separators stay platform-native —
+/// otherwise mixed separators (`.clud/loop\DONE` on Windows) leak into
+/// the prompt text and confuse the agent.
 pub const LOOP_DIR: &str = ".clud/loop";
+const LOOP_DIR_PARENT: &str = ".clud";
+const LOOP_DIR_LEAF: &str = "loop";
 pub const DONE_MARKER: &str = "DONE";
 pub const BLOCKED_MARKER: &str = "BLOCKED";
 
@@ -135,8 +142,12 @@ pub fn git_root_from(start: &Path) -> PathBuf {
 }
 
 /// Resolve the `<git-root>/.clud/loop/` directory.
+///
+/// Joins segment-by-segment so the separators stay platform-native
+/// (`\` on Windows, `/` elsewhere). Using `git_root.join(".clud/loop")`
+/// would leak a stray `/` into the middle of an otherwise-Windows path.
 pub fn loop_dir(git_root: &Path) -> PathBuf {
-    git_root.join(LOOP_DIR)
+    git_root.join(LOOP_DIR_PARENT).join(LOOP_DIR_LEAF)
 }
 
 /// Path to the DONE marker.
@@ -475,22 +486,122 @@ pub fn render_cache(doc: &IssueDoc, fetched_at: &str) -> String {
 
 /// Default prompt instructions appended to every loop-driven task when the
 /// DONE/BLOCKED marker contract is active.
-pub fn done_marker_contract(done_path: &str, blocked_path: &str) -> String {
+///
+/// `done_abs` and `blocked_abs` are passed as absolute paths so the model
+/// cannot reinterpret a display-relative form (e.g. `.clud/loop/DONE`) as a
+/// generic "write a completion file somewhere" instruction. See issue #95
+/// for the original failure mode (agent writing to `~/.loop/LOOP.md`).
+///
+/// The contract also documents the `<<<CLUD_LOOP_DONE: ...>>>` /
+/// `<<<CLUD_LOOP_BLOCKED: ...>>>` token fallback (see
+/// `scan_completion_token`) for the case where the agent cannot write a
+/// file — the loop runner scans its captured output for those tokens.
+pub fn done_marker_contract(done_abs: &Path, blocked_abs: &Path) -> String {
+    let done_display = done_abs.display();
+    let blocked_display = blocked_abs.display();
     format!(
         "\n\n---\n\
 You are running in a ralph loop. The loop will re-invoke you up to N times \
 with the same task until you complete it.\n\
 \n\
 When the task is fully resolved and verified (tests pass, lint clean where \
-applicable), write `{done_path}` with a one-line summary of what you \
-did. Do not write DONE prematurely — only after you are confident the work \
-is complete.\n\
+applicable), write the file at this EXACT absolute path with a one-line \
+summary of what you did:\n\
+\n\
+    {done_display}\n\
 \n\
 If you cannot make progress (missing info, external dependency, needs \
-human input), write `{blocked_path}` with a one-line reason and stop.\n\
+human input), write the file at this EXACT absolute path with a one-line \
+reason and stop:\n\
 \n\
-Otherwise, continue working — you will be re-invoked.\n"
+    {blocked_display}\n\
+\n\
+Do not create any other completion files. Only writing to the exact \
+absolute path above terminates the loop. Do not write to ~/.loop/, \
+./loop.md, LOOP.md, or any other location.\n\
+\n\
+If you cannot write the marker file for any reason, you may instead emit \
+the literal token `<<<CLUD_LOOP_DONE: <one-line summary>>>>` on a line by \
+itself as the very last thing you output, and clud will treat that as a \
+DONE signal. Use `<<<CLUD_LOOP_BLOCKED: <reason>>>>` for the BLOCKED \
+equivalent. Writing the marker file is still strongly preferred.\n\
+\n\
+Do not write DONE prematurely — only after you are confident the work is \
+complete. Otherwise, continue working — you will be re-invoked.\n"
     )
+}
+
+/// Result of scanning captured output for a `<<<CLUD_LOOP_...>>>` token.
+///
+/// Mirrors `MarkerState` but is produced by parsing stdout/stderr text
+/// rather than by reading marker files. This is a fallback for agents that
+/// summarize "task complete" without writing the marker file (issue #95).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenState {
+    Done(String),
+    Blocked(String),
+    None,
+}
+
+/// Scan captured output for completion tokens.
+///
+/// Recognizes lines that START with `<<<CLUD_LOOP_DONE:` or
+/// `<<<CLUD_LOOP_BLOCKED:` and end with `>>>`. Tokens embedded mid-line are
+/// ignored — the contract documents that the token must be on a line by
+/// itself. If multiple tokens appear, the LAST one wins (the agent's
+/// final word).
+///
+/// Used only in subprocess launch mode where we capture stdout. In PTY
+/// mode the child writes directly to the user's terminal and we never see
+/// the bytes — for now, only the marker-file path is supported there.
+pub fn scan_completion_token(captured: &str) -> TokenState {
+    const DONE_PREFIX: &str = "<<<CLUD_LOOP_DONE:";
+    const BLOCKED_PREFIX: &str = "<<<CLUD_LOOP_BLOCKED:";
+    const SUFFIX: &str = ">>>";
+
+    let mut last: TokenState = TokenState::None;
+    for raw_line in captured.lines() {
+        let line = raw_line.trim();
+        let (state, payload) = if let Some(rest) = line.strip_prefix(DONE_PREFIX) {
+            let Some(inner) = rest.strip_suffix(SUFFIX) else {
+                continue;
+            };
+            (
+                TokenState::Done(String::new()),
+                inner.trim().trim_end_matches('>').trim().to_string(),
+            )
+        } else if let Some(rest) = line.strip_prefix(BLOCKED_PREFIX) {
+            let Some(inner) = rest.strip_suffix(SUFFIX) else {
+                continue;
+            };
+            (
+                TokenState::Blocked(String::new()),
+                inner.trim().trim_end_matches('>').trim().to_string(),
+            )
+        } else {
+            continue;
+        };
+        last = match state {
+            TokenState::Done(_) => TokenState::Done(payload),
+            TokenState::Blocked(_) => TokenState::Blocked(payload),
+            TokenState::None => TokenState::None,
+        };
+    }
+    last
+}
+
+/// Read marker state from disk OR from a token in `captured` output, with
+/// the marker file taking precedence. This is the loop-runner entry point
+/// for subprocess mode where stdout is captured into a buffer.
+pub fn read_markers_or_token(paths: &MarkerPaths, captured: &str) -> MarkerState {
+    match read_markers_at(paths) {
+        MarkerState::None => match scan_completion_token(captured) {
+            TokenState::Done(s) => MarkerState::Done(s),
+            TokenState::Blocked(s) => MarkerState::Blocked(s),
+            TokenState::None => MarkerState::None,
+        },
+        state => state,
+    }
 }
 
 #[cfg(test)]
@@ -643,6 +754,136 @@ mod tests {
         assert_eq!(doc.labels, vec!["bug", "prio-high"]);
         assert_eq!(doc.comments.len(), 1);
         assert_eq!(doc.comments[0].author, "bob");
+    }
+
+    // ---- Issue #95: tightened DONE marker contract ----
+
+    #[test]
+    fn done_marker_contract_uses_absolute_paths() {
+        let done = Path::new("/tmp/proj/.clud/loop/DONE");
+        let blocked = Path::new("/tmp/proj/.clud/loop/BLOCKED");
+        let text = done_marker_contract(done, blocked);
+        // Absolute paths must appear verbatim in the contract.
+        assert!(
+            text.contains(&done.display().to_string()),
+            "contract must reference absolute DONE path: {text}"
+        );
+        assert!(
+            text.contains(&blocked.display().to_string()),
+            "contract must reference absolute BLOCKED path: {text}"
+        );
+        // Explicit "do not write elsewhere" rule must be present.
+        assert!(
+            text.contains("Do not create any other completion files"),
+            "contract must forbid other completion file locations"
+        );
+        // Token fallback must be documented.
+        assert!(
+            text.contains("<<<CLUD_LOOP_DONE:"),
+            "contract must document the DONE token fallback"
+        );
+        assert!(
+            text.contains("<<<CLUD_LOOP_BLOCKED:"),
+            "contract must document the BLOCKED token fallback"
+        );
+    }
+
+    // ---- Issue #95: token-based completion fallback ----
+
+    #[test]
+    fn scan_token_matches_done() {
+        let s = "work work work\n<<<CLUD_LOOP_DONE: fixed the bug>>>\n";
+        assert_eq!(
+            scan_completion_token(s),
+            TokenState::Done("fixed the bug".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_token_matches_blocked() {
+        let s = "<<<CLUD_LOOP_BLOCKED: missing API key>>>";
+        assert_eq!(
+            scan_completion_token(s),
+            TokenState::Blocked("missing API key".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_token_ignores_unclosed() {
+        let s = "<<<CLUD_LOOP_DONE: oops no terminator\nnext line";
+        assert_eq!(scan_completion_token(s), TokenState::None);
+    }
+
+    #[test]
+    fn scan_token_ignores_midline_occurrence() {
+        // Token must START the line (after trimming whitespace).
+        let s = "blah blah <<<CLUD_LOOP_DONE: nope>>> trailing";
+        assert_eq!(scan_completion_token(s), TokenState::None);
+    }
+
+    #[test]
+    fn scan_token_prefers_later_token() {
+        let s =
+            "<<<CLUD_LOOP_DONE: first attempt>>>\nmore work\n<<<CLUD_LOOP_DONE: actually done>>>";
+        assert_eq!(
+            scan_completion_token(s),
+            TokenState::Done("actually done".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_token_none_for_empty() {
+        assert_eq!(scan_completion_token(""), TokenState::None);
+        assert_eq!(
+            scan_completion_token("just some output\n"),
+            TokenState::None
+        );
+    }
+
+    #[test]
+    fn scan_token_strips_extra_trailing_angle_brackets() {
+        // The contract template uses `>>>>` at the end (matched template
+        // syntax `<<<...>>>>`). We accept stray trailing `>` in the payload
+        // so the model isn't punished for the visually-confusing example.
+        let s = "<<<CLUD_LOOP_DONE: payload>>>>";
+        assert_eq!(
+            scan_completion_token(s),
+            TokenState::Done("payload".to_string())
+        );
+    }
+
+    #[test]
+    fn read_markers_or_token_prefers_marker_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_loop_dir(tmp.path()).unwrap();
+        std::fs::write(done_path(tmp.path()), "via file\n").unwrap();
+        let paths = default_marker_paths(tmp.path());
+        let captured = "<<<CLUD_LOOP_BLOCKED: via token>>>\n";
+        assert_eq!(
+            read_markers_or_token(&paths, captured),
+            MarkerState::Done("via file".to_string())
+        );
+    }
+
+    #[test]
+    fn read_markers_or_token_falls_back_to_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = default_marker_paths(tmp.path());
+        let captured = "<<<CLUD_LOOP_DONE: token-only completion>>>\n";
+        assert_eq!(
+            read_markers_or_token(&paths, captured),
+            MarkerState::Done("token-only completion".to_string())
+        );
+    }
+
+    #[test]
+    fn read_markers_or_token_none_when_neither() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = default_marker_paths(tmp.path());
+        assert_eq!(
+            read_markers_or_token(&paths, "nothing relevant\n"),
+            MarkerState::None
+        );
     }
 
     #[test]
