@@ -24,13 +24,49 @@ def _uv() -> str:
     return "uv"
 
 
-def _pip_install(venv_python: Path) -> subprocess.CompletedProcess[str]:
-    """pip install clud into the given venv."""
+@pytest.fixture(scope="session")
+def prebuilt_wheel() -> Path:
+    """Return the latest pre-built clud wheel from dist/.
+
+    These tests must NOT trigger a maturin Rust rebuild — that takes ~2
+    minutes and exceeds the 90s pytest timeout (issue #101). CI builds
+    the dev wheel before running tests; locally, run `bash build` first.
+    """
+    from ci.build_wheel import latest_wheel  # type: ignore[import-not-found]
+
+    try:
+        return latest_wheel()
+    except RuntimeError as exc:
+        pytest.fail(
+            f"{exc}. The trampoline integration tests require a pre-built "
+            f"wheel in dist/. Run `bash build` to produce one, then re-run "
+            f"the tests. CI builds the wheel automatically before tests."
+        )
+
+
+def _pip_install(venv_python: Path, wheel: Path) -> subprocess.CompletedProcess[str]:
+    """pip install clud into the given venv from a pre-built wheel.
+
+    Uses --no-deps to skip dependency resolution (clud has no runtime
+    Python deps anyway) and installs from the wheel path so uv does NOT
+    invoke the PEP-517 build backend (which would trigger a maturin Rust
+    rebuild — see issue #101).
+    """
+    cmd = [
+        _uv(),
+        "pip",
+        "install",
+        "--python",
+        str(venv_python),
+        "--reinstall",
+        "--no-deps",
+        str(wheel),
+    ]
     return subprocess.run(
-        [_uv(), "pip", "install", "--python", str(venv_python), "--reinstall", str(ROOT)],
+        cmd,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=60,
         cwd=ROOT,
     )
 
@@ -75,13 +111,13 @@ def _venv_python(venv_dir: Path) -> Path:
 class TestPipInstallWhileRunning:
     """Verify pip install/uninstall works while clud is running."""
 
-    def test_install_launch_reinstall(self, test_venv: Path) -> None:
+    def test_install_launch_reinstall(self, test_venv: Path, prebuilt_wheel: Path) -> None:
         """Install clud, launch it (blocking), reinstall while running."""
         python = _venv_python(test_venv)
         clud = _clud_exe(test_venv)
 
         # Step 1: Install clud
-        result = _pip_install(python)
+        result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0, f"First install failed: {result.stderr}"
         assert clud.is_file(), f"clud binary not found at {clud}"
 
@@ -97,7 +133,7 @@ class TestPipInstallWhileRunning:
         assert data["backend"] == "claude"
 
         # Step 3: Reinstall while the .old file may still exist
-        result = _pip_install(python)
+        result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0, f"Reinstall failed: {result.stderr}"
 
         # Step 4: Verify the new install works
@@ -110,13 +146,15 @@ class TestPipInstallWhileRunning:
         assert run_result.returncode == 0
         assert "clud" in run_result.stdout
 
-    def test_install_launch_background_reinstall(self, test_venv: Path) -> None:
+    def test_install_launch_background_reinstall(
+        self, test_venv: Path, prebuilt_wheel: Path
+    ) -> None:
         """Install clud, launch a long-running process, reinstall while it's alive."""
         python = _venv_python(test_venv)
         clud = _clud_exe(test_venv)
 
         # Step 1: Install clud
-        result = _pip_install(python)
+        result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0, f"First install failed: {result.stderr}"
 
         # Step 2: Launch clud in the background (it will fail to find claude,
@@ -133,7 +171,7 @@ class TestPipInstallWhileRunning:
         time.sleep(0.5)
 
         # Step 3: Reinstall WHILE clud process may still be alive
-        result = _pip_install(python)
+        result = _pip_install(python, prebuilt_wheel)
         reinstall_ok = result.returncode == 0
 
         # Clean up the background process
@@ -154,13 +192,13 @@ class TestPipInstallWhileRunning:
         )
         assert run_result.returncode == 0
 
-    def test_uninstall_after_run(self, test_venv: Path) -> None:
+    def test_uninstall_after_run(self, test_venv: Path, prebuilt_wheel: Path) -> None:
         """Install, run, then uninstall — verify clean removal."""
         python = _venv_python(test_venv)
         clud = _clud_exe(test_venv)
 
         # Install
-        result = _pip_install(python)
+        result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0
 
         # Run (exercises trampoline, creates .old and cache files)
@@ -178,13 +216,13 @@ class TestPipInstallWhileRunning:
         # Verify binary is gone
         assert not clud.is_file(), f"clud binary still exists after uninstall: {clud}"
 
-    def test_multiple_rapid_reinstalls(self, test_venv: Path) -> None:
+    def test_multiple_rapid_reinstalls(self, test_venv: Path, prebuilt_wheel: Path) -> None:
         """Rapidly reinstall 3 times — verify no lock errors accumulate."""
         python = _venv_python(test_venv)
         clud = _clud_exe(test_venv)
 
         for i in range(3):
-            result = _pip_install(python)
+            result = _pip_install(python, prebuilt_wheel)
             assert result.returncode == 0, f"Install #{i + 1} failed: {result.stderr}"
 
             run_result = subprocess.run(
@@ -196,12 +234,12 @@ class TestPipInstallWhileRunning:
             assert run_result.returncode == 0, f"Run #{i + 1} failed: {run_result.stderr}"
 
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific lock test")
-    def test_old_file_cleanup(self, test_venv: Path) -> None:
+    def test_old_file_cleanup(self, test_venv: Path, prebuilt_wheel: Path) -> None:
         """Verify .old files are cleaned up on next launch."""
         python = _venv_python(test_venv)
         clud = _clud_exe(test_venv)
 
-        result = _pip_install(python)
+        result = _pip_install(python, prebuilt_wheel)
         assert result.returncode == 0
 
         # First run creates .old
