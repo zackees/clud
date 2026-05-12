@@ -1,6 +1,7 @@
 use clud::{
     args, backend, command, console_title, daemon, dnd, loop_artifacts, loop_spec, session,
     session_registry, skill_install, skills, stream_json, subprocess, trampoline, voice, wasm,
+    worktrees,
 };
 
 use std::io::{self, Read};
@@ -45,6 +46,25 @@ fn main() {
     skill_install::ensure_installed();
 
     let mut args = args::Args::parse_with_passthrough();
+
+    // Issue #83: `--clean-worktrees` is a self-contained maintenance path.
+    // It never launches a backend, so handle it before backend resolution.
+    if args.clean_worktrees {
+        let stale_after = match worktrees::parse_duration(&args.stale_after) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("error: invalid --stale-after value: {e}");
+                std::process::exit(2);
+            }
+        };
+        let opts = worktrees::CleanOptions {
+            stale_after,
+            dry_run: args.dry_run,
+            yes: args.yes,
+            force: args.force,
+        };
+        std::process::exit(worktrees::run(&opts));
+    }
 
     // Pipe mode: if stdin is not a terminal, read it as the prompt.
     if args.prompt.is_none()

@@ -326,3 +326,31 @@ def test_pipe_mode() -> None:
     data = json.loads(result.stdout)
     assert "-p" in data["command"]
     assert "piped prompt" in data["command"]
+
+
+def test_clean_worktrees_dry_run_smoke() -> None:
+    """Issue #83: `clud --clean-worktrees --dry-run` must enumerate worktrees
+    without crashing and without removing anything. We don't assert on the
+    exact set of worktrees (the host running the test may have any number),
+    only that the binary returns successfully and prints the dry-run banner.
+    The binary itself lives inside a git repo (this one), so the worktree
+    list is non-empty in practice — but even on a fresh clone with zero
+    extra worktrees the command must succeed.
+    """
+    result = _run("--clean-worktrees", "--dry-run", "--yes")
+    assert result.returncode == 0, (
+        f"--clean-worktrees --dry-run failed (rc={result.returncode}): "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    # Must mention worktrees in the output — sanity check that we ran the
+    # worktrees code path and not e.g. the launcher path.
+    combined = result.stdout + result.stderr
+    assert "Worktrees" in combined or "worktree" in combined.lower()
+
+
+def test_clean_worktrees_rejects_invalid_stale_after() -> None:
+    """Bogus `--stale-after` values must fail with a clear error before any
+    git invocation happens."""
+    result = _run("--clean-worktrees", "--stale-after", "30x", "--dry-run")
+    assert result.returncode != 0
+    assert "invalid --stale-after" in result.stderr or "unsupported" in result.stderr.lower()
