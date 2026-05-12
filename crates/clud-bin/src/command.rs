@@ -290,12 +290,27 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
     // per turn step, and let the runtime render those into progress lines.
     // PTY-mode loops already stream the live TUI; codex doesn't expose this
     // flag at all.
+    //
+    // The flags MUST be inserted BEFORE the prompt (`-p <prompt>`) so that
+    // `command[-1]` remains the prompt — downstream tooling, dry-run JSON
+    // consumers, and integration tests rely on that contract.
     let stream_json_progress =
         matches!(backend, Backend::Claude) && is_loop_cmd && launch_mode == LaunchMode::Subprocess;
     if stream_json_progress {
-        cmd.push("--output-format".to_string());
-        cmd.push("stream-json".to_string());
-        cmd.push("--verbose".to_string());
+        // For Claude, `push_prompt` emits `-p` then the prompt body. Find that
+        // `-p` and slot the stream-json flags in just before it. This keeps
+        // any earlier args (yolo, --model, etc.) and the prompt anchored at
+        // the tail of the command.
+        if let Some(p_idx) = cmd.iter().position(|a| a == "-p") {
+            cmd.splice(
+                p_idx..p_idx,
+                [
+                    "--output-format".to_string(),
+                    "stream-json".to_string(),
+                    "--verbose".to_string(),
+                ],
+            );
+        }
     }
 
     LaunchPlan {
@@ -1032,6 +1047,36 @@ mod tests {
             p.stream_json_progress,
             "LaunchPlan must signal the runtime to parse stream-json"
         );
+    }
+
+    #[test]
+    fn test_claude_loop_stream_json_flags_emitted_before_prompt() {
+        // Regression guard for PR #91 / commit 8c0818a: the stream-json flags
+        // must be inserted BEFORE `-p <prompt>` so that `command[-1]` is the
+        // prompt body. Dry-run consumers, the Python integration tests in
+        // tests/test_hello.py, and downstream tooling all rely on the
+        // "prompt is the last arg" contract.
+        let p = plan(&["clud", "--subprocess", "loop", "do stuff"]);
+        assert!(p.stream_json_progress);
+
+        // Prompt body must still be the last positional.
+        let last = p.command.last().expect("cmd is non-empty");
+        assert!(
+            last.starts_with("do stuff"),
+            "command[-1] must be the prompt body, got: {last:?} (full cmd: {:?})",
+            p.command
+        );
+
+        // Each stream-json flag must appear strictly before `-p`.
+        let p_idx = expect_arg(&p.command, "-p");
+        for flag in ["--output-format", "stream-json", "--verbose"] {
+            let flag_idx = expect_arg(&p.command, flag);
+            assert!(
+                flag_idx < p_idx,
+                "{flag} (idx {flag_idx}) must come before -p (idx {p_idx}); cmd={:?}",
+                p.command
+            );
+        }
     }
 
     #[test]
