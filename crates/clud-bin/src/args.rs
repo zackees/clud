@@ -134,14 +134,21 @@ pub enum Command {
     /// With no session id, lists all sessions that have log files and prints
     /// the last line of each. With an id, prints the log (last `--lines` or
     /// all) and optionally keeps following new output via `--follow`.
+    /// `--last` resolves to the most-recently-created session (live or
+    /// exited), mirroring `clud attach --last`. Read-only: never takes
+    /// exclusive ownership of the session and never evicts attached clients.
     Logs {
         session_id: Option<String>,
-        /// Keep watching the file and print new output as it arrives.
+        /// Keep watching the file and print new output as it arrives. Exits
+        /// once the session has terminated (after printing a status line).
         #[arg(long = "follow", short = 'f')]
         follow: bool,
         /// Print only the last N lines from the file. Default: all.
         #[arg(long = "lines", short = 'n')]
         lines: Option<usize>,
+        /// Operate on the most recently created session (live or exited).
+        #[arg(long = "last", short = 'l', conflicts_with = "session_id")]
+        last: bool,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
@@ -728,6 +735,104 @@ mod tests {
     fn test_list_subcommand() {
         let args = parse(&["clud", "list"]);
         assert!(matches!(args.command, Some(Command::List)));
+    }
+
+    #[test]
+    fn test_logs_with_session_id() {
+        let args = parse(&["clud", "logs", "sess-abc"]);
+        match args.command {
+            Some(Command::Logs {
+                session_id,
+                follow,
+                lines,
+                last,
+            }) => {
+                assert_eq!(session_id.as_deref(), Some("sess-abc"));
+                assert!(!follow);
+                assert!(lines.is_none());
+                assert!(!last);
+            }
+            _ => panic!("expected Logs subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_logs_follow_flag() {
+        let args = parse(&["clud", "logs", "-f", "sess-abc"]);
+        match args.command {
+            Some(Command::Logs {
+                session_id,
+                follow,
+                last,
+                ..
+            }) => {
+                assert_eq!(session_id.as_deref(), Some("sess-abc"));
+                assert!(follow);
+                assert!(!last);
+            }
+            _ => panic!("expected Logs subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_logs_lines_flag() {
+        let args = parse(&["clud", "logs", "-n", "100", "sess-abc"]);
+        match args.command {
+            Some(Command::Logs {
+                session_id,
+                lines,
+                last,
+                ..
+            }) => {
+                assert_eq!(session_id.as_deref(), Some("sess-abc"));
+                assert_eq!(lines, Some(100));
+                assert!(!last);
+            }
+            _ => panic!("expected Logs subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_logs_last_flag() {
+        let args = parse(&["clud", "logs", "--last"]);
+        match args.command {
+            Some(Command::Logs {
+                session_id,
+                follow,
+                last,
+                ..
+            }) => {
+                assert!(session_id.is_none());
+                assert!(!follow);
+                assert!(last);
+            }
+            _ => panic!("expected Logs subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_logs_last_short_flag() {
+        let args = parse(&["clud", "logs", "-l"]);
+        match args.command {
+            Some(Command::Logs { last, .. }) => {
+                assert!(last);
+            }
+            _ => panic!("expected Logs subcommand"),
+        }
+    }
+
+    /// `--last` conflicts with positional session id (mirrors `clud attach`).
+    #[test]
+    fn test_logs_last_with_session_id_conflicts() {
+        let argv: Vec<String> = ["clud", "logs", "--last", "sess-abc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = Args::try_parse_from(argv);
+        assert!(
+            result.is_err(),
+            "clap should reject --last combined with a session id"
+        );
     }
 
     #[test]
