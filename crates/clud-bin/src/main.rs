@@ -1,6 +1,6 @@
 use clud::{
-    args, backend, command, console_title, daemon, dnd, loop_spec, session, session_registry,
-    skill_install, skills, stream_json, subprocess, trampoline, voice, wasm,
+    args, backend, command, console_title, daemon, dnd, loop_artifacts, loop_spec, session,
+    session_registry, skill_install, skills, stream_json, subprocess, trampoline, voice, wasm,
 };
 
 use std::io::{self, Read};
@@ -165,21 +165,51 @@ fn main() {
         });
     }
 
+    // Issue #96: durable `.clud/loop/` artifacts (info.json, log.txt,
+    // motivation.md, working copy of LOOP.md / task file, .gitignore
+    // auto-injection). Only active when the user actually ran
+    // `clud loop`; other commands skip the bookkeeping entirely.
+    let mut loop_session: Option<loop_artifacts::LoopSession> =
+        if let Some(args::Command::Loop { task, .. }) = &args.command {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let git_root = loop_spec::git_root_from(&cwd);
+            let _ = loop_spec::ensure_loop_dir(&git_root);
+            loop_artifacts::ensure_loop_in_gitignore(&git_root);
+            if let Some(t) = task {
+                let spec = loop_spec::classify(t);
+                let _ = loop_artifacts::materialize_working_copy(&git_root, &spec);
+            }
+            Some(loop_artifacts::LoopSession::start(
+                &git_root,
+                plan.iterations,
+            ))
+        } else {
+            None
+        };
+
     let exit_code = if daemon::experimental_enabled(&args) {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
         match plan.launch_mode {
-            backend::LaunchMode::Subprocess => {
-                run_plan_subprocess(&plan, args.verbose, interrupted.as_ref())
-            }
+            backend::LaunchMode::Subprocess => run_plan_subprocess(
+                &plan,
+                args.verbose,
+                interrupted.as_ref(),
+                loop_session.as_mut(),
+            ),
             backend::LaunchMode::Pty => run_plan_pty(
                 &plan,
                 args.verbose,
                 interrupted.as_ref(),
                 should_register_drop_target(&args),
+                loop_session.as_mut(),
             ),
         }
     };
+    if let Some(session) = loop_session.as_mut() {
+        let (summary, err) = summarize_loop_outcome(exit_code);
+        session.on_loop_end(summary, err);
+    }
     drop(_registry_guard);
     drop(_dnd_subprocess_guard);
     std::process::exit(exit_code);
@@ -372,7 +402,33 @@ fn normalize_exit_code(code: i32) -> i32 {
     }
 }
 
-fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &AtomicBool) -> i32 {
+/// Translate the final loop exit code into a `(summary, error)` pair
+/// for `LoopSession::on_loop_end`. The mapping mirrors
+/// `check_loop_markers`/`loop_unconverged_exit`:
+///   - 0 → DONE
+///   - 2 → iteration cap exhausted
+///   - 3 → BLOCKED marker
+///   - 130 → interrupt (Ctrl-C)
+///   - anything else → "exit code N" + same as the error string
+fn summarize_loop_outcome(exit_code: i32) -> (&'static str, Option<String>) {
+    match exit_code {
+        0 => ("DONE", None),
+        2 => (
+            "iteration cap exhausted",
+            Some("iteration cap exhausted".to_string()),
+        ),
+        3 => ("BLOCKED", Some("blocked by agent".to_string())),
+        130 => ("interrupted", Some("Interrupted by user".to_string())),
+        _ => ("exit", Some(format!("exit code {exit_code}"))),
+    }
+}
+
+fn run_plan_subprocess(
+    plan: &command::LaunchPlan,
+    verbose: bool,
+    interrupted: &AtomicBool,
+    mut loop_session: Option<&mut loop_artifacts::LoopSession>,
+) -> i32 {
     use std::path::PathBuf;
 
     use running_process_core::{Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode};
@@ -381,8 +437,12 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
     let mut last_exit = 0i32;
 
     for iteration in 0..plan.iterations {
+        let iter_num = iteration + 1;
         if plan.iterations > 1 {
-            eprintln!("[clud] iteration {}/{}", iteration + 1, plan.iterations);
+            eprintln!("[clud] iteration {}/{}", iter_num, plan.iterations);
+        }
+        if let Some(s) = loop_session.as_deref_mut() {
+            s.on_iteration_start(iter_num);
         }
 
         if verbose {
@@ -416,6 +476,9 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
         let process = NativeProcess::new(config);
         if let Err(e) = process.start() {
             eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+            if let Some(s) = loop_session.as_deref_mut() {
+                s.on_iteration_end(iter_num, 1, Some(format!("failed to start: {e}")));
+            }
             return 1;
         }
 
@@ -427,25 +490,33 @@ fn run_plan_subprocess(plan: &command::LaunchPlan, verbose: bool, interrupted: &
         match exit_code {
             ProcessOutcome::Exited(code) => {
                 last_exit = code;
+                if let Some(s) = loop_session.as_deref_mut() {
+                    s.on_iteration_end(iter_num, code, None);
+                }
                 if last_exit != 0 && plan.iterations > 1 {
                     eprintln!(
                         "[clud] iteration {} failed with exit code {}",
-                        iteration + 1,
-                        last_exit
+                        iter_num, last_exit
                     );
                     return last_exit;
                 }
             }
             ProcessOutcome::Interrupted => {
                 eprintln!("[clud] interrupted via Ctrl+C");
+                if let Some(s) = loop_session.as_deref_mut() {
+                    s.on_iteration_end(iter_num, 130, Some("Interrupted by user".to_string()));
+                }
                 return 130;
             }
             ProcessOutcome::Error => {
+                if let Some(s) = loop_session.as_deref_mut() {
+                    s.on_iteration_end(iter_num, 1, Some("runner error".to_string()));
+                }
                 return 1;
             }
         }
 
-        if let Some(code) = check_loop_markers(plan, iteration + 1) {
+        if let Some(code) = check_loop_markers(plan, iter_num) {
             return code;
         }
     }
@@ -566,6 +637,7 @@ fn run_plan_pty(
     verbose: bool,
     interrupted: &AtomicBool,
     dnd_enabled: bool,
+    mut loop_session: Option<&mut loop_artifacts::LoopSession>,
 ) -> i32 {
     use running_process_core::pty::NativePtyProcess;
 
@@ -598,8 +670,12 @@ fn run_plan_pty(
     let (rows, cols) = get_terminal_size();
 
     for iteration in 0..plan.iterations {
+        let iter_num = iteration + 1;
         if plan.iterations > 1 {
-            eprintln!("[clud] iteration {}/{}", iteration + 1, plan.iterations);
+            eprintln!("[clud] iteration {}/{}", iter_num, plan.iterations);
+        }
+        if let Some(s) = loop_session.as_deref_mut() {
+            s.on_iteration_start(iter_num);
         }
 
         if verbose {
@@ -617,6 +693,9 @@ fn run_plan_pty(
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[clud] failed to create pty: {}", e);
+                if let Some(s) = loop_session.as_deref_mut() {
+                    s.on_iteration_end(iter_num, 1, Some(format!("pty create failed: {e}")));
+                }
                 return 1;
             }
         };
@@ -631,6 +710,9 @@ fn run_plan_pty(
 
         if let Err(e) = process.start_impl() {
             eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+            if let Some(s) = loop_session.as_deref_mut() {
+                s.on_iteration_end(iter_num, 1, Some(format!("pty start failed: {e}")));
+            }
             return 1;
         }
 
@@ -651,17 +733,24 @@ fn run_plan_pty(
         );
         drop(_raw_guard);
         last_exit = normalize_exit_code(exit_code);
+        if let Some(s) = loop_session.as_deref_mut() {
+            let err = if last_exit == 130 {
+                Some("Interrupted by user".to_string())
+            } else {
+                None
+            };
+            s.on_iteration_end(iter_num, last_exit, err);
+        }
 
         if last_exit != 0 && plan.iterations > 1 {
             eprintln!(
                 "[clud] iteration {} failed with exit code {}",
-                iteration + 1,
-                last_exit
+                iter_num, last_exit
             );
             return last_exit;
         }
 
-        if let Some(code) = check_loop_markers(plan, iteration + 1) {
+        if let Some(code) = check_loop_markers(plan, iter_num) {
             return code;
         }
     }
