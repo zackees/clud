@@ -25,6 +25,12 @@ jobs:
     timeout-minutes: 45
     env:
       RUST_BACKTRACE: "1"
+      # Issue #13 follow-up: whisper-rs-sys vendors `std::filesystem::path`
+      # which requires macOS 10.15+. Rust on stable defaults to 10.12,
+      # which fails on the macos-15-intel runner. Force-bump so the
+      # vendored C++ build sees the modern SDK target on every macOS
+      # job (no-op on Linux/Windows).
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
     steps:
       - uses: actions/checkout@v4
 

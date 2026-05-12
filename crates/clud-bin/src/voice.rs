@@ -30,7 +30,22 @@ mod enabled {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use rodio::{OutputStreamBuilder, Sink, Source};
     use running_process_core::pty::NativePtyProcess;
+    // Issue #13 follow-up: whisper-rs-sys does not build on aarch64-pc-windows-msvc.
+    // The dep is target-gated in Cargo.toml; voice transcription is stubbed
+    // on that one platform via `WhisperContextHandle = ()` plus an error
+    // return from `transcribe_audio` (model loading + Whisper calls are
+    // bypassed there). All other surfaces (cpal mic capture, rodio cue
+    // playback, F3 state machine, downsampling) ship unchanged.
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+    /// On supported targets this aliases the real Whisper context;
+    /// on Windows ARM (where the dep is omitted) it collapses to `()`
+    /// so the worker thread compiles without pulling whisper-rs in.
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
+    type WhisperContextHandle = WhisperContext;
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    type WhisperContextHandle = ();
 
     use crate::session::InteractiveHooks;
 
@@ -563,7 +578,7 @@ mod enabled {
             let (event_tx, event_rx) = mpsc::channel::<WorkerEvent>();
 
             std::thread::spawn(move || {
-                let mut context: Option<WhisperContext> = None;
+                let mut context: Option<WhisperContextHandle> = None;
 
                 while let Ok(command) = command_rx.recv() {
                     match command {
@@ -596,9 +611,10 @@ mod enabled {
         }
     }
 
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     fn transcribe_audio(
         config: &VoiceConfig,
-        context: &mut Option<WhisperContext>,
+        context: &mut Option<WhisperContextHandle>,
         audio: &[f32],
     ) -> Result<String, String> {
         if let Some(test_transcript) = &config.test_transcript {
@@ -661,6 +677,26 @@ mod enabled {
         }
 
         Ok(transcript.trim().to_string())
+    }
+
+    /// Windows ARM stub: whisper-rs-sys's vendored C++ doesn't build on
+    /// `aarch64-pc-windows-msvc`. Mic capture and the F3 state machine
+    /// still ship; only transcription is unavailable. The test-bypass
+    /// path (`CLUD_VOICE_TEST_TRANSCRIPT`) is preserved so unit tests
+    /// for the state machine still run on this target.
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    fn transcribe_audio(
+        config: &VoiceConfig,
+        _context: &mut Option<WhisperContextHandle>,
+        _audio: &[f32],
+    ) -> Result<String, String> {
+        if let Some(test_transcript) = &config.test_transcript {
+            return Ok(test_transcript.clone());
+        }
+        Err("voice transcription is not supported on this platform \
+             (aarch64-pc-windows-msvc): the vendored whisper-rs-sys C++ \
+             source does not build on Windows ARM"
+            .to_string())
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -1009,7 +1045,19 @@ mod enabled {
             // Inject a fake recording marker so we can assert the
             // press-while-recording path doesn't tear it down. We
             // skip the real ActiveRecording::start (no mic in CI).
-            mode.recording = Some(make_fake_recording());
+            //
+            // CI runners (especially headless Linux/macOS images) often
+            // have no default input device; `make_fake_recording`
+            // returns `None` there and we skip the test rather than
+            // panic. Dev boxes with a real mic exercise the full path.
+            let Some(rec) = make_fake_recording() else {
+                eprintln!(
+                    "skipping voice_state_press_while_recording_is_ignored: \
+                     no default input device available"
+                );
+                return;
+            };
+            mode.recording = Some(rec);
             let pty_handle = make_dummy_pty();
             let result = <VoiceMode as crate::session::InteractiveHooks>::on_f3_press(
                 &mut mode,
@@ -1025,7 +1073,16 @@ mod enabled {
         #[test]
         fn voice_state_release_stops_recording() {
             let (mut mode, _g1, _g2) = voice_mode_for_state_test();
-            mode.recording = Some(make_fake_recording());
+            // See the press-while-recording test for why this skips
+            // gracefully on hosts with no default input device.
+            let Some(rec) = make_fake_recording() else {
+                eprintln!(
+                    "skipping voice_state_release_stops_recording: \
+                     no default input device available"
+                );
+                return;
+            };
+            mode.recording = Some(rec);
             let pty_handle = make_dummy_pty();
             let _ = <VoiceMode as crate::session::InteractiveHooks>::on_f3_release(
                 &mut mode,
@@ -1057,16 +1114,20 @@ mod enabled {
         /// cpal stream because we synthesize the `stream` field via a
         /// detached host probe — but we never .play() it, so it's
         /// effectively a no-op handle.
-        fn make_fake_recording() -> ActiveRecording {
-            // We can't actually fake a `cpal::Stream` without a real
-            // device, so use an `Option` indirection: this helper is
-            // only reachable on hosts where a default input device
-            // exists. Skip the test when that's not the case.
+        ///
+        /// Returns `None` on hosts where there is no default input
+        /// device (most CI runners) or where probing the input config
+        /// fails. Callers are expected to early-return with a
+        /// `skipping: ...` message rather than `expect()` a value, so
+        /// the same tests stay green on headless runners while still
+        /// exercising the real path on dev boxes with a mic.
+        fn make_fake_recording() -> Option<ActiveRecording> {
             let host = cpal::default_host();
-            let device = host
-                .default_input_device()
-                .expect("test requires a default input device on this host");
-            let supported = device.default_input_config().expect("default input config");
+            let device = host.default_input_device()?;
+            let supported = match device.default_input_config() {
+                Ok(config) => config,
+                Err(_) => return None,
+            };
             let samples = Arc::new(Mutex::new(Vec::new()));
             let stream = build_input_stream_f32(
                 &device,
@@ -1074,8 +1135,8 @@ mod enabled {
                 Arc::clone(&samples),
                 "test-fake".to_string(),
             )
-            .expect("build fake stream");
-            ActiveRecording {
+            .ok()?;
+            Some(ActiveRecording {
                 started_at: std::time::Instant::now(),
                 sample_rate: supported.sample_rate().0,
                 channels: supported.channels(),
@@ -1083,7 +1144,7 @@ mod enabled {
                 stream,
                 last_vad_offset: 0,
                 last_speech_at: None,
-            }
+            })
         }
 
         fn make_dummy_pty() -> NativePtyProcess {

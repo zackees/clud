@@ -19,9 +19,10 @@ ctrlc = "3"
 # These used to be gated to (windows, x86_64) and (macos, aarch64) only;
 # moved unconditional so voice mode ships on all six supported platforms.
 # Linux CI must `apt-get install libasound2-dev` so cpal can link ALSA.
+# `whisper-rs` is gated below — see the target-specific stanza for the
+# aarch64-pc-windows-msvc carve-out.
 cpal = "0.16"
 rodio = "0.21"
-whisper-rs = "0.16"
 # Issue #13: model auto-downloader needs a per-OS cache dir resolver,
 # a small blocking HTTP client, and a hash verifier. `ureq` is sync and
 # avoids dragging in a tokio runtime just to fetch one file.
@@ -51,6 +52,14 @@ path = "src/lib.rs"
 [[test]]
 name = "pty_behavior"
 path = "tests/pty_behavior.rs"
+
+# Issue #13 follow-up: the vendored `whisper-rs-sys` C++ source does not
+# compile on `aarch64-pc-windows-msvc` (no clean fix at the vendor level).
+# Gate the Rust dependency off on that one target so the rest of the
+# matrix still builds; voice transcription is stubbed out on Windows ARM
+# (see `voice.rs`).
+[target.'cfg(not(all(target_arch = "aarch64", target_os = "windows")))'.dependencies]
+whisper-rs = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
