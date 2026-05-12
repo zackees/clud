@@ -195,20 +195,21 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
             if let Some(ref t) = task {
                 let prompt_text = resolve_loop_task(t, &git_root, *refresh);
                 task_summary = Some(summarize_task_name(&prompt_text, 50));
-                let final_prompt =
-                    if let Some((markers, display_done, display_blocked)) = marker_paths.as_ref() {
-                        let _ = markers;
-                        format!(
-                            "{}{}",
-                            prompt_text,
-                            done_marker_contract(display_done, display_blocked)
-                        )
-                    } else {
-                        prompt_text
-                    };
+                let final_prompt = if let Some(markers) = marker_paths.as_ref() {
+                    // Issue #95: feed absolute paths into the contract so the
+                    // model writes to the exact path clud is polling, not
+                    // some invented alternative like `~/.loop/LOOP.md`.
+                    format!(
+                        "{}{}",
+                        prompt_text,
+                        done_marker_contract(&markers.done, &markers.blocked)
+                    )
+                } else {
+                    prompt_text
+                };
                 push_prompt(&mut cmd, backend, final_prompt);
             }
-            if let Some((markers, _, _)) = marker_paths {
+            if let Some(markers) = marker_paths {
                 loop_markers = Some(LoopMarkers {
                     done_path: markers.done.to_string_lossy().to_string(),
                     blocked_path: markers.blocked.to_string_lossy().to_string(),
@@ -328,29 +329,14 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
     }
 }
 
-fn resolve_marker_paths(
-    cwd: &Path,
-    git_root: &Path,
-    done_override: Option<&str>,
-) -> (MarkerPaths, String, String) {
+fn resolve_marker_paths(cwd: &Path, git_root: &Path, done_override: Option<&str>) -> MarkerPaths {
     match done_override {
         Some(raw) => {
-            let display_done = raw.to_string();
-            let display_blocked = blocked_path_from_done(Path::new(raw))
-                .to_string_lossy()
-                .to_string();
             let done = cwd.join(raw);
             let blocked = blocked_path_from_done(&done);
-            (MarkerPaths { done, blocked }, display_done, display_blocked)
+            MarkerPaths { done, blocked }
         }
-        None => {
-            let markers = loop_spec::default_marker_paths(git_root);
-            (
-                markers,
-                ".clud/loop/DONE".to_string(),
-                ".clud/loop/BLOCKED".to_string(),
-            )
-        }
+        None => loop_spec::default_marker_paths(git_root),
     }
 }
 
@@ -881,8 +867,16 @@ mod tests {
         assert!(p.command.contains(&"-p".to_string()));
         let prompt = prompt_from_plan(&p);
         assert!(prompt.starts_with("do stuff"));
-        assert!(prompt.contains(".clud/loop/DONE"));
-        assert!(prompt.contains(".clud/loop/BLOCKED"));
+        // Issue #95: contract now embeds absolute paths; the relative
+        // suffix is still present, but the separator is platform-native.
+        assert!(
+            prompt.contains(".clud/loop/DONE") || prompt.contains(".clud\\loop\\DONE"),
+            "prompt missing DONE marker path: {prompt}"
+        );
+        assert!(
+            prompt.contains(".clud/loop/BLOCKED") || prompt.contains(".clud\\loop\\BLOCKED"),
+            "prompt missing BLOCKED marker path: {prompt}"
+        );
         assert!(p.loop_markers.is_some());
     }
 
@@ -963,8 +957,16 @@ mod tests {
     fn test_codex_loop_appends_done_marker_contract() {
         let p = plan(&["clud", "--codex", "loop", "do stuff"]);
         let prompt = last_arg(&p);
-        assert!(prompt.contains(".clud/loop/DONE"));
-        assert!(prompt.contains(".clud/loop/BLOCKED"));
+        // Issue #95: absolute paths in contract; assert on the relative
+        // suffix using platform-native separators.
+        assert!(
+            prompt.contains(".clud/loop/DONE") || prompt.contains(".clud\\loop\\DONE"),
+            "prompt missing DONE marker path: {prompt}"
+        );
+        assert!(
+            prompt.contains(".clud/loop/BLOCKED") || prompt.contains(".clud\\loop\\BLOCKED"),
+            "prompt missing BLOCKED marker path: {prompt}"
+        );
         assert!(p.loop_markers.is_some());
     }
 
@@ -1407,14 +1409,16 @@ mod tests {
     #[test]
     fn test_loop_done_path_uses_supplied_path_in_prompt() {
         // --done <path> must thread the *supplied* path into the prompt
-        // contract, not the default `.clud/loop/DONE`.
+        // contract, not the default `.clud/loop/DONE`. Issue #95: the
+        // contract now uses absolute paths, but the user-supplied filename
+        // is still visible in the absolute form.
         let p = plan(&["clud", "loop", "--done", "custom/DONE.txt", "task"]);
         let prompt = prompt_from_plan(&p);
-        // The DONE side is the raw user-supplied string, untouched, so the
-        // forward slash survives on every platform.
+        // The DONE filename must appear; the directory segment may use
+        // either separator depending on platform.
         assert!(
-            prompt.contains("custom/DONE.txt"),
-            "prompt missing custom DONE path: {prompt}"
+            prompt.contains("DONE.txt"),
+            "prompt missing custom DONE filename: {prompt}"
         );
         // BLOCKED is derived from the DONE *filename's extension* via
         // `blocked_path_from_done`, which uses platform-native path joining.

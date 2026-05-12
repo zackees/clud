@@ -230,8 +230,11 @@ def test_dry_run_loop() -> None:
     # contract appended. Original task is preserved at the start.
     prompt = data["command"][-1]
     assert prompt.startswith("do stuff")
-    assert ".clud/loop/DONE" in prompt
-    assert ".clud/loop/BLOCKED" in prompt
+    # Issue #95: contract now embeds the absolute marker path; the relative
+    # suffix is still present with platform-native separators.
+    normalized_prompt = prompt.replace("\\", "/")
+    assert ".clud/loop/DONE" in normalized_prompt
+    assert ".clud/loop/BLOCKED" in normalized_prompt
     assert data["loop_markers"] is not None
     assert data["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
     assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith(
