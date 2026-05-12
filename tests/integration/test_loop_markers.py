@@ -182,6 +182,62 @@ def test_loop_dry_run_includes_loop_markers(
     assert data["loop_markers"]["blocked_path"].replace("\\", "/").endswith(".clud/loop/BLOCKED")
 
 
+def test_loop_emits_clud_loop_artifacts(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+) -> None:
+    """A `clud loop` run produces info.json + log.txt under .clud/loop/ and
+    auto-injects `.clud/loop` into a pre-existing .gitignore. Issue #96.
+
+    This is the integration counterpart of the Rust unit tests in
+    `loop_artifacts::tests` — it verifies the bookkeeping is actually
+    wired into the running runner, not just exposed as a library API.
+    """
+    import json
+
+    # Seed a .gitignore that does NOT yet cover .clud/loop so we can also
+    # assert the auto-injection ran end-to-end.
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("target/\nfoo.txt\n", encoding="utf-8")
+
+    # Need a .git so git_root_from() resolves tmp_path as the root; the
+    # implementation uses that to anchor .clud/loop and .gitignore.
+    (tmp_path / ".git").mkdir()
+
+    result = _run(
+        clud_binary,
+        "loop",
+        "--loop-count",
+        "2",
+        "task body",
+        env=mock_env,
+        cwd=tmp_path,
+    )
+    # No marker is written by the mock agent → loop exhausts and exits 2.
+    assert result.returncode == 2, f"stderr: {result.stderr}"
+
+    # info.json exists, parses, has at least one iteration recorded.
+    info_path = tmp_path / ".clud" / "loop" / "info.json"
+    assert info_path.is_file(), f"missing info.json under {tmp_path}"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    assert isinstance(info, dict)
+    assert info.get("total_iterations") == 2
+    assert info.get("completed") is True
+    iterations = info.get("iterations") or []
+    assert len(iterations) >= 1, f"expected at least one iteration; got: {iterations!r}"
+
+    # log.txt exists and contains iteration headers / footers.
+    log_path = tmp_path / ".clud" / "loop" / "log.txt"
+    assert log_path.is_file(), f"missing log.txt under {tmp_path}"
+    log = log_path.read_text(encoding="utf-8")
+    assert log.strip(), "log.txt is empty"
+    assert "iteration 1 start" in log
+    assert "loop start" in log
+
+    # .gitignore got `.clud/loop` appended.
+    gi = gitignore.read_text(encoding="utf-8")
+    assert ".clud/loop" in gi, f"gitignore missing .clud/loop entry; got: {gi!r}"
+
+
 def test_codex_loop_stops_on_done_marker(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
 ) -> None:
