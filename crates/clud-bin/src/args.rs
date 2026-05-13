@@ -171,6 +171,15 @@ pub enum Command {
         #[arg(long = "last", short = 'l', conflicts_with = "session_id")]
         last: bool,
     },
+    /// Issue #110: tracked-entry garbage collection (SQLite-backed
+    /// registry at `~/.clud/data.db`).
+    ///
+    /// Subcommands: `list`, `purge <duration>`, `reconcile`. Running
+    /// `clud gc` with no subcommand prints this help summary.
+    Gc {
+        #[command(subcommand)]
+        subcommand: Option<GcSubcommand>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -187,6 +196,30 @@ pub enum Command {
         #[arg(long = "spec-file")]
         spec_file: PathBuf,
     },
+}
+
+/// Subcommands under `clud gc`. See `crates/clud-bin/src/gc.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum GcSubcommand {
+    /// Print every tracked entry, newest first.
+    List,
+    /// Remove tracked entries older than `<duration>`.
+    Purge {
+        /// Duration (e.g. `30s`, `5m`, `2h`, `1d`).
+        duration: String,
+        /// Preview the removal plan without touching anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long = "yes", short = 'y')]
+        yes: bool,
+        /// Restrict to a single entry kind (e.g. `worktree`).
+        #[arg(long = "kind")]
+        kind: Option<String>,
+    },
+    /// Walk `.claude/worktrees/` in the current repo and insert any
+    /// previously-untracked worktree directories.
+    Reconcile,
 }
 
 impl Args {
@@ -249,7 +282,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "__daemon",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "__daemon",
         "__worker",
     ];
 
@@ -959,5 +992,94 @@ mod tests {
     fn test_yes_short_flag() {
         let args = parse(&["clud", "--clean-worktrees", "-y"]);
         assert!(args.yes);
+    }
+
+    // ---------- issue #110: `clud gc` subcommand group ----------
+
+    /// `clud gc` with no subcommand must parse successfully and yield
+    /// `Some(Command::Gc { subcommand: None })` so the runtime can print
+    /// help and exit 0.
+    #[test]
+    fn test_gc_bare_subcommand_yields_none() {
+        let args = parse(&["clud", "gc"]);
+        match args.command {
+            Some(Command::Gc { ref subcommand }) => assert!(subcommand.is_none()),
+            _ => panic!("expected Gc subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_gc_list() {
+        let args = parse(&["clud", "gc", "list"]);
+        match args.command {
+            Some(Command::Gc {
+                subcommand: Some(GcSubcommand::List),
+            }) => {}
+            _ => panic!("expected Gc::List"),
+        }
+    }
+
+    #[test]
+    fn test_gc_purge_with_duration() {
+        let args = parse(&["clud", "gc", "purge", "1d"]);
+        match args.command {
+            Some(Command::Gc {
+                subcommand:
+                    Some(GcSubcommand::Purge {
+                        ref duration,
+                        dry_run,
+                        yes,
+                        ref kind,
+                    }),
+            }) => {
+                assert_eq!(duration, "1d");
+                assert!(!dry_run);
+                assert!(!yes);
+                assert!(kind.is_none());
+            }
+            _ => panic!("expected Gc::Purge"),
+        }
+    }
+
+    #[test]
+    fn test_gc_purge_dry_run_yes_kind() {
+        let args = parse(&[
+            "clud",
+            "gc",
+            "purge",
+            "7d",
+            "--dry-run",
+            "--yes",
+            "--kind",
+            "worktree",
+        ]);
+        match args.command {
+            Some(Command::Gc {
+                subcommand:
+                    Some(GcSubcommand::Purge {
+                        ref duration,
+                        dry_run,
+                        yes,
+                        ref kind,
+                    }),
+            }) => {
+                assert_eq!(duration, "7d");
+                assert!(dry_run);
+                assert!(yes);
+                assert_eq!(kind.as_deref(), Some("worktree"));
+            }
+            _ => panic!("expected Gc::Purge with flags"),
+        }
+    }
+
+    #[test]
+    fn test_gc_reconcile() {
+        let args = parse(&["clud", "gc", "reconcile"]);
+        match args.command {
+            Some(Command::Gc {
+                subcommand: Some(GcSubcommand::Reconcile),
+            }) => {}
+            _ => panic!("expected Gc::Reconcile"),
+        }
     }
 }

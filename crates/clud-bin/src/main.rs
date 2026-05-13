@@ -1,7 +1,7 @@
 use clud::{
-    args, backend, command, console_title, daemon, dnd, loop_artifacts, loop_spec, process_tree,
-    session, session_registry, skill_install, skills, stream_json, subprocess, trampoline, voice,
-    wasm, worktrees,
+    args, backend, command, console_title, daemon, dnd, gc, loop_artifacts, loop_spec,
+    process_tree, session, session_registry, skill_install, skills, stream_json, subprocess,
+    trampoline, voice, wasm, worktrees,
 };
 
 use std::io::{self, Read};
@@ -46,6 +46,14 @@ fn main() {
     skill_install::ensure_installed();
 
     let mut args = args::Args::parse_with_passthrough();
+
+    // Issue #110: `clud gc <subcommand>` is a self-contained
+    // maintenance path that never launches a backend. Dispatch before
+    // backend resolution and before any session registry / dnd work
+    // so a registry-less host can still run `clud gc reconcile`.
+    if let Some(args::Command::Gc { subcommand }) = &args.command {
+        std::process::exit(gc::run(subcommand.clone()));
+    }
 
     // Issue #83: `--clean-worktrees` is a self-contained maintenance path.
     // It never launches a backend, so handle it before backend resolution.
@@ -176,6 +184,13 @@ fn main() {
     // Held until end-of-`main` so `Drop` removes the row on graceful exit.
     let _registry_guard = enforce_session_cap();
 
+    // Issue #110: spawn the background worktree scanner. Polls the
+    // current repo's `.claude/worktrees/` every ~2s and upserts any
+    // new agent-<id> dir into the tracked-entries table. `Drop` joins
+    // the worker thread; explicit `drop` below sequences cancellation
+    // before the session-registry guard.
+    let _scanner_guard = gc::WorktreeScanner::maybe_spawn();
+
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
     // short-circuit on iteration 1. See loop_spec for semantics.
     if let Some(ref markers) = plan.loop_markers {
@@ -230,6 +245,7 @@ fn main() {
         let (summary, err) = summarize_loop_outcome(exit_code);
         session.on_loop_end(summary, err);
     }
+    drop(_scanner_guard);
     drop(_registry_guard);
     drop(_dnd_subprocess_guard);
     std::process::exit(exit_code);
