@@ -318,9 +318,36 @@ fn main() {
     std::process::exit(exit_code);
 }
 
+/// Put stdin into raw mode (no canonical line buffering, no echo) when it is
+/// a terminal. No-op on non-Unix or when stdin is a pipe.
+#[cfg(unix)]
+fn set_stdin_raw_if_tty() {
+    use std::os::unix::io::AsRawFd;
+    let fd = io::stdin().as_raw_fd();
+    if unsafe { libc::isatty(fd) } == 0 {
+        return;
+    }
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return;
+    }
+    unsafe { libc::cfmakeraw(&mut termios) };
+    let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
+}
+
+#[cfg(not(unix))]
+fn set_stdin_raw_if_tty() {}
+
 /// Read from stdin for up to `timeout_ms` milliseconds, collecting whatever arrives.
 /// Works regardless of whether stdin is a terminal or pipe.
 fn read_stdin_timed(timeout_ms: u64) -> Option<Vec<u8>> {
+    // Real TUI children (e.g., codex Ink) put their PTY slave into raw mode
+    // before reading. The mock-agent must do the same when its stdin is a PTY
+    // slave, otherwise the kernel's canonical line discipline holds non-
+    // newline-terminated bytes (like the F3 voice-mode transcript) forever
+    // and they never reach the test's stdin capture.
+    set_stdin_raw_if_tty();
+
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
