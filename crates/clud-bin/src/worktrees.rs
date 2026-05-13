@@ -37,6 +37,11 @@ pub struct WorktreeEntry {
     /// Per `git-worktree(1)` docs we must never remove these even with
     /// `--force`.
     pub locked: bool,
+    /// Optional human-readable reason that accompanies a `locked` line.
+    /// Claude Code emits `locked claude agent agent-<id> (pid <pid>)`
+    /// when it holds a worktree for an in-flight agent; the GC
+    /// liveness probe parses the pid out of this string.
+    pub locked_reason: Option<String>,
     /// True when the porcelain block ends with a `prunable` line.
     /// Indicates git already considers the worktree stale; we use this
     /// as a hint but still apply our normal classification.
@@ -311,7 +316,7 @@ fn decide_action(inputs: StalenessInputs, opts: &CleanOptions) -> Action {
     }
 }
 
-fn fmt_age(d: Duration) -> String {
+pub(crate) fn fmt_age(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 86_400 {
         format!("{}d", secs / 86_400)
@@ -405,7 +410,7 @@ pub fn locate_main_repo_root() -> Result<PathBuf, String> {
 /// All subprocess spawning in `clud` flows through `running-process-core`
 /// (enforced by `ci/banned_imports.py`). We capture combined stdout/stderr
 /// so the error path can surface git's diagnostic on failure.
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let mut argv = vec!["git".to_string()];
     argv.extend(args.iter().map(|s| s.to_string()));
     let config = ProcessConfig {
@@ -569,6 +574,7 @@ pub fn parse_worktree_porcelain(raw: &str) -> Vec<WorktreeEntry> {
                     bare: false,
                     detached: false,
                     locked: false,
+                    locked_reason: None,
                     prunable: false,
                 });
             }
@@ -599,6 +605,10 @@ pub fn parse_worktree_porcelain(raw: &str) -> Vec<WorktreeEntry> {
             "locked" => {
                 if let Some(c) = current.as_mut() {
                     c.locked = true;
+                    let reason = value.trim();
+                    if !reason.is_empty() {
+                        c.locked_reason = Some(reason.to_string());
+                    }
                 }
             }
             "prunable" => {
@@ -854,6 +864,40 @@ branch refs/heads/feature/issue-83
     fn porcelain_empty_input() {
         assert!(parse_worktree_porcelain("").is_empty());
         assert!(parse_worktree_porcelain("\n\n").is_empty());
+    }
+
+    /// Issue #110: the `locked` porcelain line may carry a reason payload
+    /// (e.g. `claude agent agent-abf (pid 12345)`). The `gc` liveness probe
+    /// needs the reason string preserved so it can extract the pid.
+    #[test]
+    fn porcelain_captures_locked_reason() {
+        let raw = "\
+worktree /tmp/wt-with-reason
+HEAD aaa
+branch refs/heads/feature/x
+locked claude agent agent-abf9 (pid 12345)
+";
+        let v = parse_worktree_porcelain(raw);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].locked);
+        assert_eq!(
+            v[0].locked_reason.as_deref(),
+            Some("claude agent agent-abf9 (pid 12345)")
+        );
+    }
+
+    #[test]
+    fn porcelain_bare_locked_has_no_reason() {
+        let raw = "\
+worktree /tmp/wt-bare-lock
+HEAD aaa
+branch refs/heads/feature/x
+locked
+";
+        let v = parse_worktree_porcelain(raw);
+        assert_eq!(v.len(), 1);
+        assert!(v[0].locked);
+        assert!(v[0].locked_reason.is_none());
     }
 
     // ----- decide_action -----
