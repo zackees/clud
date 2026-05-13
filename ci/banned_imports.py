@@ -73,7 +73,14 @@ def main() -> int:
 
     # trampoline.rs is exempt — it must use std::process::Command to re-exec
     # before running-process-core is involved.
-    exempt = {"trampoline.rs"}
+    #
+    # process_tree.rs is exempt — production code uses sysinfo (no subprocess
+    # spawning), but the #[cfg(test)] tests deliberately use std::process::
+    # Command to spawn fixture trees *without* Containment::Contained. Using
+    # NativeProcess in those tests would attach a Job Object that already
+    # kills descendants on close, masking whether kill_tree's own walk
+    # actually works.
+    exempt = {"trampoline.rs", "process_tree.rs"}
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0
 
