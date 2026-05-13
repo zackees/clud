@@ -274,9 +274,18 @@ def mock_env_codex_cmd(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str
     return env
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def clud_binary() -> Path:
-    """Return the path to the current repo's clud binary."""
+    """Return the path to the current repo's clud binary.
+
+    Session-scoped so the build runs once per pytest session rather than
+    once per test. Function scope caused every test (88 of them) to invoke
+    `cargo build -p clud` for an incremental fingerprint check; on Windows
+    that occasionally raced with a still-shutting-down clud.exe child from
+    the previous test and failed with file-lock errors, cascading the rest
+    of the suite into "cargo build -p clud exited with code 1" ERROR setups.
+    On slow runners (Windows ARM) the cumulative cargo overhead also
+    pushed the integration job past its 30-minute budget."""
     return _find_clud()
 
 
