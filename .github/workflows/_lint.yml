@@ -46,8 +46,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       # Issue #68: replace the dtolnay + sccache + rust-cache stack with soldr.
+      # Pinned to a specific SHA because the floating `v0` tag moved to a
+      # Node20 TypeScript port that fails to read `components` from
+      # `rust-toolchain.toml`, leaving the toolchain without rustfmt/clippy
+      # and causing `cargo fmt --check` to fail with "'cargo-fmt' is not
+      # installed for the toolchain". See zackees/setup-soldr#76.
       - name: Setup soldr
-        uses: zackees/setup-soldr@v0
+        uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
         with:
           toolchain: "1.94.1"
           version: "0.7.11"
