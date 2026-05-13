@@ -303,7 +303,11 @@ mod enabled {
         sample_rate: u32,
         channels: u16,
         samples: Arc<Mutex<Vec<f32>>>,
-        stream: cpal::Stream,
+        /// `None` when this recording was constructed via
+        /// [`ActiveRecording::synthetic`] for tests or for the
+        /// `CLUD_VOICE_TEST_TRANSCRIPT` bypass — no mic is owned, so
+        /// there is nothing to stop or drop. `Some` for real captures.
+        stream: Option<cpal::Stream>,
         /// Number of source-sample frames the recording had collected the
         /// last time the VAD checker ran. The tail-silence detector
         /// inspects only the new slice since the previous check.
@@ -354,10 +358,49 @@ mod enabled {
                 sample_rate,
                 channels,
                 samples,
-                stream,
+                stream: Some(stream),
                 last_vad_offset: 0,
                 last_speech_at: None,
             })
+        }
+
+        /// Construct a recording with no real microphone stream. Used by
+        /// the `CLUD_VOICE_TEST_TRANSCRIPT` bypass (so the integration
+        /// test on CI runners with no audio device still exercises
+        /// observer → VoiceMode → write_impl) and by the Rust state-
+        /// machine unit tests (so they can populate `mode.recording`
+        /// without standing up a cpal stream — that was crashing
+        /// `cargo test` with STATUS_ACCESS_VIOLATION on Windows runners
+        /// whose default WASAPI device returned a stream that segfaulted
+        /// on drop without a prior `.play()`).
+        ///
+        /// Pre-populates the sample buffer with non-silent dummy audio
+        /// so `finish()` returns a non-empty vec and `stop_recording`
+        /// queues a transcription — the worker then short-circuits to
+        /// `config.test_transcript` and writes the result back into the
+        /// PTY.
+        fn synthetic() -> Self {
+            // Backdate `started_at` past `MIN_CAPTURE_MS` so `finish()`
+            // accepts the dummy capture as long enough to keep.
+            let backdated = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(
+                    (MIN_CAPTURE_MS as u64) + 50,
+                ))
+                .unwrap_or_else(std::time::Instant::now);
+            let sample_rate: u32 = 16_000;
+            // ~200 ms of a constant non-silent tone — enough samples to
+            // survive downmix+resample and clear `is_effectively_silent`.
+            let count = (sample_rate as usize) / 5;
+            let dummy = vec![MAX_SILENCE_PEAK * 4.0; count];
+            Self {
+                started_at: backdated,
+                sample_rate,
+                channels: 1,
+                samples: Arc::new(Mutex::new(dummy)),
+                stream: None,
+                last_vad_offset: 0,
+                last_speech_at: None,
+            }
         }
 
         /// Decide whether the recording should auto-stop based on:
@@ -410,6 +453,9 @@ mod enabled {
 
         fn finish(self) -> Result<Vec<f32>, String> {
             let elapsed_ms = self.started_at.elapsed().as_millis();
+            // Drop the cpal stream first so its callbacks can't append
+            // more frames while we drain. For synthetic recordings the
+            // stream is `None`, so this is a no-op.
             drop(self.stream);
 
             let samples = match Arc::try_unwrap(self.samples) {
@@ -844,6 +890,19 @@ mod enabled {
                 return;
             }
 
+            // `CLUD_VOICE_TEST_TRANSCRIPT` bypasses the mic entirely so the
+            // integration test in `tests/integration/test_voice_mode.py`
+            // runs on CI hosts with no audio device (Linux runners with no
+            // ALSA card, macOS runners where the mic is too tightly
+            // sandboxed for the timing window). The release path will
+            // still queue a transcription; the worker short-circuits to
+            // `config.test_transcript` and writes it back into the PTY.
+            if self.config.test_transcript.is_some() {
+                play_cue(CueTone::Start);
+                self.recording = Some(ActiveRecording::synthetic());
+                return;
+            }
+
             match ActiveRecording::start() {
                 Ok(recording) => {
                     play_cue(CueTone::Start);
@@ -1039,25 +1098,17 @@ mod enabled {
             // Hold-to-record contract: a press WHILE already recording
             // must NOT toggle the recording off. This is the load-
             // bearing test against the old toggle behavior.
+            //
+            // The recording slot is filled via `ActiveRecording::synthetic`
+            // — no real cpal stream, no audio device. The older helper
+            // built a real WASAPI stream and dropped it without `.play()`,
+            // which segfaulted `cargo test` on the Windows server runners
+            // whose phantom default input device returned a stream that
+            // crashed on drop (STATUS_ACCESS_VIOLATION).
             let (mut mode, _g1, _g2) = voice_mode_for_state_test();
             assert!(mode.recording.is_none(), "starts idle");
 
-            // Inject a fake recording marker so we can assert the
-            // press-while-recording path doesn't tear it down. We
-            // skip the real ActiveRecording::start (no mic in CI).
-            //
-            // CI runners (especially headless Linux/macOS images) often
-            // have no default input device; `make_fake_recording`
-            // returns `None` there and we skip the test rather than
-            // panic. Dev boxes with a real mic exercise the full path.
-            let Some(rec) = make_fake_recording() else {
-                eprintln!(
-                    "skipping voice_state_press_while_recording_is_ignored: \
-                     no default input device available"
-                );
-                return;
-            };
-            mode.recording = Some(rec);
+            mode.recording = Some(ActiveRecording::synthetic());
             let pty_handle = make_dummy_pty();
             let result = <VoiceMode as crate::session::InteractiveHooks>::on_f3_press(
                 &mut mode,
@@ -1073,16 +1124,7 @@ mod enabled {
         #[test]
         fn voice_state_release_stops_recording() {
             let (mut mode, _g1, _g2) = voice_mode_for_state_test();
-            // See the press-while-recording test for why this skips
-            // gracefully on hosts with no default input device.
-            let Some(rec) = make_fake_recording() else {
-                eprintln!(
-                    "skipping voice_state_release_stops_recording: \
-                     no default input device available"
-                );
-                return;
-            };
-            mode.recording = Some(rec);
+            mode.recording = Some(ActiveRecording::synthetic());
             let pty_handle = make_dummy_pty();
             let _ = <VoiceMode as crate::session::InteractiveHooks>::on_f3_release(
                 &mut mode,
@@ -1107,44 +1149,6 @@ mod enabled {
                 &pty_handle,
             );
             assert!(result.is_ok());
-        }
-
-        /// Stand up a fake `ActiveRecording` for state-machine tests.
-        /// The struct's `Drop` doesn't touch the (already-dropped)
-        /// cpal stream because we synthesize the `stream` field via a
-        /// detached host probe — but we never .play() it, so it's
-        /// effectively a no-op handle.
-        ///
-        /// Returns `None` on hosts where there is no default input
-        /// device (most CI runners) or where probing the input config
-        /// fails. Callers are expected to early-return with a
-        /// `skipping: ...` message rather than `expect()` a value, so
-        /// the same tests stay green on headless runners while still
-        /// exercising the real path on dev boxes with a mic.
-        fn make_fake_recording() -> Option<ActiveRecording> {
-            let host = cpal::default_host();
-            let device = host.default_input_device()?;
-            let supported = match device.default_input_config() {
-                Ok(config) => config,
-                Err(_) => return None,
-            };
-            let samples = Arc::new(Mutex::new(Vec::new()));
-            let stream = build_input_stream_f32(
-                &device,
-                &supported.config(),
-                Arc::clone(&samples),
-                "test-fake".to_string(),
-            )
-            .ok()?;
-            Some(ActiveRecording {
-                started_at: std::time::Instant::now(),
-                sample_rate: supported.sample_rate().0,
-                channels: supported.channels(),
-                samples,
-                stream,
-                last_vad_offset: 0,
-                last_speech_at: None,
-            })
         }
 
         fn make_dummy_pty() -> NativePtyProcess {
