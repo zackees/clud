@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-issue
 description: File a deeply-researched GitHub issue via investigate → interview → investigate → post, returning a summary plus the issue URL.
@@ -7,6 +6,7 @@ triggers:
   - When the user asks to "file an issue with research" or "open an issue after investigating"
   - When the user wants to draft an issue but needs the agent to clarify scope first
 ---
+<!-- managed-by: clud -->
 
 # /clud-issue
 

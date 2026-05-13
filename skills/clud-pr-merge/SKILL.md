@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-pr-merge
 description: Wait for CI + CodeRabbit on the current PR, fix regressions and review comments, then merge to main.
@@ -7,6 +6,7 @@ triggers:
   - When the user says "/clud-pr-merge", "ship it", "land this PR"
   - After /clud-pr completes and the user wants to follow through to merge
 ---
+<!-- managed-by: clud -->
 
 # /clud-pr-merge
 
