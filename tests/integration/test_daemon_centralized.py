@@ -108,10 +108,19 @@ def _wait_for_tree_pids(path: Path, minimum: int, timeout: float = 10.0) -> list
     raise AssertionError(f"timed out waiting for {minimum} tree pids in {path}")
 
 
-def _session_metadata(state_dir: Path, session_id: str) -> dict:
+def _session_metadata(
+    state_dir: Path, session_id: str, timeout: float = 5.0
+) -> dict:
     path = state_dir / "sessions" / f"{session_id}.json"
     _wait_for_file(path)
-    return json.loads(path.read_text(encoding="utf-8"))
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (PermissionError, json.JSONDecodeError):
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _wait_for_session_exit(state_dir: Path, session_id: str, timeout: float = 15.0) -> dict:

@@ -38,6 +38,12 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
     `tests/integration/conftest.py::_cargo_argv`.
     """
     if sys.platform == "win32":
+        try:
+            from ci.env import build_env, cargo_argv
+
+            return cargo_argv(subcommand, env=build_env())
+        except Exception:
+            pass
         soldr = shutil.which("soldr")
         if soldr:
             return [soldr, "cargo", *subcommand]

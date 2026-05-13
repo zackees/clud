@@ -30,6 +30,12 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
     VCRUNTIME140.dll / MSVCP140.dll — both ship with Windows 10+.
     """
     if sys.platform == "win32":
+        try:
+            from ci.env import build_env, cargo_argv  # type: ignore[import-not-found]
+
+            return cargo_argv(subcommand, env=build_env())
+        except Exception:
+            pass
         soldr = shutil.which("soldr")
         if soldr:
             return [soldr, "cargo", *subcommand]
@@ -95,12 +101,10 @@ def _suppress_windows_console_windows():
     """Hide console windows for integration-test subprocesses on Windows.
 
     The fixture is session-scoped so it applies to the build-time helpers as
-    well as the actual tests. Issue #55: OR's CREATE_NO_WINDOW into every
-    ``subprocess.run`` / ``subprocess.Popen`` call regardless of any
-    explicit ``creationflags`` the caller passed (e.g. Ctrl+Break tests
-    that need ``CREATE_NEW_PROCESS_GROUP``). The two flags are independent
-    bits and compose; suppressing the window does not affect signal
-    delivery or process-group semantics.
+    well as the actual tests. Issue #55: add CREATE_NO_WINDOW to ordinary
+    ``subprocess.run`` / ``subprocess.Popen`` calls. Ctrl+Break tests that
+    request ``CREATE_NEW_PROCESS_GROUP`` are left visible because hidden
+    process groups do not reliably receive Ctrl+Break on Windows runners.
     """
     if sys.platform != "win32":
         yield
@@ -112,18 +116,14 @@ def _suppress_windows_console_windows():
 
     def run(*args, **kwargs):
         kwargs = dict(kwargs)
-        # Issue #55: always add CREATE_NO_WINDOW (OR'd with any caller-set
-        # creationflags) — the previous version skipped this when
-        # creationflags was explicit, leaving Ctrl+Break test launches
-        # popping windows.
+        # Issue #55: hide ordinary child processes on Windows. Ctrl+Break
+        # tests keep their process-group creation flags unchanged.
         _add_windows_create_no_window(kwargs)
         return original_run(*args, **kwargs)
 
     def popen(*args, **kwargs):
         kwargs = dict(kwargs)
-        # Issue #55: same fix as `run` above. CREATE_NEW_PROCESS_GROUP and
-        # CREATE_NO_WINDOW are independent bits and may be OR'd together
-        # without affecting Ctrl+Break delivery.
+        # Issue #55: same fix as `run` above.
         _add_windows_create_no_window(kwargs)
         return original_popen(*args, **kwargs)
 

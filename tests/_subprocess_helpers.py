@@ -20,6 +20,7 @@ import sys
 # so the unit test can assert the *exact* bit pattern even when the test is
 # running off-Windows where the attribute does not exist.
 CREATE_NO_WINDOW: int = 0x0800_0000
+CREATE_NEW_PROCESS_GROUP: int = 0x0000_0200
 
 
 def windows_no_window_flags() -> dict[str, int]:
@@ -48,12 +49,11 @@ def windows_no_window_flags() -> dict[str, int]:
 
 
 def add_windows_create_no_window(kwargs: dict) -> None:
-    """OR ``CREATE_NO_WINDOW`` into ``kwargs["creationflags"]`` on Windows.
+    """Add ``CREATE_NO_WINDOW`` to ordinary Windows subprocess launches.
 
-    The OR is deliberate: callers may already have set
-    ``CREATE_NEW_PROCESS_GROUP`` (e.g. tests that send ``CTRL_BREAK_EVENT``
-    to a child). The two flags are independent bits and compose without
-    affecting Ctrl+Break delivery or process-group semantics.
+    Leave ``CREATE_NEW_PROCESS_GROUP`` launches alone: those tests send
+    ``CTRL_BREAK_EVENT`` to the child process group, and hidden-window
+    process groups have proven unreliable for that on Windows runners.
 
     No-op on non-Windows platforms.
     """
@@ -62,6 +62,9 @@ def add_windows_create_no_window(kwargs: dict) -> None:
     creationflags = kwargs.get("creationflags", 0)
     if not isinstance(creationflags, int):
         creationflags = 0
+    if creationflags & CREATE_NEW_PROCESS_GROUP:
+        kwargs["creationflags"] = creationflags
+        return
     kwargs["creationflags"] = creationflags | getattr(
         subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW
     )

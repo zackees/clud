@@ -27,6 +27,7 @@ if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
 from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E402
+    CREATE_NEW_PROCESS_GROUP,
     CREATE_NO_WINDOW,
     add_windows_create_no_window,
     windows_no_window_flags,
@@ -123,29 +124,24 @@ def test_add_windows_create_no_window_sets_flag_on_windows() -> None:
     assert kwargs == {"creationflags": 0x0800_0000}
 
 
-def test_add_windows_create_no_window_ors_with_existing_flag() -> None:
-    """Composing with CREATE_NEW_PROCESS_GROUP is a hard requirement.
+def test_add_windows_create_no_window_leaves_process_group_visible() -> None:
+    """CREATE_NEW_PROCESS_GROUP launches must stay signal-addressable.
 
-    Some integration tests deliver Ctrl+Break to children and need
-    ``CREATE_NEW_PROCESS_GROUP`` (0x0000_0200) on the spawn. The two
-    flags are independent bits and must compose — if the helper
-    overwrote ``creationflags`` instead of OR'ing, those tests would
-    silently lose their process-group semantics and the Ctrl+Break
-    delivery would land on the test runner instead.
+    Some integration tests deliver Ctrl+Break to children and need a real
+    process group. On Windows runners, adding CREATE_NO_WINDOW to those
+    launches prevents reliable Ctrl+Break delivery, so the popup-suppression
+    helper must leave the flags alone.
     """
     if sys.platform != "win32":
         import pytest
 
         pytest.skip("Windows-only behavior")
-    create_new_process_group = 0x0000_0200
-    kwargs: dict = {"creationflags": create_new_process_group}
+    kwargs: dict = {"creationflags": CREATE_NEW_PROCESS_GROUP}
     add_windows_create_no_window(kwargs)
-    expected = create_new_process_group | 0x0800_0000
-    assert kwargs["creationflags"] == expected
-    # Re-running the helper is idempotent — OR'ing the same bit twice is
-    # the same bit pattern.
+    assert kwargs["creationflags"] == CREATE_NEW_PROCESS_GROUP
+    # Re-running the helper is idempotent.
     add_windows_create_no_window(kwargs)
-    assert kwargs["creationflags"] == expected
+    assert kwargs["creationflags"] == CREATE_NEW_PROCESS_GROUP
 
 
 def test_add_windows_create_no_window_recovers_from_non_int_creationflags() -> None:

@@ -255,13 +255,20 @@ def soldr_path(env: dict[str, str] | None = None) -> str | None:
 
 
 def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
-    """Return the cargo argv, preferring `soldr cargo` on every platform.
+    """Return the cargo argv for CI and local helper scripts.
 
     Issue #27 pinned this on Windows; issue #68 extends it to all platforms
     so that local dev and CI (via `zackees/setup-soldr@v0`) go through the
     same rustup-resolved toolchain. Falls back to bare `cargo` when soldr
     isn't on PATH — matches `tests/integration/conftest.py::_cargo_argv`.
+    Explicit `CARGO` wins because Windows build_env() pins it to the MSVC
+    rustup toolchain, while `soldr cargo` on Windows x64 can split rustc
+    check-cfg arguments at spaces and pass `values(...))` as a filename.
     """
+    cargo = None if env is None else env.get("CARGO")
+    if cargo:
+        return [cargo, *subcommand]
+
     soldr = soldr_path(env)
     if soldr:
         return [soldr, "cargo", *subcommand]
