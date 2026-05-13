@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod dnd;
 pub mod loop_artifacts;
 pub mod loop_spec;
+pub mod process_tree;
 pub mod session;
 pub mod session_registry;
 pub mod skill_install;

@@ -1,7 +1,7 @@
 use clud::{
-    args, backend, command, console_title, daemon, dnd, loop_artifacts, loop_spec, session,
-    session_registry, skill_install, skills, stream_json, subprocess, trampoline, voice, wasm,
-    worktrees,
+    args, backend, command, console_title, daemon, dnd, loop_artifacts, loop_spec, process_tree,
+    session, session_registry, skill_install, skills, stream_json, subprocess, trampoline, voice,
+    wasm, worktrees,
 };
 
 use std::io::{self, Read};
@@ -457,6 +457,16 @@ fn run_plan_subprocess(
     let mut last_exit = 0i32;
 
     for iteration in 0..plan.iterations {
+        // Re-check the interrupted flag at the top of every iteration. A
+        // Ctrl+C that fires between the previous child's reap and our next
+        // spawn would otherwise be silently swallowed and we'd cheerfully
+        // launch another codex run. 130 is the conventional SIGINT exit
+        // code and mirrors what `ProcessOutcome::Interrupted` produces.
+        if interrupted.load(Ordering::SeqCst) {
+            eprintln!("[clud] interrupted via Ctrl+C");
+            return 130;
+        }
+
         let iter_num = iteration + 1;
         if plan.iterations > 1 {
             eprintln!("[clud] iteration {}/{}", iter_num, plan.iterations);
@@ -582,6 +592,17 @@ fn run_with_inherited_stdio(
             }
             Ok(None) => {
                 if interrupted.load(Ordering::SeqCst) {
+                    // Snapshot the PID *before* killing the direct child so
+                    // we can take down the descendant tree. On Windows the
+                    // direct child is cmd.exe (BatBadBat wrapper) but the
+                    // real agent (node.exe for codex) is a grandchild. A
+                    // plain `process.kill()` only TerminateProcess'es the
+                    // cmd.exe, leaving node.exe writing to the console
+                    // until clud itself exits and the Job Object closes —
+                    // that's the multi-second hang users were reporting.
+                    if let Some(pid) = process.pid() {
+                        process_tree::kill_tree(pid);
+                    }
                     let _ = process.kill();
                     let _ = process.wait(Some(std::time::Duration::from_secs(2)));
                     return ProcessOutcome::Interrupted;
@@ -618,6 +639,14 @@ fn run_with_stream_json_renderer(
     let timeout = Duration::from_millis(100);
     loop {
         if interrupted.load(Ordering::SeqCst) {
+            // Same descendant-kill rationale as `run_with_inherited_stdio`:
+            // when the user Ctrl+C's `clud --codex loop`, the direct child
+            // is cmd.exe and the actual codex process (node.exe) lives one
+            // level deeper. We must take down the tree, not just the
+            // immediate child, otherwise Ctrl+C lags for seconds.
+            if let Some(pid) = process.pid() {
+                process_tree::kill_tree(pid);
+            }
             let _ = process.kill();
             let _ = process.wait(Some(Duration::from_secs(2)));
             return ProcessOutcome::Interrupted;
@@ -712,6 +741,13 @@ fn run_plan_pty(
     let (rows, cols) = get_terminal_size();
 
     for iteration in 0..plan.iterations {
+        // Re-check the interrupted flag at the top of every iteration. See
+        // the matching guard in `run_plan_subprocess` — same rationale.
+        if interrupted.load(Ordering::SeqCst) {
+            eprintln!("[clud] interrupted via Ctrl+C");
+            return 130;
+        }
+
         let iter_num = iteration + 1;
         if plan.iterations > 1 {
             eprintln!("[clud] iteration {}/{}", iter_num, plan.iterations);

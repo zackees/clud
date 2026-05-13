@@ -73,7 +73,14 @@ def main() -> int:
 
     # trampoline.rs is exempt — it must use std::process::Command to re-exec
     # before running-process-core is involved.
-    exempt = {"trampoline.rs"}
+    #
+    # process_tree.rs is exempt — it runs on the Ctrl+C path and shells out
+    # to OS helpers (`taskkill` on Windows, `pgrep` on Unix) with a strict
+    # ~2s wall-clock budget. running-process-core spawns a polling thread
+    # per child via Containment::Contained / Job Objects, which is wasted
+    # overhead for fire-and-forget helper invocations whose only role is
+    # to make Ctrl+C snappy. See process_tree.rs module docs.
+    exempt = {"trampoline.rs", "process_tree.rs"}
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0
 
