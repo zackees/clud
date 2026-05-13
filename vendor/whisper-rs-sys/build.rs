@@ -446,11 +446,55 @@ fn normalize_windows_gnu_bindings(path: &std::path::Path) {
 }
 
 fn add_link_search_path(dir: &std::path::Path) -> std::io::Result<()> {
-    if dir.is_dir() {
-        println!("cargo:rustc-link-search={}", dir.display());
-        for entry in std::fs::read_dir(dir)? {
-            add_link_search_path(&entry?.path())?;
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    // Only emit a `-L` entry for directories that actually contain link
+    // artifacts. Recursively walking every cmake scratch subdir
+    // (`CMakeFiles/<ver>/CompilerIdC/Debug/...tlog`, kept for incremental
+    // metadata) blows the rustc command line past Windows' 32 KiB
+    // CreateProcess limit once CMake 4.x is in play, garbling adjacent
+    // args like `--check-cfg cfg(feature, values(...))`. CMake 3.x was
+    // sparser and stayed under the limit. clud #114.
+    let mut has_artifact = false;
+    let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            // Skip cmake's scratch trees — they never contain link
+            // artifacts and account for the vast majority of the
+            // recursion fan-out.
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name == "CMakeFiles" || name.ends_with(".dir") || name.ends_with(".tlog") {
+                continue;
+            }
+            subdirs.push(path);
+            continue;
         }
+        if !has_artifact {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "lib" | "a" | "so" | "dylib"
+                ) {
+                    has_artifact = true;
+                }
+            }
+        }
+    }
+    if has_artifact {
+        println!("cargo:rustc-link-search={}", dir.display());
+    }
+    for child in subdirs {
+        add_link_search_path(&child)?;
     }
     Ok(())
 }
