@@ -60,8 +60,11 @@ jobs:
       # Issue #68: replace dtolnay/rust-toolchain + mozilla-actions/sccache-action
       # + Swatinem/rust-cache with setup-soldr. soldr pins the MSVC toolchain on
       # Windows (issue #27) and owns build + target caching for every platform.
+      # Pinned SHA: floating `v0` regressed to a Node20 rewrite that fails
+      # to honor `components` from `rust-toolchain.toml`. See
+      # zackees/setup-soldr#76.
       - name: Setup soldr
-        uses: zackees/setup-soldr@v0
+        uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
         with:
           toolchain: "1.94.1"
           version: "0.7.11"

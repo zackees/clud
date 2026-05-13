@@ -50,8 +50,11 @@ jobs:
       # `build-cache-mode: thin` avoids the setup-soldr#53 pitfall where the
       # dev build + cargo test --no-run + cargo test pipeline shares one
       # target dir.
+      # Pinned SHA: floating `v0` regressed to a Node20 rewrite that fails
+      # to honor `components` from `rust-toolchain.toml`. See
+      # zackees/setup-soldr#76.
       - name: Setup soldr
-        uses: zackees/setup-soldr@v0
+        uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
         with:
           toolchain: "1.94.1"
           version: "0.7.11"
