@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-pr
 description: Implement a GitHub issue via parallel sub-agents and ship as a single PR with a clean working tree.
@@ -6,6 +5,7 @@ triggers:
   - When the user asks to implement a GitHub issue
   - When the user says "ship", "do-pr", "/clud-pr", or references an issue URL/number with intent to deliver
 ---
+<!-- managed-by: clud -->
 
 # /clud-pr
 

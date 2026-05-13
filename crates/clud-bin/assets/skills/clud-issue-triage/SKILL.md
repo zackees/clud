@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-issue-triage
 description: Triage GitHub issues — close ones that are absolutely resolved, and silently file follow-up issues for un-addressed CodeRabbit comments. Single issue, last week, or all (parallel sub-agents in worktrees).
@@ -7,6 +6,7 @@ triggers:
   - When the user types "/clud-issue-triage all"
   - When the user asks to "triage issues", "sweep stale issues", or "clean up the issue tracker"
 ---
+<!-- managed-by: clud -->
 
 # /clud-issue-triage
 

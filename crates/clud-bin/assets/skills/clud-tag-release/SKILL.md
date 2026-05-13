@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-tag-release
 description: Tag a release and let the auto-release workflow build it. Validates version match, clean main, no duplicate tag — then pushes the tag and surfaces the workflow URL.
@@ -7,6 +6,7 @@ triggers:
   - When the user says "cut a release", "tag a release", "ship a version"
   - When the user wants to publish a new version of a Rust/Python crate
 ---
+<!-- managed-by: clud -->
 
 # /clud-tag-release
 

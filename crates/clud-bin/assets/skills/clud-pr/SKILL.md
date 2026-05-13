@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-pr
 description: Implement a GitHub issue (or triage a PR link) inside a .claude/ worktree and ship as a single PR with no files left in the repo.
@@ -7,6 +6,7 @@ triggers:
   - When the user passes a PR URL/number to "/clud-pr" (triage mode)
   - When the user says "ship", "do-pr", "/clud-pr", or references an issue URL/number with intent to deliver
 ---
+<!-- managed-by: clud -->
 
 # /clud-pr
 

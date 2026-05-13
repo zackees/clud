@@ -1,4 +1,3 @@
-<!-- managed-by: clud -->
 ---
 name: clud-issue
 description: File a researched GitHub issue without interrogating the user — investigate, decide on best-guess defaults, post, and list those defaults in the issue body so the user can edit on GitHub.
@@ -6,6 +5,7 @@ triggers:
   - When the user types "/clud-issue" with a topic or problem statement
   - When the user asks to file or open a GitHub issue
 ---
+<!-- managed-by: clud -->
 
 # /clud-issue
 
