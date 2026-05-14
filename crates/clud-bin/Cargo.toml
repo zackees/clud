@@ -13,16 +13,12 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 ctrlc = "3"
-# Issue #13: voice-mode stack. cpal owns mic capture, rodio plays the
-# ding/dong cues, whisper-rs runs local transcription via the vendored
-# `whisper.cpp` build (see `[patch.crates-io]` in the workspace Cargo.toml).
-# These used to be gated to (windows, x86_64) and (macos, aarch64) only;
-# moved unconditional so voice mode ships on all six supported platforms.
-# Linux CI must `apt-get install libasound2-dev` so cpal can link ALSA.
+# Issue #13: voice-mode stack. Linux capture shells out to `arecord` on
+# F3 press so libasound is loaded only by that on-demand helper process,
+# not by every `clud --help` / `clud --version` startup. Windows and macOS
+# keep the in-process cpal/rodio path below.
 # `whisper-rs` is gated below — see the target-specific stanza for the
 # aarch64-pc-windows-msvc carve-out.
-cpal = "0.16"
-rodio = "0.21"
 # Issue #13: model auto-downloader needs a per-OS cache dir resolver,
 # a small blocking HTTP client, and a hash verifier. `ureq` is sync and
 # avoids dragging in a tokio runtime just to fetch one file.
@@ -61,6 +57,10 @@ path = "tests/pty_behavior.rs"
 # (see `voice.rs`).
 [target.'cfg(not(all(target_arch = "aarch64", target_os = "windows")))'.dependencies]
 whisper-rs = "0.16"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.16"
+rodio = { version = "0.21", default-features = false, features = ["playback"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

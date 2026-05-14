@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,40 +89,9 @@ CLUD = _clud_binary()
 PROJECT_VERSION = _project_version()
 
 
-@cache
-def _linux_runtime_library_dirs(source: Path) -> tuple[Path, ...]:
-    """Return Linux library dirs needed after copying the clud executable."""
-    dirs = [source.parent, source.parent / "deps", source.parent / "clud.libs"]
-    for root in (ROOT / ".venv", ROOT / "target"):
-        if root.exists():
-            dirs.extend(path.parent for path in root.rglob("libasound*.so*") if path.is_file())
-
-    seen: set[Path] = set()
-    existing_dirs: list[Path] = []
-    for path in dirs:
-        resolved = path.resolve()
-        if resolved.is_dir() and resolved not in seen:
-            seen.add(resolved)
-            existing_dirs.append(resolved)
-    return tuple(existing_dirs)
-
-
-def copied_clud_env(source: Path) -> dict[str, str]:
-    """Return an environment that can launch a copied clud binary.
-
-    Linux CI can build `clud` with a hashed ALSA SONAME such as
-    `libasound-a5b8423c.so.2` in a wheel `clud.libs` directory. The smoke tests
-    copy only the executable into a tempdir, so preserve the discovered runtime
-    library directories in `LD_LIBRARY_PATH` for the dynamic loader.
-    """
-    env = os.environ.copy()
-    if sys.platform.startswith("linux"):
-        existing = env.get("LD_LIBRARY_PATH")
-        parts = [str(path) for path in _linux_runtime_library_dirs(source)]
-        if existing:
-            parts.append(existing)
-        env["LD_LIBRARY_PATH"] = os.pathsep.join(parts)
-    return env
+def copied_clud_env(_source: Path) -> dict[str, str]:
+    """Return an environment that can launch a copied clud binary."""
+    return os.environ.copy()
 
 
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -154,6 +122,23 @@ def test_version() -> None:
     result = _run("--version")
     assert result.returncode == 0
     assert result.stdout.strip() == f"clud {PROJECT_VERSION}"
+
+
+def test_linux_binary_does_not_require_libasound_at_startup() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    ldd = shutil.which("ldd")
+    if ldd is None:
+        return
+
+    result = subprocess.run(
+        [ldd, CLUD],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "libasound" not in (result.stdout + result.stderr).lower()
 
 
 def test_dry_run_prompt() -> None:

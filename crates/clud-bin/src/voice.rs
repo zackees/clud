@@ -3,8 +3,8 @@
 //! Flow:
 //!   1. `F3Observer` in [`crate::session`] watches the byte stream coming
 //!      from the user's terminal and reports F3 press/release events.
-//!   2. [`VoiceMode::on_f3_press`] starts a [`cpal`] mic stream and plays a
-//!      `ding` cue via [`rodio`].
+//!   2. [`VoiceMode::on_f3_press`] starts microphone capture and plays a
+//!      start cue.
 //!   3. Release (real kitty-protocol release, VAD-silence auto-stop, or the
 //!      30-second hard cap — whichever fires first) calls
 //!      [`VoiceMode::on_f3_release`], which plays a `dong` cue and hands
@@ -25,17 +25,25 @@ mod enabled {
     use std::io::{self, Write};
     use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Mutex};
+    #[cfg(not(target_os = "linux"))]
     use std::time::Duration;
 
+    #[cfg(target_os = "linux")]
+    use std::io::Read;
+    #[cfg(target_os = "linux")]
+    use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+
+    #[cfg(not(target_os = "linux"))]
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    #[cfg(not(target_os = "linux"))]
     use rodio::{OutputStreamBuilder, Sink, Source};
     use running_process_core::pty::NativePtyProcess;
     // Issue #13 follow-up: whisper-rs-sys does not build on aarch64-pc-windows-msvc.
     // The dep is target-gated in Cargo.toml; voice transcription is stubbed
     // on that one platform via `WhisperContextHandle = ()` plus an error
     // return from `transcribe_audio` (model loading + Whisper calls are
-    // bypassed there). All other surfaces (cpal mic capture, rodio cue
-    // playback, F3 state machine, downsampling) ship unchanged.
+    // bypassed there). All other surfaces (mic capture, cue playback,
+    // F3 state machine, downsampling) ship unchanged.
     #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -307,7 +315,10 @@ mod enabled {
         /// [`ActiveRecording::synthetic`] for tests or for the
         /// `CLUD_VOICE_TEST_TRANSCRIPT` bypass — no mic is owned, so
         /// there is nothing to stop or drop. `Some` for real captures.
+        #[cfg(not(target_os = "linux"))]
         stream: Option<cpal::Stream>,
+        #[cfg(target_os = "linux")]
+        capture: Option<LinuxCapture>,
         /// Number of source-sample frames the recording had collected the
         /// last time the VAD checker ran. The tail-silence detector
         /// inspects only the new slice since the previous check.
@@ -318,6 +329,7 @@ mod enabled {
     }
 
     impl ActiveRecording {
+        #[cfg(not(target_os = "linux"))]
         fn start() -> Result<Self, String> {
             let host = cpal::default_host();
             let device = host
@@ -364,6 +376,22 @@ mod enabled {
             })
         }
 
+        #[cfg(target_os = "linux")]
+        fn start() -> Result<Self, String> {
+            let samples = Arc::new(Mutex::new(Vec::new()));
+            let capture = LinuxCapture::start(Arc::clone(&samples))?;
+
+            Ok(Self {
+                started_at: std::time::Instant::now(),
+                sample_rate: TARGET_SAMPLE_RATE,
+                channels: 1,
+                samples,
+                capture: Some(capture),
+                last_vad_offset: 0,
+                last_speech_at: None,
+            })
+        }
+
         /// Construct a recording with no real microphone stream. Used by
         /// the `CLUD_VOICE_TEST_TRANSCRIPT` bypass (so the integration
         /// test on CI runners with no audio device still exercises
@@ -397,7 +425,10 @@ mod enabled {
                 sample_rate,
                 channels: 1,
                 samples: Arc::new(Mutex::new(dummy)),
+                #[cfg(not(target_os = "linux"))]
                 stream: None,
+                #[cfg(target_os = "linux")]
+                capture: None,
                 last_vad_offset: 0,
                 last_speech_at: None,
             }
@@ -451,12 +482,12 @@ mod enabled {
             silence_ms >= VAD_SILENCE_TAIL_MS
         }
 
-        fn finish(self) -> Result<Vec<f32>, String> {
+        fn finish(mut self) -> Result<Vec<f32>, String> {
             let elapsed_ms = self.started_at.elapsed().as_millis();
-            // Drop the cpal stream first so its callbacks can't append
-            // more frames while we drain. For synthetic recordings the
-            // stream is `None`, so this is a no-op.
-            drop(self.stream);
+            // Stop the capture backend first so callbacks/readers can't
+            // append more frames while we drain. Synthetic recordings have
+            // no backend, so this is a no-op.
+            self.stop_capture_backend()?;
 
             let samples = match Arc::try_unwrap(self.samples) {
                 Ok(samples) => samples
@@ -478,8 +509,23 @@ mod enabled {
             }
             Ok(resampled)
         }
+
+        #[cfg(not(target_os = "linux"))]
+        fn stop_capture_backend(&mut self) -> Result<(), String> {
+            drop(self.stream.take());
+            Ok(())
+        }
+
+        #[cfg(target_os = "linux")]
+        fn stop_capture_backend(&mut self) -> Result<(), String> {
+            if let Some(capture) = self.capture.take() {
+                capture.stop()?;
+            }
+            Ok(())
+        }
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn build_input_stream_f32(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
@@ -500,6 +546,7 @@ mod enabled {
             .map_err(|err| format!("failed to build microphone stream: {err}"))
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn build_input_stream_i16(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
@@ -520,6 +567,7 @@ mod enabled {
             .map_err(|err| format!("failed to build microphone stream: {err}"))
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn build_input_stream_u16(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
@@ -541,6 +589,142 @@ mod enabled {
                 None,
             )
             .map_err(|err| format!("failed to build microphone stream: {err}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    struct LinuxCapture {
+        child: Child,
+        stderr: Option<ChildStderr>,
+        reader: Option<std::thread::JoinHandle<Result<(), String>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl LinuxCapture {
+        fn start(samples: Arc<Mutex<Vec<f32>>>) -> Result<Self, String> {
+            let mut child = Command::new("arecord")
+                .args(["-q", "-t", "raw", "-f", "S16_LE", "-c", "1", "-r", "16000"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|err| {
+                    if err.kind() == io::ErrorKind::NotFound {
+                        "Linux voice capture requires `arecord` (install alsa-utils)".to_string()
+                    } else {
+                        format!("failed to start Linux voice capture (`arecord`): {err}")
+                    }
+                })?;
+
+            let Some(stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                return Err("failed to capture arecord stdout".to_string());
+            };
+            let stderr = child.stderr.take();
+            let reader = std::thread::spawn(move || read_arecord_stdout(stdout, samples));
+
+            Ok(Self {
+                child,
+                stderr,
+                reader: Some(reader),
+            })
+        }
+
+        fn stop(mut self) -> Result<(), String> {
+            let status = match self
+                .child
+                .try_wait()
+                .map_err(|err| format!("failed to inspect arecord process: {err}"))?
+            {
+                Some(status) => status,
+                None => {
+                    if let Err(err) = self.child.kill() {
+                        if err.kind() != io::ErrorKind::InvalidInput {
+                            return Err(format!("failed to stop arecord process: {err}"));
+                        }
+                    }
+                    self.child
+                        .wait()
+                        .map_err(|err| format!("failed to wait for arecord process: {err}"))?
+                }
+            };
+
+            let reader_result = self
+                .reader
+                .take()
+                .expect("arecord reader thread exists")
+                .join()
+                .map_err(|_| "arecord reader thread panicked".to_string())?;
+
+            let mut stderr_text = String::new();
+            if let Some(mut stderr) = self.stderr.take() {
+                let _ = stderr.read_to_string(&mut stderr_text);
+            }
+
+            reader_result?;
+
+            if status.success() || exit_status_was_signal(&status) {
+                return Ok(());
+            }
+
+            let detail = stderr_text.trim();
+            if detail.is_empty() {
+                Err(format!("microphone capture command failed with {status}"))
+            } else {
+                Err(format!("microphone capture command failed: {detail}"))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_arecord_stdout(
+        mut stdout: ChildStdout,
+        samples: Arc<Mutex<Vec<f32>>>,
+    ) -> Result<(), String> {
+        let mut buffer = [0u8; 8192];
+        let mut carry: Option<u8> = None;
+
+        loop {
+            let n = stdout
+                .read(&mut buffer)
+                .map_err(|err| format!("failed to read microphone samples: {err}"))?;
+            if n == 0 {
+                break;
+            }
+
+            let mut start = 0usize;
+            let mut converted: Vec<f32> = Vec::with_capacity((n + 1) / 2);
+            if let Some(lo) = carry.take() {
+                let sample = i16::from_le_bytes([lo, buffer[0]]);
+                converted.push(sample as f32 / i16::MAX as f32);
+                start = 1;
+            }
+
+            let chunk = &buffer[start..n];
+            let even_len = chunk.len() & !1usize;
+            for bytes in chunk[..even_len].chunks_exact(2) {
+                let sample = i16::from_le_bytes([bytes[0], bytes[1]]);
+                converted.push(sample as f32 / i16::MAX as f32);
+            }
+            if even_len < chunk.len() {
+                carry = Some(chunk[even_len]);
+            }
+
+            if !converted.is_empty() {
+                samples
+                    .lock()
+                    .map_err(|_| "microphone sample buffer lock poisoned".to_string())?
+                    .extend(converted);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn exit_status_was_signal(status: &std::process::ExitStatus) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+
+        status.signal().is_some()
     }
 
     fn downmix_and_resample(samples: Vec<f32>, channels: u16, sample_rate: u32) -> Vec<f32> {
@@ -751,6 +935,7 @@ mod enabled {
         Stop,
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn play_cue(tone: CueTone) {
         std::thread::spawn(move || {
             let freq_hz = match tone {
@@ -778,6 +963,12 @@ mod enabled {
                 }
             }
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn play_cue(_tone: CueTone) {
+        print!("\x07");
+        let _ = io::stdout().flush();
     }
 
     fn missing_model_message() -> String {

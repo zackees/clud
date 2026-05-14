@@ -39,12 +39,6 @@ jobs:
           restore-keys: |
             venv-${{ inputs.runs-on }}-py3.11-
 
-      # Issue #13: cargo clippy compiles the same code path as the build
-      # job, so it also needs ALSA dev headers on Linux for cpal to link.
-      - name: Install Linux audio deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
       # Issue #68: replace the dtolnay + sccache + rust-cache stack with soldr.
       # Pinned to a specific SHA because the floating `v0` tag moved to a
       # Node20 TypeScript port that fails to read `components` from

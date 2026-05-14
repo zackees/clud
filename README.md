@@ -107,7 +107,8 @@ the same sessions with their root PID and current working directory.
 backend prompt using local `whisper.cpp`. Hold `F3`, speak, release `F3`, and
 the transcript appears at your cursor without auto-submitting — you can edit
 it before pressing Enter. Available on **all six** supported platforms
-(Linux x86/ARM, Windows x86/ARM, macOS x86/ARM).
+(Linux x86/ARM, Windows x86/ARM, macOS x86/ARM). On Linux, microphone capture
+uses `arecord` on demand so `libasound` is not required for normal startup.
 
 ### Enabling it
 
@@ -145,9 +146,11 @@ the auto-download is skipped.
 | Kitty-protocol terminals (kitty, Ghostty, modern iTerm2, WezTerm, Alacritty with kitty mode) | True press-and-hold: recording stops the instant you release `F3`. |
 | Everything else (Windows Terminal / ConPTY, older xterm, etc.) | Press `F3` to start; recording auto-stops after 1.5 seconds of silence (VAD) or 30 seconds maximum, whichever comes first. |
 
-Cues are short tones generated programmatically — `ding` on start
-(~880 Hz, 90 ms), `dong` on stop (~660 Hz, 120 ms). If the default audio
-output device is unavailable, `clud` falls back to a terminal bell.
+Cues are short tones generated programmatically on macOS/Windows — `ding`
+on start (~880 Hz, 90 ms), `dong` on stop (~660 Hz, 120 ms). Linux uses a
+terminal bell so `clud` does not link audio output libraries at startup. If
+the default audio output device is unavailable, `clud` falls back to a
+terminal bell.
 
 ### Environment variables
 
@@ -160,7 +163,7 @@ output device is unavailable, `clud` falls back to a terminal bell.
 
 ### Troubleshooting
 
-- **Nothing happens when I press F3.** Check that `CLUD_VOICE=1` is exported in the same shell. Then verify a default input device exists (`pamixer --get-default-source` on Linux, "Sound" preferences on macOS/Windows).
+- **Nothing happens when I press F3.** Check that `CLUD_VOICE=1` is exported in the same shell. On Linux, install `alsa-utils` so `arecord` is available, then verify a default input device exists (`arecord -l` on Linux, "Sound" preferences on macOS/Windows).
 - **"voice mode is enabled but the Whisper model is not yet available"** — the auto-download hasn't finished. Watch stderr for `[clud] voice: download N% (...)` lines, or pre-seed the cache path manually with `curl -L -o <cache-path> https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin`.
 - **Recording keeps stopping mid-sentence on non-kitty terminals.** The VAD silence window is 1.5 s — pause less, or switch to a kitty-protocol terminal for true hold-to-record.
 - **Transcript is empty / garbage.** Whisper struggles on very short utterances and noisy backgrounds. The `MIN_CAPTURE_MS` floor (150 ms) silently drops sub-150 ms blips; speak for at least half a second.
