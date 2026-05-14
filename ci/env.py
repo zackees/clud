@@ -241,14 +241,10 @@ def build_env() -> dict[str, str]:
 def soldr_path(env: dict[str, str] | None = None) -> str | None:
     """Return the path to the soldr binary, or None if not available.
 
-    soldr (https://github.com/zackees/soldr) is pulled in as a dev dependency
-    and proxies cargo/rustc/maturin invocations through the rustup-managed
-    toolchain (via `rustup which`). On Windows, developer machines that have
-    a chocolatey-installed GNU-host cargo first on PATH produce binaries
-    that link MinGW runtime DLLs (libstdc++-6.dll etc.), which fail to load
-    on stock Windows. CI runners today happen to have the MSVC rustup
-    toolchain first on PATH, but that's luck — this helper pins the
-    behavior by making every cargo/maturin CI call go through soldr.
+    This remains for legacy callers and tests that need to discover the
+    optional soldr helper. CI cargo/maturin invocations use the explicit
+    tool paths and environment from this module rather than routing through
+    soldr by default.
     """
     path = None if env is None else env.get("PATH")
     return shutil.which("soldr", path=path)
@@ -257,21 +253,17 @@ def soldr_path(env: dict[str, str] | None = None) -> str | None:
 def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
     """Return the cargo argv for CI and local helper scripts.
 
-    Issue #27 pinned this on Windows; issue #68 extends it to all platforms
-    so that local dev and CI (via `zackees/setup-soldr@v0`) go through the
-    same rustup-resolved toolchain. Falls back to bare `cargo` when soldr
-    isn't on PATH — matches `tests/integration/conftest.py::_cargo_argv`.
     Explicit `CARGO` wins because Windows build_env() pins it to the MSVC
-    rustup toolchain, while `soldr cargo` on Windows x64 can split rustc
-    check-cfg arguments at spaces and pass `values(...))` as a filename.
+    rustup toolchain. Otherwise use bare `cargo`: setup-soldr still installs
+    the requested toolchain and restores the target cache, while routing
+    through `soldr cargo` starts zccache. In PR #114 CI, that zccache layer
+    exited early on Linux x86 integration and was killed with 137 on Linux ARM
+    lint, so cargo itself is the stable execution path.
     """
     cargo = None if env is None else env.get("CARGO")
     if cargo:
         return [cargo, *subcommand]
 
-    soldr = soldr_path(env)
-    if soldr:
-        return [soldr, "cargo", *subcommand]
     return ["cargo", *subcommand]
 
 

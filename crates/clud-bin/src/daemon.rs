@@ -1422,7 +1422,7 @@ fn daemon_create_session(
         .map_err(|err| io::Error::other(err.to_string()))?;
 
     let started = Instant::now();
-    let snapshot = loop {
+    let mut snapshot = loop {
         match read_json_file::<SessionSnapshot>(&session_snapshot_path(state_dir, &session_id)) {
             Ok(snapshot) => break snapshot,
             Err(err) if started.elapsed() < Duration::from_secs(5) => {
@@ -1434,12 +1434,25 @@ fn daemon_create_session(
     };
 
     // Verify the worker's TCP listener is actually accepting connections
-    // before reporting the session as ready. Repeat jobs intentionally don't
-    // expose an attach port, so `worker_port == 0` is valid there.
+    // before reporting the session as ready. If the backend exits immediately,
+    // the worker can persist the final snapshot and close its listener before
+    // this readiness loop observes it; that is still a valid created session
+    // whose failure can be inspected later.
     if snapshot.attachable {
         loop {
+            if snapshot.exit_code.is_some() {
+                break;
+            }
             if TcpStream::connect(("127.0.0.1", snapshot.worker_port)).is_ok() {
                 break;
+            }
+            if let Ok(updated) =
+                read_json_file::<SessionSnapshot>(&session_snapshot_path(state_dir, &session_id))
+            {
+                snapshot = updated;
+                if snapshot.exit_code.is_some() {
+                    break;
+                }
             }
             if started.elapsed() >= Duration::from_secs(5) {
                 return Err(io::Error::new(

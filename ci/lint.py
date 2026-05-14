@@ -16,7 +16,7 @@ def run(cmd: list[str]) -> int:
 
 
 def _cargo(subcommand: list[str]) -> list[str]:
-    """Return the cargo argv, preferring `soldr cargo` on Windows (issue #27)."""
+    """Return the cargo argv for the configured CI environment."""
     from ci.env import cargo_argv, clean_env
 
     return cargo_argv(subcommand, env=clean_env())
