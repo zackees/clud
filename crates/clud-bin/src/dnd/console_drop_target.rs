@@ -6,9 +6,12 @@
 //! Windows produces the OS "no-drop" cursor — the drop is rejected at
 //! the OLE layer (`IDropTarget::DragEnter` → `DROPEFFECT_NONE`) before
 //! any bytes reach `clud`'s stdin. The fix path described in #66 is to
-//! have `clud` register **its own** `IDropTarget` on
-//! `GetConsoleWindow()` so the most-recent-registration-wins rule of
-//! `RegisterDragDrop` displaces conhost's refusal.
+//! have `clud` register **its own** `IDropTarget` on the window that
+//! actually receives the Explorer drag. Under legacy conhost that is
+//! usually `GetConsoleWindow()`. Under Windows Terminal, `GetConsoleWindow()`
+//! is a `PseudoConsoleWindow`; Explorer hovers over the visible
+//! `WindowsTerminal.exe` top-level window instead, so we register both
+//! when possible.
 //!
 //! Issue #79 adds a wrinkle: Claude Code (the backend) registers its
 //! own `IDropTarget` after launch and overrides ours. Solution:
@@ -46,9 +49,9 @@
 //! themselves fire on whichever thread owns the console window's
 //! message pump; COM marshals the call across apartments as needed.
 //!
-//! The guard's `Drop` impl signals the worker, joins it, and only
-//! then drops the registrar (which calls `RevokeDragDrop` +
-//! `OleUninitialize` on the worker thread via a destructor message).
+//! The guard's `Drop` impl signals the worker and joins it. The worker
+//! owns the OLE apartment; before it exits, it revokes each registered
+//! window and calls `OleUninitialize` on that same thread.
 //!
 //! ## What's still TODO (sub-agent B)
 //!
@@ -232,6 +235,8 @@ fn responsive_sleep(total: Duration, shutdown: &RefreshShutdown) -> bool {
         return false;
     }
     if total.is_zero() {
+        #[cfg(windows)]
+        pump_ole_messages();
         return true;
     }
     // Wake at most every 100ms so guard drop doesn't have to wait the
@@ -243,10 +248,39 @@ fn responsive_sleep(total: Duration, shutdown: &RefreshShutdown) -> bool {
             return false;
         }
         let step = if remaining < chunk { remaining } else { chunk };
+        #[cfg(windows)]
+        {
+            pump_ole_messages();
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjects(
+                    None,
+                    false,
+                    step.as_millis().min(u128::from(u32::MAX)) as u32,
+                    windows::Win32::UI::WindowsAndMessaging::QS_ALLINPUT,
+                );
+            }
+            pump_ole_messages();
+        }
+        #[cfg(not(windows))]
         std::thread::sleep(step);
         remaining = remaining.saturating_sub(step);
     }
     !shutdown.is_signaled()
+}
+
+#[cfg(windows)]
+fn pump_ole_messages() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+
+    let mut msg = MSG::default();
+    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() } {
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
 }
 
 /// The worker-loop core, generic over `DragDropRegistrar` so it can be
@@ -384,17 +418,26 @@ pub fn dispatch_dropfiles_to_injector(buf: &[u8], injector: &DropInjector) {
 #[cfg(windows)]
 mod win {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use windows::core::ComObject;
-    use windows::Win32::Foundation::{HWND, POINTL, RPC_E_CHANGED_MODE};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINTL, RPC_E_CHANGED_MODE};
     use windows::Win32::System::Com::IDataObject;
     use windows::Win32::System::Console::GetConsoleWindow;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows::Win32::System::Ole::{
         IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize, RegisterDragDrop,
         RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
 
     /// COM object implementing `IDropTarget`. Accepts every drop with
     /// `DROPEFFECT_COPY` (so the cursor switches from ⊘ to a copy
@@ -553,7 +596,7 @@ mod win {
     /// `RevokeDragDrop` on the worker thread that owns the OLE
     /// apartment.
     struct OleRegistrar {
-        hwnd: SendHwnd,
+        hwnds: Vec<SendHwnd>,
         target: IDropTarget,
         ole_initialized: AtomicBool,
     }
@@ -571,14 +614,44 @@ mod win {
 
     impl super::DragDropRegistrar for OleRegistrar {
         fn register(&self) -> Result<(), i32> {
-            // SAFETY: pure FFI; hwnd validated at registration time;
-            // self.target is a ref-counted owned interface.
-            unsafe { RegisterDragDrop(self.hwnd.0, &self.target).map_err(|e| e.code().0) }
+            let mut first_error: Option<i32> = None;
+            let mut successes = 0usize;
+
+            for hwnd in &self.hwnds {
+                // SAFETY: pure FFI; hwnds are probed before construction.
+                // Revoke first so clud can replace a terminal/backend target
+                // while this foreground session owns the interaction.
+                let _ = unsafe { RevokeDragDrop(hwnd.0) };
+
+                // SAFETY: pure FFI; self.target is a ref-counted COM object.
+                match unsafe { RegisterDragDrop(hwnd.0, &self.target) } {
+                    Ok(()) => successes += 1,
+                    Err(e) => {
+                        first_error.get_or_insert(e.code().0);
+                    }
+                }
+            }
+
+            if successes > 0 {
+                Ok(())
+            } else {
+                Err(first_error.unwrap_or(0x8000_4005u32 as i32))
+            }
         }
 
         fn revoke(&self) -> Result<(), i32> {
-            // SAFETY: pure FFI; hwnd validated at registration time.
-            unsafe { RevokeDragDrop(self.hwnd.0).map_err(|e| e.code().0) }
+            let mut first_error: Option<i32> = None;
+            for hwnd in &self.hwnds {
+                // SAFETY: pure FFI; best-effort cleanup for every target.
+                if let Err(e) = unsafe { RevokeDragDrop(hwnd.0) } {
+                    first_error.get_or_insert(e.code().0);
+                }
+            }
+            if let Some(error) = first_error {
+                Err(error)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -593,9 +666,11 @@ mod win {
 
     impl Drop for OleKeepAlive {
         fn drop(&mut self) {
-            // Best-effort cleanup — errors here can't be surfaced.
-            let _ = self.registrar.revoke();
+            // Normal cleanup happens on the worker STA thread. This is
+            // only a fallback for an abnormal worker exit after OLE init.
             if self.registrar.ole_initialized.swap(false, Ordering::SeqCst) {
+                // Best-effort cleanup — errors here can't be surfaced.
+                let _ = self.registrar.revoke();
                 // SAFETY: balanced against the OleInitialize the
                 // worker performed at startup.
                 unsafe { OleUninitialize() };
@@ -607,10 +682,9 @@ mod win {
         injector: DropInjector,
         config: RefreshConfig,
     ) -> Result<ConsoleDropTargetGuard, RegisterError> {
-        // 1. Resolve the console HWND.
-        // SAFETY: pure FFI, no preconditions.
-        let hwnd = unsafe { GetConsoleWindow() };
-        if hwnd.is_invalid() {
+        // 1. Resolve every HWND that can receive the Explorer drag.
+        let hwnds = drop_target_hwnds();
+        if hwnds.is_empty() {
             return Err(RegisterError::ConsoleWindowUnavailable);
         }
 
@@ -623,7 +697,7 @@ mod win {
         let target_iface: IDropTarget = drop_target.to_interface::<IDropTarget>();
 
         let registrar = Arc::new(OleRegistrar {
-            hwnd: SendHwnd(hwnd),
+            hwnds: hwnds.into_iter().map(SendHwnd).collect(),
             target: target_iface,
             ole_initialized: AtomicBool::new(false),
         });
@@ -672,19 +746,16 @@ mod win {
                         hr as u32
                     );
                 }
-                // OleUninitialize happens via OleKeepAlive::drop on
-                // the *guard's* thread, not here. This is technically
-                // wrong by the strictest reading of the COM apartment
-                // model — OleUninitialize should run on the same
-                // thread as OleInitialize. In practice the guard
-                // typically lives for the lifetime of the program
-                // and Drop runs on the main thread; we accept the
-                // sliver of risk in exchange for not having to
-                // marshal a "please-uninit" message back here.
-                //
-                // TODO(#79): if this causes problems on real Windows
-                // hosts, send a uninit-and-exit signal back into the
-                // worker and OleUninitialize from there.
+                // Cleanup belongs on this STA thread: it is the one
+                // that called OleInitialize and RegisterDragDrop.
+                let _ = worker_registrar.revoke();
+                if worker_registrar
+                    .ole_initialized
+                    .swap(false, Ordering::SeqCst)
+                {
+                    // SAFETY: balanced against OleInitialize above.
+                    unsafe { OleUninitialize() };
+                }
             })
             .map_err(|_| RegisterError::WorkerSpawnFailed)?;
 
@@ -717,6 +788,207 @@ mod win {
                 keep_alive: Some(keep_alive),
             }),
         })
+    }
+
+    #[derive(Clone)]
+    struct ProcessEntry {
+        pid: u32,
+        parent_pid: u32,
+        exe: String,
+    }
+
+    fn drop_target_hwnds() -> Vec<HWND> {
+        let mut hwnds = Vec::new();
+
+        if std::env::var_os("WT_SESSION").is_some() {
+            for hwnd in windows_terminal_hwnds_for_current_process() {
+                push_unique_hwnd(&mut hwnds, hwnd);
+            }
+        }
+
+        // SAFETY: pure FFI, no preconditions.
+        let console = unsafe { GetConsoleWindow() };
+        push_unique_hwnd(&mut hwnds, console);
+        hwnds
+    }
+
+    fn push_unique_hwnd(hwnds: &mut Vec<HWND>, hwnd: HWND) {
+        if hwnd.is_invalid() {
+            return;
+        }
+        if hwnds.iter().any(|existing| existing.0 == hwnd.0) {
+            return;
+        }
+        hwnds.push(hwnd);
+    }
+
+    fn windows_terminal_hwnds_for_current_process() -> Vec<HWND> {
+        let entries = process_entries();
+        let current_pid = unsafe { GetCurrentProcessId() };
+        let Some(wt_pid) = find_named_ancestor(
+            current_pid,
+            &entries,
+            &["WindowsTerminal.exe", "WindowsTerminalPreview.exe"],
+        ) else {
+            return Vec::new();
+        };
+        visible_top_level_windows_for_pid(wt_pid)
+    }
+
+    fn find_named_ancestor(
+        current_pid: u32,
+        entries: &[ProcessEntry],
+        target_names: &[&str],
+    ) -> Option<u32> {
+        let by_pid: HashMap<u32, &ProcessEntry> =
+            entries.iter().map(|entry| (entry.pid, entry)).collect();
+        let mut pid = current_pid;
+        let mut hops = 0usize;
+        while let Some(entry) = by_pid.get(&pid) {
+            if target_names
+                .iter()
+                .any(|name| entry.exe.eq_ignore_ascii_case(name))
+            {
+                return Some(entry.pid);
+            }
+            if entry.parent_pid == 0 || entry.parent_pid == pid {
+                break;
+            }
+            pid = entry.parent_pid;
+            hops += 1;
+            if hops > 64 {
+                break;
+            }
+        }
+        None
+    }
+
+    fn process_entries() -> Vec<ProcessEntry> {
+        // SAFETY: pure FFI snapshot.
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return Vec::new();
+        };
+
+        let mut entries = Vec::new();
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        // SAFETY: `entry` has the required dwSize field initialized.
+        if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+            loop {
+                entries.push(ProcessEntry {
+                    pid: entry.th32ProcessID,
+                    parent_pid: entry.th32ParentProcessID,
+                    exe: nul_terminated_wide_to_string(&entry.szExeFile),
+                });
+
+                // SAFETY: same initialized PROCESSENTRY32W buffer.
+                if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                    break;
+                }
+            }
+        }
+
+        // SAFETY: closes the snapshot handle returned above.
+        let _ = unsafe { CloseHandle(snapshot) };
+        entries
+    }
+
+    fn nul_terminated_wide_to_string(buf: &[u16]) -> String {
+        let len = buf.iter().position(|&unit| unit == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..len])
+    }
+
+    struct EnumWindowsState {
+        pid: u32,
+        hwnds: Vec<HWND>,
+    }
+
+    fn visible_top_level_windows_for_pid(pid: u32) -> Vec<HWND> {
+        let mut state = EnumWindowsState {
+            pid,
+            hwnds: Vec::new(),
+        };
+        let state_ptr = &mut state as *mut EnumWindowsState;
+        // SAFETY: callback only uses `state_ptr` during this synchronous call.
+        let _ = unsafe { EnumWindows(Some(enum_windows_proc), LPARAM(state_ptr as isize)) };
+        state.hwnds
+    }
+
+    unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> windows_core::BOOL {
+        let state = unsafe { &mut *(lparam.0 as *mut EnumWindowsState) };
+        if unsafe { IsWindowVisible(hwnd).as_bool() } {
+            let mut pid = 0u32;
+            unsafe {
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            }
+            if pid == state.pid {
+                push_unique_hwnd(&mut state.hwnds, hwnd);
+            }
+        }
+        windows_core::BOOL(1)
+    }
+
+    #[cfg(test)]
+    mod win_tests {
+        use super::*;
+
+        #[test]
+        fn find_named_ancestor_finds_windows_terminal_parent() {
+            let entries = vec![
+                ProcessEntry {
+                    pid: 1,
+                    parent_pid: 0,
+                    exe: "explorer.exe".to_string(),
+                },
+                ProcessEntry {
+                    pid: 2,
+                    parent_pid: 1,
+                    exe: "WindowsTerminal.exe".to_string(),
+                },
+                ProcessEntry {
+                    pid: 3,
+                    parent_pid: 2,
+                    exe: "cmd.exe".to_string(),
+                },
+                ProcessEntry {
+                    pid: 4,
+                    parent_pid: 3,
+                    exe: "clud.exe".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                find_named_ancestor(4, &entries, &["WindowsTerminal.exe"]),
+                Some(2)
+            );
+        }
+
+        #[test]
+        fn find_named_ancestor_returns_none_without_terminal_parent() {
+            let entries = vec![
+                ProcessEntry {
+                    pid: 1,
+                    parent_pid: 0,
+                    exe: "explorer.exe".to_string(),
+                },
+                ProcessEntry {
+                    pid: 2,
+                    parent_pid: 1,
+                    exe: "cmd.exe".to_string(),
+                },
+                ProcessEntry {
+                    pid: 3,
+                    parent_pid: 2,
+                    exe: "clud.exe".to_string(),
+                },
+            ];
+
+            assert_eq!(
+                find_named_ancestor(3, &entries, &["WindowsTerminal.exe"]),
+                None
+            );
+        }
     }
 }
 
