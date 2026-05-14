@@ -7,10 +7,9 @@
 //! Three states per skill:
 //! - **Missing** — write the embedded copy, log a one-line install notice.
 //! - **Matches modulo whitespace** — silent no-op.
-//! - **Diverges semantically** — warn on stderr; do NOT overwrite. The user
-//!   has edited the working copy and either wants to check the changes back
-//!   into the source repo or revert. Either way, blind overwrite would lose
-//!   their work.
+//! - **Diverges semantically** — overwrite with the embedded copy and log
+//!   `[clud] updated /<name>` in green. The embedded version is treated as
+//!   the source of truth; local edits to the installed SKILL.md are lost.
 //!
 //! Each skill's source-of-truth lives at `skills/<name>/SKILL.md` in the repo
 //! and is embedded at compile time, so a fresh `clud` install always carries
@@ -61,7 +60,7 @@ fn ensure_skill_installed(skill: &Skill) {
     match classify(&path, skill.content) {
         Existing::Missing => write_install(&path, skill),
         Existing::Matches => {}
-        Existing::Diverges => warn_diverges(&path),
+        Existing::Diverges => update_diverges(&path, skill),
         Existing::Unreadable(err) => {
             eprintln!("[clud] note: could not read {}: {err}", path.display());
         }
@@ -144,12 +143,16 @@ fn write_install(path: &Path, skill: &Skill) {
     );
 }
 
-fn warn_diverges(path: &Path) {
-    eprintln!(
-        "[clud] note: {} diverges from the version embedded in clud; \
-         check in your changes to the clud repo or revert.",
-        path.display()
-    );
+fn update_diverges(path: &Path, skill: &Skill) {
+    if let Err(e) = std::fs::write(path, skill.content) {
+        eprintln!(
+            "[clud] note: could not update /{} skill at {}: {e}",
+            skill.name,
+            path.display()
+        );
+        return;
+    }
+    eprintln!("\x1b[32m[clud] updated /{}\x1b[0m", skill.name);
 }
 
 #[cfg(test)]
@@ -175,7 +178,7 @@ mod tests {
         match &state {
             Existing::Missing => write_install(path, skill),
             Existing::Matches => {}
-            Existing::Diverges => warn_diverges(path),
+            Existing::Diverges => update_diverges(path, skill),
             Existing::Unreadable(_) => {}
         }
         state
@@ -252,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_diff_warns_and_preserves_user_edits() {
+    fn semantic_diff_overwrites_with_embedded_copy() {
         let tmp = TempDir::new().unwrap();
         let skill = ref_skill();
         let target = tmp.path().join("SKILL.md");
@@ -265,9 +268,11 @@ mod tests {
             "added content must classify as Diverges, got {state:?}"
         );
 
-        // Critical: the user's edit is preserved, not overwritten.
         let after = fs::read_to_string(&target).unwrap();
-        assert_eq!(after, user_version, "Diverges branch must NOT overwrite");
+        assert_eq!(
+            after, skill.content,
+            "Diverges branch must overwrite with the embedded copy"
+        );
     }
 
     #[test]
