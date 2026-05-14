@@ -51,12 +51,6 @@ jobs:
           restore-keys: |
             venv-${{ inputs.runs-on }}-py3.11-
 
-      # Issue #13: cpal links against ALSA on Linux. See _unit-test.yml for
-      # the full rationale.
-      - name: Install Linux audio deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
       # Issue #68: replace dtolnay/rust-toolchain + mozilla-actions/sccache-action
       # + Swatinem/rust-cache with setup-soldr. soldr pins the MSVC toolchain on
       # Windows (issue #27) and owns build + target caching for every platform.

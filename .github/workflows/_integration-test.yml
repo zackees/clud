@@ -40,12 +40,6 @@ jobs:
           restore-keys: |
             venv-${{ inputs.runs-on }}-py3.11-
 
-      # Issue #13: cpal links against ALSA on Linux. See _unit-test.yml for
-      # the full rationale.
-      - name: Install Linux audio deps
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
       # Issue #68: replace the dtolnay + sccache + rust-cache stack with soldr.
       # `build-cache-mode: thin` avoids the setup-soldr#53 pitfall where the
       # dev build + cargo test --no-run + cargo test pipeline shares one
