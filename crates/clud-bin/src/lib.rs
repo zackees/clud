@@ -12,6 +12,7 @@ pub mod console_title;
 pub mod daemon;
 pub mod dnd;
 pub mod gc;
+pub mod hook_health;
 pub mod loop_artifacts;
 pub mod loop_spec;
 pub mod process_tree;
