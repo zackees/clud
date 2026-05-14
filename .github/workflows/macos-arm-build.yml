@@ -1,8 +1,7 @@
 name: macOS ARM Build
 on:
   push:
-    branches: [rust, main]
-  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       build-mode:
