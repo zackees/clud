@@ -20,6 +20,9 @@ jobs:
       # vendored C++ build sees the modern SDK target on every macOS
       # job (no-op on Linux/Windows).
       MACOSX_DEPLOYMENT_TARGET: "10.15"
+      CFLAGS: "-g0"
+      CXXFLAGS: "-g0"
+      SOLDR_LINKER: "fast"
     steps:
       - uses: actions/checkout@v4
 
@@ -55,14 +58,54 @@ jobs:
           cache: true
           build-cache-mode: thin
 
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mold
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11 -v
 
       - name: Dev build
-        run: uv run --no-editable -m ci.build_wheel --dev
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            ulimit -v 13000000
+          fi
+          uv run --no-editable -m ci.build_wheel --dev
 
       - name: Integration Tests
-        run: uv run --no-editable -m ci.test --integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            ulimit -v 13000000
+          fi
+          uv run --no-editable -m ci.test --integration
+
+      - name: Diagnose Linux build failure
+        if: ${{ failure() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set +e
+          echo "::group::OOM / killed-process scan"
+          (sudo dmesg 2>/dev/null || dmesg 2>/dev/null) | grep -iE 'killed|oom|out of memory|signal 9' | tail -50
+          [ $? -ne 0 ] && echo "(no OOM/kill messages found)"
+          echo "::endgroup::"
+          echo "::group::Last 100 dmesg lines"
+          (sudo dmesg 2>/dev/null || dmesg 2>/dev/null) | tail -100
+          echo "::endgroup::"
+          echo "::group::Memory snapshot"
+          free -h
+          echo "::endgroup::"
+          echo "::group::Disk snapshot"
+          df -h
+          echo "::endgroup::"
 
       - name: Upload failure logs
         if: ${{ failure() }}
