@@ -870,8 +870,10 @@ mod win {
         };
 
         let mut entries = Vec::new();
-        let mut entry = PROCESSENTRY32W::default();
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
 
         // SAFETY: `entry` has the required dwSize field initialized.
         if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
