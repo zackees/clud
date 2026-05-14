@@ -39,7 +39,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from test_hello import CLUD  # type: ignore[import-not-found]  # noqa: E402
+from test_hello import CLUD, copied_clud_env  # type: ignore[import-not-found]  # noqa: E402
 
 
 def _run_clud_in_dir(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -59,6 +59,7 @@ def _run_clud_in_dir(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=10,
         cwd=str(cwd),
+        env=copied_clud_env(source),
     )
 
 
