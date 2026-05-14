@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +90,42 @@ CLUD = _clud_binary()
 PROJECT_VERSION = _project_version()
 
 
+@cache
+def _linux_runtime_library_dirs(source: Path) -> tuple[Path, ...]:
+    """Return Linux library dirs needed after copying the clud executable."""
+    dirs = [source.parent, source.parent / "deps", source.parent / "clud.libs"]
+    for root in (ROOT / ".venv", ROOT / "target"):
+        if root.exists():
+            dirs.extend(path.parent for path in root.rglob("libasound*.so*") if path.is_file())
+
+    seen: set[Path] = set()
+    existing_dirs: list[Path] = []
+    for path in dirs:
+        resolved = path.resolve()
+        if resolved.is_dir() and resolved not in seen:
+            seen.add(resolved)
+            existing_dirs.append(resolved)
+    return tuple(existing_dirs)
+
+
+def copied_clud_env(source: Path) -> dict[str, str]:
+    """Return an environment that can launch a copied clud binary.
+
+    Linux CI can build `clud` with a hashed ALSA SONAME such as
+    `libasound-a5b8423c.so.2` in a wheel `clud.libs` directory. The smoke tests
+    copy only the executable into a tempdir, so preserve the discovered runtime
+    library directories in `LD_LIBRARY_PATH` for the dynamic loader.
+    """
+    env = os.environ.copy()
+    if sys.platform.startswith("linux"):
+        existing = env.get("LD_LIBRARY_PATH")
+        parts = [str(path) for path in _linux_runtime_library_dirs(source)]
+        if existing:
+            parts.append(existing)
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(parts)
+    return env
+
+
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as temp_dir:
         source = Path(CLUD)
@@ -100,6 +137,7 @@ def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProce
             text=True,
             timeout=10,
             input=input_data,
+            env=copied_clud_env(source),
         )
 
 
@@ -392,7 +430,7 @@ def test_fix_hooks_dry_run_plans_without_writing(tmp_path: Path) -> None:
         source = Path(CLUD)
         launch = Path(temp_dir) / source.name
         shutil.copy2(source, launch)
-        env = os.environ.copy()
+        env = copied_clud_env(source)
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         env["CLUD_HOOK_HOME"] = str(home)
