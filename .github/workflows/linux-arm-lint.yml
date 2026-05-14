@@ -1,8 +1,7 @@
 name: Linux ARM Lint
 on:
   push:
-    branches: [rust, main]
-  pull_request:
+    branches: [main]
 jobs:
   call:
     uses: ./.github/workflows/_lint.yml

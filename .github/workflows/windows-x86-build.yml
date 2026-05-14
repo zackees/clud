@@ -1,8 +1,7 @@
 name: Windows x86 Build
 on:
   push:
-    branches: [rust, main]
-  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       build-mode:
