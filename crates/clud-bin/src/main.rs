@@ -191,16 +191,17 @@ fn main() {
         None
     };
 
-    // Issue #73: open the SQLite session registry, GC dead siblings,
+    // Issue #73: open the redb-backed session registry, GC dead siblings,
     // refuse to launch if we're at the cap, otherwise insert our own row.
     // Held until end-of-`main` so `Drop` removes the row on graceful exit.
     let _registry_guard = enforce_session_cap();
 
     // Issue #110: spawn the background worktree scanner. Polls the
-    // current repo's `.claude/worktrees/` every ~2s and upserts any
-    // new agent-<id> dir into the tracked-entries table. `Drop` joins
-    // the worker thread; explicit `drop` below sequences cancellation
-    // before the session-registry guard.
+    // current repo's `.claude/worktrees/` every ~2s and inserts any
+    // newly-detected agent-<id> dir into the tracked-entries table.
+    // Existing rows are left alone — the scanner is insert-only, no
+    // write churn. `Drop` joins the worker thread; explicit `drop` below
+    // sequences cancellation before the session-registry guard.
     let _scanner_guard = gc::WorktreeScanner::maybe_spawn();
 
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
