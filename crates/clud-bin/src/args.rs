@@ -176,8 +176,8 @@ pub enum Command {
         #[arg(long = "last", short = 'l', conflicts_with = "session_id")]
         last: bool,
     },
-    /// Issue #110: tracked-entry garbage collection (SQLite-backed
-    /// registry at `~/.clud/data.db`).
+    /// Issue #110: tracked-entry garbage collection (redb-backed
+    /// registry at `~/.clud/data.redb`).
     ///
     /// Subcommands: `list`, `purge <duration>`, `reconcile`. Running
     /// `clud gc` with no subcommand prints this help summary.

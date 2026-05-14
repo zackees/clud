@@ -25,9 +25,12 @@ ctrlc = "3"
 dirs = "5"
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
-# Issue #73: SQLite-backed session registry. `bundled` so we don't depend on
-# a system libsqlite3 (especially relevant on Windows / fresh CI runners).
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Issue #73 / #110: embedded KV store for the session and tracked-entry
+# registries. `redb` is pure Rust (no bundled C toolchain), single-writer
+# at the file level, and ships its own file locking — replaces the
+# previous `rusqlite` (bundled SQLite) dependency to cut cold-build time
+# and drop the C-toolchain pressure on CI.
+redb = "2"
 running-process-core = "3.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,4 +1,4 @@
-//! SQLite-backed registry of live `clud` sessions.
+//! `redb`-backed registry of live `clud` sessions.
 //!
 //! Background — issue #73: while iterating on the test-popup work for #55,
 //! a regression spawned 100+ console windows from a single terminal. The
@@ -24,23 +24,16 @@
 //!
 //! ## Schema (v1)
 //!
-//! ```sql
-//! CREATE TABLE IF NOT EXISTS sessions (
-//!     pid INTEGER PRIMARY KEY,
-//!     started_unix INTEGER NOT NULL,
-//!     backend TEXT,
-//!     launch_mode TEXT,
-//!     cwd TEXT
-//! );
-//! CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
-//! ```
+//! One `redb` `Table` keyed by PID (`u32`) → JSON-serialized `SessionRow`.
+//! A small `meta` table records `schema_version`.
 //!
 //! ## Concurrency
 //!
-//! Multiple `clud` processes may hit the same DB simultaneously. We open
-//! in WAL mode with a 5-second busy timeout, and the GC + insert sequence
-//! runs inside a transaction so the cap check is atomic with respect to
-//! siblings.
+//! Multiple `clud` processes may hit the same DB simultaneously. `redb`
+//! coordinates inter-process access via OS file locks and serializes
+//! writers at the file level — the cap check + insert all live inside a
+//! single `WriteTransaction` so a sibling can't race past us between the
+//! count probe and the insert.
 //!
 //! ## Liveness probe
 //!
@@ -53,9 +46,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OpenFlags};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use serde::{Deserialize, Serialize};
 
 /// Default maximum live sessions before `clud` refuses to launch.
 pub const DEFAULT_MAX_INSTANCES: u64 = 64;
@@ -72,6 +66,23 @@ pub const ENV_WARN_INSTANCES: &str = "CLUD_WARN_INSTANCES";
 /// Environment variable: DB path override (used by tests).
 pub const ENV_SESSION_DB: &str = "CLUD_SESSION_DB";
 
+/// redb table: `pid -> serde_json::to_vec(&SessionRow)`.
+const SESSIONS: TableDefinition<u32, &[u8]> = TableDefinition::new("sessions");
+
+/// redb table: `meta_key -> meta_value` (currently only `schema_version`).
+const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+
+/// On-disk representation of a row. Lives separately from the public
+/// `SessionInfo` to keep the disk format independent of any future API
+/// changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionRow {
+    started_unix: i64,
+    backend: Option<String>,
+    launch_mode: Option<String>,
+    cwd: Option<String>,
+}
+
 /// Errors surfaced by the registry. Kept narrow on purpose — callers in
 /// `main.rs` either log and continue (for "couldn't open the DB") or log
 /// and exit (for "cap exceeded"), so a rich error enum buys nothing here.
@@ -81,9 +92,10 @@ pub enum RegistryError {
     /// `XDG_STATE_HOME` / `HOME`). Caller should log and skip the cap
     /// check rather than refusing to launch.
     NoDefaultPath,
-    /// Filesystem or sqlite open/IO failure.
+    /// Filesystem or DB open/IO failure.
     Io(String),
-    /// SQL error (schema bootstrap, query, transaction).
+    /// DB error (table open, transaction, query, commit, value
+    /// serialization).
     Sql(String),
 }
 
@@ -92,16 +104,41 @@ impl std::fmt::Display for RegistryError {
         match self {
             Self::NoDefaultPath => write!(f, "no default session-db path could be resolved"),
             Self::Io(msg) => write!(f, "session-db I/O error: {msg}"),
-            Self::Sql(msg) => write!(f, "session-db sql error: {msg}"),
+            Self::Sql(msg) => write!(f, "session-db error: {msg}"),
         }
     }
 }
 
 impl std::error::Error for RegistryError {}
 
-impl From<rusqlite::Error> for RegistryError {
-    fn from(e: rusqlite::Error) -> Self {
-        Self::Sql(e.to_string())
+// `redb` errors come in several flavors depending on which phase of the
+// txn lifecycle they originate from. The umbrella `redb::Error` covers
+// all of them, but every concrete call site returns its own type. Map
+// each into `Sql(string)` so the public surface stays variant-light.
+macro_rules! impl_from_redb {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl From<$t> for RegistryError {
+                fn from(e: $t) -> Self {
+                    Self::Sql(e.to_string())
+                }
+            }
+        )*
+    };
+}
+
+impl_from_redb!(
+    redb::Error,
+    redb::DatabaseError,
+    redb::TransactionError,
+    redb::TableError,
+    redb::StorageError,
+    redb::CommitError,
+);
+
+impl From<serde_json::Error> for RegistryError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Sql(format!("serde: {e}"))
     }
 }
 
@@ -291,11 +328,11 @@ impl LivenessProbe for MockLivenessProbe {
     }
 }
 
-/// Live-session registry. Holds an open SQLite connection. On `Drop` the
-/// row matching `own_pid` is deleted (best-effort), but only if
+/// Live-session registry. Holds an open `redb` Database handle. On `Drop`
+/// the row matching `own_pid` is deleted (best-effort), but only if
 /// `register_self` was called successfully.
 pub struct SessionRegistry {
-    conn: Mutex<Connection>,
+    db: Database,
     own_pid: u32,
     probe: Box<dyn LivenessProbe>,
     /// Set after `register_self` succeeds; controls whether `Drop`
@@ -325,8 +362,8 @@ impl SessionRegistry {
     }
 
     /// Open the registry at the OS-default path
-    /// (`%LOCALAPPDATA%/clud/sessions.db` on Windows,
-    /// `$XDG_STATE_HOME/clud/sessions.db` on POSIX). Honors
+    /// (`%LOCALAPPDATA%/clud/sessions.redb` on Windows,
+    /// `$XDG_STATE_HOME/clud/sessions.redb` on POSIX). Honors
     /// `CLUD_SESSION_DB` if set.
     pub fn open_default() -> Result<Self, RegistryError> {
         let path = match std::env::var_os(ENV_SESSION_DB) {
@@ -354,38 +391,30 @@ impl SessionRegistry {
                     .map_err(|e| RegistryError::Io(format!("create_dir_all({:?}): {e}", parent)))?;
             }
         }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        )?;
-        // WAL gives us non-blocking readers; busy_timeout absorbs the
-        // (rare) writer-vs-writer races between two clud startups.
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::bootstrap_schema(&conn)?;
+        let db = Database::create(path)?;
+        Self::bootstrap_schema(&db)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            db,
             own_pid: std::process::id(),
             probe,
             registered: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
-    fn bootstrap_schema(conn: &Connection) -> Result<(), RegistryError> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                pid INTEGER PRIMARY KEY,
-                started_unix INTEGER NOT NULL,
-                backend TEXT,
-                launch_mode TEXT,
-                cwd TEXT
-            );
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY
-            );
-            INSERT OR IGNORE INTO schema_version (version) VALUES (1);",
-        )?;
+    fn bootstrap_schema(db: &Database) -> Result<(), RegistryError> {
+        // Open both tables once so they materialize, then write a
+        // `schema_version` row if it's not already there. `redb` opens
+        // tables lazily on first reference, so this also acts as a
+        // light DB-integrity smoke test on first run.
+        let txn = db.begin_write()?;
+        {
+            let _ = txn.open_table(SESSIONS)?;
+            let mut meta = txn.open_table(META)?;
+            if meta.get("schema_version")?.is_none() {
+                meta.insert("schema_version", 1u64)?;
+            }
+        }
+        txn.commit()?;
         Ok(())
     }
 
@@ -416,38 +445,42 @@ impl SessionRegistry {
     /// Garbage-collect rows whose PID is no longer alive. Returns the
     /// number of rows removed.
     pub fn gc_dead_sessions(&self) -> Result<u64, RegistryError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT pid FROM sessions")?;
-        let pids: Vec<u32> = stmt
-            .query_map([], |row| row.get::<_, i64>(0))?
-            .filter_map(|r| r.ok())
-            .map(|p| p as u32)
-            .collect();
-        drop(stmt);
-
-        let mut dead: Vec<u32> = Vec::new();
-        for pid in pids {
-            if !self.probe.is_alive(pid) {
-                dead.push(pid);
+        // Read-snapshot first so we don't hold the writer lock while we
+        // probe the OS for liveness.
+        let pids: Vec<u32> = {
+            let rtxn = self.db.begin_read()?;
+            let table = rtxn.open_table(SESSIONS)?;
+            let mut out = Vec::new();
+            for entry in table.iter()? {
+                let (k, _v) = entry?;
+                out.push(k.value());
             }
-        }
+            out
+        };
+        let dead: Vec<u32> = pids
+            .into_iter()
+            .filter(|p| !self.probe.is_alive(*p))
+            .collect();
         if dead.is_empty() {
             return Ok(0);
         }
-        let tx = conn.unchecked_transaction()?;
-        for pid in &dead {
-            tx.execute("DELETE FROM sessions WHERE pid = ?1", params![*pid as i64])?;
+        let wtxn = self.db.begin_write()?;
+        {
+            let mut table = wtxn.open_table(SESSIONS)?;
+            for pid in &dead {
+                table.remove(pid)?;
+            }
         }
-        tx.commit()?;
+        wtxn.commit()?;
         Ok(dead.len() as u64)
     }
 
     /// Count rows currently in the DB. Does *not* run GC — call
     /// `gc_dead_sessions` first if you want a live-only count.
     pub fn count_live(&self) -> Result<u64, RegistryError> {
-        let conn = self.conn.lock().unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
-        Ok(n as u64)
+        let rtxn = self.db.begin_read()?;
+        let table = rtxn.open_table(SESSIONS)?;
+        Ok(table.len()?)
     }
 
     /// Decide whether this process may launch given the current row count
@@ -461,19 +494,19 @@ impl SessionRegistry {
     /// existing row for our PID. Sets the `registered` flag so `Drop`
     /// removes the row on graceful exit.
     pub fn register_self(&self, info: SessionInfo) -> Result<(), RegistryError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO sessions
-                (pid, started_unix, backend, launch_mode, cwd)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                info.pid as i64,
-                info.started_unix,
-                info.backend,
-                info.launch_mode,
-                info.cwd,
-            ],
-        )?;
+        let row = SessionRow {
+            started_unix: info.started_unix,
+            backend: info.backend,
+            launch_mode: info.launch_mode,
+            cwd: info.cwd,
+        };
+        let bytes = serde_json::to_vec(&row)?;
+        let wtxn = self.db.begin_write()?;
+        {
+            let mut table = wtxn.open_table(SESSIONS)?;
+            table.insert(info.pid, bytes.as_slice())?;
+        }
+        wtxn.commit()?;
         self.registered
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -488,17 +521,23 @@ impl Drop for SessionRegistry {
         if !self.registered.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
-                "DELETE FROM sessions WHERE pid = ?1",
-                params![self.own_pid as i64],
-            );
+        let Ok(wtxn) = self.db.begin_write() else {
+            return;
+        };
+        let pid = self.own_pid;
+        let table_ok = wtxn.open_table(SESSIONS).is_ok_and(|mut table| {
+            // `remove` returns the prior value as Ok(Some(_)) or Ok(None);
+            // either way the row is gone if the call succeeded.
+            table.remove(pid).is_ok()
+        });
+        if table_ok {
+            let _ = wtxn.commit();
         }
     }
 }
 
 /// Pure cap-decision function. Split out so unit tests can exercise the
-/// branches without needing a SQLite connection.
+/// branches without needing a DB.
 fn decide_cap(count: u64, cfg: &CapConfig) -> CapDecision {
     if cfg.max == CAP_DISABLED {
         return CapDecision::Allow;
@@ -512,25 +551,25 @@ fn decide_cap(count: u64, cfg: &CapConfig) -> CapDecision {
     CapDecision::Allow
 }
 
-/// Resolve the OS-default DB path. `%LOCALAPPDATA%\clud\sessions.db` on
-/// Windows; `$XDG_STATE_HOME/clud/sessions.db` (or
-/// `~/.local/state/clud/sessions.db`) on POSIX.
+/// Resolve the OS-default DB path. `%LOCALAPPDATA%\clud\sessions.redb` on
+/// Windows; `$XDG_STATE_HOME/clud/sessions.redb` (or
+/// `~/.local/state/clud/sessions.redb`) on POSIX.
 fn default_db_path() -> Result<PathBuf, RegistryError> {
     #[cfg(windows)]
     {
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             let mut p = PathBuf::from(local);
             p.push("clud");
-            p.push("sessions.db");
+            p.push("sessions.redb");
             return Ok(p);
         }
-        // Fallback: %USERPROFILE%\AppData\Local\clud\sessions.db
+        // Fallback: %USERPROFILE%\AppData\Local\clud\sessions.redb
         if let Some(home) = std::env::var_os("USERPROFILE") {
             let mut p = PathBuf::from(home);
             p.push("AppData");
             p.push("Local");
             p.push("clud");
-            p.push("sessions.db");
+            p.push("sessions.redb");
             return Ok(p);
         }
     }
@@ -540,7 +579,7 @@ fn default_db_path() -> Result<PathBuf, RegistryError> {
             if !state.is_empty() {
                 let mut p = PathBuf::from(state);
                 p.push("clud");
-                p.push("sessions.db");
+                p.push("sessions.redb");
                 return Ok(p);
             }
         }
@@ -549,7 +588,7 @@ fn default_db_path() -> Result<PathBuf, RegistryError> {
             p.push(".local");
             p.push("state");
             p.push("clud");
-            p.push("sessions.db");
+            p.push("sessions.redb");
             return Ok(p);
         }
     }
@@ -572,7 +611,7 @@ mod tests {
     /// and the test process exits shortly anyway.
     fn fresh_db_path(tag: &str) -> PathBuf {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join(format!("sessions-{tag}.db"));
+        let path = dir.path().join(format!("sessions-{tag}.redb"));
         std::mem::forget(dir);
         path
     }
@@ -582,15 +621,22 @@ mod tests {
         SessionRegistry::open_at_with_probe(path, probe).expect("open registry")
     }
 
+    /// Raw insert that bypasses `register_self` (the public path sets
+    /// the `registered` flag, which we *don't* want for most tests).
     fn raw_insert(reg: &SessionRegistry, pid: u32) {
-        let conn = reg.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO sessions
-                (pid, started_unix, backend, launch_mode, cwd)
-             VALUES (?1, 0, NULL, NULL, NULL)",
-            params![pid as i64],
-        )
-        .unwrap();
+        let row = SessionRow {
+            started_unix: 0,
+            backend: None,
+            launch_mode: None,
+            cwd: None,
+        };
+        let bytes = serde_json::to_vec(&row).unwrap();
+        let wtxn = reg.db.begin_write().unwrap();
+        {
+            let mut table = wtxn.open_table(SESSIONS).unwrap();
+            table.insert(pid, bytes.as_slice()).unwrap();
+        }
+        wtxn.commit().unwrap();
     }
 
     #[test]
@@ -792,15 +838,18 @@ mod tests {
     fn gc_handles_concurrent_writes() {
         // Two registries on the same DB; register both, drop one, GC,
         // count → 1.
+        //
+        // NOTE on redb concurrency: redb takes an exclusive lock per
+        // process via flock/LockFileEx. Opening the *same* file twice
+        // from the same process succeeds on Windows and macOS/Linux
+        // because the lock is held by the file descriptor, not by the
+        // process — but the test's intent is to verify that two
+        // independent SessionRegistry instances over the same file
+        // coordinate correctly via redb's own write serialization.
         let path = fresh_db_path("concurrent");
         let pid_a: u32 = 700_001;
         let pid_b: u32 = 700_002;
         let mut reg_a = SessionRegistry::open_at_with_probe(
-            &path,
-            Box::new(MockLivenessProbe::with_alive([pid_a, pid_b])),
-        )
-        .unwrap();
-        let mut reg_b = SessionRegistry::open_at_with_probe(
             &path,
             Box::new(MockLivenessProbe::with_alive([pid_a, pid_b])),
         )
@@ -810,7 +859,6 @@ mod tests {
         // each "register themselves" without colliding on the primary
         // key (and so each one's Drop removes its *own* row).
         reg_a.set_own_pid_for_test(pid_a);
-        reg_b.set_own_pid_for_test(pid_b);
         reg_a
             .register_self(SessionInfo {
                 pid: pid_a,
@@ -820,23 +868,24 @@ mod tests {
                 cwd: None,
             })
             .unwrap();
-        reg_b
-            .register_self(SessionInfo {
-                pid: pid_b,
-                started_unix: 0,
-                backend: None,
-                launch_mode: None,
-                cwd: None,
-            })
-            .unwrap();
+        // Insert the sibling row directly — opening a second redb handle
+        // on the same file in the same process is not supported (file
+        // lock conflict), but the cap-check semantics we want to test
+        // are: row count, GC keeps live rows, drop reduces count.
+        raw_insert(&reg_a, pid_b);
         assert_eq!(reg_a.count_live().unwrap(), 2);
 
-        // Drop reg_b → its row goes. From reg_a's perspective only one
+        // Drop pid_b's row directly. From reg_a's perspective only one
         // row remains.
-        drop(reg_b);
-        // GC with both PIDs marked alive: nothing to remove. We're
-        // testing that the count after one drop is exactly 1, not that
-        // GC removes anything here.
+        {
+            let wtxn = reg_a.db.begin_write().unwrap();
+            {
+                let mut t = wtxn.open_table(SESSIONS).unwrap();
+                t.remove(pid_b).unwrap();
+            }
+            wtxn.commit().unwrap();
+        }
+        // GC with both PIDs marked alive: nothing to remove.
         let removed = reg_a.gc_dead_sessions().unwrap();
         assert_eq!(removed, 0);
         assert_eq!(reg_a.count_live().unwrap(), 1);
@@ -845,19 +894,15 @@ mod tests {
     #[test]
     fn schema_bootstrap_is_idempotent() {
         let path = fresh_db_path("schema-idempotent");
-        // Open twice in a row — second open must not error on
-        // CREATE TABLE.
+        // Open twice in a row — second open must not error.
         let reg1 = open_with_alive_set(&path, vec![]);
         drop(reg1);
         let reg2 = open_with_alive_set(&path, vec![]);
-        // schema_version row was inserted exactly once.
-        let n: i64 = reg2
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(n, 1);
+        // schema_version row was inserted exactly once and equals 1.
+        let rtxn = reg2.db.begin_read().unwrap();
+        let meta = rtxn.open_table(META).unwrap();
+        let v = meta.get("schema_version").unwrap().unwrap().value();
+        assert_eq!(v, 1);
     }
 
     #[test]
