@@ -688,7 +688,7 @@ mod enabled {
 
             reader_result?;
 
-            if exit_code == 0 || exit_code < 0 {
+            if exit_code <= 0 {
                 return Ok(());
             }
 
