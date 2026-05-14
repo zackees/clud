@@ -1,5 +1,5 @@
 use clud::{
-    args, backend, command, console_title, daemon, dnd, gc, loop_artifacts, loop_spec,
+    args, backend, command, console_title, daemon, dnd, gc, hook_health, loop_artifacts, loop_spec,
     process_tree, session, session_registry, skill_install, skills, stream_json, subprocess,
     trampoline, voice, wasm, worktrees,
 };
@@ -74,6 +74,14 @@ fn main() {
         std::process::exit(worktrees::run(&opts));
     }
 
+    // Issue #112: explicit hook-parity remediation path. Normal launches only
+    // warn; this flag is the opt-in path that may edit deterministic Codex
+    // trust config and ask the selected backend to migrate hook definitions.
+    if args.fix_hooks {
+        let selected_backend = backend::resolve_backend(args.claude, args.codex);
+        std::process::exit(hook_health::run_fix_hooks(&args, selected_backend));
+    }
+
     // Pipe mode: if stdin is not a terminal, read it as the prompt.
     if args.prompt.is_none()
         && args.message.is_none()
@@ -123,6 +131,10 @@ fn main() {
     let interrupted = install_ctrl_c_flag();
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
         std::process::exit(exit_code);
+    }
+
+    if hook_health::should_check_launch(&args) {
+        hook_health::emit_launch_warnings();
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);

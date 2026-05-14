@@ -75,6 +75,11 @@ pub struct Args {
     #[arg(long = "clean-worktrees")]
     pub clean_worktrees: bool,
 
+    /// Inspect Claude/Codex PreToolUse hook parity and apply explicit,
+    /// repo-scoped repairs where clud can do so safely.
+    #[arg(long = "fix-hooks")]
+    pub fix_hooks: bool,
+
     /// Issue #83: minimum age before a clean worktree is treated as stale.
     /// Accepts `30s`, `5m`, `2h`, `1d`. Defaults to `1d`.
     #[arg(long = "stale-after", default_value = "1d")]
@@ -275,6 +280,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--no-dnd",
         "--no-drag-drop",
         "--clean-worktrees",
+        "--fix-hooks",
         "--yes",
         "--force",
         "--help",
@@ -929,6 +935,7 @@ mod tests {
         assert!(!args.detachable);
         assert!(!args.no_dnd);
         assert!(!args.clean_worktrees);
+        assert!(!args.fix_hooks);
         assert!(!args.yes);
         assert!(!args.force);
         assert_eq!(args.stale_after, "1d");
@@ -986,6 +993,22 @@ mod tests {
         let args = parse(&["clud", "--clean-worktrees", "--dry-run"]);
         assert!(args.clean_worktrees);
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_fix_hooks_flag() {
+        let args = parse(&["clud", "--fix-hooks"]);
+        assert!(args.fix_hooks);
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn test_fix_hooks_dry_run_with_backend_selection() {
+        let args = parse(&["clud", "--fix-hooks", "--dry-run", "--codex"]);
+        assert!(args.fix_hooks);
+        assert!(args.dry_run);
+        assert!(args.codex);
+        assert!(!args.claude);
     }
 
     #[test]

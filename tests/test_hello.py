@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -363,3 +364,51 @@ def test_clean_worktrees_rejects_invalid_stale_after() -> None:
     result = _run("--clean-worktrees", "--stale-after", "30x", "--dry-run")
     assert result.returncode != 0
     assert "invalid --stale-after" in result.stderr or "unsupported" in result.stderr.lower()
+
+
+def test_fix_hooks_dry_run_plans_without_writing(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "python check.py"}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    home.mkdir()
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = Path(temp_dir) / source.name
+        shutil.copy2(source, launch)
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        result = subprocess.run(
+            [str(launch), "--dry-run", "--fix-hooks"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 0
+    assert "hook health dry-run" in result.stdout
+    assert "Claude PreToolUse hooks exist" in result.stdout
+    assert "claude->codex" in result.stdout
+    assert "matcher `Bash`" in result.stdout
+    assert "add Codex project trust" not in result.stdout
+    assert not (home / ".codex" / "config.toml").exists()
