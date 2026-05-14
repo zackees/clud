@@ -168,6 +168,9 @@ pub fn should_check_launch(args: &Args) -> bool {
     if args.fix_hooks || args.clean_worktrees {
         return false;
     }
+    if !args.codex {
+        return false;
+    }
     matches!(
         args.command,
         None | Some(CliCommand::Loop { .. })
