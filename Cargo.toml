@@ -13,10 +13,11 @@ license = "BSD-3-Clause"
 repository = "https://github.com/zackees/clud"
 homepage = "https://github.com/zackees/clud"
 
+[profile.dev]
+debug = 0
+
 [profile.release]
-debug = "line-tables-only"
-split-debuginfo = "packed"
-strip = "none"
+debug = 0
 
 [patch.crates-io]
 whisper-rs = { path = "vendor/whisper-rs" }
