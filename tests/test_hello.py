@@ -27,13 +27,13 @@ def _project_version() -> str:
 
 
 def _cargo_argv(subcommand: list[str]) -> list[str]:
-    """Return the cargo argv, preferring `soldr cargo` on Windows (issue #27).
+    """Return the cargo argv, pinning the MSVC toolchain on Windows.
 
     Windows rustc installations from chocolatey ship a GNU-host rustc which
     links C/C++ deps against MinGW runtime DLLs (libstdc++-6.dll,
     libgcc_s_seh-1.dll, libwinpthread-1.dll). Those DLLs aren't on stock
     Windows, so a test that launches the resulting binary fails with
-    STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139). `soldr cargo ...` forces the
+    STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139). `ci.env.build_env()` forces the
     MSVC target via the rustup-managed toolchain. Mirrors
     `tests/integration/conftest.py::_cargo_argv`.
     """
@@ -72,8 +72,8 @@ def _clud_binary() -> str:
             return msg["executable"]
 
     ext = ".exe" if sys.platform == "win32" else ""
-    # soldr / `--target x86_64-pc-windows-msvc` lands artifacts in a
-    # triple-qualified subdir; bare cargo lands in target/debug. Check both.
+    # The MSVC-pinned env lands artifacts in a triple-qualified subdir; bare
+    # cargo lands in target/debug. Check both.
     for fallback in (
         ROOT / "target" / "x86_64-pc-windows-msvc" / "debug" / f"clud{ext}",
         ROOT / "target" / "aarch64-pc-windows-msvc" / "debug" / f"clud{ext}",

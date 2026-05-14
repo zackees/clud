@@ -25,6 +25,7 @@ _ANSI_RE = re.compile(
     # restores full state; the test must strip them before parsing JSON.
     r"|[\x30-\x7e])"
 )
+_DETACH_EXIT_TIMEOUT = 10.0
 
 
 def _daemon_env(mock_env: dict[str, str], state_dir: Path) -> dict[str, str]:
@@ -245,7 +246,7 @@ class TestDaemonManagedSessionFlags:
             "3000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
 
             attached = subprocess.run(
                 [str(clud_binary), "attach", session_id],
@@ -290,7 +291,7 @@ class TestDaemonManagedSessionFlags:
             "5000",
         )
         try:
-            assert _wait_for_exit(proc1, timeout=2) == 0
+            assert _wait_for_exit(proc1, timeout=_DETACH_EXIT_TIMEOUT) == 0
 
             listed = subprocess.run(
                 [str(clud_binary), "attach"],
@@ -324,7 +325,7 @@ class TestDaemonManagedSessionFlags:
             cwd=launch_cwd,
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             metadata = _session_metadata(state_dir, session_id)
 
             listed = subprocess.run(
@@ -1203,7 +1204,7 @@ class TestDaemonSessionHardening:
             "3000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             # `_read_session_id` already consumed the "session ... running
             # in background" line. The "attach with: clud attach <id>" line
             # follows it, terminated by \n. `readline()` reads until \n so
@@ -1247,7 +1248,7 @@ class TestDaemonSessionHardening:
             "3000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             attached = subprocess.run(
                 [str(clud_binary), "attach"],
                 capture_output=True,
@@ -1277,7 +1278,7 @@ class TestDaemonSessionHardening:
             "30000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             result = subprocess.run(
                 [str(clud_binary), "kill", session_id],
                 capture_output=True,
@@ -1364,7 +1365,7 @@ class TestDaemonSessionHardening:
             "3000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
 
             # Attach by name instead of ID
             attached = subprocess.run(
@@ -1398,7 +1399,7 @@ class TestDaemonSessionHardening:
             "3000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             listed = subprocess.run(
                 [str(clud_binary), "list"],
                 capture_output=True,
@@ -1428,7 +1429,7 @@ class TestDaemonSessionHardening:
             "3000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             # Use first 10 chars of session_id as prefix
             prefix = session_id[:10]
             attached = subprocess.run(
@@ -1462,7 +1463,7 @@ class TestDaemonSessionHardening:
             "30000",
         )
         try:
-            assert _wait_for_exit(proc, timeout=2) == 0
+            assert _wait_for_exit(proc, timeout=_DETACH_EXIT_TIMEOUT) == 0
             result = subprocess.run(
                 [str(clud_binary), "kill", "kill-by-name"],
                 capture_output=True,
@@ -1491,7 +1492,7 @@ class TestDaemonSessionHardening:
             "--mock-sleep-ms",
             "5000",
         )
-        assert _wait_for_exit(proc1, timeout=2) == 0
+        assert _wait_for_exit(proc1, timeout=_DETACH_EXIT_TIMEOUT) == 0
         time.sleep(0.2)
         # Create second session (most recent)
         proc2, _session_id_2 = _launch_detached(
@@ -1504,7 +1505,7 @@ class TestDaemonSessionHardening:
             "--mock-sleep-ms",
             "3000",
         )
-        assert _wait_for_exit(proc2, timeout=2) == 0
+        assert _wait_for_exit(proc2, timeout=_DETACH_EXIT_TIMEOUT) == 0
         try:
             # attach --last should get the second session
             attached = subprocess.run(

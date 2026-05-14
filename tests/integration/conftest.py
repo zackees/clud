@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 
 def _cargo_argv(subcommand: list[str]) -> list[str]:
-    """Return the cargo argv, preferring `soldr cargo` on Windows.
+    """Return the cargo argv, pinning the MSVC toolchain on Windows.
 
     Windows rustc installations from chocolatey ship a GNU-host rustc which
     links C++ deps (whisper-rs) against MinGW runtime DLLs
@@ -26,8 +26,9 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
     aren't present on stock Windows, so the resulting debug binary fails
     with STATUS_ENTRYPOINT_NOT_FOUND when launched as a subprocess.
 
-    `soldr cargo ...` forces the MSVC target, which links against
-    VCRUNTIME140.dll / MSVCP140.dll — both ship with Windows 10+.
+    `ci.env.build_env()` exports the rustup-managed MSVC cargo/rustc paths,
+    which link against VCRUNTIME140.dll / MSVCP140.dll. The `soldr` branch
+    below is only an emergency fallback if this file is run outside the repo.
     """
     if sys.platform == "win32":
         try:
@@ -46,8 +47,7 @@ def _cargo_build_env() -> dict[str, str]:
     """Return the env used for building clud/mock-agent in tests.
 
     On Windows, reuse ci.env.build_env() which pins RUSTUP_TOOLCHAIN and
-    CARGO_BUILD_TARGET to the MSVC variants — the same env the wheel build
-    uses. This is a fallback for systems without `soldr`.
+    CARGO_BUILD_TARGET to the MSVC variants, matching the wheel build.
     """
     if sys.platform != "win32":
         return os.environ.copy()
@@ -293,7 +293,7 @@ def _scan_for_clud_zombies() -> list[dict]:
     """Scan the system for orphaned CLUD-spawned processes."""
     ext = ".exe" if sys.platform == "win32" else ""
     candidates = [
-        # soldr / explicit --target put artifacts under target/<triple>/debug.
+        # MSVC-pinned builds put artifacts under target/<triple>/debug.
         ROOT
         / "target"
         / "x86_64-pc-windows-msvc"

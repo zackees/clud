@@ -1,8 +1,8 @@
 """Assert that a Windows wheel's clud.exe was built against MSVC, not MinGW.
 
 Issue #27: the test harness and dev workflow pin the MSVC toolchain via
-`ci/env.py::build_env()` and `soldr`, but nothing at the CI layer asserts
-the resulting binary actually has only MSVC runtime imports. If the pin
+`ci/env.py::build_env()`, but nothing at the CI layer asserts the
+resulting binary actually has only MSVC runtime imports. If the pin
 ever slipped, we'd ship a wheel depending on `libstdc++-6.dll` /
 `libgcc_s_seh-1.dll` / `libwinpthread-1.dll` — none of which ship with
 Windows, so the binary would fail to start for any user who doesn't
