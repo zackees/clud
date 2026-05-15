@@ -1,7 +1,8 @@
 use clud::{
     args, backend, command, console_title, daemon, dnd, gc, gc_daemon, hook_health,
     large_file_guard, loop_artifacts, loop_spec, process_tree, session, session_registry,
-    skill_install, skills, stream_json, subprocess, trampoline, voice, wasm, worktrees,
+    skill_install, skills, stream_json, subprocess, trampoline, voice, wasm, win_creation_flags,
+    worktrees,
 };
 
 use std::io::{self, Read};
@@ -558,7 +559,18 @@ fn run_plan_subprocess(
             // directly to our console (preserving any TUI behavior).
             capture: plan.stream_json_progress,
             stderr_mode: StderrMode::Stdout,
-            creationflags: None,
+            // Windows: spawn the backend in its own console process
+            // group so the OS does not deliver `CTRL_C_EVENT` to the
+            // child (or its descendants) when the user hits Ctrl+C.
+            // clud's own `ctrlc` handler catches the event and tears
+            // the child tree down via `process_tree::kill_tree`; the
+            // child only receives a hard termination, never a stray
+            // signal that would let the `nodejs-wheel` Python launcher
+            // raise `KeyboardInterrupt` and dump a traceback over
+            // clud's clean exit message. POSIX has no equivalent flag
+            // and the terminal foreground-process-group behavior is
+            // already correct, so the helper returns `None` there.
+            creationflags: win_creation_flags::user_facing_backend_creationflags(),
             create_process_group: false,
             stdin_mode: StdinMode::Inherit,
             nice: None,
