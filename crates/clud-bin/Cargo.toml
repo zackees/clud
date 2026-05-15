@@ -23,6 +23,9 @@ ctrlc = "3"
 # a small blocking HTTP client, and a hash verifier. `ureq` is sync and
 # avoids dragging in a tokio runtime just to fetch one file.
 dirs = "5"
+# Issue #132: gitignore-aware repo walk for the startup large-file guard.
+# Matches the major version ripgrep / fd use; no feature flags needed.
+ignore = "0.4"
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # Issue #73 / #110: embedded KV store for the session and tracked-entry

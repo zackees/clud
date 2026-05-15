@@ -13,6 +13,7 @@ pub mod daemon;
 pub mod dnd;
 pub mod gc;
 pub mod hook_health;
+pub mod large_file_guard;
 pub mod loop_artifacts;
 pub mod loop_spec;
 pub mod process_tree;
