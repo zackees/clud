@@ -1,7 +1,6 @@
 name: macOS x86 Build
 on:
   push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       build-mode:

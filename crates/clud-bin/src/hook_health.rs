@@ -792,6 +792,8 @@ fn run_backend_prompt(
         force: false,
         experimental_daemon_centralized: false,
         daemon_state_dir: None,
+        daemon_mode: None,
+        no_daemon: true,
         command: None,
         passthrough: args.passthrough.clone(),
     };

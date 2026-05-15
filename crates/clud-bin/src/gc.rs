@@ -31,7 +31,6 @@ use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::args::{Args, GcSubcommand};
-use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::worktrees;
 
 /// Env-var override for the DB path. Mirrors `CLUD_SESSION_DB` in
@@ -450,6 +449,13 @@ fn best_effort_branch(path: &Path) -> Option<String> {
 /// Polling scanner that watches a `.claude/worktrees/` directory and
 /// inserts new agent-* subdirs into the registry as they appear.
 /// Cancels cooperatively via `Arc<AtomicBool>`.
+///
+/// Issue #135 Phase 1: the scanner now sends `gc.insert` IPC ops to the
+/// daemon instead of opening redb directly. If the daemon is unreachable
+/// the scanner logs once at debug level and stops trying for the rest of
+/// the session. Phase 2 moves this entire scanner into the daemon
+/// process; for now the scanner thread still lives in the clud-bin
+/// process.
 pub struct WorktreeScanner {
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -457,16 +463,9 @@ pub struct WorktreeScanner {
 
 impl WorktreeScanner {
     /// Spawn a scanner watching the *current* repo's `.claude/worktrees/`.
-    /// Returns `None` if the registry can't be opened or the repo root
-    /// can't be located — the caller logs and continues.
+    /// Returns `None` if the repo root can't be located — the caller logs
+    /// and continues.
     pub fn maybe_spawn() -> Option<Self> {
-        let registry = match Registry::open_default() {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                eprintln!("[clud] warning: gc registry unavailable: {e}");
-                return None;
-            }
-        };
         let main_root = match worktrees::locate_main_repo_root() {
             Ok(p) => p,
             Err(_) => {
@@ -476,18 +475,18 @@ impl WorktreeScanner {
             }
         };
         let watch_dir = main_root.join(".claude").join("worktrees");
-        Some(Self::spawn(registry, watch_dir, Some(main_root)))
+        Some(Self::spawn(watch_dir, Some(main_root)))
     }
 
-    /// Explicit spawn. Tests pass a custom watch dir + tempdir-backed
-    /// registry. `scan_interval` is hardcoded to ~2s via the
-    /// 20-chunk × 100ms sleep loop.
-    pub fn spawn(registry: Arc<Registry>, watch_dir: PathBuf, repo_root: Option<PathBuf>) -> Self {
+    /// Explicit spawn. Tests pass a custom watch dir. Inserts go through
+    /// the GC daemon IPC; if the daemon is unreachable the scanner gives
+    /// up silently.
+    pub fn spawn(watch_dir: PathBuf, repo_root: Option<PathBuf>) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_t = cancel.clone();
         let handle = std::thread::Builder::new()
             .name("clud-gc-scanner".to_string())
-            .spawn(move || run_scanner_loop(registry, watch_dir, repo_root, cancel_t))
+            .spawn(move || run_scanner_loop(watch_dir, repo_root, cancel_t))
             .expect("spawn scanner thread");
         Self {
             cancel,
@@ -510,24 +509,58 @@ impl Drop for WorktreeScanner {
     }
 }
 
-fn run_scanner_loop(
-    registry: Arc<Registry>,
-    watch_dir: PathBuf,
-    repo_root: Option<PathBuf>,
-    cancel: Arc<AtomicBool>,
-) {
+/// Walk `watch_dir` once, sending `gc.insert` IPC ops for each agent-*
+/// subdir found. Returns `Err` on the first IPC failure so the caller
+/// can stop retrying.
+fn scan_once_via_ipc(watch_dir: &Path, repo_root: Option<&Path>) -> Result<(), String> {
+    let entries = match std::fs::read_dir(watch_dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("read_dir({:?}): {e}", watch_dir)),
+    };
+    for entry in entries.flatten() {
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = match name.to_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if !name_str.starts_with("agent-") {
+            continue;
+        }
+        let path = entry.path();
+        let path_str = path.to_string_lossy().to_string();
+        let branch = best_effort_branch(&path);
+        let input = InsertInput {
+            kind: "worktree".to_string(),
+            path: path_str,
+            repo_root: repo_root.map(|p| p.to_string_lossy().to_string()),
+            branch,
+            agent_id: Some(name_str),
+            now_unix: now_unix(),
+        };
+        crate::gc_daemon::client_insert(&input).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn run_scanner_loop(watch_dir: PathBuf, repo_root: Option<PathBuf>, cancel: Arc<AtomicBool>) {
     let repo_root_ref = repo_root.as_deref();
-    let mut last_error_kind: Option<String> = None;
+    let mut ipc_failed = false;
     while !cancel.load(Ordering::SeqCst) {
-        match reconcile_dir(&registry, &watch_dir, repo_root_ref) {
-            Ok(_) => last_error_kind = None,
-            Err(e) => {
-                // Dedupe noisy errors — log once per distinct kind.
-                let key = format!("{:?}", &e);
-                if last_error_kind.as_deref() != Some(&key) {
-                    eprintln!("[clud] warning: gc scanner: {e}");
-                    last_error_kind = Some(key);
+        if !ipc_failed {
+            if let Err(e) = scan_once_via_ipc(&watch_dir, repo_root_ref) {
+                // Best-effort: log once, then stop trying.
+                if std::env::var_os("CLUD_GC_SCANNER_VERBOSE").is_some() {
+                    eprintln!("[clud] debug: gc scanner: daemon ipc failed: {e}");
                 }
+                ipc_failed = true;
             }
         }
         // Interruptible sleep: 20 × 100ms = ~2s, but cancellable within
@@ -542,20 +575,42 @@ fn run_scanner_loop(
 }
 
 // ---------- CLI handlers ----------
+//
+// Issue #135 Phase 1: the CLI no longer opens the redb directly. Every
+// subcommand is a thin IPC client against the GC daemon; the daemon owns
+// the redb handle and serializes all reads/writes through a single
+// registry worker thread. See `gc_daemon.rs` for the protocol and the
+// auto-spawn flow. `--no-daemon` (or `CLUD_NO_DAEMON=1`) on any `clud gc`
+// op is an error — there is no read-only fallback in v1.
+
+use crate::gc_daemon;
 
 /// Dispatch a `clud gc` invocation. Returns the process exit code.
-pub fn run(sub: Option<GcSubcommand>) -> i32 {
-    match sub {
-        None => print_help_and_exit_zero(),
-        Some(GcSubcommand::List) => cmd_list(),
-        Some(GcSubcommand::Purge {
+pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
+    // Bare `clud gc` keeps printing help and does NOT contact the daemon.
+    if sub.is_none() {
+        return print_help_and_exit_zero();
+    }
+    if args.no_daemon || daemon_disabled_via_env() {
+        eprintln!("error: gc operations require the GC daemon; remove --no-daemon");
+        return 2;
+    }
+    match sub.unwrap() {
+        GcSubcommand::List { json } => cmd_list(json),
+        GcSubcommand::Purge {
             duration,
             dry_run,
             yes,
             kind,
-        }) => cmd_purge(&duration, dry_run, yes, kind.as_deref()),
-        Some(GcSubcommand::Reconcile) => cmd_reconcile(),
+        } => cmd_purge(duration.as_deref(), dry_run, yes, kind.as_deref()),
+        GcSubcommand::Reconcile => cmd_reconcile(),
     }
+}
+
+fn daemon_disabled_via_env() -> bool {
+    std::env::var_os(gc_daemon::ENV_NO_DAEMON)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn print_help_and_exit_zero() -> i32 {
@@ -573,36 +628,37 @@ fn print_help_and_exit_zero() -> i32 {
     }
 }
 
-fn open_registry_or_log() -> Option<Registry> {
-    match Registry::open_default() {
-        Ok(r) => Some(r),
-        Err(e) => {
-            eprintln!("error: {e}");
-            None
-        }
-    }
-}
-
-fn cmd_list() -> i32 {
-    let Some(registry) = open_registry_or_log() else {
-        return 1;
-    };
-    let rows = match registry.list(None) {
+fn cmd_list(json: bool) -> i32 {
+    let rows = match gc_daemon::client_list(None) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: list failed: {e}");
             return 1;
         }
     };
-    print_table(&rows);
+    if json {
+        match serde_json::to_string(&rows) {
+            Ok(s) => println!("{}", s),
+            Err(e) => {
+                eprintln!("error: serialize failed: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+    print_table_from_rows(&rows);
     0
 }
 
 fn cmd_reconcile() -> i32 {
-    let Some(registry) = open_registry_or_log() else {
-        return 1;
+    let main_root = match worktrees::locate_main_repo_root() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: reconcile requires a git repo: {e}");
+            return 1;
+        }
     };
-    match run_reconcile(&registry) {
+    match gc_daemon::client_reconcile(&main_root) {
         Ok(n) => {
             println!(
                 "reconcile: {n} new entr{}",
@@ -617,176 +673,48 @@ fn cmd_reconcile() -> i32 {
     }
 }
 
-fn cmd_purge(duration: &str, dry_run: bool, yes: bool, kind_filter: Option<&str>) -> i32 {
-    let dur = match worktrees::parse_duration(duration) {
-        Ok(d) => d,
-        Err(e) => {
+fn cmd_purge(duration: Option<&str>, dry_run: bool, yes: bool, kind_filter: Option<&str>) -> i32 {
+    // Pre-flight: validate the duration string before contacting the
+    // daemon (gives a clean exit-2 with a specific message for malformed
+    // input).
+    if let Some(d) = duration {
+        if let Err(e) = worktrees::parse_duration(d) {
             eprintln!("error: invalid duration: {e}");
             return 2;
         }
-    };
-    let Some(registry) = open_registry_or_log() else {
-        return 1;
-    };
-    // Run reconcile inline so the purge sees the latest worktrees.
-    if let Err(e) = run_reconcile(&registry) {
-        eprintln!("[clud] warning: pre-purge reconcile failed: {e}");
-    }
-    let cutoff = now_unix().saturating_sub(dur.as_secs() as i64);
-    let mut candidates = match registry.select_older_than(cutoff, kind_filter) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: select failed: {e}");
-            return 1;
-        }
-    };
-
-    // Apply liveness filter for worktree-kind rows: if the worktree is
-    // git-locked with `pid <N>` in its reason and the pid is alive, skip.
-    let live_locks = collect_live_lock_paths();
-    let mut skipped_live: Vec<TrackedEntry> = Vec::new();
-    candidates.retain(|c| {
-        if c.kind == "worktree" && live_locks.contains(&c.path) {
-            skipped_live.push(c.clone());
-            false
-        } else {
-            true
-        }
-    });
-
-    if candidates.is_empty() {
-        if !skipped_live.is_empty() {
-            println!(
-                "purge: no removable entries (skipped {} with live agent pid)",
-                skipped_live.len()
-            );
-        } else {
-            println!("purge: no entries older than {}", duration);
-        }
-        return 0;
     }
 
-    println!(
-        "purge plan ({} candidate(s) older than {duration}):",
-        candidates.len()
-    );
-    for c in &candidates {
-        let age = age_of(c);
-        println!(
-            "  remove  [{}]  {}  (age {}, agent {})",
-            c.kind,
-            c.path,
-            worktrees::fmt_age(age),
-            c.agent_id.as_deref().unwrap_or("-"),
-        );
-    }
-    if !skipped_live.is_empty() {
-        println!("skipped ({}, live agent pid):", skipped_live.len());
-        for s in &skipped_live {
-            println!("  skip    [{}]  {}", s.kind, s.path);
-        }
-    }
-
-    if dry_run {
-        println!("\n--dry-run: no changes made.");
-        return 0;
-    }
-
-    if !yes && !confirm_interactive(candidates.len()) {
+    // Interactive safety prompt for purge-all (no duration). When `--yes`
+    // is passed, skip. When `--dry-run` is passed, the daemon does not
+    // actually delete anything anyway.
+    if !dry_run && !yes && duration.is_none() && !confirm_purge_all() {
         println!("aborted.");
         return 0;
     }
 
-    let mut removed = 0usize;
-    let mut failed = 0usize;
-    for c in &candidates {
-        if let Err(e) = remove_entry_and_delete_row(&registry, c) {
-            eprintln!("error: failed to remove {}: {e}", c.path);
-            failed += 1;
-        } else {
-            removed += 1;
-        }
+    // Pre-purge reconcile so the daemon's view matches the current repo's
+    // `.claude/worktrees/`. Best-effort.
+    if let Ok(main_root) = worktrees::locate_main_repo_root() {
+        let _ = gc_daemon::client_reconcile(&main_root);
     }
-    println!(
-        "summary: {removed} removed, {skipped} skipped, {failed} failed.",
-        skipped = skipped_live.len(),
-    );
-    if failed > 0 {
-        1
-    } else {
-        0
-    }
-}
 
-/// Best-effort removal of a worktree (or arbitrary path) followed by the
-/// row delete. Each entry's removal + delete is its own transaction so a
-/// stuck row doesn't block the others.
-fn remove_entry_and_delete_row(registry: &Registry, entry: &TrackedEntry) -> Result<(), String> {
-    if entry.kind == "worktree" {
-        // Try git first; fall back to plain rm -rf only if the dir still
-        // exists after git's refusal.
-        let main_root = entry.repo_root.clone().unwrap_or_else(|| ".".to_string());
-        let git_result = worktrees::run_git(
-            Path::new(&main_root),
-            &["worktree", "remove", "--force", &entry.path],
-        );
-        match git_result {
-            Ok(_) => {}
-            Err(e) => {
-                let dir = Path::new(&entry.path);
-                if dir.exists() {
-                    std::fs::remove_dir_all(dir)
-                        .map_err(|fs_err| format!("git({e}); fs({fs_err})"))?;
-                }
-                // If the dir is already gone we treat the git failure as
-                // a no-op: the row is stale.
+    match gc_daemon::client_purge(duration, kind_filter, dry_run) {
+        Ok((removed, skipped)) => {
+            if dry_run {
+                println!("--dry-run: would remove {removed}, skip {skipped}.");
+            } else {
+                println!("summary: removed {removed}, skipped {skipped}.");
             }
+            0
         }
-    } else {
-        // Non-worktree kinds: best-effort directory delete.
-        let p = Path::new(&entry.path);
-        if p.exists() {
-            std::fs::remove_dir_all(p).map_err(|e| format!("remove_dir_all: {e}"))?;
-        }
-    }
-    registry.delete(entry.id).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Build the set of worktree paths whose `locked` line names a still-live
-/// pid. We probe `git worktree list --porcelain` in the current repo,
-/// parse each entry's lock reason, and run the embedded pid through the
-/// production `OsLivenessProbe`.
-fn collect_live_lock_paths() -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    let probe = OsLivenessProbe;
-    let main_root = match worktrees::locate_main_repo_root() {
-        Ok(p) => p,
-        Err(_) => return out,
-    };
-    let raw = match worktrees::run_git(&main_root, &["worktree", "list", "--porcelain"]) {
-        Ok(s) => s,
-        Err(_) => return out,
-    };
-    let entries = worktrees::parse_worktree_porcelain(&raw);
-    for e in entries {
-        if !e.locked {
-            continue;
-        }
-        let Some(reason) = e.locked_reason.as_deref() else {
-            continue;
-        };
-        let Some(pid) = extract_pid_from_lock_reason(reason) else {
-            continue;
-        };
-        if probe.is_alive(pid) {
-            out.insert(e.path.to_string_lossy().to_string());
+        Err(e) => {
+            eprintln!("error: purge failed: {e}");
+            1
         }
     }
-    out
 }
 
-fn print_table(rows: &[TrackedEntry]) {
+fn print_table_from_rows(rows: &[gc_daemon::ListRow]) {
     if rows.is_empty() {
         println!("(no tracked entries)");
         return;
@@ -823,13 +751,9 @@ fn print_table(rows: &[TrackedEntry]) {
     }
 }
 
-fn age_of(r: &TrackedEntry) -> Duration {
-    Duration::from_secs((now_unix() - r.created_unix).max(0) as u64)
-}
-
-fn confirm_interactive(n: usize) -> bool {
+fn confirm_purge_all() -> bool {
     use std::io::{self, Write};
-    print!("remove {n} entry/entries? [y/N] ");
+    print!("purge ALL non-live-locked entries? [y/N] ");
     let _ = io::stdout().flush();
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
@@ -1060,40 +984,18 @@ mod tests {
         assert_eq!(after.id, before.id, "id must remain stable");
     }
 
-    #[test]
-    fn scanner_inserts_new_worktree_within_one_cycle() {
-        let path = fresh_db_path("scanner-insert");
-        let reg = Arc::new(Registry::open_at(&path).unwrap());
-        let dir = tempfile::tempdir().unwrap();
-        let watch = dir.path().to_path_buf();
-        std::fs::create_dir_all(&watch).unwrap();
-        let mut scanner = WorktreeScanner::spawn(reg.clone(), watch.clone(), None);
-        // Create after spawn, give the loop one cycle to notice.
-        std::thread::sleep(Duration::from_millis(300));
-        std::fs::create_dir_all(watch.join("agent-fresh")).unwrap();
-        // Up to 2 full cycles (~4s) before we declare failure — generous
-        // for slow CI hosts.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if reg.count().unwrap() >= 1 {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                panic!("scanner did not pick up agent-fresh within 5s");
-            }
-            std::thread::sleep(Duration::from_millis(150));
-        }
-        scanner.cancel();
-        let rows = reg.list(None).unwrap();
-        assert!(rows.iter().any(|r| r.path.ends_with("agent-fresh")));
-    }
+    // Issue #135 Phase 1: the scanner now talks IPC to the GC daemon
+    // rather than opening redb directly. Verifying the end-to-end insert
+    // path now lives in `gc_daemon::tests` and the Python integration
+    // tests; here we only verify the scanner cancels promptly.
 
     #[test]
     fn scanner_cancels_promptly() {
-        let path = fresh_db_path("scanner-cancel");
-        let reg = Arc::new(Registry::open_at(&path).unwrap());
+        // Force the IPC path to be disabled so the scanner doesn't
+        // attempt a real daemon spawn in CI.
+        std::env::set_var(crate::gc_daemon::ENV_NO_DAEMON, "1");
         let dir = tempfile::tempdir().unwrap();
-        let mut scanner = WorktreeScanner::spawn(reg, dir.path().to_path_buf(), None);
+        let mut scanner = WorktreeScanner::spawn(dir.path().to_path_buf(), None);
         let start = std::time::Instant::now();
         scanner.cancel();
         let elapsed = start.elapsed();
