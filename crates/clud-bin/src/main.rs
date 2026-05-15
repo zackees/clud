@@ -655,6 +655,43 @@ enum ProcessOutcome {
     Error,
 }
 
+/// Tear down a backend child that has not exited yet because the user
+/// just hit Ctrl+C.
+///
+/// Sequence:
+///
+/// 1. Windows-only: send `CTRL_BREAK_EVENT` to the child's console
+///    process group. The backend is spawned with
+///    `CREATE_NEW_PROCESS_GROUP` so the OS does *not* deliver the
+///    user's `CTRL_C_EVENT` to it — that prevents stray
+///    `KeyboardInterrupt` tracebacks from blocking `subprocess` waits
+///    in the `nodejs-wheel` Python launcher used by some Claude Code
+///    installs. The break we send here is the cooperative path for any
+///    backend that *does* install a Ctrl+Break handler. Failures and
+///    non-Windows targets short-circuit silently and we proceed to the
+///    hard kill.
+/// 2. `kill_tree`: snapshot the PID *before* killing the direct child
+///    so we can walk descendants. On Windows the direct child is
+///    cmd.exe (BatBadBat wrapper, see `subprocess.rs`) and the real
+///    agent (node.exe for codex / claude) is a grandchild — plain
+///    `process.kill()` would only TerminateProcess the cmd.exe and the
+///    orphan would keep writing to the console until our Job Object
+///    closes, producing the multi-second hang users reported.
+/// 3. `process.kill()` + `process.wait(2s)`: final TerminateProcess on
+///    the direct handle and a bounded wait so we don't return while
+///    the child is still draining.
+fn teardown_interrupted_child(process: &running_process_core::NativeProcess) {
+    if let Some(pid) = process.pid() {
+        // Cooperative Ctrl+Break first. No-op on POSIX (returns false)
+        // and any failure on Windows is non-fatal — the hard kill below
+        // is always run regardless.
+        let _ = process_tree::try_break_group(pid);
+        process_tree::kill_tree(pid);
+    }
+    let _ = process.kill();
+    let _ = process.wait(Some(std::time::Duration::from_secs(2)));
+}
+
 /// Inherited-stdio path: poll the child until it exits, kill on Ctrl+C.
 /// This is the original `run_plan_subprocess` body, extracted unchanged so
 /// the stream-json path can sit alongside it without duplicating the
@@ -673,19 +710,7 @@ fn run_with_inherited_stdio(
             }
             Ok(None) => {
                 if interrupted.load(Ordering::SeqCst) {
-                    // Snapshot the PID *before* killing the direct child so
-                    // we can take down the descendant tree. On Windows the
-                    // direct child is cmd.exe (BatBadBat wrapper) but the
-                    // real agent (node.exe for codex) is a grandchild. A
-                    // plain `process.kill()` only TerminateProcess'es the
-                    // cmd.exe, leaving node.exe writing to the console
-                    // until clud itself exits and the Job Object closes —
-                    // that's the multi-second hang users were reporting.
-                    if let Some(pid) = process.pid() {
-                        process_tree::kill_tree(pid);
-                    }
-                    let _ = process.kill();
-                    let _ = process.wait(Some(std::time::Duration::from_secs(2)));
+                    teardown_interrupted_child(process);
                     return ProcessOutcome::Interrupted;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -720,16 +745,7 @@ fn run_with_stream_json_renderer(
     let timeout = Duration::from_millis(100);
     loop {
         if interrupted.load(Ordering::SeqCst) {
-            // Same descendant-kill rationale as `run_with_inherited_stdio`:
-            // when the user Ctrl+C's `clud --codex loop`, the direct child
-            // is cmd.exe and the actual codex process (node.exe) lives one
-            // level deeper. We must take down the tree, not just the
-            // immediate child, otherwise Ctrl+C lags for seconds.
-            if let Some(pid) = process.pid() {
-                process_tree::kill_tree(pid);
-            }
-            let _ = process.kill();
-            let _ = process.wait(Some(Duration::from_secs(2)));
+            teardown_interrupted_child(process);
             return ProcessOutcome::Interrupted;
         }
         match process.read_stream(StreamKind::Stdout, Some(timeout)) {
