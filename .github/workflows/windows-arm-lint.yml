@@ -1,7 +1,6 @@
 name: Windows ARM Lint
 on:
   push:
-    branches: [main]
 jobs:
   call:
     uses: ./.github/workflows/_lint.yml

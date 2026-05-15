@@ -1,7 +1,6 @@
 name: Linux x86 Lint
 on:
   push:
-    branches: [main]
 jobs:
   call:
     uses: ./.github/workflows/_lint.yml
