@@ -101,6 +101,20 @@ pub struct Args {
     #[arg(long = "daemon-state-dir", hide = true)]
     pub daemon_state_dir: Option<PathBuf>,
 
+    /// Issue #135: select daemon mode. `gc` runs the GC-only daemon (no
+    /// session TCP listener). `session` and `auto` are reserved for the
+    /// current centralized-session daemon path (forward-compatible alias).
+    /// Used implicitly by the internal `__gc-daemon` subcommand and the
+    /// auto-spawn helper; setting it explicitly is rare.
+    #[arg(long = "daemon", value_name = "MODE", hide = true)]
+    pub daemon_mode: Option<String>,
+
+    /// Issue #135: opt out of the GC daemon auto-spawn for this invocation.
+    /// `clud gc *` operations fail fast with this flag because they
+    /// require the daemon. Other code paths skip the spawn silently.
+    #[arg(long = "no-daemon")]
+    pub no_daemon: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -190,6 +204,14 @@ pub enum Command {
         #[arg(long = "state-dir")]
         state_dir: PathBuf,
     },
+    /// Issue #135: GC-only daemon mode. Internal subcommand used by
+    /// `gc_daemon::ensure_running()`. Binds a loopback TCP port, owns
+    /// `~/.clud/data.redb` exclusively, and serves the `gc.*` IPC ops.
+    #[command(name = "__gc-daemon", hide = true)]
+    InternalGcDaemon {
+        #[arg(long = "state-dir")]
+        state_dir: PathBuf,
+    },
     #[command(name = "__worker", hide = true)]
     InternalWorker {
         #[arg(long = "state-dir")]
@@ -207,11 +229,17 @@ pub enum Command {
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
     /// Print every tracked entry, newest first.
-    List,
-    /// Remove tracked entries older than `<duration>`.
+    List {
+        /// Issue #135: emit a JSON array instead of the human-readable table.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Remove tracked entries older than `<duration>`. When `<duration>`
+    /// is omitted, purge ALL tracked entries that are not live-locked.
     Purge {
-        /// Duration (e.g. `30s`, `5m`, `2h`, `1d`).
-        duration: String,
+        /// Duration (e.g. `30s`, `5m`, `2h`, `1d`). When omitted, purge
+        /// every non-live-locked entry regardless of age.
+        duration: Option<String>,
         /// Preview the removal plan without touching anything.
         #[arg(long = "dry-run")]
         dry_run: bool,
@@ -258,6 +286,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--repeat",
         "--daemon-state-dir",
         "--stale-after",
+        "--daemon",
+        "--state-dir",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
@@ -283,13 +313,26 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--fix-hooks",
         "--yes",
         "--force",
+        "--no-daemon",
+        "--json",
         "--help",
         "--version",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "__daemon",
+        "loop",
+        "up",
+        "rebase",
+        "fix",
+        "wasm",
+        "attach",
+        "kill",
+        "list",
+        "logs",
+        "gc",
+        "__daemon",
         "__worker",
+        "__gc-daemon",
     ];
 
     let mut in_subcommand = false;
@@ -1036,9 +1079,21 @@ mod tests {
         let args = parse(&["clud", "gc", "list"]);
         match args.command {
             Some(Command::Gc {
-                subcommand: Some(GcSubcommand::List),
-            }) => {}
+                subcommand: Some(GcSubcommand::List { json }),
+            }) => assert!(!json),
             _ => panic!("expected Gc::List"),
+        }
+    }
+
+    #[test]
+    fn test_gc_list_json() {
+        // Issue #135: `clud gc list --json` emits JSON for downstream tooling.
+        let args = parse(&["clud", "gc", "list", "--json"]);
+        match args.command {
+            Some(Command::Gc {
+                subcommand: Some(GcSubcommand::List { json }),
+            }) => assert!(json),
+            _ => panic!("expected Gc::List --json"),
         }
     }
 
@@ -1055,12 +1110,26 @@ mod tests {
                         ref kind,
                     }),
             }) => {
-                assert_eq!(duration, "1d");
+                assert_eq!(duration.as_deref(), Some("1d"));
                 assert!(!dry_run);
                 assert!(!yes);
                 assert!(kind.is_none());
             }
             _ => panic!("expected Gc::Purge"),
+        }
+    }
+
+    #[test]
+    fn test_gc_purge_without_duration_means_purge_all() {
+        // Issue #135 Phase 1: bare `clud gc purge` -> purge ALL non-live-locked.
+        let args = parse(&["clud", "gc", "purge"]);
+        match args.command {
+            Some(Command::Gc {
+                subcommand: Some(GcSubcommand::Purge { ref duration, .. }),
+            }) => {
+                assert!(duration.is_none(), "purge with no arg -> None duration");
+            }
+            _ => panic!("expected bare Gc::Purge"),
         }
     }
 
@@ -1086,13 +1155,20 @@ mod tests {
                         ref kind,
                     }),
             }) => {
-                assert_eq!(duration, "7d");
+                assert_eq!(duration.as_deref(), Some("7d"));
                 assert!(dry_run);
                 assert!(yes);
                 assert_eq!(kind.as_deref(), Some("worktree"));
             }
             _ => panic!("expected Gc::Purge with flags"),
         }
+    }
+
+    #[test]
+    fn test_no_daemon_flag() {
+        // Issue #135: `--no-daemon` disables auto-spawn.
+        let args = parse(&["clud", "--no-daemon", "-p", "hi"]);
+        assert!(args.no_daemon);
     }
 
     #[test]
