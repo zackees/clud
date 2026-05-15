@@ -1831,7 +1831,15 @@ fn start_subprocess_session(
         .start()
         .map_err(|err| io::Error::other(err.to_string()))?;
 
-    {
+    // Drain stdout in a dedicated thread. We must NOT broadcast the
+    // backend's exit until this drain has fully completed, otherwise
+    // a race lets the wait-thread enqueue `Exited` ahead of an
+    // unflushed final `Output` chunk on the worker→client channel —
+    // an attaching client then breaks on Exited and silently drops
+    // the backend's last line of output. macOS-ARM hit this most
+    // often in `test_attach_last` (PR #136); the equivalent flake on
+    // other platforms is harder to trigger but the bug is pre-existing.
+    let read_handle = {
         let process = Arc::clone(&process);
         let shared = Arc::clone(shared);
         thread::spawn(move || loop {
@@ -1848,16 +1856,23 @@ fn start_subprocess_session(
                 }
                 ReadStatus::Eof => break,
             }
-        });
-    }
+        })
+    };
 
     {
         let process = Arc::clone(&process);
         let shared = Arc::clone(shared);
         thread::spawn(move || {
-            if let Ok(code) = process.wait(None) {
-                shared.broadcast_exit(code);
-            }
+            let code = match process.wait(None) {
+                Ok(code) => code,
+                Err(_) => return,
+            };
+            // Wait for the stdout drain to finish so every `push_output`
+            // call has landed before we enqueue `Exited`. `read_combined`
+            // polls with a 100ms timeout and rechecks `returncode()` on
+            // each Timeout, so this join terminates within ~100ms.
+            let _ = read_handle.join();
+            shared.broadcast_exit(code);
         });
     }
 
@@ -1889,7 +1904,10 @@ fn start_pty_session(
         .start_impl()
         .map_err(|err| io::Error::other(err.to_string()))?;
 
-    {
+    // Same Output-vs-Exited race fix as `start_subprocess_session`:
+    // join the PTY-read thread before broadcasting exit so the
+    // final chunk can never be enqueued after `Exited`.
+    let read_handle = {
         let process = Arc::clone(&process);
         let shared = Arc::clone(shared);
         thread::spawn(move || loop {
@@ -1904,16 +1922,19 @@ fn start_pty_session(
                 }
                 Err(_) => break,
             }
-        });
-    }
+        })
+    };
 
     {
         let process = Arc::clone(&process);
         let shared = Arc::clone(shared);
         thread::spawn(move || {
-            if let Ok(code) = process.wait_impl(None) {
-                shared.broadcast_exit(code);
-            }
+            let code = match process.wait_impl(None) {
+                Ok(code) => code,
+                Err(_) => return,
+            };
+            let _ = read_handle.join();
+            shared.broadcast_exit(code);
         });
     }
 
