@@ -158,7 +158,20 @@ fn main() {
     // launch on spawn failure. `--dry-run` also skips so unit tests that
     // copy the binary into a tempdir don't leave the daemon's `.old`
     // exe locked when tempdir cleanup runs.
-    if !args.no_daemon && !args.dry_run {
+    //
+    // Also skip when the centralized session daemon path is active
+    // (`daemon::experimental_enabled`): that path manages its own
+    // detached-daemon lifecycle (session daemon + per-session worker)
+    // via `trampoline::spawn_detached_self`. Auto-spawning a second
+    // detached background process from the same parent racing alongside
+    // the session-daemon spawn destabilizes the test's `clud list`
+    // visibility on Linux — the spawned children share fd inheritance
+    // and process-group setup that briefly perturbs the freshly-spawned
+    // session worker. Subsequent non-experimental clud invocations
+    // (including the per-iteration child cluds the repeat worker
+    // launches) still trigger the auto-spawn, so the gc daemon is
+    // available as soon as it's first actually needed.
+    if !args.no_daemon && !args.dry_run && !daemon::experimental_enabled(&args) {
         if let Err(e) = gc_daemon::ensure_running() {
             eprintln!("[clud] note: gc daemon unavailable: {}", e);
         }
