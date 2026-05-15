@@ -1179,18 +1179,22 @@ mod tests {
             run_registration_loop(&*worker_registrar, cfg, &worker_shutdown)
         });
 
-        // Let the loop tick a few times.
-        std::thread::sleep(Duration::from_millis(220));
+        // Poll for the loop to tick 1 initial + ≥2 refreshes. A fixed sleep
+        // was flaky on slow runners (e.g. macOS ARM under load only managed
+        // 2 calls in 220 ms, see run 25886391903). Polling with a generous
+        // deadline keeps the test deterministic on any platform.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while calls.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         shutdown.signal();
         let result = handle.join().expect("worker panicked");
         result.expect("loop ok");
 
-        // 1 initial + at least 2 refreshes within ~220ms.
         let n = calls.load(Ordering::SeqCst);
         assert!(
             n >= 3,
-            "expected at least 3 register calls, got {} (initial + ≥2 refreshes)",
-            n
+            "expected at least 3 register calls, got {n} (initial + ≥2 refreshes) within 5s budget",
         );
     }
 
