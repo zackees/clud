@@ -1,7 +1,7 @@
 use clud::{
-    args, backend, command, console_title, daemon, dnd, gc, hook_health, loop_artifacts, loop_spec,
-    process_tree, session, session_registry, skill_install, skills, stream_json, subprocess,
-    trampoline, voice, wasm, worktrees,
+    args, backend, command, console_title, daemon, dnd, gc, hook_health, large_file_guard,
+    loop_artifacts, loop_spec, process_tree, session, session_registry, skill_install, skills,
+    stream_json, subprocess, trampoline, voice, wasm, worktrees,
 };
 
 use std::io::{self, Read};
@@ -135,6 +135,12 @@ fn main() {
 
     if hook_health::should_check_launch(&args) {
         hook_health::emit_launch_warnings();
+    }
+
+    if !args.clean_worktrees && !args.fix_hooks {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let root = loop_spec::git_root_from(&cwd);
+        large_file_guard::run(&root);
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);
