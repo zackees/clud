@@ -1,7 +1,7 @@
 use clud::{
-    args, backend, command, console_title, daemon, dnd, gc, hook_health, large_file_guard,
-    loop_artifacts, loop_spec, process_tree, session, session_registry, skill_install, skills,
-    stream_json, subprocess, trampoline, voice, wasm, worktrees,
+    args, backend, command, console_title, daemon, dnd, gc, gc_daemon, hook_health,
+    large_file_guard, loop_artifacts, loop_spec, process_tree, session, session_registry,
+    skill_install, skills, stream_json, subprocess, trampoline, voice, wasm, worktrees,
 };
 
 use std::io::{self, Read};
@@ -47,12 +47,20 @@ fn main() {
 
     let mut args = args::Args::parse_with_passthrough();
 
+    // Issue #135: hidden `__gc-daemon` subcommand is the GC-only daemon
+    // entry point. Owns `~/.clud/data.redb` exclusively and serves the
+    // `gc.*` IPC ops. Dispatch first so it never falls through to
+    // backend resolution.
+    if let Some(args::Command::InternalGcDaemon { state_dir }) = &args.command {
+        std::process::exit(gc_daemon::run_daemon(state_dir));
+    }
+
     // Issue #110: `clud gc <subcommand>` is a self-contained
     // maintenance path that never launches a backend. Dispatch before
     // backend resolution and before any session registry / dnd work
     // so a registry-less host can still run `clud gc reconcile`.
     if let Some(args::Command::Gc { subcommand }) = &args.command {
-        std::process::exit(gc::run(subcommand.clone()));
+        std::process::exit(gc::run(&args, subcommand.clone()));
     }
 
     // Issue #83: `--clean-worktrees` is a self-contained maintenance path.
@@ -141,6 +149,19 @@ fn main() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let root = loop_spec::git_root_from(&cwd);
         large_file_guard::run(&root);
+    }
+
+    // Issue #135: best-effort auto-spawn of the GC daemon. The daemon
+    // owns `~/.clud/data.redb` exclusively and serves IPC ops for the
+    // `clud gc` CLI and the in-process `WorktreeScanner`. Skips silently
+    // when `--no-daemon` or `CLUD_NO_DAEMON=1` is set; never blocks a
+    // launch on spawn failure. `--dry-run` also skips so unit tests that
+    // copy the binary into a tempdir don't leave the daemon's `.old`
+    // exe locked when tempdir cleanup runs.
+    if !args.no_daemon && !args.dry_run {
+        if let Err(e) = gc_daemon::ensure_running() {
+            eprintln!("[clud] note: gc daemon unavailable: {}", e);
+        }
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);
