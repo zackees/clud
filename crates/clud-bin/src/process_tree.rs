@@ -25,6 +25,10 @@
 //! Best-effort: failures are silent and the whole operation is bounded by
 //! the cost of one `sysinfo` system snapshot, which is well under our
 //! sub-second Ctrl+C latency target.
+//!
+//! [`try_break_group`] is the cooperative companion on Windows: it sends
+//! `CTRL_BREAK_EVENT` to the child's console process group so a
+//! well-behaved agent can flush state before the hard `kill_tree` follows.
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
@@ -86,6 +90,43 @@ fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
         }
     }
     descendants
+}
+
+/// Best-effort cooperative shutdown of a Windows console process group.
+///
+/// When clud spawns the backend with `CREATE_NEW_PROCESS_GROUP`, the
+/// child becomes the root of a new console process group identified by
+/// its PID. Calling `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`
+/// delivers a break signal to every process in that group, giving a
+/// well-behaved agent (one that installs a `SetConsoleCtrlHandler` for
+/// `CTRL_BREAK_EVENT`) a chance to flush state before clud follows up
+/// with a hard `kill_tree`.
+///
+/// Returns `true` if the OS accepted the call (the group existed and the
+/// event was queued), `false` otherwise. Failures are silent and
+/// non-fatal: the caller is expected to fall through to `kill_tree` after
+/// a short grace window regardless.
+///
+/// No-op on non-Windows targets — POSIX has no `CREATE_NEW_PROCESS_GROUP`
+/// concept and clud's foreground process group already receives the
+/// terminal's SIGINT directly.
+pub fn try_break_group(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+        // SAFETY: `GenerateConsoleCtrlEvent` is documented as safe to
+        // call with any PID; passing a non-existent group simply returns
+        // FALSE without dereferencing memory. The function signature in
+        // `windows-rs` is `unsafe extern "system"`, which is the standard
+        // marker for Win32 entry points — no Rust invariant is violated.
+        let ok = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+        ok.is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 #[cfg(test)]
