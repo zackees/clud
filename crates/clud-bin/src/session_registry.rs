@@ -27,13 +27,26 @@
 //! One `redb` `Table` keyed by PID (`u32`) → JSON-serialized `SessionRow`.
 //! A small `meta` table records `schema_version`.
 //!
-//! ## Concurrency
+//! ## Concurrency (issue #138)
 //!
-//! Multiple `clud` processes may hit the same DB simultaneously. `redb`
-//! coordinates inter-process access via OS file locks and serializes
-//! writers at the file level — the cap check + insert all live inside a
-//! single `WriteTransaction` so a sibling can't race past us between the
-//! count probe and the insert.
+//! `redb` takes an **exclusive per-process file lock** when it opens a
+//! database (`LockFileEx` on Windows, `flock` on POSIX) — only one
+//! process at a time can hold the redb file open. To serialize concurrent
+//! `clud` startups without failing the loser with `DatabaseAlreadyOpen`,
+//! every redb open is bracketed by an `fs4` advisory exclusive lock on a
+//! sibling lock file (`sessions.lock` next to `sessions.redb`):
+//!
+//!   1. Acquire `sessions.lock` (blocks if a sibling holds it).
+//!   2. Open `sessions.redb`.
+//!   3. GC dead siblings, check the cap, register-self (write txn).
+//!   4. Close redb (`Drop`).
+//!   5. Release `sessions.lock` (OS reclaims on fd drop).
+//!
+//! The lock is held only for the duration of the startup ops (a few ms),
+//! not for the lifetime of the `clud` session. Shutdown re-acquires the
+//! lock briefly to remove the row. This means N concurrent `clud` launches
+//! serialize on the *lock* — never on the redb file lock — and the cap
+//! check is consistent across all of them.
 //!
 //! ## Liveness probe
 //!
@@ -44,10 +57,12 @@
 //! on POSIX `kill(pid, 0)` (which returns 0 / `ESRCH` without actually
 //! sending a signal).
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs4::fs_std::FileExt;
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +80,15 @@ pub const ENV_WARN_INSTANCES: &str = "CLUD_WARN_INSTANCES";
 
 /// Environment variable: DB path override (used by tests).
 pub const ENV_SESSION_DB: &str = "CLUD_SESSION_DB";
+
+/// Environment variable: lock-file path override. Defaults to the
+/// `sessions.redb` parent dir + `sessions.lock`. Tests can point this at
+/// a tempdir to isolate from concurrent test runs.
+pub const ENV_SESSION_LOCK: &str = "CLUD_SESSION_LOCK";
+
+/// Filename used for the cross-process advisory lock when the path is
+/// derived from the DB path's parent dir.
+const LOCK_FILE_NAME: &str = "sessions.lock";
 
 /// redb table: `pid -> serde_json::to_vec(&SessionRow)`.
 const SESSIONS: TableDefinition<u32, &[u8]> = TableDefinition::new("sessions");
@@ -511,6 +535,26 @@ impl SessionRegistry {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+
+    /// Delete this process's row explicitly (issue #138). Unlike `Drop`,
+    /// this is a synchronous, error-reporting deletion the startup/shutdown
+    /// helpers can call inside the lockfile's critical section.
+    ///
+    /// Clears the `registered` flag so a subsequent `Drop` doesn't try to
+    /// re-delete and clobber a sibling that happens to inherit our PID
+    /// after we exit (POSIX PID reuse).
+    pub fn unregister(&self) -> Result<(), RegistryError> {
+        let pid = self.own_pid;
+        let wtxn = self.db.begin_write()?;
+        {
+            let mut table = wtxn.open_table(SESSIONS)?;
+            let _ = table.remove(pid)?;
+        }
+        wtxn.commit()?;
+        self.registered
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl Drop for SessionRegistry {
@@ -549,6 +593,130 @@ fn decide_cap(count: u64, cfg: &CapConfig) -> CapDecision {
         return CapDecision::Warn(count);
     }
     CapDecision::Allow
+}
+
+/// RAII guard for the cross-process session-registry lock (issue #138).
+/// The OS releases the advisory lock automatically when the file handle
+/// drops (or when the process exits), so Drop is intentionally empty —
+/// we just need to keep the `File` alive.
+pub struct LockGuard {
+    _file: File,
+}
+
+/// Acquire the cross-process session-registry advisory lock. Blocks
+/// until the lock is exclusive to us; only fails on filesystem errors
+/// (missing parent dir we can't create, permission denied, etc.).
+///
+/// The lock file path comes from `CLUD_SESSION_LOCK` if set, else from
+/// the DB path's parent dir + `sessions.lock`. Tests can point both env
+/// vars at a tempdir to fully isolate from the host's real registry.
+pub fn acquire_lock() -> Result<LockGuard, RegistryError> {
+    let path = default_lock_path()?;
+    acquire_lock_at(&path)
+}
+
+/// Acquire the lock at a specific path. Public for tests; production
+/// callers should use `acquire_lock()` so the env override is honored.
+pub fn acquire_lock_at(path: &Path) -> Result<LockGuard, RegistryError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| RegistryError::Io(format!("create_dir_all({:?}): {e}", parent)))?;
+        }
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| RegistryError::Io(format!("open lock {:?}: {e}", path)))?;
+    // Blocks until acquired. The lock auto-releases on fd drop or
+    // process death, so a crashed `clud` doesn't deadlock siblings.
+    FileExt::lock_exclusive(&file)
+        .map_err(|e| RegistryError::Io(format!("lock_exclusive: {e}")))?;
+    Ok(LockGuard { _file: file })
+}
+
+/// Resolve the path used for the session-registry advisory lock.
+/// `CLUD_SESSION_LOCK` overrides; otherwise we derive it from the DB
+/// path's parent dir so both files live next to each other.
+pub fn default_lock_path() -> Result<PathBuf, RegistryError> {
+    if let Some(v) = std::env::var_os(ENV_SESSION_LOCK) {
+        return Ok(PathBuf::from(v));
+    }
+    let db_path = match std::env::var_os(ENV_SESSION_DB) {
+        Some(v) => PathBuf::from(v),
+        None => default_db_path()?,
+    };
+    let parent = db_path
+        .parent()
+        .map(Path::to_path_buf)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok(parent.join(LOCK_FILE_NAME))
+}
+
+/// Result of `run_startup_under_lock`: the cap decision plus a flag for
+/// whether `register_self` was called (only true when the decision was
+/// Allow or Warn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupOutcome {
+    pub decision: CapDecision,
+    pub registered: bool,
+}
+
+/// Run the full startup sequence (gc → cap-check → register) under the
+/// cross-process lock, then close the redb file. Returns the cap decision
+/// plus whether we registered ourselves. Caller (typically `main.rs`)
+/// decides what to do with the decision: print a warning, refuse to
+/// launch, or proceed.
+///
+/// On `Refuse(_)` the row is **not** inserted — the caller is supposed
+/// to exit, and inserting would inflate the count for the next sibling.
+pub fn run_startup_under_lock(
+    cfg: &CapConfig,
+    info: SessionInfo,
+) -> Result<StartupOutcome, RegistryError> {
+    let _lock = acquire_lock()?;
+    let registry = SessionRegistry::open_default()?;
+    let _ = registry.gc_dead_sessions()?;
+    let decision = registry.check_cap(cfg)?;
+    let mut registered = false;
+    if !matches!(decision, CapDecision::Refuse(_)) {
+        registry.register_self(info)?;
+        // `register_self` sets the `registered` flag, which would tell
+        // the registry's `Drop` impl to immediately remove our row. We
+        // *want* the row to persist after this function returns so
+        // sibling launches can see us in their cap count — cleanup
+        // happens later in `run_shutdown_under_lock`. Clear the flag
+        // here to disarm Drop.
+        registry
+            .registered
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        registered = true;
+    }
+    // Drop registry (closes redb) before dropping _lock so the redb file
+    // lock releases first; the next sibling can open redb as soon as our
+    // lock drops.
+    drop(registry);
+    drop(_lock);
+    Ok(StartupOutcome {
+        decision,
+        registered,
+    })
+}
+
+/// Run the shutdown sequence (remove own row) under the cross-process
+/// lock, then close the redb file. Best-effort: if anything fails we
+/// return the error but the next startup's GC pass will clean the row.
+pub fn run_shutdown_under_lock() -> Result<(), RegistryError> {
+    let _lock = acquire_lock()?;
+    let registry = SessionRegistry::open_default()?;
+    registry.unregister()?;
+    drop(registry);
+    drop(_lock);
+    Ok(())
 }
 
 /// Resolve the OS-default DB path. `%LOCALAPPDATA%\clud\sessions.redb` on
@@ -979,5 +1147,181 @@ mod tests {
         seen.insert(a);
         seen.insert(b);
         assert_eq!(seen.len(), 2);
+    }
+
+    /// **Issue #138 regression test**: `unregister` deletes the row
+    /// synchronously and clears the `registered` flag so a subsequent
+    /// `Drop` doesn't try to re-delete the row (and possibly clobber a
+    /// sibling that inherited our PID via PID reuse).
+    #[test]
+    fn unregister_deletes_row_and_clears_flag() {
+        let path = fresh_db_path("unregister");
+        let reg = open_with_alive_set(&path, vec![std::process::id()]);
+        reg.register_self(SessionInfo {
+            pid: std::process::id(),
+            started_unix: 1234,
+            backend: None,
+            launch_mode: None,
+            cwd: None,
+        })
+        .unwrap();
+        assert_eq!(reg.count_live().unwrap(), 1);
+        assert!(reg.registered.load(std::sync::atomic::Ordering::SeqCst));
+        reg.unregister().unwrap();
+        assert_eq!(reg.count_live().unwrap(), 0);
+        assert!(!reg.registered.load(std::sync::atomic::Ordering::SeqCst));
+        // Subsequent Drop must not panic and must not touch the table.
+        drop(reg);
+        let reg2 = open_with_alive_set(&path, vec![]);
+        assert_eq!(reg2.count_live().unwrap(), 0);
+    }
+
+    /// **Issue #138 regression test**: two `acquire_lock_at` calls on the
+    /// same lock path serialize — the second one only returns after the
+    /// first guard drops. We model "wait for the other thread" with a
+    /// barrier + a generous timeout to keep the test deterministic on
+    /// slow CI without making the happy path slow.
+    ///
+    /// Why this is the right shape: redb's exclusive lock fails fast on
+    /// contention; `fs4`'s `lock_exclusive` blocks. The lock-file pattern
+    /// from issue #138 converts a "fail on contention" surface into a
+    /// "queue on contention" surface — that's what this test pins.
+    #[test]
+    fn acquire_lock_serializes_callers() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock_path = dir.path().join("acquire-serializes.lock");
+
+        // Holder thread: grabs the lock, then sleeps for a known interval.
+        let holder_path = lock_path.clone();
+        let holder_started = Arc::new(AtomicU64::new(0));
+        let holder_released = Arc::new(AtomicU64::new(0));
+        let holder_started_clone = Arc::clone(&holder_started);
+        let holder_released_clone = Arc::clone(&holder_released);
+        let holder = thread::spawn(move || {
+            let _guard = acquire_lock_at(&holder_path).expect("holder lock");
+            holder_started_clone.store(now_ms(), Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(200));
+            holder_released_clone.store(now_ms(), Ordering::SeqCst);
+        });
+
+        // Wait until the holder confirms it owns the lock before we try
+        // to acquire from this thread. Otherwise we might *win* the race
+        // and the test asserts nothing.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while holder_started.load(Ordering::SeqCst) == 0 {
+            if std::time::Instant::now() > deadline {
+                panic!("holder never acquired the lock");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        // Now race: this acquire MUST block until the holder releases.
+        let waiter_acquired = now_ms();
+        let _guard = acquire_lock_at(&lock_path).expect("waiter lock");
+        let waiter_unblocked = now_ms();
+        holder.join().expect("holder join");
+
+        // The waiter's unblock time should be at or after the holder's
+        // release time. Generous epsilon (50ms) for clock skew between
+        // the two thread observations on a busy CI runner.
+        let released = holder_released.load(Ordering::SeqCst);
+        assert!(
+            waiter_unblocked + 50 >= released,
+            "waiter unblocked at {waiter_unblocked} but holder released at {released}",
+        );
+        // Sanity: the waiter was at least delayed beyond when it tried.
+        assert!(
+            waiter_unblocked >= waiter_acquired,
+            "waiter clock skew detected: tried at {waiter_acquired}, unblocked at {waiter_unblocked}",
+        );
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// **Issue #138 regression test**: `run_startup_under_lock` opens the
+    /// redb file, performs gc / cap-check / register inside the lock, and
+    /// **closes the file before returning**. After it returns, a subsequent
+    /// caller can immediately open the redb file — proving the lock is
+    /// scoped to the helper, not the whole `clud` lifetime.
+    #[test]
+    fn run_startup_under_lock_releases_redb_after_return() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("startup-releases.redb");
+        let lock = dir.path().join("startup-releases.lock");
+        // SAFETY: serialized via ENV_LOCK.
+        unsafe {
+            std::env::set_var(ENV_SESSION_DB, &db);
+            std::env::set_var(ENV_SESSION_LOCK, &lock);
+            std::env::set_var(ENV_MAX_INSTANCES, "0"); // disable cap to keep test simple
+        }
+
+        let info = SessionInfo {
+            pid: std::process::id(),
+            started_unix: 1,
+            backend: None,
+            launch_mode: None,
+            cwd: None,
+        };
+        let cfg = SessionRegistry::cap_config_from_env();
+        let outcome = run_startup_under_lock(&cfg, info).expect("startup");
+        assert_eq!(outcome.decision, CapDecision::Allow);
+        assert!(outcome.registered);
+
+        // If `run_startup_under_lock` left redb open, this would fail
+        // with `DatabaseAlreadyOpen`. The whole point of issue #138 is
+        // that this succeeds without contention.
+        let reopen = SessionRegistry::open_default().expect("reopen");
+        assert_eq!(reopen.count_live().unwrap(), 1);
+        drop(reopen);
+
+        // Shutdown removes the row, again under the lock.
+        run_shutdown_under_lock().expect("shutdown");
+        let after = SessionRegistry::open_default().expect("reopen after shutdown");
+        assert_eq!(after.count_live().unwrap(), 0);
+
+        unsafe {
+            std::env::remove_var(ENV_SESSION_DB);
+            std::env::remove_var(ENV_SESSION_LOCK);
+            std::env::remove_var(ENV_MAX_INSTANCES);
+        }
+    }
+
+    /// **Issue #138 regression test**: `default_lock_path` derives from
+    /// the DB path's parent dir when `CLUD_SESSION_LOCK` is unset.
+    /// `CLUD_SESSION_LOCK` wins when both are set.
+    #[test]
+    fn default_lock_path_derives_from_db_parent_or_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("derives.redb");
+        // SAFETY: serialized via ENV_LOCK.
+        unsafe {
+            std::env::set_var(ENV_SESSION_DB, &db);
+            std::env::remove_var(ENV_SESSION_LOCK);
+        }
+        let derived = default_lock_path().expect("derived");
+        assert_eq!(derived, dir.path().join("sessions.lock"));
+
+        let explicit = dir.path().join("custom.lock");
+        unsafe {
+            std::env::set_var(ENV_SESSION_LOCK, &explicit);
+        }
+        let resolved = default_lock_path().expect("explicit");
+        assert_eq!(resolved, explicit);
+        unsafe {
+            std::env::remove_var(ENV_SESSION_DB);
+            std::env::remove_var(ENV_SESSION_LOCK);
+        }
     }
 }
