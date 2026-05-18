@@ -227,10 +227,14 @@ fn main() {
         None
     };
 
-    // Issue #73: open the redb-backed session registry, GC dead siblings,
-    // refuse to launch if we're at the cap, otherwise insert our own row.
-    // Held until end-of-`main` so `Drop` removes the row on graceful exit.
-    let _registry_guard = startup::enforce_session_cap();
+    // Issue #73 / #138: enforce the live-session cap. Opens the redb file
+    // inside a cross-process advisory lock, performs gc / cap-check /
+    // register-self, and **closes redb before returning**. The returned
+    // guard holds nothing but a "we registered" flag; on Drop it briefly
+    // re-acquires the lock to remove our row. Holding redb for the
+    // lifetime of `main` would race with concurrent `clud` launches and
+    // print spurious `Database already open` warnings (issue #138).
+    let _session_guard = startup::enforce_session_cap();
 
     // Issue #110: spawn the background worktree scanner. Polls the
     // current repo's `.claude/worktrees/` every ~2s and inserts any
@@ -295,7 +299,7 @@ fn main() {
         session.on_loop_end(summary, err);
     }
     drop(_scanner_guard);
-    drop(_registry_guard);
+    drop(_session_guard);
     drop(_dnd_subprocess_guard);
     std::process::exit(exit_code);
 }

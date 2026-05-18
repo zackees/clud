@@ -90,27 +90,45 @@ pub fn try_register_console_drop_target_pty() -> (
     }
 }
 
-/// Issue #73: enforce the live-session cap. On `Refuse` this calls
-/// `std::process::exit(1)` directly — we never return to the launch path.
+/// RAII guard for the session-registry row. On Drop, briefly re-acquires
+/// the cross-process lock, opens the redb file, removes our row, and
+/// closes. Best-effort — failures are silent because the next startup's
+/// GC pass cleans up stale rows anyway (issue #73).
+pub struct ScopedSessionGuard;
+
+impl Drop for ScopedSessionGuard {
+    fn drop(&mut self) {
+        let _ = session_registry::run_shutdown_under_lock();
+    }
+}
+
+/// Issue #73 / #138: enforce the live-session cap. Acquires a cross-process
+/// advisory lock, opens redb, runs gc + cap-check + register-self, then
+/// closes redb and releases the lock — all in one short critical section
+/// at startup. On `Refuse` this calls `std::process::exit(1)` directly.
 /// On `Warn` we print to stderr and continue. Failures to open / GC the
 /// DB are *non-fatal*: we log to stderr and skip the cap check, because
 /// breaking `clud` startup over a registry hiccup would be much worse
 /// than the rare case where the guardrail is temporarily missing.
-pub fn enforce_session_cap() -> Option<session_registry::SessionRegistry> {
-    let registry = match session_registry::SessionRegistry::open_default() {
-        Ok(r) => r,
+///
+/// Returns a guard whose Drop removes our row on graceful exit. The guard
+/// holds no DB or lock between startup and shutdown — concurrent `clud`
+/// launches can therefore both run through this function without racing
+/// on the redb file lock (which previously caused issue #138's
+/// `Database already open` warning).
+pub fn enforce_session_cap() -> Option<ScopedSessionGuard> {
+    let cfg = session_registry::SessionRegistry::cap_config_from_env();
+    let info = session_registry::SessionInfo::for_self(None, None);
+    let outcome = match session_registry::run_startup_under_lock(&cfg, info) {
+        Ok(o) => o,
         Err(e) => {
             eprintln!("[clud] warning: could not open session registry: {e}");
             return None;
         }
     };
-    if let Err(e) = registry.gc_dead_sessions() {
-        eprintln!("[clud] warning: session-registry GC failed: {e}");
-    }
-    let cfg = session_registry::SessionRegistry::cap_config_from_env();
-    match registry.check_cap(&cfg) {
-        Ok(session_registry::CapDecision::Allow) => {}
-        Ok(session_registry::CapDecision::Warn(count)) => {
+    match outcome.decision {
+        session_registry::CapDecision::Allow => {}
+        session_registry::CapDecision::Warn(count) => {
             eprintln!(
                 "[clud] warning: {count} live clud sessions detected (warn threshold {warn}, cap {cap}). \
                  Set {env_max}=0 to disable, or wind down old sessions.",
@@ -119,7 +137,7 @@ pub fn enforce_session_cap() -> Option<session_registry::SessionRegistry> {
                 env_max = session_registry::ENV_MAX_INSTANCES,
             );
         }
-        Ok(session_registry::CapDecision::Refuse(count)) => {
+        session_registry::CapDecision::Refuse(count) => {
             eprintln!(
                 "[clud] error: {count} live clud sessions exceed the cap of {cap}. \
                  Refusing to launch (fork-bomb guardrail, issue #73). \
@@ -130,15 +148,12 @@ pub fn enforce_session_cap() -> Option<session_registry::SessionRegistry> {
             );
             std::process::exit(1);
         }
-        Err(e) => {
-            eprintln!("[clud] warning: session-registry cap check failed: {e}");
-        }
     }
-    let info = session_registry::SessionInfo::for_self(None, None);
-    if let Err(e) = registry.register_self(info) {
-        eprintln!("[clud] warning: could not register session: {e}");
+    if outcome.registered {
+        Some(ScopedSessionGuard)
+    } else {
+        None
     }
-    Some(registry)
 }
 
 pub fn install_ctrl_c_flag() -> Arc<AtomicBool> {

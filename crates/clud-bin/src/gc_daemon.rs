@@ -29,7 +29,19 @@
 //! `trampoline::spawn_detached_self` with `invisible_helper_creationflags()`
 //! on Windows. After spawn we poll for the info file to appear and the TCP
 //! port to accept connections, up to 5 seconds.
+//!
+//! # Bringup race (issue #138)
+//!
+//! Two `clud` startups firing `ensure_running()` simultaneously would both
+//! see no daemon, both try to spawn one, and end up fighting over the
+//! state-dir info file and the TCP bind. Serialized via an `fs4` advisory
+//! exclusive lock on `<state_dir>/gc-daemon.lock`: we acquire the lock,
+//! **re-probe** the info file (a sibling may have spawned a daemon while
+//! we waited), and only spawn if still absent. The lock is held only
+//! across the check-spawn-wait window — the daemon itself does not hold
+//! it.
 
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -38,6 +50,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::gc::{extract_pid_from_lock_reason, reconcile_dir, InsertInput, Registry, TrackedEntry};
@@ -75,6 +88,27 @@ pub fn default_state_dir() -> io::Result<PathBuf> {
 
 fn info_path(state_dir: &Path) -> PathBuf {
     state_dir.join("gc-daemon.info")
+}
+
+fn lock_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("gc-daemon.lock")
+}
+
+/// Acquire the bringup advisory lock at `<state_dir>/gc-daemon.lock`.
+/// Issue #138: serializes concurrent `ensure_running()` callers so two
+/// `clud` startups don't both try to spawn the daemon. The lock auto-
+/// releases when the returned file handle drops (or the process dies).
+fn acquire_bringup_lock(state_dir: &Path) -> io::Result<std::fs::File> {
+    std::fs::create_dir_all(state_dir)?;
+    let path = lock_path(state_dir);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
 }
 
 fn read_info(state_dir: &Path) -> io::Result<DaemonInfo> {
@@ -505,8 +539,11 @@ pub struct DaemonHandle {
 /// 1. Honor `CLUD_NO_DAEMON=1` — return an error without spawning.
 /// 2. Read `~/.clud/state/gc-daemon.info`; if its PID is alive and the
 ///    port accepts connections, return it.
-/// 3. Otherwise spawn `clud __gc-daemon --state-dir <state_dir>` detached
-///    and poll for readiness up to 5 seconds.
+/// 3. Otherwise acquire `<state_dir>/gc-daemon.lock` (issue #138), re-
+///    probe the info file under the lock, and only spawn if a sibling
+///    didn't already bring the daemon up while we waited. Spawn
+///    `clud __gc-daemon --state-dir <state_dir>` detached and poll for
+///    readiness up to 5 seconds. Lock releases when this function returns.
 pub fn ensure_running() -> io::Result<DaemonHandle> {
     if std::env::var_os(ENV_NO_DAEMON)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -518,6 +555,16 @@ pub fn ensure_running() -> io::Result<DaemonHandle> {
         ));
     }
     let state_dir = default_state_dir()?;
+    // Fast path: daemon already up. Cheap to skip the lock entirely.
+    if let Some(h) = probe_existing(&state_dir) {
+        return Ok(h);
+    }
+    // Slow path: serialize bringup. Two concurrent `clud` startups must
+    // not both spawn a daemon — otherwise they race on the info file and
+    // the TCP bind. The lock auto-releases on Drop / process exit.
+    let _bringup_lock = acquire_bringup_lock(&state_dir)?;
+    // Re-probe under the lock: a sibling may have spawned the daemon
+    // while we blocked.
     if let Some(h) = probe_existing(&state_dir) {
         return Ok(h);
     }
