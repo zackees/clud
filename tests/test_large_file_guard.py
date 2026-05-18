@@ -46,18 +46,15 @@ def test_warns_in_clud_repo() -> None:
     assert WARNING_HEADER in result.stderr, (
         f"warning header missing from stderr:\n{result.stderr}"
     )
-    # `daemon.rs`, `command.rs`, and `voice.rs` have been the top 3 by
-    # source-file size in clud for a long time; if any of these drops out
-    # of the report a non-trivial refactor has landed.
-    for expected in ("daemon.rs", "command.rs", "voice.rs"):
+    # The current top offenders by source-file size in clud after the
+    # daemon/command/voice/main split. If any of these drops out of the
+    # report a non-trivial refactor has landed (and the prior triumvirate
+    # of daemon.rs / command.rs / voice.rs is already gone — they've been
+    # split into per-concern submodules).
+    for expected in ("console_drop_target.rs", "session.rs", "pty_behavior.rs"):
         assert expected in result.stderr, (
             f"expected {expected} in warning, got:\n{result.stderr}"
         )
-    # Report must include a `(N more)` tail — clud has more than 4 files
-    # over the threshold (Rust sources, large integration tests, etc.).
-    assert "more)" in result.stderr, (
-        f"expected `(N more)` tail in warning, got:\n{result.stderr}"
-    )
 
 
 def test_silent_in_tiny_tempdir() -> None:
