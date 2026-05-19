@@ -66,13 +66,32 @@ pub enum InputEvent {
 }
 
 /// Translate a slice of input events into the bytes that should be
-/// written to the child PTY's stdin.
-///
-/// Stub for issue #141 RED commit: returns `Vec::new()` so the tests
-/// below fail with concrete assertion mismatches. The real
-/// implementation lands in the GREEN commit.
-pub fn translate(_events: &[InputEvent]) -> Vec<u8> {
-    Vec::new()
+/// written to the child PTY's stdin. See the module-level docstring
+/// for the translation rules.
+pub fn translate(events: &[InputEvent]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for event in events {
+        let key = match event {
+            InputEvent::Key(k) if k.key_down => k,
+            // Key-up events and non-key records both drop here.
+            _ => continue,
+        };
+        if key.virtual_key_code == VK_RETURN {
+            let shift = (key.control_key_state & SHIFT_PRESSED) != 0;
+            out.push(if shift { b'\n' } else { b'\r' });
+            continue;
+        }
+        // Regular char key. `unicode_char` is one UTF-16 code unit; for
+        // BMP keys that's the full character. Surrogate pairs from
+        // dead-key sequences arrive as two consecutive events, which
+        // `from_utf16_lossy` joins correctly if both halves end up in
+        // the same `translate` call.
+        if key.unicode_char != 0 {
+            let s = String::from_utf16_lossy(&[key.unicode_char]);
+            out.extend_from_slice(s.as_bytes());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
