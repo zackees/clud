@@ -19,6 +19,75 @@ use super::types::{
     LOG_ROTATE_BYTES,
 };
 
+/// Probe whether the peer of `stream` has closed the connection, without
+/// mutating any flags shared with sibling clones of the same socket.
+///
+/// On Unix, `TcpStream::set_nonblocking` calls `fcntl(F_SETFL, O_NONBLOCK)`,
+/// which sets the flag on the file *description* — shared with every fd
+/// produced by `dup()`/`try_clone()`. The previous probe implementation flipped
+/// nonblocking-on, peeked, then flipped it back, but during that brief window
+/// the writer thread's clone of the same socket would also be nonblocking. A
+/// concurrent `write_all` could then fail with `WouldBlock`, the writer thread
+/// would break, `detach_client` would clear the slot, and an in-flight second
+/// attach would race in and either succeed or see EOF before the rejection
+/// reached the wire. That's the flake the macOS ARM integration test
+/// (`test_concurrent_attach_attempt_is_rejected`) was hitting.
+///
+/// Using `recv(MSG_DONTWAIT | MSG_PEEK)` directly performs a one-shot
+/// nonblocking peek without modifying any persistent socket state, so sibling
+/// fds keep their original (blocking) mode throughout.
+///
+/// On Windows the previous approach is fine — `set_nonblocking` there maps to
+/// `ioctlsocket(FIONBIO)`, which is per-handle, so the flag never leaks to
+/// sibling clones.
+fn probe_socket_dead(stream: &TcpStream, attached_at: Instant) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let mut buf = [0u8; 1];
+        // SAFETY: `fd` is a valid socket descriptor for the lifetime of the
+        // borrowed `&TcpStream`. `recv` writes at most `buf.len()` bytes into
+        // `buf` and never reads from the rest of the address space.
+        let ret = unsafe {
+            libc::recv(
+                fd,
+                buf.as_mut_ptr() as *mut _,
+                buf.len(),
+                libc::MSG_DONTWAIT | libc::MSG_PEEK,
+            )
+        };
+        if ret == 0 {
+            return true; // peer closed (clean EOF)
+        }
+        if ret > 0 {
+            return false; // data available, definitely alive
+        }
+        let err = io::Error::last_os_error();
+        match err.kind() {
+            io::ErrorKind::WouldBlock => false,
+            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => true,
+            // Unknown error: treat as stale after 10s, matches the prior policy.
+            _ => attached_at.elapsed() > Duration::from_secs(10),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut buf = [0u8; 1];
+        stream.set_nonblocking(true).ok();
+        let dead = match stream.peek(&mut buf) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => true,
+            Err(ref e) if e.kind() == io::ErrorKind::ConnectionAborted => true,
+            Err(_) => attached_at.elapsed() > Duration::from_secs(10),
+        };
+        stream.set_nonblocking(false).ok();
+        dead
+    }
+}
+
 pub(super) struct WorkerShared {
     pub(super) state_dir: PathBuf,
     pub(super) session_id: String,
@@ -264,24 +333,7 @@ impl WorkerShared {
     pub(super) fn evict_dead_client(&self) {
         let mut guard = self.client.lock().expect("client mutex poisoned");
         let should_evict = if let Some(client) = guard.as_ref() {
-            // Try a zero-byte peek to check if the connection is still alive.
-            // A connection-reset or broken-pipe error means the peer is gone.
-            let mut probe = [0u8; 1];
-            client.shutdown.set_nonblocking(true).ok();
-            let dead = match client.shutdown.peek(&mut probe) {
-                // EOF means peer closed the connection
-                Ok(0) => true,
-                // WouldBlock means the socket is alive but has no data
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => false,
-                Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => true,
-                Err(ref e) if e.kind() == io::ErrorKind::ConnectionAborted => true,
-                // Unknown error: consider stale after 10s
-                Err(_) => client.attached_at.elapsed() > Duration::from_secs(10),
-                // Data available means socket is alive
-                Ok(_) => false,
-            };
-            client.shutdown.set_nonblocking(false).ok();
-            dead
+            probe_socket_dead(&client.shutdown, client.attached_at)
         } else {
             false
         };
