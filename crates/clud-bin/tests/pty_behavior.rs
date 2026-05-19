@@ -1109,3 +1109,101 @@ fn raw_pump_restores_raw_mode_on_panic() {
     let _ = process.wait_impl(Some(2.0));
     let _ = process.close_impl();
 }
+
+/// Issue #141 follow-up: bytes from `extra_rx` reach the child PTY
+/// exactly as `console_input::translate()` produces them. The pump
+/// doesn't know or care that the bytes came from a console-input
+/// translator — it forwards `extra_rx` chunks to the child the same
+/// way it would forward stdin. This integration test asserts that
+/// invariant by:
+///
+///   1. Building `console_input::translate()` over a synthetic event
+///      stream containing Shift+Enter and plain Enter.
+///   2. Sending the translated bytes through `extra_rx`.
+///   3. Capturing the child's stdin via `--mock-stdin-raw-to`.
+///   4. Asserting both `\n` (Shift+Enter) and `\r` (plain Enter) made
+///      the round trip.
+///
+/// Windows-only because `console_input` is `#[cfg(windows)]`. The
+/// underlying pump path (`run_raw_pty_pump_with_extra_rx`) works on
+/// every platform; this test just exercises the Windows path.
+#[cfg(windows)]
+#[test]
+fn extra_rx_forwards_shift_enter_translated_bytes_to_pty() {
+    require_pty_or_skip!("extra_rx_forwards_shift_enter_translated_bytes_to_pty");
+
+    use clud::console_input::{translate, InputEvent, KeyEvent, SHIFT_PRESSED, VK_RETURN};
+
+    let agent = mock_agent_path();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let raw_stdin = tmp.path().join("stdin_raw.bin");
+
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-read-stdin-ms".to_string(),
+        "800".to_string(),
+        "--mock-stdin-raw-to".to_string(),
+        raw_stdin.to_string_lossy().to_string(),
+    ];
+
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+    std::thread::sleep(Duration::from_millis(150));
+
+    // What the production reader would emit for a Shift+Enter + plain
+    // Enter sequence. The pump treats these bytes as opaque — exactly
+    // the surface this test pins.
+    let translated = translate(&[
+        InputEvent::Key(KeyEvent {
+            key_down: true,
+            virtual_key_code: VK_RETURN,
+            unicode_char: b'\r' as u16,
+            control_key_state: SHIFT_PRESSED,
+        }),
+        InputEvent::Key(KeyEvent {
+            key_down: true,
+            virtual_key_code: VK_RETURN,
+            unicode_char: b'\r' as u16,
+            control_key_state: 0,
+        }),
+    ]);
+    assert_eq!(translated, b"\n\r", "translator output drifted");
+
+    // Send the translated bytes via extra_rx. A short sleep before
+    // sending lets the pump enter its main loop; the child's stdin
+    // line-mode buffer holds the bytes until newline (mock-sleep then
+    // reads them all).
+    let (extra_tx, extra_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        let _ = extra_tx.send(translated.clone());
+    });
+
+    let interrupted = AtomicBool::new(false);
+    let mut hooks = CountingHooks::new(false);
+
+    let _exit = clud::session::run_raw_pty_pump_with_extra_rx(
+        &process,
+        &interrupted,
+        &mut hooks,
+        Cursor::new(Vec::<u8>::new()),
+        Some(extra_rx),
+    );
+
+    let _ = process.wait_impl(Some(5.0));
+    let _ = drain_reader(&process, Duration::from_millis(300));
+    let _ = process.close_impl();
+
+    let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    assert!(
+        got.contains(&b'\n'),
+        "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
+        got
+    );
+    assert!(
+        got.contains(&b'\r'),
+        "plain Enter translation must produce a \\r in the child's stdin; got {:?}",
+        got
+    );
+}

@@ -22,6 +22,42 @@ use crate::verbose_log;
 use crate::voice;
 use crate::win_creation_flags;
 
+/// Merge two optional byte channels into one. Used by `run_plan_pty`
+/// to combine the drag-drop side channel with the Windows console-input
+/// reader (issue #141 follow-up) before handing the result to the
+/// pump's `extra_rx` slot.
+///
+/// Zero or one input returns the inputs themselves (no extra thread).
+/// Two inputs spawn a small forwarder thread per channel that drains
+/// each input and forwards bytes to a unified output channel. The
+/// forwarders exit when their input closes or the output drops.
+fn merge_extra_rx(
+    a: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    b: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+) -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(rx), None) | (None, Some(rx)) => Some(rx),
+        (Some(a), Some(b)) => {
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            for input in [a, b] {
+                let tx = tx.clone();
+                std::thread::Builder::new()
+                    .name("clud-extra-rx-merge".into())
+                    .spawn(move || {
+                        while let Ok(chunk) = input.recv() {
+                            if tx.send(chunk).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .ok();
+            }
+            Some(rx)
+        }
+    }
+}
+
 /// Build the child environment: inherit parent env + inject tracking vars.
 /// Deduplicates keys so we never pass the same var twice.
 pub fn child_env() -> Vec<(String, String)> {
@@ -447,6 +483,33 @@ pub fn run_plan_pty(
         (None, None)
     };
 
+    // Issue #141 follow-up: spawn the Windows console-input reader so
+    // Shift+Enter inserts `\n` even under bare cmd.exe in conhost. The
+    // reader produces a `Receiver<Vec<u8>>` we merge with `dnd_rx` for
+    // the pump's first iteration. Held for the whole function so the
+    // console mode is restored on Drop. Skipped if stdin isn't a real
+    // console (the reader can't function on a piped stdin).
+    #[cfg(windows)]
+    let (mut console_input_rx, _console_input_guards) = if session::terminals_are_interactive() {
+        match crate::console_input::spawn_console_input_reader() {
+            Ok((mut handle, mode_guard)) => {
+                let rx = handle.take_receiver();
+                (rx, Some((handle, mode_guard)))
+            }
+            Err(e) => {
+                eprintln!("[clud] note: console-input reader unavailable: {e}");
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    #[cfg(not(windows))]
+    let (mut console_input_rx, _console_input_guards): (
+        Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+        Option<()>,
+    ) = (None, None);
+
     let env = child_env();
     let mut last_exit = 0i32;
     let (rows, cols) = get_terminal_size();
@@ -526,12 +589,22 @@ pub fn run_plan_pty(
 
         let mut hooks = voice::VoiceMode::from_env();
         let _raw_guard = session::enter_raw_mode_if_tty();
-        // First iteration takes ownership of the dnd_rx (if any);
-        // subsequent iterations get None. We can't clone the receiver
-        // and the OLE registration is a one-shot for the whole
-        // process anyway (see RefreshConfig — the worker thread is
-        // shared across iterations).
-        let extra_rx = if iteration == 0 { dnd_rx.take() } else { None };
+        // First iteration takes ownership of the side-channel receivers
+        // (drag-drop bytes and, on Windows, console-input bytes from
+        // the Shift+Enter reader); subsequent iterations get None. We
+        // can't clone an `mpsc::Receiver`, and the OLE registration is
+        // a one-shot for the whole process anyway (see `RefreshConfig`
+        // — the worker thread is shared across iterations). The console
+        // reader behaves similarly: its worker keeps running for the
+        // life of `run_plan_pty`, but only iteration 0 sees its bytes.
+        // For typical single-iteration invocations this is irrelevant;
+        // for `clud loop` it's an accepted limitation tracked in the
+        // PR body.
+        let extra_rx = if iteration == 0 {
+            merge_extra_rx(dnd_rx.take(), console_input_rx.take())
+        } else {
+            None
+        };
         let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose(
             &process,
             interrupted,
