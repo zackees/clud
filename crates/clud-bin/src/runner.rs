@@ -185,10 +185,16 @@ pub fn run_plan_subprocess(
         let process = NativeProcess::new(config);
         if let Err(e) = process.start() {
             eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+            if verbose {
+                verbose_log::log(format_args!("[clud] subprocess: start failed: {e}"));
+            }
             if let Some(s) = loop_session.as_deref_mut() {
                 s.on_iteration_end(iter_num, 1, Some(format!("failed to start: {e}")));
             }
             return 1;
+        }
+        if verbose {
+            verbose_log::log("[clud] subprocess: started");
         }
 
         // Issue #95: in stream-json mode we also accumulate the rendered
@@ -206,6 +212,9 @@ pub fn run_plan_subprocess(
         match exit_code {
             ProcessOutcome::Exited(code) => {
                 last_exit = code;
+                if verbose {
+                    verbose_log::log(format_args!("[clud] subprocess: exited code {code}"));
+                }
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, code, None);
                 }
@@ -227,6 +236,9 @@ pub fn run_plan_subprocess(
                 return 130;
             }
             ProcessOutcome::Error => {
+                if verbose {
+                    verbose_log::log("[clud] subprocess: runner error");
+                }
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 1, Some("runner error".to_string()));
                 }
@@ -436,6 +448,11 @@ pub fn run_plan_pty(
     let env = child_env();
     let mut last_exit = 0i32;
     let (rows, cols) = get_terminal_size();
+    if verbose {
+        verbose_log::log(format_args!(
+            "[clud] pty: terminal size rows={rows} cols={cols}"
+        ));
+    }
 
     for iteration in 0..plan.iterations {
         // Re-check the interrupted flag at the top of every iteration. See
@@ -473,6 +490,9 @@ pub fn run_plan_pty(
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[clud] failed to create pty: {}", e);
+                if verbose {
+                    verbose_log::log(format_args!("[clud] pty: create failed: {e}"));
+                }
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 1, Some(format!("pty create failed: {e}")));
                 }
@@ -490,10 +510,16 @@ pub fn run_plan_pty(
 
         if let Err(e) = process.start_impl() {
             eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+            if verbose {
+                verbose_log::log(format_args!("[clud] pty: start failed: {e}"));
+            }
             if let Some(s) = loop_session.as_deref_mut() {
                 s.on_iteration_end(iter_num, 1, Some(format!("pty start failed: {e}")));
             }
             return 1;
+        }
+        if verbose {
+            verbose_log::log("[clud] pty: started");
         }
 
         let mut hooks = voice::VoiceMode::from_env();
@@ -514,6 +540,9 @@ pub fn run_plan_pty(
         );
         drop(_raw_guard);
         last_exit = normalize_exit_code(exit_code);
+        if verbose {
+            verbose_log::log(format_args!("[clud] pty: exited code {last_exit}"));
+        }
         if let Some(s) = loop_session.as_deref_mut() {
             let err = if last_exit == 130 {
                 Some("Interrupted by user".to_string())
