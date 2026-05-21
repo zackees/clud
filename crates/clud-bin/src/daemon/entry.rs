@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use crate::args::{Args, Command};
 use crate::backend::LaunchMode;
 use crate::command::LaunchPlan;
+use crate::verbose_log;
 
 use super::attach::{attach_to_session, run_attach};
 use super::client::{ensure_daemon, send_daemon_request};
@@ -142,9 +143,21 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
 
 pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &AtomicBool) -> i32 {
     let state_dir = state_dir(args);
+    if args.verbose {
+        verbose_log::log(format_args!(
+            "[clud] daemon: ensure state_dir={}",
+            verbose_log::display_path(&state_dir)
+        ));
+    }
     if let Err(err) = ensure_daemon(&state_dir) {
         eprintln!("[clud] failed to start daemon: {}", err);
+        if args.verbose {
+            verbose_log::log(format_args!("[clud] daemon: ensure failed: {err}"));
+        }
         return 1;
+    }
+    if args.verbose {
+        verbose_log::log("[clud] daemon: ready");
     }
 
     let repeat_enabled = plan.repeat_schedule.is_some();
@@ -173,6 +186,14 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
     } else {
         None
     };
+    if args.verbose {
+        verbose_log::log(format_args!(
+            "[clud] daemon: create session kind={:?} detach={} repeat={}",
+            kind,
+            args.detach || args.detachable,
+            repeat_enabled
+        ));
+    }
     let request = DaemonRequest::Create {
         spec: Box::new(WorkerLaunchSpec {
             plan: plan.clone(),
@@ -192,12 +213,18 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         Ok(response) => response,
         Err(err) => {
             eprintln!("[clud] daemon request failed: {}", err);
+            if args.verbose {
+                verbose_log::log(format_args!("[clud] daemon: request failed: {err}"));
+            }
             return 1;
         }
     };
 
     match response {
         DaemonResponse::Created { session } => {
+            if args.verbose {
+                verbose_log::log(format_args!("[clud] daemon: session {}", session.id));
+            }
             if repeat_enabled {
                 eprintln!("[clud] repeat job {} running in background", session.id);
                 eprintln!("[clud] list jobs with: clud list");
@@ -215,6 +242,9 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         }
         DaemonResponse::Error { message } => {
             eprintln!("[clud] daemon error: {}", message);
+            if args.verbose {
+                verbose_log::log(format_args!("[clud] daemon: error: {message}"));
+            }
             1
         }
         DaemonResponse::Session { .. } | DaemonResponse::Terminated { .. } => 1,

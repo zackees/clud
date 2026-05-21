@@ -44,6 +44,20 @@ fn main() {
     skill_install::ensure_installed();
 
     let mut args = args::Args::parse_with_passthrough();
+    if args.verbose {
+        match verbose_log::enable_file_logging() {
+            Ok(path) => {
+                verbose_log::log(format_args!(
+                    "[clud] verbose log: {}",
+                    verbose_log::display_path(&path)
+                ));
+            }
+            Err(err) => {
+                verbose_log::log(format_args!("[clud] verbose log unavailable: {err}"));
+            }
+        }
+        verbose_log::log(format_args!("[clud] pid {}", std::process::id()));
+    }
 
     // Issue #135: hidden `__gc-daemon` subcommand is the GC-only daemon
     // entry point. Owns `~/.clud/data.redb` exclusively and serves the
@@ -140,12 +154,18 @@ fn main() {
     }
 
     if hook_health::should_check_launch(&args) {
+        if args.verbose {
+            verbose_log::log("[clud] hooks: checking launch parity");
+        }
         hook_health::emit_launch_warnings();
     }
 
     if !args.clean_worktrees && !args.fix_hooks {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let root = loop_spec::git_root_from(&cwd);
+        if args.verbose {
+            verbose_log::log("[clud] large-file guard: scanning project");
+        }
         large_file_guard::run(&root);
     }
 
@@ -170,9 +190,17 @@ fn main() {
     // launches) still trigger the auto-spawn, so the gc daemon is
     // available as soon as it's first actually needed.
     if !args.no_daemon && !args.dry_run && !daemon::experimental_enabled(&args) {
+        if args.verbose {
+            verbose_log::log("[clud] gc daemon: ensure running");
+        }
         if let Err(e) = gc_daemon::ensure_running() {
             eprintln!("[clud] note: gc daemon unavailable: {}", e);
+            if args.verbose {
+                verbose_log::log(format_args!("[clud] gc daemon: unavailable: {e}"));
+            }
         }
+    } else if args.verbose {
+        verbose_log::log("[clud] gc daemon: skipped");
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);
@@ -192,6 +220,15 @@ fn main() {
     };
 
     let plan = command::build_launch_plan(&args, backend, &backend_path);
+    if args.verbose {
+        verbose_log::log(format_args!(
+            "[clud] plan: backend={} mode={} iterations={} stream_json={}",
+            backend.executable_name(),
+            plan.launch_mode.as_str(),
+            plan.iterations,
+            plan.stream_json_progress
+        ));
+    }
 
     if args.dry_run {
         let json = serde_json::json!({
@@ -224,8 +261,14 @@ fn main() {
     let _dnd_subprocess_guard = if startup::should_register_drop_target(&args)
         && plan.launch_mode == backend::LaunchMode::Subprocess
     {
+        if args.verbose {
+            verbose_log::log("[clud] dnd: registering subprocess drop target");
+        }
         startup::try_register_console_drop_target_subprocess()
     } else {
+        if args.verbose {
+            verbose_log::log("[clud] dnd: subprocess drop target skipped");
+        }
         None
     };
 
@@ -236,6 +279,9 @@ fn main() {
     // re-acquires the lock to remove our row. Holding redb for the
     // lifetime of `main` would race with concurrent `clud` launches and
     // print spurious `Database already open` warnings (issue #138).
+    if args.verbose {
+        verbose_log::log("[clud] session registry: enforcing cap");
+    }
     let _session_guard = startup::enforce_session_cap();
 
     // Issue #110: spawn the background worktree scanner. Polls the
@@ -244,11 +290,17 @@ fn main() {
     // Existing rows are left alone — the scanner is insert-only, no
     // write churn. `Drop` joins the worker thread; explicit `drop` below
     // sequences cancellation before the session-registry guard.
+    if args.verbose {
+        verbose_log::log("[clud] worktree scanner: starting");
+    }
     let _scanner_guard = gc::WorktreeScanner::maybe_spawn();
 
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
     // short-circuit on iteration 1. See loop_spec for semantics.
     if let Some(ref markers) = plan.loop_markers {
+        if args.verbose {
+            verbose_log::log("[clud] loop markers: clearing stale DONE/BLOCKED files");
+        }
         loop_spec::clear_markers_at(&loop_spec::MarkerPaths {
             done: std::path::PathBuf::from(&markers.done_path),
             blocked: std::path::PathBuf::from(&markers.blocked_path),
@@ -261,6 +313,9 @@ fn main() {
     // `clud loop`; other commands skip the bookkeeping entirely.
     let mut loop_session: Option<loop_artifacts::LoopSession> =
         if let Some(args::Command::Loop { task, .. }) = &args.command {
+            if args.verbose {
+                verbose_log::log("[clud] loop artifacts: starting session");
+            }
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let git_root = loop_spec::git_root_from(&cwd);
             let _ = loop_spec::ensure_loop_dir(&git_root);
@@ -277,7 +332,15 @@ fn main() {
             None
         };
 
-    let exit_code = if daemon::experimental_enabled(&args) {
+    let centralized = daemon::experimental_enabled(&args);
+    if args.verbose {
+        verbose_log::log(if centralized {
+            "[clud] launch: centralized daemon"
+        } else {
+            "[clud] launch: direct runner"
+        });
+    }
+    let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
         match plan.launch_mode {
@@ -303,5 +366,8 @@ fn main() {
     drop(_scanner_guard);
     drop(_session_guard);
     drop(_dnd_subprocess_guard);
+    if args.verbose {
+        verbose_log::log(format_args!("[clud] exit: code {exit_code}"));
+    }
     std::process::exit(exit_code);
 }

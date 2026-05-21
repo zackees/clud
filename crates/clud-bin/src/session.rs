@@ -530,6 +530,12 @@ where
     let normalize_console_stdin =
         should_normalize_interactive_console_stdin(interactive_real_stdin);
     let interrupt_on_ctrl_c_byte = interactive_real_stdin;
+    if verbose {
+        verbose_log::log(format_args!(
+            "[clud] pty pump: start interactive_stdin={} normalize_console_stdin={}",
+            interactive_real_stdin, normalize_console_stdin
+        ));
+    }
 
     // Detached reader: pumps `stdin_source` → channel until EOF or error.
     // Detached (not joined) so a blocked `read()` on real stdin doesn't
@@ -646,6 +652,14 @@ where
             }
 
             if requested_interrupt || interrupted.load(Ordering::SeqCst) {
+                if verbose {
+                    let source = if requested_interrupt {
+                        "stdin Ctrl+C byte"
+                    } else {
+                        "interrupt flag"
+                    };
+                    verbose_log::log(format_args!("[clud] pty pump: interrupt via {source}"));
+                }
                 return interrupt_pty_process(process, verbose);
             }
         }
@@ -657,10 +671,16 @@ where
         if let Ok(Some(code)) =
             running_process_core::pty::poll_pty_process(&process.handles, &process.returncode)
         {
+            if verbose {
+                verbose_log::log(format_args!("[clud] pty pump: child exited code {code}"));
+            }
             return code;
         }
 
         if interrupted.load(Ordering::SeqCst) {
+            if verbose {
+                verbose_log::log("[clud] pty pump: interrupt flag observed");
+            }
             return interrupt_pty_process(process, verbose);
         }
     }
