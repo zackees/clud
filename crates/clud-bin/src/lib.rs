@@ -30,6 +30,7 @@ pub mod startup;
 pub mod stream_json;
 pub mod subprocess;
 pub mod trampoline;
+pub mod verbose_log;
 pub mod voice;
 pub mod wasm;
 pub mod win_creation_flags;

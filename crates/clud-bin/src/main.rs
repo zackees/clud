@@ -1,12 +1,14 @@
 use clud::{
     args, backend, command, console_setup, console_title, daemon, gc, gc_daemon, hook_health,
     large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills, startup,
-    trampoline, wasm, worktrees,
+    trampoline, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, Read};
 
 fn main() {
+    verbose_log::init_launch_clock();
+
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();
 

@@ -18,6 +18,7 @@ use crate::process_tree;
 use crate::session;
 use crate::stream_json;
 use crate::subprocess;
+use crate::verbose_log;
 use crate::voice;
 use crate::win_creation_flags;
 
@@ -41,6 +42,25 @@ pub fn child_env() -> Vec<(String, String)> {
 pub fn get_terminal_size() -> (u16, u16) {
     let probe = terminal_size::terminal_size().map(|(w, h)| (w.0, h.0));
     resolve_terminal_size(probe)
+}
+
+fn display_verbose_command(command: &[String]) -> String {
+    let Some((program, args)) = command.split_first() else {
+        return String::new();
+    };
+    let mut rendered = Vec::with_capacity(command.len());
+    rendered.push(display_program_name(program));
+    rendered.extend(args.iter().cloned());
+    rendered.join(" ")
+}
+
+fn display_program_name(program: &str) -> String {
+    let tail = program.rsplit(['\\', '/']).next().unwrap_or(program);
+    if tail.is_empty() {
+        program.to_string()
+    } else {
+        tail.to_string()
+    }
 }
 
 /// Translate a `(cols, rows)` probe result into a `(rows, cols)` size to hand
@@ -106,7 +126,9 @@ pub fn run_plan_subprocess(
         // launch another codex run. 130 is the conventional SIGINT exit
         // code and mirrors what `ProcessOutcome::Interrupted` produces.
         if interrupted.load(Ordering::SeqCst) {
-            eprintln!("[clud] interrupted via Ctrl+C");
+            if verbose {
+                verbose_log::log("[clud] interrupted via Ctrl+C");
+            }
             return 130;
         }
 
@@ -119,7 +141,10 @@ pub fn run_plan_subprocess(
         }
 
         if verbose {
-            eprintln!("[clud] exec (subprocess): {}", plan.command.join(" "));
+            verbose_log::log(format_args!(
+                "[clud] exec (subprocess): {}",
+                display_verbose_command(&plan.command)
+            ));
         }
 
         let config = ProcessConfig {
@@ -193,7 +218,9 @@ pub fn run_plan_subprocess(
                 }
             }
             ProcessOutcome::Interrupted => {
-                eprintln!("[clud] interrupted via Ctrl+C");
+                if verbose {
+                    verbose_log::log("[clud] interrupted via Ctrl+C");
+                }
                 if let Some(s) = loop_session.as_deref_mut() {
                     s.on_iteration_end(iter_num, 130, Some("Interrupted by user".to_string()));
                 }
@@ -414,7 +441,9 @@ pub fn run_plan_pty(
         // Re-check the interrupted flag at the top of every iteration. See
         // the matching guard in `run_plan_subprocess` — same rationale.
         if interrupted.load(Ordering::SeqCst) {
-            eprintln!("[clud] interrupted via Ctrl+C");
+            if verbose {
+                verbose_log::log("[clud] interrupted via Ctrl+C");
+            }
             return 130;
         }
 
@@ -427,7 +456,10 @@ pub fn run_plan_pty(
         }
 
         if verbose {
-            eprintln!("[clud] exec (pty): {}", plan.command.join(" "));
+            verbose_log::log(format_args!(
+                "[clud] exec (pty): {}",
+                display_verbose_command(&plan.command)
+            ));
         }
 
         let process = match NativePtyProcess::new(
@@ -472,12 +504,13 @@ pub fn run_plan_pty(
         // process anyway (see RefreshConfig — the worker thread is
         // shared across iterations).
         let extra_rx = if iteration == 0 { dnd_rx.take() } else { None };
-        let exit_code = session::run_raw_pty_pump_with_extra_rx(
+        let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose(
             &process,
             interrupted,
             &mut hooks,
             io::stdin(),
             extra_rx,
+            verbose,
         );
         drop(_raw_guard);
         last_exit = normalize_exit_code(exit_code);
@@ -536,5 +569,38 @@ mod tests {
     fn launch_mode_defaults_to_subprocess() {
         let launch_mode = crate::backend::LaunchMode::Subprocess;
         assert_eq!(launch_mode.as_str(), "subprocess");
+    }
+
+    #[test]
+    fn display_verbose_command_strips_program_paths() {
+        let command = vec![
+            r"C:\tools\node\claude.exe".to_string(),
+            "--verbose".to_string(),
+            "-p".to_string(),
+            "hello".to_string(),
+        ];
+        assert_eq!(
+            display_verbose_command(&command),
+            "claude.exe --verbose -p hello"
+        );
+
+        let command = vec![
+            "/usr/local/bin/codex".to_string(),
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+        ];
+        assert_eq!(
+            display_verbose_command(&command),
+            "codex --dangerously-bypass-approvals-and-sandbox"
+        );
+    }
+
+    #[test]
+    fn display_verbose_command_keeps_plain_program_names() {
+        let command = vec![
+            "claude".to_string(),
+            "--model".to_string(),
+            "opus".to_string(),
+        ];
+        assert_eq!(display_verbose_command(&command), "claude --model opus");
     }
 }
