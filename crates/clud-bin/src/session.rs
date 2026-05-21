@@ -10,6 +10,7 @@ use running_process_core::pty::NativePtyProcess;
 
 use crate::console_title::OscTitleStripper;
 use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
+use crate::verbose_log;
 
 /// Resize the PTY. On Windows, `running_process_core::pty::NativePtyProcess::resize_impl`
 /// is a deliberate no-op (see that crate's `pty/mod.rs:730-737`), so reaching
@@ -377,15 +378,39 @@ where
     H: InteractiveHooks,
     R: std::io::Read + Send + 'static,
 {
+    run_raw_pty_pump_with_extra_rx_verbose(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        extra_rx,
+        false,
+    )
+}
+
+/// Production pump entry with optional clud-level diagnostics.
+pub fn run_raw_pty_pump_with_extra_rx_verbose<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    verbose: bool,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
     let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
     spawn_os_resize_watcher(resize_tx);
-    run_raw_pty_pump_full(
+    run_raw_pty_pump_full_verbose(
         process,
         interrupted,
         hooks,
         stdin_source,
         resize_rx,
         extra_rx,
+        verbose,
     )
 }
 
@@ -469,6 +494,30 @@ pub fn run_raw_pty_pump_full<H, R>(
     stdin_source: R,
     resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
     extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
+    run_raw_pty_pump_full_verbose(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        resize_rx,
+        extra_rx,
+        false,
+    )
+}
+
+fn run_raw_pty_pump_full_verbose<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    verbose: bool,
 ) -> i32
 where
     H: InteractiveHooks,
@@ -597,7 +646,7 @@ where
             }
 
             if requested_interrupt || interrupted.load(Ordering::SeqCst) {
-                return interrupt_pty_process(process);
+                return interrupt_pty_process(process, verbose);
             }
         }
 
@@ -612,7 +661,7 @@ where
         }
 
         if interrupted.load(Ordering::SeqCst) {
-            return interrupt_pty_process(process);
+            return interrupt_pty_process(process, verbose);
         }
     }
 }
@@ -784,31 +833,39 @@ fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
 /// pump has observed the flag. Platform-split because `send_interrupt_impl`
 /// is a byte-write on Windows (duplicates the 0x03 already forwarded via
 /// raw-mode stdin) and a pgroup-SIGINT on POSIX (cooperative, no duplicate).
-fn interrupt_pty_process(process: &NativePtyProcess) -> i32 {
+fn interrupt_pty_process(process: &NativePtyProcess, verbose: bool) -> i32 {
     #[cfg(windows)]
     {
         // Closing the PTY triggers ConPTY's CTRL_CLOSE_EVENT path and
         // tears the child down without writing a second 0x03 byte.
         let _ = process.close_impl();
-        eprintln!("[clud] interrupted via Ctrl+C (pty)");
+        if verbose {
+            verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
+        }
         130
     }
     #[cfg(not(windows))]
     match process.send_interrupt_impl() {
         Ok(()) => match process.wait_impl(Some(2.0)) {
             Ok(code) => {
-                eprintln!("[clud] interrupted via Ctrl+C (pty)");
+                if verbose {
+                    verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
+                }
                 code
             }
             Err(_) => {
                 let _ = process.close_impl();
-                eprintln!("[clud] interrupted via Ctrl+C (pty)");
+                if verbose {
+                    verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
+                }
                 130
             }
         },
         Err(_) => {
             let _ = process.close_impl();
-            eprintln!("[clud] interrupted via Ctrl+C (pty)");
+            if verbose {
+                verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
+            }
             130
         }
     }
