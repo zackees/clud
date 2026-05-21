@@ -72,31 +72,23 @@ Quick lookup — which file owns a given subcommand:
 - `clud --clean-worktrees` → `worktrees.rs`.
 - `clud --fix-hooks` → `hook_health.rs`.
 
-## Cross-cutting conventions
+## Cross-cutting subsystems
 
-- **Single launch source of truth.** Every code path that needs to know "what would clud actually run" goes through `command::build_launch_plan` and consumes the resulting `LaunchPlan`. `--dry-run` JSON, `runner.rs`, the daemon worker, and the hook-health remediator all share this struct rather than reconstructing argv.
-- **Windows-first care.** Several modules exist purely to absorb Windows quirks: `subprocess` (BatBadBat / `.cmd` rewrite), `trampoline` (exe self-rename for `pip install`), `win_creation_flags` (`CREATE_NO_WINDOW` for invisible helpers), `console_setup` (`ENABLE_VIRTUAL_TERMINAL_INPUT`), `console_input` (Shift+Enter via `ReadConsoleInputW`), and `console_title` (OSC-title keeper). All of them degrade to no-ops on POSIX.
-- **Best-effort, non-fatal startup nudges.** `skills`, `skill_install`, `hook_health` (warn mode), `large_file_guard`, and `console_title` are all wrapped so a failure logs to stderr and continues — none of them can block a launch.
-- **`lib.rs` is the single module instantiation site.** `main.rs` imports through `clud::{...}`; integration tests link the same library. There is no `mod ...;` declaration anywhere in `main.rs`.
-- **`redb` is touched in exactly one place per file.** `~/.clud/data.redb` is owned by the `gc_daemon` process (issue #135 Phase 1); the in-process `gc::WorktreeScanner` and the `clud gc list` / `purge` clients all funnel through the daemon's JSON-over-loopback-TCP protocol. The per-launch session cap lives in a separate `redb` table accessed via `session_registry`, which serializes with a sidecar `sessions.lock` so multiple `clud` processes never race on the file.
-- **Ctrl+C is cooperative.** `startup::install_ctrlc_flag` arms a `Arc<AtomicBool>` consumed by the loop iteration in `runner.rs`, the daemon attach loop in `daemon/attach.rs`, and the GC scanner thread in `gc.rs`. Forced reaping of orphan descendants is delegated to `process_tree::kill_tree`.
+Subsystems that span multiple files have their own topic docs under `docs/architecture/`:
 
-## Launch flow
+- **Loop subsystem** (`command/`, `loop_spec`, `loop_check`, `loop_artifacts`, `stream_json`, `runner`) → [docs/architecture/loop-subsystem.md](../../../docs/architecture/loop-subsystem.md)
+- **Daemon IPC** (everything under `daemon/`) → [docs/architecture/daemon-ipc.md](../../../docs/architecture/daemon-ipc.md)
+- **Session lifecycle** (`session`, `console_*`, `capture`, `dnd` injection, `voice` hooks) → [docs/architecture/session-lifecycle.md](../../../docs/architecture/session-lifecycle.md)
+- **Skill system** (`skills`, `skill_install`, `assets/skills/`) → [docs/architecture/skill-system.md](../../../docs/architecture/skill-system.md)
+- **GC and registry** (`gc`, `gc_daemon`, `session_registry`, `worktrees`) → [docs/architecture/gc-and-registry.md](../../../docs/architecture/gc-and-registry.md)
+- **Windows quirks** (`trampoline`, `subprocess` BatBadBat, `console_*`, `dnd`, `win_creation_flags`, `voice` ARM carveout) → [docs/architecture/windows-quirks.md](../../../docs/architecture/windows-quirks.md)
+- **Launch plan** (`command/types::LaunchPlan` + all consumers) → [docs/architecture/launch-plan.md](../../../docs/architecture/launch-plan.md)
 
-A typical interactive launch hits the modules in roughly this order:
-
-1. `main.rs` initializes the launch clock (`verbose_log`), unlocks the exe (`trampoline`), stamps the console title (`console_title`), installs bundled skills (`skills`, `skill_install`), checks hook health (`hook_health`), and warns on large files (`large_file_guard`).
-2. `args.rs` parses the CLI; `backend.rs` resolves which agent and launch mode to use; `startup.rs` registers the session in `session_registry` (enforcing `CLUD_MAX_INSTANCES`) and installs the Ctrl+C atomic flag.
-3. `command::build_launch_plan` (from `command/`) assembles the `LaunchPlan` — argv, env, prompt, optional loop markers, optional `--repeat` schedule. For `clud loop`, `loop_spec` resolves the task and `loop_artifacts` initializes `<git-root>/.clud/loop/`.
-4. `main.rs` hands the plan to `runner.rs`, which dispatches to either the subprocess path (via `subprocess.rs`, with `stream_json` rendering progress) or the PTY path (via `session.rs`, with `console_input` translating Shift+Enter and `dnd` injecting drops).
-5. In PTY mode `voice::VoiceMode` attaches an `InteractiveHooks` impl so F3 press/release flows the captured audio through `voice/worker.rs` and writes the transcript back into the PTY master.
-6. After each iteration, `loop_check` polls DONE/BLOCKED markers; `loop_artifacts` rolls forward `info.json` / `log.txt`; on terminal signals, `process_tree::kill_tree` reaps the descendant tree before exit.
-
-When `--detach` / `attach` / `list` / `kill` / `logs` is used, `main.rs` routes into `daemon/` instead, and the daemon process re-enters this same binary as a `__daemon` or `__worker` to host or run the session.
+Non-obvious design choices (single `LaunchPlan`, `lib.rs` as the only `mod ...` site, cooperative Ctrl+C, redb single-owner) have ADRs in [docs/DESIGN_DECISIONS.md](../../../docs/DESIGN_DECISIONS.md).
 
 ## Entry point
 
-`main.rs` is the binary entry; `lib.rs` re-exports every top-level module (and the four subdirs) as `pub mod ...` so the integration tests under `crates/clud-bin/tests/` can link against internals (notably `session::run_raw_pty_pump` and `session::F3Observer`). Production builds resolve each module through the library, so there is exactly one instance of each module in the final binary.
+`main.rs` is the binary entry; `lib.rs` re-exports every top-level module (and the four subdirs) as `pub mod ...` so integration tests under `crates/clud-bin/tests/` can link against internals (notably `session::run_raw_pty_pump` and `session::F3Observer`). See [DD-007](../../../docs/DESIGN_DECISIONS.md#dd-007-librs-is-the-only-place-that-declares-modules-mainrs-imports-through-clud) for why the single-instantiation pattern matters.
 
 ## See also
 

@@ -2,6 +2,8 @@
 
 Centralized session manager for backgrounded, detachable, and repeating clud runs. A long-lived daemon process (one per state-dir) accepts TCP JSON requests to spawn per-session worker subprocesses; each worker owns one backend (`claude` or `codex`) running under a PTY or a captured subprocess, persists snapshots + an append-only log to disk, and brokers attach/detach from interactive clients. Clients use this layer for `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs`, and `clud loop --repeat`. Internal helper commands `__daemon` and `__worker` re-enter the same binary in their respective roles.
 
+For the wire protocol, attach flow, snapshot/log persistence, and failure modes, see [docs/architecture/daemon-ipc.md](../../../../docs/architecture/daemon-ipc.md). This README is the per-file inventory.
+
 ## Files
 
 - `mod.rs` — module root. Only re-exports `experimental_enabled`, `handle_special_command`, `run_centralized_session` from `entry`.

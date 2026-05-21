@@ -41,6 +41,10 @@ crates/                    → see crates/README.md
 testbins/                  → see testbins/README.md
   mock-agent/              → see testbins/mock-agent/README.md
     src/                   → see testbins/mock-agent/src/README.md
+docs/                      → see docs/README.md
+  ARCHITECTURE.md          # index of subsystem topic docs
+  DESIGN_DECISIONS.md      # ADR-style records (DD-001 … DD-010)
+  architecture/            # one file per cross-cutting subsystem
 src/clud/__init__.py       # Minimal Python package (version shim only)
 ci/                        # CI scripts (env, build, lint, test)
 tests/                     # Python tests (unit + integration)
@@ -48,18 +52,37 @@ tests/                     # Python tests (unit + integration)
 
 ### How to navigate
 
-- **Where is X implemented?** Start at [`crates/clud-bin/src/README.md`](crates/clud-bin/src/README.md). It groups every top-level `.rs` file by concern (CLI surface, console/terminal, loop subsystem, GC, platform glue) and includes a "Quick lookup — which file owns a given subcommand" table.
-- **How does a subsystem work?** Each subdirectory README (`command/`, `daemon/`, `dnd/`, `voice/`) describes its purpose, files, key public items with `file:line` refs, and who calls into it.
+- **Where is X implemented?** Start at [`crates/clud-bin/src/README.md`](crates/clud-bin/src/README.md). It groups every top-level `.rs` file by concern and includes a "Quick lookup — which file owns a given subcommand" table.
+- **What's in this directory?** Each directory's `README.md` lists its files, key public items with `file:line` refs, and who calls into it.
+- **How does a subsystem work end-to-end?** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — topic docs that span multiple directories (loop, daemon IPC, session lifecycle, skill system, gc/registry, Windows quirks, launch plan).
+- **Why was it designed this way?** [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — ADR-style rationale for non-obvious choices.
 - **How does a test work?** [`crates/clud-bin/tests/README.md`](crates/clud-bin/tests/README.md) for Rust integration tests; [`testbins/mock-agent/README.md`](testbins/mock-agent/README.md) for the mock backend.
-- **How do bundled skills ship?** [`crates/clud-bin/assets/skills/README.md`](crates/clud-bin/assets/skills/README.md) — note the two-installer caveat (`skills.rs` vs `skill_install.rs`).
 
-## Key Design Decisions
+## Architecture & design docs
 
-- **YOLO by default**: always injects `--dangerously-skip-permissions` unless `--safe`.
-- **Backend agnostic**: supports both `claude` and `codex` via `--claude` / `--codex`.
-- **Unknown flag passthrough**: unrecognized CLI flags are forwarded to the backend.
-- **Single `LaunchPlan`**: every code path goes through `command::build_launch_plan` (see [`src/command/README.md`](crates/clud-bin/src/command/README.md)). `--dry-run` emits this plan as JSON.
-- **Test-first**: every feature has both Rust `#[test]` and Python subprocess tests.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — index of subsystem topic docs (each ~150–400 lines, self-contained).
+- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — 10 ADRs covering the non-obvious choices below and more.
+
+## Where to put new docs
+
+Tiered to keep agent context windows small and prevent duplication:
+
+1. **Per-directory README** (`<dir>/README.md`) covers **what's in this directory** — files, key types with `file:line`, callers. If a fact applies only inside one directory, write it here.
+2. **Subsystem topic doc** (`docs/architecture/<topic>.md`) covers **how a subsystem works across directories**. If a concept spans 2+ directories or 3+ files, write it here and have the per-dir READMEs link in with a one-line breadcrumb.
+3. **Design decision** (`docs/DESIGN_DECISIONS.md`, append-only `DD-NNN`) covers **why** a non-obvious choice was made. If a reader could plausibly ask "why didn't you do it the other way?", add a DD.
+4. **Never duplicate.** One doc owns each fact; everyone else links. When you find yourself copying a paragraph, replace the copy with a breadcrumb.
+
+For a new cross-cutting feature: add the topic doc → register it in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) → add a breadcrumb in each touched per-dir README → if the design is non-obvious, append a `DD-NNN` to `DESIGN_DECISIONS.md`.
+
+## Key Design Decisions (summary)
+
+See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
+
+- **YOLO by default** — `--dangerously-skip-permissions` is auto-injected unless `--safe` ([DD-002](docs/DESIGN_DECISIONS.md#dd-002-yolo-mode-is-the-default-safe-is-the-opt-out)).
+- **Backend agnostic** — supports both `claude` and `codex` via `--claude` / `--codex` ([DD-004](docs/DESIGN_DECISIONS.md#dd-004-backend-agnostic--support-both-claude-and-codex)).
+- **Single `LaunchPlan`** — every code path goes through `command::build_launch_plan`; `--dry-run` emits it as JSON ([DD-005](docs/DESIGN_DECISIONS.md#dd-005-single-launchplan-as-source-of-truth-for-everything-clud-runs), [launch-plan.md](docs/architecture/launch-plan.md)).
+- **Unknown flag passthrough** — unrecognized CLI flags are forwarded to the backend.
+- **Test-first** — every feature has both Rust `#[test]` and Python subprocess tests.
 
 ## Code Quality Standards
 

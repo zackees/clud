@@ -2,6 +2,8 @@
 
 Drag-and-drop handling for terminal-embedded `clud` sessions. Provides two complementary paths: (1) a cross-platform string normalizer that canonicalizes the path-shaped byte sequences each terminal injects on a drop (cmd.exe quoted paths, mintty `/c/...` MSYS paths, PowerShell `& 'C:\...'`, macOS backslash-escaped spaces, GNOME `file://` URIs), and (2) a Windows-only OLE `IDropTarget` adapter that intercepts drops at the COM layer (fixing issue #65 where conhost rejects the drop) and forwards parsed paths to a per-launch-mode injector (subprocess via `WriteConsoleInputW`, PTY via the master writer).
 
+The Windows COM lifecycle (`OleInitialize` worker thread, `RegisterDragDrop` displacement strategy for issue #79, `IDropTarget` vtable, RAII teardown) is covered in [docs/architecture/windows-quirks.md](../../../../docs/architecture/windows-quirks.md). The PTY-side injection path (how bytes reach the master) is in [docs/architecture/session-lifecycle.md](../../../../docs/architecture/session-lifecycle.md).
+
 ## Files
 
 - `mod.rs` — public `normalize_dropped_path` / `looks_like_dropped_path` string transforms plus `pub mod` re-exports of the submodules.
