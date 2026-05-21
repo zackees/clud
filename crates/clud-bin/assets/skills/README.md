@@ -11,17 +11,13 @@ Claude Code "skills" bundled into the `clud` binary as compile-time assets. On e
 
 ## How skills ship
 
-Each `SKILL.md` here is embedded into the binary via `include_str!` and written out on launch. Two installer paths exist and contributors should be aware of both:
+Each `SKILL.md` here is embedded into the binary via `include_str!` and written out on launch. Two installers run on every launch:
 
-- **`crates/clud-bin/src/skills.rs`** is the multi-backend installer. It iterates `BUNDLED_SKILLS` (sourced from this directory) and `SKILL_BACKENDS` (currently `~/.claude` and `~/.codex`), writes only when the target `SKILL.md` is missing, and never overwrites user edits.
-- **`crates/clud-bin/src/skill_install.rs`** is a Claude-only installer that reads from a separate top-level `skills/` directory in the repo (not this one) and *does* overwrite when content diverges semantically from the embedded copy (whitespace/CRLF differences are tolerated).
+- **`crates/clud-bin/src/skills.rs`** — multi-backend (`~/.claude`, `~/.codex`), never overwrites user edits, reads from this directory.
+- **`crates/clud-bin/src/skill_install.rs`** — Claude-only, overwrites on semantic divergence, reads from a separate top-level `skills/` directory in the repo.
 
-Both run on every launch and degrade silently on error. If you change a bundled skill, confirm which installer (or both) owns the on-disk copy.
+The two source trees ship different subsets — see [docs/architecture/skill-system.md](../../../../docs/architecture/skill-system.md) for the full divergence map, rationale, and the eventual consolidation plan ([DD-008](../../../../docs/DESIGN_DECISIONS.md#dd-008-dual-skill-installer-skillsrs-vs-skill_installrs--interim-state)).
 
 ## Adding a skill
 
-- Create `assets/skills/<name>/SKILL.md` with the standard frontmatter (`name:`, `description:`, `triggers:`) and the `<!-- managed-by: clud -->` marker.
-- Append a `BundledSkill { name, skill_md: include_str!("../assets/skills/<name>/SKILL.md") }` entry to `BUNDLED_SKILLS` in `crates/clud-bin/src/skills.rs`.
-- Decide whether the skill also needs to ship via `crates/clud-bin/src/skill_install.rs` (overwriting installer, top-level `skills/<name>/SKILL.md` source) and update that bundle list if so.
-- Add a short `README.md` next to the new `SKILL.md` and link it from the **Skills** section above.
-- Run `bash lint` and `bash test`; the existing unit tests assert the bundle is non-empty, names are unique, and every entry carries the `managed-by: clud` marker.
+See the checklist in [docs/architecture/skill-system.md](../../../../docs/architecture/skill-system.md#adding-a-skill) — it covers which installer to register with, where to place `SKILL.md`, the unit-test invariants, and the README expectation. Confirm both installers are updated if the skill should ship to Codex as well.

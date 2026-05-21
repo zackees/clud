@@ -2,6 +2,8 @@
 
 Builds the `LaunchPlan` that downstream runners execute: backend-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring, and Claude `stream-json` progress injection for subprocess-mode loops.
 
+The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) is documented at [docs/architecture/launch-plan.md](../../../../docs/architecture/launch-plan.md); the DONE/BLOCKED contract and `--repeat` no-overlap scheduler at [docs/architecture/loop-subsystem.md](../../../../docs/architecture/loop-subsystem.md).
+
 ## Files
 
 - `mod.rs` — module facade; re-exports `build_launch_plan`, `has_noninteractive_prompt`, `next_run_at_millis`, `repeat_implies_no_done_warning`, `summarize_task_name`, and the `LaunchPlan` / `LoopMarkers` / `RepeatSchedule` types.
