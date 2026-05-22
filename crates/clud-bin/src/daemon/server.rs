@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use running_process_core::{
-    CommandSpec, Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode,
-};
+use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 use sysinfo::Signal;
 
 use crate::win_creation_flags::invisible_helper_creationflags;
@@ -143,7 +141,12 @@ fn daemon_create_session(
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
-        containment: Some(Containment::Detached),
+        // `running-process-core` 3.4 removed the explicit `Containment`
+        // knob; every `NativeProcess` is now automatically bound to a
+        // kill-on-close Job Object on Windows. The worker can no longer
+        // outlive the daemon on Windows, but the worker already polls
+        // `pid_is_alive(daemon_pid)` to clean up if the daemon dies, so
+        // the OS-level link only tightens that contract.
     }));
     worker
         .start()

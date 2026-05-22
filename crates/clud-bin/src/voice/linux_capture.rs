@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use running_process_core::{
-    CommandSpec, Containment, NativeProcess, ProcessConfig, ProcessError, StderrMode, StdinMode,
+    CommandSpec, NativeProcess, ProcessConfig, ProcessError, StderrMode, StdinMode,
 };
 
 pub(super) struct LinuxCapture {
@@ -44,7 +44,6 @@ impl LinuxCapture {
             create_process_group: false,
             stdin_mode: StdinMode::Null,
             nice: None,
-            containment: Some(Containment::Contained),
         });
 
         if let Err(err) = process.start() {

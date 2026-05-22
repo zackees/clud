@@ -341,7 +341,6 @@ fn run_gh_capture(args: &[&str]) -> Result<(i32, String), String> {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
-        containment: None,
     };
     let process = NativeProcess::new(config);
     process

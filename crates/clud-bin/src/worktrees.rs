@@ -424,7 +424,6 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
-        containment: None,
     };
     let process = NativeProcess::new(config);
     process
