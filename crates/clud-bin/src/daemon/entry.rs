@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, IsTerminal};
 use std::sync::atomic::AtomicBool;
 
 use crate::args::{Args, Command};
@@ -17,7 +17,35 @@ use super::types::{
     DaemonRequest, DaemonResponse, SessionKind, WorkerLaunchSpec, ENV_FEATURE_FLAG,
 };
 use super::worker::run_worker;
+use crate::gc_daemon::ENV_NO_DAEMON;
 
+/// True when the launch should be routed through the centralized session
+/// daemon (`daemon::run_centralized_session`) instead of the direct
+/// runner in `runner::run_plan_{subprocess,pty}`.
+///
+/// **As of PR3 the centralized path is now the default for *interactive*
+/// launches** — when both stdin and stdout are TTYs. Piped invocations
+/// (`clud -p "x" | jq`, `echo foo | clud`, CI test harnesses) keep using
+/// the direct runner so they don't pay the daemon round-trip and so
+/// stdio framing stays byte-identical with what scripts expect.
+///
+/// Override matrix:
+///
+/// | Trigger                                  | Centralized? |
+/// |------------------------------------------|--------------|
+/// | `--detach` / `--detachable` / repeat job | **forced on** |
+/// | `--experimental-daemon-centralized`      | **forced on** (legacy alias) |
+/// | `CLUD_EXPERIMENTAL_DAEMON=1`             | **forced on** (legacy alias) |
+/// | `--no-daemon`                            | off |
+/// | `CLUD_NO_DAEMON=1`                       | off |
+/// | Interactive (stdin & stdout both TTYs)   | **on** ← new default |
+/// | Piped (anything else)                    | off (direct runner) |
+///
+/// The legacy "experimental" opt-in still forces centralized so any
+/// script that was setting `CLUD_EXPERIMENTAL_DAEMON=1` keeps working
+/// unchanged. The function name `experimental_enabled` is preserved for
+/// the same reason (one external call site in `main.rs`); a rename can
+/// land as a follow-up cleanup.
 pub fn experimental_enabled(args: &Args) -> bool {
     let repeat_enabled = matches!(
         args.command,
@@ -26,13 +54,37 @@ pub fn experimental_enabled(args: &Args) -> bool {
             ..
         })
     );
-    args.detach
+
+    let force_on = args.detach
         || args.detachable
         || repeat_enabled
         || args.experimental_daemon_centralized
-        || std::env::var(ENV_FEATURE_FLAG)
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        || env_truthy(ENV_FEATURE_FLAG);
+    if force_on {
+        return true;
+    }
+
+    // PR3: centralized daemon is now the default for interactive launches.
+    // Honor the user's explicit opt-out flags first.
+    if args.no_daemon || env_truthy(ENV_NO_DAEMON) {
+        return false;
+    }
+
+    // Interactive (both TTYs) → centralized. Piped → direct runner.
+    //
+    // Rationale: every meaningful win of the centralized path (kill-on-
+    // close Job Object lifetime, attach/detach, replay, session listing,
+    // voice + DnD) only matters when there's a human at the keyboard.
+    // For piped one-shots the direct runner is simpler, faster, and
+    // produces byte-identical stdio framing that script automation
+    // relies on.
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i32> {
