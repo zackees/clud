@@ -114,7 +114,7 @@ pub fn run_plan_subprocess(
 ) -> i32 {
     use std::path::PathBuf;
 
-    use running_process_core::{Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+    use running_process_core::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
     let env = child_env();
     let mut last_exit = 0i32;
@@ -173,13 +173,15 @@ pub fn run_plan_subprocess(
             stdin_mode: StdinMode::Inherit,
             nice: None,
             // Issue #9: Claude/Codex spawn tool subprocesses (cargo test,
-            // npm test, long builds) that leak as zombies when a clud
-            // session dies abnormally (crash, terminal close, Task Manager
-            // kill). `Containment::Contained` binds the child tree's
-            // lifetime to ours: PR_SET_PDEATHSIG(SIGKILL) on Linux, a
-            // kill-on-close Job Object on Windows. The daemon path already
-            // sets this (daemon.rs); direct subprocess runs now do too.
-            containment: Some(Containment::Contained),
+            // npm test, long builds) that leak as zombies when clud dies
+            // abnormally. Since `running-process-core` 3.4, every
+            // `NativeProcess` is automatically placed in a kill-on-close
+            // Job Object on Windows, which gives us the same blast-radius
+            // bound as the old `Containment::Contained` opt-in. On Linux
+            // the wrapper no longer sets `PR_SET_PDEATHSIG(SIGKILL)`
+            // implicitly; orphan reaping there falls back to the daemon
+            // worker's `pid_is_alive` watchdog (foreground sessions still
+            // rely on the OS killing the process tree at terminal close).
         };
 
         let process = NativeProcess::new(config);

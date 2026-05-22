@@ -499,9 +499,15 @@ class TestInterruptReporting:
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
+        # PR #145 gated the "[clud] interrupted via Ctrl+C (pty)" diagnostic
+        # behind `--verbose`; pass that flag here so the assertion below has
+        # the message to check against. Without `--verbose` the diagnostic is
+        # silenced by design and the test had been failing on every platform's
+        # integration run since #145 landed.
         proc = subprocess.Popen(
             [
                 str(clud_binary),
+                "--verbose",
                 "--pty",
                 "-p",
                 "hello",

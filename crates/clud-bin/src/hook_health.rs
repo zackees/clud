@@ -9,7 +9,7 @@ use crate::backend::{self, Backend};
 use crate::command;
 use crate::loop_spec;
 use crate::subprocess;
-use running_process_core::{Containment, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use running_process_core::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -808,7 +808,6 @@ fn run_backend_prompt(
         create_process_group: false,
         stdin_mode: StdinMode::Inherit,
         nice: None,
-        containment: Some(Containment::Contained),
     };
     let process = NativeProcess::new(config);
     process
