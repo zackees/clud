@@ -619,17 +619,20 @@ impl clud::session::InteractiveHooks for CountingHooks {
     fn intercept_f3(&self) -> bool {
         self.intercept
     }
-    fn on_f3_press(&mut self, _process: &NativePtyProcess) -> std::io::Result<()> {
+    fn on_f3_press(&mut self, _sink: &mut dyn clud::session::PtyInputSink) -> std::io::Result<()> {
         self.f3_presses
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn on_f3_release(&mut self, _process: &NativePtyProcess) -> std::io::Result<()> {
+    fn on_f3_release(
+        &mut self,
+        _sink: &mut dyn clud::session::PtyInputSink,
+    ) -> std::io::Result<()> {
         self.f3_releases
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn on_tick(&mut self, _process: &NativePtyProcess) -> std::io::Result<()> {
+    fn on_tick(&mut self, _sink: &mut dyn clud::session::PtyInputSink) -> std::io::Result<()> {
         self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
@@ -1065,7 +1068,7 @@ fn raw_pump_restores_raw_mode_on_panic() {
     // restores the terminal.
     struct PanickingHooks;
     impl clud::session::InteractiveHooks for PanickingHooks {
-        fn on_tick(&mut self, _process: &NativePtyProcess) -> std::io::Result<()> {
+        fn on_tick(&mut self, _sink: &mut dyn clud::session::PtyInputSink) -> std::io::Result<()> {
             panic!("deliberate panic in on_tick");
         }
     }

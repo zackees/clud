@@ -22,6 +22,28 @@ use super::types::{
     RawTerminalGuard, SessionKind, SessionSnapshot, WorkerClientMessage, WorkerServerMessage,
     BACKGROUND_PROMPT_TIMEOUT,
 };
+use crate::session::{InteractiveHooks, PtyInputSink};
+use crate::voice::VoiceMode;
+
+/// `PtyInputSink` impl that forwards bytes to the daemon-owned PTY as a
+/// `WorkerClientMessage::Input` TCP frame. This is what lets centralized
+/// mode wire `VoiceMode` (and other `InteractiveHooks` impls) without
+/// having a local `NativePtyProcess` to write to. Synthetic input from
+/// voice transcripts, drag-drop paths, etc. lands at the daemon worker
+/// and is forwarded to the PTY master alongside real keystrokes.
+struct WorkerInputSink {
+    writer: Arc<Mutex<TcpStream>>,
+}
+
+impl PtyInputSink for WorkerInputSink {
+    fn write_input(&mut self, bytes: &[u8], submit: bool) -> io::Result<()> {
+        let msg = WorkerClientMessage::Input {
+            data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            submit,
+        };
+        send_worker_message(&self.writer, &msg)
+    }
+}
 
 pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &AtomicBool) -> i32 {
     if let Err(err) = ensure_daemon(state_dir) {
@@ -261,6 +283,26 @@ fn run_remote_interactive(
             return LocalAttachResult::Completed(1);
         }
     };
+    // VoiceMode + PtyInputSink: same `InteractiveHooks` plumbing the
+    // local-PTY pump uses, just with input bytes routed through the
+    // daemon-worker TCP socket instead of `NativePtyProcess::write_impl`.
+    // When voice is disabled by env (`CLUD_VOICE_*` unset, no model
+    // present) `intercept_f3()` returns false and all the hook calls
+    // below are constant-time no-ops.
+    let mut voice = VoiceMode::from_env();
+    let mut sink = WorkerInputSink {
+        writer: Arc::clone(&writer),
+    };
+
+    // Issue #79: register the console IDropTarget so dropped paths reach
+    // the daemon-owned PTY just like keystrokes. Held for the lifetime of
+    // the interactive attach; the worker displacement thread refreshes
+    // the registration as needed. No-op on POSIX.
+    #[cfg(windows)]
+    let (_dnd_guard, dnd_rx) = crate::startup::try_register_console_drop_target_pty();
+    #[cfg(not(windows))]
+    let (_dnd_guard, dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) =
+        (None, None);
     loop {
         if interrupted.load(Ordering::SeqCst) {
             return LocalAttachResult::InterruptRequested;
@@ -280,6 +322,20 @@ fn run_remote_interactive(
                     }
                     KeyAction::Interrupt => {
                         return LocalAttachResult::InterruptRequested;
+                    }
+                    KeyAction::F3Press => {
+                        if voice.intercept_f3() {
+                            if let Err(err) = voice.on_f3_press(&mut sink) {
+                                eprintln!("[clud] warning: voice F3 press hook failed: {}", err);
+                            }
+                        }
+                    }
+                    KeyAction::F3Release => {
+                        if voice.intercept_f3() {
+                            if let Err(err) = voice.on_f3_release(&mut sink) {
+                                eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
+                            }
+                        }
                     }
                     KeyAction::Ignore => {}
                 },
@@ -302,6 +358,30 @@ fn run_remote_interactive(
             },
             Ok(false) => {}
             Err(_) => return LocalAttachResult::Completed(1),
+        }
+        // Tick the voice hook even when no keyboard event arrived: this
+        // drains pending whisper transcripts into `WorkerInputSink` and
+        // runs the VAD auto-stop for terminals that don't emit F3
+        // release events.
+        if let Err(err) = voice.on_tick(&mut sink) {
+            eprintln!("[clud] warning: voice tick hook failed: {}", err);
+        }
+
+        // Drain any drop-target bytes the OLE worker pushed since the
+        // last tick. Each chunk is one dropped path (or a paste-batched
+        // group). `submit=false` keeps the cursor in the input box so
+        // the user can edit before submitting, matching the local-PTY
+        // runner's behavior.
+        if let Some(rx) = &dnd_rx {
+            while let Ok(chunk) = rx.try_recv() {
+                let _ = send_worker_message(
+                    &writer,
+                    &WorkerClientMessage::Input {
+                        data_b64: base64::engine::general_purpose::STANDARD.encode(&chunk),
+                        submit: false,
+                    },
+                );
+            }
         }
     }
 }
