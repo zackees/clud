@@ -228,6 +228,16 @@ impl Drop for RawTerminalGuard {
 pub(super) enum KeyAction {
     Forward(Vec<u8>),
     Interrupt,
+    /// F3 went down. In centralized mode the attach pump fires
+    /// `InteractiveHooks::on_f3_press`; in local-PTY mode the runner's
+    /// raw pump observes the matching byte sequence directly. Both paths
+    /// converge on `VoiceMode` so hold-to-record behaves the same way.
+    F3Press,
+    /// F3 came back up — emitted only by terminals that report key
+    /// releases (kitty protocol; Windows ConPTY only when keyboard
+    /// enhancement flags negotiate). Other terminals stop recording via
+    /// VAD auto-stop in `VoiceMode::on_tick`.
+    F3Release,
     Ignore,
 }
 

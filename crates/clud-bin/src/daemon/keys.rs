@@ -3,6 +3,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use super::types::KeyAction;
 
 pub(super) fn translate_key_event(key: KeyEvent) -> KeyAction {
+    // F3 is special: voice mode wants both press AND release events so
+    // the hold-to-record contract works in centralized mode the same way
+    // it does in the local-PTY runner. Handle it before the generic
+    // release filter below.
+    if matches!(key.code, KeyCode::F(3)) {
+        return match key.kind {
+            KeyEventKind::Release => KeyAction::F3Release,
+            _ => KeyAction::F3Press,
+        };
+    }
     if matches!(key.kind, KeyEventKind::Release) {
         return KeyAction::Ignore;
     }
