@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use running_process_core::pty::NativePtyProcess;
-
-use crate::session::InteractiveHooks;
+use crate::session::{InteractiveHooks, PtyInputSink};
 
 use super::config::VoiceConfig;
 use super::cues::{play_cue, CueTone};
@@ -159,7 +157,7 @@ impl VoiceMode {
         }
     }
 
-    fn drain_worker_events(&mut self, process: &NativePtyProcess) -> io::Result<()> {
+    fn drain_worker_events(&mut self, sink: &mut dyn PtyInputSink) -> io::Result<()> {
         let Some(worker) = self.worker.as_ref() else {
             return Ok(());
         };
@@ -172,9 +170,7 @@ impl VoiceMode {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    process
-                        .write_impl(trimmed.as_bytes(), false)
-                        .map_err(|err| io::Error::other(err.to_string()))?;
+                    sink.write_input(trimmed.as_bytes(), false)?;
                 }
                 Ok(WorkerEvent::Error(err)) => {
                     self.transcribing = false;
@@ -204,21 +200,21 @@ impl InteractiveHooks for VoiceMode {
     /// intervening release, neither of which should kill capture.
     /// Stops come from `on_f3_release` (kitty terminals) or the VAD
     /// auto-stop in `on_tick` (everyone else).
-    fn on_f3_press(&mut self, _process: &NativePtyProcess) -> io::Result<()> {
+    fn on_f3_press(&mut self, _sink: &mut dyn PtyInputSink) -> io::Result<()> {
         if self.recording.is_none() {
             self.start_recording();
         }
         Ok(())
     }
 
-    fn on_f3_release(&mut self, _process: &NativePtyProcess) -> io::Result<()> {
+    fn on_f3_release(&mut self, _sink: &mut dyn PtyInputSink) -> io::Result<()> {
         if self.recording.is_some() {
             self.stop_recording();
         }
         Ok(())
     }
 
-    fn on_tick(&mut self, process: &NativePtyProcess) -> io::Result<()> {
+    fn on_tick(&mut self, sink: &mut dyn PtyInputSink) -> io::Result<()> {
         // VAD-silence / hard-cap auto-stop. Fires on terminals that
         // don't emit kitty release events (Windows ConPTY in
         // particular); harmless on those that do, because
@@ -231,7 +227,7 @@ impl InteractiveHooks for VoiceMode {
         if auto_stop {
             self.stop_recording();
         }
-        self.drain_worker_events(process)
+        self.drain_worker_events(sink)
     }
 }
 
@@ -240,6 +236,7 @@ mod tests {
     use super::*;
     use crate::voice::audio::TARGET_SAMPLE_RATE;
     use crate::voice::audio::{downmix_and_resample, has_speech_peak, is_effectively_silent};
+    use running_process_core::pty::NativePtyProcess;
     use std::env;
 
     #[test]
@@ -337,8 +334,9 @@ mod tests {
 
         mode.recording = Some(ActiveRecording::synthetic());
         let pty_handle = make_dummy_pty();
+        let mut sink = crate::session::NativePtyProcessSink::new(&pty_handle);
         let result =
-            <VoiceMode as crate::session::InteractiveHooks>::on_f3_press(&mut mode, &pty_handle);
+            <VoiceMode as crate::session::InteractiveHooks>::on_f3_press(&mut mode, &mut sink);
         assert!(result.is_ok());
         assert!(
             mode.recording.is_some(),
@@ -351,8 +349,9 @@ mod tests {
         let (mut mode, _g1, _g2) = voice_mode_for_state_test();
         mode.recording = Some(ActiveRecording::synthetic());
         let pty_handle = make_dummy_pty();
+        let mut sink = crate::session::NativePtyProcessSink::new(&pty_handle);
         let _ =
-            <VoiceMode as crate::session::InteractiveHooks>::on_f3_release(&mut mode, &pty_handle);
+            <VoiceMode as crate::session::InteractiveHooks>::on_f3_release(&mut mode, &mut sink);
         assert!(
             mode.recording.is_none(),
             "release must drain the recording slot so the next press can start fresh"
@@ -367,8 +366,9 @@ mod tests {
         let (mut mode, _g1, _g2) = voice_mode_for_state_test();
         assert!(mode.recording.is_none());
         let pty_handle = make_dummy_pty();
+        let mut sink = crate::session::NativePtyProcessSink::new(&pty_handle);
         let result =
-            <VoiceMode as crate::session::InteractiveHooks>::on_f3_release(&mut mode, &pty_handle);
+            <VoiceMode as crate::session::InteractiveHooks>::on_f3_release(&mut mode, &mut sink);
         assert!(result.is_ok());
     }
 
