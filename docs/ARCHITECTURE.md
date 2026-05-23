@@ -7,10 +7,10 @@ Index of subsystem architecture docs. Each file is self-contained for one cross-
 | Document | Lines | What it covers |
 |---|---|---|
 | [architecture/loop-subsystem.md](architecture/loop-subsystem.md) | ~250 | `clud loop`: task resolution, plan synthesis, iteration run, DONE/BLOCKED marker contract, artifact rollover, repeat scheduling |
-| [architecture/daemon-ipc.md](architecture/daemon-ipc.md) | ~250 | Centralized session daemon: TCP JSON IPC, daemon/worker re-entry model, snapshot persistence, attach broker |
+| [architecture/daemon-ipc.md](architecture/daemon-ipc.md) | ~250 | Always-on clud daemon hosting session ops + GC: TCP JSON IPC, daemon/worker re-entry model, snapshot persistence, attach broker |
 | [architecture/session-lifecycle.md](architecture/session-lifecycle.md) | ~300 | PTY session pump, console mode setup, OSC title keeper, capture for attach, drag-drop and voice injection points |
 | [architecture/skill-system.md](architecture/skill-system.md) | ~200 | Skill bundling (`include_str!`), dual-installer model (`skills.rs` vs `skill_install.rs`), multi-backend install |
-| [architecture/gc-and-registry.md](architecture/gc-and-registry.md) | ~250 | `gc_daemon` single-owner redb model, session cap registry, worktree scanner, GC subcommands |
+| [architecture/gc-and-registry.md](architecture/gc-and-registry.md) | ~250 | always-on `clud __daemon` single-owner redb model, session cap registry, worktree scanner, GC subcommands |
 | [architecture/windows-quirks.md](architecture/windows-quirks.md) | ~300 | Windows-only platform code: trampoline, BatBadBat `.cmd` rewrite, console modes, Shift+Enter key translation, `IDropTarget`, `CREATE_NO_WINDOW`, ARM whisper carveout |
 | [architecture/launch-plan.md](architecture/launch-plan.md) | ~180 | `LaunchPlan` as the single source of truth: construction, consumers, `--dry-run` JSON |
 

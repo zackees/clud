@@ -14,7 +14,7 @@ subcommand.
 | File | Concern | Ownership | Lifetime |
 |---|---|---|---|
 | `sessions.redb` (POSIX: `$XDG_STATE_HOME/clud/`; Windows: `%LOCALAPPDATA%\clud\`) | Per-launch session cap | File-lock serialized via `sessions.lock` | Opened for ms at startup and again at shutdown; never across the session |
-| `~/.clud/data.redb` | Tracked-entry GC (`agent-*` worktrees) | Single-owner `clud __gc-daemon` process; everyone else uses JSON-over-TCP | Opened once by the daemon; lives until the daemon dies |
+| `~/.clud/data.redb` | Tracked-entry GC (`agent-*` worktrees) | Single-owner: the always-on `clud __daemon` process owns it via the in-process `daemon/gc_service.rs` registry-worker thread; everyone else uses JSON-over-TCP | Opened once at daemon startup; lives until the daemon idle-shuts |
 
 Why two files? The session cap is a *guardrail* — it needs the simplest possible "open, decide,
 close" semantics so a crashed `clud` can never deadlock the next one. The tracked-entry GC is a
@@ -73,41 +73,45 @@ acquires the advisory lock.
 - `CLUD_WARN_INSTANCES` (default `cap/2`).
 - `CLUD_SESSION_DB`, `CLUD_SESSION_LOCK` — test overrides for the file paths.
 
-## GC daemon (single-owner data.redb)
+## Clud daemon (single-owner data.redb)
 
-`~/.clud/data.redb` is held by **exactly one process**: the `clud __gc-daemon` subprocess. Issue
-#135 Phase 1 introduced this; the design rationale (`crates/clud-bin/src/gc_daemon.rs:13`) is
-that redb's locking is intra-process and any attempt to coordinate multi-process access via the
-file lock was unreliable in practice — startup races, partial-write windows, and the cost of
-opening/closing redb on every CLI invocation all pushed us toward funneling everything through
-one owner.
+`~/.clud/data.redb` is held by **exactly one process**: the always-on `clud __daemon` subprocess.
+Issue #135 Phase 1 originally introduced this as a separate `gc_daemon`; [DD-012] folded it
+into the existing session daemon so there's one daemon per user that hosts both `--detach` /
+`attach` / `list` / etc. and the GC registry. The single-owner-of-redb invariant is unchanged —
+only the owning process identity moved.
 
-The daemon process:
+The merged daemon's GC half:
 
-1. Binds a loopback TCP port on `127.0.0.1:0` (kernel-assigned).
+1. Binds a loopback TCP port on `127.0.0.1:0` (kernel-assigned, shared with session-management
+   IPC).
 2. Spawns one **registry worker thread** that owns the `Registry` handle and is the sole
-   reader/writer of the redb file (`crates/clud-bin/src/gc_daemon.rs:224`).
-3. Atomically writes `(pid, port)` JSON to `~/.clud/state/gc-daemon.info`
-   (`crates/clud-bin/src/gc_daemon.rs:119`).
+   reader/writer of the redb file (`crates/clud-bin/src/daemon/gc_service.rs:spawn_registry_worker`).
+   The session-management half of the daemon runs in the same process but on different threads;
+   nothing else touches the redb handle.
+3. Atomically writes `(pid, port)` JSON to `~/.clud/state/daemon.json`
+   (`crates/clud-bin/src/daemon/server.rs`).
 4. Serves connections forever: accept thread → per-connection thread →
    `mpsc::Sender<GcRequestMsg>` → worker thread → reply on a per-request `mpsc::sync_channel(1)`
-   (`crates/clud-bin/src/gc_daemon.rs:469`).
+   (`crates/clud-bin/src/daemon/server.rs::dispatch_gc_op`).
 
-Wire protocol is JSON-over-loopback-TCP, one request per connection, versioned envelope
-`{"v": 1, "op": "...", ...}`. Operations: `gc.list`, `gc.purge`, `gc.reconcile`, `gc.insert`
-(`crates/clud-bin/src/gc_daemon.rs:144`). Replies are `gc.list.ok`, `gc.purge.ok`,
-`gc.reconcile.ok`, `gc.insert.ok`, `gc.insert.skipped`, or `error`
-(`crates/clud-bin/src/gc_daemon.rs:186`).
+Wire protocol is JSON-over-loopback-TCP, one request per connection. The session daemon's
+existing `DaemonRequest`/`DaemonResponse` enum gained two variants:
+`DaemonRequest::Gc { payload: GcOp }` and `DaemonResponse::Gc { reply: GcReply }`. Inside,
+`GcOp` carries `list` / `purge` / `reconcile` / `insert` (`crates/clud-bin/src/daemon/types.rs`);
+`GcReply` carries `list_ok` / `purge_ok` / `reconcile_ok` / `insert_ok` / `error`.
 
-`ensure_running()` (`crates/clud-bin/src/gc_daemon.rs:547`) is the idempotent bringup entry
-point. It reads `gc-daemon.info`, probes the PID, and if alive + accepting TCP, returns.
-Otherwise it acquires `<state_dir>/gc-daemon.lock` (issue #138 — serializes concurrent bringup so
-two `clud` startups don't both spawn a daemon and race on the TCP bind), **re-probes** under the
-lock, and only spawns if still absent.
+`ensure_daemon(state_dir)` (`crates/clud-bin/src/daemon/client.rs`) is the idempotent bringup
+entry point, called from `main.rs` on every clud invocation. It reads `daemon.json`, probes the
+PID, and if alive + accepting TCP, returns. Otherwise it acquires `<state_dir>/daemon.lock`
+(issue #138 — serializes concurrent bringup so two `clud` startups don't both spawn a daemon and
+race on the TCP bind), **re-probes** under the lock, and only spawns if still absent.
 
-Spawn is `clud __gc-daemon --state-dir <state_dir>` detached via
-`trampoline::spawn_detached_self` with `invisible_helper_creationflags()` on Windows. Caller
-polls up to 5 seconds for the info file plus a successful TCP connect.
+Spawn is `clud __daemon --state-dir <state_dir>` detached via `trampoline::spawn_detached_self`
+with `invisible_helper_creationflags()` on Windows. Caller polls up to 5 seconds for the info
+file plus a successful TCP connect.
+
+[DD-012]: ../DESIGN_DECISIONS.md#dd-012-one-always-on-daemon-hosts-both-session-ops-and-the-gc-registry
 
 ## GC subcommands
 
@@ -115,20 +119,21 @@ All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
 `CLUD_NO_DAEMON=1`) is **an error**, not a fallback — there is no read-only path in v1
 (`crates/clud-bin/src/gc.rs:594`).
 
-- **`clud gc list [--json]`** — `cmd_list` (`crates/clud-bin/src/gc.rs:631`) sends `gc.list`,
-  prints a table (or JSON). Each row reports `kind / age / agent_id / branch / path` plus a
-  `live_locked` flag computed by the daemon by parsing `git worktree list --porcelain` and
-  extracting `(pid <N>)` from any `locked <reason>` line.
+- **`clud gc list [--json]`** — `cmd_list` (`crates/clud-bin/src/gc.rs`) calls
+  `daemon::gc_client_list`, prints a table (or JSON). Each row reports
+  `kind / age / agent_id / branch / path` plus a `live_locked` flag computed by the daemon
+  by parsing `git worktree list --porcelain` and extracting `(pid <N>)` from any
+  `locked <reason>` line.
 - **`clud gc purge [--duration 7d] [--kind worktree] [--dry-run] [--yes]`** — `cmd_purge`
-  (`crates/clud-bin/src/gc.rs:676`) pre-validates the duration string locally, then sends
-  `gc.purge`. The daemon selects candidates (all rows, or rows older than `now - duration`),
-  partitions out live-locked worktrees, and either reports the count (dry-run) or runs `git
-  worktree remove --force` (falling back to `remove_dir_all` if git refuses) and deletes the
-  row. Bare `clud gc purge` (no `--duration`) is interactive and asks for `y/N` confirmation
-  unless `--yes`.
-- **`clud gc reconcile`** — `cmd_reconcile` (`crates/clud-bin/src/gc.rs:653`) sends
-  `gc.reconcile` with the current repo root. The daemon walks `<repo>/.claude/worktrees/` and
-  inserts any agent-* subdir that isn't already tracked. Returns the count of new rows.
+  pre-validates the duration string locally, then calls `daemon::gc_client_purge`. The daemon
+  selects candidates (all rows, or rows older than `now - duration`), partitions out
+  live-locked worktrees, and either reports the count (dry-run) or runs `git worktree remove
+  --force` (falling back to `remove_dir_all` if git refuses) and deletes the row. Bare
+  `clud gc purge` (no `--duration`) is interactive and asks for `y/N` confirmation unless
+  `--yes`.
+- **`clud gc reconcile`** — `cmd_reconcile` calls `daemon::gc_client_reconcile` with the
+  current repo root. The daemon walks `<repo>/.claude/worktrees/` and inserts any agent-*
+  subdir that isn't already tracked. Returns the count of new rows.
 
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
 (`crates/clud-bin/src/gc.rs:591`).
@@ -186,14 +191,18 @@ Session cap:
 
 GC store / daemon:
 
-- `Registry` (`crates/clud-bin/src/gc.rs:149`) — owns the redb handle inside the daemon worker
-  thread.
-- `TrackedEntry`, `InsertInput` (`crates/clud-bin/src/gc.rs:119`,
-  `crates/clud-bin/src/gc.rs:133`) — public row + insert-input shapes.
-- `WorktreeScanner` (`crates/clud-bin/src/gc.rs:459`) — polling thread.
-- `DaemonInfo`, `DaemonHandle` (`crates/clud-bin/src/gc_daemon.rs:74`,
-  `crates/clud-bin/src/gc_daemon.rs:532`) — info-file shape + ensure-running return value.
-- `ListRow` (`crates/clud-bin/src/gc_daemon.rs:205`) — public JSON row.
+- `Registry` (`crates/clud-bin/src/gc.rs`) — owns the redb handle inside the daemon's
+  registry-worker thread.
+- `TrackedEntry`, `InsertInput` (`crates/clud-bin/src/gc.rs`) — public row + insert-input
+  shapes.
+- `WorktreeScanner` (`crates/clud-bin/src/gc.rs`) — polling thread that talks IPC to the
+  daemon.
+- `DaemonInfo` (`crates/clud-bin/src/daemon/types.rs`) — info-file shape (pid + port) shared
+  with the session-management half of the daemon.
+- `ListRow` (`crates/clud-bin/src/daemon/types.rs`) — public JSON row shape returned by
+  `gc.list` and serialized by `clud gc list --json`.
+- `GcOp`, `GcReply` (`crates/clud-bin/src/daemon/types.rs`) — IPC payload enums carried inside
+  `DaemonRequest::Gc` / `DaemonResponse::Gc`.
 
 `--clean-worktrees`:
 
@@ -203,15 +212,16 @@ GC store / daemon:
 
 ## Failure modes
 
-- **Daemon crash mid-request.** Client's TCP `read_line` returns 0 bytes; `client_*` surfaces
-  as `io::Error`. CLI prints `error: <op> failed: <msg>` and exits 1. The next `ensure_running()`
-  from any clud process re-spawns the daemon. The worker's `recv_timeout(30s)` in
-  `handle_connection` (`crates/clud-bin/src/gc_daemon.rs:508`) prevents a wedged worker from
-  hanging the accept thread indefinitely.
+- **Daemon crash mid-request.** Client's TCP `read_line` returns 0 bytes; `gc_client_*`
+  surfaces as `io::Error`. CLI prints `error: <op> failed: <msg>` and exits 1. The next
+  `ensure_daemon()` from any clud process re-spawns the daemon. The worker's
+  `recv_timeout(WORKER_REPLY_TIMEOUT)` in `dispatch_gc_op`
+  (`crates/clud-bin/src/daemon/server.rs`) prevents a wedged worker from hanging the accept
+  thread indefinitely.
 
-- **Bringup race.** Two `clud` startups call `ensure_running()` simultaneously. Both see no
-  daemon. Both try to acquire `gc-daemon.lock`. The winner spawns; the loser blocks, then
-  re-probes under the lock, finds the daemon, and returns its handle. Issue #138.
+- **Bringup race.** Two `clud` startups call `ensure_daemon()` simultaneously. Both see no
+  daemon. Both try to acquire `daemon.lock`. The winner spawns; the loser blocks, then
+  re-probes under the lock, finds the daemon, and returns. Issue #138.
 
 - **`sessions.redb` lock contention.** N concurrent `clud` launches serialize on `sessions.lock`,
   never on the redb file lock. The lock is held for ~ms per launch; even hundreds of
@@ -236,14 +246,16 @@ GC store / daemon:
   cannot clobber a sibling that happened to inherit its PID via POSIX PID reuse. `unregister`
   clears the flag too, for the same reason.
 
-- **`CLUD_NO_DAEMON=1`.** All `clud gc *` subcommands exit 2 with "gc operations require the GC
-  daemon; remove --no-daemon". The scanner's IPC fails silently and the thread idles for the
-  rest of the session. The session cap is unaffected (it doesn't use the daemon).
+- **`CLUD_NO_DAEMON=1` or `--no-daemon`.** All `clud gc *` subcommands exit 2 with "gc
+  operations require the clud daemon; remove --no-daemon". The scanner's IPC fails silently
+  and the thread idles for the rest of the session. The session cap is unaffected (it doesn't
+  use the daemon). The always-on auto-spawn from `main.rs` is also skipped.
 
 ## See also
 
-- [`daemon-ipc.md`](daemon-ipc.md) — the long-lived session daemon uses the same
-  JSON-over-loopback-TCP pattern but is a *different* daemon process serving a different concern
-  (interactive sessions, not GC). The GC daemon's protocol is private to this subsystem.
-- [`../DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md) — DD-006 covers the "redb is single-owner"
-  rule and the rationale for the daemon-fronted design over per-process file-lock coordination.
+- [`daemon-ipc.md`](daemon-ipc.md) — the always-on `clud __daemon` hosts both interactive
+  session ops (`Create` / `Session` / `Terminate`) and GC ops (`Gc { payload }`) on the same
+  loopback TCP listener.
+- [`../DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md) — DD-006 introduced the "redb is
+  single-owner" rule; DD-012 records the merge of `gc_daemon` into the session daemon while
+  preserving that invariant.

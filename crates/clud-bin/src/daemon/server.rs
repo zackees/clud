@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,10 +13,13 @@ use sysinfo::Signal;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
+use super::gc_service::{spawn_registry_worker, GcRequestMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
 use super::process_utils::{pid_is_alive, signal_process_tree};
-use super::types::{DaemonInfo, DaemonRequest, DaemonResponse, SessionSnapshot, WorkerLaunchSpec};
+use super::types::{
+    DaemonInfo, DaemonRequest, DaemonResponse, GcReply, SessionSnapshot, WorkerLaunchSpec,
+};
 
 pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     if let Err(err) = fs::create_dir_all(state_dir) {
@@ -49,6 +52,17 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         return 1;
     }
 
+    // Issue #135: GC registry worker is in-process now. Failing to open
+    // the registry is non-fatal — session ops still work; only GC ops
+    // will error back to the CLI. Log once and continue.
+    let gc_tx = match spawn_registry_worker() {
+        Ok(tx) => Some(tx),
+        Err(err) => {
+            eprintln!("[clud] note: gc registry unavailable: {}", err);
+            None
+        }
+    };
+
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
@@ -56,8 +70,9 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         };
         let workers = Arc::clone(&workers);
         let state_dir = state_dir.to_path_buf();
+        let gc_tx = gc_tx.clone();
         thread::spawn(move || {
-            let _ = handle_daemon_connection(stream, &state_dir, &workers);
+            let _ = handle_daemon_connection(stream, &state_dir, &workers, gc_tx);
         });
     }
     0
@@ -67,6 +82,7 @@ fn handle_daemon_connection(
     mut stream: TcpStream,
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -99,8 +115,34 @@ fn handle_daemon_connection(
                 },
             }
         }
+        DaemonRequest::Gc { payload } => {
+            let reply = dispatch_gc_op(gc_tx.as_ref(), payload);
+            DaemonResponse::Gc { reply }
+        }
     };
     write_json_line(&mut stream, &response)
+}
+
+/// Hand a GC op to the registry worker and await the reply. Returns a
+/// `GcReply::Error` if the worker is missing (failed to spawn at daemon
+/// startup), hung up, or didn't reply within [`WORKER_REPLY_TIMEOUT`].
+fn dispatch_gc_op(gc_tx: Option<&mpsc::Sender<GcRequestMsg>>, op: super::types::GcOp) -> GcReply {
+    let Some(tx) = gc_tx else {
+        return GcReply::Error {
+            message: "gc registry unavailable in this daemon".to_string(),
+        };
+    };
+    let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
+    if tx.send(GcRequestMsg { op, reply_tx }).is_err() {
+        return GcReply::Error {
+            message: "gc registry worker stopped".to_string(),
+        };
+    }
+    reply_rx
+        .recv_timeout(WORKER_REPLY_TIMEOUT)
+        .unwrap_or_else(|_| GcReply::Error {
+            message: "gc registry worker timed out".to_string(),
+        })
 }
 
 fn daemon_create_session(

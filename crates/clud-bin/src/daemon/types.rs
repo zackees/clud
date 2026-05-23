@@ -17,6 +17,9 @@ use super::process_utils::signal_process_tree;
 pub(super) const ENV_FEATURE_FLAG: &str = "CLUD_EXPERIMENTAL_DAEMON";
 pub(super) const ENV_STATE_DIR: &str = "CLUD_DAEMON_STATE_DIR";
 pub(super) const ENV_BACKLOG_BYTES: &str = "CLUD_BACKLOG_BYTES";
+/// Issue #135: opt out of the always-on daemon auto-spawn. Used by both
+/// the CLI flag `--no-daemon` and the `clud gc *` precondition check.
+pub const ENV_NO_DAEMON: &str = "CLUD_NO_DAEMON";
 pub(super) const DEFAULT_BACKLOG_LIMIT_BYTES: usize = 256 * 1024;
 pub(super) const BACKGROUND_PROMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -101,9 +104,23 @@ pub(super) struct WorkerLaunchSpec {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(super) enum DaemonRequest {
-    Create { spec: Box<WorkerLaunchSpec> },
-    Session { session_id: String },
-    Terminate { session_id: String },
+    Create {
+        spec: Box<WorkerLaunchSpec>,
+    },
+    Session {
+        session_id: String,
+    },
+    Terminate {
+        session_id: String,
+    },
+    /// Issue #135: GC ops served by the registry worker thread (see
+    /// `gc_service.rs`). Carry the original `gc.*` op inside a single
+    /// enum variant so the wire format and the registry-worker dispatch
+    /// share one definition. (Field is `payload` rather than `op` so it
+    /// doesn't collide with the outer `#[serde(tag = "op")]`.)
+    Gc {
+        payload: GcOp,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,7 +129,70 @@ pub(super) enum DaemonResponse {
     Created { session: SessionSnapshot },
     Session { session: SessionSnapshot },
     Terminated { session: SessionSnapshot },
+    Gc { reply: GcReply },
     Error { message: String },
+}
+
+/// Issue #135: payload carried by `DaemonRequest::Gc`. Identical in
+/// shape to the standalone `gc_daemon` protocol it replaces; only the
+/// outer envelope changed.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "gc_op", rename_all = "snake_case")]
+pub(crate) enum GcOp {
+    List {
+        #[serde(default)]
+        kind: Option<String>,
+    },
+    Purge {
+        /// Duration string (e.g. `"7d"`) or `None` to purge ALL non-live-locked entries.
+        #[serde(default)]
+        duration: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    Reconcile {
+        repo_root: String,
+    },
+    Insert {
+        kind: String,
+        path: String,
+        #[serde(default)]
+        repo_root: Option<String>,
+        #[serde(default)]
+        branch: Option<String>,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        created_unix: Option<i64>,
+    },
+}
+
+/// Issue #135: payload carried by `DaemonResponse::Gc`. Mirrors what the
+/// registry worker emits.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "gc_op", rename_all = "snake_case")]
+pub(crate) enum GcReply {
+    ListOk { rows: Vec<ListRow> },
+    PurgeOk { removed: usize, skipped: usize },
+    ReconcileOk { inserted: usize },
+    InsertOk,
+    Error { message: String },
+}
+
+/// Row shape returned by `gc.list`. Stable JSON schema for the CLI; the
+/// `clud gc list --json` output is this struct serialized as an array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListRow {
+    pub id: i64,
+    pub kind: String,
+    pub path: String,
+    pub repo_root: Option<String>,
+    pub branch: Option<String>,
+    pub agent_id: Option<String>,
+    pub created_unix: i64,
+    pub live_locked: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

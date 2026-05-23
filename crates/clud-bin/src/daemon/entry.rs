@@ -307,7 +307,9 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             }
             1
         }
-        DaemonResponse::Session { .. } | DaemonResponse::Terminated { .. } => 1,
+        DaemonResponse::Session { .. }
+        | DaemonResponse::Terminated { .. }
+        | DaemonResponse::Gc { .. } => 1,
     }
 }
 

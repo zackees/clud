@@ -75,8 +75,8 @@ def _registry_env(
     user's real `%LOCALAPPDATA%\\clud\\sessions.redb`. The lockfile lives
     next to the redb file anyway, but pinning both is explicit.
 
-    Also disables the gc daemon (`CLUD_NO_DAEMON=1`) so the test doesn't
-    leave a long-lived `clud __gc-daemon` child wedged behind it.
+    Also disables the always-on clud daemon (`CLUD_NO_DAEMON=1`) so the
+    test doesn't leave a long-lived `clud __daemon` child wedged behind it.
     """
     env = dict(base)
     env["CLUD_SESSION_DB"] = str(tmp_path / "sessions.redb")

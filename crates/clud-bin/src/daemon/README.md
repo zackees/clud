@@ -1,17 +1,23 @@
 # daemon/
 
-Centralized session manager for backgrounded, detachable, and repeating clud runs. A long-lived daemon process (one per state-dir) accepts TCP JSON requests to spawn per-session worker subprocesses; each worker owns one backend (`claude` or `codex`) running under a PTY or a captured subprocess, persists snapshots + an append-only log to disk, and brokers attach/detach from interactive clients. Clients use this layer for `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs`, and `clud loop --repeat`. Internal helper commands `__daemon` and `__worker` re-enter the same binary in their respective roles.
+Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns served from the same loopback TCP listener:
 
-For the wire protocol, attach flow, snapshot/log persistence, and failure modes, see [docs/architecture/daemon-ipc.md](../../../../docs/architecture/daemon-ipc.md). This README is the per-file inventory.
+1. **Session manager** — spawns per-session worker subprocesses for `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs`, and `clud loop --repeat`. Each worker owns one backend (`claude` or `codex`) running under a PTY or a captured subprocess, persists snapshots + an append-only log to disk, and brokers attach/detach from interactive clients.
+2. **GC service** — single-owner of `~/.clud/data.redb`. All `clud gc *` IPC ops route to a dedicated registry-worker thread (`gc_service.rs`); the worker is the sole reader/writer of the redb file, eliminating multi-process locking races (issue #138).
+
+Foreground interactive launches still use the direct runner by default — the daemon hosts the centralized PTY path only when explicitly opted in (`--detach`, `--detachable`, `--experimental-daemon-centralized`, repeat jobs). See [docs/architecture/daemon-ipc.md](../../../../docs/architecture/daemon-ipc.md) for the wire protocol, attach flow, snapshot/log persistence, and failure modes. This README is the per-file inventory.
+
+Internal helper subcommands `__daemon` and `__worker` re-enter the same binary in their respective roles.
 
 ## Files
 
-- `mod.rs` — module root. Only re-exports `experimental_enabled`, `handle_special_command`, `run_centralized_session` from `entry`.
+- `mod.rs` — module root. Re-exports the public surface: `ensure_daemon`, `default_state_dir`, `ENV_NO_DAEMON`, `ListRow`, `gc_client_{list,purge,reconcile,insert}` plus the existing `experimental_enabled` / `handle_special_command` / `run_centralized_session`.
 - `entry.rs` — public dispatch: feature-flag check, routing for `attach`/`kill`/`list`/`logs`/`__daemon`/`__worker`, and the main `Create` request for normal sessions.
-- `types.rs` — shared structs, enums, env-var keys, and constants (`SessionSnapshot`, `WorkerLaunchSpec`, `DaemonRequest`/`Response`, `WorkerClientMessage`/`ServerMessage`, `SessionRuntime`, `RawTerminalGuard`, etc.).
-- `paths.rs` — filesystem layout helpers under the daemon state dir (`daemon.json`, `sessions/`, `specs/`, `logs/`).
-- `client.rs` — client-side daemon RPC: `ensure_daemon` spawns the daemon if absent, `send_daemon_request`, `request_session_termination`, stale-state cleanup.
-- `server.rs` — daemon-process entry: binds the loopback listener, accepts `Create`/`Session`/`Terminate` requests, spawns worker subprocesses, reaps them.
+- `types.rs` — shared structs, enums, env-var keys, and constants (`SessionSnapshot`, `WorkerLaunchSpec`, `DaemonRequest`/`Response`, `GcOp`/`GcReply`, `ListRow`, `WorkerClientMessage`/`ServerMessage`, `SessionRuntime`, `RawTerminalGuard`, `ENV_NO_DAEMON`).
+- `paths.rs` — filesystem layout helpers under the daemon state dir (`default_state_dir` → `~/.clud/state`, `daemon.json`, `daemon.lock` bringup serialization, `sessions/`, `specs/`, `logs/`).
+- `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn), `send_daemon_request`, `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
+- `server.rs` — daemon-process entry: binds the loopback listener, spawns the GC registry worker, accepts `Create`/`Session`/`Terminate`/`Gc` requests, spawns worker subprocesses, reaps them.
+- `gc_service.rs` — single-owner registry worker thread (issue #135): opens `~/.clud/data.redb` once, serializes every `gc.*` op through an `mpsc::Receiver<GcRequestMsg>`. Replaces the standalone `gc_daemon` process that shipped in Phase 1.
 - `worker.rs` — worker-process entry: starts the backend (subprocess or PTY), serves attach connections, runs the repeat-job loop.
 - `worker_shared.rs` — per-worker shared state: snapshot, in-memory backlog, optional `TerminalCapture` for PTY attach-replay, log file rotation, single-client attach gate.
 - `attach.rs` — interactive client-side attach loop: handshake, raw-terminal keyboard forwarding, Ctrl-C → background-prompt flow, exit-code propagation.

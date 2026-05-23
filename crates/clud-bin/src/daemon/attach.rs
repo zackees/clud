@@ -85,7 +85,9 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
             eprintln!("[clud] daemon error: {}", message);
             1
         }
-        DaemonResponse::Created { .. } | DaemonResponse::Terminated { .. } => 1,
+        DaemonResponse::Created { .. }
+        | DaemonResponse::Terminated { .. }
+        | DaemonResponse::Gc { .. } => 1,
     }
 }
 
