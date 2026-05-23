@@ -130,6 +130,20 @@ pub(super) fn attach_to_session(
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => {
+                // EOF before any handshake response. Two known causes:
+                //   1. Worker really is gone (process died between connect
+                //      and our read).
+                //   2. Transient — worker's `handle_worker_client` returned
+                //      early without writing, e.g. it read 0 bytes back from
+                //      our handshake because our `write_all` and the
+                //      worker's `read_line` raced under TCP buffering quirks.
+                // Within the retry window, give the worker another shot: the
+                // second attempt usually slots in cleanly. Outside the window,
+                // surface the EOF as a real failure.
+                if started.elapsed() < attach_retry_window {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 eprintln!(
                     "[clud] daemon worker closed the connection for session {}",
                     session.id
