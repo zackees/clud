@@ -1,6 +1,8 @@
 name: Windows ARM Build
 on:
   push:
+    tags-ignore:
+      - "**"
   workflow_dispatch:
     inputs:
       build-mode:

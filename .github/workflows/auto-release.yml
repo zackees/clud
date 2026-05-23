@@ -1,0 +1,207 @@
+name: Auto Release
+
+on:
+  push:
+    tags:
+      - "[0-9]*"
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. 2.0.10 or v2.0.10). Leave empty to use the current workspace version."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Resolve and validate release tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_TAG: ${{ inputs.tag }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          workspace_version = cargo["workspace"]["package"]["version"]
+          project_version = pyproject["project"]["version"]
+
+          if workspace_version != project_version:
+              sys.exit(
+                  f"Version mismatch: Cargo.toml workspace={workspace_version}, "
+                  f"pyproject.toml project={project_version}"
+              )
+          version = workspace_version
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          ref_type = os.environ.get("GITHUB_REF_TYPE", "")
+          if event_name == "push" and ref_type == "tag":
+              raw_tag = os.environ["GITHUB_REF_NAME"]
+              checkout_ref = raw_tag
+          else:
+              raw_tag = os.environ.get("RAW_TAG", "").strip() or version
+              checkout_ref = os.environ.get("GITHUB_SHA", "")
+
+          normalized = raw_tag[1:] if raw_tag.startswith("v") else raw_tag
+          if normalized != version:
+              sys.exit(
+                  f"Tag {raw_tag!r} does not match workspace version {version!r}. "
+                  "Bump Cargo.toml [workspace.package].version and pyproject.toml "
+                  "[project].version, commit, and re-tag."
+              )
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          seen = set()
+          for candidate in (raw_tag, normalized, f"v{normalized}"):
+              if not candidate or candidate in seen:
+                  continue
+              seen.add(candidate)
+              result = subprocess.run(
+                  ["gh", "api", f"repos/{repo}/releases/tags/{candidate}"],
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode == 0 and result.stdout.strip():
+                  data = json.loads(result.stdout)
+                  if data.get("published_at"):
+                      sys.exit(
+                          f"Release {candidate} is already published at "
+                          f"{data['published_at']} — refusing to re-publish."
+                      )
+
+          out_path = os.environ["GITHUB_OUTPUT"]
+          with open(out_path, "a", encoding="utf-8") as fh:
+              fh.write(f"checkout_ref={checkout_ref}\n")
+              fh.write(f"release_tag={raw_tag}\n")
+              fh.write(f"version={version}\n")
+
+          print(
+              f"Resolved release tag={raw_tag} version={version} "
+              f"ref={checkout_ref}"
+          )
+          PY
+
+  build:
+    name: Build wheels
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs-on: ubuntu-24.04
+            artifact-name: wheels-linux-x86
+            include-sdist: true
+          - runs-on: ubuntu-24.04-arm
+            artifact-name: wheels-linux-arm
+            include-sdist: false
+          - runs-on: windows-2025
+            artifact-name: wheels-windows-x86
+            include-sdist: false
+          - runs-on: windows-11-arm
+            artifact-name: wheels-windows-arm
+            include-sdist: false
+          - runs-on: macos-15
+            artifact-name: wheels-macos-arm
+            include-sdist: false
+          - runs-on: macos-15-intel
+            artifact-name: wheels-macos-x86
+            include-sdist: false
+    uses: ./.github/workflows/_build.yml
+    with:
+      runs-on: ${{ matrix.runs-on }}
+      artifact-name: ${{ matrix.artifact-name }}
+      build-mode: release
+      include-sdist: ${{ matrix.include-sdist }}
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          print-hash: true
+          skip-existing: true
+
+  publish-release:
+    name: Publish GitHub release
+    needs: [preflight, build, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.release_tag }}
+          name: clud ${{ needs.preflight.outputs.version }}
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ```bash
+            pip install clud==${{ needs.preflight.outputs.version }}
+            ```
+
+            ```bash
+            uv tool install clud==${{ needs.preflight.outputs.version }}
+            ```
+
+            Pre-built wheels for Linux (x86/ARM), Windows (x86/ARM), and macOS (x86/ARM) are attached below and available on PyPI.
+          files: dist/*
+          fail_on_unmatched_files: true
