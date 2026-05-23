@@ -1,6 +1,8 @@
 name: macOS x86 Build
 on:
   push:
+    tags-ignore:
+      - "**"
   workflow_dispatch:
     inputs:
       build-mode:
