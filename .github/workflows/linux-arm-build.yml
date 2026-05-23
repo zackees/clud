@@ -1,7 +1,7 @@
 name: Linux ARM Build
 on:
   push:
-    tags-ignore:
+    branches:
       - "**"
   workflow_dispatch:
     inputs:

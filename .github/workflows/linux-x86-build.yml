@@ -1,7 +1,7 @@
 name: Linux x86 Build
 on:
   push:
-    tags-ignore:
+    branches:
       - "**"
   workflow_dispatch:
     inputs:
