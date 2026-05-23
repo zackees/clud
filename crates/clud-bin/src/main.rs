@@ -1,5 +1,5 @@
 use clud::{
-    args, backend, command, console_setup, console_title, daemon, gc, gc_daemon, hook_health,
+    args, backend, command, console_setup, console_title, daemon, gc, hook_health,
     large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills, startup,
     trampoline, verbose_log, wasm, worktrees,
 };
@@ -57,14 +57,6 @@ fn main() {
             }
         }
         verbose_log::log(format_args!("[clud] pid {}", std::process::id()));
-    }
-
-    // Issue #135: hidden `__gc-daemon` subcommand is the GC-only daemon
-    // entry point. Owns `~/.clud/data.redb` exclusively and serves the
-    // `gc.*` IPC ops. Dispatch first so it never falls through to
-    // backend resolution.
-    if let Some(args::Command::InternalGcDaemon { state_dir }) = &args.command {
-        std::process::exit(gc_daemon::run_daemon(state_dir));
     }
 
     // Issue #110: `clud gc <subcommand>` is a self-contained
@@ -169,38 +161,35 @@ fn main() {
         large_file_guard::run(&root);
     }
 
-    // Issue #135: best-effort auto-spawn of the GC daemon. The daemon
-    // owns `~/.clud/data.redb` exclusively and serves IPC ops for the
-    // `clud gc` CLI and the in-process `WorktreeScanner`. Skips silently
-    // when `--no-daemon` or `CLUD_NO_DAEMON=1` is set; never blocks a
-    // launch on spawn failure. `--dry-run` also skips so unit tests that
-    // copy the binary into a tempdir don't leave the daemon's `.old`
-    // exe locked when tempdir cleanup runs.
-    //
-    // Also skip when the centralized session daemon path is active
-    // (`daemon::experimental_enabled`): that path manages its own
-    // detached-daemon lifecycle (session daemon + per-session worker)
-    // via `trampoline::spawn_detached_self`. Auto-spawning a second
-    // detached background process from the same parent racing alongside
-    // the session-daemon spawn destabilizes the test's `clud list`
-    // visibility on Linux — the spawned children share fd inheritance
-    // and process-group setup that briefly perturbs the freshly-spawned
-    // session worker. Subsequent non-experimental clud invocations
-    // (including the per-iteration child cluds the repeat worker
-    // launches) still trigger the auto-spawn, so the gc daemon is
-    // available as soon as it's first actually needed.
-    if !args.no_daemon && !args.dry_run && !daemon::experimental_enabled(&args) {
+    // Issue #135: always-on clud daemon. One background process per user
+    // hosts the GC registry (redb owner + worker thread) and is the
+    // execution target for `--detach` / `--detachable` / repeat jobs /
+    // `--experimental-daemon-centralized`. Foreground interactive
+    // launches still use the direct runner by default (PR #152 reverted
+    // the attach-pump default). Skip on `--no-daemon` /
+    // `CLUD_NO_DAEMON=1` and on `--dry-run` so unit tests that copy
+    // the binary into a tempdir don't leave the daemon's `.old` exe
+    // locked when tempdir cleanup runs. Never blocks a launch on
+    // spawn failure.
+    if !args.no_daemon && !args.dry_run {
         if args.verbose {
-            verbose_log::log("[clud] gc daemon: ensure running");
+            verbose_log::log("[clud] daemon: ensure running");
         }
-        if let Err(e) = gc_daemon::ensure_running() {
-            eprintln!("[clud] note: gc daemon unavailable: {}", e);
-            if args.verbose {
-                verbose_log::log(format_args!("[clud] gc daemon: unavailable: {e}"));
+        match daemon::default_state_dir() {
+            Ok(state_dir) => {
+                if let Err(e) = daemon::ensure_daemon(&state_dir) {
+                    eprintln!("[clud] note: daemon unavailable: {}", e);
+                    if args.verbose {
+                        verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[clud] note: cannot resolve state dir: {}", e);
             }
         }
     } else if args.verbose {
-        verbose_log::log("[clud] gc daemon: skipped");
+        verbose_log::log("[clud] daemon: skipped");
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);

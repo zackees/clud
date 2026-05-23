@@ -43,8 +43,7 @@ Process management and GC:
 
 - `process_tree.rs` — best-effort descendant-tree termination via `sysinfo`; fixes the multi-second Ctrl+C hang for `clud --codex` on Windows where `cmd.exe → node.exe` would orphan the real child.
 - `session_registry.rs` — `redb`-backed registry of live `clud` PIDs that caps concurrent siblings (default 64, `CLUD_MAX_INSTANCES`); `Drop` removes the row, startup GCs dead rows.
-- `gc.rs` — `clud gc list` / `purge` / `reconcile` and the in-process `WorktreeScanner` thread that polls `.claude/worktrees/agent-*` for new entries.
-- `gc_daemon.rs` — single-owner GC daemon process: holds `~/.clud/data.redb` exclusively and serves JSON-over-loopback-TCP from a registry-worker thread (issue #135 Phase 1).
+- `gc.rs` — `clud gc list` / `purge` / `reconcile` CLI handlers (thin IPC clients against the always-on daemon) and the in-process `WorktreeScanner` thread that polls `.claude/worktrees/agent-*` for new entries. The GC registry itself lives inside the daemon (see `daemon/gc_service.rs`).
 - `worktrees.rs` — `--clean-worktrees` (issue #83): enumerates via `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone, removes safe ones; `--dry-run` faithful.
 
 Platform glue:
@@ -68,7 +67,7 @@ Quick lookup — which file owns a given subcommand:
 
 - `clud loop ...` → `command::build_launch_plan` (prompt + markers) + `loop_spec` (task resolution) + `loop_artifacts` (artifact files) + `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` → all in `daemon/` (dispatched from `daemon::handle_special_command`).
-- `clud gc list` / `purge` / `reconcile` → `gc.rs` (CLI handlers) talking to `gc_daemon` (registry owner).
+- `clud gc list` / `purge` / `reconcile` → `gc.rs` (CLI handlers) talking to `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` → `worktrees.rs`.
 - `clud --fix-hooks` → `hook_health.rs`.
 
@@ -80,7 +79,7 @@ Subsystems that span multiple files have their own topic docs under `docs/archit
 - **Daemon IPC** (everything under `daemon/`) → [docs/architecture/daemon-ipc.md](../../../docs/architecture/daemon-ipc.md)
 - **Session lifecycle** (`session`, `console_*`, `capture`, `dnd` injection, `voice` hooks) → [docs/architecture/session-lifecycle.md](../../../docs/architecture/session-lifecycle.md)
 - **Skill system** (`skills`, `skill_install`, `assets/skills/`) → [docs/architecture/skill-system.md](../../../docs/architecture/skill-system.md)
-- **GC and registry** (`gc`, `gc_daemon`, `session_registry`, `worktrees`) → [docs/architecture/gc-and-registry.md](../../../docs/architecture/gc-and-registry.md)
+- **GC and registry** (`gc`, `daemon/gc_service`, `session_registry`, `worktrees`) → [docs/architecture/gc-and-registry.md](../../../docs/architecture/gc-and-registry.md)
 - **Windows quirks** (`trampoline`, `subprocess` BatBadBat, `console_*`, `dnd`, `win_creation_flags`, `voice` ARM carveout) → [docs/architecture/windows-quirks.md](../../../docs/architecture/windows-quirks.md)
 - **Launch plan** (`command/types::LaunchPlan` + all consumers) → [docs/architecture/launch-plan.md](../../../docs/architecture/launch-plan.md)
 

@@ -14,7 +14,6 @@ pub mod console_title;
 pub mod daemon;
 pub mod dnd;
 pub mod gc;
-pub mod gc_daemon;
 pub mod hook_health;
 pub mod large_file_guard;
 pub mod loop_artifacts;

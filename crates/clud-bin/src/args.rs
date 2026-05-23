@@ -101,11 +101,11 @@ pub struct Args {
     #[arg(long = "daemon-state-dir", hide = true)]
     pub daemon_state_dir: Option<PathBuf>,
 
-    /// Issue #135: select daemon mode. `gc` runs the GC-only daemon (no
-    /// session TCP listener). `session` and `auto` are reserved for the
-    /// current centralized-session daemon path (forward-compatible alias).
-    /// Used implicitly by the internal `__gc-daemon` subcommand and the
-    /// auto-spawn helper; setting it explicitly is rare.
+    /// Issue #135: reserved for forward compatibility. The merged
+    /// always-on clud daemon (`__daemon`) hosts both session ops and the
+    /// GC registry, so the prior `--daemon=gc` / `--daemon=session`
+    /// distinction is no longer required. Kept as an accepted flag so
+    /// older clud invocations don't error.
     #[arg(long = "daemon", value_name = "MODE", hide = true)]
     pub daemon_mode: Option<String>,
 
@@ -201,14 +201,6 @@ pub enum Command {
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
-        #[arg(long = "state-dir")]
-        state_dir: PathBuf,
-    },
-    /// Issue #135: GC-only daemon mode. Internal subcommand used by
-    /// `gc_daemon::ensure_running()`. Binds a loopback TCP port, owns
-    /// `~/.clud/data.redb` exclusively, and serves the `gc.*` IPC ops.
-    #[command(name = "__gc-daemon", hide = true)]
-    InternalGcDaemon {
         #[arg(long = "state-dir")]
         state_dir: PathBuf,
     },
@@ -320,19 +312,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop",
-        "up",
-        "rebase",
-        "fix",
-        "wasm",
-        "attach",
-        "kill",
-        "list",
-        "logs",
-        "gc",
-        "__daemon",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "__daemon",
         "__worker",
-        "__gc-daemon",
     ];
 
     let mut in_subcommand = false;

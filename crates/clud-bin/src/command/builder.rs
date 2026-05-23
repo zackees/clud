@@ -136,8 +136,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         | Some(Command::Logs { .. })
         | Some(Command::Gc { .. })
         | Some(Command::InternalDaemon { .. })
-        | Some(Command::InternalWorker { .. })
-        | Some(Command::InternalGcDaemon { .. }) => {}
+        | Some(Command::InternalWorker { .. }) => {}
         None => {
             if let Some(ref prompt) = args.prompt {
                 push_prompt(&mut cmd, backend, prompt.clone());

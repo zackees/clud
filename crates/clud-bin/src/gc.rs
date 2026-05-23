@@ -545,7 +545,8 @@ fn scan_once_via_ipc(watch_dir: &Path, repo_root: Option<&Path>) -> Result<(), S
             agent_id: Some(name_str),
             now_unix: now_unix(),
         };
-        crate::gc_daemon::client_insert(&input).map_err(|e| e.to_string())?;
+        let state_dir = crate::daemon::default_state_dir().map_err(|e| e.to_string())?;
+        crate::daemon::gc_client_insert(&state_dir, &input).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -576,14 +577,12 @@ fn run_scanner_loop(watch_dir: PathBuf, repo_root: Option<PathBuf>, cancel: Arc<
 
 // ---------- CLI handlers ----------
 //
-// Issue #135 Phase 1: the CLI no longer opens the redb directly. Every
-// subcommand is a thin IPC client against the GC daemon; the daemon owns
-// the redb handle and serializes all reads/writes through a single
-// registry worker thread. See `gc_daemon.rs` for the protocol and the
-// auto-spawn flow. `--no-daemon` (or `CLUD_NO_DAEMON=1`) on any `clud gc`
-// op is an error — there is no read-only fallback in v1.
-
-use crate::gc_daemon;
+// Issue #135: the CLI no longer opens the redb directly. Every subcommand
+// is a thin IPC client against the always-on session daemon, which now
+// owns the redb handle and serializes all reads/writes through a single
+// registry worker thread (see `daemon/gc_service.rs`). `--no-daemon` (or
+// `CLUD_NO_DAEMON=1`) on any `clud gc` op is an error — there is no
+// read-only fallback.
 
 /// Dispatch a `clud gc` invocation. Returns the process exit code.
 pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
@@ -592,23 +591,36 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
         return print_help_and_exit_zero();
     }
     if args.no_daemon || daemon_disabled_via_env() {
-        eprintln!("error: gc operations require the GC daemon; remove --no-daemon");
+        eprintln!("error: gc operations require the clud daemon; remove --no-daemon");
         return 2;
     }
+    let state_dir = match crate::daemon::default_state_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: cannot resolve clud state dir: {e}");
+            return 1;
+        }
+    };
     match sub.unwrap() {
-        GcSubcommand::List { json } => cmd_list(json),
+        GcSubcommand::List { json } => cmd_list(&state_dir, json),
         GcSubcommand::Purge {
             duration,
             dry_run,
             yes,
             kind,
-        } => cmd_purge(duration.as_deref(), dry_run, yes, kind.as_deref()),
-        GcSubcommand::Reconcile => cmd_reconcile(),
+        } => cmd_purge(
+            &state_dir,
+            duration.as_deref(),
+            dry_run,
+            yes,
+            kind.as_deref(),
+        ),
+        GcSubcommand::Reconcile => cmd_reconcile(&state_dir),
     }
 }
 
 fn daemon_disabled_via_env() -> bool {
-    std::env::var_os(gc_daemon::ENV_NO_DAEMON)
+    std::env::var_os(crate::daemon::ENV_NO_DAEMON)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -628,8 +640,8 @@ fn print_help_and_exit_zero() -> i32 {
     }
 }
 
-fn cmd_list(json: bool) -> i32 {
-    let rows = match gc_daemon::client_list(None) {
+fn cmd_list(state_dir: &Path, json: bool) -> i32 {
+    let rows = match crate::daemon::gc_client_list(state_dir, None) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: list failed: {e}");
@@ -650,7 +662,7 @@ fn cmd_list(json: bool) -> i32 {
     0
 }
 
-fn cmd_reconcile() -> i32 {
+fn cmd_reconcile(state_dir: &Path) -> i32 {
     let main_root = match worktrees::locate_main_repo_root() {
         Ok(p) => p,
         Err(e) => {
@@ -658,7 +670,7 @@ fn cmd_reconcile() -> i32 {
             return 1;
         }
     };
-    match gc_daemon::client_reconcile(&main_root) {
+    match crate::daemon::gc_client_reconcile(state_dir, &main_root) {
         Ok(n) => {
             println!(
                 "reconcile: {n} new entr{}",
@@ -673,7 +685,13 @@ fn cmd_reconcile() -> i32 {
     }
 }
 
-fn cmd_purge(duration: Option<&str>, dry_run: bool, yes: bool, kind_filter: Option<&str>) -> i32 {
+fn cmd_purge(
+    state_dir: &Path,
+    duration: Option<&str>,
+    dry_run: bool,
+    yes: bool,
+    kind_filter: Option<&str>,
+) -> i32 {
     // Pre-flight: validate the duration string before contacting the
     // daemon (gives a clean exit-2 with a specific message for malformed
     // input).
@@ -695,10 +713,10 @@ fn cmd_purge(duration: Option<&str>, dry_run: bool, yes: bool, kind_filter: Opti
     // Pre-purge reconcile so the daemon's view matches the current repo's
     // `.claude/worktrees/`. Best-effort.
     if let Ok(main_root) = worktrees::locate_main_repo_root() {
-        let _ = gc_daemon::client_reconcile(&main_root);
+        let _ = crate::daemon::gc_client_reconcile(state_dir, &main_root);
     }
 
-    match gc_daemon::client_purge(duration, kind_filter, dry_run) {
+    match crate::daemon::gc_client_purge(state_dir, duration, kind_filter, dry_run) {
         Ok((removed, skipped)) => {
             if dry_run {
                 println!("--dry-run: would remove {removed}, skip {skipped}.");
@@ -714,7 +732,7 @@ fn cmd_purge(duration: Option<&str>, dry_run: bool, yes: bool, kind_filter: Opti
     }
 }
 
-fn print_table_from_rows(rows: &[gc_daemon::ListRow]) {
+fn print_table_from_rows(rows: &[crate::daemon::ListRow]) {
     if rows.is_empty() {
         println!("(no tracked entries)");
         return;
@@ -984,16 +1002,16 @@ mod tests {
         assert_eq!(after.id, before.id, "id must remain stable");
     }
 
-    // Issue #135 Phase 1: the scanner now talks IPC to the GC daemon
+    // Issue #135: the scanner now talks IPC to the always-on clud daemon
     // rather than opening redb directly. Verifying the end-to-end insert
-    // path now lives in `gc_daemon::tests` and the Python integration
-    // tests; here we only verify the scanner cancels promptly.
+    // path lives in `daemon/gc_service.rs::tests` and the Python
+    // integration tests; here we only verify the scanner cancels promptly.
 
     #[test]
     fn scanner_cancels_promptly() {
         // Force the IPC path to be disabled so the scanner doesn't
         // attempt a real daemon spawn in CI.
-        std::env::set_var(crate::gc_daemon::ENV_NO_DAEMON, "1");
+        std::env::set_var(crate::daemon::ENV_NO_DAEMON, "1");
         let dir = tempfile::tempdir().unwrap();
         let mut scanner = WorktreeScanner::spawn(dir.path().to_path_buf(), None);
         let start = std::time::Instant::now();

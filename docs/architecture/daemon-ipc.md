@@ -180,6 +180,6 @@ Every `push_output` chunk goes to three sinks (`worker_shared.rs:299`-`331`): th
 
 - `../../crates/clud-bin/src/daemon/README.md` — per-file directory README with the full `file:line` index of public items.
 - `session-lifecycle.md` — `TerminalCapture` parser, PTY pump, input injection, the exact bytes the repaint payload contains.
-- `gc-and-registry.md` — separate redb-backed registry for cross-session GC (`gc_daemon`), not to be confused with this daemon.
+- `gc-and-registry.md` — the GC half of the same daemon process: `~/.clud/data.redb` is owned by an in-process registry-worker thread and served via the `DaemonRequest::Gc { payload }` variant on this same TCP listener (issue #135 / DD-012).
 - `launch-plan.md` — `LaunchPlan` is the inner payload that `WorkerLaunchSpec` wraps and ships to the worker.
 - `../DESIGN_DECISIONS.md` — rationale for TCP+JSON over named pipes / Unix sockets, single-binary re-entry over a separate daemon executable, and atomic file writes over a real database.
