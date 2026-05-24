@@ -48,10 +48,12 @@ def test_warns_with_synthetic_large_files() -> None:
         # produces 4 listed entries + a `(1 more)` tail.
         names = ["alpha.rs", "bravo.rs", "charlie.rs", "delta.rs", "echo.rs"]
         for idx, name in enumerate(names):
-            # 50 kB of unique content per file so file sizes differ and the
-            # ordering inside the report is stable.
-            content = (f"// {name} line {idx}\n" * 2000)[: 50 * 1024 + idx * 1024]
-            (tmp_path / name).write_text(content)
+            # Definite size in bytes: 50 kB + 1 kB per index, so every file
+            # clears the 40 kB threshold and the order in the report is
+            # stable. Using fixed bytes avoids the foot-gun where an f-string
+            # template happens to multiply out to under-threshold size.
+            size = 50 * 1024 + idx * 1024
+            (tmp_path / name).write_text("x" * size)
         result = _run(tmp_path, "--dry-run", "-p", "hello")
         assert result.returncode == 0, result.stderr
         assert WARNING_HEADER in result.stderr, (
