@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,10 @@ from pathlib import Path
 
 def _clud_binary() -> str:
     """Find the clud binary in the venv."""
+    env_binary = os.environ.get("CLUD_TEST_BINARY")
+    if env_binary and Path(env_binary).is_file():
+        return env_binary
+
     venv = Path(sys.executable).parent
     if sys.platform == "win32":
         candidate = venv / "clud.exe"

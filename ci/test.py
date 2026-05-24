@@ -1,4 +1,8 @@
-"""Test orchestrator for clud: cargo test + pytest."""
+"""Test orchestrator for clud: cargo test + pytest.
+
+Default mode runs unit coverage. `--integration` runs only integration tests;
+`--full` runs both.
+"""
 
 from __future__ import annotations
 
@@ -13,68 +17,136 @@ ROOT = Path(__file__).resolve().parent.parent
 _PYTEST_NO_TESTS_COLLECTED = 5
 
 
+def _select_suites(argv: list[str]) -> tuple[bool, bool, list[str]]:
+    full = "--full" in argv
+    integration = "--integration" in argv or full
+    unit = not integration or full
+    pytest_args = [a for a in argv if a not in ("--integration", "--full")]
+    return unit, integration, pytest_args
+
+
 def _pytest_ok(returncode: int) -> bool:
     return returncode in (0, _PYTEST_NO_TESTS_COLLECTED)
 
 
-def run(cmd: list[str]) -> int:
+def run(cmd: list[str], *, env: dict[str, str] | None = None) -> int:
     from ci.env import clean_env
 
-    return subprocess.run(cmd, cwd=ROOT, env=clean_env()).returncode
+    return subprocess.run(cmd, cwd=ROOT, env=env if env is not None else clean_env()).returncode
 
 
-def _cargo(subcommand: list[str]) -> list[str]:
+def _cargo(subcommand: list[str], *, env: dict[str, str] | None = None) -> list[str]:
     """Return the cargo argv for the configured CI environment."""
     from ci.env import cargo_argv, clean_env
 
-    return cargo_argv(subcommand, env=clean_env())
+    return cargo_argv(subcommand, env=env if env is not None else clean_env())
+
+
+def _binary_name(name: str) -> str:
+    return f"{name}.exe" if sys.platform == "win32" else name
+
+
+def _target_debug_dirs(env: dict[str, str]) -> list[Path]:
+    dirs: list[Path] = []
+    target = env.get("CARGO_BUILD_TARGET")
+    if target:
+        dirs.append(ROOT / "target" / target / "debug")
+    dirs.append(ROOT / "target" / "debug")
+    return dirs
+
+
+def _find_target_binary(name: str, env: dict[str, str]) -> Path | None:
+    binary = _binary_name(name)
+    for directory in _target_debug_dirs(env):
+        candidate = directory / binary
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _installed_clud_script() -> Path | None:
+    candidate = Path(sys.executable).parent / _binary_name("clud")
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def _prepare_pytest_binaries(
+    env: dict[str, str],
+    *,
+    prefer_installed_clud: bool,
+) -> dict[str, str] | None:
+    installed_clud = _installed_clud_script() if prefer_installed_clud else None
+    packages = ["mock-agent"] if installed_clud is not None else ["clud", "mock-agent"]
+    cmd = _cargo(["build", *[arg for package in packages for arg in ("-p", package)]], env=env)
+    if run(cmd, env=env) != 0:
+        return None
+
+    clud_binary = installed_clud or _find_target_binary("clud", env)
+    mock_agent_binary = _find_target_binary("mock-agent", env)
+    if clud_binary is None or mock_agent_binary is None:
+        missing = [
+            name
+            for name, binary in (
+                ("clud", clud_binary),
+                ("mock-agent", mock_agent_binary),
+            )
+            if binary is None
+        ]
+        print(f"missing built pytest binaries: {', '.join(missing)}", file=sys.stderr)
+        return None
+
+    pytest_env = env.copy()
+    pytest_env["CLUD_TEST_BINARY"] = str(clud_binary)
+    pytest_env["CLUD_TEST_MOCK_AGENT_BINARY"] = str(mock_agent_binary)
+    return pytest_env
 
 
 def main(argv: list[str] | None = None) -> int:
-    from ci.env import activate
+    from ci.env import activate, clean_env
 
     activate()
+    env = clean_env()
 
     argv = list(sys.argv[1:] if argv is None else argv)
-    run_integration = "--integration" in argv or "--full" in argv
-    pytest_args = [a for a in argv if a not in ("--integration", "--full")]
+    run_unit, run_integration, pytest_args = _select_suites(argv)
 
-    # Rust tests. The pty_behavior integration tests need the `mock-agent`
-    # binary on disk at `target/.../debug/mock-agent`, but `cargo test --no-run`
-    # only compiles test binaries, not workspace bins. Without an explicit
-    # pre-build the test falls back to a self-issued `cargo build -p mock-agent`
-    # whose `--message-format json` parsing has been seen to flake under
-    # sccache (issue: macos-x86 unit-test job, run 24694769083). Build the
-    # bin up front so the test path that needs it always finds it.
-    if run(_cargo(["build", "-p", "mock-agent"])) != 0:
+    # Rust and Python tests need workspace binaries on disk, but
+    # `cargo test --no-run` only compiles test binaries, not workspace bins.
+    # Build them once up front and pass their paths into pytest so module
+    # collection does not trigger extra cargo builds.
+    pytest_env = _prepare_pytest_binaries(
+        env,
+        prefer_installed_clud=run_integration and not run_unit,
+    )
+    if pytest_env is None:
         return 1
-    if run(_cargo(["test", "--workspace", "--no-run"])) != 0:
-        return 1
-    cargo_test = _cargo(["test", "--workspace"])
-    if sys.platform == "win32":
-        cargo_test += ["--", "--test-threads=1"]
-    if run(cargo_test) != 0:
-        return 1
+    if run_unit:
+        if run(_cargo(["test", "--workspace", "--no-run"], env=env), env=env) != 0:
+            return 1
+        cargo_test = _cargo(["test", "--workspace"], env=env)
+        if sys.platform == "win32":
+            cargo_test += ["--", "--test-threads=1"]
+        if run(cargo_test, env=env) != 0:
+            return 1
 
-    # Python unit tests (skip integration by default)
-    pytest_cmd = [sys.executable, "-m", "pytest", "-m", "not integration", *pytest_args]
-    if not _pytest_ok(run(pytest_cmd)):
-        return 1
+        # Python unit tests (skip integration by default)
+        pytest_cmd = [sys.executable, "-m", "pytest", "-m", "not integration", *pytest_args]
+        if not _pytest_ok(run(pytest_cmd, env=pytest_env)):
+            return 1
 
     # Integration tests (only when requested). `-v` prints each test name
     # before it runs so a hang in CI is pinned to the exact test rather than
     # appearing as silent dead air.
     if run_integration:
-        from ci.env import clean_env
-
-        env = clean_env()
-        env["CLUD_INTEGRATION_TESTS"] = "1"
+        int_env = pytest_env.copy()
+        int_env["CLUD_INTEGRATION_TESTS"] = "1"
         # Disable the Windows exe-unlock dance for every clud subprocess
         # spawned by tests. See #37: the rename+copy+GC pattern appears to
         # keep stdout/stderr pipe handles alive on Windows CI, which wedges
         # subprocess.run in a pipe-EOF wait. Tests don't need hot-reload
         # protection, so this is strictly safer for the test harness.
-        env["CLUD_NO_UNLOCK"] = "1"
+        int_env["CLUD_NO_UNLOCK"] = "1"
         int_cmd = [
             sys.executable,
             "-m",
@@ -84,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             "-v",
             *pytest_args,
         ]
-        rc = subprocess.run(int_cmd, cwd=ROOT, env=env).returncode
+        rc = subprocess.run(int_cmd, cwd=ROOT, env=int_env).returncode
         if not _pytest_ok(rc):
             return 1
 
