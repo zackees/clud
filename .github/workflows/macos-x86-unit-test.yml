@@ -1,6 +1,9 @@
 name: macOS x86 Unit Test
 on:
   push:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   call:
     uses: ./.github/workflows/_unit-test.yml

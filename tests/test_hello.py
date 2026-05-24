@@ -53,6 +53,10 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
 
 def _clud_binary() -> str:
     """Build the current repo's clud binary and return its path."""
+    env_binary = os.environ.get("CLUD_TEST_BINARY")
+    if env_binary and Path(env_binary).is_file():
+        return env_binary
+
     result = subprocess.run(
         _cargo_argv(["build", "-p", "clud", "--message-format=json"]),
         cwd=ROOT,

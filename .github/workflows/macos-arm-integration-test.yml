@@ -1,8 +1,12 @@
 name: macOS ARM Integration Test
 on:
   push:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   call:
     uses: ./.github/workflows/_integration-test.yml
     with:
       runs-on: macos-15
+      artifact-name: wheels-macos-arm

@@ -26,9 +26,9 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
     aren't present on stock Windows, so the resulting debug binary fails
     with STATUS_ENTRYPOINT_NOT_FOUND when launched as a subprocess.
 
-    `ci.env.build_env()` exports the rustup-managed MSVC cargo/rustc paths,
-    which link against VCRUNTIME140.dll / MSVCP140.dll. The `soldr` branch
-    below is only an emergency fallback if this file is run outside the repo.
+    `ci.env.build_env()` selects the rustup-managed MSVC toolchain, which
+    links against VCRUNTIME140.dll / MSVCP140.dll. The `soldr` branch below is
+    only an emergency fallback if this file is run outside the repo.
     """
     if sys.platform == "win32":
         try:
@@ -68,8 +68,9 @@ def _build_env_without_sccache() -> dict[str, str]:
     its whole idle lifetime — so `capture_output=True` never sees EOF and
     `communicate()` hangs indefinitely on Windows runners. Stripping the
     wrapper for the fixture's cargo call avoids the inheritance entirely.
-    The outer workflow's `Dev build` step already warmed the cache; this
-    fixture call is usually a no-op incremental build anyway. See #37.
+    The CI test orchestrator already builds the workspace binaries and passes
+    their paths through the environment; this fallback call is usually a local
+    no-op incremental build. See #37.
     """
     env = _cargo_build_env()
     env.pop("RUSTC_WRAPPER", None)
@@ -183,6 +184,12 @@ def _cargo_build_inherit_stdio(package: str) -> None:
 
 def _find_clud() -> Path:
     """Build the current repo's clud binary and return its path."""
+    env_binary = os.environ.get("CLUD_TEST_BINARY")
+    if env_binary:
+        candidate = Path(env_binary)
+        if candidate.is_file():
+            return candidate
+
     _cargo_build_inherit_stdio("clud")
     binary = _find_built_binary("clud")
     if binary is None:
@@ -192,6 +199,12 @@ def _find_clud() -> Path:
 
 def _build_mock_agent() -> Path:
     """Build the mock-agent binary and return its path."""
+    env_binary = os.environ.get("CLUD_TEST_MOCK_AGENT_BINARY")
+    if env_binary:
+        candidate = Path(env_binary)
+        if candidate.is_file():
+            return candidate
+
     _cargo_build_inherit_stdio("mock-agent")
     binary = _find_built_binary("mock-agent")
     if binary is None:

@@ -101,6 +101,36 @@ def toolchain_bin() -> Path:
     return rustup_home() / "toolchains" / toolchain_name() / "bin"
 
 
+def _env_flag_enabled(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _path_is_within(path: str | Path, directory: str | Path) -> bool:
+    try:
+        path_norm = os.path.normcase(os.path.abspath(str(path)))
+        directory_norm = os.path.normcase(os.path.abspath(str(directory)))
+        return os.path.commonpath([path_norm, directory_norm]) == directory_norm
+    except ValueError:
+        return False
+
+
+def _soldr_shims_requested(env: dict[str, str] | None = None) -> bool:
+    source = os.environ if env is None else env
+    if _env_flag_enabled(source.get("CLUD_USE_SOLDR_SHIMS")):
+        return True
+
+    path = source.get("PATH")
+    if path is None:
+        return False
+    cargo = shutil.which("cargo", path=path)
+    shims_dir = source.get("SOLDR_SHIMS_DIR")
+    if cargo and shims_dir and _path_is_within(cargo, shims_dir):
+        return True
+
+    soldr = shutil.which("soldr", path=path)
+    return bool(cargo and soldr and Path(cargo).parent.name.lower() == "shims")
+
+
 def _find_vswhere() -> Path | None:
     candidates = [
         Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
@@ -143,14 +173,16 @@ def _find_vsdevcmd() -> Path | None:
 def _windows_build_env() -> dict[str, str]:
     env = os.environ.copy()
     toolchain_bin_dir = toolchain_bin()
+    use_soldr_shims = _soldr_shims_requested(env)
     if toolchain_bin_dir.is_dir():
-        env["PATH"] = str(toolchain_bin_dir) + os.pathsep + env.get("PATH", "")
-        cargo_exe = toolchain_bin_dir / "cargo.exe"
-        rustc_exe = toolchain_bin_dir / "rustc.exe"
-        if cargo_exe.is_file():
-            env["CARGO"] = str(cargo_exe)
-        if rustc_exe.is_file():
-            env["RUSTC"] = str(rustc_exe)
+        if not use_soldr_shims:
+            env["PATH"] = str(toolchain_bin_dir) + os.pathsep + env.get("PATH", "")
+            cargo_exe = toolchain_bin_dir / "cargo.exe"
+            rustc_exe = toolchain_bin_dir / "rustc.exe"
+            if cargo_exe.is_file():
+                env["CARGO"] = str(cargo_exe)
+            if rustc_exe.is_file():
+                env["RUSTC"] = str(rustc_exe)
         env["RUSTUP_TOOLCHAIN"] = toolchain_name()
         env["CARGO_BUILD_TARGET"] = host_target_triple()
 
@@ -204,6 +236,15 @@ def activate() -> None:
     normalized_parts = {
         os.path.normcase(os.path.normpath(part)) for part in path_parts if part
     }
+    if _soldr_shims_requested(os.environ):
+        filtered_parts = [
+            part
+            for part in path_parts
+            if os.path.normcase(os.path.normpath(part)) != normalized_cargo_bin
+        ]
+        filtered_parts.append(str(bin_dir))
+        os.environ["PATH"] = os.pathsep.join(filtered_parts)
+        return
     if normalized_cargo_bin in normalized_parts:
         return
     os.environ["PATH"] = (
@@ -212,6 +253,8 @@ def activate() -> None:
 
 
 def _apply_sccache(env: dict[str, str]) -> dict[str, str]:
+    if _soldr_shims_requested(env):
+        return env
     if env.get("RUSTC_WRAPPER"):
         return env
     sccache = shutil.which("sccache", path=env.get("PATH"))
@@ -230,6 +273,10 @@ def clean_env() -> dict[str, str]:
         env.pop("VIRTUAL_ENV", None)
         env.setdefault("PYTHONUTF8", "1")
     env.setdefault("RUSTUP_TOOLCHAIN", toolchain_name())
+    if _soldr_shims_requested(env):
+        env.pop("CARGO", None)
+        env.pop("RUSTC", None)
+        env.pop("RUSTC_WRAPPER", None)
     env = _apply_sccache(env)
     return env
 
@@ -241,10 +288,9 @@ def build_env() -> dict[str, str]:
 def soldr_path(env: dict[str, str] | None = None) -> str | None:
     """Return the path to the soldr binary, or None if not available.
 
-    This remains for legacy callers and tests that need to discover the
-    optional soldr helper. CI cargo/maturin invocations use the explicit
-    tool paths and environment from this module rather than routing through
-    soldr by default.
+    This remains for callers and tests that need to discover the optional
+    soldr helper. CI routes cargo through setup-soldr's PATH shims when
+    CLUD_USE_SOLDR_SHIMS is enabled.
     """
     path = None if env is None else env.get("PATH")
     return shutil.which("soldr", path=path)
@@ -253,15 +299,12 @@ def soldr_path(env: dict[str, str] | None = None) -> str | None:
 def cargo_argv(subcommand: list[str], env: dict[str, str] | None = None) -> list[str]:
     """Return the cargo argv for CI and local helper scripts.
 
-    Explicit `CARGO` wins because Windows build_env() pins it to the MSVC
-    rustup toolchain. Otherwise use bare `cargo`: setup-soldr still installs
-    the requested toolchain and restores the target cache, while routing
-    through `soldr cargo` starts zccache. In PR #114 CI, that zccache layer
-    exited early on Linux x86 integration and was killed with 137 on Linux ARM
-    lint, so cargo itself is the stable execution path.
+    When setup-soldr shims are enabled, use bare `cargo` so PATH resolves to
+    the shim and maturin/cargo subcommands go through soldr/zccache. Otherwise
+    explicit `CARGO` still wins for local and non-soldr CI environments.
     """
     cargo = None if env is None else env.get("CARGO")
-    if cargo:
+    if cargo and not _soldr_shims_requested(env):
         return [cargo, *subcommand]
 
     return ["cargo", *subcommand]
@@ -280,13 +323,12 @@ def maturin_argv(subcommand: list[str], env: dict[str, str] | None = None) -> li
     fire here), producing `tool not found: no asset matches target
     x86_64-unknown-linux-gnu` and breaking every Linux Build job.
 
-    maturin is already pinned in pyproject.toml dev deps and installed
-    into the uv-managed venv on every runner, so `python -m maturin`
-    works uniformly across platforms without any GitHub-Releases lookup.
-    The Windows MSVC pin from issue #27 is preserved through the cargo
-    side: `_windows_build_env` exports `CARGO`/`RUSTC`/`RUSTUP_TOOLCHAIN`
-    + prepends the MSVC toolchain bin to PATH, so when this maturin
-    invocation spawns cargo it picks up the same MSVC toolchain that
-    `soldr cargo` would have given it.
+    maturin is already pinned in pyproject.toml dev deps and installed into
+    the uv-managed venv on every runner, so `python -m maturin` works uniformly
+    across platforms without any GitHub-Releases lookup. In CI, setup-soldr's
+    cargo shim remains first on PATH and `clean_env()` removes explicit
+    CARGO/RUSTC/RUSTC_WRAPPER overrides, so the cargo process spawned by
+    maturin still goes through soldr/zccache. The Windows MSVC pin is
+    preserved with RUSTUP_TOOLCHAIN and CARGO_BUILD_TARGET.
     """
     return [sys.executable, "-m", "maturin", *subcommand]

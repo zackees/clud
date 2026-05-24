@@ -21,7 +21,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "10.15"
       CFLAGS: "-g0"
       CXXFLAGS: "-g0"
-      SOLDR_LINKER: "fast"
+      CLUD_USE_SOLDR_SHIMS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -42,20 +42,6 @@ jobs:
           restore-keys: |
             venv-${{ inputs.runs-on }}-py3.11-
 
-      # Issue #68: replace the dtolnay + sccache + rust-cache stack with soldr.
-      # Pinned to a specific SHA because the floating `v0` tag moved to a
-      # Node20 TypeScript port that fails to read `components` from
-      # `rust-toolchain.toml`, leaving the toolchain without rustfmt/clippy
-      # and causing `cargo fmt --check` to fail with "'cargo-fmt' is not
-      # installed for the toolchain". See zackees/setup-soldr#76.
-      - name: Setup soldr
-        uses: zackees/setup-soldr@8bc6da394b8ad370654826a0b3d8f5e3615d10d6 # v0 (pre-Node20-rewrite)
-        with:
-          toolchain: "1.94.1"
-          version: "0.7.11"
-          cache: true
-          build-cache-mode: thin
-
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -63,7 +49,24 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends mold
-          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+
+      # Issue #68: setup-soldr owns Rust provisioning plus build/target caching.
+      # Shims keep cargo fmt, clippy-driver, and all cargo subcommands routed
+      # through soldr/zccache. Install mold before setup so dependency cooking
+      # and clippy share the same linker fingerprint.
+      - name: Setup soldr
+        uses: zackees/setup-soldr@v0
+        with:
+          toolchain: "1.94.1"
+          version: "0.7.32"
+          cache: true
+          build-cache-mode: thin
+          shims: true
+          linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
+          preserve-source-mtimes: true
+          solo-toolchain-cache: true
+          prebuild-deps: cargo-chef
+          prebuild-deps-flags: "--workspace"
 
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11 -v

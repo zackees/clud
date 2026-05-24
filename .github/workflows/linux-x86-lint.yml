@@ -1,6 +1,6 @@
 name: Linux x86 Lint
 on:
-  push:
+  workflow_dispatch:
 jobs:
   call:
     uses: ./.github/workflows/_lint.yml
