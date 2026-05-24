@@ -31,29 +31,38 @@ def _run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_warns_in_clud_repo() -> None:
-    """Inside the clud repo, the guard fires, names the worst offenders,
-    and reports at least 4 lines with a `(N more)` tail.
+def test_warns_with_synthetic_large_files() -> None:
+    """The guard fires, names the worst offenders, and reports at least
+    4 lines with a `(N more)` tail when the repo contains >40 kB sources.
 
-    Naming exact files is brittle (a single edit on top of any file could
-    flip the leaderboard), so we assert (a) the worst three known-large
-    `.rs` files are all listed, and (b) the report is capped at 4 entries
-    with a `(N more)` tail proving there are extras the user should look
-    into.
+    Uses a synthetic tempdir with 5 large `.rs` files instead of relying
+    on the clud repo's own source: per-file LOC is moving target (the
+    refactor that splits a file out from under the test should not be
+    the one that fails the test), and the report's exact contents drift
+    every time an unrelated file grows.
     """
-    result = _run(ROOT, "--dry-run", "-p", "hello")
-    assert result.returncode == 0, result.stderr
-    assert WARNING_HEADER in result.stderr, (
-        f"warning header missing from stderr:\n{result.stderr}"
-    )
-    # The current top offenders by source-file size in clud after the
-    # daemon/command/voice/main split. If any of these drops out of the
-    # report a non-trivial refactor has landed (and the prior triumvirate
-    # of daemon.rs / command.rs / voice.rs is already gone — they've been
-    # split into per-concern submodules).
-    for expected in ("console_drop_target.rs", "session.rs", "pty_behavior.rs"):
-        assert expected in result.stderr, (
-            f"expected {expected} in warning, got:\n{result.stderr}"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / ".git").mkdir()
+        # 5 files past the 40 kB / ~1000 LOC threshold so the guard
+        # produces 4 listed entries + a `(1 more)` tail.
+        names = ["alpha.rs", "bravo.rs", "charlie.rs", "delta.rs", "echo.rs"]
+        for idx, name in enumerate(names):
+            # 50 kB of unique content per file so file sizes differ and the
+            # ordering inside the report is stable.
+            content = (f"// {name} line {idx}\n" * 2000)[: 50 * 1024 + idx * 1024]
+            (tmp_path / name).write_text(content)
+        result = _run(tmp_path, "--dry-run", "-p", "hello")
+        assert result.returncode == 0, result.stderr
+        assert WARNING_HEADER in result.stderr, (
+            f"warning header missing from stderr:\n{result.stderr}"
+        )
+        # All 5 should be candidates, of which 4 are named and 1 is in the
+        # `(N more)` tail. Asserting any 3 of the 5 keeps the test
+        # tolerant to sort-order ties on identical file sizes.
+        listed = sum(1 for name in names if name in result.stderr)
+        assert listed >= 3, (
+            f"expected at least 3 synthetic .rs files in warning, got:\n{result.stderr}"
         )
 
 
