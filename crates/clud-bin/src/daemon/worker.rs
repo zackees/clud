@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use running_process_core::pty::NativePtyProcess;
-use running_process_core::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+use running_process::pty::NativePtyProcess;
+use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;

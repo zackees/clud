@@ -9,7 +9,7 @@ use crate::backend::{self, Backend};
 use crate::command;
 use crate::loop_spec;
 use crate::subprocess;
-use running_process_core::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use running_process::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;

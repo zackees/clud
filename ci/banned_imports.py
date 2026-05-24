@@ -1,6 +1,6 @@
 """Lint rule: ban direct subprocess/PTY calls in Rust source.
 
-All process execution must go through running-process-core.
+All process execution must go through running-process.
 This script scans .rs files (excluding testbins/) for banned patterns
 and fails the build if any are found.
 """
@@ -15,17 +15,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Patterns that indicate direct subprocess usage (banned in crates/)
 BANNED_PATTERNS: list[tuple[str, str]] = [
-    (r"\bstd::process::Command\b", "use running_process_core::NativeProcess instead"),
-    (r"\bprocess::Command\b", "use running_process_core::NativeProcess instead"),
-    (r"\bCommand::new\b", "use running_process_core::NativeProcess instead"),
-    (r"\bstd::process::Stdio\b", "use running_process_core StdinMode/StderrMode instead"),
-    (r"\bstd::process::Child\b", "use running_process_core::NativeProcess instead"),
-    (r"\bstd::process::Output\b", "use running_process_core::NativeProcess instead"),
-    (r"\buse std::process::\{", "use running_process_core instead of std::process"),
-    # Tokio's async process API is also banned — running-process-core is the
-    # single chokepoint. If async is needed, extend running-process-core.
-    (r"\btokio::process\b", "use running_process_core::NativeProcess instead"),
-    (r"\buse tokio::process\b", "use running_process_core instead of tokio::process"),
+    (r"\bstd::process::Command\b", "use running_process::NativeProcess instead"),
+    (r"\bprocess::Command\b", "use running_process::NativeProcess instead"),
+    (r"\bCommand::new\b", "use running_process::NativeProcess instead"),
+    (r"\bstd::process::Stdio\b", "use running_process StdinMode/StderrMode instead"),
+    (r"\bstd::process::Child\b", "use running_process::NativeProcess instead"),
+    (r"\bstd::process::Output\b", "use running_process::NativeProcess instead"),
+    (r"\buse std::process::\{", "use running_process instead of std::process"),
+    # Tokio's async process API is also banned — running-process is the
+    # single chokepoint. If async is needed, extend running-process.
+    (r"\btokio::process\b", "use running_process::NativeProcess instead"),
+    (r"\buse tokio::process\b", "use running_process instead of tokio::process"),
 ]
 
 # Only std::process::exit is allowed (it's not subprocess spawning)
@@ -72,7 +72,7 @@ def main() -> int:
         return 0
 
     # trampoline.rs is exempt — it must use std::process::Command to re-exec
-    # before running-process-core is involved.
+    # before running-process is involved.
     #
     # process_tree.rs is exempt — production code uses sysinfo (no subprocess
     # spawning), but the #[cfg(test)] tests deliberately use std::process::
@@ -97,7 +97,7 @@ def main() -> int:
     if total_violations > 0:
         print(
             f"\n{total_violations} banned import(s) found. "
-            "All subprocess execution must use running-process-core.",
+            "All subprocess execution must use running-process.",
             file=sys.stderr,
         )
         return 1

@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::voice::audio::TARGET_SAMPLE_RATE;
     use crate::voice::audio::{downmix_and_resample, has_speech_peak, is_effectively_silent};
-    use running_process_core::pty::NativePtyProcess;
+    use running_process::pty::NativePtyProcess;
     use std::env;
 
     #[test]

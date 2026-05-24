@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::types::ENV_BACKLOG_BYTES;
 
 pub(super) fn child_env() -> Vec<(String, String)> {
-    let originator_key = running_process_core::ORIGINATOR_ENV_VAR;
+    let originator_key = running_process::ORIGINATOR_ENV_VAR;
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key != "IN_CLUD" && key != originator_key)
         .collect();

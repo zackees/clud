@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use running_process_core::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;

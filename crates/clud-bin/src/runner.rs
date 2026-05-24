@@ -61,7 +61,7 @@ fn merge_extra_rx(
 /// Build the child environment: inherit parent env + inject tracking vars.
 /// Deduplicates keys so we never pass the same var twice.
 pub fn child_env() -> Vec<(String, String)> {
-    let originator_key = running_process_core::ORIGINATOR_ENV_VAR;
+    let originator_key = running_process::ORIGINATOR_ENV_VAR;
 
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| k != "IN_CLUD" && k != originator_key)
@@ -150,7 +150,7 @@ pub fn run_plan_subprocess(
 ) -> i32 {
     use std::path::PathBuf;
 
-    use running_process_core::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
+    use running_process::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
     let env = child_env();
     let mut last_exit = 0i32;
@@ -330,7 +330,7 @@ enum ProcessOutcome {
 /// 3. `process.kill()` + `process.wait(2s)`: final TerminateProcess on
 ///    the direct handle and a bounded wait so we don't return while
 ///    the child is still draining.
-fn teardown_interrupted_child(process: &running_process_core::NativeProcess) {
+fn teardown_interrupted_child(process: &running_process::NativeProcess) {
     if let Some(pid) = process.pid() {
         // Cooperative Ctrl+Break first. No-op on POSIX (returns false)
         // and any failure on Windows is non-fatal — the hard kill below
@@ -347,7 +347,7 @@ fn teardown_interrupted_child(process: &running_process_core::NativeProcess) {
 /// the stream-json path can sit alongside it without duplicating the
 /// non-streaming control flow.
 fn run_with_inherited_stdio(
-    process: &running_process_core::NativeProcess,
+    process: &running_process::NativeProcess,
     interrupted: &AtomicBool,
 ) -> ProcessOutcome {
     loop {
@@ -385,11 +385,11 @@ fn run_with_inherited_stdio(
 /// is what the agent emits in a non-JSON-wrapped chunk; we keep the
 /// payload as-is so token recognition isn't confused by event framing.
 fn run_with_stream_json_renderer(
-    process: &running_process_core::NativeProcess,
+    process: &running_process::NativeProcess,
     interrupted: &AtomicBool,
     captured_output: &mut String,
 ) -> ProcessOutcome {
-    use running_process_core::{ReadStatus, StreamKind};
+    use running_process::{ReadStatus, StreamKind};
     use std::time::Duration;
 
     let timeout = Duration::from_millis(100);
@@ -428,11 +428,8 @@ fn run_with_stream_json_renderer(
     }
 }
 
-fn drain_remaining_stdout(
-    process: &running_process_core::NativeProcess,
-    captured_output: &mut String,
-) {
-    use running_process_core::StreamKind;
+fn drain_remaining_stdout(process: &running_process::NativeProcess, captured_output: &mut String) {
+    use running_process::StreamKind;
     for chunk in process.drain_stream(StreamKind::Stdout) {
         emit_rendered_line(&chunk, captured_output);
     }
@@ -457,7 +454,7 @@ pub fn run_plan_pty(
     dnd_enabled: bool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
 ) -> i32 {
-    use running_process_core::pty::NativePtyProcess;
+    use running_process::pty::NativePtyProcess;
 
     // Enable VT input on the Windows console for the whole PTY session.
     // The raw byte pump reads from clud's stdin, so PTY mode needs the
