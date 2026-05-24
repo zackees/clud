@@ -428,10 +428,7 @@ fn run_with_stream_json_renderer(
     }
 }
 
-fn drain_remaining_stdout(
-    process: &running_process::NativeProcess,
-    captured_output: &mut String,
-) {
+fn drain_remaining_stdout(process: &running_process::NativeProcess, captured_output: &mut String) {
     use running_process::StreamKind;
     for chunk in process.drain_stream(StreamKind::Stdout) {
         emit_rendered_line(&chunk, captured_output);

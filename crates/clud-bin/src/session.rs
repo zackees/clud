@@ -5,8 +5,8 @@ use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use running_process::pty::PtySize;
 use running_process::pty::NativePtyProcess;
+use running_process::pty::PtySize;
 
 use crate::console_title::OscTitleStripper;
 use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
