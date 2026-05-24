@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use running_process_core::{
+use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ProcessError, StderrMode, StdinMode,
 };
 

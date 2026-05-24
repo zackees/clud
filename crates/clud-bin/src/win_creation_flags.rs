@@ -49,7 +49,7 @@ pub fn invisible_helper_flags() -> u32 {
 }
 
 /// `Some(CREATE_NO_WINDOW)` on Windows, `None` elsewhere — the shape that
-/// `running_process_core::ProcessConfig::creationflags` expects. Using
+/// `running_process::ProcessConfig::creationflags` expects. Using
 /// `None` off-Windows lets the running-process-core priority-flag
 /// short-circuit stay intact (passing `Some(0)` would also work, but is
 /// semantically misleading).

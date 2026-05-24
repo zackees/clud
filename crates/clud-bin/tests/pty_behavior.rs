@@ -1,4 +1,4 @@
-//! Cross-platform behavior tests for `running_process_core::pty::NativePtyProcess`
+//! Cross-platform behavior tests for `running_process::pty::NativePtyProcess`
 //! as used by `clud --codex` (see zackees/clud#28, #31).
 //!
 //! Each test asserts the platform-specific contract that
@@ -34,7 +34,7 @@
 
 use std::time::Duration;
 
-use running_process_core::pty::NativePtyProcess;
+use running_process::pty::NativePtyProcess;
 use serde_json::Value;
 
 mod common;
@@ -234,7 +234,7 @@ fn initial_pty_size_is_forwarded_to_child() {
     }
 }
 
-/// Document what `running_process_core::pty::NativePtyProcess::resize_impl`
+/// Document what `running_process::pty::NativePtyProcess::resize_impl`
 /// does today on each platform:
 ///   - POSIX: `master.resize()` propagates; the child sees the new size.
 ///   - Windows: intentional no-op (see running-process-core mod.rs:730-737).

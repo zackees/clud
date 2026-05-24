@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use running_process_core::pty::NativePtyProcess;
-use running_process_core::{
+use running_process::pty::NativePtyProcess;
+use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
 };
 use serde_json::Value;
@@ -174,7 +174,7 @@ pub fn drain_reader(process: &NativePtyProcess, overall_timeout: Duration) -> Ve
             Err(_) => break,
         }
         if let Ok(Some(_)) =
-            running_process_core::pty::poll_pty_process(&process.handles, &process.returncode)
+            running_process::pty::poll_pty_process(&process.handles, &process.returncode)
         {
             while let Ok(Some(chunk)) = process.read_chunk_impl(Some(0.1)) {
                 buf.extend_from_slice(&chunk);

@@ -14,7 +14,7 @@ use std::io::Cursor;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use running_process_core::pty::NativePtyProcess;
+use running_process::pty::NativePtyProcess;
 
 mod common;
 use common::{drain_reader, mock_agent_path};

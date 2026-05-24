@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use running_process_core::pty::NativePtyProcess;
-use running_process_core::NativeProcess;
+use running_process::pty::NativePtyProcess;
+use running_process::NativeProcess;
 use serde::{Deserialize, Serialize};
 use sysinfo::Signal;
 

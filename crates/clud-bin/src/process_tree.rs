@@ -11,7 +11,7 @@
 //! ```
 //!
 //! When the user hits Ctrl+C, `process.kill()` on a
-//! `running_process_core::NativeProcess` only terminates the **direct**
+//! `running_process::NativeProcess` only terminates the **direct**
 //! child (cmd.exe). The orphaned `node.exe` keeps writing to the inherited
 //! console for several seconds until clud itself exits and its Job Object
 //! closes — that's the multi-second hang users were reporting.

@@ -5,14 +5,14 @@ use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use running_process_core::pty::reexports::portable_pty::PtySize;
-use running_process_core::pty::NativePtyProcess;
+use running_process::pty::PtySize;
+use running_process::pty::NativePtyProcess;
 
 use crate::console_title::OscTitleStripper;
 use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
 use crate::verbose_log;
 
-/// Resize the PTY. On Windows, `running_process_core::pty::NativePtyProcess::resize_impl`
+/// Resize the PTY. On Windows, `running_process::pty::NativePtyProcess::resize_impl`
 /// is a deliberate no-op (see that crate's `pty/mod.rs:730-737`), so reaching
 /// the underlying master's `resize()` directly is the only way to honor a
 /// `SIGWINCH`/`Event::Resize`. On POSIX the library's implementation does the
@@ -710,7 +710,7 @@ where
         }
 
         if let Ok(Some(code)) =
-            running_process_core::pty::poll_pty_process(&process.handles, &process.returncode)
+            running_process::pty::poll_pty_process(&process.handles, &process.returncode)
         {
             if verbose {
                 verbose_log::log(format_args!("[clud] pty pump: child exited code {code}"));

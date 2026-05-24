@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use running_process_core::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 use sysinfo::Signal;
 
 use crate::win_creation_flags::invisible_helper_creationflags;

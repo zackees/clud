@@ -22,7 +22,7 @@
 #[cfg(windows)]
 use std::path::Path;
 
-use running_process_core::CommandSpec;
+use running_process::CommandSpec;
 
 /// Translate an argv-style launch into the most compatible `CommandSpec` for
 /// the current platform.
@@ -126,7 +126,7 @@ mod tests {
         let spec =
             command_spec_for_subprocess(vec!["codex.exe".into(), "exec".into(), "hello".into()]);
         match spec {
-            running_process_core::CommandSpec::Argv(argv) => {
+            running_process::CommandSpec::Argv(argv) => {
                 assert_eq!(argv, vec!["codex.exe", "exec", "hello"]);
             }
             other => panic!("expected Argv for native executable, got {other:?}"),
@@ -146,7 +146,7 @@ mod tests {
         let spec =
             command_spec_for_subprocess(vec![r"C:\Users\me\AppData\Roaming\npm\codex.cmd".into()]);
         match spec {
-            running_process_core::CommandSpec::Shell(command) => {
+            running_process::CommandSpec::Shell(command) => {
                 assert_eq!(command, r#""C:\Users\me\AppData\Roaming\npm\codex.cmd""#);
             }
             other => panic!("expected Shell for .cmd wrapper, got {other:?}"),
@@ -162,7 +162,7 @@ mod tests {
             "hello world".into(),
         ]);
         let rendered = match spec {
-            running_process_core::CommandSpec::Shell(s) => s,
+            running_process::CommandSpec::Shell(s) => s,
             other => panic!("expected Shell, got {other:?}"),
         };
         assert!(
@@ -186,7 +186,7 @@ mod tests {
             "caret ^ stays".into(),
         ]);
         let rendered = match spec {
-            running_process_core::CommandSpec::Shell(s) => s,
+            running_process::CommandSpec::Shell(s) => s,
             other => panic!("expected Shell, got {other:?}"),
         };
         assert!(
@@ -230,7 +230,7 @@ mod tests {
             r#"100% "quoted" prompt"#.into(),
         ]);
         let rendered = match spec {
-            running_process_core::CommandSpec::Shell(s) => s,
+            running_process::CommandSpec::Shell(s) => s,
             other => panic!("expected Shell, got {other:?}"),
         };
         assert!(
@@ -246,7 +246,7 @@ mod tests {
         // hit the cmd.exe path.
         let spec = command_spec_for_subprocess(vec![r"C:\tools\thing.BAT".into(), "go".into()]);
         match spec {
-            running_process_core::CommandSpec::Shell(_) => {}
+            running_process::CommandSpec::Shell(_) => {}
             other => panic!("expected Shell for .BAT wrapper, got {other:?}"),
         }
     }
@@ -263,7 +263,7 @@ mod tests {
             "hello".into(),
         ]);
         match spec {
-            running_process_core::CommandSpec::Argv(argv) => {
+            running_process::CommandSpec::Argv(argv) => {
                 assert_eq!(
                     argv,
                     vec![r"C:\Program Files\Tool\codex.exe", "exec", "hello"],
@@ -282,7 +282,7 @@ mod tests {
         // earlier resolver). These must not be wrapped.
         let spec = command_spec_for_subprocess(vec!["codex".into(), "exec".into()]);
         match spec {
-            running_process_core::CommandSpec::Argv(argv) => {
+            running_process::CommandSpec::Argv(argv) => {
                 assert_eq!(argv, vec!["codex", "exec"]);
             }
             other => panic!("expected Argv for extensionless path, got {other:?}"),
@@ -297,7 +297,7 @@ mod tests {
         // dependency on Linux/macOS.
         let spec = command_spec_for_subprocess(vec!["codex.cmd".into(), "exec".into()]);
         match spec {
-            running_process_core::CommandSpec::Argv(argv) => {
+            running_process::CommandSpec::Argv(argv) => {
                 assert_eq!(argv, vec!["codex.cmd", "exec"]);
             }
             other => panic!("expected Argv off Windows, got {other:?}"),
@@ -310,14 +310,14 @@ mod tests {
         // `.sh` and extensionless POSIX paths must always pass through.
         let spec = command_spec_for_subprocess(vec!["./run.sh".into(), "--flag".into()]);
         match spec {
-            running_process_core::CommandSpec::Argv(argv) => {
+            running_process::CommandSpec::Argv(argv) => {
                 assert_eq!(argv, vec!["./run.sh", "--flag"]);
             }
             other => panic!("expected Argv for .sh script, got {other:?}"),
         }
         let spec = command_spec_for_subprocess(vec!["/usr/bin/codex".into(), "exec".into()]);
         match spec {
-            running_process_core::CommandSpec::Argv(argv) => {
+            running_process::CommandSpec::Argv(argv) => {
                 assert_eq!(argv, vec!["/usr/bin/codex", "exec"]);
             }
             other => panic!("expected Argv for extensionless path, got {other:?}"),
