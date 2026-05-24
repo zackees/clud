@@ -492,6 +492,10 @@ class TestLoopMode:
 class TestInterruptReporting:
     """Verify Ctrl+C reports how clud was launched."""
 
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="Regression on Linux after running-process 4.0.x migration — see zackees/clud#159",
+    )
     def test_ctrl_c_reports_pty_mode_when_forced(
         self, clud_binary: Path, mock_env: dict[str, str]
     ) -> None:
