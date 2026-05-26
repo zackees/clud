@@ -1,4 +1,6 @@
+use std::fs::OpenOptions;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use crate::args::{Args, Command};
@@ -37,6 +39,7 @@ use super::worker::run_worker;
 /// | Trigger                                  | Centralized? |
 /// |------------------------------------------|--------------|
 /// | `--detach` / `--detachable` / repeat job | **forced on** |
+/// | `--transcript <path>`                    | **forced on** |
 /// | `--experimental-daemon-centralized`      | **forced on** (legacy alias) |
 /// | `CLUD_EXPERIMENTAL_DAEMON=1`             | **forced on** (legacy alias) |
 /// | `--no-daemon` / `CLUD_NO_DAEMON=1`       | off (no-ops here, kept for explicitness) |
@@ -55,6 +58,7 @@ pub fn experimental_enabled(args: &Args) -> bool {
 
     args.detach
         || args.detachable
+        || args.transcript.is_some()
         || repeat_enabled
         || args.experimental_daemon_centralized
         || env_truthy(ENV_FEATURE_FLAG)
@@ -224,6 +228,20 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
     }
 
     let repeat_enabled = plan.repeat_schedule.is_some();
+    let transcript_path = match args.transcript.as_deref() {
+        Some(path) => match prepare_transcript_path(path) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                eprintln!(
+                    "[clud] failed to prepare transcript {}: {}",
+                    path.display(),
+                    err
+                );
+                return 1;
+            }
+        },
+        None => None,
+    };
     let kind = select_session_kind(
         plan.launch_mode,
         repeat_enabled,
@@ -267,6 +285,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
             repeat_interval_secs: plan.repeat_schedule.as_ref().map(|s| s.interval_secs),
             repeat_run_command,
             backlog_bytes,
+            transcript_path,
         }),
     };
     let response = match send_daemon_request(&state_dir, &request) {
@@ -311,6 +330,23 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         | DaemonResponse::Terminated { .. }
         | DaemonResponse::Gc { .. } => 1,
     }
+}
+
+fn prepare_transcript_path(path: &Path) -> io::Result<PathBuf> {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    if let Some(parent) = resolved.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&resolved)?;
+    Ok(resolved)
 }
 
 fn build_repeat_once_command(args: &Args) -> io::Result<Vec<String>> {
@@ -436,5 +472,41 @@ mod tests {
             select_session_kind(LaunchMode::Subprocess, true, true),
             SessionKind::Subprocess
         ));
+    }
+
+    #[test]
+    fn transcript_forces_centralized_daemon() {
+        let args = Args {
+            prompt: Some("hi".into()),
+            message: None,
+            continue_session: false,
+            resume: None,
+            claude: false,
+            codex: false,
+            subprocess: false,
+            pty: false,
+            model: None,
+            safe: false,
+            dry_run: false,
+            detach: false,
+            detachable: false,
+            session_name: None,
+            transcript: Some(PathBuf::from("session.log")),
+            backlog_size: None,
+            verbose: false,
+            no_dnd: false,
+            clean_worktrees: false,
+            fix_hooks: false,
+            stale_after: "1d".into(),
+            yes: false,
+            force: false,
+            experimental_daemon_centralized: false,
+            daemon_state_dir: None,
+            daemon_mode: None,
+            no_daemon: false,
+            command: None,
+            passthrough: Vec::new(),
+        };
+        assert!(experimental_enabled(&args));
     }
 }

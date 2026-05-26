@@ -52,6 +52,11 @@ pub struct Args {
     #[arg(long = "name")]
     pub session_name: Option<String>,
 
+    /// Write daemon-managed session output bytes to a transcript file.
+    /// Implies centralized daemon execution.
+    #[arg(long = "transcript", value_name = "PATH")]
+    pub transcript: Option<PathBuf>,
+
     /// Override the in-memory attach-replay backlog cap. Accepts bytes
     /// (`262144`), or SI/binary suffixes (`256k`, `256KiB`, `1mb`). The
     /// compiled default is 256 KiB. Also honored as `CLUD_BACKLOG_BYTES`.
@@ -272,6 +277,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--resume",
         "--model",
         "--name",
+        "--transcript",
         "--backlog-size",
         "--loop-count",
         "--done",

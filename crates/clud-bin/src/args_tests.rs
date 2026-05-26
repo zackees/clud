@@ -444,6 +444,15 @@ fn test_name_flag() {
 }
 
 #[test]
+fn test_transcript_flag() {
+    let args = parse(&["clud", "--transcript", "session.log", "-p", "hello"]);
+    assert_eq!(
+        args.transcript.as_ref().map(|p| p.as_os_str()),
+        Some(std::ffi::OsStr::new("session.log"))
+    );
+}
+
+#[test]
 fn test_list_subcommand() {
     let args = parse(&["clud", "list"]);
     assert!(matches!(args.command, Some(Command::List)));
@@ -581,6 +590,7 @@ fn test_default_no_flags() {
     assert!(!args.dry_run);
     assert!(!args.detach);
     assert!(!args.detachable);
+    assert!(args.transcript.is_none());
     assert!(!args.no_dnd);
     assert!(!args.clean_worktrees);
     assert!(!args.fix_hooks);

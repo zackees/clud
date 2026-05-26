@@ -18,6 +18,7 @@ from ._daemon_helpers import (
     read_session_id,
     read_session_id_from_text,
     session_metadata,
+    wait_for_file,
     wait_for_exit,
 )
 
@@ -25,6 +26,37 @@ pytestmark = pytest.mark.integration
 
 
 class TestDaemonManagedSessionFlags:
+    def test_transcript_flag_forces_daemon_and_writes_output(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        transcript = tmp_path / "session.transcript"
+        env = managed_env(mock_env, state_dir)
+
+        result = subprocess.run(
+            [
+                str(clud_binary),
+                "--transcript",
+                str(transcript),
+                "--codex",
+                "-p",
+                "transcript-tag",
+                "--",
+                "--mock-sleep-ms",
+                "50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        session_id = read_session_id_from_text(result.stderr)
+        wait_for_file(transcript)
+        contents = transcript.read_text(encoding="utf-8")
+        assert "transcript-tag" in contents
+        kill_daemon_for_session(state_dir, session_id)
+
     def test_detach_launch_returns_immediately_and_can_attach(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:

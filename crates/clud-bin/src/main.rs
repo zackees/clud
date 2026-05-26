@@ -226,6 +226,7 @@ fn main() {
             "backend": backend.executable_name(),
             "launch_mode": plan.launch_mode.as_str(),
             "repeat_interval_secs": plan.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            "transcript": args.transcript.as_ref().map(|p| p.to_string_lossy().to_string()),
             "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({
                 "done_path": m.done_path,
                 "blocked_path": m.blocked_path,

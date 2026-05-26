@@ -782,6 +782,7 @@ fn run_backend_prompt(
         detach: false,
         detachable: false,
         session_name: None,
+        transcript: None,
         backlog_size: None,
         verbose: args.verbose,
         no_dnd: true,

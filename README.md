@@ -31,6 +31,7 @@ clud --pty                        # Force PTY launch mode
 clud --subprocess                 # Force subprocess launch mode
 clud --detach -p "review this PR" # Start a daemon-managed session without attaching
 clud --detachable -p "fix CI"     # Ctrl+C asks whether to keep the session in background
+clud --transcript session.log -p "debug this" # Tee daemon session output to a file
 clud -c                           # Continue the most recent conversation
 clud --resume                     # Resume a session
 clud --resume abc123              # Resume a specific session by ID or search term
@@ -61,6 +62,7 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--pty` | Force PTY launch mode |
 | `--detach` | Start a daemon-managed session directly in the background |
 | `--detachable` | Run attached under the daemon; `Ctrl+C` prompts whether to background or end |
+| `--transcript <PATH>` | Tee daemon-managed session output bytes to a transcript file |
 | `--model <NAME>` | Set model preference (e.g., haiku, sonnet, opus) |
 | `--safe` | Disable YOLO mode (don't inject `--dangerously-skip-permissions`) |
 | `--dry-run` | Print what would be executed, then exit |

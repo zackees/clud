@@ -1,12 +1,15 @@
 use std::fs;
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use running_process::telemetry::{
+    TeeBackpressure, TeeEvent, TeeHandle, TeeOptions, TeeRegistry, TeeStream,
+};
 
 use crate::capture::TerminalCapture;
 
@@ -15,8 +18,8 @@ use super::paths::{session_log_path, session_snapshot_path};
 #[cfg(test)]
 use super::types::DEFAULT_BACKLOG_LIMIT_BYTES;
 use super::types::{
-    AttachClientResult, AttachedClient, BacklogState, SessionSnapshot, WorkerServerMessage,
-    LOG_ROTATE_BYTES,
+    AttachClientResult, AttachedClient, BacklogState, SessionKind, SessionSnapshot,
+    WorkerServerMessage, LOG_ROTATE_BYTES,
 };
 
 /// Probe whether the peer of `stream` has closed the connection, without
@@ -105,9 +108,17 @@ pub(super) struct WorkerShared {
     /// pm2-style tail / follow output that has scrolled off the in-memory
     /// backlog or from sessions that have fully exited.
     log_file: Mutex<Option<fs::File>>,
+    transcript_tees: TeeRegistry,
+    transcript_stream: TeeStream,
+    transcript_sink: Mutex<Option<TranscriptSink>>,
     client: Mutex<Option<AttachedClient>>,
     next_client_id: AtomicU64,
     pub(super) stop_accepting: AtomicBool,
+}
+
+struct TranscriptSink {
+    handle: TeeHandle,
+    worker: std::thread::JoinHandle<()>,
 }
 
 impl WorkerShared {
@@ -122,6 +133,10 @@ impl WorkerShared {
         snapshot: SessionSnapshot,
         backlog_limit_bytes: usize,
     ) -> Self {
+        let transcript_stream = match &snapshot.kind {
+            SessionKind::Pty => TeeStream::PtyOutput,
+            SessionKind::Subprocess => TeeStream::Stdout,
+        };
         Self {
             state_dir,
             session_id,
@@ -130,6 +145,9 @@ impl WorkerShared {
             backlog_limit_bytes: backlog_limit_bytes.max(1),
             capture: Mutex::new(None),
             log_file: Mutex::new(None),
+            transcript_tees: TeeRegistry::new(),
+            transcript_stream,
+            transcript_sink: Mutex::new(None),
             client: Mutex::new(None),
             next_client_id: AtomicU64::new(1),
             stop_accepting: AtomicBool::new(false),
@@ -192,6 +210,46 @@ impl WorkerShared {
             .open(&primary)
         {
             *self.log_file.lock().expect("log_file mutex poisoned") = Some(file);
+        }
+    }
+
+    pub(super) fn init_transcript_file(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        let (handle, receiver) = self.transcript_tees.add_channel_with_options(
+            self.transcript_stream,
+            1024,
+            TeeOptions {
+                backpressure: TeeBackpressure::DropOldest,
+            },
+        );
+        let worker = std::thread::Builder::new()
+            .name("clud-transcript-tee".into())
+            .spawn(move || transcript_file_worker(&mut file, receiver))
+            .map_err(io::Error::other)?;
+        self.transcript_sink
+            .lock()
+            .expect("transcript_sink mutex poisoned")
+            .replace(TranscriptSink { handle, worker });
+        Ok(())
+    }
+
+    pub(super) fn close_transcript(&self) {
+        let sink = self
+            .transcript_sink
+            .lock()
+            .expect("transcript_sink mutex poisoned")
+            .take();
+        let Some(sink) = sink else { return };
+        let _ = self.transcript_tees.remove(sink.handle);
+        if sink.worker.join().is_err() {
+            eprintln!("[clud] warning: transcript writer thread panicked");
         }
     }
 
@@ -377,6 +435,7 @@ impl WorkerShared {
         // appended to `<state_dir>/logs/<session_id>.log`, so `clud logs` can
         // show output that scrolled off the 256 KiB in-memory backlog.
         self.append_log(&chunk);
+        self.transcript_tees.write(self.transcript_stream, &chunk);
         self.send_to_client(WorkerServerMessage::Output {
             data_b64: base64::engine::general_purpose::STANDARD.encode(chunk),
         });
@@ -406,6 +465,29 @@ impl WorkerShared {
             snapshot,
         )
     }
+}
+
+impl Drop for WorkerShared {
+    fn drop(&mut self) {
+        self.close_transcript();
+    }
+}
+
+fn transcript_file_worker(file: &mut fs::File, receiver: mpsc::Receiver<TeeEvent>) {
+    while let Ok(event) = receiver.recv() {
+        let result = match event {
+            TeeEvent::Bytes(bytes) => file.write_all(&bytes),
+            TeeEvent::MissedBytes(n) => file.write_all(&transcript_missed_marker(n)),
+        };
+        if result.is_err() || file.flush().is_err() {
+            break;
+        }
+    }
+    let _ = file.flush();
+}
+
+fn transcript_missed_marker(n: u64) -> Vec<u8> {
+    format!("\n[running-process tee missed {n} bytes]\n").into_bytes()
 }
 
 #[cfg(test)]
@@ -608,6 +690,19 @@ mod tests {
         let path = session_log_path(tmp.path(), "s1");
         let contents = fs::read(&path).expect("read log");
         assert_eq!(contents, b"line one\nline two\n");
+    }
+
+    #[test]
+    fn transcript_file_receives_output_through_running_process_tee() {
+        let tmp = TempDir::new().unwrap();
+        let shared = test_shared(tmp.path(), SessionKind::Pty);
+        let transcript = tmp.path().join("session.transcript");
+        shared.init_transcript_file(&transcript).unwrap();
+        shared.push_output(b"hello transcript\n".to_vec());
+        shared.close_transcript();
+
+        let contents = fs::read(&transcript).expect("read transcript");
+        assert_eq!(contents, b"hello transcript\n");
     }
 
     #[test]
