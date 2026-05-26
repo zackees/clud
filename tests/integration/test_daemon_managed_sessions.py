@@ -43,7 +43,7 @@ class TestDaemonManagedSessionFlags:
                 "transcript-tag",
                 "--",
                 "--mock-sleep-ms",
-                "50",
+                "1000",
             ],
             capture_output=True,
             text=True,
