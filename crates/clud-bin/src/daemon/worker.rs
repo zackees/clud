@@ -85,6 +85,16 @@ pub(super) fn run_worker(
         backlog_limit,
     ));
     shared.init_log_file();
+    if let Some(path) = &spec.transcript_path {
+        if let Err(err) = shared.init_transcript_file(path) {
+            eprintln!(
+                "[clud] failed to open transcript {}: {}",
+                path.display(),
+                err
+            );
+            return 1;
+        }
+    }
 
     let runtime = match spec.kind {
         SessionKind::Subprocess => match start_subprocess_session(&spec, &shared) {
@@ -161,6 +171,7 @@ pub(super) fn run_worker(
             Err(_) => break,
         }
     }
+    shared.close_transcript();
     let _ = persist_snapshot(state_dir, session_id, &shared);
     let _ = fs::remove_file(spec_path(state_dir, session_id));
     0
@@ -203,6 +214,16 @@ fn run_repeat_worker(
         spec.backlog_bytes.unwrap_or(DEFAULT_BACKLOG_LIMIT_BYTES),
     ));
     shared.init_log_file();
+    if let Some(path) = &spec.transcript_path {
+        if let Err(err) = shared.init_transcript_file(path) {
+            eprintln!(
+                "[clud] failed to open transcript {}: {}",
+                path.display(),
+                err
+            );
+            return 1;
+        }
+    }
     if let Err(err) = persist_snapshot(state_dir, session_id, &shared) {
         eprintln!("[clud] failed to write repeat session metadata: {}", err);
         return 1;
@@ -211,6 +232,7 @@ fn run_repeat_worker(
     loop {
         if !pid_is_alive(daemon_pid) {
             shared.set_exit_code(137);
+            shared.close_transcript();
             let _ = persist_snapshot(state_dir, session_id, &shared);
             let _ = fs::remove_file(spec_path(state_dir, session_id));
             return 0;
@@ -218,6 +240,7 @@ fn run_repeat_worker(
 
         shared.set_repeat_state(true, None);
         if !run_repeat_once(&repeat_run_command, spec, daemon_pid, &shared) {
+            shared.close_transcript();
             let _ = persist_snapshot(state_dir, session_id, &shared);
             let _ = fs::remove_file(spec_path(state_dir, session_id));
             return 0;
@@ -239,6 +262,7 @@ fn run_repeat_worker(
         {
             if !pid_is_alive(daemon_pid) {
                 shared.set_exit_code(137);
+                shared.close_transcript();
                 let _ = persist_snapshot(state_dir, session_id, &shared);
                 let _ = fs::remove_file(spec_path(state_dir, session_id));
                 return 0;

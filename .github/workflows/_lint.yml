@@ -68,6 +68,18 @@ jobs:
           prebuild-deps: cargo-chef
           prebuild-deps-flags: "--workspace"
 
+      - name: Restore source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::group::Files changed by dependency prebuild"
+            git diff --name-only
+            git diff --cached --name-only
+            echo "::endgroup::"
+            git restore --staged --worktree -- .
+          fi
+
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11 -v
 

@@ -1,5 +1,6 @@
 use std::io;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -99,6 +100,11 @@ pub(super) struct WorkerLaunchSpec {
     /// spec files written by older clud versions.
     #[serde(default)]
     pub(super) backlog_bytes: Option<usize>,
+    /// Optional daemon-side transcript file. The worker tees every output
+    /// chunk through running-process telemetry and drains the file sink
+    /// before exiting.
+    #[serde(default)]
+    pub(super) transcript_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
