@@ -1,10 +1,10 @@
 use clud::{
-    args, backend, command, console_setup, console_title, daemon, gc, hook_health,
-    large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills, startup,
-    trampoline, verbose_log, wasm, worktrees,
+    args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc,
+    hook_health, large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills,
+    startup, trampoline, verbose_log, wasm, worktrees,
 };
 
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
     verbose_log::init_launch_clock();
@@ -193,17 +193,25 @@ fn main() {
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);
-    let backend_path = match backend::find_backend(backend) {
-        Some(path) => path.to_string_lossy().to_string(),
-        None => {
-            if args.dry_run {
-                backend.executable_name().to_string()
-            } else {
-                eprintln!(
-                    "error: {} not found on PATH. Install it or use --dry-run.",
-                    backend.executable_name()
-                );
-                std::process::exit(1);
+    let backend_path = {
+        let mut bootstrap_host = backend_bootstrap::ProductionBackendBootstrapHost;
+        let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+        let stdin = io::stdin();
+        let stderr = io::stderr();
+        let mut input = stdin.lock();
+        let mut err = stderr.lock();
+        match backend_bootstrap::resolve_backend_path(
+            backend,
+            args.dry_run,
+            interactive,
+            &mut input,
+            &mut err,
+            &mut bootstrap_host,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = writeln!(err, "{error}");
+                std::process::exit(error.exit_code());
             }
         }
     };
