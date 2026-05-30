@@ -194,12 +194,26 @@ jobs:
           body: |
             ## Install
 
+            **macOS / Linux:**
+
             ```bash
-            pip install clud==${{ needs.preflight.outputs.version }}
+            curl -fsSL https://raw.githubusercontent.com/zackees/clud/main/install.sh | sh
             ```
+
+            **Windows (PowerShell):**
+
+            ```powershell
+            irm https://raw.githubusercontent.com/zackees/clud/main/install.ps1 | iex
+            ```
+
+            Pin this exact version with `CLUD_VERSION=${{ needs.preflight.outputs.version }}` (POSIX) or `$env:CLUD_VERSION = '${{ needs.preflight.outputs.version }}'` (PowerShell) before piping into `sh` / `iex`.
+
+            Already managing Python tools? Equivalent:
 
             ```bash
             uv tool install clud==${{ needs.preflight.outputs.version }}
+            pipx install clud==${{ needs.preflight.outputs.version }}
+            pip install clud==${{ needs.preflight.outputs.version }}
             ```
 
             Pre-built wheels for Linux (x86/ARM), Windows (x86/ARM), and macOS (x86/ARM) are attached below and available on PyPI.
