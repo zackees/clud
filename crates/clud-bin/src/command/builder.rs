@@ -135,6 +135,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         | Some(Command::List)
         | Some(Command::Logs { .. })
         | Some(Command::Gc { .. })
+        | Some(Command::Ui { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}
         None => {

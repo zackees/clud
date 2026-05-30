@@ -35,6 +35,15 @@ pub(super) struct GcRequestMsg {
 /// worker.
 pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
+    spawn_registry_worker_with(registry)
+}
+
+/// Same as [`spawn_registry_worker`] but accepts a pre-constructed
+/// `Registry`. Tests use this to bind a worker to an isolated `redb`
+/// file without depending on the process-global `CLUD_DATA_DB` env var.
+pub(super) fn spawn_registry_worker_with(
+    registry: Registry,
+) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let (tx, rx) = mpsc::channel::<GcRequestMsg>();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
@@ -158,6 +167,61 @@ pub(super) fn process_op(registry: &Registry, op: GcOp) -> GcReply {
                 Err(e) => GcReply::Error {
                     message: e.to_string(),
                 },
+            }
+        }
+
+        GcOp::RecordRepoVisit {
+            repo_root,
+            cwd,
+            now_unix: provided,
+        } => {
+            let stamp = provided.unwrap_or_else(now_unix);
+            match registry.record_repo_visit(&repo_root, &cwd, stamp) {
+                Ok(()) => GcReply::RepoVisitOk,
+                Err(e) => GcReply::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+
+        GcOp::ListRepoVisits => match registry.list_repo_visits() {
+            Ok(rows) => GcReply::RepoVisitsOk { rows },
+            Err(e) => GcReply::Error {
+                message: e.to_string(),
+            },
+        },
+
+        GcOp::DeleteById { id } => {
+            let entries = match registry.list(None) {
+                Ok(v) => v,
+                Err(e) => {
+                    return GcReply::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            let Some(target) = entries.into_iter().find(|e| e.id == id) else {
+                // Idempotent: an id that no longer exists is `removed=0,
+                // skipped=0`. The dashboard refreshes after every delete
+                // so a stale id click is silently a no-op.
+                return GcReply::PurgeOk {
+                    removed: 0,
+                    skipped: 0,
+                };
+            };
+            let live_locks = collect_live_lock_paths();
+            if target.kind == "worktree" && live_locks.contains(&target.path) {
+                return GcReply::PurgeOk {
+                    removed: 0,
+                    skipped: 1,
+                };
+            }
+            match remove_entry_and_delete_row(registry, &target) {
+                Ok(()) => GcReply::PurgeOk {
+                    removed: 1,
+                    skipped: 0,
+                },
+                Err(message) => GcReply::Error { message },
             }
         }
     }
@@ -403,6 +467,95 @@ mod tests {
             GcReply::ListOk { rows } => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].kind, "worktree");
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Issue #183: per-row Delete must target exactly the requested id
+    /// regardless of how many siblings share its kind. Earlier iterations
+    /// of the dashboard worked around the missing IPC primitive by
+    /// issuing `Purge { kind: Some(k) }` and refusing when k had >1 row,
+    /// which broke the per-row button in the common multi-row case.
+    #[test]
+    fn delete_by_id_removes_only_the_targeted_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete-by-id.redb");
+        let (tx, _g) = spawn_test_worker(&db_path);
+
+        // Three rows of the same kind — the bug case the workaround
+        // refused to handle.
+        let paths = [
+            dir.path().join("e1").to_string_lossy().to_string(),
+            dir.path().join("e2").to_string_lossy().to_string(),
+            dir.path().join("e3").to_string_lossy().to_string(),
+        ];
+        for p in &paths {
+            std::fs::create_dir_all(p).unwrap();
+            call(
+                &tx,
+                GcOp::Insert {
+                    kind: "cache".to_string(),
+                    path: p.clone(),
+                    repo_root: None,
+                    branch: None,
+                    agent_id: None,
+                    created_unix: Some(100),
+                },
+            );
+        }
+
+        // Snapshot the rows so we can pick the middle id by stable mapping.
+        let list = match call(&tx, GcOp::List { kind: None }) {
+            GcReply::ListOk { rows } => rows,
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert_eq!(list.len(), 3);
+        let middle = list
+            .iter()
+            .find(|r| r.path == paths[1])
+            .expect("middle row");
+
+        let resp = call(&tx, GcOp::DeleteById { id: middle.id });
+        match resp {
+            GcReply::PurgeOk { removed, skipped } => {
+                assert_eq!(removed, 1);
+                assert_eq!(skipped, 0);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        // The two siblings must survive.
+        let after = match call(&tx, GcOp::List { kind: None }) {
+            GcReply::ListOk { rows } => rows,
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        let remaining: Vec<&str> = after.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(after.len(), 2);
+        assert!(remaining.contains(&paths[0].as_str()));
+        assert!(remaining.contains(&paths[2].as_str()));
+        assert!(!remaining.contains(&paths[1].as_str()));
+
+        // The on-disk path for the targeted row should be gone too.
+        assert!(!std::path::Path::new(&paths[1]).exists());
+        // Siblings should still be on disk.
+        assert!(std::path::Path::new(&paths[0]).exists());
+        assert!(std::path::Path::new(&paths[2]).exists());
+    }
+
+    /// Deleting a non-existent id is idempotent (`removed=0, skipped=0`).
+    /// Lets the dashboard refresh-then-click race resolve without a 500.
+    #[test]
+    fn delete_by_id_with_missing_id_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete-missing.redb");
+        let (tx, _g) = spawn_test_worker(&db_path);
+
+        let resp = call(&tx, GcOp::DeleteById { id: 9_999_999 });
+        match resp {
+            GcReply::PurgeOk { removed, skipped } => {
+                assert_eq!(removed, 0);
+                assert_eq!(skipped, 0);
             }
             other => panic!("unexpected reply: {other:?}"),
         }

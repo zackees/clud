@@ -33,6 +33,58 @@ fn schema_bootstraps_on_first_open() {
     // Reopening on a populated db must not error out.
 }
 
+// ---------- Issue #183: repo_visits table ----------
+
+#[test]
+fn record_repo_visit_inserts_first_row() {
+    let reg = fresh_registry("repo-visit-insert");
+    reg.record_repo_visit("/dev/foo", "/dev/foo", 1000)
+        .expect("record");
+    let rows = reg.list_repo_visits().expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].repo_root, "/dev/foo");
+    assert_eq!(rows[0].last_cwd, "/dev/foo");
+    assert_eq!(rows[0].last_visited_unix, 1000);
+    assert_eq!(rows[0].run_count, 1);
+}
+
+#[test]
+fn record_repo_visit_increments_run_count() {
+    let reg = fresh_registry("repo-visit-incr");
+    reg.record_repo_visit("/dev/foo", "/dev/foo", 1000).unwrap();
+    reg.record_repo_visit("/dev/foo", "/dev/foo/sub", 1100)
+        .unwrap();
+    reg.record_repo_visit("/dev/foo", "/dev/foo", 1200).unwrap();
+    let rows = reg.list_repo_visits().expect("list");
+    assert_eq!(rows.len(), 1, "second/third visits upsert, never duplicate");
+    assert_eq!(rows[0].run_count, 3);
+    // last_visited and last_cwd reflect the most recent call.
+    assert_eq!(rows[0].last_visited_unix, 1200);
+    assert_eq!(rows[0].last_cwd, "/dev/foo");
+}
+
+#[test]
+fn list_repo_visits_orders_newest_first() {
+    let reg = fresh_registry("repo-visit-order");
+    reg.record_repo_visit("/dev/old", "/dev/old", 100).unwrap();
+    reg.record_repo_visit("/dev/newest", "/dev/newest", 9000)
+        .unwrap();
+    reg.record_repo_visit("/dev/mid", "/dev/mid", 500).unwrap();
+    let rows = reg.list_repo_visits().expect("list");
+    let repos: Vec<&str> = rows.iter().map(|r| r.repo_root.as_str()).collect();
+    assert_eq!(repos, vec!["/dev/newest", "/dev/mid", "/dev/old"]);
+}
+
+#[test]
+fn record_repo_visit_distinguishes_keys() {
+    let reg = fresh_registry("repo-visit-distinct");
+    reg.record_repo_visit("/dev/a", "/dev/a", 100).unwrap();
+    reg.record_repo_visit("/dev/b", "/dev/b", 200).unwrap();
+    let rows = reg.list_repo_visits().expect("list");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.run_count == 1));
+}
+
 #[test]
 fn insert_then_list_round_trips() {
     let reg = fresh_registry("rt");

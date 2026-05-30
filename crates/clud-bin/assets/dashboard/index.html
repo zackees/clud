@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>clud dashboard</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fafafa;
+      --fg: #1c1c1c;
+      --muted: #6b7280;
+      --accent: #2563eb;
+      --accent-fg: #ffffff;
+      --border: #e5e7eb;
+      --card: #ffffff;
+      --warn: #b45309;
+      --live: #15803d;
+      --gone: #9ca3af;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e0e10;
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --accent: #60a5fa;
+        --accent-fg: #0e0e10;
+        --border: #27272a;
+        --card: #18181b;
+        --warn: #f59e0b;
+        --live: #22c55e;
+        --gone: #6b7280;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    h1 { font-size: 18px; margin: 0; }
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 24px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    header .meta { color: var(--muted); font-size: 12px; font-family: ui-monospace, "Menlo", "Consolas", monospace; }
+    .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .tab {
+      padding: 8px 14px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .tab.active {
+      background: var(--card);
+      color: var(--fg);
+      border-color: var(--border);
+      margin-bottom: -1px;
+    }
+    section { display: none; }
+    section.active { display: block; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+    .card h2 { font-size: 14px; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td {
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+    td.path, td.id { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; word-break: break-all; }
+    .badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .badge.live { background: color-mix(in srgb, var(--live) 18%, transparent); color: var(--live); }
+    .badge.gone { background: color-mix(in srgb, var(--gone) 18%, transparent); color: var(--gone); }
+    .badge.kind { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); margin-right: 6px; }
+    .button {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 0;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .button.danger { background: var(--warn); color: white; }
+    .button.subtle { background: transparent; color: var(--accent); padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+    .button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .empty { color: var(--muted); padding: 8px; font-style: italic; }
+    .toolbar { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
+    .row-actions { text-align: right; white-space: nowrap; }
+    .stats {
+      display: flex;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+    .stats b { color: var(--fg); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>clud dashboard</h1>
+    <div class="meta" id="daemon-meta">connecting…</div>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="sessions">Sessions</button>
+    <button class="tab" data-tab="gc">Garbage</button>
+    <button class="tab" data-tab="repos">Repos</button>
+  </div>
+
+  <section id="sessions" class="active">
+    <div class="card">
+      <h2>Sessions <span id="sessions-count" class="meta"></span></h2>
+      <div id="sessions-body"><p class="empty">loading…</p></div>
+    </div>
+  </section>
+
+  <section id="gc">
+    <div class="card">
+      <h2>Tracked garbage <span id="gc-count" class="meta"></span></h2>
+      <div class="toolbar" id="gc-toolbar"></div>
+      <div id="gc-body"><p class="empty">loading…</p></div>
+    </div>
+  </section>
+
+  <section id="repos">
+    <div class="card">
+      <h2>Repos visited <span id="repos-count" class="meta"></span></h2>
+      <div id="repos-body"><p class="empty">loading…</p></div>
+    </div>
+  </section>
+
+  <div class="footer">
+    Polling <code>/state.json</code> every 5s. Loopback only — no authentication.
+  </div>
+
+  <script>
+    const POLL_MS = 5000;
+    let lastState = null;
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+      });
+    });
+
+    function fmtAge(unix) {
+      if (!unix) return '-';
+      const secs = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+      if (secs < 60) return `${secs}s`;
+      if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+      if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+      return `${Math.floor(secs / 86400)}d`;
+    }
+    function fmtUptime(s) {
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      if (h > 0) return `${h}h ${m}m`;
+      if (m > 0) return `${m}m ${sec}s`;
+      return `${sec}s`;
+    }
+    function esc(s) {
+      if (s === null || s === undefined) return '';
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[c]);
+    }
+
+    function renderHeader(state) {
+      const d = state.daemon;
+      document.getElementById('daemon-meta').textContent =
+        `pid ${d.pid} · ipc ${d.ipc_port} · ui ${d.dashboard_port ?? '?'} · v${d.version} · up ${fmtUptime(d.uptime_secs)}`;
+      const s = state.stats;
+      document.getElementById('stats').innerHTML = `
+        <span><b>${s.live_session_count}</b> live / <b>${s.session_count}</b> sessions</span>
+        <span><b>${s.gc_count}</b> tracked</span>
+        <span><b>${s.repo_count}</b> repos</span>
+      `;
+    }
+
+    function renderSessions(state) {
+      const sessions = state.sessions || [];
+      document.getElementById('sessions-count').textContent =
+        sessions.length ? `(${sessions.length})` : '';
+      if (!sessions.length) {
+        document.getElementById('sessions-body').innerHTML =
+          '<p class="empty">no sessions recorded.</p>';
+        return;
+      }
+      const rows = sessions.map(s => `
+        <tr>
+          <td class="id">${esc(s.id)}</td>
+          <td>${esc(s.name || '-')}</td>
+          <td><span class="badge kind">${esc(s.kind)}</span></td>
+          <td>${s.live
+            ? '<span class="badge live">live</span>'
+            : `<span class="badge gone">exit ${esc(s.exit_code ?? '?')}</span>`}</td>
+          <td>${esc(fmtAge(s.created_at))}</td>
+          <td class="path">${esc(s.cwd || '-')}</td>
+        </tr>`).join('');
+      document.getElementById('sessions-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>id</th><th>name</th><th>kind</th><th>state</th><th>age</th><th>cwd</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    function renderGc(state) {
+      const rows = state.gc || [];
+      const kindCounts = state.stats.gc_by_kind || {};
+      document.getElementById('gc-count').textContent = rows.length ? `(${rows.length})` : '';
+
+      const toolbar = document.getElementById('gc-toolbar');
+      toolbar.innerHTML = '';
+      Object.entries(kindCounts).sort().forEach(([kind, count]) => {
+        const btn = document.createElement('button');
+        btn.className = 'button subtle';
+        btn.textContent = `Purge all ${kind} (${count})`;
+        btn.addEventListener('click', () => doPurge({ kind }, `Purge all ${count} ${kind} entries?`));
+        toolbar.appendChild(btn);
+      });
+
+      if (!rows.length) {
+        document.getElementById('gc-body').innerHTML =
+          '<p class="empty">no tracked garbage.</p>';
+        return;
+      }
+      const html = rows.map(r => `
+        <tr>
+          <td><span class="badge kind">${esc(r.kind)}</span></td>
+          <td>${esc(fmtAge(r.created_unix))}</td>
+          <td>${esc(r.agent_id || '-')}</td>
+          <td>${esc(r.branch || '-')}</td>
+          <td class="path">${esc(r.path)}</td>
+          <td class="row-actions">
+            ${r.live_locked
+              ? '<span class="badge live">locked</span>'
+              : `<button class="button danger" data-id="${r.id}" data-kind="${esc(r.kind)}" data-path="${esc(r.path)}">Delete</button>`}
+          </td>
+        </tr>`).join('');
+      document.getElementById('gc-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>kind</th><th>age</th><th>agent</th><th>branch</th><th>path</th><th></th>
+          </tr></thead>
+          <tbody>${html}</tbody>
+        </table>`;
+      document.querySelectorAll('#gc-body button[data-id]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = Number(btn.dataset.id);
+          const kind = btn.dataset.kind || 'entry';
+          const path = btn.dataset.path || '';
+          const prompt =
+            `Delete this ${kind}?\n\n  ${path}\n\n` +
+            `Removes the directory from disk and drops the tracking row.`;
+          doPurge({ id }, prompt);
+        });
+      });
+    }
+
+    function renderRepos(state) {
+      const repos = state.repos || [];
+      document.getElementById('repos-count').textContent = repos.length ? `(${repos.length})` : '';
+      if (!repos.length) {
+        document.getElementById('repos-body').innerHTML =
+          '<p class="empty">no repo visits recorded yet.</p>';
+        return;
+      }
+      const rows = repos.map(r => `
+        <tr>
+          <td class="path">${esc(r.repo_root)}</td>
+          <td>${esc(fmtAge(r.last_visited_unix))}</td>
+          <td>${esc(r.run_count)}</td>
+          <td class="path">${esc(r.last_cwd)}</td>
+        </tr>`).join('');
+      document.getElementById('repos-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>repo</th><th>last visited</th><th>runs</th><th>last cwd</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    async function doPurge(body, prompt) {
+      if (!confirm(prompt)) return;
+      try {
+        const resp = await fetch('/gc/purge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(`purge failed: ${data.error || resp.statusText}`);
+          return;
+        }
+        await refresh();
+      } catch (err) {
+        alert(`purge failed: ${err}`);
+      }
+    }
+
+    async function refresh() {
+      try {
+        const resp = await fetch('/state.json');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const state = await resp.json();
+        lastState = state;
+        renderHeader(state);
+        renderSessions(state);
+        renderGc(state);
+        renderRepos(state);
+      } catch (err) {
+        document.getElementById('daemon-meta').textContent =
+          `connection lost: ${err}`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, POLL_MS);
+  </script>
+</body>
+</html>

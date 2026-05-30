@@ -204,6 +204,18 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: Option<GcSubcommand>,
     },
+    /// Issue #183: open the local web dashboard served by the always-on
+    /// clud daemon. Shows live sessions, garbage tracking, and the repos
+    /// clud has been launched in. Loopback only.
+    Ui {
+        /// Print `/state.json` to stdout and exit without launching a browser.
+        #[arg(long = "json")]
+        json: bool,
+        /// Print the dashboard URL and ensure the daemon is up, but do
+        /// not launch a browser. Handy when running on a headless host.
+        #[arg(long = "no-open")]
+        no_open: bool,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -313,13 +325,14 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--force",
         "--no-daemon",
         "--json",
+        "--no-open",
         "--help",
         "--version",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "__daemon",
-        "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
+        "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

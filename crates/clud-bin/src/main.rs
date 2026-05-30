@@ -1,7 +1,7 @@
 use clud::{
     args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc,
     hook_health, large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills,
-    startup, trampoline, verbose_log, wasm, worktrees,
+    startup, trampoline, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -65,6 +65,12 @@ fn main() {
     // so a registry-less host can still run `clud gc reconcile`.
     if let Some(args::Command::Gc { subcommand }) = &args.command {
         std::process::exit(gc::run(&args, subcommand.clone()));
+    }
+
+    // Issue #183: `clud ui` opens the local dashboard. Self-contained;
+    // never launches a backend.
+    if let Some(args::Command::Ui { json, no_open }) = &args.command {
+        std::process::exit(ui::run(*json, *no_open));
     }
 
     // Issue #83: `--clean-worktrees` is a self-contained maintenance path.
@@ -182,6 +188,11 @@ fn main() {
                     if args.verbose {
                         verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));
                     }
+                } else {
+                    // Issue #183: record one row in the `repo_visits` table
+                    // per (repo_root, current launch). Errors are non-fatal:
+                    // failing to record a visit must never block a launch.
+                    record_repo_visit_best_effort(&state_dir, args.verbose);
                 }
             }
             Err(e) => {
@@ -368,4 +379,27 @@ fn main() {
         verbose_log::log(format_args!("[clud] exit: code {exit_code}"));
     }
     std::process::exit(exit_code);
+}
+
+/// Issue #183: best-effort upsert of `(repo_root, cwd)` into the daemon's
+/// `repo_visits` table. Resolves the current git root; if there isn't one,
+/// this is a no-op (we don't track scratch-dir launches). All errors are
+/// swallowed — recording a repo visit must never block a launch.
+fn record_repo_visit_best_effort(state_dir: &std::path::Path, verbose: bool) {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    // `git_root_from` returns its input verbatim when no `.git` is found
+    // anywhere up the tree. We treat that as "not in a repo" and skip,
+    // so we don't accumulate one row per random scratch directory.
+    let repo_root = loop_spec::git_root_from(&cwd);
+    if !repo_root.join(".git").exists() {
+        return;
+    }
+    if let Err(e) = daemon::gc_client_record_repo_visit(state_dir, &repo_root, &cwd) {
+        if verbose {
+            verbose_log::log(format_args!("[clud] repo_visit: {e}"));
+        }
+    }
 }
