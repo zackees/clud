@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/zackees/clud/main/install.sh | sh
 irm https://raw.githubusercontent.com/zackees/clud/main/install.ps1 | iex
 ```
 
-Both scripts install [`uv`](https://docs.astral.sh/uv) if needed, then `uv tool install clud`, and put `clud` on PATH for new shells. Pin a version with `CLUD_VERSION=2.0.13 curl ... | sh` (POSIX) or `$env:CLUD_VERSION = '2.0.13'; irm ... | iex` (PowerShell). Re-run to upgrade.
+Both scripts install [`uv`](https://docs.astral.sh/uv) if needed, then `uv tool install clud`, and put `clud` on PATH for new shells. Pin a version with `CLUD_VERSION=2.0.14 curl ... | sh` (POSIX) or `$env:CLUD_VERSION = '2.0.14'; irm ... | iex` (PowerShell). Re-run to upgrade.
 
 Already have a Python package manager? Any of these works equivalently:
 
