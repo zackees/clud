@@ -226,6 +226,48 @@ fn only_real_stdin_gets_interactive_console_policy() {
     assert!(!stdin_source_is_real_stdin::<std::io::Cursor<Vec<u8>>>());
 }
 
+// ─── should_spawn_byte_stream_stdin_reader (issue #188) ─────────────
+
+/// Issue #188 GREEN: Windows + interactive console + extra_rx wired
+/// suppresses the byte-stream stdin reader so the `console_input`
+/// `ReadConsoleInputW` worker is the sole consumer of the STDIN
+/// console queue. Without this gate, the byte-stream reader's
+/// `ReadFile` call races with `ReadConsoleInputW` on the same queue
+/// and Shift+Enter events surface as `\r` instead of `\n`.
+#[cfg(windows)]
+#[test]
+fn windows_interactive_with_extra_rx_suppresses_byte_stream_reader() {
+    assert!(!should_spawn_byte_stream_stdin_reader(true, true));
+}
+
+/// Issue #188: without an `extra_rx`, nothing else is consuming the
+/// console queue, so the byte-stream reader must run — otherwise no
+/// keystrokes reach the child at all.
+#[test]
+fn no_extra_rx_keeps_byte_stream_reader() {
+    assert!(should_spawn_byte_stream_stdin_reader(true, false));
+    assert!(should_spawn_byte_stream_stdin_reader(false, false));
+}
+
+/// Issue #188: piped stdin (`echo "..." | clud`) is not a console
+/// queue at all — `ReadConsoleInputW` can't function on a pipe handle
+/// — so the byte-stream reader must run even when an `extra_rx` is
+/// supplied. The `interactive_real_stdin` gate keys on
+/// `terminals_are_interactive()`.
+#[test]
+fn piped_stdin_keeps_byte_stream_reader_even_with_extra_rx() {
+    assert!(should_spawn_byte_stream_stdin_reader(false, true));
+}
+
+/// Issue #188: POSIX has no conhost / `ReadFile` modifier-stripping
+/// race, so the suppression must not apply there — the gate is
+/// `cfg!(windows)`-scoped.
+#[cfg(not(windows))]
+#[test]
+fn posix_keeps_byte_stream_reader_even_with_extra_rx() {
+    assert!(should_spawn_byte_stream_stdin_reader(true, true));
+}
+
 // ─── BracketedPasteNormalizer (issue #63 / #79) ────────────────────
 
 #[test]
