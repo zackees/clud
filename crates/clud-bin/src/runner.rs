@@ -60,17 +60,35 @@ fn merge_extra_rx(
 
 /// Build the child environment: inherit parent env + inject tracking vars.
 /// Deduplicates keys so we never pass the same var twice.
+///
+/// On Windows, also forces UTF-8 for any Python helper the agent shells
+/// out to (Codex / Claude tool scripts, MCP servers, install probes …)
+/// so output doesn't mojibake against the user's OEM codepage. Paired
+/// with the `chcp 65001` prefix in `subprocess::render_windows_batch_command`
+/// (issue #168). Node itself respects the console codepage and needs no
+/// dedicated env var.
 pub fn child_env() -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
 
+    let utf8_keys: &[&str] = if cfg!(windows) {
+        &["IN_CLUD", originator_key, "PYTHONIOENCODING", "PYTHONUTF8"]
+    } else {
+        &["IN_CLUD", originator_key]
+    };
+
     let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k != "IN_CLUD" && k != originator_key)
+        .filter(|(k, _)| !utf8_keys.contains(&k.as_str()))
         .collect();
 
     env.push(("IN_CLUD".to_string(), "1".to_string()));
 
     let originator_value = format!("CLUD:{}", std::process::id());
     env.push((originator_key.to_string(), originator_value));
+
+    if cfg!(windows) {
+        env.push(("PYTHONIOENCODING".to_string(), "utf-8".to_string()));
+        env.push(("PYTHONUTF8".to_string(), "1".to_string()));
+    }
 
     env
 }
@@ -703,5 +721,27 @@ mod tests {
             "opus".to_string(),
         ];
         assert_eq!(display_verbose_command(&command), "claude --model opus");
+    }
+
+    /// Issue #168: Windows children get UTF-8 forced via Python env vars
+    /// so any Python helper the agent spawns emits and reads UTF-8.
+    /// IN_CLUD and ORIGINATOR vars must still be present, and PYTHONUTF8
+    /// must be exactly "1" (Python accepts 0/1 only).
+    #[cfg(windows)]
+    #[test]
+    fn child_env_sets_python_utf8_vars_on_windows() {
+        let env = child_env();
+        let lookup = |key: &str| -> Option<String> {
+            env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+        };
+        assert_eq!(lookup("PYTHONIOENCODING").as_deref(), Some("utf-8"));
+        assert_eq!(lookup("PYTHONUTF8").as_deref(), Some("1"));
+        assert_eq!(lookup("IN_CLUD").as_deref(), Some("1"));
+        assert!(
+            lookup(running_process::ORIGINATOR_ENV_VAR).is_some(),
+            "ORIGINATOR var must still be set"
+        );
+        let pyio_count = env.iter().filter(|(k, _)| k == "PYTHONIOENCODING").count();
+        assert_eq!(pyio_count, 1, "PYTHONIOENCODING must appear exactly once");
     }
 }
