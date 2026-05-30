@@ -926,29 +926,38 @@ fn interrupt_pty_process(process: &NativePtyProcess, verbose: bool) -> i32 {
         130
     }
     #[cfg(not(windows))]
-    match process.send_interrupt_impl() {
-        Ok(()) => match process.wait_impl(Some(2.0)) {
-            Ok(code) => {
-                if verbose {
-                    verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
-                }
-                code
+    {
+        // Belt-and-braces: portable-pty's `send_interrupt` queries
+        // `tcgetpgrp(master_fd)` to find the FG pgroup and signals it.
+        // If that query returns None (no controlling-terminal coupling
+        // ever established, or the slave already lost FG), the library
+        // falls back to writing a raw 0x03 byte to the master — which
+        // only fires SIGINT if the slave still has ISIG set and the
+        // child is actively reading. Tests that drive a sleep-only
+        // child (issue #159) fail under that fallback because nothing
+        // converts 0x03 to a signal. Send through both paths and also
+        // signal the child's PID tree directly so all three vectors are
+        // covered. Then `close_impl` ensures the master is torn down so
+        // the pump loop doesn't keep polling a half-dead PTY.
+        let _ = process.send_interrupt_impl();
+        let tree_signal_result = process.terminate_tree_impl();
+        let _ = process.wait_impl(Some(2.0));
+        let _ = process.close_impl();
+        if verbose {
+            verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
+            if let Err(err) = tree_signal_result {
+                verbose_log::log(format_args!(
+                    "[clud] pty interrupt: tree-signal fallback failed: {err}"
+                ));
             }
-            Err(_) => {
-                let _ = process.close_impl();
-                if verbose {
-                    verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
-                }
-                130
-            }
-        },
-        Err(_) => {
-            let _ = process.close_impl();
-            if verbose {
-                verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
-            }
-            130
         }
+        // Match the Windows branch above: always report SIGINT's
+        // shell-convention 130 when clud itself handled the Ctrl-C.
+        // The child's actual exit code is observable via the wait_impl
+        // call above (stored in returncode for diagnostics); we just
+        // don't propagate it, because the contract is "user pressed
+        // Ctrl-C → exit 130" regardless of how the child shut down.
+        130
     }
 }
 
