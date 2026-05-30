@@ -650,13 +650,33 @@ where
         // callback) — these are pre-normalized path bytes that should
         // bypass the bracketed-paste detector and go straight to the
         // PTY.
+        //
+        // The 0x03 byte check is required on Windows: when the
+        // `console_input` reader (issue #141 / PR #144) is active, it
+        // turns off `ENABLE_PROCESSED_INPUT` so the OS no longer fires
+        // a `CTRL_C_EVENT` for Ctrl-C. The press arrives instead as a
+        // KEY_EVENT whose translated 0x03 byte is delivered via this
+        // channel — without the check, clud forwards it to the child
+        // but never observes the interrupt itself.
         if let Some(ref rx) = extra_rx {
             if let Ok(chunk) = rx.try_recv() {
+                // Unlike stdin_rx, extra_rx is by construction always
+                // user-driven (keyboard via console_input_rx on Windows,
+                // or OLE drag-drop callback) — never a piped test
+                // fixture — so we don't need the `interrupt_on_ctrl_c_byte`
+                // gate that skips 0x03 detection on piped stdin.
+                let requested_interrupt = stdin_chunk_requests_interrupt(&chunk);
                 if let Err(err) = process.write_impl(&chunk, false) {
                     eprintln!(
                         "[clud] warning: failed to forward dropped paths to pty: {}",
                         err
                     );
+                }
+                if requested_interrupt {
+                    if verbose {
+                        verbose_log::log("[clud] pty pump: interrupt via extra_rx Ctrl+C byte");
+                    }
+                    return interrupt_pty_process(process, verbose);
                 }
             }
         }

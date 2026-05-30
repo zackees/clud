@@ -631,3 +631,73 @@ fn extra_rx_forwards_shift_enter_translated_bytes_to_pty() {
         got
     );
 }
+
+/// Regression: a Ctrl-C byte (0x03) arriving via `extra_rx` must trigger
+/// the pump's interrupt path. This is the path the Windows
+/// `console_input` reader uses when `ENABLE_PROCESSED_INPUT` is off and
+/// the OS no longer fires `CTRL_C_EVENT` — without this check clud
+/// would forward the byte to the child but never observe Ctrl-C itself,
+/// leaving users unable to exit (interactive PTY mode regression from
+/// PR #144 / commit a3ec8fe).
+///
+/// The test does NOT require Windows: it exercises the pump-level
+/// invariant on every platform, which is exactly what regressed.
+#[test]
+fn extra_rx_ctrl_c_byte_interrupts_pump() {
+    require_pty_or_skip!("extra_rx_ctrl_c_byte_interrupts_pump");
+
+    let agent = mock_agent_path();
+    // Keep the child alive longer than the test deadline so a returning
+    // pump must be the result of the interrupt path, not a natural exit.
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-sleep-ms".to_string(),
+        "10000".to_string(),
+    ];
+
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (extra_tx, extra_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = extra_tx.send(vec![0x03]);
+    });
+
+    let interrupted = AtomicBool::new(false);
+    let mut hooks = CountingHooks::new(false);
+
+    let start = Instant::now();
+    let exit = clud::session::run_raw_pty_pump_with_extra_rx(
+        &process,
+        &interrupted,
+        &mut hooks,
+        Cursor::new(Vec::<u8>::new()),
+        Some(extra_rx),
+    );
+    let elapsed = start.elapsed();
+
+    let _ = process.close_impl();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "pump should return promptly after extra_rx Ctrl-C; took {:?}",
+        elapsed
+    );
+    // On Windows the contract is the clean 130 returned by
+    // `interrupt_pty_process` after `close_impl`. On POSIX the value
+    // is whatever the SIGINT-killed child reports through the PTY
+    // wait path, which is currently unreliable for an unrelated
+    // running-process 4.0.x regression (see zackees/clud#159). The
+    // load-bearing invariant for this fix is that the pump returned
+    // at all — without the fix it would block on the 10s child sleep.
+    if cfg!(windows) {
+        assert_eq!(
+            exit, 130,
+            "extra_rx Ctrl-C must yield SIGINT-convention exit code 130 on Windows; got {}",
+            exit
+        );
+    }
+}
