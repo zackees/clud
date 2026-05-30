@@ -26,10 +26,15 @@ If the gates fail in fixable ways, dispatch a sub-agent to fix; up to 3 rounds t
    - **Default cap: 45 minutes** (the FastLED repo and similar embedded projects routinely hit 25–30 min platform builds). Tighten the cap to `max(15, p90 + 5min)` for repos with faster CI; never go below 15 minutes.
    - **Announce upfront** with one user-facing line: `[clud-pr-merge] polling CI for up to <N> min; slowest recent build was <P90> min.` Silent polling reads as a hung shell — never skip this announcement.
    - Then loop with **30-second sleeps**. Each iteration fetches:
+     - `gh pr view <num> --json state --jq .state` — **first** check every iteration. If the PR became MERGED or CLOSED, **break the loop immediately** (success for MERGED, abort for CLOSED). See "Early-exit on PR state change" below.
      - `gh pr checks <num> --json name,state,bucket` — every required check has a non-PENDING state.
      - `gh api repos/{owner}/{repo}/pulls/{num}/reviews --jq '.[] | select(.user.login=="coderabbitai[bot]")'` — at least one CodeRabbit review has been posted (or CodeRabbit explicitly "skipped" the review, which counts as reported).
 
-   Both must report at least once. If the cap elapses with neither reporting, **give up and warn the user**: `[clud-pr-merge] timed out waiting for CI/CodeRabbit after <N> minutes. Re-run when checks have reported.` Do NOT merge.
+   Both signals must report at least once *or* the PR state must change to MERGED/CLOSED. If the cap elapses with no signal, **give up and warn the user**: `[clud-pr-merge] timed out waiting for CI/CodeRabbit after <N> minutes. Re-run when checks have reported.` Do NOT merge.
+
+   **Early-exit on PR state change (CRITICAL — prevents the "stuck shell" bug).** GitHub Actions jobs do NOT cancel when a PR is merged out from under them. If a maintainer merges (or auto-merge fires) while the poll is waiting, the slow platform-build jobs on the original SHA keep running for another ~20 min. The poll's "no PENDING checks" condition stays false the whole time, so the loop keeps spawning sleeps and never exits — from the user's perspective the shell is hung. Two preventions, both mandatory:
+   1. Check `gh pr view <num> --json state` FIRST in every poll iteration and break the loop the moment state ≠ OPEN. The poll's exit reason is "PR merged/closed," not "all checks finished."
+   2. For polls started via `run_in_background: true`, the bash loop runs OUT of band from the conversation. The moment merge is confirmed externally (manual `gh pr view`, the `<task-notification>` payload of the bg task, or any other signal), kill the background task via the runtime's stop mechanism. Do NOT rely on "it'll self-terminate" — the loop's purpose is moot but the loop body doesn't know that.
 
    **Polling pattern.** Use Bash with `until <condition>; do sleep 30; done` (sleep *inside* the body). Do not chain `sleep N; <cmd>` — the Claude Code harness blocks leading sleeps. For waits longer than ~5 minutes consider `ScheduleWakeup` instead so the conversation isn't held open by an active poll.
 
@@ -74,6 +79,8 @@ If the gates fail in fixable ways, dispatch a sub-agent to fix; up to 3 rounds t
 - **Treating "check missing from main" as "passing on main"** — PR-only workflows (e.g. `pull_request_target`) never run on `push` events, so they're invisible in main's check-runs. Cross-reference recent PRs before classifying.
 - **Trusting `gh pr checks` exit code** — it returns 1 whenever any check failed, even with `--json`. Always read the output and ignore `$?`.
 - **Leading `sleep N; <cmd>` chains** — the Claude Code harness blocks these. Use `until <check>; do sleep N; done` (sleep inside the body), or `run_in_background: true` for fire-and-forget waits, or `ScheduleWakeup` for >5min waits.
+- **CI poll that doesn't watch PR state** — if `gh pr view <num> --json state` is not checked every iteration, the loop will keep spinning for 20+ minutes after a merge (GitHub Actions jobs do not cancel on merge, so PENDING checks remain PENDING). Always poll PR state first; break on MERGED/CLOSED.
+- **Background poll left running after merge confirmation** — once you see `state: MERGED` from any source, kill the background poll task explicitly. Do NOT rely on "it'll self-terminate" — the loop's exit condition is moot but the loop body doesn't know that, and respawned `sleep 30` processes will continue to spam the host until the cap is hit.
 - **Letting the fix-agent expand scope** — pass a tight scope; if the agent finds an unrelated bug, it gets noted, not fixed in this PR.
 
 ## When NOT to use this
