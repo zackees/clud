@@ -17,7 +17,7 @@ use super::paths::{
 };
 use super::process_utils::pid_is_alive;
 use super::types::{
-    DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, SessionSnapshot,
+    DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit, SessionSnapshot,
     WorkerClientMessage,
 };
 
@@ -290,6 +290,38 @@ pub fn gc_client_insert(state_dir: &Path, input: &InsertInput) -> io::Result<()>
         },
     )? {
         GcReply::InsertOk => Ok(()),
+        GcReply::Error { message } => Err(io::Error::other(message)),
+        other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
+    }
+}
+
+/// Issue #183: upsert a `repo_visits` row. Called by `clud` startup
+/// when CWD is inside a git repo. Errors are swallowed by the caller —
+/// failing to record a visit must never block a launch.
+pub fn gc_client_record_repo_visit(
+    state_dir: &Path,
+    repo_root: &Path,
+    cwd: &Path,
+) -> io::Result<()> {
+    match send_gc(
+        state_dir,
+        GcOp::RecordRepoVisit {
+            repo_root: repo_root.to_string_lossy().to_string(),
+            cwd: cwd.to_string_lossy().to_string(),
+            now_unix: None,
+        },
+    )? {
+        GcReply::RepoVisitOk => Ok(()),
+        GcReply::Error { message } => Err(io::Error::other(message)),
+        other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
+    }
+}
+
+/// Issue #183: enumerate the `repo_visits` table for the dashboard /
+/// `clud ui --json` payload.
+pub fn gc_client_list_repo_visits(state_dir: &Path) -> io::Result<Vec<RepoVisit>> {
+    match send_gc(state_dir, GcOp::ListRepoVisits)? {
+        GcReply::RepoVisitsOk { rows } => Ok(rows),
         GcReply::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
     }

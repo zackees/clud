@@ -52,6 +52,16 @@ vt100 = "0.16"
 vte = "0.15"
 wasmi = "0.40.0"
 which = "7"
+# Issue #183: in-process HTTP listener for the `clud ui` dashboard.
+# `tiny_http` is pure Rust, synchronous, and slots into the daemon's
+# existing `std::thread` model without introducing tokio. The daemon
+# binds a second loopback port alongside the JSON IPC listener and
+# serves a tiny embedded SPA + `/state.json` from it.
+tiny_http = "0.12"
+# Issue #183: cross-platform browser launch for `clud ui`. Tiny crate
+# (~50 LOC of platform glue: macOS `open`, Linux `xdg-open`, Windows
+# `cmd /c start`). One dep beats triplicate hand-rolled code.
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"

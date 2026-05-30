@@ -44,6 +44,12 @@ const TRACKED: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("trac
 /// monotonic `next_id` counter used to mint `TrackedEntry.id` values.
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 
+/// redb table (issue #183): `repo_root -> serde_json::to_vec(&RepoVisitRow)`.
+/// One row per unique git repo `clud` has been launched in. Upserted on
+/// every startup; powers the `Repos` tab of `clud ui` and the
+/// `repos[]` array in `/state.json`.
+const REPO_VISITS: TableDefinition<&str, &[u8]> = TableDefinition::new("repo_visits");
+
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_NEXT_ID: &str = "next_id";
 
@@ -139,6 +145,27 @@ pub struct InsertInput {
     pub now_unix: i64,
 }
 
+/// On-disk row for `REPO_VISITS`. Stored as serde_json bytes keyed by
+/// `repo_root`. `run_count` increments on every upsert; `last_cwd` is the
+/// CWD of the most recent invocation (may differ from `repo_root` when
+/// `clud` was run from a subdirectory of the repo).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RepoVisitRow {
+    last_visited_unix: i64,
+    run_count: u64,
+    last_cwd: String,
+}
+
+/// One row from the `repo_visits` table. Public so the daemon HTTP
+/// handler and `clud ui` JSON output can serialize it directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepoVisit {
+    pub repo_root: String,
+    pub last_visited_unix: i64,
+    pub run_count: u64,
+    pub last_cwd: String,
+}
+
 /// `redb`-backed registry of tracked entries.
 ///
 /// `redb::Database` serializes writers at the file level, so we hold a
@@ -178,6 +205,11 @@ impl Registry {
         let txn = db.begin_write()?;
         {
             let _ = txn.open_table(TRACKED)?;
+            // Issue #183: opens (or creates) the `repo_visits` table on every
+            // daemon start. Existing data.redb files predate this table and
+            // will auto-migrate on first open — redb's `open_table` is
+            // create-if-missing.
+            let _ = txn.open_table(REPO_VISITS)?;
             let mut meta = txn.open_table(META)?;
             if meta.get(META_SCHEMA_VERSION)?.is_none() {
                 meta.insert(META_SCHEMA_VERSION, 1u64)?;
@@ -188,6 +220,57 @@ impl Registry {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Issue #183: upsert one `repo_visits` row. `repo_root` is the key.
+    /// On first call inserts `{last_visited_unix, run_count: 1, last_cwd}`;
+    /// subsequent calls bump `run_count` and overwrite `last_visited_unix`
+    /// and `last_cwd`.
+    pub fn record_repo_visit(
+        &self,
+        repo_root: &str,
+        cwd: &str,
+        now_unix: i64,
+    ) -> Result<(), GcError> {
+        let wtxn = self.db.begin_write()?;
+        {
+            let mut table = wtxn.open_table(REPO_VISITS)?;
+            let prior = table.get(repo_root)?;
+            let prior_count: u64 = match prior.as_ref() {
+                Some(g) => serde_json::from_slice::<RepoVisitRow>(g.value())?.run_count,
+                None => 0,
+            };
+            // Drop the read guard before re-borrowing `table` mutably.
+            drop(prior);
+            let row = RepoVisitRow {
+                last_visited_unix: now_unix,
+                run_count: prior_count + 1,
+                last_cwd: cwd.to_string(),
+            };
+            let bytes = serde_json::to_vec(&row)?;
+            table.insert(repo_root, bytes.as_slice())?;
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    /// Issue #183: return every `repo_visits` row, newest first.
+    pub fn list_repo_visits(&self) -> Result<Vec<RepoVisit>, GcError> {
+        let rtxn = self.db.begin_read()?;
+        let table = rtxn.open_table(REPO_VISITS)?;
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (k, v) = entry?;
+            let row: RepoVisitRow = serde_json::from_slice(v.value())?;
+            out.push(RepoVisit {
+                repo_root: k.value().to_string(),
+                last_visited_unix: row.last_visited_unix,
+                run_count: row.run_count,
+                last_cwd: row.last_cwd,
+            });
+        }
+        out.sort_by(|a, b| b.last_visited_unix.cmp(&a.last_visited_unix));
+        Ok(out)
     }
 
     /// Insert a new entry keyed by `(kind, path)`. **No-op if a row with

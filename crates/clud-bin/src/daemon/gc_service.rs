@@ -35,6 +35,15 @@ pub(super) struct GcRequestMsg {
 /// worker.
 pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
+    spawn_registry_worker_with(registry)
+}
+
+/// Same as [`spawn_registry_worker`] but accepts a pre-constructed
+/// `Registry`. Tests use this to bind a worker to an isolated `redb`
+/// file without depending on the process-global `CLUD_DATA_DB` env var.
+pub(super) fn spawn_registry_worker_with(
+    registry: Registry,
+) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let (tx, rx) = mpsc::channel::<GcRequestMsg>();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
@@ -160,6 +169,27 @@ pub(super) fn process_op(registry: &Registry, op: GcOp) -> GcReply {
                 },
             }
         }
+
+        GcOp::RecordRepoVisit {
+            repo_root,
+            cwd,
+            now_unix: provided,
+        } => {
+            let stamp = provided.unwrap_or_else(now_unix);
+            match registry.record_repo_visit(&repo_root, &cwd, stamp) {
+                Ok(()) => GcReply::RepoVisitOk,
+                Err(e) => GcReply::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+
+        GcOp::ListRepoVisits => match registry.list_repo_visits() {
+            Ok(rows) => GcReply::RepoVisitsOk { rows },
+            Err(e) => GcReply::Error {
+                message: e.to_string(),
+            },
+        },
     }
 }
 

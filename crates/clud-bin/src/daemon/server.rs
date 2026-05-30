@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 use sysinfo::Signal;
@@ -14,12 +14,20 @@ use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
 use super::gc_service::{spawn_registry_worker, GcRequestMsg, WORKER_REPLY_TIMEOUT};
+use super::http::spawn_dashboard;
 use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
     DaemonInfo, DaemonRequest, DaemonResponse, GcReply, SessionSnapshot, WorkerLaunchSpec,
 };
+
+fn current_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     if let Err(err) = fs::create_dir_all(state_dir) {
@@ -43,15 +51,6 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
             return 1;
         }
     };
-    let info = DaemonInfo {
-        pid: std::process::id(),
-        port,
-    };
-    if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
-        eprintln!("[clud] failed to persist daemon info: {}", err);
-        return 1;
-    }
-
     // Issue #135: GC registry worker is in-process now. Failing to open
     // the registry is non-fatal — session ops still work; only GC ops
     // will error back to the CLI. Log once and continue.
@@ -62,6 +61,29 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
             None
         }
     };
+
+    // Issue #183: in-process HTTP dashboard. Bind a second loopback port
+    // alongside the IPC listener and run a `tiny_http` server on a worker
+    // thread. The port is recorded in `daemon.json` so `clud ui` can
+    // discover it. Bind failures are non-fatal — IPC keeps working;
+    // `dashboard_port` is just `None` on this daemon instance.
+    let started_at_unix = current_unix();
+    let dashboard_port = spawn_dashboard(
+        state_dir.to_path_buf(),
+        gc_tx.clone(),
+        port,
+        started_at_unix,
+    );
+
+    let info = DaemonInfo {
+        pid: std::process::id(),
+        port,
+        dashboard_port,
+    };
+    if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
+        eprintln!("[clud] failed to persist daemon info: {}", err);
+        return 1;
+    }
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     for stream in listener.incoming() {

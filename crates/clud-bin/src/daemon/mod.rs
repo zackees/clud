@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod entry;
 mod gc_service;
+mod http;
 mod io_helpers;
 mod keys;
 mod paths;
@@ -14,8 +15,13 @@ mod worker;
 mod worker_shared;
 
 pub use client::{
-    ensure_daemon, gc_client_insert, gc_client_list, gc_client_purge, gc_client_reconcile,
+    ensure_daemon, gc_client_insert, gc_client_list, gc_client_list_repo_visits, gc_client_purge,
+    gc_client_reconcile, gc_client_record_repo_visit,
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
+pub use http::{
+    dashboard_url_from_info, fetch_state_json, read_dashboard_info, read_dashboard_port,
+    DashboardInfo,
+};
 pub use paths::default_state_dir;
-pub use types::{ListRow, ENV_NO_DAEMON};
+pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};

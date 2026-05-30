@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sysinfo::Signal;
 
 use crate::command::LaunchPlan;
+pub use crate::gc::RepoVisit;
 
 use super::process_utils::signal_process_tree;
 
@@ -46,6 +47,12 @@ pub(super) enum SessionKind {
 pub(super) struct DaemonInfo {
     pub(super) pid: u32,
     pub(super) port: u16,
+    /// Issue #183: loopback port for the in-process HTTP dashboard. `None`
+    /// when the dashboard listener failed to bind (logged once at daemon
+    /// start; IPC keeps working). Older clud versions wrote this file
+    /// without the field, so reads tolerate its absence.
+    #[serde(default)]
+    pub(super) dashboard_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +180,18 @@ pub(crate) enum GcOp {
         #[serde(default)]
         created_unix: Option<i64>,
     },
+    /// Issue #183: upsert a `repo_visits` row, called by every clud
+    /// startup from inside a git repo. The daemon increments the
+    /// per-repo run counter and records the current cwd.
+    RecordRepoVisit {
+        repo_root: String,
+        cwd: String,
+        #[serde(default)]
+        now_unix: Option<i64>,
+    },
+    /// Issue #183: enumerate the `repo_visits` table, newest first.
+    /// Powers the `repos` array in `clud ui` / `/state.json`.
+    ListRepoVisits,
 }
 
 /// Issue #135: payload carried by `DaemonResponse::Gc`. Mirrors what the
@@ -180,11 +199,26 @@ pub(crate) enum GcOp {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "gc_op", rename_all = "snake_case")]
 pub(crate) enum GcReply {
-    ListOk { rows: Vec<ListRow> },
-    PurgeOk { removed: usize, skipped: usize },
-    ReconcileOk { inserted: usize },
+    ListOk {
+        rows: Vec<ListRow>,
+    },
+    PurgeOk {
+        removed: usize,
+        skipped: usize,
+    },
+    ReconcileOk {
+        inserted: usize,
+    },
     InsertOk,
-    Error { message: String },
+    /// Issue #183: ack for a successful `GcOp::RecordRepoVisit` upsert.
+    RepoVisitOk,
+    /// Issue #183: payload for `GcOp::ListRepoVisits`.
+    RepoVisitsOk {
+        rows: Vec<RepoVisit>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Row shape returned by `gc.list`. Stable JSON schema for the CLI; the
