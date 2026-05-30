@@ -286,10 +286,6 @@ class TestDaemonSessionHardening:
         finally:
             kill_daemon_for_session(state_dir, session_id)
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="Regression on Windows after running-process 4.0.x migration — see zackees/clud#160",
-    )
     def test_named_session_shows_in_list(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
