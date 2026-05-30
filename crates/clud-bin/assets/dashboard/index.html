@@ -268,7 +268,7 @@
           <td class="row-actions">
             ${r.live_locked
               ? '<span class="badge live">locked</span>'
-              : `<button class="button danger" data-id="${r.id}">Purge</button>`}
+              : `<button class="button danger" data-id="${r.id}" data-kind="${esc(r.kind)}" data-path="${esc(r.path)}">Delete</button>`}
           </td>
         </tr>`).join('');
       document.getElementById('gc-body').innerHTML = `
@@ -281,7 +281,12 @@
       document.querySelectorAll('#gc-body button[data-id]').forEach(btn => {
         btn.addEventListener('click', () => {
           const id = Number(btn.dataset.id);
-          doPurge({ id }, `Purge tracked entry #${id}?`);
+          const kind = btn.dataset.kind || 'entry';
+          const path = btn.dataset.path || '';
+          const prompt =
+            `Delete this ${kind}?\n\n  ${path}\n\n` +
+            `Removes the directory from disk and drops the tracking row.`;
+          doPurge({ id }, prompt);
         });
       });
     }

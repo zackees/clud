@@ -192,6 +192,13 @@ pub(crate) enum GcOp {
     /// Issue #183: enumerate the `repo_visits` table, newest first.
     /// Powers the `repos` array in `clud ui` / `/state.json`.
     ListRepoVisits,
+    /// Issue #183: surgically delete a single tracked entry by its
+    /// `id`. Used by the dashboard's per-row Delete button. Runs the
+    /// same on-disk removal as `Purge` (worktree-aware) but targets
+    /// exactly one row regardless of how many siblings share its kind.
+    DeleteById {
+        id: i64,
+    },
 }
 
 /// Issue #135: payload carried by `DaemonResponse::Gc`. Mirrors what the

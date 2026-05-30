@@ -236,26 +236,12 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<GcRequestMsg>>
         return;
     };
 
-    // Resolve the request into the GcOp::Purge call. `id` filter is
-    // performed daemon-side after we receive the full list. To keep this
-    // route a single round-trip per request we issue one Purge per filter
-    // form and rely on the kind/duration arguments already supported.
+    // Route the request: per-row delete uses the surgical `DeleteById`
+    // IPC op so the on-disk and registry-row removal target exactly the
+    // requested row regardless of how many siblings share its kind. The
+    // bulk per-kind / per-age path keeps using `Purge`.
     let op = match payload.id {
-        Some(id) => {
-            // Single-row purge: look up the matching entry by id, then
-            // purge by (kind=its kind, path=its path) using delete_by_id
-            // — issue a List first, find the row, then send a tailored op.
-            match purge_single_by_id(tx, id) {
-                Ok(reply) => {
-                    respond_purge_reply(request, reply);
-                    return;
-                }
-                Err(err) => {
-                    respond_json(request, 500, json_error_bytes(&err).as_slice());
-                    return;
-                }
-            }
-        }
+        Some(id) => GcOp::DeleteById { id },
         None => GcOp::Purge {
             duration: None,
             kind: payload.kind.clone(),
@@ -287,65 +273,6 @@ fn respond_purge_reply(request: Request, reply: GcReply) {
             );
         }
     }
-}
-
-/// Resolve `id` -> its `(kind, path)` and then issue a Purge filtered to
-/// that one row. There is no native single-row purge op so we round-trip
-/// once to enumerate, then once to purge. Acceptable because dashboard
-/// purges are user-initiated, not on the hot path.
-fn purge_single_by_id(tx: &mpsc::Sender<GcRequestMsg>, id: i64) -> Result<GcReply, String> {
-    let list_reply = send_gc_op(tx, GcOp::List { kind: None })?;
-    let rows = match list_reply {
-        GcReply::ListOk { rows } => rows,
-        GcReply::Error { message } => return Err(message),
-        other => return Err(format!("unexpected reply: {other:?}")),
-    };
-    let Some(target) = rows.into_iter().find(|r| r.id == id) else {
-        // No row with that id — return an idempotent zero-effect ack.
-        return Ok(GcReply::PurgeOk {
-            removed: 0,
-            skipped: 0,
-        });
-    };
-    if target.live_locked {
-        return Ok(GcReply::PurgeOk {
-            removed: 0,
-            skipped: 1,
-        });
-    }
-    // The existing purge op filters by kind+age but not by path. Best
-    // available primitive: filter by kind and then accept that a kind
-    // with multiple non-live-locked rows older than nothing will purge
-    // them all. To keep semantics tight we use a fresh op variant that
-    // already exists in the IPC surface — `Purge { duration: None, kind:
-    // Some(target.kind) }` — but only when there's just one row of that
-    // kind. Otherwise fall back to deleting via a future per-id IPC
-    // (tracked separately); for now we return a clear error.
-    let same_kind_count = match send_gc_op(
-        tx,
-        GcOp::List {
-            kind: Some(target.kind.clone()),
-        },
-    )? {
-        GcReply::ListOk { rows } => rows.len(),
-        GcReply::Error { message } => return Err(message),
-        other => return Err(format!("unexpected reply: {other:?}")),
-    };
-    if same_kind_count > 1 {
-        return Err(format!(
-            "per-id purge not yet supported when multiple rows share kind={} \
-             (matched id={id}); use the per-kind purge button instead",
-            target.kind
-        ));
-    }
-    send_gc_op(
-        tx,
-        GcOp::Purge {
-            duration: None,
-            kind: Some(target.kind),
-            dry_run: false,
-        },
-    )
 }
 
 // ---------- state aggregation ----------
@@ -814,6 +741,84 @@ mod tests {
         let state_body = fetch_state_json(port).expect("re-fetch state");
         let state: DashboardState = serde_json::from_str(&state_body).expect("parse state");
         assert_eq!(state.stats.gc_count, 0);
+    }
+
+    /// Per-row Delete button on the dashboard: `POST /gc/purge {id: N}`
+    /// must remove exactly the targeted row even when other rows share
+    /// its `kind`. Replaces the earlier "single row of a kind" workaround
+    /// that returned a 500 in this case.
+    #[test]
+    fn end_to_end_per_row_delete_only_targets_requested_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete-by-id.redb");
+
+        let registry = Registry::open_at(&db_path).expect("open registry");
+        let gc_tx = spawn_registry_worker_with(registry).expect("worker");
+
+        // Three siblings of the same kind in a tempdir.
+        let paths: Vec<String> = ["e1", "e2", "e3"]
+            .iter()
+            .map(|name| {
+                let p = dir.path().join(name);
+                std::fs::create_dir_all(&p).unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+        for p in &paths {
+            let (rx_t, rx) = mpsc::sync_channel::<GcReply>(1);
+            gc_tx
+                .send(GcRequestMsg {
+                    op: GcOp::Insert {
+                        kind: "cache".to_string(),
+                        path: p.clone(),
+                        repo_root: None,
+                        branch: None,
+                        agent_id: None,
+                        created_unix: Some(1000),
+                    },
+                    reply_tx: rx_t,
+                })
+                .unwrap();
+            let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+
+        let port = spawn_dashboard(dir.path().to_path_buf(), Some(gc_tx.clone()), 9999, 100)
+            .expect("dashboard spawned");
+
+        // Fetch /state.json to get the assigned ids.
+        let state_body = fetch_state_json(port).expect("fetch state");
+        let state: DashboardState = serde_json::from_str(&state_body).expect("parse");
+        let middle = state
+            .gc
+            .iter()
+            .find(|r| r.path == paths[1])
+            .expect("middle row");
+
+        // POST /gc/purge {"id": <middle.id>}
+        let body = fetch_path(
+            port,
+            "POST",
+            "/gc/purge",
+            Some(format!(r#"{{"id":{}}}"#, middle.id)),
+        )
+        .expect("delete");
+        let resp: PurgeResponse = serde_json::from_str(&body).expect("parse");
+        assert_eq!(resp.removed, 1);
+        assert_eq!(resp.skipped, 0);
+
+        // The two siblings must survive.
+        let after = fetch_state_json(port).expect("re-fetch state");
+        let after_state: DashboardState = serde_json::from_str(&after).expect("parse");
+        let surviving: Vec<&str> = after_state.gc.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(after_state.gc.len(), 2);
+        assert!(surviving.contains(&paths[0].as_str()));
+        assert!(surviving.contains(&paths[2].as_str()));
+        assert!(!surviving.contains(&paths[1].as_str()));
+
+        // On-disk deletion happened for the targeted row only.
+        assert!(!std::path::Path::new(&paths[1]).exists());
+        assert!(std::path::Path::new(&paths[0]).exists());
+        assert!(std::path::Path::new(&paths[2]).exists());
     }
 
     /// Tiny HTTP/1.0 client for tests. Connect, send a request, read the
