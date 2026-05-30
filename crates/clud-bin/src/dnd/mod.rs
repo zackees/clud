@@ -195,7 +195,12 @@ fn unescape_shell_spaces(s: &str) -> String {
             out.push(bytes[i]);
             i += 1;
         }
-        String::from_utf8(out).unwrap_or_default()
+        // Input is &str (valid UTF-8) and we only ever delete ASCII `\`
+        // bytes from `\ ` pairs, so `out` is guaranteed valid UTF-8 here.
+        // `from_utf8_lossy` keeps the contract obviously safe — strict
+        // `from_utf8` would otherwise need a `.expect` that nothing in
+        // the dnd flow could prove holds at a glance (issue #168 audit).
+        String::from_utf8_lossy(&out).into_owned()
     }
 }
 

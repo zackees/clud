@@ -75,12 +75,24 @@ fn is_windows_batch_wrapper(program: Option<&str>) -> bool {
 ///   command line. Without `/S`, cmd applies a different "first-and-last
 ///   quote on the line" rule that breaks on paths with spaces.
 /// * `/C` runs the command and exits.
+///
+/// The rendered command is prefixed with `chcp 65001 > nul &` so the
+/// shim and its descendants run under codepage 65001 (UTF-8). Without
+/// this, cmd.exe inherits the user's OEM/ANSI codepage (CP437 / CP1252
+/// / CP932 / …) and any non-ASCII bytes written by Node-based agents
+/// (Claude, Codex) get mojibaked on the way out. `> nul` swallows the
+/// "Active code page: 65001" banner so the user's session stays clean.
+/// `&` (not `&&`) keeps the launch going even if a hardened
+/// configuration refuses the codepage switch — the worst case is then
+/// the same as before this change, not a hard failure (issue #168).
 #[cfg(windows)]
 fn render_windows_batch_command(argv: &[String]) -> String {
-    argv.iter()
+    let cmd = argv
+        .iter()
         .map(|arg| quote_for_cmd(arg))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    format!("chcp 65001 > nul & {cmd}")
 }
 
 /// Quote one argv token for cmd.exe.
@@ -142,12 +154,15 @@ mod tests {
     #[test]
     fn cmd_wrapper_with_no_args_routes_through_shell() {
         // Just the `.cmd` path with no extra args: the rendered command is
-        // simply the quoted exe path, which still has to go through cmd.exe.
+        // the UTF-8 codepage prefix followed by the quoted exe path.
         let spec =
             command_spec_for_subprocess(vec![r"C:\Users\me\AppData\Roaming\npm\codex.cmd".into()]);
         match spec {
             running_process::CommandSpec::Shell(command) => {
-                assert_eq!(command, r#""C:\Users\me\AppData\Roaming\npm\codex.cmd""#);
+                assert_eq!(
+                    command,
+                    r#"chcp 65001 > nul & "C:\Users\me\AppData\Roaming\npm\codex.cmd""#
+                );
             }
             other => panic!("expected Shell for .cmd wrapper, got {other:?}"),
         }
@@ -166,8 +181,29 @@ mod tests {
             other => panic!("expected Shell, got {other:?}"),
         };
         assert!(
-            rendered.starts_with(r#""C:\path with spaces\codex.cmd" "exec" "hello world""#),
+            rendered.contains(r#""C:\path with spaces\codex.cmd" "exec" "hello world""#),
             "spaces in exe path and arg must each be wrapped in quotes: {rendered}"
+        );
+    }
+
+    /// Issue #168: every cmd.exe wrapping must force codepage 65001 so
+    /// Node-based agents (Claude / Codex) emit and consume UTF-8 instead
+    /// of mojibaking under the user's OEM/ANSI codepage.
+    #[cfg(windows)]
+    #[test]
+    fn cmd_wrapper_prepends_utf8_codepage_switch() {
+        let spec = command_spec_for_subprocess(vec![
+            r"C:\Users\me\AppData\Roaming\npm\codex.cmd".into(),
+            "exec".into(),
+            "hello".into(),
+        ]);
+        let rendered = match spec {
+            running_process::CommandSpec::Shell(s) => s,
+            other => panic!("expected Shell, got {other:?}"),
+        };
+        assert!(
+            rendered.starts_with("chcp 65001 > nul & "),
+            "every cmd.exe shim must start with the UTF-8 codepage switch: {rendered}"
         );
     }
 
