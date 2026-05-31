@@ -29,6 +29,27 @@ use super::io_helpers::read_json_file;
 use super::paths::{daemon_info_path, sessions_dir};
 use super::process_utils::pid_is_alive;
 use super::types::{DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot};
+use crate::session_registry::LiveSession;
+
+/// Supplier of live session-registry rows. Injected at the dashboard
+/// boundary so production wires in the redb-backed reader while unit
+/// tests pass a no-op stub. This avoids env-var coupling between
+/// parallel tests in `daemon::http::tests` (issue #190 follow-up: the
+/// initial implementation that read `CLUD_SESSION_DB` directly inside
+/// `build_dashboard_state` raced with `build_state_with_empty_state_dir_returns_zeros`
+/// on macOS x86 CI).
+pub(super) type LiveSessionsProvider =
+    std::sync::Arc<dyn Fn() -> Vec<LiveSession> + Send + Sync + 'static>;
+
+/// Production provider: reads the redb session registry under the
+/// cross-process advisory lock. Errors are swallowed so a registry
+/// hiccup never blanks the dashboard for sessions that *do* have
+/// JSON snapshots.
+pub(super) fn default_live_sessions_provider() -> LiveSessionsProvider {
+    std::sync::Arc::new(|| {
+        crate::session_registry::list_live_sessions_under_lock().unwrap_or_default()
+    })
+}
 
 /// Bundled single-page dashboard. Vanilla JS, no build step. Polls
 /// `/state.json` every 5s and renders the three tabs (Sessions / GC /
@@ -114,6 +135,7 @@ pub(super) fn spawn_dashboard(
     gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
+    live_sessions_provider: LiveSessionsProvider,
 ) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -131,7 +153,16 @@ pub(super) fn spawn_dashboard(
     };
     let res = thread::Builder::new()
         .name("clud-dashboard-http".to_string())
-        .spawn(move || run_dashboard_loop(server, state_dir, gc_tx, ipc_port, started_at_unix));
+        .spawn(move || {
+            run_dashboard_loop(
+                server,
+                state_dir,
+                gc_tx,
+                ipc_port,
+                started_at_unix,
+                live_sessions_provider,
+            )
+        });
     match res {
         Ok(_) => Some(port),
         Err(err) => {
@@ -147,6 +178,7 @@ fn run_dashboard_loop(
     gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
+    live_sessions_provider: LiveSessionsProvider,
 ) {
     for request in server.incoming_requests() {
         let method = request.method().clone();
@@ -163,6 +195,7 @@ fn run_dashboard_loop(
                     gc_tx.as_ref(),
                     ipc_port,
                     started_at_unix,
+                    live_sessions_provider.as_ref(),
                 );
             }
             (Method::Post, "/gc/purge") => {
@@ -183,8 +216,10 @@ fn handle_state(
     gc_tx: Option<&mpsc::Sender<GcRequestMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
+    live_sessions_provider: &(dyn Fn() -> Vec<LiveSession> + Send + Sync),
 ) {
-    match build_dashboard_state(state_dir, gc_tx, ipc_port, started_at_unix) {
+    let live_sessions = live_sessions_provider();
+    match build_dashboard_state(state_dir, gc_tx, ipc_port, started_at_unix, live_sessions) {
         Ok(state) => match serde_json::to_vec(&state) {
             Ok(bytes) => respond_json(request, 200, &bytes),
             Err(err) => respond_json(
@@ -282,6 +317,7 @@ fn build_dashboard_state(
     gc_tx: Option<&mpsc::Sender<GcRequestMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
+    live_sessions: Vec<LiveSession>,
 ) -> Result<DashboardState, String> {
     let now_unix = current_unix();
 
@@ -290,8 +326,11 @@ fn build_dashboard_state(
     // path) by reading the redb session registry. The on-disk snapshot
     // files are only written by the centralized daemon worker, so without
     // this merge the dashboard would render "no sessions recorded" even
-    // while a foreground `clud` is clearly running.
-    merge_registry_sessions(&mut sessions);
+    // while a foreground `clud` is clearly running. The caller — typically
+    // `handle_state` via `default_live_sessions_provider` — does the
+    // actual registry read so tests can inject mock data without env-var
+    // entanglement.
+    merge_registry_sessions(&mut sessions, live_sessions);
     let live_session_count = sessions.iter().filter(|s| s.live).count();
 
     let gc_rows = match gc_tx {
@@ -394,17 +433,12 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
 /// session list (issue #190). Direct-runner `clud` invocations never
 /// produce a `SessionSnapshot` JSON file but do register themselves in
 /// the redb registry for the fork-bomb cap, so the registry is the only
-/// place where they're visible.
-///
-/// Failures are silent: a registry hiccup must never break the dashboard
-/// for sessions that *do* have snapshots on disk.
-fn merge_registry_sessions(sessions: &mut Vec<SessionView>) {
-    let live = match crate::session_registry::list_live_sessions_under_lock() {
-        Ok(rows) => rows,
-        Err(_) => return,
-    };
-
-    for row in live {
+/// place where they're visible. `live_sessions` is provided by the
+/// caller — production wires in the real registry reader; tests pass
+/// `Vec::new()` (or seeded data) to avoid env-var racing across the
+/// `daemon::http::tests` module.
+fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<LiveSession>) {
+    for row in live_sessions {
         let id = format!("direct-{}", row.pid);
         sessions.push(SessionView {
             id,
@@ -646,10 +680,17 @@ mod tests {
         assert_eq!(&raw[idx..], b"{\"x\":1}");
     }
 
+    /// Shared "no live sessions" provider for the tests below that pre-date
+    /// issue #190 — they don't care about the registry merge and would
+    /// otherwise have to fight the global `CLUD_SESSION_DB` env-var.
+    fn empty_live_provider() -> super::LiveSessionsProvider {
+        std::sync::Arc::new(Vec::new)
+    }
+
     #[test]
     fn build_state_with_empty_state_dir_returns_zeros() {
         let dir = tempfile::tempdir().unwrap();
-        let state = build_dashboard_state(dir.path(), None, 9999, 100).expect("build");
+        let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
         assert_eq!(state.stats.session_count, 0);
         assert_eq!(state.stats.live_session_count, 0);
         assert_eq!(state.stats.gc_count, 0);
@@ -664,90 +705,40 @@ mod tests {
     /// must merge those rows in so the Sessions tab isn't perpetually
     /// empty for users who never use `--detach` / `--experimental-daemon-centralized`.
     ///
-    /// Uses an env-var override + an env-lock so this can't trample
-    /// other tests touching `CLUD_SESSION_DB` / `CLUD_SESSION_LOCK`. Seeds
-    /// the registry with `std::process::id()` so the production OS PID
-    /// probe (used by `list_live_sessions_under_lock`) reports the row
-    /// as alive without needing a mock probe override.
+    /// Inject a synthetic `LiveSession` directly so this test can run in
+    /// parallel with the rest of the suite — no env-var fiddling, no
+    /// cross-test races on `CLUD_SESSION_DB`.
     #[test]
     fn build_state_surfaces_direct_runner_registry_rows() {
-        use crate::session_registry::{
-            SessionInfo, SessionRegistry, ENV_SESSION_DB, ENV_SESSION_LOCK,
-        };
-        use std::sync::Mutex as StdMutex;
-        static ENV_LOCK: StdMutex<()> = StdMutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let live = vec![LiveSession {
+            pid: 4242,
+            started_unix: 1_700_000_000,
+            backend: Some("claude".to_string()),
+            launch_mode: Some("subprocess".to_string()),
+            cwd: Some("/dev/repo".to_string()),
+        }];
 
-        let tmp = tempfile::tempdir().unwrap();
-        let db_path = tmp.path().join("sessions.redb");
-        let lock_path = tmp.path().join("sessions.lock");
-
-        // SAFETY: env-var mutation is process-global. The ENV_LOCK above
-        // serializes the few tests that touch these vars.
-        let prev_db = std::env::var_os(ENV_SESSION_DB);
-        let prev_lock = std::env::var_os(ENV_SESSION_LOCK);
-        std::env::set_var(ENV_SESSION_DB, &db_path);
-        std::env::set_var(ENV_SESSION_LOCK, &lock_path);
-
-        // Seed: register the *current* process so the OS liveness probe
-        // in `list_live_sessions_under_lock` will report it alive.
-        let mut registry = SessionRegistry::open_at(&db_path).expect("open registry");
-        registry
-            .register_self(SessionInfo {
-                pid: std::process::id(),
-                started_unix: 1_700_000_000,
-                backend: Some("claude".to_string()),
-                launch_mode: Some("subprocess".to_string()),
-                cwd: Some("/dev/repo".to_string()),
-            })
-            .expect("register self");
-        // Re-point the registry's `own_pid` at a sentinel before drop so
-        // its Drop impl removes a non-existent row instead of the row we
-        // just inserted. Mirrors the production `run_startup_under_lock`
-        // dance, which clears the `registered` flag for the same reason.
-        registry.set_own_pid_for_test(0);
-        drop(registry);
-
-        // Run the assertions inside `catch_unwind` so cleanup of env vars
-        // and the seeded row happens even on assertion failure.
-        let assert_outcome = std::panic::catch_unwind(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let state = build_dashboard_state(dir.path(), None, 9999, 100).expect("build");
-            let direct: Vec<_> = state
-                .sessions
-                .iter()
-                .filter(|s| s.kind == "direct")
-                .collect();
-            assert_eq!(
-                direct.len(),
-                1,
-                "registry-backed direct session should appear; got {:?}",
-                state.sessions
-            );
-            assert_eq!(direct[0].name.as_deref(), Some("claude"));
-            assert_eq!(direct[0].cwd.as_deref(), Some("/dev/repo"));
-            assert!(direct[0].live);
-            assert_eq!(direct[0].worker_port, 0);
-        });
-
-        // Clean up the row we wrote so we don't leave it for any test
-        // that re-opens the same DB later.
-        if let Ok(reg) = SessionRegistry::open_at(&db_path) {
-            let _ = reg.unregister();
-        }
-
-        match prev_db {
-            Some(v) => std::env::set_var(ENV_SESSION_DB, v),
-            None => std::env::remove_var(ENV_SESSION_DB),
-        }
-        match prev_lock {
-            Some(v) => std::env::set_var(ENV_SESSION_LOCK, v),
-            None => std::env::remove_var(ENV_SESSION_LOCK),
-        }
-
-        if let Err(payload) = assert_outcome {
-            std::panic::resume_unwind(payload);
-        }
+        let state = build_dashboard_state(dir.path(), None, 9999, 100, live).expect("build");
+        let direct: Vec<_> = state
+            .sessions
+            .iter()
+            .filter(|s| s.kind == "direct")
+            .collect();
+        assert_eq!(
+            direct.len(),
+            1,
+            "registry-backed direct session should appear; got {:?}",
+            state.sessions
+        );
+        assert_eq!(direct[0].id, "direct-4242");
+        assert_eq!(direct[0].name.as_deref(), Some("claude"));
+        assert_eq!(direct[0].cwd.as_deref(), Some("/dev/repo"));
+        assert!(direct[0].live);
+        assert_eq!(direct[0].worker_port, 0);
+        // The live-session count in the stats must include direct sessions
+        // — that's what the dashboard header displays.
+        assert_eq!(state.stats.live_session_count, 1);
     }
 
     #[test]
@@ -759,7 +750,7 @@ mod tests {
             fake_snapshot("sess-a", "test", "/dev/foo"),
         );
 
-        let state = build_dashboard_state(dir.path(), None, 9999, 100).expect("build");
+        let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].id, "sess-a");
         assert_eq!(state.sessions[0].name.as_deref(), Some("test"));
@@ -820,8 +811,14 @@ mod tests {
         let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
         // Spawn the actual HTTP server.
-        let port = spawn_dashboard(dir.path().to_path_buf(), Some(gc_tx.clone()), 9999, 100)
-            .expect("dashboard spawned");
+        let port = spawn_dashboard(
+            dir.path().to_path_buf(),
+            Some(gc_tx.clone()),
+            9999,
+            100,
+            empty_live_provider(),
+        )
+        .expect("dashboard spawned");
 
         // Hit /state.json.
         let body = fetch_state_json(port).expect("fetch state");
@@ -864,8 +861,14 @@ mod tests {
             let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
 
-        let port = spawn_dashboard(dir.path().to_path_buf(), Some(gc_tx.clone()), 9999, 100)
-            .expect("dashboard spawned");
+        let port = spawn_dashboard(
+            dir.path().to_path_buf(),
+            Some(gc_tx.clone()),
+            9999,
+            100,
+            empty_live_provider(),
+        )
+        .expect("dashboard spawned");
 
         // POST /gc/purge {"kind":"cache"}
         let body = fetch_path(
@@ -924,8 +927,14 @@ mod tests {
             let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
 
-        let port = spawn_dashboard(dir.path().to_path_buf(), Some(gc_tx.clone()), 9999, 100)
-            .expect("dashboard spawned");
+        let port = spawn_dashboard(
+            dir.path().to_path_buf(),
+            Some(gc_tx.clone()),
+            9999,
+            100,
+            empty_live_provider(),
+        )
+        .expect("dashboard spawned");
 
         // Fetch /state.json to get the assigned ids.
         let state_body = fetch_state_json(port).expect("fetch state");
