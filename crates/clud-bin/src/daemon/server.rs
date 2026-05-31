@@ -14,7 +14,7 @@ use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
 use super::gc_service::{spawn_registry_worker, GcRequestMsg, WORKER_REPLY_TIMEOUT};
-use super::http::spawn_dashboard;
+use super::http::{default_live_sessions_provider, spawn_dashboard};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
 use super::process_utils::{pid_is_alive, signal_process_tree};
@@ -73,6 +73,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         gc_tx.clone(),
         port,
         started_at_unix,
+        default_live_sessions_provider(),
     );
 
     let info = DaemonInfo {

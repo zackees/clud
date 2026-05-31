@@ -211,6 +211,19 @@ pub struct SessionInfo {
     pub cwd: Option<String>,
 }
 
+/// A live session row read back from the registry. Mirrors `SessionInfo`
+/// but represents a row that has already been persisted and probed alive
+/// — used by the dashboard to surface direct-runner sessions that never
+/// produce a `SessionSnapshot` JSON file (issue #190).
+#[derive(Debug, Clone)]
+pub struct LiveSession {
+    pub pid: u32,
+    pub started_unix: i64,
+    pub backend: Option<String>,
+    pub launch_mode: Option<String>,
+    pub cwd: Option<String>,
+}
+
 impl SessionInfo {
     /// Build a `SessionInfo` for the current process with `now` as
     /// `started_unix`.
@@ -536,6 +549,36 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Return every row whose PID is currently alive. Used by the
+    /// dashboard (issue #190) to surface direct-runner sessions that
+    /// never get a `SessionSnapshot` JSON file written for them. Caller
+    /// should hold the cross-process advisory lock.
+    pub fn list_live(&self) -> Result<Vec<LiveSession>, RegistryError> {
+        let rtxn = self.db.begin_read()?;
+        let table = rtxn.open_table(SESSIONS)?;
+        let mut out = Vec::new();
+        for entry in table.iter()? {
+            let (k, v) = entry?;
+            let pid = k.value();
+            if !self.probe.is_alive(pid) {
+                continue;
+            }
+            let bytes = v.value().to_vec();
+            let row: SessionRow = match serde_json::from_slice(&bytes) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            out.push(LiveSession {
+                pid,
+                started_unix: row.started_unix,
+                backend: row.backend,
+                launch_mode: row.launch_mode,
+                cwd: row.cwd,
+            });
+        }
+        Ok(out)
+    }
+
     /// Delete this process's row explicitly (issue #138). Unlike `Drop`,
     /// this is a synchronous, error-reporting deletion the startup/shutdown
     /// helpers can call inside the lockfile's critical section.
@@ -705,6 +748,34 @@ pub fn run_startup_under_lock(
         decision,
         registered,
     })
+}
+
+/// List every live session row under the cross-process lock, then close
+/// the redb file. Used by the dashboard (issue #190) to surface direct-
+/// runner sessions alongside daemon-spawned ones. Performs a GC pass
+/// first so dead rows don't appear in the UI.
+///
+/// Returns an empty `Vec` (not an error) when the registry DB file does
+/// not yet exist — that just means no `clud` has ever started, so there
+/// can be no live sessions. Crucially, this also keeps unit-test calls
+/// from materializing a real registry file at the user's
+/// `%LOCALAPPDATA%\clud\sessions.redb` / `$XDG_STATE_HOME/clud/sessions.redb`
+/// path when they merely exercise the dashboard's state-aggregation code.
+pub fn list_live_sessions_under_lock() -> Result<Vec<LiveSession>, RegistryError> {
+    let db_path = match std::env::var_os(ENV_SESSION_DB) {
+        Some(v) => PathBuf::from(v),
+        None => default_db_path()?,
+    };
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let _lock = acquire_lock()?;
+    let registry = SessionRegistry::open_default()?;
+    let _ = registry.gc_dead_sessions();
+    let out = registry.list_live()?;
+    drop(registry);
+    drop(_lock);
+    Ok(out)
 }
 
 /// Run the shutdown sequence (remove own row) under the cross-process
