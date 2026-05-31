@@ -567,10 +567,21 @@ where
     let normalize_console_stdin =
         should_normalize_interactive_console_stdin(interactive_real_stdin);
     let interrupt_on_ctrl_c_byte = interactive_real_stdin;
+    // Issue #188: when an `extra_rx` is wired and we're on Windows with
+    // an interactive real-stdin console, the `console_input`
+    // `ReadConsoleInputW` reader is feeding that channel and is the
+    // authoritative source of console bytes (including Shift+Enter →
+    // `\n`). Spawning the byte-stream stdin reader below would race
+    // with it on the same STDIN console queue — `ReadFile` strips
+    // modifier state, so a stolen Shift+Enter surfaces as `\r`. Skip
+    // it in that exact case so `console_input` is the sole consumer.
+    let spawn_byte_stream_stdin_reader =
+        should_spawn_byte_stream_stdin_reader(interactive_real_stdin, extra_rx.is_some());
     if verbose {
         verbose_log::log(format_args!(
-            "[clud] pty pump: start interactive_stdin={} normalize_console_stdin={}",
-            interactive_real_stdin, normalize_console_stdin
+            "[clud] pty pump: start interactive_stdin={} normalize_console_stdin={} \
+             spawn_byte_stream_stdin_reader={}",
+            interactive_real_stdin, normalize_console_stdin, spawn_byte_stream_stdin_reader
         ));
     }
 
@@ -578,25 +589,34 @@ where
     // Detached (not joined) so a blocked `read()` on real stdin doesn't
     // wedge shutdown when the child exits — the process is terminating
     // anyway. See Step 12.
-    std::thread::spawn(move || {
-        let mut reader = stdin_source;
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    let mut chunk = buf[..n].to_vec();
-                    if normalize_console_stdin {
-                        normalize_interactive_console_stdin_chunk(&mut chunk);
+    if spawn_byte_stream_stdin_reader {
+        std::thread::spawn(move || {
+            let mut reader = stdin_source;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        let mut chunk = buf[..n].to_vec();
+                        if normalize_console_stdin {
+                            normalize_interactive_console_stdin_chunk(&mut chunk);
+                        }
+                        if stdin_tx.send(chunk).is_err() {
+                            break; // Main thread dropped the receiver → exit.
+                        }
                     }
-                    if stdin_tx.send(chunk).is_err() {
-                        break; // Main thread dropped the receiver → exit.
-                    }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
-    });
+        });
+    } else {
+        // `console_input` is the sole consumer via `extra_rx`. Drop the
+        // unused stdin source and channel sender so the corresponding
+        // `stdin_rx.try_recv()` in the main loop returns `Empty`
+        // immediately (no thread will ever send on it).
+        drop(stdin_source);
+        drop(stdin_tx);
+    }
 
     let mut observer = F3Observer::new();
     // Issue #63 / #79: bracketed-paste passes through the PTY pump as
@@ -753,6 +773,26 @@ fn stdin_source_is_real_stdin<R: 'static>() -> bool {
 
 fn should_normalize_interactive_console_stdin(interactive_real_stdin: bool) -> bool {
     cfg!(windows) && interactive_real_stdin
+}
+
+/// Decide whether the PTY pump should spawn its byte-stream stdin
+/// reader thread (the one that calls `io::stdin().read(...)`).
+///
+/// Issue #188: On Windows with an interactive real-stdin console and an
+/// `extra_rx` already wired, the `console_input::ReadConsoleInputW`
+/// worker is the authoritative source of console bytes — including the
+/// modifier-aware Shift+Enter → `\n` translation. Spawning the
+/// byte-stream reader in that case would race with `ReadConsoleInputW`
+/// on the same STDIN console queue. `ReadFile` strips modifier state
+/// before producing bytes, so a stolen Shift+Enter surfaces as `\r`
+/// instead of `\n`. Returning `false` keeps `console_input` as the
+/// sole consumer.
+///
+/// Every other configuration — POSIX, piped stdin, no `extra_rx` —
+/// keeps the byte-stream reader so existing behavior (including
+/// `echo "prompt" | clud` and POSIX interactive use) is unchanged.
+fn should_spawn_byte_stream_stdin_reader(interactive_real_stdin: bool, has_extra_rx: bool) -> bool {
+    !(cfg!(windows) && interactive_real_stdin && has_extra_rx)
 }
 
 fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
