@@ -285,7 +285,13 @@ fn build_dashboard_state(
 ) -> Result<DashboardState, String> {
     let now_unix = current_unix();
 
-    let sessions = read_session_views(state_dir).unwrap_or_default();
+    let mut sessions = read_session_views(state_dir).unwrap_or_default();
+    // Issue #190: surface direct-runner sessions (default `clud` invocation
+    // path) by reading the redb session registry. The on-disk snapshot
+    // files are only written by the centralized daemon worker, so without
+    // this merge the dashboard would render "no sessions recorded" even
+    // while a foreground `clud` is clearly running.
+    merge_registry_sessions(&mut sessions);
     let live_session_count = sessions.iter().filter(|s| s.live).count();
 
     let gc_rows = match gc_tx {
@@ -382,6 +388,51 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
     // Newest first.
     out.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
     Ok(out)
+}
+
+/// Merge live rows from the redb session registry into the dashboard's
+/// session list (issue #190). Direct-runner `clud` invocations never
+/// produce a `SessionSnapshot` JSON file but do register themselves in
+/// the redb registry for the fork-bomb cap, so the registry is the only
+/// place where they're visible.
+///
+/// Failures are silent: a registry hiccup must never break the dashboard
+/// for sessions that *do* have snapshots on disk.
+fn merge_registry_sessions(sessions: &mut Vec<SessionView>) {
+    let live = match crate::session_registry::list_live_sessions_under_lock() {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+
+    for row in live {
+        let id = format!("direct-{}", row.pid);
+        sessions.push(SessionView {
+            id,
+            kind: "direct".to_string(),
+            // Surface the backend selection (`claude` / `codex`) under the
+            // session name column so users can tell which agent each
+            // direct-runner row corresponds to.
+            name: row.backend.clone(),
+            cwd: row.cwd,
+            // `started_unix` is seconds; snapshot rows use milliseconds.
+            // Convert so the dashboard's age formatter renders both the
+            // same way without a per-kind unit-toggle.
+            created_at: Some((row.started_unix.max(0) as u64) * 1000),
+            detachable: false,
+            background: false,
+            attachable: false,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            exit_code: None,
+            worker_port: 0,
+            // The registry already filtered by OS PID liveness probe.
+            live: true,
+        });
+    }
+
+    // Newest first across the merged list.
+    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
 }
 
 // ---------- IPC plumbing ----------
@@ -606,6 +657,97 @@ mod tests {
         assert_eq!(state.daemon.ipc_port, 9999);
         assert_eq!(state.daemon.started_at_unix, 100);
         assert_eq!(state.daemon.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Issue #190: direct-runner `clud` invocations only show up in the
+    /// redb session registry, not as JSON snapshots on disk. The dashboard
+    /// must merge those rows in so the Sessions tab isn't perpetually
+    /// empty for users who never use `--detach` / `--experimental-daemon-centralized`.
+    ///
+    /// Uses an env-var override + an env-lock so this can't trample
+    /// other tests touching `CLUD_SESSION_DB` / `CLUD_SESSION_LOCK`. Seeds
+    /// the registry with `std::process::id()` so the production OS PID
+    /// probe (used by `list_live_sessions_under_lock`) reports the row
+    /// as alive without needing a mock probe override.
+    #[test]
+    fn build_state_surfaces_direct_runner_registry_rows() {
+        use crate::session_registry::{
+            SessionInfo, SessionRegistry, ENV_SESSION_DB, ENV_SESSION_LOCK,
+        };
+        use std::sync::Mutex as StdMutex;
+        static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("sessions.redb");
+        let lock_path = tmp.path().join("sessions.lock");
+
+        // SAFETY: env-var mutation is process-global. The ENV_LOCK above
+        // serializes the few tests that touch these vars.
+        let prev_db = std::env::var_os(ENV_SESSION_DB);
+        let prev_lock = std::env::var_os(ENV_SESSION_LOCK);
+        std::env::set_var(ENV_SESSION_DB, &db_path);
+        std::env::set_var(ENV_SESSION_LOCK, &lock_path);
+
+        // Seed: register the *current* process so the OS liveness probe
+        // in `list_live_sessions_under_lock` will report it alive.
+        let mut registry = SessionRegistry::open_at(&db_path).expect("open registry");
+        registry
+            .register_self(SessionInfo {
+                pid: std::process::id(),
+                started_unix: 1_700_000_000,
+                backend: Some("claude".to_string()),
+                launch_mode: Some("subprocess".to_string()),
+                cwd: Some("/dev/repo".to_string()),
+            })
+            .expect("register self");
+        // Re-point the registry's `own_pid` at a sentinel before drop so
+        // its Drop impl removes a non-existent row instead of the row we
+        // just inserted. Mirrors the production `run_startup_under_lock`
+        // dance, which clears the `registered` flag for the same reason.
+        registry.set_own_pid_for_test(0);
+        drop(registry);
+
+        // Run the assertions inside `catch_unwind` so cleanup of env vars
+        // and the seeded row happens even on assertion failure.
+        let assert_outcome = std::panic::catch_unwind(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let state = build_dashboard_state(dir.path(), None, 9999, 100).expect("build");
+            let direct: Vec<_> = state
+                .sessions
+                .iter()
+                .filter(|s| s.kind == "direct")
+                .collect();
+            assert_eq!(
+                direct.len(),
+                1,
+                "registry-backed direct session should appear; got {:?}",
+                state.sessions
+            );
+            assert_eq!(direct[0].name.as_deref(), Some("claude"));
+            assert_eq!(direct[0].cwd.as_deref(), Some("/dev/repo"));
+            assert!(direct[0].live);
+            assert_eq!(direct[0].worker_port, 0);
+        });
+
+        // Clean up the row we wrote so we don't leave it for any test
+        // that re-opens the same DB later.
+        if let Ok(reg) = SessionRegistry::open_at(&db_path) {
+            let _ = reg.unregister();
+        }
+
+        match prev_db {
+            Some(v) => std::env::set_var(ENV_SESSION_DB, v),
+            None => std::env::remove_var(ENV_SESSION_DB),
+        }
+        match prev_lock {
+            Some(v) => std::env::set_var(ENV_SESSION_LOCK, v),
+            None => std::env::remove_var(ENV_SESSION_LOCK),
+        }
+
+        if let Err(payload) = assert_outcome {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[test]
