@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
+use sysinfo::Signal;
 
 use crate::gc::InsertInput;
 use crate::trampoline;
@@ -15,7 +16,7 @@ use super::io_helpers::{read_json_file, write_json_line};
 use super::paths::{
     daemon_info_path, daemon_lock_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
 };
-use super::process_utils::pid_is_alive;
+use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
     DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit, SessionSnapshot,
     WorkerClientMessage,
@@ -37,16 +38,36 @@ use super::types::{
 pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(state_dir)?;
     cleanup_stale_state(state_dir);
-    if probe_existing(state_dir).is_some() {
-        return Ok(());
+    if let Some(info) = probe_existing(state_dir) {
+        if daemon_version_matches(&info) {
+            return Ok(());
+        }
+        // Issue #192: stale daemon from a prior clud version. Kill it
+        // under the bringup lock so a fresh `__daemon` (with the current
+        // binary's dashboard + registry-merge code) takes over.
+        let _bringup_lock = acquire_bringup_lock(state_dir)?;
+        if let Some(info) = probe_existing(state_dir) {
+            if !daemon_version_matches(&info) {
+                replace_stale_daemon(state_dir, &info)?;
+            } else {
+                return Ok(());
+            }
+        }
+        return spawn_and_await_daemon(state_dir);
     }
 
     let _bringup_lock = acquire_bringup_lock(state_dir)?;
     // Re-probe under the lock: a sibling may have spawned while we waited.
-    if probe_existing(state_dir).is_some() {
-        return Ok(());
+    if let Some(info) = probe_existing(state_dir) {
+        if daemon_version_matches(&info) {
+            return Ok(());
+        }
+        replace_stale_daemon(state_dir, &info)?;
     }
+    spawn_and_await_daemon(state_dir)
+}
 
+fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
     let args = vec![
         "__daemon".to_string(),
         "--state-dir".to_string(),
@@ -59,7 +80,7 @@ pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     loop {
         if let Some(info) = probe_existing(state_dir) {
             // Make sure we didn't read a stale info file from before the spawn.
-            if info.pid != our_pid {
+            if info.pid != our_pid && daemon_version_matches(&info) {
                 return Ok(());
             }
         }
@@ -83,6 +104,44 @@ fn probe_existing(state_dir: &Path) -> Option<DaemonInfo> {
     } else {
         None
     }
+}
+
+/// Issue #192: returns true when the running daemon was built from the
+/// same `CARGO_PKG_VERSION` as this binary. `None` here means the daemon
+/// was started by clud <= 2.0.14 (pre-fix daemons never wrote a `version`
+/// field), so treat as a mismatch — they predate the registry-merge
+/// dashboard fix and should be replaced.
+fn daemon_version_matches(info: &DaemonInfo) -> bool {
+    info.version.as_deref() == Some(env!("CARGO_PKG_VERSION"))
+}
+
+/// Issue #192: terminate a stale daemon (and its worker tree) and delete
+/// its `daemon.json` so a fresh daemon can take over. Best-effort — if
+/// the kill races with the daemon's own exit, the file may already be
+/// gone. Held by the caller under `acquire_bringup_lock` so only one
+/// upgrade attempt runs at a time.
+fn replace_stale_daemon(state_dir: &Path, info: &DaemonInfo) -> io::Result<()> {
+    eprintln!(
+        "[clud] restarting daemon: running {} != binary {}",
+        info.version.as_deref().unwrap_or("<pre-2.0.15>"),
+        env!("CARGO_PKG_VERSION"),
+    );
+    signal_process_tree(info.pid, Signal::Term);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while pid_is_alive(info.pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    if pid_is_alive(info.pid) {
+        signal_process_tree(info.pid, Signal::Kill);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pid_is_alive(info.pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // Remove the stale info file so `probe_existing` doesn't return it
+    // again during the spawn-await loop.
+    let _ = fs::remove_file(daemon_info_path(state_dir));
+    Ok(())
 }
 
 fn acquire_bringup_lock(state_dir: &Path) -> io::Result<fs::File> {
@@ -324,5 +383,53 @@ pub fn gc_client_list_repo_visits(state_dir: &Path) -> io::Result<Vec<RepoVisit>
         GcReply::RepoVisitsOk { rows } => Ok(rows),
         GcReply::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #192: a daemon whose `daemon.json` reports the same version
+    /// as the spawning binary must NOT be restarted. This is the steady-
+    /// state case for every `ensure_daemon` call after the first launch.
+    #[test]
+    fn daemon_version_matches_current_binary() {
+        let info = DaemonInfo {
+            pid: 1,
+            port: 0,
+            dashboard_port: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        };
+        assert!(daemon_version_matches(&info));
+    }
+
+    /// A daemon whose `daemon.json` reports a different version is stale
+    /// (likely a leftover from an in-place upgrade). `ensure_daemon` must
+    /// see this as a mismatch so the upgrade path replaces it.
+    #[test]
+    fn daemon_version_mismatch_when_versions_differ() {
+        let info = DaemonInfo {
+            pid: 1,
+            port: 0,
+            dashboard_port: None,
+            version: Some("0.0.0-not-the-current".to_string()),
+        };
+        assert!(!daemon_version_matches(&info));
+    }
+
+    /// `daemon.json` files written by clud <= 2.0.14 omit the `version`
+    /// field entirely. Treat them as stale so they're swept away on the
+    /// next launch — those daemons predate the registry-merge dashboard
+    /// fix (#190) and would keep reporting zero sessions.
+    #[test]
+    fn daemon_version_mismatch_when_field_absent() {
+        let info = DaemonInfo {
+            pid: 1,
+            port: 0,
+            dashboard_port: None,
+            version: None,
+        };
+        assert!(!daemon_version_matches(&info));
     }
 }

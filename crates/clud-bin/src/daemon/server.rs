@@ -80,6 +80,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         pid: std::process::id(),
         port,
         dashboard_port,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
         eprintln!("[clud] failed to persist daemon info: {}", err);

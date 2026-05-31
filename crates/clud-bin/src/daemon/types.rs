@@ -53,6 +53,13 @@ pub(super) struct DaemonInfo {
     /// without the field, so reads tolerate its absence.
     #[serde(default)]
     pub(super) dashboard_port: Option<u16>,
+    /// Issue #192: the `CARGO_PKG_VERSION` of the binary that launched
+    /// this daemon. `ensure_daemon` uses this to detect a stale daemon
+    /// after an in-place upgrade and restart it so bug-fix releases (e.g.
+    /// the #190 registry merge) take effect on the next `clud` invocation.
+    /// `None` for daemon.json files written by clud <= 2.0.14.
+    #[serde(default)]
+    pub(super) version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
