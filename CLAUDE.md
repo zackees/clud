@@ -88,6 +88,10 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 
+### Bundled Skill Imports
+
+When adding or renaming any imported/bundled skill, update the relevant `BUNDLED_SKILLS` registry and make sure the `SKILL.md` frontmatter parses with a real YAML parser. The guardrail tests live in `crates/clud-bin/src/skills.rs` for `crates/clud-bin/assets/skills/*/SKILL.md` imports and `crates/clud-bin/src/skill_install.rs` for root `skills/*/SKILL.md` imports. Run `soldr cargo test -p clud --lib skills::` and `soldr cargo test -p clud --lib skill_install::` after changing skill imports or frontmatter.
+
 ## Test Coverage
 
 - ~104 Rust unit tests across arg parsing, command building, backend resolution, loop-spec (URL classification, GH-JSON parsing, marker files).
