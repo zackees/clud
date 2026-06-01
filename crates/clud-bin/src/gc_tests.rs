@@ -260,6 +260,111 @@ fn reconcile_extern_repos_dir_inserts_immediate_child_dirs() {
 }
 
 #[test]
+fn sibling_clone_name_matching_is_conservative() {
+    for name in [
+        "clud-pr-178",
+        "clud-release-v1",
+        "clud-issue-178",
+        "clud-wt-fix",
+        "soldr-wt-task",
+        "zccache-wt-task",
+    ] {
+        assert!(
+            is_sibling_clone_dir_name("clud", name),
+            "expected {name} to match"
+        );
+    }
+
+    for name in ["myrepo-wt-fix", "myrepo-issue-178"] {
+        assert!(
+            is_sibling_clone_dir_name("myrepo", name),
+            "expected repo-scoped {name} to match"
+        );
+    }
+
+    for name in [
+        "clud",
+        "agent-abc",
+        "dep-a",
+        "random-wt-task",
+        "random-issue-178",
+        "myrepo-pr-178",
+        "clud-pr-",
+        "soldr-wt-",
+        "zccache-wt-",
+    ] {
+        assert!(
+            !is_sibling_clone_dir_name("clud", name),
+            "expected {name} to be rejected"
+        );
+    }
+}
+
+#[test]
+fn reconcile_sibling_clones_dir_inserts_only_matching_siblings() {
+    let reg = fresh_registry("reconcile-sibling-clones");
+    let dir = tempfile::tempdir().unwrap();
+    let repo_root = dir.path().join("clud");
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    for name in [
+        "clud-wt-fix",
+        "clud-issue-178",
+        "clud-pr-178",
+        "soldr-wt-task",
+        "zccache-wt-task",
+    ] {
+        std::fs::create_dir_all(dir.path().join(name)).unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("random-wt-task")).unwrap();
+    std::fs::create_dir_all(dir.path().join("random-issue-178")).unwrap();
+    std::fs::write(dir.path().join("clud-release-file"), b"hi").unwrap();
+    std::fs::create_dir_all(dir.path().join("clud-release-v1").join("nested")).unwrap();
+
+    let res = reconcile_sibling_clones_dir(&reg, &repo_root).unwrap();
+    assert_eq!(res.inserted, 6);
+    assert_eq!(res.skipped, 0);
+
+    let rows = reg.list(None).unwrap();
+    let repo_root_str = repo_root.to_string_lossy().to_string();
+    assert_eq!(rows.len(), 6);
+    assert!(rows.iter().all(|r| r.kind == SIBLING_CLONE_KIND));
+    assert!(rows.iter().all(|r| r.agent_id.is_none()));
+    assert!(rows
+        .iter()
+        .all(|r| r.repo_root.as_deref() == Some(repo_root_str.as_str())));
+    assert!(rows.iter().any(|r| r.path.ends_with("clud-wt-fix")));
+    assert!(rows.iter().any(|r| r.path.ends_with("clud-issue-178")));
+    assert!(rows.iter().any(|r| r.path.ends_with("clud-pr-178")));
+    assert!(rows.iter().any(|r| r.path.ends_with("clud-release-v1")));
+    assert!(rows.iter().any(|r| r.path.ends_with("soldr-wt-task")));
+    assert!(rows.iter().any(|r| r.path.ends_with("zccache-wt-task")));
+    assert!(!rows.iter().any(|r| r.path.ends_with("random-wt-task")));
+    assert!(!rows.iter().any(|r| r.path.ends_with("random-issue-178")));
+    assert!(!rows.iter().any(|r| r.path.ends_with("nested")));
+    assert!(!rows.iter().any(|r| r.path.ends_with("clud")));
+}
+
+#[test]
+fn reconcile_repo_root_counts_sibling_clones() {
+    let reg = fresh_registry("reconcile-repo-root-count");
+    let dir = tempfile::tempdir().unwrap();
+    let repo_root = dir.path().join("repo");
+    std::fs::create_dir_all(repo_root.join(".claude").join("worktrees").join("agent-a")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".extern-repos").join("dep-a")).unwrap();
+    std::fs::create_dir_all(dir.path().join("repo-wt-fix")).unwrap();
+
+    let inserted = reconcile_repo_root(&reg, &repo_root).unwrap();
+    assert_eq!(inserted, 3);
+
+    let rows = reg.list(None).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().any(|r| r.kind == WORKTREE_KIND));
+    assert!(rows.iter().any(|r| r.kind == EXTERN_REPO_KIND));
+    assert!(rows.iter().any(|r| r.kind == SIBLING_CLONE_KIND));
+}
+
+#[test]
 fn reconcile_dir_handles_missing_watch_dir() {
     let reg = fresh_registry("reconcile-missing");
     let dir = tempfile::tempdir().unwrap();
