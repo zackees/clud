@@ -24,9 +24,9 @@ Three hard rules:
 1. **`.gitignore` gate.** Check that `.gitignore` covers `.claude/` (for example `.claude/`, `.claude/**`, or `/.claude/`).
    - If yes, continue.
    - If no, delete any `.claude/worktrees/` created during this run, then either ask to add `.claude/` to `.gitignore` or use a sibling path outside the repo (`../<repo>-wt-<branch>/`). Do not create an unignored worktree inside the repo.
-2. **Stale worktrees.** Before creating a new worktree, scan `.claude/worktrees/*` for directories older than 24 hours. If any exist, list them and ask whether to delete them. Do not remove stale worktrees without permission.
+2. **Stale worktrees.** Before creating a new worktree, run `git worktree prune`, then scan `.claude/worktrees/*` for directories older than 24 hours. If any exist, list them and ask whether to delete them. Do not remove stale worktrees without permission.
 3. **Create the worktree.** `git fetch origin main && git worktree add -b feat/<short-name> .claude/worktrees/<branch> origin/main`. All edits, commits, lint, and tests happen inside that path.
-4. **Tear down.** After `gh pr create` succeeds, run `git worktree remove .claude/worktrees/<branch>` and confirm the entry is gone from `git worktree list`.
+4. **Tear down.** After `gh pr create` succeeds, run `git worktree remove .claude/worktrees/<branch>`, then `git worktree prune`, and confirm the entry is gone from `git worktree list`.
 
 ## Mode Selection
 
@@ -62,7 +62,7 @@ Look at the input first:
 7. **Clean tree gate.** Run `git status` inside the worktree. Commit source changes that belong in the PR. Delete tmp, scratch, and build artifacts. The worktree must be clean before push.
 8. **Commit.** Use a conventional commit. Reference the issue when one exists (`Closes #<num>` in the commit body or PR body). For freeform tasks, summarize the task instead.
 9. **Push and open PR.** `git push -u origin <branch>`, then `gh pr create`. The body should include the issue link when present, a concise summary, and tests run.
-10. **Remove the worktree.** Remove the worktree, confirm it is gone, then verify the main checkout's `git status` is clean.
+10. **Remove the worktree.** Run `git worktree remove .claude/worktrees/<branch>`, then `git worktree prune`, confirm it is gone, then verify the main checkout's `git status` is clean.
 11. **Final response.** Give the PR URL and any essential test note. Keep it short.
 
 ## Failure Modes To Avoid
