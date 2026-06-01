@@ -18,6 +18,16 @@ DIST = ROOT / "dist"
 BuildMode = Literal["dev", "release"]
 
 
+def build_environment(mode: BuildMode, env: dict[str, str]) -> dict[str, str]:
+    if mode == "release" and platform.system() == "Linux":
+        env = env.copy()
+        # maturin --zig delegates final linking to cargo-zigbuild's target
+        # linker. setup-soldr's fast linker shim forces host clang/mold, which
+        # cannot see Zig's Linux C++ runtime during manylinux wheel builds.
+        env["SOLDR_LINKER"] = "default"
+    return env
+
+
 def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[str]:
     from ci.env import maturin_argv
 
@@ -82,7 +92,7 @@ def install_wheel(wheel: Path, *, env: dict[str, str]) -> int:
 def run_build(mode: BuildMode) -> int:
     from ci.env import build_env
 
-    env = build_env()
+    env = build_environment(mode, build_env())
     DIST.mkdir(parents=True, exist_ok=True)
     before = {path.name for path in built_wheels()}
     cmd = build_command(mode, env=env)
