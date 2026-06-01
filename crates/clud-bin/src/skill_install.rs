@@ -46,6 +46,10 @@ const BUNDLED_SKILLS: &[Skill] = &[
         name: "clud-windows-trash",
         content: include_str!("../../../skills/clud-windows-trash/SKILL.md"),
     },
+    Skill {
+        name: "clud-extern-repos",
+        content: include_str!("../../../skills/clud-extern-repos/SKILL.md"),
+    },
 ];
 
 /// Run the install/check for every bundled skill on launch. Cheap on the
@@ -374,6 +378,10 @@ mod tests {
         assert!(
             names.contains(&"clud-windows-trash"),
             "clud-windows-trash missing from bundle"
+        );
+        assert!(
+            names.contains(&"clud-extern-repos"),
+            "clud-extern-repos missing from bundle"
         );
     }
 

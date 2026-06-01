@@ -233,6 +233,33 @@ fn reconcile_dir_inserts_agent_subdirs() {
 }
 
 #[test]
+fn reconcile_extern_repos_dir_inserts_immediate_child_dirs() {
+    let reg = fresh_registry("reconcile-extern-repos");
+    let dir = tempfile::tempdir().unwrap();
+    let repo_root = dir.path().join("repo");
+    let watch = repo_root.join(".extern-repos");
+    std::fs::create_dir_all(watch.join("dep-a")).unwrap();
+    std::fs::create_dir_all(watch.join("dep-b").join("nested")).unwrap();
+    std::fs::write(watch.join("README"), b"hi").unwrap();
+
+    let res = reconcile_extern_repos_dir(&reg, &watch, Some(&repo_root)).unwrap();
+    assert_eq!(res.inserted, 2);
+    assert_eq!(res.skipped, 0);
+
+    let rows = reg.list(None).unwrap();
+    let repo_root_str = repo_root.to_string_lossy().to_string();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.kind == EXTERN_REPO_KIND));
+    assert!(rows.iter().all(|r| r.agent_id.is_none()));
+    assert!(rows
+        .iter()
+        .all(|r| r.repo_root.as_deref() == Some(repo_root_str.as_str())));
+    assert!(rows.iter().any(|r| r.path.ends_with("dep-a")));
+    assert!(rows.iter().any(|r| r.path.ends_with("dep-b")));
+    assert!(!rows.iter().any(|r| r.path.ends_with("nested")));
+}
+
+#[test]
 fn reconcile_dir_handles_missing_watch_dir() {
     let reg = fresh_registry("reconcile-missing");
     let dir = tempfile::tempdir().unwrap();
