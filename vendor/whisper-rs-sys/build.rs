@@ -5,12 +5,20 @@ extern crate semver;
 
 use cmake::Config;
 use std::env;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 fn main() {
     let target = env::var("TARGET").unwrap();
+    println!("cargo:rerun-if-env-changed=CARGO_ZIGBUILD_RUSTC_VERSION");
+    println!("cargo:rerun-if-env-changed=ZIG_COMMAND");
+    println!("cargo:rerun-if-env-changed=CXX");
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        target_env_key("CXX", &target)
+    );
     // Link C++ standard library
     if let Some(cpp_stdlib) = get_cpp_link_stdlib(&target) {
         println!("cargo:rustc-link-lib=dylib={}", cpp_stdlib);
@@ -374,13 +382,47 @@ fn main() {
 fn get_cpp_link_stdlib(target: &str) -> Option<&'static str> {
     if target.contains("msvc") {
         None
-    } else if target.contains("apple") || target.contains("freebsd") || target.contains("openbsd") {
+    } else if target.contains("apple")
+        || target.contains("freebsd")
+        || target.contains("openbsd")
+    {
         Some("c++")
     } else if target.contains("android") {
         Some("c++_shared")
+    } else if linux_zig_cxx_toolchain(target) {
+        Some("c++")
     } else {
         Some("stdc++")
     }
+}
+
+fn linux_zig_cxx_toolchain(target: &str) -> bool {
+    if !target.contains("linux") {
+        return false;
+    }
+
+    // cargo-zigbuild uses Zig's C++ runtime on Linux; those objects carry
+    // std::__1 symbols, so linking libstdc++ leaves whisper.cpp unresolved.
+    env::var_os("CARGO_ZIGBUILD_RUSTC_VERSION").is_some()
+        || env::var_os("ZIG_COMMAND").is_some()
+        || env_value_mentions_zigcxx("CXX")
+        || env_value_mentions_zigcxx(&target_env_key("CXX", target))
+}
+
+fn target_env_key(prefix: &str, target: &str) -> String {
+    format!("{}_{}", prefix, target.replace('-', "_"))
+}
+
+fn env_value_mentions_zigcxx(key: &str) -> bool {
+    match env::var_os(key) {
+        Some(value) => os_str_mentions_zigcxx(&value),
+        None => false,
+    }
+}
+
+fn os_str_mentions_zigcxx(value: &OsStr) -> bool {
+    let value = value.to_string_lossy().to_ascii_lowercase();
+    value.contains("zigcxx") || value.contains("zig c++")
 }
 
 fn configure_windows_gnu_toolchain(config: &mut Config) {
