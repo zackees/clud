@@ -555,7 +555,7 @@ pub fn run_plan_pty(
         // the matching guard in `run_plan_subprocess` — same rationale.
         if interrupted.load(Ordering::SeqCst) {
             if verbose {
-                verbose_log::log("[clud] interrupted via Ctrl+C");
+                verbose_log::log("[clud] interrupted via Ctrl+C (pty)");
             }
             return 130;
         }
