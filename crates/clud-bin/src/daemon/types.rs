@@ -130,6 +130,8 @@ pub(super) enum DaemonRequest {
     Session {
         session_id: String,
     },
+    /// Return canonicalized CWDs for every live session snapshot.
+    ListLiveCwds,
     Terminate {
         session_id: String,
     },
@@ -153,6 +155,9 @@ pub(super) enum DaemonResponse {
     },
     Session {
         session: SessionSnapshot,
+    },
+    LiveCwds {
+        paths: Vec<PathBuf>,
     },
     Terminated {
         session: SessionSnapshot,
@@ -419,6 +424,33 @@ mod tests {
         let wire = serde_json::to_string(&DaemonRequest::Shutdown).unwrap();
         let parsed: DaemonRequest = serde_json::from_str(&wire).unwrap();
         assert!(matches!(parsed, DaemonRequest::Shutdown));
+    }
+
+    #[test]
+    fn list_live_cwds_request_serializes_as_tagged_op() {
+        let wire = serde_json::to_string(&DaemonRequest::ListLiveCwds).unwrap();
+        assert_eq!(wire, r#"{"op":"list_live_cwds"}"#);
+    }
+
+    #[test]
+    fn live_cwds_response_roundtrips_with_paths() {
+        let response = DaemonResponse::LiveCwds {
+            paths: vec![PathBuf::from("/tmp/live-a"), PathBuf::from("/tmp/live-b")],
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(wire.contains(r#""op":"live_cwds""#));
+        assert!(wire.contains(r#"/tmp/live-a"#));
+
+        let parsed: DaemonResponse = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonResponse::LiveCwds { paths } => {
+                assert_eq!(
+                    paths,
+                    vec![PathBuf::from("/tmp/live-a"), PathBuf::from("/tmp/live-b")]
+                );
+            }
+            other => panic!("expected LiveCwds, got {other:?}"),
+        }
     }
 
     #[test]
