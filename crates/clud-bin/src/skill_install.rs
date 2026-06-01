@@ -158,8 +158,17 @@ fn update_diverges(path: &Path, skill: &Skill) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use std::fs;
     use tempfile::TempDir;
+
+    #[derive(Debug, Deserialize)]
+    struct SkillFrontmatter {
+        name: String,
+        description: String,
+        #[serde(default)]
+        triggers: Vec<String>,
+    }
 
     /// Embedded copy of the canonical clud-pr skill — used as the
     /// embedded-content reference in the install state-transition tests.
@@ -168,6 +177,25 @@ mod tests {
     /// here too.
     fn ref_skill() -> &'static Skill {
         &BUNDLED_SKILLS[0]
+    }
+
+    fn frontmatter_yaml<'a>(skill_name: &str, skill_md: &'a str) -> &'a str {
+        let Some(after_open) = skill_md
+            .strip_prefix("---\r\n")
+            .or_else(|| skill_md.strip_prefix("---\n"))
+        else {
+            panic!("skill {skill_name} must start with YAML frontmatter");
+        };
+        let Some(end) = after_open.find("\n---") else {
+            panic!("skill {skill_name} missing closing YAML frontmatter marker");
+        };
+        &after_open[..end]
+    }
+
+    fn parse_frontmatter(skill: &Skill) -> SkillFrontmatter {
+        serde_yaml::from_str(frontmatter_yaml(skill.name, skill.content)).unwrap_or_else(|err| {
+            panic!("skill {} has invalid YAML frontmatter: {err}", skill.name)
+        })
     }
 
     /// Mirror of [`ensure_skill_installed`] but routed at a caller-supplied
@@ -293,10 +321,10 @@ mod tests {
     }
 
     #[test]
-    fn every_bundled_skill_has_real_content() {
+    fn every_bundled_skill_has_real_content_and_valid_frontmatter() {
         // Compile-time + content guard: if someone deletes a skill file
         // the include_str! still compiles to "" — assert every entry has
-        // real frontmatter so a missing file is caught here, not by the
+        // real YAML frontmatter so a missing file is caught here, not by the
         // user reading an empty SKILL.md from their home dir.
         assert!(!BUNDLED_SKILLS.is_empty(), "no bundled skills?");
         for skill in BUNDLED_SKILLS {
@@ -306,11 +334,20 @@ mod tests {
                 skill.name,
                 skill.content.len()
             );
-            let frontmatter_marker = format!("name: {}", skill.name);
+            let frontmatter = parse_frontmatter(skill);
+            assert_eq!(
+                frontmatter.name, skill.name,
+                "skill {} frontmatter name must match BUNDLED_SKILLS entry",
+                skill.name
+            );
             assert!(
-                skill.content.contains(&frontmatter_marker),
-                "skill {} content missing 'name: {}' frontmatter — bad include_str path?",
-                skill.name,
+                !frontmatter.description.trim().is_empty(),
+                "skill {} missing frontmatter description",
+                skill.name
+            );
+            assert!(
+                !frontmatter.triggers.is_empty(),
+                "skill {} missing frontmatter triggers",
                 skill.name
             );
         }

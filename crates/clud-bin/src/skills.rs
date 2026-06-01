@@ -194,7 +194,35 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use tempfile::tempdir;
+
+    #[derive(Debug, Deserialize)]
+    struct SkillFrontmatter {
+        name: String,
+        description: String,
+        #[serde(default)]
+        triggers: Vec<String>,
+    }
+
+    fn frontmatter_yaml<'a>(skill_name: &str, skill_md: &'a str) -> &'a str {
+        let Some(after_open) = skill_md
+            .strip_prefix("---\r\n")
+            .or_else(|| skill_md.strip_prefix("---\n"))
+        else {
+            panic!("skill {skill_name} must start with YAML frontmatter");
+        };
+        let Some(end) = after_open.find("\n---") else {
+            panic!("skill {skill_name} missing closing YAML frontmatter marker");
+        };
+        &after_open[..end]
+    }
+
+    fn parse_frontmatter(skill: &BundledSkill) -> SkillFrontmatter {
+        serde_yaml::from_str(frontmatter_yaml(skill.name, skill.skill_md)).unwrap_or_else(|err| {
+            panic!("skill {} has invalid YAML frontmatter: {err}", skill.name)
+        })
+    }
 
     fn fake_skills() -> Vec<BundledSkill> {
         vec![
@@ -272,6 +300,29 @@ mod tests {
                 s.skill_md.contains("managed-by: clud"),
                 "skill {} missing managed-by marker",
                 s.name
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_skill_frontmatter_is_valid_yaml() {
+        assert!(!BUNDLED_SKILLS.is_empty());
+        for skill in BUNDLED_SKILLS {
+            let frontmatter = parse_frontmatter(skill);
+            assert_eq!(
+                frontmatter.name, skill.name,
+                "skill {} frontmatter name must match BUNDLED_SKILLS entry",
+                skill.name
+            );
+            assert!(
+                !frontmatter.description.trim().is_empty(),
+                "skill {} missing frontmatter description",
+                skill.name
+            );
+            assert!(
+                !frontmatter.triggers.is_empty(),
+                "skill {} missing frontmatter triggers",
+                skill.name
             );
         }
     }
