@@ -243,121 +243,125 @@ fn opts(stale_after: Duration, force: bool) -> CleanOptions {
     }
 }
 
+fn days(n: u64) -> Duration {
+    Duration::from_secs(86_400 * n)
+}
+
+fn inputs(status: WorktreeStatus, age: Duration) -> StalenessInputs {
+    StalenessInputs {
+        status,
+        age,
+        lock_status: LockStatus::Unlocked,
+        locked_hard_age: days(7),
+    }
+}
+
+fn locked_inputs(
+    status: WorktreeStatus,
+    age: Duration,
+    lock_status: LockStatus,
+) -> StalenessInputs {
+    StalenessInputs {
+        status,
+        age,
+        lock_status,
+        locked_hard_age: days(7),
+    }
+}
+
 #[test]
 fn decide_clean_and_old_is_removed() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::Clean,
-        age: Duration::from_secs(86_400 * 2),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::Clean, days(2)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert!(matches!(act, Action::Remove(_)));
 }
 
 #[test]
 fn decide_clean_but_fresh_is_ignored() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::Clean,
-        age: Duration::from_secs(60),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::Clean, Duration::from_secs(60)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert_eq!(act, Action::Ignore);
 }
 
 #[test]
 fn decide_branch_gone_is_always_removed() {
     // Even when fresh, a [gone] upstream → remove.
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::BranchGone,
-        age: Duration::from_secs(1),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::BranchGone, Duration::from_secs(1)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert!(matches!(act, Action::Remove(_)));
 }
 
 #[test]
 fn decide_dirty_without_force_is_skipped() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::Dirty,
-        age: Duration::from_secs(86_400 * 30),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::Dirty, days(30)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert!(matches!(act, Action::Skip(_)));
 }
 
 #[test]
 fn decide_dirty_with_force_is_removed() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::Dirty,
-        age: Duration::from_secs(86_400 * 30),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), true));
+    let act = decide_action(
+        inputs(WorktreeStatus::Dirty, days(30)),
+        &opts(Duration::from_secs(86_400), true),
+    );
     assert!(matches!(act, Action::Remove(_)));
 }
 
 #[test]
 fn decide_unpushed_without_force_is_skipped() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::Unpushed,
-        age: Duration::from_secs(86_400 * 30),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::Unpushed, days(30)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert!(matches!(act, Action::Skip(_)));
 }
 
 #[test]
 fn decide_unpushed_with_force_is_removed() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::Unpushed,
-        age: Duration::from_secs(86_400 * 30),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), true));
+    let act = decide_action(
+        inputs(WorktreeStatus::Unpushed, days(30)),
+        &opts(Duration::from_secs(86_400), true),
+    );
     assert!(matches!(act, Action::Remove(_)));
 }
 
 #[test]
 fn decide_no_upstream_fresh_is_ignored() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::NoUpstream,
-        age: Duration::from_secs(60),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::NoUpstream, Duration::from_secs(60)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert_eq!(act, Action::Ignore);
 }
 
 #[test]
 fn decide_no_upstream_stale_skipped_without_force() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::NoUpstream,
-        age: Duration::from_secs(86_400 * 30),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), false));
+    let act = decide_action(
+        inputs(WorktreeStatus::NoUpstream, days(30)),
+        &opts(Duration::from_secs(86_400), false),
+    );
     assert!(matches!(act, Action::Skip(_)));
 }
 
 #[test]
 fn decide_no_upstream_stale_removed_with_force() {
-    let inputs = StalenessInputs {
-        status: WorktreeStatus::NoUpstream,
-        age: Duration::from_secs(86_400 * 30),
-        locked: false,
-    };
-    let act = decide_action(inputs, &opts(Duration::from_secs(86_400), true));
+    let act = decide_action(
+        inputs(WorktreeStatus::NoUpstream, days(30)),
+        &opts(Duration::from_secs(86_400), true),
+    );
     assert!(matches!(act, Action::Remove(_)));
 }
 
-/// Locked worktrees must NEVER be removed — not even with `--force`.
-/// This is the critical safety invariant the issue calls out.
 #[test]
-fn decide_locked_never_removed_even_with_force() {
+fn decide_fresh_live_locks_are_skipped_even_with_force() {
     for status in [
         WorktreeStatus::Clean,
         WorktreeStatus::Dirty,
@@ -365,17 +369,240 @@ fn decide_locked_never_removed_even_with_force() {
         WorktreeStatus::NoUpstream,
         WorktreeStatus::BranchGone,
     ] {
-        let inputs = StalenessInputs {
-            status,
-            age: Duration::from_secs(86_400 * 365),
-            locked: true,
-        };
-        let act = decide_action(inputs, &opts(Duration::from_secs(86_400), true));
+        let act = decide_action(
+            locked_inputs(status, days(7), LockStatus::LivePid(12345)),
+            &opts(Duration::from_secs(86_400), true),
+        );
         assert!(
             matches!(act, Action::Skip(_)),
-            "locked + {status:?} must be Skip, got {act:?}"
+            "live locked + {status:?} must be Skip, got {act:?}"
         );
     }
+}
+
+#[test]
+fn decide_stale_live_lock_can_remove_clean_worktree_after_hard_age() {
+    let act = decide_action(
+        locked_inputs(WorktreeStatus::Clean, days(8), LockStatus::LivePid(12345)),
+        &opts(Duration::from_secs(86_400), false),
+    );
+    let Action::Remove(reason) = act else {
+        panic!("expected hard-aged live lock to be removable when clean, got {act:?}");
+    };
+    assert!(reason.contains("stale lock (pid 12345 still alive; hard age exceeded)"));
+    assert!(reason.contains("clean + stale"));
+}
+
+#[test]
+fn decide_fresh_dead_or_unknown_locks_are_skipped() {
+    for lock_status in [LockStatus::DeadPid(12345), LockStatus::NoPid] {
+        let act = decide_action(
+            locked_inputs(WorktreeStatus::BranchGone, days(7), lock_status),
+            &opts(Duration::from_secs(86_400), true),
+        );
+        assert!(
+            matches!(act, Action::Skip(_)),
+            "{lock_status:?} at hard-age boundary must be skipped, got {act:?}"
+        );
+    }
+}
+
+#[test]
+fn decide_stale_dead_lock_can_remove_clean_worktree() {
+    let act = decide_action(
+        locked_inputs(WorktreeStatus::Clean, days(8), LockStatus::DeadPid(12345)),
+        &opts(Duration::from_secs(86_400), false),
+    );
+    let Action::Remove(reason) = act else {
+        panic!("expected stale dead lock to be removable when clean, got {act:?}");
+    };
+    assert!(reason.contains("stale lock (dead pid 12345)"));
+    assert!(reason.contains("clean + stale"));
+}
+
+#[test]
+fn decide_stale_no_pid_lock_can_remove_branch_gone_worktree() {
+    let act = decide_action(
+        locked_inputs(WorktreeStatus::BranchGone, days(8), LockStatus::NoPid),
+        &opts(Duration::from_secs(86_400), false),
+    );
+    let Action::Remove(reason) = act else {
+        panic!("expected stale no-pid lock to be removable when branch is gone, got {act:?}");
+    };
+    assert!(reason.contains("stale lock (no pid)"));
+    assert!(reason.contains("upstream branch gone"));
+}
+
+#[test]
+fn decide_stale_dead_lock_still_requires_force_for_dirty_worktree() {
+    let without_force = decide_action(
+        locked_inputs(WorktreeStatus::Dirty, days(8), LockStatus::DeadPid(12345)),
+        &opts(Duration::from_secs(86_400), false),
+    );
+    assert!(matches!(without_force, Action::Skip(_)));
+
+    let with_force = decide_action(
+        locked_inputs(WorktreeStatus::Dirty, days(8), LockStatus::DeadPid(12345)),
+        &opts(Duration::from_secs(86_400), true),
+    );
+    assert!(matches!(with_force, Action::Remove(_)));
+}
+
+#[test]
+fn locked_hard_age_defaults_to_seven_days() {
+    assert_eq!(locked_hard_age_from_raw(None), days(7));
+    assert_eq!(locked_hard_age_from_raw(Some("3")), days(3));
+    assert_eq!(locked_hard_age_from_raw(Some("not-a-number")), days(7));
+}
+
+fn classified_locked(
+    name: &str,
+    status: WorktreeStatus,
+    age: Duration,
+    reason: Option<&str>,
+) -> Classified {
+    Classified {
+        entry: WorktreeEntry {
+            path: PathBuf::from(format!("/tmp/{name}")),
+            head: None,
+            branch: None,
+            bare: false,
+            detached: false,
+            locked: true,
+            locked_reason: reason.map(str::to_string),
+            prunable: false,
+        },
+        status,
+        age,
+        is_main: false,
+    }
+}
+
+#[test]
+fn build_plan_uses_lock_reason_pid_liveness() {
+    let rows = vec![
+        classified_locked(
+            "live",
+            WorktreeStatus::Clean,
+            days(6),
+            Some("claude agent agent-live (pid 111)"),
+        ),
+        classified_locked(
+            "dead",
+            WorktreeStatus::Clean,
+            days(8),
+            Some("claude agent agent-dead (pid 222)"),
+        ),
+    ];
+    let probe = crate::session_registry::MockLivenessProbe::with_alive([111]);
+    let plan = build_plan_with_liveness(&rows, &opts(days(1), false), &probe, days(7));
+
+    assert_eq!(plan.candidates.len(), 1);
+    assert!(plan.candidates[0].entry.path.ends_with("dead"));
+    assert!(plan.candidates[0].reason.contains("dead pid 222"));
+    assert_eq!(plan.skipped.len(), 1);
+    assert!(plan.skipped[0].entry.path.ends_with("live"));
+    assert!(plan.skipped[0].reason.contains("live pid 111"));
+}
+
+#[test]
+fn remove_worktree_path_falls_back_when_git_success_leaves_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let wt = tmp.path().join("wt");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    std::fs::create_dir_all(&wt).expect("worktree dir");
+    std::fs::write(wt.join("file.txt"), "content").expect("worktree file");
+
+    let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+    let outcome = remove_worktree_path_with_git(&repo, &wt, false, |cwd, args| {
+        assert_eq!(cwd, repo.as_path());
+        calls
+            .borrow_mut()
+            .push(args.iter().map(|s| s.to_string()).collect());
+        Ok(String::new())
+    })
+    .expect("fallback should remove directory and prune");
+
+    assert_eq!(outcome, RemovalOutcome::FallbackAfterGitSuccess);
+    assert!(!wt.exists());
+    let calls = calls.into_inner();
+    assert_eq!(
+        calls[0],
+        vec![
+            "worktree".to_string(),
+            "remove".to_string(),
+            wt.to_string_lossy().to_string()
+        ]
+    );
+    assert_eq!(
+        calls[1],
+        vec![
+            "worktree".to_string(),
+            "unlock".to_string(),
+            wt.to_string_lossy().to_string()
+        ]
+    );
+    assert_eq!(
+        calls[2],
+        vec![
+            "worktree".to_string(),
+            "prune".to_string(),
+            "--expire=now".to_string()
+        ]
+    );
+}
+
+#[test]
+fn remove_worktree_path_falls_back_when_git_remove_fails_and_dir_remains() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let wt = tmp.path().join("wt");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    std::fs::create_dir_all(&wt).expect("worktree dir");
+
+    let wt_arg = wt.to_string_lossy().to_string();
+    let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+    let outcome = remove_worktree_path_with_git(&repo, &wt, true, |_, args| {
+        calls
+            .borrow_mut()
+            .push(args.iter().map(|s| s.to_string()).collect());
+        if args == ["worktree", "remove", "--force", wt_arg.as_str()] {
+            Err("locked worktree".to_string())
+        } else {
+            Ok(String::new())
+        }
+    })
+    .expect("fallback should remove directory and prune");
+
+    assert_eq!(outcome, RemovalOutcome::FallbackAfterGitFailure);
+    assert!(!wt.exists());
+    let calls = calls.into_inner();
+    assert_eq!(
+        calls[0],
+        vec![
+            "worktree".to_string(),
+            "remove".to_string(),
+            "--force".to_string(),
+            wt.to_string_lossy().to_string()
+        ]
+    );
+    assert_eq!(
+        calls[1],
+        vec![
+            "worktree".to_string(),
+            "unlock".to_string(),
+            wt.to_string_lossy().to_string()
+        ]
+    );
+    assert_eq!(
+        calls[2],
+        vec![
+            "worktree".to_string(),
+            "prune".to_string(),
+            "--expire=now".to_string()
+        ]
+    );
 }
 
 #[test]

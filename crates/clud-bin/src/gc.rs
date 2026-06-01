@@ -55,6 +55,7 @@ const META_NEXT_ID: &str = "next_id";
 
 pub const WORKTREE_KIND: &str = "worktree";
 pub const EXTERN_REPO_KIND: &str = "extern-repo";
+pub const SIBLING_CLONE_KIND: &str = "sibling-clone";
 
 /// Errors surfaced by `gc.rs`. Narrow on purpose — the CLI handlers
 /// stringify these and log; nothing branches on the variant.
@@ -444,11 +445,20 @@ pub fn extract_pid_from_lock_reason(reason: &str) -> Option<u32> {
 /// of new entries (i.e. rows that didn't previously exist).
 pub fn run_reconcile(registry: &Registry) -> Result<usize, GcError> {
     let main_root = worktrees::locate_main_repo_root().map_err(GcError::Io)?;
+    reconcile_repo_root(registry, &main_root)
+}
+
+/// Reconcile all tracked directories associated with `main_root`.
+///
+/// This scans repo-local worktrees, repo-local `.extern-repos/`, and
+/// top-level sibling temp clones adjacent to the main checkout.
+pub fn reconcile_repo_root(registry: &Registry, main_root: &Path) -> Result<usize, GcError> {
     let watch_dir = main_root.join(".claude").join("worktrees");
-    let worktree_res = reconcile_dir(registry, &watch_dir, Some(&main_root))?;
+    let worktree_res = reconcile_dir(registry, &watch_dir, Some(main_root))?;
     let extern_res =
-        reconcile_extern_repos_dir(registry, &main_root.join(".extern-repos"), Some(&main_root))?;
-    Ok(worktree_res.inserted + extern_res.inserted)
+        reconcile_extern_repos_dir(registry, &main_root.join(".extern-repos"), Some(main_root))?;
+    let sibling_res = reconcile_sibling_clones_dir(registry, main_root)?;
+    Ok(worktree_res.inserted + extern_res.inserted + sibling_res.inserted)
 }
 
 /// Result of one scan pass.
@@ -485,10 +495,30 @@ pub fn reconcile_extern_repos_dir(
     reconcile_dir_with_kind(registry, watch_dir, repo_root, ScanKind::ExternRepo)
 }
 
+/// Walk the parent of `repo_root` and insert immediate child directories
+/// that look like disposable sibling clones created by clud/soldr tooling.
+///
+/// Matching is intentionally narrow: explicit tool prefixes are accepted,
+/// and broad `*-wt-*` / `*-issue-*` examples are interpreted only as
+/// current-repo-scoped names such as `<repo>-wt-<branch>`.
+pub fn reconcile_sibling_clones_dir(
+    registry: &Registry,
+    repo_root: &Path,
+) -> Result<ScanResult, GcError> {
+    let Some(parent) = repo_root.parent() else {
+        return Ok(ScanResult::default());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(ScanResult::default());
+    }
+    reconcile_dir_with_kind(registry, parent, Some(repo_root), ScanKind::SiblingClone)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ScanKind {
     Worktree,
     ExternRepo,
+    SiblingClone,
 }
 
 impl ScanKind {
@@ -496,21 +526,72 @@ impl ScanKind {
         match self {
             Self::Worktree => WORKTREE_KIND,
             Self::ExternRepo => EXTERN_REPO_KIND,
+            Self::SiblingClone => SIBLING_CLONE_KIND,
         }
     }
 
-    fn accepts_dir_name(self, name: &str) -> bool {
+    fn accepts_dir_name(self, name: &str, repo_root: Option<&Path>) -> bool {
         match self {
             Self::Worktree => name.starts_with("agent-"),
             Self::ExternRepo => true,
+            Self::SiblingClone => repo_root
+                .and_then(repo_name)
+                .map(|repo| is_sibling_clone_dir_name(repo, name))
+                .unwrap_or(false),
         }
     }
 
     fn agent_id(self, name: &str) -> Option<String> {
         match self {
             Self::Worktree => Some(name.to_string()),
-            Self::ExternRepo => None,
+            Self::ExternRepo | Self::SiblingClone => None,
         }
+    }
+}
+
+fn repo_name(repo_root: &Path) -> Option<&str> {
+    repo_root.file_name().and_then(|name| name.to_str())
+}
+
+fn is_sibling_clone_dir_name(repo_name: &str, name: &str) -> bool {
+    if repo_name.is_empty() || name == repo_name {
+        return false;
+    }
+
+    // Explicit temp-clone prefixes used by clud and related tooling.
+    // The broader issue examples `*-wt-*` and `*-issue-*` are handled
+    // below only when they are scoped to the current repo name.
+    const TOOL_PREFIXES: &[&str] = &[
+        "clud-pr-",
+        "clud-release-",
+        "clud-issue-",
+        "soldr-wt-",
+        "zccache-wt-",
+    ];
+    if TOOL_PREFIXES
+        .iter()
+        .any(|prefix| has_nonempty_suffix(name, prefix))
+    {
+        return true;
+    }
+
+    has_nonempty_suffix(name, &format!("{repo_name}-wt-"))
+        || has_nonempty_suffix(name, &format!("{repo_name}-issue-"))
+}
+
+fn has_nonempty_suffix(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .map(|suffix| !suffix.is_empty())
+        .unwrap_or(false)
+}
+
+fn path_matches_repo_root(path: &Path, repo_root: &Path) -> bool {
+    if path == repo_root {
+        return true;
+    }
+    match (path.canonicalize(), repo_root.canonicalize()) {
+        (Ok(path), Ok(repo_root)) => path == repo_root,
+        _ => false,
     }
 }
 
@@ -539,10 +620,17 @@ fn reconcile_dir_with_kind(
             Some(s) => s,
             None => continue,
         };
-        if !scan_kind.accepts_dir_name(name_str) {
+        if !scan_kind.accepts_dir_name(name_str, repo_root) {
             continue;
         }
         let path = entry.path();
+        if matches!(scan_kind, ScanKind::SiblingClone)
+            && repo_root
+                .map(|root| path_matches_repo_root(&path, root))
+                .unwrap_or(false)
+        {
+            continue;
+        }
         let path_str = path.to_string_lossy().to_string();
 
         let existed_before = registry_has_entry(registry, scan_kind.kind(), &path_str)?;
@@ -634,6 +722,22 @@ impl WorktreeScanner {
         ))
     }
 
+    /// Spawn a scanner watching top-level sibling temp clones next to the
+    /// current repo. Returns `None` if the repo root can't be located or
+    /// has no parent directory.
+    pub fn maybe_spawn_sibling_clones() -> Option<Self> {
+        let main_root = match worktrees::locate_main_repo_root() {
+            Ok(p) => p,
+            Err(_) => return None,
+        };
+        let parent = main_root.parent()?.to_path_buf();
+        Some(Self::spawn_with_kind(
+            parent,
+            Some(main_root),
+            ScanKind::SiblingClone,
+        ))
+    }
+
     /// Explicit spawn. Tests pass a custom watch dir. Inserts go through
     /// the GC daemon IPC; if the daemon is unreachable the scanner gives
     /// up silently.
@@ -700,10 +804,17 @@ fn scan_once_via_ipc(
             Some(s) => s.to_string(),
             None => continue,
         };
-        if !scan_kind.accepts_dir_name(&name_str) {
+        if !scan_kind.accepts_dir_name(&name_str, repo_root) {
             continue;
         }
         let path = entry.path();
+        if matches!(scan_kind, ScanKind::SiblingClone)
+            && repo_root
+                .map(|root| path_matches_repo_root(&path, root))
+                .unwrap_or(false)
+        {
+            continue;
+        }
         let path_str = path.to_string_lossy().to_string();
         let branch = best_effort_branch(&path);
         let input = InsertInput {

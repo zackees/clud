@@ -2,8 +2,9 @@
 
 `clud` maintains two separate `redb` databases for two separate concerns: a per-launch
 **session cap** that bounds how many sibling `clud` processes may run concurrently, and a
-**tracked-entry GC** that owns the lifecycle of `.claude/worktrees/agent-*` directories across
-repos and across invocations. The two stores live in different files, on different code paths,
+**tracked-entry GC** that owns the lifecycle of `.claude/worktrees/agent-*`, `.extern-repos/*`,
+and known sibling temp-clone directories across repos and across invocations. The two stores live
+in different files, on different code paths,
 with different ownership models — they have nothing to do with each other besides both being
 `redb`-backed, and confusing them is the single fastest way to wedge the system. This doc covers
 both, plus the worktree scanner that feeds the GC store and the unrelated `--clean-worktrees`
@@ -14,7 +15,7 @@ subcommand.
 | File | Concern | Ownership | Lifetime |
 |---|---|---|---|
 | `sessions.redb` (POSIX: `$XDG_STATE_HOME/clud/`; Windows: `%LOCALAPPDATA%\clud\`) | Per-launch session cap | File-lock serialized via `sessions.lock` | Opened for ms at startup and again at shutdown; never across the session |
-| `~/.clud/data.redb` | Tracked-entry GC (`agent-*` worktrees) | Single-owner: the always-on `clud __daemon` process owns it via the in-process `daemon/gc_service.rs` registry-worker thread; everyone else uses JSON-over-TCP | Opened once at daemon startup; lives until the daemon idle-shuts |
+| `~/.clud/data.redb` | Tracked-entry GC (`agent-*` worktrees, extern repos, sibling temp clones) | Single-owner: the always-on `clud __daemon` process owns it via the in-process `daemon/gc_service.rs` registry-worker thread; everyone else uses JSON-over-TCP | Opened once at daemon startup; lives until the daemon idle-shuts |
 
 Why two files? The session cap is a *guardrail* — it needs the simplest possible "open, decide,
 close" semantics so a crashed `clud` can never deadlock the next one. The tracked-entry GC is a
@@ -127,22 +128,25 @@ All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
 - **`clud gc purge [--duration 7d] [--kind worktree] [--dry-run] [--yes]`** — `cmd_purge`
   pre-validates the duration string locally, then calls `daemon::gc_client_purge`. The daemon
   selects candidates (all rows, or rows older than `now - duration`), partitions out
-  live-locked worktrees, and either reports the count (dry-run) or runs `git worktree remove
-  --force` (falling back to `remove_dir_all` if git refuses) and deletes the row. Bare
+  live-locked worktrees or live session CWD ancestors, and either reports the count (dry-run) or
+  runs verified removal. Worktree rows use `git worktree remove --force`; if git fails or reports
+  success while the directory survives, clud falls back to direct removal plus `git worktree prune`.
+  Bare
   `clud gc purge` (no `--duration`) is interactive and asks for `y/N` confirmation unless
   `--yes`.
 - **`clud gc reconcile`** — `cmd_reconcile` calls `daemon::gc_client_reconcile` with the
-  current repo root. The daemon walks `<repo>/.claude/worktrees/` and inserts any agent-*
-  subdir that isn't already tracked. Returns the count of new rows.
+  current repo root. The daemon walks `<repo>/.claude/worktrees/`, `<repo>/.extern-repos/`, and
+  conservative sibling temp-clone names next to the repo. Returns the count of new rows.
 
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
 (`crates/clud-bin/src/gc.rs:591`).
 
 ## Worktree scanner
 
-`WorktreeScanner` (`crates/clud-bin/src/gc.rs:459`) is a polling thread spawned at clud startup
-from `main.rs:296` via `WorktreeScanner::maybe_spawn()`. It walks `<repo>/.claude/worktrees/`
-every ~2 seconds and sends `gc.insert` IPC ops for any `agent-*` subdir it sees. The scanner is
+`WorktreeScanner` (`crates/clud-bin/src/gc.rs`) is a polling thread spawned at clud startup
+from `main.rs` via `WorktreeScanner::maybe_spawn*()`. It walks `<repo>/.claude/worktrees/`,
+`<repo>/.extern-repos/`, and conservative sibling temp-clone names every ~2 seconds and sends
+`gc.insert` IPC ops for matching immediate subdirs it sees. The scanner is
 **insert-only**: rows that already exist are no-ops (`Registry::insert_if_new` at
 `crates/clud-bin/src/gc.rs:198`), so there is no per-cycle write churn.
 
@@ -169,9 +173,11 @@ It enumerates via `git worktree list --porcelain`, classifies each entry as
 and removes those that are *safe* — clean AND (older than `--stale-after` OR upstream `[gone]`).
 `--force` widens the safe set to include `dirty` and `unpushed`.
 
-**Locked worktrees are never removed, even with `--force`**
-(`crates/clud-bin/src/worktrees.rs:268`). `--dry-run` is a faithful preview: nothing is mutated
-until the actual `git worktree remove` invocation.
+Locked worktrees with fresh live/unknown/dead lock reasons are skipped. Once a lock exceeds
+`CLUD_GC_LOCKED_HARD_AGE_DAYS` (default 7), `--clean-worktrees` presumes it is orphaned and lets
+the entry pass through the same clean/dirty/unpushed/no-upstream/force rules as an unlocked
+worktree. `--dry-run` is a faithful preview: nothing is mutated until the actual verified
+worktree removal path.
 
 The GC daemon does borrow `parse_worktree_porcelain` and the "extract pid from locked-reason"
 helper from this module to compute the `live_locked` flag on `gc.list` output, but the two flows

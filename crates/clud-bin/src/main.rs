@@ -304,9 +304,10 @@ fn main() {
     }
     let _session_guard = startup::enforce_session_cap();
 
-    // Issue #110/#181: spawn background GC scanners. They poll the current
-    // repo's `.claude/worktrees/` and `.extern-repos/` directories every
-    // ~2s and insert newly-detected tracked entries.
+    // Issue #110/#181/#178: spawn background GC scanners. They poll the
+    // current repo's `.claude/worktrees/`, `.extern-repos/`, and sibling
+    // temp-clone directories every ~2s and insert newly-detected tracked
+    // entries.
     // Existing rows are left alone — the scanner is insert-only, no
     // write churn. `Drop` joins the worker thread; explicit `drop` below
     // sequences cancellation before the session-registry guard.
@@ -315,6 +316,7 @@ fn main() {
     }
     let _scanner_guard = gc::WorktreeScanner::maybe_spawn();
     let _extern_repo_scanner_guard = gc::WorktreeScanner::maybe_spawn_extern_repos();
+    let _sibling_clone_scanner_guard = gc::WorktreeScanner::maybe_spawn_sibling_clones();
 
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
     // short-circuit on iteration 1. See loop_spec for semantics.
@@ -384,6 +386,7 @@ fn main() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
         session.on_loop_end(summary, err);
     }
+    drop(_sibling_clone_scanner_guard);
     drop(_extern_repo_scanner_guard);
     drop(_scanner_guard);
     drop(_session_guard);

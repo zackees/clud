@@ -16,8 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
 use crate::gc::{
-    extract_pid_from_lock_reason, reconcile_dir, reconcile_extern_repos_dir, InsertInput, Registry,
-    TrackedEntry, EXTERN_REPO_KIND, WORKTREE_KIND,
+    extract_pid_from_lock_reason, reconcile_repo_root, InsertInput, Registry, TrackedEntry,
+    EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND,
 };
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::subprocess;
@@ -32,9 +32,18 @@ pub(super) const WORKER_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ENV_GC_TICK_SECS: &str = "CLUD_GC_TICK_SECS";
 const ENV_GC_EXTERN_REPO_MAX_AGE_SECS: &str = "CLUD_GC_EXTERN_REPO_MAX_AGE_SECS";
+const ENV_GC_WARN_FREE_GB: &str = "CLUD_GC_WARN_FREE_GB";
+const ENV_GC_AUTO_PURGE_FREE_GB: &str = "CLUD_GC_AUTO_PURGE_FREE_GB";
+const ENV_GC_MIN_AGE_HOURS: &str = "CLUD_GC_MIN_AGE_HOURS";
+const ENV_GC_AUTO_PURGE_ENABLED: &str = "CLUD_GC_AUTO_PURGE_ENABLED";
 const DEFAULT_GC_TICK_SECS: u64 = 3600;
 const DEFAULT_EXTERN_REPO_STALE_AFTER_SECS: u64 = 24 * 60 * 60;
+const DEFAULT_GC_WARN_FREE_GB: u64 = 10;
+const DEFAULT_GC_AUTO_PURGE_FREE_GB: u64 = 5;
+const DEFAULT_GC_MIN_AGE_HOURS: u64 = 24;
+const DEFAULT_GC_AUTO_PURGE_ENABLED: bool = true;
 const PERIODIC_GC_WORKTREE_STALE_AFTER: &str = "48h";
+const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
 
 #[cfg(test)]
 const ENV_TEST_GH_BIN: &str = "CLUD_TEST_GH_BIN";
@@ -105,6 +114,74 @@ fn gc_tick_cadence_from_raw(raw: Option<&str>) -> Option<Duration> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GcDiskWatchdogConfig {
+    warn_free_bytes: u64,
+    auto_purge_free_bytes: u64,
+    min_age: Duration,
+    auto_purge_enabled: bool,
+}
+
+impl GcDiskWatchdogConfig {
+    fn from_env() -> Self {
+        let warn_free_gb = std::env::var(ENV_GC_WARN_FREE_GB).ok();
+        let auto_purge_free_gb = std::env::var(ENV_GC_AUTO_PURGE_FREE_GB).ok();
+        let min_age_hours = std::env::var(ENV_GC_MIN_AGE_HOURS).ok();
+        let auto_purge_enabled = std::env::var(ENV_GC_AUTO_PURGE_ENABLED).ok();
+        gc_disk_watchdog_config_from_raw(
+            warn_free_gb.as_deref(),
+            auto_purge_free_gb.as_deref(),
+            min_age_hours.as_deref(),
+            auto_purge_enabled.as_deref(),
+        )
+    }
+}
+
+fn gc_disk_watchdog_config_from_raw(
+    warn_free_gb: Option<&str>,
+    auto_purge_free_gb: Option<&str>,
+    min_age_hours: Option<&str>,
+    auto_purge_enabled: Option<&str>,
+) -> GcDiskWatchdogConfig {
+    GcDiskWatchdogConfig {
+        warn_free_bytes: parse_gb_to_bytes(warn_free_gb, DEFAULT_GC_WARN_FREE_GB),
+        auto_purge_free_bytes: parse_gb_to_bytes(auto_purge_free_gb, DEFAULT_GC_AUTO_PURGE_FREE_GB),
+        min_age: parse_hours_to_duration(min_age_hours, DEFAULT_GC_MIN_AGE_HOURS),
+        auto_purge_enabled: parse_bool_setting(auto_purge_enabled, DEFAULT_GC_AUTO_PURGE_ENABLED),
+    }
+}
+
+fn parse_gb_to_bytes(raw: Option<&str>, default_gb: u64) -> u64 {
+    raw.and_then(|value| {
+        let gb = value.trim().parse::<f64>().ok()?;
+        if !gb.is_finite() || gb < 0.0 {
+            return None;
+        }
+        let bytes = gb * BYTES_PER_GB as f64;
+        if bytes >= u64::MAX as f64 {
+            Some(u64::MAX)
+        } else {
+            Some(bytes.round() as u64)
+        }
+    })
+    .unwrap_or_else(|| default_gb.saturating_mul(BYTES_PER_GB))
+}
+
+fn parse_hours_to_duration(raw: Option<&str>, default_hours: u64) -> Duration {
+    let hours = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default_hours);
+    Duration::from_secs(hours.saturating_mul(60 * 60))
+}
+
+fn parse_bool_setting(raw: Option<&str>, default: bool) -> bool {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        _ => default,
+    }
+}
+
 fn run_worker_loop(
     registry: Registry,
     rx: mpsc::Receiver<GcRequestMsg>,
@@ -149,6 +226,25 @@ fn handle_worker_msg(
 }
 
 fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsProvider) {
+    let config = GcDiskWatchdogConfig::from_env();
+    run_periodic_purge_tick_with_free_space(
+        registry,
+        live_cwds_provider,
+        &config,
+        &free_space_bytes_for_path,
+    );
+}
+
+fn run_periodic_purge_tick_with_free_space<F>(
+    registry: &Registry,
+    live_cwds_provider: &LiveCwdsProvider,
+    disk_config: &GcDiskWatchdogConfig,
+    free_space: &F,
+) where
+    F: Fn(&Path) -> Result<u64, String> + ?Sized,
+{
+    run_disk_watchdog_tick(registry, live_cwds_provider, disk_config, free_space);
+
     let worktree_reply = process_op_with_live_cwds(
         registry,
         GcOp::Purge {
@@ -179,6 +275,194 @@ fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsPro
         }
         Err(message) => {
             eprintln!("[clud] gc tick: trash error: {message}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskWatchdogDecision {
+    warn: bool,
+    auto_purge: bool,
+}
+
+fn disk_watchdog_decision(config: &GcDiskWatchdogConfig, free_bytes: u64) -> DiskWatchdogDecision {
+    DiskWatchdogDecision {
+        warn: free_bytes < config.warn_free_bytes,
+        auto_purge: config.auto_purge_enabled && free_bytes < config.auto_purge_free_bytes,
+    }
+}
+
+fn run_disk_watchdog_tick<F>(
+    registry: &Registry,
+    live_cwds_provider: &LiveCwdsProvider,
+    config: &GcDiskWatchdogConfig,
+    free_space: &F,
+) where
+    F: Fn(&Path) -> Result<u64, String> + ?Sized,
+{
+    let entries = match registry.list(None) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("[clud] gc tick disk: failed to list tracked roots: {err}");
+            return;
+        }
+    };
+    let roots = collect_tracked_entry_roots(&entries);
+    let mut purge_roots = Vec::new();
+    for root in roots {
+        match free_space(&root) {
+            Ok(free_bytes) => {
+                let decision = disk_watchdog_decision(config, free_bytes);
+                if decision.warn {
+                    eprintln!(
+                        "[clud] gc tick disk: {} has {} GB free, below warn threshold {} GB",
+                        root.display(),
+                        format_gb(free_bytes),
+                        format_gb(config.warn_free_bytes)
+                    );
+                }
+                if decision.auto_purge {
+                    purge_roots.push(root);
+                }
+            }
+            Err(message) => {
+                eprintln!(
+                    "[clud] gc tick disk: failed to sample free space for {}: {message}",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    if purge_roots.is_empty() {
+        return;
+    }
+    let purge_reply = purge_old_reclaimable_entries_for_roots(
+        registry,
+        live_cwds_provider,
+        &purge_roots,
+        config.min_age,
+    );
+    log_disk_watchdog_purge_reply(purge_roots.len(), config, purge_reply);
+}
+
+fn collect_tracked_entry_roots(entries: &[TrackedEntry]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for entry in entries {
+        let root = tracked_entry_root(entry);
+        let key = root.to_string_lossy().to_string();
+        if seen.insert(key) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+fn tracked_entry_root(entry: &TrackedEntry) -> PathBuf {
+    if let Some(repo_root) = entry
+        .repo_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        PathBuf::from(repo_root)
+    } else {
+        PathBuf::from(&entry.path)
+    }
+}
+
+fn purge_old_reclaimable_entries_for_roots(
+    registry: &Registry,
+    live_cwds_provider: &LiveCwdsProvider,
+    roots: &[PathBuf],
+    min_age: Duration,
+) -> GcReply {
+    let cutoff = now_unix().saturating_sub(duration_secs_i64(min_age));
+    let candidates = match registry.select_older_than(cutoff, None) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            return GcReply::Error {
+                message: err.to_string(),
+            };
+        }
+    };
+    let candidates = candidates
+        .into_iter()
+        .filter(|entry| entry.kind == WORKTREE_KIND || entry.kind == SIBLING_CLONE_KIND)
+        .filter(|entry| tracked_entry_matches_any_root(entry, roots))
+        .collect();
+    purge_entries(registry, candidates, live_cwds_provider(), false)
+}
+
+fn tracked_entry_matches_any_root(entry: &TrackedEntry, roots: &[PathBuf]) -> bool {
+    let entry_root = tracked_entry_root(entry);
+    let entry_path = Path::new(&entry.path);
+    roots.iter().any(|root| {
+        path_matches_or_is_under(&entry_root, root) || path_matches_or_is_under(entry_path, root)
+    })
+}
+
+fn path_matches_or_is_under(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+fn duration_secs_i64(duration: Duration) -> i64 {
+    duration.as_secs().min(i64::MAX as u64) as i64
+}
+
+fn log_disk_watchdog_purge_reply(
+    low_root_count: usize,
+    config: &GcDiskWatchdogConfig,
+    reply: GcReply,
+) {
+    match reply {
+        GcReply::PurgeOk { removed, skipped } => {
+            eprintln!(
+                "[clud] gc tick disk: auto-purge checked {low_root_count} low root(s), min age {}h, removed {removed}, skipped {skipped}",
+                config.min_age.as_secs() / (60 * 60)
+            );
+        }
+        GcReply::Error { message } => {
+            eprintln!("[clud] gc tick disk: auto-purge error: {message}");
+        }
+        other => {
+            eprintln!("[clud] gc tick disk: unexpected auto-purge reply: {other:?}");
+        }
+    }
+}
+
+fn format_gb(bytes: u64) -> String {
+    format!("{:.2}", bytes as f64 / BYTES_PER_GB as f64)
+}
+
+fn free_space_bytes_for_path(path: &Path) -> Result<u64, String> {
+    let probe_path = disk_probe_path(path)?;
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|disk| probe_path.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count())
+        .map(|disk| disk.available_space())
+        .ok_or_else(|| format!("no mounted disk found for {}", probe_path.display()))
+}
+
+fn disk_probe_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| format!("current_dir: {err}"))?
+            .join(path)
+    };
+    let mut probe = absolute.clone();
+    loop {
+        if probe.exists() {
+            return Ok(probe);
+        }
+        if !probe.pop() {
+            return Ok(absolute);
         }
     }
 }
@@ -230,7 +514,7 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
             let candidates_res = match &duration {
                 Some(d) => match worktrees::parse_duration(d) {
                     Ok(dur) => {
-                        let cutoff = now_unix().saturating_sub(dur.as_secs() as i64);
+                        let cutoff = now_unix().saturating_sub(duration_secs_i64(dur));
                         registry.select_older_than(cutoff, kind.as_deref())
                     }
                     Err(e) => {
@@ -249,44 +533,12 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
                     };
                 }
             };
-            let live_locks = collect_live_lock_paths();
-            let live_cwds = canonicalize_live_cwds(live_cwds);
-            let mut purgeable = Vec::new();
-            let mut skipped = 0usize;
-            for candidate in candidates {
-                if entry_is_live(&candidate, &live_locks, &live_cwds) {
-                    skipped += 1;
-                    continue;
-                }
-                if !entry_kind_allows_purge(&candidate) {
-                    skipped += 1;
-                    continue;
-                }
-                purgeable.push(candidate);
-            }
-            if dry_run {
-                return GcReply::PurgeOk {
-                    removed: purgeable.len(),
-                    skipped,
-                };
-            }
-            let mut removed = 0usize;
-            for entry in &purgeable {
-                if remove_entry_and_delete_row(registry, entry).is_ok() {
-                    removed += 1;
-                }
-            }
-            GcReply::PurgeOk { removed, skipped }
+            purge_entries(registry, candidates, live_cwds, dry_run)
         }
 
         GcOp::Reconcile { repo_root } => {
             let root = PathBuf::from(&repo_root);
-            let watch_dir = root.join(".claude").join("worktrees");
-            match reconcile_dir(registry, &watch_dir, Some(&root)).and_then(|worktree_res| {
-                let extern_res =
-                    reconcile_extern_repos_dir(registry, &root.join(".extern-repos"), Some(&root))?;
-                Ok(worktree_res.inserted + extern_res.inserted)
-            }) {
+            match reconcile_repo_root(registry, &root) {
                 Ok(inserted) => GcReply::ReconcileOk { inserted },
                 Err(e) => GcReply::Error {
                     message: e.to_string(),
@@ -374,6 +626,42 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
             }
         }
     }
+}
+
+fn purge_entries(
+    registry: &Registry,
+    candidates: Vec<TrackedEntry>,
+    live_cwds: Vec<PathBuf>,
+    dry_run: bool,
+) -> GcReply {
+    let live_locks = collect_live_lock_paths();
+    let live_cwds = canonicalize_live_cwds(live_cwds);
+    let mut purgeable = Vec::new();
+    let mut skipped = 0usize;
+    for candidate in candidates {
+        if entry_is_live(&candidate, &live_locks, &live_cwds) {
+            skipped += 1;
+            continue;
+        }
+        if !entry_kind_allows_purge(&candidate) {
+            skipped += 1;
+            continue;
+        }
+        purgeable.push(candidate);
+    }
+    if dry_run {
+        return GcReply::PurgeOk {
+            removed: purgeable.len(),
+            skipped,
+        };
+    }
+    let mut removed = 0usize;
+    for entry in &purgeable {
+        if remove_entry_and_delete_row(registry, entry).is_ok() {
+            removed += 1;
+        }
+    }
+    GcReply::PurgeOk { removed, skipped }
 }
 
 fn canonicalize_live_cwds(live_cwds: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -634,16 +922,8 @@ fn collect_live_lock_paths() -> HashSet<String> {
 fn remove_entry_and_delete_row(registry: &Registry, entry: &TrackedEntry) -> Result<(), String> {
     if entry.kind == "worktree" {
         let main_root = entry.repo_root.clone().unwrap_or_else(|| ".".to_string());
-        let git_result = worktrees::run_git(
-            Path::new(&main_root),
-            &["worktree", "remove", "--force", &entry.path],
-        );
-        if git_result.is_err() {
-            let dir = Path::new(&entry.path);
-            if dir.exists() {
-                std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
-            }
-        }
+        let _ =
+            worktrees::remove_worktree_path(Path::new(&main_root), Path::new(&entry.path), true)?;
     } else if entry.kind == "trash" {
         std::fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())?;
     } else {
@@ -799,6 +1079,76 @@ mod tests {
         assert_eq!(
             gc_tick_cadence_from_raw(Some("1")),
             Some(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn gc_disk_watchdog_config_parses_defaults_and_overrides() {
+        let defaults = gc_disk_watchdog_config_from_raw(None, None, None, None);
+        assert_eq!(defaults.warn_free_bytes, 10 * BYTES_PER_GB);
+        assert_eq!(defaults.auto_purge_free_bytes, 5 * BYTES_PER_GB);
+        assert_eq!(defaults.min_age, Duration::from_secs(24 * 60 * 60));
+        assert!(defaults.auto_purge_enabled);
+
+        let overrides =
+            gc_disk_watchdog_config_from_raw(Some("1.5"), Some("2"), Some("7"), Some("off"));
+        assert_eq!(overrides.warn_free_bytes, BYTES_PER_GB + BYTES_PER_GB / 2);
+        assert_eq!(overrides.auto_purge_free_bytes, 2 * BYTES_PER_GB);
+        assert_eq!(overrides.min_age, Duration::from_secs(7 * 60 * 60));
+        assert!(!overrides.auto_purge_enabled);
+    }
+
+    #[test]
+    fn gc_disk_watchdog_config_falls_back_on_invalid_values() {
+        let config =
+            gc_disk_watchdog_config_from_raw(Some("-1"), Some("nan"), Some("bad"), Some("maybe"));
+        assert_eq!(config.warn_free_bytes, 10 * BYTES_PER_GB);
+        assert_eq!(config.auto_purge_free_bytes, 5 * BYTES_PER_GB);
+        assert_eq!(config.min_age, Duration::from_secs(24 * 60 * 60));
+        assert!(config.auto_purge_enabled);
+    }
+
+    #[test]
+    fn disk_watchdog_decision_warns_and_purges_only_below_thresholds() {
+        let config = GcDiskWatchdogConfig {
+            warn_free_bytes: 10 * BYTES_PER_GB,
+            auto_purge_free_bytes: 5 * BYTES_PER_GB,
+            min_age: Duration::from_secs(24 * 60 * 60),
+            auto_purge_enabled: true,
+        };
+
+        assert_eq!(
+            disk_watchdog_decision(&config, 10 * BYTES_PER_GB),
+            DiskWatchdogDecision {
+                warn: false,
+                auto_purge: false
+            }
+        );
+        assert_eq!(
+            disk_watchdog_decision(&config, 9 * BYTES_PER_GB),
+            DiskWatchdogDecision {
+                warn: true,
+                auto_purge: false
+            }
+        );
+        assert_eq!(
+            disk_watchdog_decision(&config, 4 * BYTES_PER_GB),
+            DiskWatchdogDecision {
+                warn: true,
+                auto_purge: true
+            }
+        );
+
+        let disabled = GcDiskWatchdogConfig {
+            auto_purge_enabled: false,
+            ..config
+        };
+        assert_eq!(
+            disk_watchdog_decision(&disabled, 4 * BYTES_PER_GB),
+            DiskWatchdogDecision {
+                warn: true,
+                auto_purge: false
+            }
         );
     }
 
@@ -1042,46 +1392,85 @@ mod tests {
     }
 
     #[test]
-    fn periodic_tick_removes_old_worktree_entry() {
+    fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("periodic-purge.redb");
-        let (tx, _g) = spawn_test_worker_with_tick(&db_path, "1");
+        let registry = Registry::open_at(&db_path).unwrap();
         let old_path = dir.path().join("old-worktree");
+        let old_sibling = dir.path().join("clud-pr-old");
         std::fs::create_dir_all(&old_path).unwrap();
+        std::fs::create_dir_all(&old_sibling).unwrap();
 
-        let resp = call(
-            &tx,
-            GcOp::Insert {
+        registry
+            .insert_if_new(&InsertInput {
                 kind: "worktree".to_string(),
                 path: old_path.to_string_lossy().to_string(),
                 repo_root: Some(dir.path().to_string_lossy().to_string()),
                 branch: Some("stale".to_string()),
                 agent_id: Some("agent-old".to_string()),
-                created_unix: Some(now_unix().saturating_sub(49 * 60 * 60)),
-            },
-        );
-        assert!(matches!(resp, GcReply::InsertOk));
+                now_unix: now_unix().saturating_sub(25 * 60 * 60),
+            })
+            .unwrap();
+        registry
+            .insert_if_new(&InsertInput {
+                kind: SIBLING_CLONE_KIND.to_string(),
+                path: old_sibling.to_string_lossy().to_string(),
+                repo_root: Some(dir.path().to_string_lossy().to_string()),
+                branch: Some("old".to_string()),
+                agent_id: None,
+                now_unix: now_unix().saturating_sub(25 * 60 * 60),
+            })
+            .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let rows = match call(
-                &tx,
-                GcOp::List {
-                    kind: Some("worktree".to_string()),
-                },
-            ) {
-                GcReply::ListOk { rows } => rows,
-                other => panic!("unexpected reply: {other:?}"),
-            };
-            if rows.is_empty() {
-                assert!(!old_path.exists());
-                break;
-            }
-            if Instant::now() >= deadline {
-                panic!("periodic purge did not remove old worktree entry within 3 seconds");
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        let config = GcDiskWatchdogConfig {
+            warn_free_bytes: 10 * BYTES_PER_GB,
+            auto_purge_free_bytes: 5 * BYTES_PER_GB,
+            min_age: Duration::from_secs(24 * 60 * 60),
+            auto_purge_enabled: true,
+        };
+        let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
+        run_periodic_purge_tick_with_free_space(&registry, &live_cwds_provider, &config, &|_| {
+            Ok(4 * BYTES_PER_GB)
+        });
+
+        assert!(registry.list(Some(WORKTREE_KIND)).unwrap().is_empty());
+        assert!(registry.list(Some(SIBLING_CLONE_KIND)).unwrap().is_empty());
+        assert!(!old_path.exists());
+        assert!(!old_sibling.exists());
+    }
+
+    #[test]
+    fn periodic_tick_keeps_old_worktree_entry_when_free_space_is_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("periodic-healthy.redb");
+        let registry = Registry::open_at(&db_path).unwrap();
+        let old_path = dir.path().join("old-worktree");
+        std::fs::create_dir_all(&old_path).unwrap();
+
+        registry
+            .insert_if_new(&InsertInput {
+                kind: "worktree".to_string(),
+                path: old_path.to_string_lossy().to_string(),
+                repo_root: Some(dir.path().to_string_lossy().to_string()),
+                branch: Some("stale".to_string()),
+                agent_id: Some("agent-old".to_string()),
+                now_unix: now_unix().saturating_sub(25 * 60 * 60),
+            })
+            .unwrap();
+
+        let config = GcDiskWatchdogConfig {
+            warn_free_bytes: 10 * BYTES_PER_GB,
+            auto_purge_free_bytes: 5 * BYTES_PER_GB,
+            min_age: Duration::from_secs(24 * 60 * 60),
+            auto_purge_enabled: true,
+        };
+        let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
+        run_periodic_purge_tick_with_free_space(&registry, &live_cwds_provider, &config, &|_| {
+            Ok(20 * BYTES_PER_GB)
+        });
+
+        assert_eq!(registry.list(Some(WORKTREE_KIND)).unwrap().len(), 1);
+        assert!(old_path.exists());
     }
 
     #[test]

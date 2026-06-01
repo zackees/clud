@@ -19,8 +19,14 @@ use std::time::{Duration, SystemTime};
 
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
+use crate::gc::extract_pid_from_lock_reason;
+use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
+
+pub const ENV_GC_LOCKED_HARD_AGE_DAYS: &str = "CLUD_GC_LOCKED_HARD_AGE_DAYS";
+const DEFAULT_GC_LOCKED_HARD_AGE_DAYS: u64 = 7;
+const SECS_PER_DAY: u64 = 86_400;
 
 /// One row of the porcelain output from `git worktree list --porcelain`.
 ///
@@ -34,8 +40,8 @@ pub struct WorktreeEntry {
     pub bare: bool,
     pub detached: bool,
     /// True when the porcelain block ends with a `locked` line.
-    /// Per `git-worktree(1)` docs we must never remove these even with
-    /// `--force`.
+    /// Live locks are skipped; stale dead/no-PID locks pass through a
+    /// hard-age gate before normal removal rules are applied.
     pub locked: bool,
     /// Optional human-readable reason that accompanies a `locked` line.
     /// Claude Code emits `locked claude agent agent-<id> (pid <pid>)`
@@ -75,6 +81,18 @@ impl WorktreeStatus {
     }
 }
 
+/// Liveness of a git-worktree lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockStatus {
+    Unlocked,
+    /// Locked, but the lock reason did not contain a parseable PID.
+    NoPid,
+    /// Locked by a PID that is still alive.
+    LivePid(u32),
+    /// Locked by a PID that is no longer alive.
+    DeadPid(u32),
+}
+
 /// Inputs to the stale-detection predicate. Kept as a plain struct so the
 /// logic is trivial to unit-test without touching disk or `git`.
 #[derive(Debug, Clone, Copy)]
@@ -82,8 +100,11 @@ pub struct StalenessInputs {
     pub status: WorktreeStatus,
     /// Age of the worktree's working directory (mtime delta).
     pub age: Duration,
-    /// Locked worktrees are never stale (skipped from removal entirely).
-    pub locked: bool,
+    /// Liveness of any git-worktree lock.
+    pub lock_status: LockStatus,
+    /// Locked worktrees are presumed orphaned after this age, even if the
+    /// lock PID still appears live.
+    pub locked_hard_age: Duration,
 }
 
 /// Options gathered from the CLI flags.
@@ -172,15 +193,9 @@ pub fn run(opts: &CleanOptions) -> i32 {
     let mut removed = 0usize;
     let mut failed = 0usize;
     for c in &plan.candidates {
-        let mut args: Vec<&str> = vec!["worktree", "remove"];
-        if opts.force {
-            args.push("--force");
-        }
-        let path_str = c.entry.path.to_string_lossy().to_string();
-        args.push(&path_str);
-        match run_git(&main_repo, &args) {
-            Ok(_) => {
-                println!("removed {}", c.entry.path.display());
+        match remove_worktree_path(&main_repo, &c.entry.path, opts.force) {
+            Ok(note) => {
+                println!("removed {}{}", c.entry.path.display(), note);
                 removed += 1;
             }
             Err(e) => {
@@ -225,22 +240,26 @@ struct Plan {
 }
 
 fn build_plan(rows: &[Classified], opts: &CleanOptions) -> Plan {
+    let probe = OsLivenessProbe;
+    build_plan_with_liveness(rows, opts, &probe, locked_hard_age_from_env())
+}
+
+fn build_plan_with_liveness(
+    rows: &[Classified],
+    opts: &CleanOptions,
+    probe: &dyn LivenessProbe,
+    locked_hard_age: Duration,
+) -> Plan {
     let mut plan = Plan::default();
     for row in rows {
         if row.is_main {
             continue;
         }
-        if row.entry.locked {
-            plan.skipped.push(Candidate {
-                entry: row.entry.clone(),
-                reason: "locked".to_string(),
-            });
-            continue;
-        }
         let inputs = StalenessInputs {
             status: row.status,
             age: row.age,
-            locked: row.entry.locked,
+            lock_status: lock_status_for_entry(&row.entry, probe),
+            locked_hard_age,
         };
         match decide_action(inputs, opts) {
             Action::Remove(reason) => plan.candidates.push(Candidate {
@@ -257,6 +276,23 @@ fn build_plan(rows: &[Classified], opts: &CleanOptions) -> Plan {
     plan
 }
 
+fn lock_status_for_entry(entry: &WorktreeEntry, probe: &dyn LivenessProbe) -> LockStatus {
+    if !entry.locked {
+        return LockStatus::Unlocked;
+    }
+    let Some(reason) = entry.locked_reason.as_deref() else {
+        return LockStatus::NoPid;
+    };
+    let Some(pid) = extract_pid_from_lock_reason(reason) else {
+        return LockStatus::NoPid;
+    };
+    if probe.is_alive(pid) {
+        LockStatus::LivePid(pid)
+    } else {
+        LockStatus::DeadPid(pid)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
     Remove(String),
@@ -266,11 +302,12 @@ enum Action {
 }
 
 fn decide_action(inputs: StalenessInputs, opts: &CleanOptions) -> Action {
-    if inputs.locked {
-        return Action::Skip("locked".to_string());
-    }
+    let lock_prefix = match locked_removal_prefix(inputs) {
+        Ok(prefix) => prefix,
+        Err(reason) => return Action::Skip(reason),
+    };
     let is_old = inputs.age >= opts.stale_after;
-    match inputs.status {
+    let action = match inputs.status {
         WorktreeStatus::Clean => {
             if is_old {
                 Action::Remove(format!("clean + stale ({})", fmt_age(inputs.age)))
@@ -313,7 +350,69 @@ fn decide_action(inputs: StalenessInputs, opts: &CleanOptions) -> Action {
                 Action::Skip("unpushed commits (use --force to remove)".to_string())
             }
         }
+    };
+    apply_lock_prefix(action, lock_prefix)
+}
+
+fn locked_removal_prefix(inputs: StalenessInputs) -> Result<Option<String>, String> {
+    match inputs.lock_status {
+        LockStatus::Unlocked => Ok(None),
+        LockStatus::LivePid(pid) => {
+            if inputs.age > inputs.locked_hard_age {
+                Ok(Some(format!(
+                    "stale lock (pid {pid} still alive; hard age exceeded)"
+                )))
+            } else {
+                Err(format!("locked (live pid {pid})"))
+            }
+        }
+        LockStatus::NoPid => {
+            if inputs.age > inputs.locked_hard_age {
+                Ok(Some("stale lock (no pid)".to_string()))
+            } else {
+                Err(format!(
+                    "locked (no pid; hard age not reached: {} <= {})",
+                    fmt_age(inputs.age),
+                    fmt_age(inputs.locked_hard_age)
+                ))
+            }
+        }
+        LockStatus::DeadPid(pid) => {
+            if inputs.age > inputs.locked_hard_age {
+                Ok(Some(format!("stale lock (dead pid {pid})")))
+            } else {
+                Err(format!(
+                    "locked (dead pid {pid}; hard age not reached: {} <= {})",
+                    fmt_age(inputs.age),
+                    fmt_age(inputs.locked_hard_age)
+                ))
+            }
+        }
     }
+}
+
+fn apply_lock_prefix(action: Action, lock_prefix: Option<String>) -> Action {
+    let Some(prefix) = lock_prefix else {
+        return action;
+    };
+    match action {
+        Action::Remove(reason) => Action::Remove(format!("{prefix}; {reason}")),
+        Action::Skip(reason) => Action::Skip(format!("{prefix}; {reason}")),
+        Action::Ignore => Action::Ignore,
+    }
+}
+
+fn locked_hard_age_from_env() -> Duration {
+    let raw = std::env::var(ENV_GC_LOCKED_HARD_AGE_DAYS).ok();
+    locked_hard_age_from_raw(raw.as_deref())
+}
+
+fn locked_hard_age_from_raw(raw: Option<&str>) -> Duration {
+    let days = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GC_LOCKED_HARD_AGE_DAYS);
+    let secs = days.saturating_mul(SECS_PER_DAY);
+    Duration::from_secs(secs)
 }
 
 pub(crate) fn fmt_age(d: Duration) -> String {
@@ -377,6 +476,115 @@ fn confirm_interactive(n: usize) -> bool {
         return false;
     }
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemovalOutcome {
+    GitRemove,
+    FallbackAfterGitSuccess,
+    FallbackAfterGitFailure,
+    PrunedAfterGitFailure,
+}
+
+impl RemovalOutcome {
+    fn note(self) -> &'static str {
+        match self {
+            Self::GitRemove => "",
+            Self::FallbackAfterGitSuccess => " (direct fallback after git reported success)",
+            Self::FallbackAfterGitFailure => " (direct fallback after git remove failed)",
+            Self::PrunedAfterGitFailure => " (path already gone; pruned stale git metadata)",
+        }
+    }
+}
+
+pub(crate) fn remove_worktree_path(
+    main_repo: &Path,
+    path: &Path,
+    force: bool,
+) -> Result<&'static str, String> {
+    remove_worktree_path_with_git(main_repo, path, force, run_git).map(RemovalOutcome::note)
+}
+
+fn remove_worktree_path_with_git<F>(
+    main_repo: &Path,
+    path: &Path,
+    force: bool,
+    git: F,
+) -> Result<RemovalOutcome, String>
+where
+    F: Fn(&Path, &[&str]) -> Result<String, String>,
+{
+    let mut args: Vec<&str> = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    let path_str = path.to_string_lossy().to_string();
+    args.push(&path_str);
+
+    match git(main_repo, &args) {
+        Ok(_) => {
+            if !path_try_exists(path)? {
+                return Ok(RemovalOutcome::GitRemove);
+            }
+            fallback_remove_and_prune(main_repo, path, &git).map_err(|fallback_err| {
+                format!(
+                    "git worktree remove reported success but {} still exists; fallback failed: {fallback_err}",
+                    path.display()
+                )
+            })?;
+            Ok(RemovalOutcome::FallbackAfterGitSuccess)
+        }
+        Err(git_err) => {
+            if path_try_exists(path)? {
+                fallback_remove_and_prune(main_repo, path, &git).map_err(|fallback_err| {
+                    format!(
+                        "git worktree remove failed: {git_err}; fallback failed: {fallback_err}"
+                    )
+                })?;
+                Ok(RemovalOutcome::FallbackAfterGitFailure)
+            } else {
+                best_effort_unlock_and_prune_worktree(main_repo, path, &git);
+                Ok(RemovalOutcome::PrunedAfterGitFailure)
+            }
+        }
+    }
+}
+
+fn fallback_remove_and_prune<F>(main_repo: &Path, path: &Path, git: &F) -> Result<(), String>
+where
+    F: Fn(&Path, &[&str]) -> Result<String, String>,
+{
+    if path_try_exists(path)? {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!("remove_dir_all({}): {e}", path.display()));
+            }
+        }
+    }
+    if path_try_exists(path)? {
+        return Err(format!(
+            "{} still exists after remove_dir_all",
+            path.display()
+        ));
+    }
+    best_effort_unlock_and_prune_worktree(main_repo, path, git);
+    Ok(())
+}
+
+fn best_effort_unlock_and_prune_worktree<F>(main_repo: &Path, path: &Path, git: &F)
+where
+    F: Fn(&Path, &[&str]) -> Result<String, String>,
+{
+    let path_str = path.to_string_lossy().to_string();
+    let _ = git(main_repo, &["worktree", "unlock", &path_str]);
+    let _ = git(main_repo, &["worktree", "prune", "--expire=now"]);
+}
+
+fn path_try_exists(path: &Path) -> Result<bool, String> {
+    path.try_exists()
+        .map_err(|e| format!("checking whether {} exists: {e}", path.display()))
 }
 
 // ---------- git-side helpers ----------
