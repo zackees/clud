@@ -8,7 +8,7 @@ Claude Code "skills" bundled into the `clud` binary as compile-time assets. On e
 - [clud-issue-triage/](clud-issue-triage/README.md) — Triage GitHub issues: close ones that are clearly resolved and silently file follow-ups for un-addressed CodeRabbit comments; supports single, last-week, or all (parallel sub-agents in worktrees).
 - [clud-pr/](clud-pr/README.md) — Implement a GitHub issue, PR follow-up, or freeform task inside a `.claude/` worktree and ship one clean PR.
 - [clud-tag-release/](clud-tag-release/README.md) — Tag a release after validating version match, clean `main`, and no duplicate tag, then push and surface the auto-release workflow URL.
-- [clud-docker-rust-app/](clud-docker-rust-app/README.md) — Containerize a Rust app for fast incremental Docker builds — named volumes for `target/` + `CARGO_HOME` + `RUSTUP_HOME`, source bind-mounted, soldr-wrapped cargo, and a Python orchestrator. No-op rebuilds drop from minutes to seconds, especially on Windows/WSL2.
+- [clud-docker-rust-app-dev/](clud-docker-rust-app-dev/README.md) — Build a Rust app inside Docker for **development iteration** (not deployment) — fast incremental cargo builds via named volumes for `target/` + `CARGO_HOME` + `RUSTUP_HOME`, source bind-mounted, soldr-wrapped cargo, and a Python orchestrator. The `-dev` suffix is load-bearing: this is a per-developer scratch container, not a `docker push`-bound image; use `cargo chef` / multi-stage builds for that path.
 
 ## How skills ship
 

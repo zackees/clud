@@ -1,17 +1,21 @@
 ---
-name: clud-docker-rust-app
-description: Containerize a Rust app for fast incremental Docker builds — named volumes for target/ + CARGO_HOME + RUSTUP_HOME, source bind-mounted, soldr-wrapped cargo, and a Python orchestrator. No-op rebuilds drop from minutes to seconds, especially on Windows/WSL2.
+name: clud-docker-rust-app-dev
+description: Build a Rust app inside Docker for **development iteration** — fast incremental cargo builds via named volumes for target/ + CARGO_HOME + RUSTUP_HOME, source bind-mounted (no COPY), soldr-wrapped cargo, and a Python orchestrator. **Not for deployment** — this produces a developer harness, not a shippable image; for production/distribution images use a multi-stage Dockerfile with `cargo chef`.
 triggers:
-  - When the user types "/clud-docker-rust-app"
-  - When the user says "turn this into a docker" / "dockerize this" / "containerize this rust app"
-  - When the user asks to make a Rust build reproducible inside Docker
-  - When a Rust workspace's Docker builds are slow because every iteration re-COPYs source and loses cargo incremental state
+  - When the user types "/clud-docker-rust-app-dev"
+  - When the user says "turn this into a docker" / "dockerize this" / "containerize this rust app" *for development or iteration*
+  - When the user asks to make a Rust build reproducible inside Docker *for local dev*
+  - When the user complains that their Rust app's Docker builds are slow because every iteration re-COPYs source and loses cargo incremental state
+  - When the user wants to run cargo build / test / clippy / fmt inside a container without touching the host toolchain
+  - **Do NOT trigger** when the user is asking for a slim production/release image, a multi-stage distribution build, a single-binary deployable container, or anything destined for `docker push` to a registry — that is the deployment path, not the dev path.
 ---
 <!-- managed-by: clud -->
 
-# /clud-docker-rust-app
+# /clud-docker-rust-app-dev
 
-Containerize a Rust application so that **incremental builds inside the container are seconds, not minutes** — including on Windows + Docker Desktop, where the WSL2 9P translation layer is the silent killer of cargo fingerprints.
+**Development harness, not a deployment image.** Containerize a Rust application so that **incremental cargo builds inside the container are seconds, not minutes** — including on Windows + Docker Desktop, where the WSL2 9P translation layer is the silent killer of cargo fingerprints.
+
+The output of this skill is a **dev iteration loop** — `python ci/perf_local.py cargo build` runs incrementally inside a container with the host's source bind-mounted and cargo state in named volumes. The image itself is never `docker push`ed; it's a per-developer scratch environment. For production images that *do* ship, see the "When NOT to use this skill" section below.
 
 This playbook is distilled from the two reference implementations:
 
@@ -283,9 +287,14 @@ python ci/perf_local.py --wipe
 
 ## When NOT to use this skill
 
-- The user wants a *distribution* image (multi-stage build that produces a slim final image with just the binary). That's a different goal — pure layer caching is fine because you only build once per release. Use a standard multi-stage Dockerfile with `cargo chef` or `--mount=type=cache` instead.
-- The project is a tiny single-binary CLI where the full build is already under a minute. The named-volume setup is overkill — just use a normal Dockerfile.
-- CI-only invocations on Linux runners (no Windows host involved). Host bind mounts are fine on Linux ext4; the named-volume cost is purely a Windows + macOS Docker Desktop fix.
+This skill is for **dev iteration**. It is the wrong tool when the user's intent is **deployment**. Specifically, do NOT invoke `/clud-docker-rust-app-dev` (and do NOT silently produce its output) when:
+
+- **The user wants a deployment / distribution image.** A `docker push`-bound image — multi-stage build that produces a slim final image carrying just the release binary — is a fundamentally different artifact. Pure Docker layer caching is fine for that path because you only build per release, not per save. Use a standard multi-stage Dockerfile with `cargo chef` or `RUN --mount=type=cache,target=...` instead. The dev-iteration skill's named-volume strategy is *useless* for deployment images (the volume doesn't exist at `docker push` time) and the bind-mounted source pattern is *wrong* for deployment images (the image must be self-contained).
+- **The user wants to publish a container to a registry** (`docker push`, GHCR, Docker Hub, AWS ECR, etc.). Same reason — that's a deployment pipeline, not a dev loop.
+- **The user wants a reproducible CI-only build on Linux runners** (no Windows host involved). Host bind mounts are fine on Linux ext4; the named-volume cost is purely a Windows + macOS Docker Desktop fix. Reach for `cargo chef` + layer caching there.
+- **The project is a tiny single-binary CLI where the full build is already under a minute.** The named-volume setup is overkill — a normal Dockerfile is enough.
+
+The mental test: "after this skill runs, will the user's next move be `python ci/perf_local.py cargo test` (dev loop) or `docker push ghcr.io/foo/bar:1.2.3` (deployment)?" If the answer is the second one, this is not the right skill.
 
 ## End state
 
