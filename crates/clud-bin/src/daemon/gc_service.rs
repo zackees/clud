@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::gc::{extract_pid_from_lock_reason, reconcile_dir, InsertInput, Registry, TrackedEntry};
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
@@ -22,6 +22,10 @@ use super::types::{GcOp, GcReply, ListRow};
 /// How long a connection thread waits for the registry worker before
 /// giving up. Generous because purge can rm-rf large trees synchronously.
 pub(super) const WORKER_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+
+const ENV_GC_TICK_SECS: &str = "CLUD_GC_TICK_SECS";
+const DEFAULT_GC_TICK_SECS: u64 = 3600;
+const PERIODIC_GC_WORKTREE_STALE_AFTER: &str = "48h";
 
 /// One request handed from a connection thread to the registry worker.
 pub(super) struct GcRequestMsg {
@@ -45,17 +49,86 @@ pub(super) fn spawn_registry_worker_with(
     registry: Registry,
 ) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let (tx, rx) = mpsc::channel::<GcRequestMsg>();
+    let tick_cadence = gc_tick_cadence_from_env();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
-        .spawn(move || run_worker_loop(registry, rx))?;
+        .spawn(move || run_worker_loop(registry, rx, tick_cadence))?;
     Ok(tx)
 }
 
-fn run_worker_loop(registry: Registry, rx: mpsc::Receiver<GcRequestMsg>) {
-    while let Ok(msg) = rx.recv() {
-        let reply = process_op(&registry, msg.op);
-        // Hung-up callers are fine — the worker keeps serving the rest.
-        let _ = msg.reply_tx.send(reply);
+fn gc_tick_cadence_from_env() -> Option<Duration> {
+    let raw = std::env::var(ENV_GC_TICK_SECS).ok();
+    gc_tick_cadence_from_raw(raw.as_deref())
+}
+
+fn gc_tick_cadence_from_raw(raw: Option<&str>) -> Option<Duration> {
+    let secs = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_GC_TICK_SECS);
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
+
+fn run_worker_loop(
+    registry: Registry,
+    rx: mpsc::Receiver<GcRequestMsg>,
+    tick_cadence: Option<Duration>,
+) {
+    let Some(tick_cadence) = tick_cadence else {
+        while let Ok(msg) = rx.recv() {
+            handle_worker_msg(&registry, msg);
+        }
+        return;
+    };
+
+    let mut next_tick = Instant::now() + tick_cadence;
+    loop {
+        let timeout = next_tick.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(msg) => {
+                handle_worker_msg(&registry, msg);
+                if Instant::now() >= next_tick {
+                    run_periodic_purge_tick(&registry);
+                    next_tick = Instant::now() + tick_cadence;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                run_periodic_purge_tick(&registry);
+                next_tick = Instant::now() + tick_cadence;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn handle_worker_msg(registry: &Registry, msg: GcRequestMsg) {
+    let reply = process_op(registry, msg.op);
+    // Hung-up callers are fine — the worker keeps serving the rest.
+    let _ = msg.reply_tx.send(reply);
+}
+
+fn run_periodic_purge_tick(registry: &Registry) {
+    let reply = process_op(
+        registry,
+        GcOp::Purge {
+            duration: Some(PERIODIC_GC_WORKTREE_STALE_AFTER.to_string()),
+            kind: Some("worktree".to_string()),
+            dry_run: false,
+        },
+    );
+    match reply {
+        GcReply::PurgeOk { removed, skipped } => {
+            eprintln!("[clud] gc tick: removed {removed}, skipped {skipped}");
+        }
+        GcReply::Error { message } => {
+            eprintln!("[clud] gc tick: error: {message}");
+        }
+        other => {
+            eprintln!("[clud] gc tick: unexpected reply: {other:?}");
+        }
     }
 }
 
@@ -308,16 +381,52 @@ mod tests {
         mpsc::Sender<GcRequestMsg>,
         std::sync::MutexGuard<'static, ()>,
     ) {
+        spawn_test_worker_with_tick(db_path, "0")
+    }
+
+    fn spawn_test_worker_with_tick(
+        db_path: &Path,
+        tick_secs: &str,
+    ) -> (
+        mpsc::Sender<GcRequestMsg>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_db = std::env::var_os(ENV_DATA_DB);
+        let prior_tick = std::env::var_os(ENV_GC_TICK_SECS);
         std::env::set_var(ENV_DATA_DB, db_path);
-        let tx = spawn_registry_worker().unwrap();
+        std::env::set_var(ENV_GC_TICK_SECS, tick_secs);
+        let tx = spawn_registry_worker();
+        restore_env_var(ENV_GC_TICK_SECS, prior_tick);
+        restore_env_var(ENV_DATA_DB, prior_db);
+        let tx = tx.unwrap();
         (tx, guard)
+    }
+
+    fn restore_env_var(key: &str, prior: Option<std::ffi::OsString>) {
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 
     fn call(tx: &mpsc::Sender<GcRequestMsg>, op: GcOp) -> GcReply {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
         tx.send(GcRequestMsg { op, reply_tx }).unwrap();
         reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn gc_tick_cadence_config_handles_default_disable_and_positive() {
+        assert_eq!(
+            gc_tick_cadence_from_raw(None),
+            Some(Duration::from_secs(DEFAULT_GC_TICK_SECS))
+        );
+        assert_eq!(gc_tick_cadence_from_raw(Some("0")), None);
+        assert_eq!(
+            gc_tick_cadence_from_raw(Some("1")),
+            Some(Duration::from_secs(1))
+        );
     }
 
     #[test]
@@ -426,6 +535,49 @@ mod tests {
         match resp {
             GcReply::ListOk { rows } => assert_eq!(rows.len(), 1),
             other => panic!("unexpected reply: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn periodic_tick_removes_old_worktree_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("periodic-purge.redb");
+        let (tx, _g) = spawn_test_worker_with_tick(&db_path, "1");
+        let old_path = dir.path().join("old-worktree");
+        std::fs::create_dir_all(&old_path).unwrap();
+
+        let resp = call(
+            &tx,
+            GcOp::Insert {
+                kind: "worktree".to_string(),
+                path: old_path.to_string_lossy().to_string(),
+                repo_root: Some(dir.path().to_string_lossy().to_string()),
+                branch: Some("stale".to_string()),
+                agent_id: Some("agent-old".to_string()),
+                created_unix: Some(now_unix().saturating_sub(49 * 60 * 60)),
+            },
+        );
+        assert!(matches!(resp, GcReply::InsertOk));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let rows = match call(
+                &tx,
+                GcOp::List {
+                    kind: Some("worktree".to_string()),
+                },
+            ) {
+                GcReply::ListOk { rows } => rows,
+                other => panic!("unexpected reply: {other:?}"),
+            };
+            if rows.is_empty() {
+                assert!(!old_path.exists());
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("periodic purge did not remove old worktree entry within 3 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
