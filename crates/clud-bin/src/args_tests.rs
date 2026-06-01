@@ -796,3 +796,14 @@ fn test_gc_reconcile() {
         _ => panic!("expected Gc::Reconcile"),
     }
 }
+
+#[test]
+fn test_daemon_restart_subcommand_parses() {
+    let args = parse(&["clud", "daemon", "restart"]);
+    match args.command {
+        Some(Command::Daemon {
+            subcommand: DaemonSubcommand::Restart,
+        }) => {}
+        other => panic!("expected Daemon::Restart, got {other:?}"),
+    }
+}

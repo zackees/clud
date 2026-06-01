@@ -87,7 +87,8 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
         }
         DaemonResponse::Created { .. }
         | DaemonResponse::Terminated { .. }
-        | DaemonResponse::Gc { .. } => 1,
+        | DaemonResponse::Gc { .. }
+        | DaemonResponse::ShutdownAck { .. } => 1,
     }
 }
 

@@ -3,13 +3,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use crate::args::{Args, Command};
+use crate::args::{Args, Command, DaemonSubcommand};
 use crate::backend::LaunchMode;
 use crate::command::{has_noninteractive_prompt, LaunchPlan};
 use crate::verbose_log;
 
 use super::attach::{attach_to_session, run_attach};
-use super::client::{ensure_daemon, send_daemon_request};
+use super::client::{ensure_daemon, request_daemon_shutdown, send_daemon_request};
 use super::commands::{run_kill, run_list, run_logs};
 use super::io_helpers::{resolve_backlog_bytes, terminal_dimensions};
 use super::paths::state_dir;
@@ -68,6 +68,34 @@ fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32 {
+    match subcommand {
+        DaemonSubcommand::Restart => match request_daemon_shutdown(state_dir) {
+            Ok(pid) => {
+                eprintln!("[clud] daemon pid {pid} stopped");
+                if let Err(err) = ensure_daemon(state_dir) {
+                    eprintln!("[clud] failed to start replacement daemon: {err}");
+                    return 1;
+                }
+                eprintln!("[clud] new daemon started");
+                0
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                eprintln!("[clud] no running daemon; starting one");
+                if let Err(err) = ensure_daemon(state_dir) {
+                    eprintln!("[clud] failed to start daemon: {err}");
+                    return 1;
+                }
+                0
+            }
+            Err(err) => {
+                eprintln!("[clud] daemon restart failed: {err}");
+                1
+            }
+        },
+    }
 }
 
 pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i32> {
@@ -164,6 +192,10 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
                 *lines,
                 interrupted,
             ))
+        }
+        Some(Command::Daemon { subcommand }) => {
+            let state_dir = state_dir(args);
+            Some(run_daemon_subcommand(&state_dir, subcommand))
         }
         Some(Command::InternalDaemon { state_dir }) => Some(run_daemon(state_dir)),
         Some(Command::InternalWorker {
@@ -328,7 +360,8 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         }
         DaemonResponse::Session { .. }
         | DaemonResponse::Terminated { .. }
-        | DaemonResponse::Gc { .. } => 1,
+        | DaemonResponse::Gc { .. }
+        | DaemonResponse::ShutdownAck { .. } => 1,
     }
 }
 

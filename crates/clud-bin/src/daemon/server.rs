@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -88,17 +89,46 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     }
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else {
-            continue;
-        };
-        let workers = Arc::clone(&workers);
-        let state_dir = state_dir.to_path_buf();
-        let gc_tx = gc_tx.clone();
-        thread::spawn(move || {
-            let _ = handle_daemon_connection(stream, &state_dir, &workers, gc_tx);
-        });
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    if let Err(err) = listener.set_nonblocking(true) {
+        eprintln!("[clud] failed to configure daemon listener: {}", err);
+        return 1;
     }
+
+    loop {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                let workers = Arc::clone(&workers);
+                let state_dir = state_dir.to_path_buf();
+                let gc_tx = gc_tx.clone();
+                let shutdown_requested = Arc::clone(&shutdown_requested);
+                thread::spawn(move || {
+                    let _ = handle_daemon_connection(
+                        stream,
+                        &state_dir,
+                        &workers,
+                        gc_tx,
+                        &shutdown_requested,
+                    );
+                });
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+                eprintln!("[clud] daemon listener accept failed: {}", err);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+
+    let _ = fs::remove_file(daemon_info_path(state_dir));
     0
 }
 
@@ -107,6 +137,7 @@ fn handle_daemon_connection(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
+    shutdown_requested: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -143,8 +174,17 @@ fn handle_daemon_connection(
             let reply = dispatch_gc_op(gc_tx.as_ref(), payload);
             DaemonResponse::Gc { reply }
         }
+        DaemonRequest::Shutdown => DaemonResponse::ShutdownAck {
+            pid: std::process::id(),
+        },
     };
-    write_json_line(&mut stream, &response)
+    let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
+    let result = write_json_line(&mut stream, &response);
+    if is_shutdown {
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        shutdown_requested.store(true, Ordering::SeqCst);
+    }
+    result
 }
 
 /// Hand a GC op to the registry worker and await the reply. Returns a

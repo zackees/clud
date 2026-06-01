@@ -14,6 +14,13 @@ use crate::daemon::{
     DashboardInfo,
 };
 
+pub(crate) fn dashboard_listener_missing_message(pid: u32) -> String {
+    format!(
+        "error: this daemon (pid {pid}) was started without a dashboard listener. \
+         Restart it with `clud daemon restart`, then re-run `clud ui`."
+    )
+}
+
 pub fn run(json: bool, no_open: bool) -> i32 {
     let state_dir = match daemon::default_state_dir() {
         Ok(p) => p,
@@ -37,12 +44,7 @@ pub fn run(json: bool, no_open: bool) -> i32 {
     };
 
     let Some(port) = info.dashboard_port else {
-        eprintln!(
-            "error: this daemon ({}) was started without a dashboard listener. \
-             Stop it (e.g. via `clud kill --all` for sessions; the daemon will respawn) \
-             and retry.",
-            info.pid
-        );
+        eprintln!("{}", dashboard_listener_missing_message(info.pid));
         return 1;
     };
 
@@ -95,9 +97,21 @@ mod tests {
     //! pinning here are the surface the CLI promises.
 
     #[test]
-    fn module_compiles() {
-        // Trivial check: forces the module to be exercised under
-        // `cargo test`. Real behavioral tests live in `daemon/http.rs`
-        // alongside the routes this CLI consumes.
+    fn dashboard_listener_missing_message_includes_pid() {
+        let msg = super::dashboard_listener_missing_message(142500);
+        assert!(msg.contains("142500"));
+    }
+
+    #[test]
+    fn dashboard_listener_missing_message_does_not_recommend_kill_all() {
+        let msg = super::dashboard_listener_missing_message(1);
+        assert!(!msg.contains("kill --all"));
+        assert!(!msg.contains("will respawn"));
+    }
+
+    #[test]
+    fn dashboard_listener_missing_message_points_at_daemon_restart() {
+        let msg = super::dashboard_listener_missing_message(1);
+        assert!(msg.contains("clud daemon restart"));
     }
 }
