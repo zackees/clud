@@ -141,16 +141,32 @@ pub(super) enum DaemonRequest {
     Gc {
         payload: GcOp,
     },
+    /// Ask the daemon to exit after replying. Used by `clud daemon restart`.
+    Shutdown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(super) enum DaemonResponse {
-    Created { session: SessionSnapshot },
-    Session { session: SessionSnapshot },
-    Terminated { session: SessionSnapshot },
-    Gc { reply: GcReply },
-    Error { message: String },
+    Created {
+        session: SessionSnapshot,
+    },
+    Session {
+        session: SessionSnapshot,
+    },
+    Terminated {
+        session: SessionSnapshot,
+    },
+    Gc {
+        reply: GcReply,
+    },
+    /// Acknowledgement for `DaemonRequest::Shutdown`.
+    ShutdownAck {
+        pid: u32,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Issue #135: payload carried by `DaemonRequest::Gc`. Identical in
@@ -386,4 +402,36 @@ pub(super) struct AttachedClient {
 pub(super) struct BacklogState {
     pub(super) chunks: std::collections::VecDeque<Vec<u8>>,
     pub(super) total_bytes: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_request_serializes_as_tagged_op() {
+        let wire = serde_json::to_string(&DaemonRequest::Shutdown).unwrap();
+        assert_eq!(wire, r#"{"op":"shutdown"}"#);
+    }
+
+    #[test]
+    fn shutdown_request_roundtrips() {
+        let wire = serde_json::to_string(&DaemonRequest::Shutdown).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(parsed, DaemonRequest::Shutdown));
+    }
+
+    #[test]
+    fn shutdown_ack_response_roundtrips_with_pid() {
+        let response = DaemonResponse::ShutdownAck { pid: 142500 };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(wire.contains(r#""op":"shutdown_ack""#));
+        assert!(wire.contains(r#""pid":142500"#));
+
+        let parsed: DaemonResponse = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonResponse::ShutdownAck { pid } => assert_eq!(pid, 142500),
+            other => panic!("expected ShutdownAck, got {other:?}"),
+        }
+    }
 }

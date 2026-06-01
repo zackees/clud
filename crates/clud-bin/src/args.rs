@@ -216,6 +216,11 @@ pub enum Command {
         #[arg(long = "no-open")]
         no_open: bool,
     },
+    /// Control the always-on clud daemon.
+    Daemon {
+        #[command(subcommand)]
+        subcommand: DaemonSubcommand,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -232,6 +237,13 @@ pub enum Command {
         #[arg(long = "spec-file")]
         spec_file: PathBuf,
     },
+}
+
+/// Subcommands under `clud daemon`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DaemonSubcommand {
+    /// Restart the daemon process so the next CLI call uses the current binary.
+    Restart,
 }
 
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc.rs`.
@@ -332,7 +344,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
-        "__daemon", "__worker",
+        "daemon", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

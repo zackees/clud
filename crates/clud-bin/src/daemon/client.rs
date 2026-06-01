@@ -165,7 +165,13 @@ pub(super) fn send_daemon_request(
     write_json_line(&mut stream, request)?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let bytes = reader.read_line(&mut line)?;
+    if bytes == 0 || line.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "daemon closed connection without replying",
+        ));
+    }
     serde_json::from_str(&line).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
@@ -186,6 +192,69 @@ pub(super) fn request_session_termination(
             format!("unexpected daemon response: {response:?}"),
         )),
     }
+}
+
+/// Ask the daemon to terminate and wait for its pid to exit. Returns the
+/// daemon pid that was stopped. If the running daemon predates the shutdown
+/// IPC and drops the connection on the unknown request, fall back to killing
+/// the recorded pid tree directly; that is the version-skew state this
+/// recovery path is meant to repair.
+pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
+    let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
+    let recorded_pid = info.pid;
+    if !pid_is_alive(recorded_pid) {
+        let _ = fs::remove_file(daemon_info_path(state_dir));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("daemon pid {recorded_pid} is not running"),
+        ));
+    }
+
+    let pid = match send_daemon_request(state_dir, &DaemonRequest::Shutdown) {
+        Ok(DaemonResponse::ShutdownAck { pid }) => pid,
+        Ok(DaemonResponse::Error { message }) => return Err(io::Error::other(message)),
+        Ok(response) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected daemon response: {response:?}"),
+            ));
+        }
+        Err(err) if is_old_daemon_signature(&err) => {
+            eprintln!(
+                "[clud] daemon pid {recorded_pid} does not support shutdown IPC; terminating it directly"
+            );
+            signal_process_tree(recorded_pid, Signal::Term);
+            thread::sleep(Duration::from_millis(150));
+            if pid_is_alive(recorded_pid) {
+                signal_process_tree(recorded_pid, Signal::Kill);
+            }
+            recorded_pid
+        }
+        Err(err) => return Err(err),
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pid_is_alive(pid) {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("daemon pid {pid} did not exit within 10s after shutdown"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = fs::remove_file(daemon_info_path(state_dir));
+    Ok(pid)
+}
+
+fn is_old_daemon_signature(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
 }
 
 pub(super) fn send_worker_message(
@@ -389,6 +458,8 @@ pub fn gc_client_list_repo_visits(state_dir: &Path) -> io::Result<Vec<RepoVisit>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Issue #192: a daemon whose `daemon.json` reports the same version
     /// as the spawning binary must NOT be restarted. This is the steady-
@@ -431,5 +502,100 @@ mod tests {
             version: None,
         };
         assert!(!daemon_version_matches(&info));
+    }
+
+    fn write_daemon_info(state_dir: &Path, pid: u32, port: u16) {
+        fs::create_dir_all(state_dir).unwrap();
+        let info = DaemonInfo {
+            pid,
+            port,
+            dashboard_port: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        };
+        super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();
+    }
+
+    fn spawn_silent_peer() -> (u16, Arc<AtomicBool>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let saw_request = Arc::new(AtomicBool::new(false));
+        let saw_request_thread = Arc::clone(&saw_request);
+
+        thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                if !line.is_empty() {
+                    saw_request_thread.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+
+        (port, saw_request)
+    }
+
+    #[test]
+    fn send_daemon_request_translates_silent_peer_to_unexpected_eof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (port, saw_request) = spawn_silent_peer();
+        write_daemon_info(tmp.path(), std::process::id(), port);
+
+        let err = send_daemon_request(tmp.path(), &DaemonRequest::Shutdown)
+            .expect_err("silent peer must not produce a daemon response");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(
+            !err.to_string().contains("EOF while parsing a value"),
+            "must not surface the raw serde_json EOF message: {err}"
+        );
+
+        for _ in 0..20 {
+            if saw_request.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            saw_request.load(Ordering::SeqCst),
+            "stub peer should have observed the request before closing"
+        );
+    }
+
+    #[test]
+    fn is_old_daemon_signature_recognizes_connection_drop_variants() {
+        assert!(is_old_daemon_signature(&io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "x"
+        )));
+        assert!(is_old_daemon_signature(&io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "x"
+        )));
+        assert!(is_old_daemon_signature(&io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "x"
+        )));
+        assert!(!is_old_daemon_signature(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "x"
+        )));
+        assert!(!is_old_daemon_signature(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "x"
+        )));
+    }
+
+    #[test]
+    fn request_daemon_shutdown_treats_dead_pid_as_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_daemon_info(tmp.path(), u32::MAX, 9);
+
+        let err = request_daemon_shutdown(tmp.path())
+            .expect_err("dead daemon pid should be treated as absent");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(
+            !daemon_info_path(tmp.path()).exists(),
+            "stale daemon.json should be removed"
+        );
     }
 }
