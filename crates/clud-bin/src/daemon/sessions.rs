@@ -97,16 +97,11 @@ pub(super) fn list_background_sessions(state_dir: &Path) -> Vec<SessionSnapshot>
         let Ok(session) = read_json_file::<SessionSnapshot>(&path) else {
             continue;
         };
-        if session.exit_code.is_some() || !session.background {
+        if !session.background {
             continue;
         }
-        if !pid_is_alive(session.worker_pid) {
+        if !session_is_live(&session) {
             continue;
-        }
-        if let Some(root_pid) = session.root_pid {
-            if !pid_is_alive(root_pid) {
-                continue;
-            }
         }
         sessions.push(session);
     }
@@ -114,11 +109,55 @@ pub(super) fn list_background_sessions(state_dir: &Path) -> Vec<SessionSnapshot>
     sessions
 }
 
+pub(super) fn list_live_session_cwds(state_dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = fs::read_dir(sessions_dir(state_dir)) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(session) = read_json_file::<SessionSnapshot>(&path) else {
+            continue;
+        };
+        if !session_is_live(&session) {
+            continue;
+        }
+        let Some(cwd) = session.cwd.as_deref() else {
+            continue;
+        };
+        let Ok(canonical) = fs::canonicalize(cwd) else {
+            continue;
+        };
+        paths.push(canonical);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub(super) fn list_attachable_sessions(state_dir: &Path) -> Vec<SessionSnapshot> {
     list_background_sessions(state_dir)
         .into_iter()
         .filter(|session| session.attachable)
         .collect()
+}
+
+fn session_is_live(session: &SessionSnapshot) -> bool {
+    if session.exit_code.is_some() {
+        return false;
+    }
+    if !pid_is_alive(session.worker_pid) {
+        return false;
+    }
+    if let Some(root_pid) = session.root_pid {
+        if !pid_is_alive(root_pid) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -129,10 +168,21 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_snapshot(state_dir: &Path, id: &str, created_at: u64, exit_code: Option<i32>) {
+        write_snapshot_with_cwd_and_pid(state_dir, id, created_at, exit_code, None, 0);
+    }
+
+    fn write_snapshot_with_cwd_and_pid(
+        state_dir: &Path,
+        id: &str,
+        created_at: u64,
+        exit_code: Option<i32>,
+        cwd: Option<String>,
+        worker_pid: u32,
+    ) {
         let snap = SessionSnapshot {
             id: id.into(),
             kind: SessionKind::Subprocess,
-            cwd: None,
+            cwd,
             name: None,
             created_at: Some(created_at),
             detachable: false,
@@ -142,7 +192,7 @@ mod tests {
             repeat_next_run_at: None,
             repeat_running: false,
             daemon_pid: 0,
-            worker_pid: 0,
+            worker_pid,
             worker_port: 0,
             root_pid: None,
             exit_code,
@@ -168,5 +218,42 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let nonexistent = tmp.path().join("does-not-exist");
         assert!(most_recent_session_any(&nonexistent).is_none());
+    }
+
+    #[test]
+    fn list_live_session_cwds_returns_canonical_live_cwds() {
+        let tmp = TempDir::new().unwrap();
+        let live_cwd = tmp.path().join("live");
+        let exited_cwd = tmp.path().join("exited");
+        std::fs::create_dir_all(&live_cwd).unwrap();
+        std::fs::create_dir_all(&exited_cwd).unwrap();
+
+        write_snapshot_with_cwd_and_pid(
+            tmp.path(),
+            "sess-live",
+            1,
+            None,
+            Some(live_cwd.to_string_lossy().to_string()),
+            std::process::id(),
+        );
+        write_snapshot_with_cwd_and_pid(
+            tmp.path(),
+            "sess-exited",
+            2,
+            Some(0),
+            Some(exited_cwd.to_string_lossy().to_string()),
+            std::process::id(),
+        );
+        write_snapshot_with_cwd_and_pid(
+            tmp.path(),
+            "sess-dead-worker",
+            3,
+            None,
+            Some(exited_cwd.to_string_lossy().to_string()),
+            u32::MAX,
+        );
+
+        let paths = list_live_session_cwds(tmp.path());
+        assert_eq!(paths, vec![std::fs::canonicalize(live_cwd).unwrap()]);
     }
 }

@@ -14,11 +14,12 @@ use sysinfo::Signal;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
-use super::gc_service::{spawn_registry_worker, GcRequestMsg, WORKER_REPLY_TIMEOUT};
+use super::gc_service::{spawn_registry_worker_for_state, GcRequestMsg, WORKER_REPLY_TIMEOUT};
 use super::http::{default_live_sessions_provider, spawn_dashboard};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
 use super::process_utils::{pid_is_alive, signal_process_tree};
+use super::sessions::list_live_session_cwds;
 use super::types::{
     DaemonInfo, DaemonRequest, DaemonResponse, GcReply, SessionSnapshot, WorkerLaunchSpec,
 };
@@ -55,7 +56,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // Issue #135: GC registry worker is in-process now. Failing to open
     // the registry is non-fatal — session ops still work; only GC ops
     // will error back to the CLI. Log once and continue.
-    let gc_tx = match spawn_registry_worker() {
+    let gc_tx = match spawn_registry_worker_for_state(state_dir.to_path_buf()) {
         Ok(tx) => Some(tx),
         Err(err) => {
             eprintln!("[clud] note: gc registry unavailable: {}", err);
@@ -162,6 +163,9 @@ fn handle_daemon_connection(
                 },
             }
         }
+        DaemonRequest::ListLiveCwds => DaemonResponse::LiveCwds {
+            paths: list_live_session_cwds(state_dir),
+        },
         DaemonRequest::Terminate { session_id } => {
             match daemon_terminate_session(state_dir, workers, &session_id) {
                 Ok(session) => DaemonResponse::Terminated { session },

@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -33,26 +33,47 @@ pub(super) struct GcRequestMsg {
     pub(super) reply_tx: mpsc::SyncSender<GcReply>,
 }
 
+type LiveCwdsProvider = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync + 'static>;
+
 /// Open the registry and spawn the single worker thread. Returns the
 /// sender every connection thread uses to dispatch GC ops. Caller keeps
 /// the sender alive for the daemon's lifetime; dropping it stops the
 /// worker.
+#[cfg(test)]
 pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
     spawn_registry_worker_with(registry)
 }
 
+pub(super) fn spawn_registry_worker_for_state(
+    state_dir: PathBuf,
+) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
+    let registry = Registry::open_default().map_err(std::io::Error::other)?;
+    spawn_registry_worker_with_live_cwds(
+        registry,
+        Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
+    )
+}
+
 /// Same as [`spawn_registry_worker`] but accepts a pre-constructed
 /// `Registry`. Tests use this to bind a worker to an isolated `redb`
 /// file without depending on the process-global `CLUD_DATA_DB` env var.
+#[cfg(test)]
 pub(super) fn spawn_registry_worker_with(
     registry: Registry,
+) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
+    spawn_registry_worker_with_live_cwds(registry, Arc::new(Vec::<PathBuf>::new))
+}
+
+fn spawn_registry_worker_with_live_cwds(
+    registry: Registry,
+    live_cwds_provider: LiveCwdsProvider,
 ) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
     let (tx, rx) = mpsc::channel::<GcRequestMsg>();
     let tick_cadence = gc_tick_cadence_from_env();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
-        .spawn(move || run_worker_loop(registry, rx, tick_cadence))?;
+        .spawn(move || run_worker_loop(registry, rx, tick_cadence, live_cwds_provider))?;
     Ok(tx)
 }
 
@@ -76,10 +97,11 @@ fn run_worker_loop(
     registry: Registry,
     rx: mpsc::Receiver<GcRequestMsg>,
     tick_cadence: Option<Duration>,
+    live_cwds_provider: LiveCwdsProvider,
 ) {
     let Some(tick_cadence) = tick_cadence else {
         while let Ok(msg) = rx.recv() {
-            handle_worker_msg(&registry, msg);
+            handle_worker_msg(&registry, msg, &live_cwds_provider);
         }
         return;
     };
@@ -89,14 +111,14 @@ fn run_worker_loop(
         let timeout = next_tick.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
             Ok(msg) => {
-                handle_worker_msg(&registry, msg);
+                handle_worker_msg(&registry, msg, &live_cwds_provider);
                 if Instant::now() >= next_tick {
-                    run_periodic_purge_tick(&registry);
+                    run_periodic_purge_tick(&registry, &live_cwds_provider);
                     next_tick = Instant::now() + tick_cadence;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                run_periodic_purge_tick(&registry);
+                run_periodic_purge_tick(&registry, &live_cwds_provider);
                 next_tick = Instant::now() + tick_cadence;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -104,20 +126,25 @@ fn run_worker_loop(
     }
 }
 
-fn handle_worker_msg(registry: &Registry, msg: GcRequestMsg) {
-    let reply = process_op(registry, msg.op);
+fn handle_worker_msg(
+    registry: &Registry,
+    msg: GcRequestMsg,
+    live_cwds_provider: &LiveCwdsProvider,
+) {
+    let reply = process_op_with_live_cwds(registry, msg.op, live_cwds_provider());
     // Hung-up callers are fine — the worker keeps serving the rest.
     let _ = msg.reply_tx.send(reply);
 }
 
-fn run_periodic_purge_tick(registry: &Registry) {
-    let reply = process_op(
+fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsProvider) {
+    let reply = process_op_with_live_cwds(
         registry,
         GcOp::Purge {
             duration: Some(PERIODIC_GC_WORKTREE_STALE_AFTER.to_string()),
             kind: Some("worktree".to_string()),
             dry_run: false,
         },
+        live_cwds_provider(),
     );
     match reply {
         GcReply::PurgeOk { removed, skipped } => {
@@ -132,7 +159,7 @@ fn run_periodic_purge_tick(registry: &Registry) {
     }
 }
 
-pub(super) fn process_op(registry: &Registry, op: GcOp) -> GcReply {
+fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathBuf>) -> GcReply {
     match op {
         GcOp::List { kind } => match registry.list(kind.as_deref()) {
             Ok(rows) => {
@@ -185,9 +212,10 @@ pub(super) fn process_op(registry: &Registry, op: GcOp) -> GcReply {
                 }
             };
             let live_locks = collect_live_lock_paths();
+            let live_cwds = canonicalize_live_cwds(live_cwds);
             let (purgeable, skipped): (Vec<_>, Vec<_>) = candidates
                 .into_iter()
-                .partition(|c| !(c.kind == "worktree" && live_locks.contains(&c.path)));
+                .partition(|c| !entry_is_live(c, &live_locks, &live_cwds));
             if dry_run {
                 return GcReply::PurgeOk {
                     removed: purgeable.len(),
@@ -283,7 +311,8 @@ pub(super) fn process_op(registry: &Registry, op: GcOp) -> GcReply {
                 };
             };
             let live_locks = collect_live_lock_paths();
-            if target.kind == "worktree" && live_locks.contains(&target.path) {
+            let live_cwds = canonicalize_live_cwds(live_cwds);
+            if entry_is_live(&target, &live_locks, &live_cwds) {
                 return GcReply::PurgeOk {
                     removed: 0,
                     skipped: 1,
@@ -298,6 +327,36 @@ pub(super) fn process_op(registry: &Registry, op: GcOp) -> GcReply {
             }
         }
     }
+}
+
+fn canonicalize_live_cwds(live_cwds: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = live_cwds
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn entry_is_live(
+    entry: &TrackedEntry,
+    live_locks: &HashSet<String>,
+    live_cwds: &[PathBuf],
+) -> bool {
+    if entry.kind == "worktree" && live_locks.contains(&entry.path) {
+        return true;
+    }
+    entry_path_contains_live_cwd(entry, live_cwds)
+}
+
+fn entry_path_contains_live_cwd(entry: &TrackedEntry, live_cwds: &[PathBuf]) -> bool {
+    let Ok(entry_path) = std::fs::canonicalize(&entry.path) else {
+        return false;
+    };
+    live_cwds
+        .iter()
+        .any(|cwd| cwd == &entry_path || cwd.starts_with(&entry_path))
 }
 
 fn now_unix() -> i64 {
@@ -401,6 +460,15 @@ mod tests {
         restore_env_var(ENV_DATA_DB, prior_db);
         let tx = tx.unwrap();
         (tx, guard)
+    }
+
+    fn spawn_test_worker_with_live_cwds(
+        db_path: &Path,
+        live_cwds: Vec<PathBuf>,
+    ) -> mpsc::Sender<GcRequestMsg> {
+        let registry = Registry::open_at(db_path).expect("open registry");
+        spawn_registry_worker_with_live_cwds(registry, Arc::new(move || live_cwds.clone()))
+            .expect("spawn registry worker")
     }
 
     fn restore_env_var(key: &str, prior: Option<std::ffi::OsString>) {
@@ -536,6 +604,105 @@ mod tests {
             GcReply::ListOk { rows } => assert_eq!(rows.len(), 1),
             other => panic!("unexpected reply: {other:?}"),
         }
+    }
+
+    #[test]
+    fn purge_skips_entry_equal_to_live_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("live-cwd-direct.redb");
+        let path_a = dir.path().join("A");
+        let path_b = dir.path().join("B");
+        std::fs::create_dir_all(&path_a).unwrap();
+        std::fs::create_dir_all(&path_b).unwrap();
+        let tx = spawn_test_worker_with_live_cwds(&db_path, vec![path_a.clone()]);
+
+        for path in [&path_a, &path_b] {
+            call(
+                &tx,
+                GcOp::Insert {
+                    kind: "cache".to_string(),
+                    path: path.to_string_lossy().to_string(),
+                    repo_root: None,
+                    branch: None,
+                    agent_id: None,
+                    created_unix: Some(100),
+                },
+            );
+        }
+
+        let resp = call(
+            &tx,
+            GcOp::Purge {
+                duration: None,
+                kind: None,
+                dry_run: false,
+            },
+        );
+        match resp {
+            GcReply::PurgeOk { removed, skipped } => {
+                assert_eq!(removed, 1);
+                assert_eq!(skipped, 1);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        assert!(path_a.exists(), "live cwd entry should remain on disk");
+        assert!(!path_b.exists(), "non-live entry should be deleted");
+        let rows = match call(&tx, GcOp::List { kind: None }) {
+            GcReply::ListOk { rows } => rows,
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, path_a.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn purge_skips_entry_that_is_ancestor_of_live_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("live-cwd-ancestor.redb");
+        let path_a = dir.path().join("A");
+        let live_subdir = path_a.join("sub");
+        std::fs::create_dir_all(&live_subdir).unwrap();
+        let tx = spawn_test_worker_with_live_cwds(&db_path, vec![live_subdir]);
+
+        call(
+            &tx,
+            GcOp::Insert {
+                kind: "cache".to_string(),
+                path: path_a.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                created_unix: Some(100),
+            },
+        );
+
+        let resp = call(
+            &tx,
+            GcOp::Purge {
+                duration: None,
+                kind: None,
+                dry_run: false,
+            },
+        );
+        match resp {
+            GcReply::PurgeOk { removed, skipped } => {
+                assert_eq!(removed, 0);
+                assert_eq!(skipped, 1);
+            }
+            other => panic!("unexpected reply: {other:?}"),
+        }
+
+        assert!(
+            path_a.exists(),
+            "ancestor of live cwd should remain on disk"
+        );
+        let rows = match call(&tx, GcOp::List { kind: None }) {
+            GcReply::ListOk { rows } => rows,
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, path_a.to_string_lossy().to_string());
     }
 
     #[test]
