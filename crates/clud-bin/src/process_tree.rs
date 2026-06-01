@@ -92,6 +92,17 @@ fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
     descendants
 }
 
+/// Whether Ctrl+C teardown should start with a cooperative Ctrl+Break.
+///
+/// Native backend executables can receive this best-effort signal before the
+/// hard kill. Windows batch wrappers cannot: their direct child is `cmd.exe`,
+/// and Ctrl+Break makes cmd's batch interpreter print `Terminate batch job
+/// (Y/N)?` and wait on stdin. For those wrappers we skip straight to
+/// `kill_tree`, which still terminates the cmd.exe child and its descendants.
+pub fn should_cooperative_break(direct_child_is_batch_wrapper: bool) -> bool {
+    !direct_child_is_batch_wrapper
+}
+
 /// Best-effort cooperative shutdown of a Windows console process group.
 ///
 /// When clud spawns the backend with `CREATE_NEW_PROCESS_GROUP`, the
@@ -106,6 +117,9 @@ fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
 /// event was queued), `false` otherwise. Failures are silent and
 /// non-fatal: the caller is expected to fall through to `kill_tree` after
 /// a short grace window regardless.
+///
+/// Do not call this when the direct child is a `cmd.exe` batch wrapper; see
+/// [`should_cooperative_break`] for the user-visible prompt it avoids.
 ///
 /// No-op on non-Windows targets — POSIX has no `CREATE_NEW_PROCESS_GROUP`
 /// concept and clud's foreground process group already receives the
@@ -133,6 +147,16 @@ pub fn try_break_group(pid: u32) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn cooperative_break_skipped_for_batch_wrapper() {
+        assert!(!super::should_cooperative_break(true));
+    }
+
+    #[test]
+    fn cooperative_break_sent_for_native_executable() {
+        assert!(super::should_cooperative_break(false));
+    }
 
     #[test]
     fn kill_tree_of_dead_pid_does_not_panic() {

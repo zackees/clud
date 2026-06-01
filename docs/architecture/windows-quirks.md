@@ -11,9 +11,9 @@ overwrite it, an OLE `IDropTarget` adapter so dragging a file onto the
 console window actually drops paths into the prompt, `CREATE_NO_WINDOW` for
 daemon-helper subprocesses that would otherwise flash a conhost window, a
 `whisper-rs` carve-out on `aarch64-pc-windows-msvc` where the sys-crate
-doesn't build, and a descendant-tree killer to reap orphaned `node.exe`
-grandchildren when the user hits Ctrl+C on `clud --codex`. All nine degrade
-to no-ops (or different mechanisms entirely) on POSIX.
+doesn't build, and a Ctrl+C descendant-tree teardown that reaps orphaned
+backend grandchildren without tripping cmd.exe's batch-job prompt. All nine
+degrade to no-ops (or different mechanisms entirely) on POSIX.
 
 ## Why so many?
 
@@ -82,11 +82,14 @@ the codebase stays portable.
   thanks to the outer quotes. The `/D` flag suppresses any user-installed
   `AutoRun` registry key; `/S` makes cmd's quote handling predictable
   (outermost `"..."` stripped verbatim); `/C` runs and exits.
+  `subprocess::argv_is_batch_wrapped` exposes the same `.cmd` / `.bat`
+  decision to the Ctrl+C teardown path so clud can treat the intermediate
+  `cmd.exe` differently from a native backend executable.
 
 - **File**: `crates/clud-bin/src/subprocess.rs:34`
   (`command_spec_for_subprocess`); the case-insensitive `.cmd`/`.bat` check
   at `:47` (`is_windows_batch_wrapper`); per-arg quoting at `:106`
-  (`quote_for_cmd`).
+  (`quote_for_cmd`); `argv_is_batch_wrapped` for Ctrl+C teardown gating.
 
 - **POSIX behavior**: No-op. `is_windows_batch_wrapper` is gated
   `#[cfg(windows)]`; on POSIX every argv stays as `CommandSpec::Argv` and a
@@ -303,11 +306,12 @@ the codebase stays portable.
   is compiled. Only `aarch64-pc-windows-msvc` is carved out; Linux ARM
   and macOS ARM build `whisper-rs` normally.
 
-### (i) `process_tree::kill_tree` for `--codex` Ctrl+C orphan reap
+### (i) `process_tree::kill_tree` for Ctrl+C backend-tree reap
 
-- **Symptom**: User hits Ctrl+C in `clud --codex` and the prompt takes
-  several seconds to come back; in the meantime an orphaned `node.exe`
-  (the real Codex) keeps writing garbage to the inherited console. The
+- **Symptom**: User hits Ctrl+C in a subprocess-mode backend session and
+  the prompt takes several seconds to come back; in the meantime an
+  orphaned `node.exe` (the real Claude/Codex backend) keeps writing
+  garbage to the inherited console. The
   cause is structural: because of quirk (b) the real process tree at
   runtime is `clud.exe → cmd.exe → node.exe`, and `process.kill()` on
   the direct child reaps only the cmd.exe — the node.exe survives until
@@ -320,11 +324,17 @@ the codebase stays portable.
   deepest-first, ending with the root. The cooperative companion
   `try_break_group` calls
   `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` so a well-behaved
-  agent with a `SetConsoleCtrlHandler` for `CTRL_BREAK_EVENT` can flush
-  state during the short grace window before the hard kill follows.
+  native agent with a `SetConsoleCtrlHandler` for `CTRL_BREAK_EVENT` can
+  flush state during the short grace window before the hard kill follows.
+  That cooperative break is skipped when the direct child is the BatBadBat
+  `cmd.exe` wrapper from quirk (b): cmd's batch interpreter responds by
+  printing `Terminate batch job (Y/N)?` and waiting on stdin. The hard
+  `kill_tree` step still runs for both Claude and Codex, so the wrapper and
+  backend descendants are reaped without prompting.
 
 - **File**: `crates/clud-bin/src/process_tree.rs:46` (`kill_tree`); `:75`
-  (`descendant_pids`); `:113` (`try_break_group`).
+  (`descendant_pids`); `should_cooperative_break`; `:113`
+  (`try_break_group`).
 
 - **POSIX behavior**: Same `kill_tree` code path runs (`sysinfo` is
   cross-platform; `Signal::Kill` is SIGKILL on Unix; `process.kill()`

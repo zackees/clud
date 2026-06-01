@@ -201,6 +201,7 @@ pub fn run_plan_subprocess(
             ));
         }
 
+        let batch_wrapped = subprocess::argv_is_batch_wrapped(&plan.command);
         let config = ProcessConfig {
             command: subprocess::command_spec_for_subprocess(plan.command.clone()),
             cwd: plan.cwd.as_ref().map(PathBuf::from),
@@ -261,9 +262,14 @@ pub fn run_plan_subprocess(
         // fallback is unavailable there.
         let mut captured_output = String::new();
         let exit_code = if plan.stream_json_progress {
-            run_with_stream_json_renderer(&process, interrupted, &mut captured_output)
+            run_with_stream_json_renderer(
+                &process,
+                interrupted,
+                &mut captured_output,
+                batch_wrapped,
+            )
         } else {
-            run_with_inherited_stdio(&process, interrupted)
+            run_with_inherited_stdio(&process, interrupted, batch_wrapped)
         };
         match exit_code {
             ProcessOutcome::Exited(code) => {
@@ -328,8 +334,9 @@ enum ProcessOutcome {
 ///
 /// Sequence:
 ///
-/// 1. Windows-only: send `CTRL_BREAK_EVENT` to the child's console
-///    process group. The backend is spawned with
+/// 1. Windows-only, when the direct child is a native executable: send
+///    `CTRL_BREAK_EVENT` to the child's console process group. The
+///    backend is spawned with
 ///    `CREATE_NEW_PROCESS_GROUP` so the OS does *not* deliver the
 ///    user's `CTRL_C_EVENT` to it — that prevents stray
 ///    `KeyboardInterrupt` tracebacks from blocking `subprocess` waits
@@ -338,6 +345,11 @@ enum ProcessOutcome {
 ///    backend that *does* install a Ctrl+Break handler. Failures and
 ///    non-Windows targets short-circuit silently and we proceed to the
 ///    hard kill.
+///
+///    When the direct child is `cmd.exe` running a `.cmd` / `.bat`
+///    backend wrapper, skip this step. Ctrl+Break makes cmd's batch
+///    interpreter display `Terminate batch job (Y/N)?` and wait on
+///    stdin, so the clean interrupt path must go straight to `kill_tree`.
 /// 2. `kill_tree`: snapshot the PID *before* killing the direct child
 ///    so we can walk descendants. On Windows the direct child is
 ///    cmd.exe (BatBadBat wrapper, see `subprocess.rs`) and the real
@@ -348,12 +360,14 @@ enum ProcessOutcome {
 /// 3. `process.kill()` + `process.wait(2s)`: final TerminateProcess on
 ///    the direct handle and a bounded wait so we don't return while
 ///    the child is still draining.
-fn teardown_interrupted_child(process: &running_process::NativeProcess) {
+fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wrapped: bool) {
     if let Some(pid) = process.pid() {
-        // Cooperative Ctrl+Break first. No-op on POSIX (returns false)
-        // and any failure on Windows is non-fatal — the hard kill below
-        // is always run regardless.
-        let _ = process_tree::try_break_group(pid);
+        // Cooperative Ctrl+Break first when it is safe. No-op on POSIX
+        // (returns false), and any Windows failure is non-fatal because
+        // the hard kill below always runs.
+        if process_tree::should_cooperative_break(batch_wrapped) {
+            let _ = process_tree::try_break_group(pid);
+        }
         process_tree::kill_tree(pid);
     }
     let _ = process.kill();
@@ -367,6 +381,7 @@ fn teardown_interrupted_child(process: &running_process::NativeProcess) {
 fn run_with_inherited_stdio(
     process: &running_process::NativeProcess,
     interrupted: &AtomicBool,
+    batch_wrapped: bool,
 ) -> ProcessOutcome {
     loop {
         match process.poll() {
@@ -378,7 +393,7 @@ fn run_with_inherited_stdio(
             }
             Ok(None) => {
                 if interrupted.load(Ordering::SeqCst) {
-                    teardown_interrupted_child(process);
+                    teardown_interrupted_child(process, batch_wrapped);
                     return ProcessOutcome::Interrupted;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -406,6 +421,7 @@ fn run_with_stream_json_renderer(
     process: &running_process::NativeProcess,
     interrupted: &AtomicBool,
     captured_output: &mut String,
+    batch_wrapped: bool,
 ) -> ProcessOutcome {
     use running_process::{ReadStatus, StreamKind};
     use std::time::Duration;
@@ -413,7 +429,7 @@ fn run_with_stream_json_renderer(
     let timeout = Duration::from_millis(100);
     loop {
         if interrupted.load(Ordering::SeqCst) {
-            teardown_interrupted_child(process);
+            teardown_interrupted_child(process, batch_wrapped);
             return ProcessOutcome::Interrupted;
         }
         match process.read_stream(StreamKind::Stdout, Some(timeout)) {
