@@ -53,6 +53,9 @@ const REPO_VISITS: TableDefinition<&str, &[u8]> = TableDefinition::new("repo_vis
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_NEXT_ID: &str = "next_id";
 
+pub const WORKTREE_KIND: &str = "worktree";
+pub const EXTERN_REPO_KIND: &str = "extern-repo";
+
 /// Errors surfaced by `gc.rs`. Narrow on purpose — the CLI handlers
 /// stringify these and log; nothing branches on the variant.
 #[derive(Debug)]
@@ -442,7 +445,10 @@ pub fn extract_pid_from_lock_reason(reason: &str) -> Option<u32> {
 pub fn run_reconcile(registry: &Registry) -> Result<usize, GcError> {
     let main_root = worktrees::locate_main_repo_root().map_err(GcError::Io)?;
     let watch_dir = main_root.join(".claude").join("worktrees");
-    reconcile_dir(registry, &watch_dir, Some(&main_root)).map(|res| res.inserted)
+    let worktree_res = reconcile_dir(registry, &watch_dir, Some(&main_root))?;
+    let extern_res =
+        reconcile_extern_repos_dir(registry, &main_root.join(".extern-repos"), Some(&main_root))?;
+    Ok(worktree_res.inserted + extern_res.inserted)
 }
 
 /// Result of one scan pass.
@@ -466,6 +472,54 @@ pub fn reconcile_dir(
     watch_dir: &Path,
     repo_root: Option<&Path>,
 ) -> Result<ScanResult, GcError> {
+    reconcile_dir_with_kind(registry, watch_dir, repo_root, ScanKind::Worktree)
+}
+
+/// Walk `<repo>/.extern-repos/` and insert each immediate child directory
+/// as an `extern-repo` row. Nested directories are intentionally ignored.
+pub fn reconcile_extern_repos_dir(
+    registry: &Registry,
+    watch_dir: &Path,
+    repo_root: Option<&Path>,
+) -> Result<ScanResult, GcError> {
+    reconcile_dir_with_kind(registry, watch_dir, repo_root, ScanKind::ExternRepo)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ScanKind {
+    Worktree,
+    ExternRepo,
+}
+
+impl ScanKind {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Worktree => WORKTREE_KIND,
+            Self::ExternRepo => EXTERN_REPO_KIND,
+        }
+    }
+
+    fn accepts_dir_name(self, name: &str) -> bool {
+        match self {
+            Self::Worktree => name.starts_with("agent-"),
+            Self::ExternRepo => true,
+        }
+    }
+
+    fn agent_id(self, name: &str) -> Option<String> {
+        match self {
+            Self::Worktree => Some(name.to_string()),
+            Self::ExternRepo => None,
+        }
+    }
+}
+
+fn reconcile_dir_with_kind(
+    registry: &Registry,
+    watch_dir: &Path,
+    repo_root: Option<&Path>,
+    scan_kind: ScanKind,
+) -> Result<ScanResult, GcError> {
     let mut res = ScanResult::default();
     let entries = match std::fs::read_dir(watch_dir) {
         Ok(it) => it,
@@ -485,13 +539,13 @@ pub fn reconcile_dir(
             Some(s) => s,
             None => continue,
         };
-        if !name_str.starts_with("agent-") {
+        if !scan_kind.accepts_dir_name(name_str) {
             continue;
         }
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
 
-        let existed_before = registry_has_entry(registry, "worktree", &path_str)?;
+        let existed_before = registry_has_entry(registry, scan_kind.kind(), &path_str)?;
 
         if existed_before {
             // No-op insert; just bump the skipped counter.
@@ -501,11 +555,11 @@ pub fn reconcile_dir(
 
         let branch = best_effort_branch(&path);
         let input = InsertInput {
-            kind: "worktree".to_string(),
+            kind: scan_kind.kind().to_string(),
             path: path_str,
             repo_root: repo_root.map(|p| p.to_string_lossy().to_string()),
             branch,
-            agent_id: Some(name_str.to_string()),
+            agent_id: scan_kind.agent_id(name_str),
             now_unix: now_unix(),
         };
         registry.insert_if_new(&input)?;
@@ -520,7 +574,7 @@ fn registry_has_entry(registry: &Registry, kind: &str, path: &str) -> Result<boo
     Ok(table.get((kind, path))?.is_some())
 }
 
-fn best_effort_branch(path: &Path) -> Option<String> {
+pub(crate) fn best_effort_branch(path: &Path) -> Option<String> {
     worktrees::run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .map(|s| s.trim().to_string())
@@ -558,18 +612,46 @@ impl WorktreeScanner {
             }
         };
         let watch_dir = main_root.join(".claude").join("worktrees");
-        Some(Self::spawn(watch_dir, Some(main_root)))
+        Some(Self::spawn_with_kind(
+            watch_dir,
+            Some(main_root),
+            ScanKind::Worktree,
+        ))
+    }
+
+    /// Spawn a scanner watching the current repo's `.extern-repos/`.
+    /// Returns `None` if the repo root can't be located.
+    pub fn maybe_spawn_extern_repos() -> Option<Self> {
+        let main_root = match worktrees::locate_main_repo_root() {
+            Ok(p) => p,
+            Err(_) => return None,
+        };
+        let watch_dir = main_root.join(".extern-repos");
+        Some(Self::spawn_with_kind(
+            watch_dir,
+            Some(main_root),
+            ScanKind::ExternRepo,
+        ))
     }
 
     /// Explicit spawn. Tests pass a custom watch dir. Inserts go through
     /// the GC daemon IPC; if the daemon is unreachable the scanner gives
     /// up silently.
     pub fn spawn(watch_dir: PathBuf, repo_root: Option<PathBuf>) -> Self {
+        Self::spawn_with_kind(watch_dir, repo_root, ScanKind::Worktree)
+    }
+
+    fn spawn_with_kind(
+        watch_dir: PathBuf,
+        repo_root: Option<PathBuf>,
+        scan_kind: ScanKind,
+    ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_t = cancel.clone();
+        let thread_name = format!("clud-gc-scanner-{}", scan_kind.kind());
         let handle = std::thread::Builder::new()
-            .name("clud-gc-scanner".to_string())
-            .spawn(move || run_scanner_loop(watch_dir, repo_root, cancel_t))
+            .name(thread_name)
+            .spawn(move || run_scanner_loop(watch_dir, repo_root, scan_kind, cancel_t))
             .expect("spawn scanner thread");
         Self {
             cancel,
@@ -592,10 +674,14 @@ impl Drop for WorktreeScanner {
     }
 }
 
-/// Walk `watch_dir` once, sending `gc.insert` IPC ops for each agent-*
-/// subdir found. Returns `Err` on the first IPC failure so the caller
+/// Walk `watch_dir` once, sending `gc.insert` IPC ops for each matching
+/// immediate subdir. Returns `Err` on the first IPC failure so the caller
 /// can stop retrying.
-fn scan_once_via_ipc(watch_dir: &Path, repo_root: Option<&Path>) -> Result<(), String> {
+fn scan_once_via_ipc(
+    watch_dir: &Path,
+    repo_root: Option<&Path>,
+    scan_kind: ScanKind,
+) -> Result<(), String> {
     let entries = match std::fs::read_dir(watch_dir) {
         Ok(it) => it,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -614,18 +700,18 @@ fn scan_once_via_ipc(watch_dir: &Path, repo_root: Option<&Path>) -> Result<(), S
             Some(s) => s.to_string(),
             None => continue,
         };
-        if !name_str.starts_with("agent-") {
+        if !scan_kind.accepts_dir_name(&name_str) {
             continue;
         }
         let path = entry.path();
         let path_str = path.to_string_lossy().to_string();
         let branch = best_effort_branch(&path);
         let input = InsertInput {
-            kind: "worktree".to_string(),
+            kind: scan_kind.kind().to_string(),
             path: path_str,
             repo_root: repo_root.map(|p| p.to_string_lossy().to_string()),
             branch,
-            agent_id: Some(name_str),
+            agent_id: scan_kind.agent_id(&name_str),
             now_unix: now_unix(),
         };
         let state_dir = crate::daemon::default_state_dir().map_err(|e| e.to_string())?;
@@ -634,12 +720,17 @@ fn scan_once_via_ipc(watch_dir: &Path, repo_root: Option<&Path>) -> Result<(), S
     Ok(())
 }
 
-fn run_scanner_loop(watch_dir: PathBuf, repo_root: Option<PathBuf>, cancel: Arc<AtomicBool>) {
+fn run_scanner_loop(
+    watch_dir: PathBuf,
+    repo_root: Option<PathBuf>,
+    scan_kind: ScanKind,
+    cancel: Arc<AtomicBool>,
+) {
     let repo_root_ref = repo_root.as_deref();
     let mut ipc_failed = false;
     while !cancel.load(Ordering::SeqCst) {
         if !ipc_failed {
-            if let Err(e) = scan_once_via_ipc(&watch_dir, repo_root_ref) {
+            if let Err(e) = scan_once_via_ipc(&watch_dir, repo_root_ref, scan_kind) {
                 // Best-effort: log once, then stop trying.
                 if std::env::var_os("CLUD_GC_SCANNER_VERBOSE").is_some() {
                     eprintln!("[clud] debug: gc scanner: daemon ipc failed: {e}");

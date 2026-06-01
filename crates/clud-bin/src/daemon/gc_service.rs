@@ -13,8 +13,15 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::gc::{extract_pid_from_lock_reason, reconcile_dir, InsertInput, Registry, TrackedEntry};
+use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+
+use crate::gc::{
+    extract_pid_from_lock_reason, reconcile_dir, reconcile_extern_repos_dir, InsertInput, Registry,
+    TrackedEntry, EXTERN_REPO_KIND, WORKTREE_KIND,
+};
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
+use crate::subprocess;
+use crate::win_creation_flags::invisible_helper_creationflags;
 use crate::worktrees;
 
 use super::types::{GcOp, GcReply, ListRow};
@@ -24,8 +31,13 @@ use super::types::{GcOp, GcReply, ListRow};
 pub(super) const WORKER_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ENV_GC_TICK_SECS: &str = "CLUD_GC_TICK_SECS";
+const ENV_GC_EXTERN_REPO_MAX_AGE_SECS: &str = "CLUD_GC_EXTERN_REPO_MAX_AGE_SECS";
 const DEFAULT_GC_TICK_SECS: u64 = 3600;
+const DEFAULT_EXTERN_REPO_STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 const PERIODIC_GC_WORKTREE_STALE_AFTER: &str = "48h";
+
+#[cfg(test)]
+const ENV_TEST_GH_BIN: &str = "CLUD_TEST_GH_BIN";
 
 /// One request handed from a connection thread to the registry worker.
 pub(super) struct GcRequestMsg {
@@ -141,22 +153,23 @@ fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsPro
         registry,
         GcOp::Purge {
             duration: Some(PERIODIC_GC_WORKTREE_STALE_AFTER.to_string()),
-            kind: Some("worktree".to_string()),
+            kind: Some(WORKTREE_KIND.to_string()),
             dry_run: false,
         },
         live_cwds_provider(),
     );
-    match worktree_reply {
-        GcReply::PurgeOk { removed, skipped } => {
-            eprintln!("[clud] gc tick: removed {removed}, skipped {skipped}");
-        }
-        GcReply::Error { message } => {
-            eprintln!("[clud] gc tick: error: {message}");
-        }
-        other => {
-            eprintln!("[clud] gc tick: unexpected reply: {other:?}");
-        }
-    }
+    log_periodic_purge_reply(WORKTREE_KIND, worktree_reply);
+
+    let extern_reply = process_op_with_live_cwds(
+        registry,
+        GcOp::Purge {
+            duration: None,
+            kind: Some(EXTERN_REPO_KIND.to_string()),
+            dry_run: false,
+        },
+        live_cwds_provider(),
+    );
+    log_periodic_purge_reply(EXTERN_REPO_KIND, extern_reply);
 
     match reap_trash_entries(registry) {
         Ok((removed, failed)) => {
@@ -166,6 +179,20 @@ fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsPro
         }
         Err(message) => {
             eprintln!("[clud] gc tick: trash error: {message}");
+        }
+    }
+}
+
+fn log_periodic_purge_reply(kind: &str, reply: GcReply) {
+    match reply {
+        GcReply::PurgeOk { removed, skipped } => {
+            eprintln!("[clud] gc tick {kind}: removed {removed}, skipped {skipped}");
+        }
+        GcReply::Error { message } => {
+            eprintln!("[clud] gc tick {kind}: error: {message}");
+        }
+        other => {
+            eprintln!("[clud] gc tick {kind}: unexpected reply: {other:?}");
         }
     }
 }
@@ -224,13 +251,23 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
             };
             let live_locks = collect_live_lock_paths();
             let live_cwds = canonicalize_live_cwds(live_cwds);
-            let (purgeable, skipped): (Vec<_>, Vec<_>) = candidates
-                .into_iter()
-                .partition(|c| !entry_is_live(c, &live_locks, &live_cwds));
+            let mut purgeable = Vec::new();
+            let mut skipped = 0usize;
+            for candidate in candidates {
+                if entry_is_live(&candidate, &live_locks, &live_cwds) {
+                    skipped += 1;
+                    continue;
+                }
+                if !entry_kind_allows_purge(&candidate) {
+                    skipped += 1;
+                    continue;
+                }
+                purgeable.push(candidate);
+            }
             if dry_run {
                 return GcReply::PurgeOk {
                     removed: purgeable.len(),
-                    skipped: skipped.len(),
+                    skipped,
                 };
             }
             let mut removed = 0usize;
@@ -239,19 +276,18 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
                     removed += 1;
                 }
             }
-            GcReply::PurgeOk {
-                removed,
-                skipped: skipped.len(),
-            }
+            GcReply::PurgeOk { removed, skipped }
         }
 
         GcOp::Reconcile { repo_root } => {
             let root = PathBuf::from(&repo_root);
             let watch_dir = root.join(".claude").join("worktrees");
-            match reconcile_dir(registry, &watch_dir, Some(&root)) {
-                Ok(res) => GcReply::ReconcileOk {
-                    inserted: res.inserted,
-                },
+            match reconcile_dir(registry, &watch_dir, Some(&root)).and_then(|worktree_res| {
+                let extern_res =
+                    reconcile_extern_repos_dir(registry, &root.join(".extern-repos"), Some(&root))?;
+                Ok(worktree_res.inserted + extern_res.inserted)
+            }) {
+                Ok(inserted) => GcReply::ReconcileOk { inserted },
                 Err(e) => GcReply::Error {
                     message: e.to_string(),
                 },
@@ -373,6 +409,189 @@ fn entry_path_contains_live_cwd(entry: &TrackedEntry, live_cwds: &[PathBuf]) -> 
         .any(|cwd| cwd == &entry_path || cwd.starts_with(&entry_path))
 }
 
+fn entry_kind_allows_purge(entry: &TrackedEntry) -> bool {
+    if entry.kind == EXTERN_REPO_KIND {
+        return extern_repo_is_purgeable(entry, extern_repo_stale_after());
+    }
+    true
+}
+
+fn extern_repo_stale_after() -> Duration {
+    let secs = std::env::var(ENV_GC_EXTERN_REPO_MAX_AGE_SECS)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_EXTERN_REPO_STALE_AFTER_SECS);
+    Duration::from_secs(secs)
+}
+
+fn extern_repo_is_purgeable(entry: &TrackedEntry, stale_after: Duration) -> bool {
+    let path = Path::new(&entry.path);
+    if !path.is_dir() {
+        return false;
+    }
+    let Some(mtime) = most_recent_mtime(path) else {
+        return false;
+    };
+    let Ok(age) = SystemTime::now().duration_since(mtime) else {
+        return false;
+    };
+    if age < stale_after {
+        return false;
+    }
+    let Some(branch) = entry
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| crate::gc::best_effort_branch(path))
+    else {
+        return false;
+    };
+    let Some(slug) = repo_slug_for_extern_repo(path) else {
+        return false;
+    };
+    gh_pr_list_reports_merged(&branch, &slug)
+}
+
+fn most_recent_mtime(path: &Path) -> Option<SystemTime> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let mut latest = metadata.modified().ok()?;
+    if metadata.is_dir() {
+        let entries = std::fs::read_dir(path).ok()?;
+        for entry in entries.flatten() {
+            if let Some(child_mtime) = most_recent_mtime(&entry.path()) {
+                if child_mtime > latest {
+                    latest = child_mtime;
+                }
+            }
+        }
+    }
+    Some(latest)
+}
+
+fn repo_slug_for_extern_repo(path: &Path) -> Option<String> {
+    let remote = worktrees::run_git(path, &["remote", "get-url", "origin"]).ok()?;
+    parse_github_slug_from_remote_url(&remote)
+}
+
+fn parse_github_slug_from_remote_url(remote: &str) -> Option<String> {
+    let s = remote.trim().trim_end_matches('/');
+    if let Some(rest) = s.strip_prefix("git@github.com:") {
+        return slug_from_github_path(rest);
+    }
+    for prefix in [
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+        "git://github.com/",
+    ] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return slug_from_github_path(rest);
+        }
+    }
+    None
+}
+
+fn slug_from_github_path(path: &str) -> Option<String> {
+    let clean = path.trim().trim_matches('/').trim_end_matches(".git");
+    let mut parts = clean.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim().trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn gh_pr_list_reports_merged(branch: &str, slug: &str) -> bool {
+    let args = vec![
+        "pr".to_string(),
+        "list".to_string(),
+        "--head".to_string(),
+        branch.to_string(),
+        "--state".to_string(),
+        "all".to_string(),
+        "--json".to_string(),
+        "mergedAt,url".to_string(),
+        "--repo".to_string(),
+        slug.to_string(),
+    ];
+    let Ok((exit_code, stdout)) = run_gh_capture(&args) else {
+        return false;
+    };
+    exit_code == 0 && gh_pr_list_json_has_merged(&stdout)
+}
+
+fn gh_pr_list_json_has_merged(stdout: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return false;
+    };
+    value
+        .as_array()
+        .map(|items| {
+            items.iter().any(|item| {
+                item.get("mergedAt")
+                    .and_then(|merged_at| merged_at.as_str())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn run_gh_capture(args: &[String]) -> Result<(i32, String), String> {
+    let mut argv = vec![gh_program()];
+    argv.extend(args.iter().cloned());
+    let config = ProcessConfig {
+        command: subprocess::command_spec_for_subprocess(argv),
+        cwd: None,
+        env: None,
+        capture: true,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: invisible_helper_creationflags(),
+        create_process_group: false,
+        stdin_mode: StdinMode::Null,
+        nice: None,
+    };
+    let process = NativeProcess::new(config);
+    process
+        .start()
+        .map_err(|e| format!("failed to start gh: {e}"))?;
+
+    let mut buf = Vec::<u8>::new();
+    loop {
+        match process.read_combined(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(event) => {
+                buf.extend_from_slice(&event.line);
+                buf.push(b'\n');
+            }
+            ReadStatus::Timeout => {
+                if process.returncode().is_some() {
+                    break;
+                }
+            }
+            ReadStatus::Eof => break,
+        }
+    }
+    let exit_code = process
+        .wait(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("waiting for gh: {e}"))?;
+    Ok((exit_code, String::from_utf8_lossy(&buf).to_string()))
+}
+
+fn gh_program() -> String {
+    #[cfg(test)]
+    {
+        if let Some(path) = std::env::var_os(ENV_TEST_GH_BIN) {
+            if !path.is_empty() {
+                return path.to_string_lossy().to_string();
+            }
+        }
+    }
+    "gh".to_string()
+}
+
 fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -461,7 +680,12 @@ fn reap_trash_entries(registry: &Registry) -> Result<(usize, usize), String> {
 mod tests {
     use super::*;
     use crate::gc::ENV_DATA_DB;
+    use std::ffi::OsString;
+    use std::fs;
     use std::sync::Mutex;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     // ENV_DATA_DB is process-global; serialize so two test threads
     // never race to open the same redb file concurrently.
@@ -515,10 +739,54 @@ mod tests {
         }
     }
 
+    struct ScopedEnv {
+        key: &'static str,
+        prior: Option<OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prior = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            restore_env_var(self.key, self.prior.take());
+        }
+    }
+
     fn call(tx: &mpsc::Sender<GcRequestMsg>, op: GcOp) -> GcReply {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
         tx.send(GcRequestMsg { op, reply_tx }).unwrap();
         reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    fn write_mock_gh(dir: &Path, json: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = dir.join("gh.cmd");
+            fs::write(&path, format!("@echo off\r\necho {json}\r\nexit /b 0\r\n")).unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = dir.join("gh");
+            fs::write(
+                &path,
+                format!("#!/bin/sh\ncat <<'JSON'\n{json}\nJSON\nexit 0\n"),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                let mut perms = fs::metadata(&path).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&path, perms).unwrap();
+            }
+            path
+        }
     }
 
     #[test]
@@ -532,6 +800,37 @@ mod tests {
             gc_tick_cadence_from_raw(Some("1")),
             Some(Duration::from_secs(1))
         );
+    }
+
+    #[test]
+    fn github_remote_slug_parser_accepts_common_origin_urls() {
+        assert_eq!(
+            parse_github_slug_from_remote_url("git@github.com:zackees/dep.git"),
+            Some("zackees/dep".to_string())
+        );
+        assert_eq!(
+            parse_github_slug_from_remote_url("https://github.com/zackees/dep.git\n"),
+            Some("zackees/dep".to_string())
+        );
+        assert_eq!(
+            parse_github_slug_from_remote_url("ssh://git@github.com/zackees/dep"),
+            Some("zackees/dep".to_string())
+        );
+        assert_eq!(
+            parse_github_slug_from_remote_url("https://example.com/x/y"),
+            None
+        );
+    }
+
+    #[test]
+    fn gh_pr_list_json_requires_non_empty_merged_at() {
+        assert!(gh_pr_list_json_has_merged(
+            r#"[{"mergedAt":"2026-01-01T00:00:00Z","url":"https://github.com/a/b/pull/1"}]"#
+        ));
+        assert!(!gh_pr_list_json_has_merged(
+            r#"[{"mergedAt":null,"url":"https://github.com/a/b/pull/1"}]"#
+        ));
+        assert!(!gh_pr_list_json_has_merged("not json"));
     }
 
     #[test]
@@ -833,6 +1132,53 @@ mod tests {
         assert_eq!((removed, failed), (0, 1));
         assert!(not_a_dir.exists());
         assert_eq!(registry.list(Some("trash")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn periodic_tick_removes_merged_stale_extern_repo_entry() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("extern-purge.redb");
+        let repo = dir.path().join("extern");
+        fs::create_dir_all(&repo).unwrap();
+        worktrees::run_git(&repo, &["init"]).expect("git init");
+        worktrees::run_git(&repo, &["checkout", "-b", "feat/test"]).expect("git branch");
+        worktrees::run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/zackees/dependency.git",
+            ],
+        )
+        .expect("git remote");
+
+        let mock_gh = write_mock_gh(
+            dir.path(),
+            r#"[{"mergedAt":"2026-01-01T00:00:00Z","url":"https://github.com/zackees/dependency/pull/1"}]"#,
+        );
+        let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
+        let _gh = ScopedEnv::set(ENV_TEST_GH_BIN, mock_gh.as_os_str());
+
+        let registry = Registry::open_at(&db_path).expect("open registry");
+        registry
+            .insert_if_new(&InsertInput {
+                kind: EXTERN_REPO_KIND.to_string(),
+                path: repo.to_string_lossy().to_string(),
+                repo_root: Some(dir.path().to_string_lossy().to_string()),
+                branch: Some("feat/test".to_string()),
+                agent_id: None,
+                now_unix: now_unix(),
+            })
+            .expect("insert extern repo");
+
+        let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
+        run_periodic_purge_tick(&registry, &live_cwds_provider);
+
+        let rows = registry.list(Some(EXTERN_REPO_KIND)).expect("list");
+        assert!(rows.is_empty(), "merged extern-repo row should be deleted");
+        assert!(!repo.exists(), "merged extern-repo dir should be deleted");
     }
 
     #[test]
