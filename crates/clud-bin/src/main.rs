@@ -1,7 +1,7 @@
 use clud::{
     args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc,
     hook_health, large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills,
-    startup, trampoline, ui, verbose_log, wasm, worktrees,
+    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -71,6 +71,17 @@ fn main() {
     // never launches a backend.
     if let Some(args::Command::Ui { json, no_open }) = &args.command {
         std::process::exit(ui::run(*json, *no_open));
+    }
+
+    // Issue #182: `clud trash` is self-contained maintenance. Dispatch
+    // before backend resolution so quarantining a locked artifact never
+    // launches an agent process.
+    if let Some(args::Command::Trash {
+        cross_volume,
+        paths,
+    }) = &args.command
+    {
+        std::process::exit(trash::run(&args, paths, *cross_volume));
     }
 
     // Issue #83: `--clean-worktrees` is a self-contained maintenance path.

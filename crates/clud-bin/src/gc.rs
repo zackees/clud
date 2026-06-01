@@ -685,7 +685,7 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
         }
     };
     match sub.unwrap() {
-        GcSubcommand::List { json } => cmd_list(&state_dir, json),
+        GcSubcommand::List { json, kind } => cmd_list(&state_dir, json, kind.as_deref()),
         GcSubcommand::Purge {
             duration,
             dry_run,
@@ -723,8 +723,8 @@ fn print_help_and_exit_zero() -> i32 {
     }
 }
 
-fn cmd_list(state_dir: &Path, json: bool) -> i32 {
-    let rows = match crate::daemon::gc_client_list(state_dir, None) {
+fn cmd_list(state_dir: &Path, json: bool, kind_filter: Option<&str>) -> i32 {
+    let rows = match crate::daemon::gc_client_list(state_dir, kind_filter) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: list failed: {e}");

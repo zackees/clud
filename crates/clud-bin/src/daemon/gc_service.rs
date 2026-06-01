@@ -137,7 +137,7 @@ fn handle_worker_msg(
 }
 
 fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsProvider) {
-    let reply = process_op_with_live_cwds(
+    let worktree_reply = process_op_with_live_cwds(
         registry,
         GcOp::Purge {
             duration: Some(PERIODIC_GC_WORKTREE_STALE_AFTER.to_string()),
@@ -146,7 +146,7 @@ fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsPro
         },
         live_cwds_provider(),
     );
-    match reply {
+    match worktree_reply {
         GcReply::PurgeOk { removed, skipped } => {
             eprintln!("[clud] gc tick: removed {removed}, skipped {skipped}");
         }
@@ -155,6 +155,17 @@ fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsPro
         }
         other => {
             eprintln!("[clud] gc tick: unexpected reply: {other:?}");
+        }
+    }
+
+    match reap_trash_entries(registry) {
+        Ok((removed, failed)) => {
+            if removed > 0 || failed > 0 {
+                eprintln!("[clud] gc tick: trash removed {removed}, failed {failed}");
+            }
+        }
+        Err(message) => {
+            eprintln!("[clud] gc tick: trash error: {message}");
         }
     }
 }
@@ -344,6 +355,9 @@ fn entry_is_live(
     live_locks: &HashSet<String>,
     live_cwds: &[PathBuf],
 ) -> bool {
+    if entry.kind == "trash" {
+        return false;
+    }
     if entry.kind == "worktree" && live_locks.contains(&entry.path) {
         return true;
     }
@@ -411,6 +425,8 @@ fn remove_entry_and_delete_row(registry: &Registry, entry: &TrackedEntry) -> Res
                 std::fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
             }
         }
+    } else if entry.kind == "trash" {
+        std::fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())?;
     } else {
         let p = Path::new(&entry.path);
         if p.exists() {
@@ -418,6 +434,27 @@ fn remove_entry_and_delete_row(registry: &Registry, entry: &TrackedEntry) -> Res
         }
     }
     registry.delete(entry.id).map_err(|e| e.to_string())
+}
+
+fn reap_trash_entries(registry: &Registry) -> Result<(usize, usize), String> {
+    let entries = registry
+        .list(Some("trash"))
+        .map_err(|err| err.to_string())?;
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    for entry in entries {
+        match std::fs::remove_dir_all(&entry.path) {
+            Ok(()) => {
+                registry.delete(entry.id).map_err(|err| err.to_string())?;
+                eprintln!("[gc] trash: reaped {}", entry.path);
+                removed += 1;
+            }
+            Err(_) => {
+                failed += 1;
+            }
+        }
+    }
+    Ok((removed, failed))
 }
 
 #[cfg(test)]
@@ -746,6 +783,56 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn trash_reaper_deletes_successful_entry_and_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trash-reap.redb");
+        let registry = Registry::open_at(&db_path).unwrap();
+        let trash_dir = dir.path().join("trash-item");
+        std::fs::create_dir_all(&trash_dir).unwrap();
+        registry
+            .insert_if_new(&InsertInput {
+                kind: "trash".to_string(),
+                path: trash_dir.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: Some("C:/repo/target/debug/foo.dll".to_string()),
+                now_unix: 100,
+            })
+            .unwrap();
+
+        let (removed, failed) = reap_trash_entries(&registry).unwrap();
+
+        assert_eq!((removed, failed), (1, 0));
+        assert!(!trash_dir.exists());
+        assert!(registry.list(Some("trash")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn trash_reaper_keeps_row_when_delete_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("trash-reap-fail.redb");
+        let registry = Registry::open_at(&db_path).unwrap();
+        let not_a_dir = dir.path().join("still-locked.dll");
+        std::fs::write(&not_a_dir, b"locked").unwrap();
+        registry
+            .insert_if_new(&InsertInput {
+                kind: "trash".to_string(),
+                path: not_a_dir.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: Some("C:/repo/target/debug/still-locked.dll".to_string()),
+                now_unix: 100,
+            })
+            .unwrap();
+
+        let (removed, failed) = reap_trash_entries(&registry).unwrap();
+
+        assert_eq!((removed, failed), (0, 1));
+        assert!(not_a_dir.exists());
+        assert_eq!(registry.list(Some("trash")).unwrap().len(), 1);
     }
 
     #[test]

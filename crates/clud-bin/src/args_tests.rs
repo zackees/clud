@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 
 fn parse(args: &[&str]) -> Args {
     let raw: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -694,8 +695,11 @@ fn test_gc_list() {
     let args = parse(&["clud", "gc", "list"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::List { json }),
-        }) => assert!(!json),
+            subcommand: Some(GcSubcommand::List { json, kind }),
+        }) => {
+            assert!(!json);
+            assert!(kind.is_none());
+        }
         _ => panic!("expected Gc::List"),
     }
 }
@@ -706,9 +710,26 @@ fn test_gc_list_json() {
     let args = parse(&["clud", "gc", "list", "--json"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::List { json }),
-        }) => assert!(json),
+            subcommand: Some(GcSubcommand::List { json, kind }),
+        }) => {
+            assert!(json);
+            assert!(kind.is_none());
+        }
         _ => panic!("expected Gc::List --json"),
+    }
+}
+
+#[test]
+fn test_gc_list_kind_filter() {
+    let args = parse(&["clud", "gc", "list", "--kind", "trash"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand: Some(GcSubcommand::List { json, kind }),
+        }) => {
+            assert!(!json);
+            assert_eq!(kind.as_deref(), Some("trash"));
+        }
+        _ => panic!("expected Gc::List --kind trash"),
     }
 }
 
@@ -794,6 +815,30 @@ fn test_gc_reconcile() {
             subcommand: Some(GcSubcommand::Reconcile),
         }) => {}
         _ => panic!("expected Gc::Reconcile"),
+    }
+}
+
+#[test]
+fn test_trash_command_parses_paths_and_cross_volume() {
+    let args = parse(&[
+        "clud",
+        "trash",
+        "--cross-volume",
+        "target/foo.dll",
+        "bar.exe",
+    ]);
+    match args.command {
+        Some(Command::Trash {
+            cross_volume,
+            paths,
+        }) => {
+            assert!(cross_volume);
+            assert_eq!(
+                paths,
+                vec![PathBuf::from("target/foo.dll"), PathBuf::from("bar.exe")]
+            );
+        }
+        _ => panic!("expected Trash command"),
     }
 }
 

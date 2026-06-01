@@ -23,5 +23,5 @@ pub use http::{
     dashboard_url_from_info, fetch_state_json, read_dashboard_info, read_dashboard_port,
     DashboardInfo,
 };
-pub use paths::default_state_dir;
+pub use paths::{default_state_dir, default_trash_dir};
 pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};

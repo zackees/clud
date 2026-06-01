@@ -22,6 +22,16 @@ pub fn default_state_dir() -> std::io::Result<PathBuf> {
     Ok(home.join(".clud").join("state"))
 }
 
+/// Per-user quarantine root for `clud trash`.
+///
+/// Lives next to `data.redb` at `~/.clud/trash/` so the always-on daemon
+/// can reap entries across all repos and shells.
+pub fn default_trash_dir() -> std::io::Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| std::io::Error::other("no home directory; cannot resolve clud trash dir"))?;
+    Ok(home.join(".clud").join("trash"))
+}
+
 pub(super) fn state_dir(args: &Args) -> PathBuf {
     if let Some(path) = &args.daemon_state_dir {
         return path.clone();
