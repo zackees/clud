@@ -228,5 +228,11 @@ def wait_for_exit(proc: subprocess.Popen[str], timeout: float = 10.0) -> int:
 
 
 def kill_daemon_for_session(state_dir: Path, session_id: str) -> None:
-    metadata = session_metadata(state_dir, session_id)
+    path = state_dir / "sessions" / f"{session_id}.json"
+    if not path.is_file():
+        return
+    try:
+        metadata = session_metadata(state_dir, session_id)
+    except FileNotFoundError:
+        return
     kill_process(metadata["daemon_pid"])

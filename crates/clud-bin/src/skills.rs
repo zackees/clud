@@ -47,8 +47,8 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-tag-release/SKILL.md"),
     },
     BundledSkill {
-        name: "clud-docker-rust-app",
-        skill_md: include_str!("../assets/skills/clud-docker-rust-app/SKILL.md"),
+        name: "clud-docker-rust-app-dev",
+        skill_md: include_str!("../assets/skills/clud-docker-rust-app-dev/SKILL.md"),
     },
 ];
 
@@ -283,7 +283,7 @@ mod tests {
         assert!(names.contains(&"clud-issue-triage"));
         assert!(names.contains(&"clud-pr"));
         assert!(names.contains(&"clud-tag-release"));
-        assert!(names.contains(&"clud-docker-rust-app"));
+        assert!(names.contains(&"clud-docker-rust-app-dev"));
     }
 
     #[test]
