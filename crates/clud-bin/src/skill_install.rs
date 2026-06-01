@@ -42,6 +42,10 @@ const BUNDLED_SKILLS: &[Skill] = &[
         name: "clud-issue",
         content: include_str!("../../../skills/clud-issue/SKILL.md"),
     },
+    Skill {
+        name: "clud-windows-trash",
+        content: include_str!("../../../skills/clud-windows-trash/SKILL.md"),
+    },
 ];
 
 /// Run the install/check for every bundled skill on launch. Cheap on the
@@ -366,6 +370,10 @@ mod tests {
         assert!(
             names.contains(&"clud-issue"),
             "clud-issue missing from bundle"
+        );
+        assert!(
+            names.contains(&"clud-windows-trash"),
+            "clud-windows-trash missing from bundle"
         );
     }
 

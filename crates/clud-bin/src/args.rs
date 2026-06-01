@@ -216,6 +216,15 @@ pub enum Command {
         #[arg(long = "no-open")]
         no_open: bool,
     },
+    /// Quarantine paths under ~/.clud/trash and let daemon GC reap them.
+    Trash {
+        /// Allow copy + best-effort source removal when source and trash
+        /// live on different volumes.
+        #[arg(long = "cross-volume")]
+        cross_volume: bool,
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
     /// Control the always-on clud daemon.
     Daemon {
         #[command(subcommand)]
@@ -254,6 +263,9 @@ pub enum GcSubcommand {
         /// Issue #135: emit a JSON array instead of the human-readable table.
         #[arg(long = "json")]
         json: bool,
+        /// Restrict to a single entry kind (e.g. `worktree`, `trash`).
+        #[arg(long = "kind")]
+        kind: Option<String>,
     },
     /// Remove tracked entries older than `<duration>`. When `<duration>`
     /// is omitted, purge ALL tracked entries that are not live-locked.
@@ -344,7 +356,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
-        "daemon", "__daemon", "__worker",
+        "trash", "daemon", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
