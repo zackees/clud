@@ -277,4 +277,8 @@ bash test --integration     # Include integration tests with mock agents
 
 ## License
 
-BSD 3-Clause License
+Clud Proprietary License. Free use is available for individuals and
+organizations under 20 people, with lifetime grandfathering for organizations
+that qualified before growing beyond that size. Larger organizations need a
+commercial license unless they have a grandfathered or contributor-granted free
+license. See [LICENSE](LICENSE) for the full terms.

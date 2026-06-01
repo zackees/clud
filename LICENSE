@@ -1,28 +1,124 @@
-BSD 3-Clause License
+Clud Proprietary License
 
-Copyright (c) 2024, Zach Vorhies
+Copyright (c) 2024-present, Zach Vorhies
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
+This software is proprietary source-available software. It is not open-source
+software. You may use it only under this license or under a separate written
+commercial license from the licensor.
 
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
+1. Definitions
 
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
+"Software" means this repository, the clud software, and any source code,
+object code, documentation, assets, releases, packages, or other materials made
+available by the licensor, except for third-party components covered by their
+own license terms.
 
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
+"Licensor" means the copyright holder or any party authorized by the copyright
+holder to grant licenses for the Software.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+"You" means the individual or legal entity exercising rights under this license.
+
+"Organization" means any company, partnership, sole proprietorship, nonprofit,
+government body, or other legal entity, together with all entities that control,
+are controlled by, or are under common control with that entity.
+
+"People Count" means the total number of people working for an Organization,
+including founders, owners, officers, directors, employees, contractors,
+consultants, and other staff, whether full-time or part-time.
+
+"Qualified Free User" means either:
+
+- an individual using the Software for that individual's own benefit; or
+- an Organization with a People Count of fewer than 20 people at the time it
+  uses the Software.
+
+"Large Organization" means an Organization with a People Count of 20 or more
+people.
+
+2. Free License for Qualified Free Users
+
+If You are a Qualified Free User, the Licensor grants You a perpetual,
+worldwide, royalty-free license to use, copy, modify, and distribute copies of
+the Software for any lawful purpose, subject to this license.
+
+Any copy or substantial portion of the Software that You distribute must include
+this license and all copyright notices provided with the Software.
+
+3. Commercial License Requirement for Large Organizations
+
+Large Organizations are not Qualified Free Users. A Large Organization must
+obtain a separate paid commercial license from the Licensor before using the
+Software, unless it has a Grandfathered Free License or a Contribution Free
+License under this license.
+
+4. Grandfathered Free License
+
+If an Organization first used the Software while it was a Qualified Free User,
+that Organization receives a Grandfathered Free License.
+
+A Grandfathered Free License is perpetual, worldwide, royalty-free, and
+continues in perpetuity even if the Organization later becomes a Large
+Organization. The Grandfathered Free License belongs only to the Organization
+that qualified for it and does not transfer to any other Organization except as
+part of a merger, acquisition, or reorganization that preserves substantially
+all of the original Organization's business.
+
+5. Contribution Free License
+
+The Licensor may grant a free license to a person or Organization that has made
+significant code improvements to the Software or related clud ecosystem
+components. Examples of potentially significant improvements include agent
+clud-skills, bug fixes, product features, user-interface improvements, and other
+non-trivial accepted code contributions.
+
+Contribution Free Licenses are not automatic. They must be requested from the
+Licensor and are effective only when granted in writing by the Licensor.
+
+6. Restrictions
+
+You may not:
+
+- use the Software for the benefit of a Large Organization unless that
+  Organization has a commercial license, a Grandfathered Free License, or a
+  Contribution Free License;
+- remove or obscure copyright notices, license notices, or required notices in
+  the Software;
+- sublicense, sell, lease, or transfer rights in the Software except as
+  expressly allowed by this license or a separate written commercial license;
+- use the Licensor's names, trademarks, service marks, or logos to endorse or
+  promote any product or service without prior written permission; or
+- use the Software in violation of applicable law.
+
+7. Third-Party Components
+
+This license does not replace or modify the license terms for third-party
+components, dependencies, vendored code, or other materials that are distributed
+with their own license notices. Those components remain governed by their own
+license terms.
+
+8. Termination
+
+If You violate this license, Your rights under it terminate automatically. The
+Licensor may reinstate Your rights in writing or by accepting Your cure of the
+violation.
+
+9. No Warranty
+
+The Software is provided "as is", without warranties or conditions of any kind,
+whether express, implied, statutory, or otherwise, including warranties of
+merchantability, fitness for a particular purpose, title, and non-infringement.
+
+10. Limitation of Liability
+
+To the maximum extent permitted by law, the Licensor will not be liable for any
+direct, indirect, incidental, special, consequential, exemplary, or punitive
+damages, or for any loss of profits, revenue, data, goodwill, or business
+opportunity, arising from or related to this license or the Software, even if
+advised of the possibility of those damages.
+
+11. Other Rights
+
+All rights not expressly granted by this license are reserved by the Licensor.
+The Licensor may offer the Software under different terms, including commercial
+terms, without affecting this license for users who already received rights
+under it.
