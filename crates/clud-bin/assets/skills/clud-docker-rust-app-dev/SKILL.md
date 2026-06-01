@@ -1,13 +1,13 @@
 ---
-name: clud-docker-rust-app-dev
-description: Build a Rust app inside Docker for **development iteration** — fast incremental cargo builds via named volumes for target/ + CARGO_HOME + RUSTUP_HOME, source bind-mounted (no COPY), soldr-wrapped cargo, and a Python orchestrator. **Not for deployment** — this produces a developer harness, not a shippable image; for production/distribution images use a multi-stage Dockerfile with `cargo chef`.
+name: "clud-docker-rust-app-dev"
+description: "Build a Rust app inside Docker for development iteration, using fast incremental cargo builds via named volumes for target/ + CARGO_HOME + RUSTUP_HOME, source bind-mounted with no COPY, soldr-wrapped cargo, and a Python orchestrator. Not for deployment: this produces a developer harness, not a shippable image; for production/distribution images use a multi-stage Dockerfile with cargo chef."
 triggers:
-  - When the user types "/clud-docker-rust-app-dev"
-  - When the user says "turn this into a docker" / "dockerize this" / "containerize this rust app" *for development or iteration*
-  - When the user asks to make a Rust build reproducible inside Docker *for local dev*
-  - When the user complains that their Rust app's Docker builds are slow because every iteration re-COPYs source and loses cargo incremental state
-  - When the user wants to run cargo build / test / clippy / fmt inside a container without touching the host toolchain
-  - **Do NOT trigger** when the user is asking for a slim production/release image, a multi-stage distribution build, a single-binary deployable container, or anything destined for `docker push` to a registry — that is the deployment path, not the dev path.
+  - "When the user types /clud-docker-rust-app-dev"
+  - "When the user says turn this into a docker, dockerize this, or containerize this rust app for development or iteration"
+  - "When the user asks to make a Rust build reproducible inside Docker for local dev"
+  - "When the user complains that their Rust app's Docker builds are slow because every iteration re-COPYs source and loses cargo incremental state"
+  - "When the user wants to run cargo build, test, clippy, or fmt inside a container without touching the host toolchain"
+  - "Do NOT trigger when the user is asking for a slim production/release image, a multi-stage distribution build, a single-binary deployable container, or anything destined for docker push to a registry; that is the deployment path, not the dev path."
 ---
 <!-- managed-by: clud -->
 
