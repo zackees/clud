@@ -40,6 +40,25 @@ pub fn command_spec_for_subprocess(argv: Vec<String>) -> CommandSpec {
     CommandSpec::Argv(argv)
 }
 
+/// Return whether this argv will be launched through `cmd.exe` on Windows.
+///
+/// Callers use this to distinguish native backend processes from BatBadBat
+/// `.cmd` / `.bat` wrappers. The distinction matters during Ctrl+C teardown:
+/// sending Ctrl+Break to a batch-wrapper `cmd.exe` can leave the user at the
+/// blocking `Terminate batch job (Y/N)?` prompt, while native executables can
+/// still use the cooperative break before the hard tree kill.
+pub fn argv_is_batch_wrapped(argv: &[String]) -> bool {
+    #[cfg(windows)]
+    {
+        is_windows_batch_wrapper(argv.first().map(String::as_str))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = argv;
+        false
+    }
+}
+
 /// True when `program` ends in `.cmd` or `.bat` (case-insensitive). Always
 /// false on non-Windows targets — POSIX never has to special-case batch
 /// wrappers.
@@ -131,7 +150,33 @@ fn quote_for_cmd(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::command_spec_for_subprocess;
+    use super::{argv_is_batch_wrapped, command_spec_for_subprocess};
+
+    #[test]
+    fn argv_is_batch_wrapped_false_for_native_and_empty_argv() {
+        assert!(!argv_is_batch_wrapped(&["claude.exe".into()]));
+        assert!(!argv_is_batch_wrapped(&["claude".into()]));
+        assert!(!argv_is_batch_wrapped(&[]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn argv_is_batch_wrapped_true_for_cmd_and_bat_on_windows() {
+        assert!(argv_is_batch_wrapped(&[
+            r"C:\Users\me\AppData\Roaming\npm\claude.cmd".into()
+        ]));
+        assert!(argv_is_batch_wrapped(&[
+            r"C:\tools\thing.BAT".into(),
+            "go".into()
+        ]));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn argv_is_batch_wrapped_always_false_off_windows() {
+        assert!(!argv_is_batch_wrapped(&["something.cmd".into()]));
+        assert!(!argv_is_batch_wrapped(&["something.bat".into()]));
+    }
 
     #[test]
     fn native_executable_stays_argv() {

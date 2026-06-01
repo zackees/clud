@@ -283,6 +283,33 @@ def mock_env_codex_cmd(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
     env.pop("VIRTUAL_ENV", None)
     env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(tmp_path / "child_pids.log")
+    env["CLUD_NO_DAEMON"] = "1"
+    env["CLUD_NO_UNLOCK"] = "1"
+    return env
+
+
+@pytest.fixture
+def mock_env_cmd_wrappers(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
+    """Windows-only env where both backends resolve to `.cmd` wrappers."""
+    if sys.platform != "win32":
+        pytest.skip("Windows-only .cmd wrapper fixture")
+
+    mock_agent_path = tmp_path / "mock-agent.exe"
+    shutil.copy2(mock_agent_binary, mock_agent_path)
+
+    for backend in ("claude", "codex"):
+        wrapper = tmp_path / f"{backend}.cmd"
+        wrapper.write_text(
+            "@echo off\r\n"
+            "\"%~dp0mock-agent.exe\" %*\r\n",
+            encoding="utf-8",
+        )
+
+    env = os.environ.copy()
+    env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
+    env.pop("VIRTUAL_ENV", None)
+    env["RUNNING_PROCESS_CHILD_PID_LOG_PATH"] = str(tmp_path / "child_pids.log")
+    env["CLUD_NO_DAEMON"] = "1"
     env["CLUD_NO_UNLOCK"] = "1"
     return env
 

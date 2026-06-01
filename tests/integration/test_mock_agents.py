@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+from ._daemon_helpers import kill_process, wait_for_pids_to_exit, wait_for_tree_pids
+
 pytestmark = pytest.mark.integration
 
 _TIMEOUT = 15
@@ -58,6 +60,21 @@ def _parse_agent_report(result: subprocess.CompletedProcess[str]) -> dict:
         if line.startswith("{"):
             return json.loads(line)
     return json.loads(cleaned)
+
+
+def _wait_for_pid_log(path: Path, minimum: int, timeout: float = 10.0) -> list[int]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.is_file():
+            pids = [
+                int(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip().isdigit()
+            ]
+            if len(pids) >= minimum:
+                return pids
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {minimum} child pids in {path}")
 
 
 class TestBackendSelection:
@@ -491,6 +508,65 @@ class TestLoopMode:
 
 class TestInterruptReporting:
     """Verify Ctrl+C reports how clud was launched."""
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only cmd.exe prompt repro")
+    @pytest.mark.parametrize(
+        ("backend_args", "backend_name"),
+        [
+            ([], "claude"),
+            (["--codex"], "codex"),
+        ],
+    )
+    def test_cmd_wrapper_ctrl_break_exit_does_not_prompt_or_orphan_children(
+        self,
+        clud_binary: Path,
+        mock_env_cmd_wrappers: dict[str, str],
+        tmp_path: Path,
+        backend_args: list[str],
+        backend_name: str,
+    ) -> None:
+        pid_log = Path(mock_env_cmd_wrappers["RUNNING_PROCESS_CHILD_PID_LOG_PATH"])
+        tree_log = tmp_path / f"{backend_name}-tree.jsonl"
+        proc = subprocess.Popen(
+            [
+                str(clud_binary),
+                *backend_args,
+                "-p",
+                f"{backend_name} clean interrupt",
+                "--",
+                "--mock-sleep-ms",
+                "15000",
+                "--mock-spawn-tree-log",
+                str(tree_log),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=mock_env_cmd_wrappers,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+
+        child_pids: list[int] = []
+        tree_pids: list[int] = []
+        try:
+            child_pids = _wait_for_pid_log(pid_log, minimum=1)
+            tree_pids = wait_for_tree_pids(tree_log, minimum=3)
+
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            time.sleep(0.1)
+            if proc.poll() is None:
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            stdout, stderr = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                kill_process(proc.pid)
+                proc.wait(timeout=5)
+
+        combined = f"{stdout}\n{stderr}"
+        wait_for_pids_to_exit(child_pids + tree_pids, timeout=10)
+        assert proc.returncode == 130, combined
+        assert "Terminate batch job" not in combined
 
     def test_ctrl_c_reports_pty_mode_when_forced(
         self, clud_binary: Path, mock_env: dict[str, str]
