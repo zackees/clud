@@ -2,9 +2,11 @@
 
 Skills are slash-command playbooks (`/clud-pr`, `/clud-issue`, etc.) that ship
 embedded inside the `clud` binary as compile-time string assets and are
-installed into the user's backend home directories (`~/.claude/skills/`,
-`~/.codex/skills/`) on every launch. A fresh `clud` install always carries the
-current canonical copy of every bundled skill without any extra setup step.
+installed into the user's backend skill directories (`~/.claude/skills/` and
+Codex's current `~/.agents/skills/`) on every launch. A fresh `clud` install
+always carries the current canonical copy of every bundled skill without any
+extra setup step. Older clud-managed Codex copies in `~/.codex/skills/` are
+purged best-effort during the same launch-time pass.
 
 ## Component map
 
@@ -27,7 +29,7 @@ expander landed. The two flows now serve overlapping but distinct purposes:
 
 | Concern | `skills.rs` | `skill_install.rs` |
 |---|---|---|
-| Backends targeted | Every entry in `SKILL_BACKENDS` whose home subdir exists (Claude + Codex today) | Hard-coded `~/.claude/skills/` only |
+| Backends targeted | Every entry in `SKILL_BACKENDS` whose home subdir exists (Claude + Codex today; Codex is gated on `~/.codex` and writes to `~/.agents/skills`) | Hard-coded `~/.claude/skills/` only |
 | Source tree | `crates/clud-bin/assets/skills/` | Top-level `skills/` |
 | Behavior on existing file | Skip — user edits are preserved | Compare modulo whitespace; overwrite when semantically divergent |
 | Bundled skill set | `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-tag-release` | `clud-pr`, `clud-pr-merge`, `clud-issue` |
@@ -44,8 +46,10 @@ trampoline unlock and the console-title stamp but before argument parsing.
 The order (see `crates/clud-bin/src/main.rs:36-44`):
 
 1. `skills::ensure_installed()` — multi-backend, preserve-existing pass.
-   Returns a per-backend `InstallReport` listing what was installed vs
-   skipped. Errors only when `$HOME`/`$USERPROFILE` cannot be resolved.
+   It first purges stale clud-managed Codex copies from `~/.codex/skills/`,
+   then returns a per-backend `InstallReport` listing what was installed vs
+   skipped in the active target directories. Errors only when
+   `$HOME`/`$USERPROFILE` cannot be resolved or active-target installs fail.
 2. `skill_install::ensure_installed()` — Claude-only drift pass. No return
    value; logs `[clud] installed /<name>` on first install and
    `[clud] updated /<name>` (green) on a semantic overwrite.
@@ -131,9 +135,11 @@ Use this checklist:
   different element type, different source-tree backing. **This collision
   is the single biggest footgun when navigating between the two installers
   — always check which module you are in.**
-- `SKILL_BACKENDS` (`skills.rs:83`): the list of `(home_subdir,
-  skills_subdir)` pairs the multi-backend installer iterates. Adding a new
-  CLI is a one-line append; see the commented OpenRouter example.
+- `SKILL_BACKENDS` (`skills.rs:83`): the list of backend install gates and
+  skill target directories the multi-backend installer iterates. Codex uses
+  `.codex` as the installed-backend gate and `.agents/skills` as the current
+  skill target. Adding a new CLI is a one-line append; see the commented
+  OpenRouter example.
 - `ensure_installed` (both modules): the public launch-time entry point;
   same name, different return type (`Result<Vec<...>, InstallError>` vs
   `()`).
@@ -144,6 +150,9 @@ Use this checklist:
   drift-installer's action choice.
 - `InstallReport` (`skills.rs:127`): per-backend result of an install
   pass, listing `installed` and `skipped_existing` skills by name.
+- `LegacyPurgeReport` (`skills.rs:127`): best-effort cleanup summary for
+  clud-managed `~/.codex/skills/<name>/SKILL.md` copies removed during the
+  migration away from the legacy Codex skill directory.
 
 ## Consolidation plan (open)
 

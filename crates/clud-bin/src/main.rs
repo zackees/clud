@@ -64,11 +64,12 @@ fn main() {
     }
 
     // Expand bundled slash-command skills (clud-issue, clud-pr) into every
-    // backend's global skills directory that already exists
-    // (~/.claude/skills/ for Claude Code, ~/.codex/skills/ for Codex).
-    // Existing files are left alone so user edits survive. Failures are
-    // non-fatal — we log and continue, since a skills hiccup must never
-    // block a launch.
+    // backend's global skills directory that already exists. Claude Code uses
+    // ~/.claude/skills/; Codex is gated on ~/.codex/ but uses the current
+    // ~/.agents/skills/ location, with stale clud-managed ~/.codex/skills/
+    // copies purged best-effort. Existing active-target files are left alone
+    // so user edits survive. Failures are non-fatal — we log and continue,
+    // since a skills hiccup must never block a launch.
     if let Err(e) = skills::ensure_installed() {
         eprintln!("[clud] note: could not install bundled skills: {e}");
     }

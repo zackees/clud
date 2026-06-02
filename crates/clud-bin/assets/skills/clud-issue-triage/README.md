@@ -8,4 +8,4 @@ Bundled skill that triages GitHub issues for the user — closing only issues th
 
 ## How it ships
 
-The skill's `SKILL.md` is embedded into the `clud` binary at compile time via `include_str!` from `crates/clud-bin/src/skills.rs` (entry in `BUNDLED_SKILLS`). On every launch, `skills::ensure_installed` walks each backend in `SKILL_BACKENDS` (Claude Code's `~/.claude/skills/`, Codex's `~/.codex/skills/`) whose home subdir already exists and writes `<skills_dir>/clud-issue-triage/SKILL.md` only when missing — existing user edits are preserved. Install errors are non-fatal and log to stderr without blocking launch.
+The skill's `SKILL.md` is embedded into the `clud` binary at compile time via `include_str!` from `crates/clud-bin/src/skills.rs` (entry in `BUNDLED_SKILLS`). On every launch, `skills::ensure_installed` walks each backend in `SKILL_BACKENDS` (Claude Code's `~/.claude/skills/`, Codex's current `~/.agents/skills/` gated on `~/.codex`) and writes `<skills_dir>/clud-issue-triage/SKILL.md` only when missing — existing user edits are preserved. Install errors are non-fatal and log to stderr without blocking launch.
