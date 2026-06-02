@@ -628,11 +628,23 @@ fn handle_worker_client(
                                     });
                                     header.text_rows
                                 }
-                                Ok(None) => rows,
+                                Ok(None) => {
+                                    shared.send_to_client(WorkerServerMessage::Output {
+                                        data_b64: base64::engine::general_purpose::STANDARD.encode(
+                                            crate::graphics::reset_layout_bytes(rows, true),
+                                        ),
+                                    });
+                                    rows
+                                }
                                 Err(err) => {
                                     eprintln!(
                                         "[clud] warning: failed to redraw daemon graphics header: {err}"
                                     );
+                                    shared.send_to_client(WorkerServerMessage::Output {
+                                        data_b64: base64::engine::general_purpose::STANDARD.encode(
+                                            crate::graphics::reset_layout_bytes(rows, true),
+                                        ),
+                                    });
                                     rows
                                 }
                             }

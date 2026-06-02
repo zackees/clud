@@ -59,6 +59,15 @@ pub struct HeaderRender {
     pub text_rows: u16,
 }
 
+pub fn reset_layout_bytes(terminal_rows: u16, clear_screen: bool) -> Vec<u8> {
+    let row = terminal_rows.max(1);
+    if clear_screen {
+        format!("\x1b[?6l\x1b[r\x1b[H\x1b[J\x1b[{row};1H").into_bytes()
+    } else {
+        format!("\x1b[?6l\x1b[r\x1b[{row};1H").into_bytes()
+    }
+}
+
 pub fn detect_current_terminal() -> TerminalCapabilities {
     running_process::current_terminal_capabilities_with_timeout(Duration::from_millis(150))
 }
@@ -211,7 +220,7 @@ pub fn render_header(
         sixel, first_text_row, first_text_row, terminal_rows, first_text_row
     )
     .expect("writing into Vec cannot fail");
-    let restore_bytes = format!("\x1b[?6l\x1b[r\x1b[{};1H", terminal_rows).into_bytes();
+    let restore_bytes = reset_layout_bytes(terminal_rows, false);
 
     Ok(Some(HeaderRender {
         bytes,
@@ -428,5 +437,18 @@ mod tests {
         assert!(text.contains("\x1b["));
         let restore = String::from_utf8_lossy(&header.restore_bytes);
         assert!(restore.contains("\x1b[r"));
+    }
+
+    #[test]
+    fn reset_layout_bytes_can_clear_for_resize_skip() {
+        let clear = String::from_utf8_lossy(&reset_layout_bytes(24, true)).into_owned();
+        assert!(clear.contains("\x1b[r"));
+        assert!(clear.contains("\x1b[H\x1b[J"));
+        assert!(clear.ends_with("\x1b[24;1H"));
+
+        let restore = String::from_utf8_lossy(&reset_layout_bytes(24, false)).into_owned();
+        assert!(restore.contains("\x1b[r"));
+        assert!(!restore.contains("\x1b[H\x1b[J"));
+        assert!(restore.ends_with("\x1b[24;1H"));
     }
 }
