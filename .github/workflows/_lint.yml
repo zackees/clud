@@ -54,7 +54,7 @@ jobs:
       # through soldr/zccache. Install mold before setup so dependency cooking
       # and clippy share the same linker fingerprint.
       - name: Setup soldr
-        uses: zackees/setup-soldr@v0.9.50
+        uses: zackees/setup-soldr@v0.9.53
         with:
           toolchain: "1.94.1"
           version: "0.7.45"
