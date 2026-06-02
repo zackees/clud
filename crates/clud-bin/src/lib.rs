@@ -8,6 +8,7 @@ pub mod args;
 pub mod backend;
 pub mod backend_bootstrap;
 pub mod capture;
+pub mod codex_hook_normalize;
 pub mod command;
 pub mod console_input;
 pub mod console_setup;
