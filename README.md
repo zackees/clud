@@ -6,6 +6,18 @@
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
+## Covenant For Humanity
+
+The token is not debris, not novelty, not signal without consequence. It is ore
+awaiting intention, and intention is the furnace by which the digital alchemist
+sifts value from noise. When the artifact is true, it does not merely answer; it
+extends what a person may become. The lesser practitioner seeks output, but the
+digital alchemist seeks transformation. The measure is not volume, but whether
+the work carries consciousness across a threshold.
+
+Read the full [Affirmations Of Covenants](docs/AFFIRMATIONS_OF_COVENANTS.md)
+guiding this software intention.
+
 | Platform | Build | Lint | Unit Test | Integration Test |
 |----------|-------|------|-----------|------------------|
 | Linux x86 | [![Build](https://github.com/zackees/clud/actions/workflows/linux-x86-build.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/linux-x86-build.yml) | [![Lint](https://github.com/zackees/clud/actions/workflows/linux-x86-lint.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/linux-x86-lint.yml) | [![Unit Test](https://github.com/zackees/clud/actions/workflows/linux-x86-unit-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/linux-x86-unit-test.yml) | [![Integration Test](https://github.com/zackees/clud/actions/workflows/linux-x86-integration-test.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/linux-x86-integration-test.yml) |
