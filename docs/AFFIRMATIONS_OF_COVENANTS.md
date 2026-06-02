@@ -6,11 +6,11 @@ prologue to the work, not a replacement for the legal terms in
 
 ## Covenant For Humanity
 
-*The token is not debris, not novelty, not signal without
+*Field note: the token is not debris, not novelty, not signal without
 consequence. It is ore awaiting intention, and intention is the furnace by
-which the digital alchemist sifts value from noise. When the artifact
-is true, it does not merely answer; it extends what a person may
-become. The lesser practitioner seeks output, but the digital alchemist seeks
+which the digital alchemist separates noise from human value. When the working
+is true, the artifact does not merely answer; it extends what a person may
+become. The lesser practitioner seeks output, but the alchemist seeks
 transformation. The measure is not volume, but whether the work carries
 consciousness across a threshold.*
 
