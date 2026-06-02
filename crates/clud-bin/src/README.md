@@ -57,6 +57,7 @@ Skills and hooks:
 - `skills.rs` — bundles slash-command skills via `include_str!` and installs them per-backend (`.claude/skills/`, `.codex/skills/`) only when the backend home already exists; never overwrites existing files.
 - `skill_install.rs` — auto-installer for the `clud-*` skill set; compares embedded vs installed `SKILL.md` modulo whitespace and overwrites divergent copies (logging `[clud] updated /<name>`).
 - `hook_health.rs` — `PreToolUse` hook parity diagnostics and `--fix-hooks` remediation (deterministic config edits plus optional agent-driven semantic hook translation).
+- `codex_hook_normalize.rs` — issue #234: idempotent global pass that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30` (`~/.clud/settings.lock` fs4 guard, green status line on change).
 
 Diagnostics and misc:
 
