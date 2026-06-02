@@ -24,7 +24,7 @@ They become meaningful only when disciplined intention turns them into artifacts
 that serve human becoming.
 
 We affirm that the digital alchemist is a steward, not an owner, of the miracle.
-The work must answer to humanity, not merely to spectacle, extraction, or speed.
+The work must answer to humanity.
 
 We affirm that invention should defend attention, increase competence, and leave
 the commons more awake than it found it.
