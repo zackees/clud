@@ -28,4 +28,4 @@ Same pain shows up on macOS Docker Desktop (different translation layer, same ou
 
 ## How it ships
 
-This skill is bundled into the `clud` binary via `crates/clud-bin/src/skills.rs` and auto-installed on launch into `~/.claude/skills/clud-docker-rust-app-dev/SKILL.md` (and the equivalent `~/.codex/` path when Codex is installed). The `skills.rs` installer never overwrites existing files, so once a user edits their installed copy, those edits stick. See `docs/architecture/skill-system.md` for the full installer model.
+This skill is bundled into the `clud` binary via `crates/clud-bin/src/skills.rs` and auto-installed on launch into `~/.claude/skills/clud-docker-rust-app-dev/SKILL.md` and Codex's current `~/.agents/skills/clud-docker-rust-app-dev/SKILL.md` path when Codex is installed. The `skills.rs` installer never overwrites existing files, so once a user edits their installed copy, those edits stick. See `docs/architecture/skill-system.md` for the full installer model.

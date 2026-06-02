@@ -89,7 +89,7 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Context:** Users run different upstream agents (`claude` and `codex`) with similar but not identical CLI surfaces. Each backend has its own arg conventions, model-flag placement, prompt-injection mechanism, and skill-install location.
 
-**Decision:** clud detects which backends are on `PATH` and supports either via `--claude` / `--codex` flags. The `Backend` enum is plumbed through every code path that constructs argv. Where backends diverge (`--model` placement, `-p` semantics, `stream-json` injection, the `exec`/`resume` keywords), the divergence is encoded inside `command/`. Skills bundled into the `clud` binary install to both `~/.claude/skills/` and `~/.codex/skills/` when those homes already exist.
+**Decision:** clud detects which backends are on `PATH` and supports either via `--claude` / `--codex` flags. The `Backend` enum is plumbed through every code path that constructs argv. Where backends diverge (`--model` placement, `-p` semantics, `stream-json` injection, the `exec`/`resume` keywords), the divergence is encoded inside `command/`. Skills bundled into the `clud` binary install to `~/.claude/skills/` for Claude Code and Codex's current `~/.agents/skills/` location when the corresponding backend homes already exist; stale clud-managed copies under the retired `~/.codex/skills/` path are purged best-effort.
 
 **Rationale:**
 - Locks clud into supporting users on either backend without forking the binary.
@@ -194,7 +194,7 @@ The separate session-cap registry (`sessions.redb`) keeps file-lock-based serial
 
 **Context:** Skills are slash-commands (`/clud-pr`, `/clud-issue`, etc.) bundled into the `clud` binary via `include_str!` and installed into the user's backend home(s) on launch. Two installer implementations exist in the codebase today:
 
-- `src/skills.rs` — multi-backend (`~/.claude/skills/`, `~/.codex/skills/`), non-overwriting (preserves user edits), reads from `crates/clud-bin/assets/skills/`.
+- `src/skills.rs` — multi-backend (`~/.claude/skills/`, Codex `~/.agents/skills/` gated by `~/.codex`), non-overwriting (preserves user edits), reads from `crates/clud-bin/assets/skills/`, and purges stale clud-managed Codex copies from `~/.codex/skills/`.
 - `src/skill_install.rs` — Claude-only (`~/.claude/skills/`), overwrites on semantic divergence (whitespace-tolerant compare), reads from a separate top-level `skills/` directory.
 
 Their `BUNDLED_SKILLS` constants ship different subsets of skills.
