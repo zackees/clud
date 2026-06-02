@@ -521,6 +521,7 @@ mod tests {
             pty: false,
             graphics: crate::graphics::GraphicsMode::Auto,
             graphics_image: None,
+            demo_gfx_sixel: false,
             model: None,
             safe: false,
             dry_run: false,

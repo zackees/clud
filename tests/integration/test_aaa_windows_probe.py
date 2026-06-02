@@ -73,6 +73,27 @@ def test_probe_help_completes_quickly(clud_binary: Path) -> None:
     )
 
 
+def test_probe_demo_gfx_sixel_emits_sixel_bytes(
+    clud_binary: Path, mock_env: dict[str, str]
+) -> None:
+    """Standalone graphics demo: no backend launch, just binary Sixel stdout."""
+    result = subprocess.run(
+        [str(clud_binary), "--demo-gfx-sixel"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=15,
+        env=mock_env,
+    )
+    assert result.returncode == 0, (
+        f"clud --demo-gfx-sixel failed: rc={result.returncode} "
+        f"stderr={result.stderr!r}"
+    )
+    assert result.stdout.startswith(b"\x1bP"), "stdout should start with Sixel DCS"
+    assert b"\x1b\\\nclud Sixel demo: hero-clud\n" in result.stdout
+    assert b"mock-agent" not in result.stdout
+    assert result.stderr == b""
+
+
 def test_probe_list_with_no_daemon_state(
     clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
 ) -> None:
