@@ -60,6 +60,7 @@ clud --claude                     # Use Claude as the backend (default)
 clud --pty                        # Force PTY launch mode
 clud --subprocess                 # Force subprocess launch mode
 clud --pty --graphics=sixel       # Force a Sixel header above PTY output
+clud --demo-gfx-sixel             # Render the README hero image as a Sixel demo
 clud --detach -p "review this PR" # Start a daemon-managed session without attaching
 clud --detachable -p "fix CI"     # Ctrl+C asks whether to keep the session in background
 clud --transcript session.log -p "debug this" # Tee daemon session output to a file
@@ -93,6 +94,7 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--pty` | Force PTY launch mode |
 | `--graphics <auto\|off\|sixel>` | Control PTY graphics headers. `auto` only enables Sixel from a live terminal probe |
 | `--graphics-image <PATH>` | Render a custom image as the PTY graphics header when Sixel is enabled |
+| `--demo-gfx-sixel` | Render the README hero image as a standalone Sixel demo and exit |
 | `--detach` | Start a daemon-managed session directly in the background |
 | `--detachable` | Run attached under the daemon; `Ctrl+C` prompts whether to background or end |
 | `--transcript <PATH>` | Tee daemon-managed session output bytes to a transcript file |

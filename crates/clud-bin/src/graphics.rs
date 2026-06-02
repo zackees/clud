@@ -15,6 +15,10 @@ const MIN_TEXT_ROWS: u16 = 8;
 const CELL_WIDTH_PX: u32 = 8;
 const CELL_HEIGHT_PX: u32 = 12;
 const MAX_HEADER_WIDTH_PX: u32 = 520;
+const MAX_DEMO_WIDTH_PX: u32 = 960;
+const MAX_DEMO_HEIGHT_PX: u32 = 540;
+const DEMO_STATUS_LINE: &str = "\nclud Sixel demo: hero-clud\n";
+const HERO_CLUD_JPG: &[u8] = include_bytes!("../assets/hero-clud.jpg");
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -175,6 +179,24 @@ pub fn capability_summary(terminal: Option<&TerminalCapabilities>) -> String {
     parts.join(" ")
 }
 
+pub fn render_demo_sixel_bytes(terminal_cols: Option<u16>) -> io::Result<Vec<u8>> {
+    let cols = terminal_cols.filter(|cols| *cols > 0).unwrap_or(80);
+    let max_width = u32::from(cols)
+        .saturating_mul(CELL_WIDTH_PX)
+        .clamp(240, MAX_DEMO_WIDTH_PX);
+    let max_height = max_width
+        .saturating_mul(9)
+        .checked_div(16)
+        .unwrap_or(MAX_DEMO_HEIGHT_PX)
+        .clamp(120, MAX_DEMO_HEIGHT_PX);
+    let (rgba, width, height) = load_image_rgba_from_memory(HERO_CLUD_JPG, max_width, max_height)?;
+    let sixel = encode_sixel_rgba(rgba, width, height)?;
+    let mut bytes = Vec::with_capacity(sixel.len() + DEMO_STATUS_LINE.len());
+    bytes.extend_from_slice(sixel.as_bytes());
+    bytes.extend_from_slice(DEMO_STATUS_LINE.as_bytes());
+    Ok(bytes)
+}
+
 pub fn render_header(
     config: &GraphicsConfig,
     terminal_rows: u16,
@@ -200,16 +222,7 @@ pub fn render_header(
         return Ok(None);
     }
 
-    let options = EncodeOptions {
-        max_colors: 48,
-        diffusion: 0.0,
-        quantize_method: QuantizeMethod::Wu,
-    };
-    let sixel = SixelImage::try_from_rgba(rgba, width as usize, height as usize)
-        .map_err(|err| io::Error::other(err.to_string()))?
-        .with_background_mode(BackgroundMode::Transparent)
-        .encode_with(&options)
-        .map_err(|err| io::Error::other(err.to_string()))?;
+    let sixel = encode_sixel_rgba(rgba, width, height)?;
 
     let first_text_row = reserved_rows + 1;
     let text_rows = terminal_rows.saturating_sub(reserved_rows).max(1);
@@ -240,14 +253,46 @@ fn load_image_rgba(
     let image = reader
         .decode()
         .map_err(|err| io::Error::other(format!("failed to decode graphics image: {err}")))?;
+    Ok(resize_image_rgba(image, max_width, max_height))
+}
+
+fn load_image_rgba_from_memory(
+    bytes: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> io::Result<(Vec<u8>, u32, u32)> {
+    let image = image::load_from_memory(bytes).map_err(|err| {
+        io::Error::other(format!("failed to decode bundled graphics image: {err}"))
+    })?;
+    Ok(resize_image_rgba(image, max_width, max_height))
+}
+
+fn resize_image_rgba(
+    image: image::DynamicImage,
+    max_width: u32,
+    max_height: u32,
+) -> (Vec<u8>, u32, u32) {
     let resized = image.resize(
-        max_width,
+        max_width.max(1),
         max_height.max(1),
         image::imageops::FilterType::Lanczos3,
     );
     let rgba = resized.to_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok((rgba.into_raw(), width, height))
+    (rgba.into_raw(), width, height)
+}
+
+fn encode_sixel_rgba(rgba: Vec<u8>, width: u32, height: u32) -> io::Result<String> {
+    let options = EncodeOptions {
+        max_colors: 48,
+        diffusion: 0.0,
+        quantize_method: QuantizeMethod::Wu,
+    };
+    SixelImage::try_from_rgba(rgba, width as usize, height as usize)
+        .map_err(|err| io::Error::other(err.to_string()))?
+        .with_background_mode(BackgroundMode::Transparent)
+        .encode_with(&options)
+        .map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn rows_for_pixel_height(height: u32) -> u16 {
@@ -450,5 +495,21 @@ mod tests {
         assert!(restore.contains("\x1b[r"));
         assert!(!restore.contains("\x1b[H\x1b[J"));
         assert!(restore.ends_with("\x1b[24;1H"));
+    }
+
+    #[test]
+    fn demo_sixel_bytes_use_bundled_hero_asset() {
+        let bytes = render_demo_sixel_bytes(Some(80)).expect("render demo");
+        assert!(
+            bytes.starts_with(b"\x1bP"),
+            "demo must start with Sixel DCS"
+        );
+        assert!(bytes.ends_with(DEMO_STATUS_LINE.as_bytes()));
+        let payload = &bytes[..bytes.len() - DEMO_STATUS_LINE.len()];
+        assert!(
+            payload.ends_with(b"\x1b\\"),
+            "demo payload must end with Sixel string terminator"
+        );
+        assert!(payload.contains(&b'q'), "Sixel raster introducer missing");
     }
 }

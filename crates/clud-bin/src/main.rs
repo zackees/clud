@@ -1,5 +1,5 @@
 use clud::{
-    args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc,
+    args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc, graphics,
     hook_health, large_file_guard, loop_artifacts, loop_spec, runner, skill_install, skills,
     startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
@@ -27,22 +27,6 @@ fn main() {
     console_title::set_for_current_cwd();
     console_title::keep_setting_in_background();
 
-    // Expand bundled slash-command skills (clud-issue, clud-pr) into every
-    // backend's global skills directory that already exists
-    // (~/.claude/skills/ for Claude Code, ~/.codex/skills/ for Codex).
-    // Existing files are left alone so user edits survive. Failures are
-    // non-fatal — we log and continue, since a skills hiccup must never
-    // block a launch.
-    if let Err(e) = skills::ensure_installed() {
-        eprintln!("[clud] note: could not install bundled skills: {e}");
-    }
-
-    // Additionally run the narrower `skill_install` flow from PR #88 (drift
-    // detection for the single bundled `/clud-pr` skill). Redundant with the
-    // broader `skills::ensure_installed()` above, but harmless — both flows
-    // are idempotent and never overwrite existing user-edited skill files.
-    skill_install::ensure_installed();
-
     let mut args = args::Args::parse_with_passthrough();
     if args.verbose {
         match verbose_log::enable_file_logging() {
@@ -58,6 +42,42 @@ fn main() {
         }
         verbose_log::log(format_args!("[clud] pid {}", std::process::id()));
     }
+
+    // Issue #233: standalone graphics smoke test. It must emit only the
+    // Sixel payload plus status line, without backend or setup side effects.
+    if args.demo_gfx_sixel {
+        let terminal_cols = terminal_size::terminal_size().map(|(width, _height)| width.0);
+        match graphics::render_demo_sixel_bytes(terminal_cols) {
+            Ok(bytes) => {
+                let mut out = io::stdout().lock();
+                if let Err(err) = out.write_all(&bytes).and_then(|_| out.flush()) {
+                    eprintln!("error: failed to write Sixel demo: {err}");
+                    std::process::exit(1);
+                }
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("error: failed to render Sixel demo: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Expand bundled slash-command skills (clud-issue, clud-pr) into every
+    // backend's global skills directory that already exists
+    // (~/.claude/skills/ for Claude Code, ~/.codex/skills/ for Codex).
+    // Existing files are left alone so user edits survive. Failures are
+    // non-fatal — we log and continue, since a skills hiccup must never
+    // block a launch.
+    if let Err(e) = skills::ensure_installed() {
+        eprintln!("[clud] note: could not install bundled skills: {e}");
+    }
+
+    // Additionally run the narrower `skill_install` flow from PR #88 (drift
+    // detection for the single bundled `/clud-pr` skill). Redundant with the
+    // broader `skills::ensure_installed()` above, but harmless — both flows
+    // are idempotent and never overwrite existing user-edited skill files.
+    skill_install::ensure_installed();
 
     // Issue #110: `clud gc <subcommand>` is a self-contained
     // maintenance path that never launches a backend. Dispatch before

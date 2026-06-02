@@ -44,6 +44,10 @@ pub struct Args {
     #[arg(long = "graphics-image", value_name = "PATH")]
     pub graphics_image: Option<PathBuf>,
 
+    /// Render the bundled README hero image as a standalone Sixel demo and exit.
+    #[arg(long = "demo-gfx-sixel")]
+    pub demo_gfx_sixel: bool,
+
     #[arg(long = "model")]
     pub model: Option<String>,
 
@@ -362,6 +366,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--no-daemon",
         "--json",
         "--no-open",
+        "--demo-gfx-sixel",
         "--help",
         "--version",
     ];

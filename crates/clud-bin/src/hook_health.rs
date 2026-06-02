@@ -778,6 +778,7 @@ fn run_backend_prompt(
         pty: false,
         graphics: crate::graphics::GraphicsMode::Off,
         graphics_image: None,
+        demo_gfx_sixel: false,
         model: args.model.clone(),
         safe: args.safe,
         dry_run: false,

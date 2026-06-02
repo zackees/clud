@@ -84,6 +84,13 @@ fn test_graphics_equals_form_stays_known() {
 }
 
 #[test]
+fn test_demo_gfx_sixel_flag() {
+    let args = parse(&["clud", "--demo-gfx-sixel", "--some-backend-flag"]);
+    assert!(args.demo_gfx_sixel);
+    assert_eq!(args.passthrough, vec!["--some-backend-flag"]);
+}
+
+#[test]
 fn test_safe_flag() {
     let args = parse(&["clud", "--safe", "-p", "hello"]);
     assert!(args.safe);
