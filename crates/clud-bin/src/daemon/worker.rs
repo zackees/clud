@@ -11,6 +11,7 @@ use base64::Engine;
 use running_process::pty::NativePtyProcess;
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
+use crate::graphics::GraphicsConfig;
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
@@ -161,8 +162,14 @@ pub(super) fn run_worker(
             Ok((stream, _)) => {
                 let shared = Arc::clone(&shared);
                 let runtime = runtime.clone();
+                let graphics = spec.plan.graphics.clone();
+                let kind = spec.kind.clone();
+                let rows = spec.rows;
+                let cols = spec.cols;
                 thread::spawn(move || {
-                    let _ = handle_worker_client(stream, &shared, &runtime);
+                    let _ = handle_worker_client(
+                        stream, &shared, &runtime, &graphics, kind, rows, cols,
+                    );
                 });
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -467,6 +474,10 @@ fn handle_worker_client(
     mut stream: TcpStream,
     shared: &Arc<WorkerShared>,
     runtime: &SessionRuntime,
+    graphics: &GraphicsConfig,
+    kind: SessionKind,
+    default_rows: u16,
+    default_cols: u16,
 ) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     reader_stream.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -477,14 +488,28 @@ fn handle_worker_client(
     }
     let message: WorkerClientMessage = serde_json::from_str(&line)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    if !matches!(message, WorkerClientMessage::Attach) {
-        return write_json_line(
-            &mut stream,
-            &WorkerServerMessage::Error {
-                message: "expected attach handshake".to_string(),
-            },
-        );
-    }
+    let (terminal, attach_rows, attach_cols) = match message {
+        WorkerClientMessage::Attach {
+            terminal,
+            rows,
+            cols,
+        } => (
+            terminal,
+            rows.unwrap_or(default_rows),
+            cols.unwrap_or(default_cols),
+        ),
+        WorkerClientMessage::Input { .. }
+        | WorkerClientMessage::Resize { .. }
+        | WorkerClientMessage::Interrupt => {
+            return write_json_line(
+                &mut stream,
+                &WorkerServerMessage::Error {
+                    message: "expected attach handshake".to_string(),
+                },
+            );
+        }
+    };
+    let is_pty = matches!(kind, SessionKind::Pty);
 
     let shutdown_handle = stream.try_clone()?;
     let (client_id, rx, snapshot, backlog) = match shared.attach_client(shutdown_handle) {
@@ -500,6 +525,30 @@ fn handle_worker_client(
             session: snapshot.clone(),
         },
     )?;
+    let mut header_restore = None;
+    if is_pty {
+        let decision = crate::graphics::decide_sixel(graphics, terminal.as_ref());
+        if decision.enabled {
+            match crate::graphics::render_header(graphics, attach_rows, attach_cols) {
+                Ok(Some(header)) => {
+                    runtime.resize(header.text_rows, attach_cols);
+                    shared.resize_capture(header.text_rows, attach_cols);
+                    write_json_line(
+                        &mut writer,
+                        &WorkerServerMessage::Output {
+                            data_b64: base64::engine::general_purpose::STANDARD
+                                .encode(&header.bytes),
+                        },
+                    )?;
+                    header_restore = Some(header.restore_bytes);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("[clud] warning: failed to render daemon graphics header: {err}");
+                }
+            }
+        }
+    }
     for chunk in backlog {
         write_json_line(
             &mut writer,
@@ -509,6 +558,14 @@ fn handle_worker_client(
         )?;
     }
     if let Some(exit_code) = snapshot.exit_code {
+        if let Some(bytes) = header_restore.as_deref() {
+            write_json_line(
+                &mut writer,
+                &WorkerServerMessage::Output {
+                    data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                },
+            )?;
+        }
         write_json_line(&mut writer, &WorkerServerMessage::Exited { exit_code })?;
         shared.detach_client(client_id);
         return Ok(());
@@ -516,7 +573,22 @@ fn handle_worker_client(
 
     let shared_for_writer = Arc::clone(shared);
     let writer_thread = thread::spawn(move || {
+        let mut header_restore = header_restore;
         while let Ok(message) = rx.recv() {
+            if let WorkerServerMessage::Exited { .. } = &message {
+                if let Some(bytes) = header_restore.take() {
+                    if write_json_line(
+                        &mut writer,
+                        &WorkerServerMessage::Output {
+                            data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        },
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
             if write_json_line(&mut writer, &message).is_err() {
                 break;
             }
@@ -536,7 +608,7 @@ fn handle_worker_client(
                     continue;
                 };
                 match message {
-                    WorkerClientMessage::Attach => break,
+                    WorkerClientMessage::Attach { .. } => break,
                     WorkerClientMessage::Input { data_b64, submit } => {
                         if let Ok(data) =
                             base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
@@ -545,8 +617,30 @@ fn handle_worker_client(
                         }
                     }
                     WorkerClientMessage::Resize { rows, cols } => {
-                        runtime.resize(rows, cols);
-                        shared.resize_capture(rows, cols);
+                        let effective_rows = if is_pty
+                            && crate::graphics::decide_sixel(graphics, terminal.as_ref()).enabled
+                        {
+                            match crate::graphics::render_header(graphics, rows, cols) {
+                                Ok(Some(header)) => {
+                                    shared.send_to_client(WorkerServerMessage::Output {
+                                        data_b64: base64::engine::general_purpose::STANDARD
+                                            .encode(&header.bytes),
+                                    });
+                                    header.text_rows
+                                }
+                                Ok(None) => rows,
+                                Err(err) => {
+                                    eprintln!(
+                                        "[clud] warning: failed to redraw daemon graphics header: {err}"
+                                    );
+                                    rows
+                                }
+                            }
+                        } else {
+                            rows
+                        };
+                        runtime.resize(effective_rows, cols);
+                        shared.resize_capture(effective_rows, cols);
                     }
                     WorkerClientMessage::Interrupt => runtime.interrupt(),
                 }

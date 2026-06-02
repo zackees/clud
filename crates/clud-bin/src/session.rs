@@ -10,6 +10,7 @@ use running_process::pty::PtySize;
 
 use crate::console_title::OscTitleStripper;
 use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
+use crate::graphics::GraphicsConfig;
 use crate::verbose_log;
 
 /// Resize the PTY. On Windows, `running_process::pty::NativePtyProcess::resize_impl`
@@ -438,6 +439,32 @@ where
     H: InteractiveHooks,
     R: std::io::Read + Send + 'static,
 {
+    run_raw_pty_pump_with_extra_rx_verbose_and_graphics(
+        process,
+        interrupted,
+        hooks,
+        stdin_source,
+        extra_rx,
+        verbose,
+        None,
+    )
+}
+
+/// Production pump entry with optional clud-level diagnostics and a PTY
+/// header renderer that can redraw/reserve rows after terminal resizes.
+pub fn run_raw_pty_pump_with_extra_rx_verbose_and_graphics<H, R>(
+    process: &NativePtyProcess,
+    interrupted: &AtomicBool,
+    hooks: &mut H,
+    stdin_source: R,
+    extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    verbose: bool,
+    graphics: Option<GraphicsConfig>,
+) -> i32
+where
+    H: InteractiveHooks,
+    R: std::io::Read + Send + 'static,
+{
     let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
     spawn_os_resize_watcher(resize_tx);
     run_raw_pty_pump_full_verbose(
@@ -447,7 +474,7 @@ where
         stdin_source,
         resize_rx,
         extra_rx,
-        verbose,
+        PumpOptions { verbose, graphics },
     )
 }
 
@@ -543,8 +570,14 @@ where
         stdin_source,
         resize_rx,
         extra_rx,
-        false,
+        PumpOptions::default(),
     )
+}
+
+#[derive(Default)]
+struct PumpOptions {
+    verbose: bool,
+    graphics: Option<GraphicsConfig>,
 }
 
 fn run_raw_pty_pump_full_verbose<H, R>(
@@ -554,7 +587,7 @@ fn run_raw_pty_pump_full_verbose<H, R>(
     stdin_source: R,
     resize_rx: std::sync::mpsc::Receiver<(u16, u16)>,
     extra_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
-    verbose: bool,
+    options: PumpOptions,
 ) -> i32
 where
     H: InteractiveHooks,
@@ -577,7 +610,7 @@ where
     // it in that exact case so `console_input` is the sole consumer.
     let spawn_byte_stream_stdin_reader =
         should_spawn_byte_stream_stdin_reader(interactive_real_stdin, extra_rx.is_some());
-    if verbose {
+    if options.verbose {
         verbose_log::log(format_args!(
             "[clud] pty pump: start interactive_stdin={} normalize_console_stdin={} \
              spawn_byte_stream_stdin_reader={}",
@@ -656,7 +689,14 @@ where
         // Drain resize events — always before stdin so a late-arriving
         // resize doesn't wait on a chunk of typing to unblock the loop.
         while let Ok((rows, cols)) = resize_rx.try_recv() {
-            if let Err(err) = resize_pty(process, rows, cols) {
+            let pty_rows = options
+                .graphics
+                .as_ref()
+                .map(|config| {
+                    redraw_graphics_header_for_resize(config, rows, cols, options.verbose)
+                })
+                .unwrap_or(rows);
+            if let Err(err) = resize_pty(process, pty_rows, cols) {
                 eprintln!("[clud] warning: failed to resize pty: {}", err);
             }
         }
@@ -693,10 +733,10 @@ where
                     );
                 }
                 if requested_interrupt {
-                    if verbose {
+                    if options.verbose {
                         verbose_log::log("[clud] pty pump: interrupt via extra_rx Ctrl+C byte");
                     }
-                    return interrupt_pty_process(process, verbose);
+                    return interrupt_pty_process(process, options.verbose);
                 }
             }
         }
@@ -730,7 +770,7 @@ where
             }
 
             if requested_interrupt || interrupted.load(Ordering::SeqCst) {
-                if verbose {
+                if options.verbose {
                     let source = if requested_interrupt {
                         "stdin Ctrl+C byte"
                     } else {
@@ -738,7 +778,7 @@ where
                     };
                     verbose_log::log(format_args!("[clud] pty pump: interrupt via {source}"));
                 }
-                return interrupt_pty_process(process, verbose);
+                return interrupt_pty_process(process, options.verbose);
             }
         }
 
@@ -752,17 +792,48 @@ where
         if let Ok(Some(code)) =
             running_process::pty::poll_pty_process(&process.handles, &process.returncode)
         {
-            if verbose {
+            if options.verbose {
                 verbose_log::log(format_args!("[clud] pty pump: child exited code {code}"));
             }
             return code;
         }
 
         if interrupted.load(Ordering::SeqCst) {
-            if verbose {
+            if options.verbose {
                 verbose_log::log("[clud] pty pump: interrupt flag observed");
             }
-            return interrupt_pty_process(process, verbose);
+            return interrupt_pty_process(process, options.verbose);
+        }
+    }
+}
+
+fn redraw_graphics_header_for_resize(
+    config: &GraphicsConfig,
+    terminal_rows: u16,
+    terminal_cols: u16,
+    verbose: bool,
+) -> u16 {
+    match crate::graphics::render_header(config, terminal_rows, terminal_cols) {
+        Ok(Some(header)) => {
+            use std::io::Write;
+            let mut out = io::stdout().lock();
+            let _ = out.write_all(&header.bytes);
+            let _ = out.flush();
+            header.text_rows
+        }
+        Ok(None) => {
+            use std::io::Write;
+            let restore = format!("\x1b[?6l\x1b[r\x1b[{};1H", terminal_rows);
+            let mut out = io::stdout().lock();
+            let _ = out.write_all(restore.as_bytes());
+            let _ = out.flush();
+            terminal_rows
+        }
+        Err(err) => {
+            if verbose {
+                verbose_log::log(format_args!("[clud] graphics: resize redraw failed: {err}"));
+            }
+            terminal_rows
         }
     }
 }

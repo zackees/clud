@@ -255,6 +255,10 @@ fn main() {
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
             "launch_mode": plan.launch_mode.as_str(),
+            "graphics": {
+                "mode": plan.graphics.mode.to_string(),
+                "image": plan.graphics.image_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            },
             "repeat_interval_secs": plan.repeat_schedule.as_ref().map(|s| s.interval_secs),
             "transcript": args.transcript.as_ref().map(|p| p.to_string_lossy().to_string()),
             "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({

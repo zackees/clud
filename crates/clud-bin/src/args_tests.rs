@@ -60,6 +60,30 @@ fn test_pty_flag() {
 }
 
 #[test]
+fn test_graphics_flag() {
+    let args = parse(&[
+        "clud",
+        "--graphics",
+        "sixel",
+        "--graphics-image",
+        "banner.png",
+    ]);
+    assert_eq!(args.graphics, crate::graphics::GraphicsMode::Sixel);
+    assert_eq!(
+        args.graphics_image.as_ref().map(|p| p.as_os_str()),
+        Some(std::ffi::OsStr::new("banner.png"))
+    );
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_graphics_equals_form_stays_known() {
+    let args = parse(&["clud", "--graphics=off", "--some-backend-flag"]);
+    assert_eq!(args.graphics, crate::graphics::GraphicsMode::Off);
+    assert_eq!(args.passthrough, vec!["--some-backend-flag"]);
+}
+
+#[test]
 fn test_safe_flag() {
     let args = parse(&["clud", "--safe", "-p", "hello"]);
     assert!(args.safe);
@@ -587,6 +611,8 @@ fn test_default_no_flags() {
     assert!(!args.codex);
     assert!(!args.subprocess);
     assert!(!args.pty);
+    assert_eq!(args.graphics, crate::graphics::GraphicsMode::Auto);
+    assert!(args.graphics_image.is_none());
     assert!(!args.safe);
     assert!(!args.dry_run);
     assert!(!args.detach);

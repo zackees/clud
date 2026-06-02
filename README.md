@@ -59,6 +59,7 @@ clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
 clud --pty                        # Force PTY launch mode
 clud --subprocess                 # Force subprocess launch mode
+clud --pty --graphics=sixel       # Force a Sixel header above PTY output
 clud --detach -p "review this PR" # Start a daemon-managed session without attaching
 clud --detachable -p "fix CI"     # Ctrl+C asks whether to keep the session in background
 clud --transcript session.log -p "debug this" # Tee daemon session output to a file
@@ -90,6 +91,8 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `--codex` | Use Codex as the backend |
 | `--subprocess` | Force subprocess launch mode |
 | `--pty` | Force PTY launch mode |
+| `--graphics <auto\|off\|sixel>` | Control PTY graphics headers. `auto` only enables Sixel from a live terminal probe |
+| `--graphics-image <PATH>` | Render a custom image as the PTY graphics header when Sixel is enabled |
 | `--detach` | Start a daemon-managed session directly in the background |
 | `--detachable` | Run attached under the daemon; `Ctrl+C` prompts whether to background or end |
 | `--transcript <PATH>` | Tee daemon-managed session output bytes to a transcript file |
@@ -104,6 +107,21 @@ Unknown flags are forwarded directly to the backend agent.
 
 `clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
 to opt back into PTY while Claude PTY issues are being investigated.
+
+## PTY Graphics Headers
+
+PTY sessions can reserve a small header area above the backend terminal and
+draw a Sixel image there. `--graphics=auto` is conservative: it only enables
+the header when `running-process` reports Sixel as supported from a live probe
+of the current terminal. Missing metadata, non-TTY attaches, blocked terminals,
+and host-name-only hints stay text-only. Use `--graphics=off` to disable the
+feature or `--graphics=sixel` to force it.
+
+By default clud renders a small bundled banner. Pass `--graphics-image <PATH>`
+to use a PNG or JPEG instead. Direct PTY launches reserve rows before the
+backend starts. Daemon-managed sessions decide at attach time, because the
+detached worker does not know which terminal will attach later; reattach and
+resize paths redraw the header where the terminal reports support.
 
 ## Codex Support
 

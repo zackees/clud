@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, LaunchMode};
+use crate::graphics::GraphicsConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchPlan {
@@ -9,6 +10,8 @@ pub struct LaunchPlan {
     pub backend: Backend,
     pub launch_mode: LaunchMode,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub graphics: GraphicsConfig,
     #[serde(default)]
     pub repeat_schedule: Option<RepeatSchedule>,
     #[serde(default)]

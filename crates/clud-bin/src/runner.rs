@@ -543,14 +543,52 @@ pub fn run_plan_pty(
 
     let env = child_env();
     let mut last_exit = 0i32;
-    let (rows, cols) = get_terminal_size();
+    let terminal_capabilities = (plan.graphics.mode != crate::graphics::GraphicsMode::Off)
+        .then(crate::graphics::detect_current_terminal);
+    let graphics_decision =
+        crate::graphics::decide_sixel(&plan.graphics, terminal_capabilities.as_ref());
     if verbose {
         verbose_log::log(format_args!(
-            "[clud] pty: terminal size rows={rows} cols={cols}"
+            "[clud] graphics: {} ({})",
+            graphics_decision.reason,
+            crate::graphics::capability_summary(terminal_capabilities.as_ref())
         ));
     }
 
     for iteration in 0..plan.iterations {
+        let (terminal_rows, cols) = get_terminal_size();
+        let mut rows = terminal_rows;
+        let header = if graphics_decision.enabled {
+            match crate::graphics::render_header(&plan.graphics, terminal_rows, cols) {
+                Ok(Some(header)) => {
+                    rows = header.text_rows;
+                    Some(header)
+                }
+                Ok(None) => {
+                    if verbose {
+                        verbose_log::log(format_args!(
+                            "[clud] graphics: skipped header for terminal rows={terminal_rows} cols={cols}"
+                        ));
+                    }
+                    None
+                }
+                Err(err) => {
+                    eprintln!("[clud] warning: failed to render graphics header: {err}");
+                    if verbose {
+                        verbose_log::log(format_args!("[clud] graphics: render failed: {err}"));
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if verbose {
+            verbose_log::log(format_args!(
+                "[clud] pty: terminal size rows={terminal_rows} cols={cols} pty_rows={rows}"
+            ));
+        }
+
         // Re-check the interrupted flag at the top of every iteration. See
         // the matching guard in `run_plan_subprocess` — same rationale.
         if interrupted.load(Ordering::SeqCst) {
@@ -618,6 +656,11 @@ pub fn run_plan_pty(
             verbose_log::log("[clud] pty: started");
         }
 
+        if let Some(header) = &header {
+            write_terminal_bytes(&header.bytes);
+        }
+        let header_restore = header.as_ref().map(|header| header.restore_bytes.clone());
+        let graphics_resize = header.as_ref().map(|_| plan.graphics.clone());
         let mut hooks = voice::VoiceMode::from_env();
         let _raw_guard = session::enter_raw_mode_if_tty();
         // First iteration takes ownership of the side-channel receivers
@@ -636,15 +679,19 @@ pub fn run_plan_pty(
         } else {
             None
         };
-        let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose(
+        let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose_and_graphics(
             &process,
             interrupted,
             &mut hooks,
             io::stdin(),
             extra_rx,
             verbose,
+            graphics_resize,
         );
         drop(_raw_guard);
+        if let Some(bytes) = header_restore.as_deref() {
+            write_terminal_bytes(bytes);
+        }
         last_exit = normalize_exit_code(exit_code);
         if verbose {
             verbose_log::log(format_args!("[clud] pty: exited code {last_exit}"));
@@ -676,6 +723,13 @@ pub fn run_plan_pty(
     }
 
     last_exit
+}
+
+fn write_terminal_bytes(bytes: &[u8]) {
+    use std::io::Write;
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
 }
 
 #[cfg(test)]
