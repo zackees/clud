@@ -39,6 +39,8 @@ soldr cargo test -p clud-bin     # crate-level Rust tests only
 
 - `clap` (derive) — CLI argument parsing with passthrough for unknown flags
 - `crossterm` / `vt100` / `vte` — terminal I/O and PTY stream parsing
+- `running-process` terminal graphics capability metadata plus
+  `icy_sixel` / `image` — conservative Sixel PTY header rendering
 - `redb` — embedded KV store for session and tracked-entry registries
   (issues #73 / #110; replaced bundled `rusqlite`)
 - `fs4` — cross-platform advisory file lock serializing concurrent redb opens

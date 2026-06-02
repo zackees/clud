@@ -519,6 +519,8 @@ mod tests {
             codex: false,
             subprocess: false,
             pty: false,
+            graphics: crate::graphics::GraphicsMode::Auto,
+            graphics_image: None,
             model: None,
             safe: false,
             dry_run: false,

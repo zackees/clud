@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use running_process::pty::NativePtyProcess;
-use running_process::NativeProcess;
+use running_process::{NativeProcess, TerminalCapabilities};
 use serde::{Deserialize, Serialize};
 use sysinfo::Signal;
 
@@ -273,9 +273,22 @@ pub struct ListRow {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(super) enum WorkerClientMessage {
-    Attach,
-    Input { data_b64: String, submit: bool },
-    Resize { rows: u16, cols: u16 },
+    Attach {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<TerminalCapabilities>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+    },
+    Input {
+        data_b64: String,
+        submit: bool,
+    },
+    Resize {
+        rows: u16,
+        cols: u16,
+    },
     Interrupt,
 }
 
@@ -451,6 +464,19 @@ mod tests {
             }
             other => panic!("expected LiveCwds, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn attach_request_accepts_missing_terminal_metadata() {
+        let parsed: WorkerClientMessage = serde_json::from_str(r#"{"op":"attach"}"#).unwrap();
+        assert!(matches!(
+            parsed,
+            WorkerClientMessage::Attach {
+                terminal: None,
+                rows: None,
+                cols: None
+            }
+        ));
     }
 
     #[test]

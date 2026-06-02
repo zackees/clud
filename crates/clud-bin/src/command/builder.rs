@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::args::{Args, Command};
 use crate::backend::{Backend, LaunchMode};
+use crate::graphics::GraphicsConfig;
 use crate::loop_spec::{done_marker_contract, git_root_from};
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
@@ -226,6 +227,10 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         cwd: std::env::current_dir()
             .ok()
             .map(|cwd| cwd.to_string_lossy().to_string()),
+        graphics: GraphicsConfig {
+            mode: args.graphics,
+            image_path: args.graphics_image.clone(),
+        },
         repeat_schedule,
         task_summary,
         loop_markers,

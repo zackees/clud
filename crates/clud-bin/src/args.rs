@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use crate::graphics::GraphicsMode;
+
 /// Fast CLI for running Claude Code and Codex in YOLO mode.
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -33,6 +35,14 @@ pub struct Args {
 
     #[arg(long = "pty", conflicts_with = "subprocess")]
     pub pty: bool,
+
+    /// Control terminal graphics headers for PTY sessions.
+    #[arg(long = "graphics", value_enum, default_value_t = GraphicsMode::Auto)]
+    pub graphics: GraphicsMode,
+
+    /// Render this image as the PTY graphics header when Sixel is enabled.
+    #[arg(long = "graphics-image", value_name = "PATH")]
+    pub graphics_image: Option<PathBuf>,
 
     #[arg(long = "model")]
     pub model: Option<String>,
@@ -315,6 +325,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--name",
         "--transcript",
         "--backlog-size",
+        "--graphics",
+        "--graphics-image",
         "--loop-count",
         "--done",
         "--repeat",

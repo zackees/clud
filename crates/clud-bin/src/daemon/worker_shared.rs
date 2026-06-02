@@ -447,7 +447,7 @@ impl WorkerShared {
         self.send_to_client(WorkerServerMessage::Exited { exit_code });
     }
 
-    fn send_to_client(&self, message: WorkerServerMessage) {
+    pub(super) fn send_to_client(&self, message: WorkerServerMessage) {
         let sender = self
             .client
             .lock()

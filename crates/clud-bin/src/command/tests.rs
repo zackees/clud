@@ -524,6 +524,25 @@ fn test_pty_override() {
 }
 
 #[test]
+fn test_graphics_config_threads_into_launch_plan() {
+    let p = plan(&[
+        "clud",
+        "--graphics=sixel",
+        "--graphics-image",
+        "banner.png",
+        "--pty",
+        "-p",
+        "hello",
+    ]);
+    assert_eq!(p.graphics.mode, crate::graphics::GraphicsMode::Sixel);
+    assert_eq!(
+        p.graphics.image_path.as_ref().map(|path| path.as_os_str()),
+        Some(std::ffi::OsStr::new("banner.png"))
+    );
+    assert!(!p.command.iter().any(|arg| arg.starts_with("--graphics")));
+}
+
+#[test]
 fn test_passthrough_flags() {
     let p = plan(&["clud", "--some-flag", "-p", "hello"]);
     assert!(p.command.contains(&"--some-flag".to_string()));

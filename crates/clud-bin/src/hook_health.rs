@@ -776,6 +776,8 @@ fn run_backend_prompt(
         codex: matches!(selected_backend, Backend::Codex),
         subprocess: true,
         pty: false,
+        graphics: crate::graphics::GraphicsMode::Off,
+        graphics_image: None,
         model: args.model.clone(),
         safe: args.safe,
         dry_run: false,

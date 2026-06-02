@@ -118,7 +118,17 @@ pub(super) fn attach_to_session(
                 return 1;
             }
         };
-        if let Err(err) = write_json_line(&mut stream, &WorkerClientMessage::Attach) {
+        let terminal =
+            matches!(session.kind, SessionKind::Pty).then(crate::graphics::detect_current_terminal);
+        let (rows, cols) = super::io_helpers::terminal_dimensions();
+        if let Err(err) = write_json_line(
+            &mut stream,
+            &WorkerClientMessage::Attach {
+                terminal,
+                rows: Some(rows),
+                cols: Some(cols),
+            },
+        ) {
             eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
             return 1;
         }
