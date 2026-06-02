@@ -823,9 +823,9 @@ fn redraw_graphics_header_for_resize(
         }
         Ok(None) => {
             use std::io::Write;
-            let restore = format!("\x1b[?6l\x1b[r\x1b[{};1H", terminal_rows);
+            let restore = crate::graphics::reset_layout_bytes(terminal_rows, true);
             let mut out = io::stdout().lock();
-            let _ = out.write_all(restore.as_bytes());
+            let _ = out.write_all(&restore);
             let _ = out.flush();
             terminal_rows
         }
@@ -833,6 +833,11 @@ fn redraw_graphics_header_for_resize(
             if verbose {
                 verbose_log::log(format_args!("[clud] graphics: resize redraw failed: {err}"));
             }
+            use std::io::Write;
+            let restore = crate::graphics::reset_layout_bytes(terminal_rows, true);
+            let mut out = io::stdout().lock();
+            let _ = out.write_all(&restore);
+            let _ = out.flush();
             terminal_rows
         }
     }
