@@ -89,7 +89,7 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Context:** Users run different upstream agents (`claude` and `codex`) with similar but not identical CLI surfaces. Each backend has its own arg conventions, model-flag placement, prompt-injection mechanism, and skill-install location.
 
-**Decision:** clud detects which backends are on `PATH` and supports either via `--claude` / `--codex` flags. The `Backend` enum is plumbed through every code path that constructs argv. Where backends diverge (`--model` placement, `-p` semantics, `stream-json` injection, the `exec`/`resume` keywords), the divergence is encoded inside `command/`. Skills bundled into the `clud` binary install to `~/.claude/skills/` for Claude Code and Codex's current `~/.agents/skills/` location when the corresponding backend homes already exist; stale clud-managed copies under the retired `~/.codex/skills/` path are purged best-effort.
+**Decision:** clud detects which backends are on `PATH` and supports either via `--claude` / `--codex` flags. The `Backend` enum is plumbed through every code path that constructs argv and every persistent launch-setup action. Where backends diverge (`--model` placement, `-p` semantics, `stream-json` injection, the `exec`/`resume` keywords), the divergence is encoded inside `command/`. Skills bundled into the `clud` binary install to `~/.claude/skills/` for Claude Code and Codex's current `~/.agents/skills/` location only during global launch setup for the selected backend; stale clud-managed copies under the retired `~/.codex/skills/` path are purged best-effort during Codex global setup.
 
 **Rationale:**
 - Locks clud into supporting users on either backend without forking the binary.
@@ -192,14 +192,14 @@ The separate session-cap registry (`sessions.redb`) keeps file-lock-based serial
 
 ## DD-008: Dual skill installer (`skills.rs` vs `skill_install.rs`) — interim state
 
-**Context:** Skills are slash-commands (`/clud-pr`, `/clud-issue`, etc.) bundled into the `clud` binary via `include_str!` and installed into the user's backend home(s) on launch. Two installer implementations exist in the codebase today:
+**Context:** Skills are slash-commands (`/clud-pr`, `/clud-issue`, etc.) bundled into the `clud` binary via `include_str!` and installed into the user's backend home(s) during global launch setup. Session-only launches do not write persistent skill files. Two installer implementations exist in the codebase today:
 
 - `src/skills.rs` — multi-backend (`~/.claude/skills/`, Codex `~/.agents/skills/` gated by `~/.codex`), non-overwriting (preserves user edits), reads from `crates/clud-bin/assets/skills/`, and purges stale clud-managed Codex copies from `~/.codex/skills/`.
 - `src/skill_install.rs` — Claude-only (`~/.claude/skills/`), overwrites on semantic divergence (whitespace-tolerant compare), reads from a separate top-level `skills/` directory.
 
 Their `BUNDLED_SKILLS` constants ship different subsets of skills.
 
-**Decision:** Accept the duality as interim state. Both installers run on every launch. Document the divergence explicitly in [skill-system.md](architecture/skill-system.md) and the dir READMEs so contributors aren't surprised. Plan to consolidate later (single installer, single source tree).
+**Decision:** Accept the duality as interim state. Both installers remain registered behind the launch setup scope gate, and global setup runs only the selected backend's actions. Document the divergence explicitly in [skill-system.md](architecture/skill-system.md) and the dir READMEs so contributors aren't surprised. Plan to consolidate later (single installer, single source tree).
 
 **Rationale:**
 - The two installers evolved independently — `skill_install.rs` predates `skills.rs` — and consolidating now would be a non-trivial change with its own design questions (which overwrite policy wins? which source tree?).
@@ -214,7 +214,7 @@ Their `BUNDLED_SKILLS` constants ship different subsets of skills.
 | Delete one installer | Either drops Codex support (`skill_install.rs` alone) or drops semantic overwrite (`skills.rs` alone). |
 
 **Consequences:**
-- Two install passes run on every `clud` launch; cost is negligible (compile-time strings, file existence checks).
+- Two installer implementations remain live, but they run only during selected-backend global setup. Session-only launches skip both.
 - Adding a new skill requires editing `BUNDLED_SKILLS` in **both** files (and possibly placing the `SKILL.md` in both source trees). [skill-system.md](architecture/skill-system.md) documents the checklist.
 - This DD should be revisited when consolidation lands; mark superseded then.
 

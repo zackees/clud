@@ -23,6 +23,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::backend::Backend;
+
 const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 
 /// One bundled skill: the directory name and the literal `SKILL.md` body.
@@ -68,6 +70,8 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// new tool is a one-line append to [`SKILL_BACKENDS`] — the on-disk layout
 /// is the same as Claude Code's, just rooted under the tool's home subdir.
 pub struct SkillBackend {
+    /// Backend this install target belongs to.
+    pub backend: Backend,
     /// Display name for log messages.
     pub name: &'static str,
     /// Path under the user's home dir where this backend stores config
@@ -103,12 +107,14 @@ impl SkillBackend {
 /// append a `SkillBackend { ... }` entry here.
 pub const SKILL_BACKENDS: &[SkillBackend] = &[
     SkillBackend {
+        backend: Backend::Claude,
         name: "Claude Code",
         home_subdir: ".claude",
         skills_home_subdir: None,
         skills_subdir: "skills",
     },
     SkillBackend {
+        backend: Backend::Codex,
         name: "Codex",
         home_subdir: ".codex",
         skills_home_subdir: Some(".agents"),
@@ -116,6 +122,7 @@ pub const SKILL_BACKENDS: &[SkillBackend] = &[
     },
     // To add a new backend (e.g. OpenRouter CLI):
     // SkillBackend {
+    //     backend: Backend::OpenRouter,
     //     name: "OpenRouter",
     //     home_subdir: ".openrouter",
     //     skills_home_subdir: None,
@@ -161,10 +168,12 @@ pub struct LegacyPurgeReport {
     pub failed: Vec<&'static str>,
 }
 
-/// Install bundled skills into every backend whose home subdir exists.
-/// Returns one `(backend, report)` per backend actually written to.
-/// Returns [`InstallError::NoHomeDir`] only when the home dir itself
-/// cannot be resolved.
+/// Compatibility helper that installs bundled skills into every backend whose
+/// home subdir exists. Production launch setup calls
+/// [`ensure_installed_for_backend`] for the selected backend instead. Returns
+/// one `(backend, report)` per backend actually written to. Returns
+/// [`InstallError::NoHomeDir`] only when the home dir itself cannot be
+/// resolved.
 pub fn ensure_installed() -> Result<Vec<(&'static SkillBackend, InstallReport)>, InstallError> {
     let home = home_dir().ok_or(InstallError::NoHomeDir)?;
     ensure_installed_at(&home)
@@ -180,6 +189,34 @@ pub fn ensure_installed_at(
         results.push((backend, report));
     }
     Ok(results)
+}
+
+pub fn ensure_installed_for_backend(
+    backend: Backend,
+) -> Result<Option<(&'static SkillBackend, InstallReport)>, InstallError> {
+    let home = home_dir().ok_or(InstallError::NoHomeDir)?;
+    ensure_installed_for_backend_at(&home, backend)
+}
+
+pub fn ensure_installed_for_backend_at(
+    home: &Path,
+    backend: Backend,
+) -> Result<Option<(&'static SkillBackend, InstallReport)>, InstallError> {
+    if matches!(backend, Backend::Codex) {
+        let _ = purge_legacy_codex_skills(home, BUNDLED_SKILLS);
+    }
+    let Some(skill_backend) = backend_for(backend) else {
+        return Ok(None);
+    };
+    if !skill_backend.root_exists(home) {
+        return Ok(None);
+    }
+    let report = install_to(&skill_backend.skills_dir(home), BUNDLED_SKILLS)?;
+    Ok(Some((skill_backend, report)))
+}
+
+pub fn backend_for(backend: Backend) -> Option<&'static SkillBackend> {
+    SKILL_BACKENDS.iter().find(|b| b.backend == backend)
 }
 
 /// All `SkillBackend`s whose home subdir currently exists under `home` —
@@ -421,12 +458,12 @@ mod tests {
 
     #[test]
     fn skill_backends_include_claude_and_codex() {
-        let backends: Vec<(&str, &str, Option<&str>)> = SKILL_BACKENDS
+        let backends: Vec<(Backend, &str, &str, Option<&str>)> = SKILL_BACKENDS
             .iter()
-            .map(|b| (b.name, b.home_subdir, b.skills_home_subdir))
+            .map(|b| (b.backend, b.name, b.home_subdir, b.skills_home_subdir))
             .collect();
-        assert!(backends.contains(&("Claude Code", ".claude", None)));
-        assert!(backends.contains(&("Codex", ".codex", Some(".agents"))));
+        assert!(backends.contains(&(Backend::Claude, "Claude Code", ".claude", None)));
+        assert!(backends.contains(&(Backend::Codex, "Codex", ".codex", Some(".agents"))));
     }
 
     #[test]
@@ -472,6 +509,7 @@ mod tests {
     fn skills_dir_resolves_under_backend_root() {
         let home = tempdir().unwrap();
         let backend = SkillBackend {
+            backend: Backend::Claude,
             name: "Test",
             home_subdir: ".testtool",
             skills_home_subdir: None,
@@ -488,10 +526,8 @@ mod tests {
         let home = tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
-        let results = ensure_installed_at(home.path()).unwrap();
-        let codex = results
-            .iter()
-            .find(|(backend, _)| backend.name == "Codex")
+        let codex = ensure_installed_for_backend_at(home.path(), Backend::Codex)
+            .unwrap()
             .expect("codex backend should be active");
 
         assert_eq!(

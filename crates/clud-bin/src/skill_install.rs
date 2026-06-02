@@ -1,8 +1,8 @@
 //! Auto-installer for the bundled `clud-*` skills.
 //!
-//! On every `clud` launch we ensure each entry in [`BUNDLED_SKILLS`] is
-//! present at `~/.claude/skills/<name>/SKILL.md` and matches the version
-//! baked into this binary via `include_str!`.
+//! During Claude global launch setup, we ensure each entry in
+//! [`BUNDLED_SKILLS`] is present at `~/.claude/skills/<name>/SKILL.md` and
+//! matches the version baked into this binary via `include_str!`.
 //!
 //! Three states per skill:
 //! - **Missing** — write the embedded copy, log a one-line install notice.
@@ -52,19 +52,25 @@ const BUNDLED_SKILLS: &[Skill] = &[
     },
 ];
 
-/// Run the install/check for every bundled skill on launch. Cheap on the
-/// steady state (one stat + one read per skill). Failures degrade silently
-/// to a stderr note.
+/// Compatibility helper that runs the install/check using the current home
+/// directory. Production launch setup calls [`ensure_installed_at`] only for
+/// Claude global setup. Cheap on the steady state (one stat + one read per
+/// skill). Failures degrade silently to a stderr note.
 pub fn ensure_installed() {
+    let Some(home) = home_dir() else {
+        return;
+    };
+    ensure_installed_at(&home);
+}
+
+pub fn ensure_installed_at(home: &Path) {
     for skill in BUNDLED_SKILLS {
-        ensure_skill_installed(skill);
+        ensure_skill_installed_at(home, skill);
     }
 }
 
-fn ensure_skill_installed(skill: &Skill) {
-    let Some(path) = target_path(skill.name) else {
-        return;
-    };
+fn ensure_skill_installed_at(home: &Path, skill: &Skill) {
+    let path = target_path_at(home, skill.name);
     match classify(&path, skill.content) {
         Existing::Missing => write_install(&path, skill),
         Existing::Matches => {}
@@ -105,14 +111,11 @@ fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn target_path(skill_name: &str) -> Option<PathBuf> {
-    let home = home_dir()?;
-    Some(
-        home.join(".claude")
-            .join("skills")
-            .join(skill_name)
-            .join("SKILL.md"),
-    )
+fn target_path_at(home: &Path, skill_name: &str) -> PathBuf {
+    home.join(".claude")
+        .join("skills")
+        .join(skill_name)
+        .join("SKILL.md")
 }
 
 fn home_dir() -> Option<PathBuf> {

@@ -1,7 +1,7 @@
 use clud::{
-    args, backend, backend_bootstrap, codex_hook_normalize, command, console_setup, console_title,
-    daemon, gc, graphics, hook_health, large_file_guard, loop_artifacts, loop_spec, runner,
-    skill_install, skills, startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc, graphics,
+    hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec, runner, startup,
+    trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -62,32 +62,6 @@ fn main() {
             }
         }
     }
-
-    // Expand bundled slash-command skills (clud-issue, clud-pr) into every
-    // backend's global skills directory that already exists. Claude Code uses
-    // ~/.claude/skills/; Codex is gated on ~/.codex/ but uses the current
-    // ~/.agents/skills/ location, with stale clud-managed ~/.codex/skills/
-    // copies purged best-effort. Existing active-target files are left alone
-    // so user edits survive. Failures are non-fatal — we log and continue,
-    // since a skills hiccup must never block a launch.
-    if let Err(e) = skills::ensure_installed() {
-        eprintln!("[clud] note: could not install bundled skills: {e}");
-    }
-
-    // Additionally run the narrower `skill_install` flow from PR #88 (drift
-    // detection for the single bundled `/clud-pr` skill). Redundant with the
-    // broader `skills::ensure_installed()` above, but harmless — both flows
-    // are idempotent and never overwrite existing user-edited skill files.
-    skill_install::ensure_installed();
-
-    // Issue #234: bump any `~/.codex/hooks.json` `PreToolUse` hook handler
-    // with `"timeout": 5` to `"timeout": 30`. Codex's documented default is
-    // much higher than 30, so values without an explicit `timeout` are
-    // already fine; this targets only the exact `5` trap that times out
-    // under normal clud-driven interactive load. Idempotent and silent
-    // when nothing changes; emits a green status line on actual edits.
-    // All failures are non-fatal — never blocks a launch.
-    codex_hook_normalize::run_global_normalization(args.verbose);
 
     // Issue #110: `clud gc <subcommand>` is a self-contained
     // maintenance path that never launches a backend. Dispatch before
@@ -267,6 +241,38 @@ fn main() {
             }
         }
     };
+
+    // Issue #242: mutable harness setup is scoped per launch. Automation,
+    // dry-runs, piped prompts, and one-shot prompt launches default to
+    // session-only and do not write backend home files. Bare interactive TUI
+    // launches can opt into global setup through a reusable selector; global
+    // setup runs only the selected backend's actions.
+    let setup_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    let setup_scope = if let Some(scope) =
+        launch_setup::scope_for_non_prompting_launch(&args, setup_interactive)
+    {
+        scope
+    } else {
+        let mut err = io::stderr().lock();
+        match launch_setup::prompt_scope(&mut err) {
+            Ok(scope) => scope,
+            Err(error) => {
+                eprintln!(
+                    "[clud] note: could not read launch setup scope ({error}); using session-only"
+                );
+                launch_setup::LaunchSetupScope::SessionOnly
+            }
+        }
+    };
+    if matches!(setup_scope, launch_setup::LaunchSetupScope::Global) {
+        let mut err = io::stderr().lock();
+        if let Err(error) = launch_setup::run_setup(setup_scope, backend, args.verbose, &mut err) {
+            eprintln!("[clud] note: global setup failed: {error}");
+        }
+    }
+    if args.verbose {
+        verbose_log::log(format_args!("[clud] setup scope: {}", setup_scope.as_str()));
+    }
 
     let plan = command::build_launch_plan(&args, backend, &backend_path);
     if args.verbose {

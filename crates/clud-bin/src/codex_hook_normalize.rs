@@ -6,7 +6,7 @@
 //! particular). Codex's own default is much higher than 30s, so a missing
 //! `timeout` is fine — only the explicit `5` is the trap.
 //!
-//! Behavior on every eligible launch:
+//! Behavior during Codex global launch setup:
 //!
 //! 1. Ensure `~/.clud/` and `~/.clud/settings.json` exist.
 //! 2. Acquire `~/.clud/settings.lock` (cross-platform advisory lock, same
@@ -62,8 +62,8 @@ impl NormalizeOutcome {
     }
 }
 
-/// Entry point called from `main.rs`. Resolves the user's home directory,
-/// runs the normalization pass, and prints the green status line to stderr
+/// Compatibility entry point that resolves the user's home directory, runs the
+/// normalization pass, and prints the green status line to stderr
 /// on any change. All failures are non-fatal — a missing home dir, an
 /// unwritable `~/.clud`, or any I/O hiccup must never block a launch.
 pub fn run_global_normalization(verbose: bool) {
@@ -87,7 +87,7 @@ pub fn run_global_normalization(verbose: bool) {
 /// `run_global_normalization` and the unit tests; `clud_dir` is the dir
 /// that holds the lock file plus the auto-created `settings.json`, and
 /// `hooks_path` is the absolute path to the Codex hooks JSON to inspect.
-pub fn run_at<W: Write>(
+pub fn run_at<W: Write + ?Sized>(
     clud_dir: &Path,
     hooks_path: &Path,
     out: &mut W,

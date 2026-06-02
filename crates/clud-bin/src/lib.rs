@@ -19,6 +19,7 @@ pub mod gc;
 pub mod graphics;
 pub mod hook_health;
 pub mod large_file_guard;
+pub mod launch_setup;
 pub mod loop_artifacts;
 pub mod loop_check;
 pub mod loop_spec;
