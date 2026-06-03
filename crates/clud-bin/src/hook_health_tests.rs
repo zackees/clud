@@ -187,13 +187,84 @@ fn deterministic_trust_repair_adds_canonical_key() {
 }
 
 #[test]
-fn per_hook_prompt_planning_uses_one_action_per_missing_matcher() {
+fn catch_all_codex_hook_satisfies_specific_claude_matchers() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");
     let home = temp.path().join("home");
     write(
         &repo.join(".claude").join("settings.json"),
         r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{}]},{"matcher":"Read","hooks":[{}]}]}}"#,
+    );
+    let codex = repo.join(".codex").join("hooks.json");
+    write(
+        &codex,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{}]}]}}"#,
+    );
+    write(
+        &home.join(".codex").join("config.toml"),
+        &format!(
+            "[projects.'{}']\ntrust_level = \"trusted\"\n{}",
+            codex_project_key(&repo),
+            trusted_state_for(&codex, 0, 0)
+        ),
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("matchers differ")),
+        "catch-all Codex matcher should satisfy specific Claude matchers: {:?}",
+        report.warnings
+    );
+    assert!(
+        plan_repairs(&report)
+            .into_iter()
+            .filter(|action| matches!(action, RepairAction::BackendPrompt { .. }))
+            .collect::<Vec<_>>()
+            .is_empty(),
+        "catch-all target coverage should not request per-tool migrations"
+    );
+}
+
+#[test]
+fn same_command_claude_hooks_plan_one_codex_catch_all_prompt() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"python check.py"}]},{"matcher":"Read","hooks":[{"type":"command","command":"python check.py"}]}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+    let prompts = plan_repairs(&report)
+        .into_iter()
+        .filter(|action| matches!(action, RepairAction::BackendPrompt { .. }))
+        .collect::<Vec<_>>();
+
+    assert_eq!(prompts.len(), 1);
+    assert!(matches!(
+        &prompts[0],
+        RepairAction::BackendPrompt {
+            target: HookFrontend::Codex,
+            matcher,
+            prompt,
+            ..
+        } if matcher == "*" && prompt.contains("catch-all")
+    ));
+}
+
+#[test]
+fn different_command_claude_hooks_stay_per_matcher_prompts() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"python bash.py"}]},{"matcher":"Read","hooks":[{"type":"command","command":"python read.py"}]}]}}"#,
     );
 
     let report = inspect_paths(&repo, Some(&home));
@@ -204,7 +275,9 @@ fn per_hook_prompt_planning_uses_one_action_per_missing_matcher() {
 
     assert_eq!(prompts.len(), 2);
     assert!(prompts.iter().all(|action| match action {
-        RepairAction::BackendPrompt { prompt, .. } => prompt.contains("exactly one hook"),
+        RepairAction::BackendPrompt {
+            matcher, prompt, ..
+        } => matcher != "*" && prompt.contains("exactly one hook"),
         _ => false,
     }));
 }

@@ -215,7 +215,7 @@ pub fn render_header(
 
     let (rgba, width, height) = match &config.image_path {
         Some(path) => load_image_rgba(path, max_width, max_height)?,
-        None => bundled_banner_rgba(max_width.min(420), max_height.max(48)),
+        None => load_image_rgba_from_memory(HERO_CLUD_JPG, max_width, max_height)?,
     };
     let reserved_rows = rows_for_pixel_height(height).min(max_reserved).max(1);
     if terminal_rows.saturating_sub(reserved_rows) < MIN_TEXT_ROWS {
@@ -302,91 +302,6 @@ fn rows_for_pixel_height(height: u32) -> u16 {
         .unwrap_or(1)
         .clamp(1, u32::from(u16::MAX)) as u16
 }
-
-fn bundled_banner_rgba(width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let width = width.max(160);
-    let height = height.clamp(42, 84);
-    let mut rgba = vec![0u8; (width * height * 4) as usize];
-    for y in 0..height {
-        for x in 0..width {
-            let t = x as f32 / width.max(1) as f32;
-            let base = [
-                (18.0 + 34.0 * t) as u8,
-                (28.0 + 54.0 * t) as u8,
-                (42.0 + 32.0 * (1.0 - t)) as u8,
-                255,
-            ];
-            set_px(&mut rgba, width, x, y, base);
-        }
-    }
-
-    let scale = (height / 10).clamp(4, 7);
-    let glyph_w = 5 * scale;
-    let glyph_h = 7 * scale;
-    let gap = scale * 2;
-    let total_w = glyph_w * 4 + gap * 3;
-    let start_x = width.saturating_sub(total_w) / 2;
-    let start_y = height.saturating_sub(glyph_h) / 2;
-    let color = [222, 245, 255, 255];
-    for (idx, glyph) in [GLYPH_C, GLYPH_L, GLYPH_U, GLYPH_D].iter().enumerate() {
-        draw_glyph(
-            &mut rgba,
-            (width, height),
-            (start_x + idx as u32 * (glyph_w + gap), start_y),
-            scale,
-            glyph,
-            color,
-        );
-    }
-
-    (rgba, width, height)
-}
-
-fn set_px(rgba: &mut [u8], width: u32, x: u32, y: u32, color: [u8; 4]) {
-    let idx = ((y * width + x) * 4) as usize;
-    rgba[idx..idx + 4].copy_from_slice(&color);
-}
-
-fn draw_glyph(
-    rgba: &mut [u8],
-    size: (u32, u32),
-    origin: (u32, u32),
-    scale: u32,
-    glyph: &[&str; 7],
-    color: [u8; 4],
-) {
-    let (width, height) = size;
-    let (x0, y0) = origin;
-    for (gy, row) in glyph.iter().enumerate() {
-        for (gx, ch) in row.as_bytes().iter().enumerate() {
-            if *ch != b'#' {
-                continue;
-            }
-            for dy in 0..scale {
-                for dx in 0..scale {
-                    let x = x0 + gx as u32 * scale + dx;
-                    let y = y0 + gy as u32 * scale + dy;
-                    if x < width && y < height {
-                        set_px(rgba, width, x, y, color);
-                    }
-                }
-            }
-        }
-    }
-}
-
-const GLYPH_C: [&str; 7] = [
-    "#####", "#....", "#....", "#....", "#....", "#....", "#####",
-];
-const GLYPH_L: [&str; 7] = [
-    "#....", "#....", "#....", "#....", "#....", "#....", "#####",
-];
-const GLYPH_U: [&str; 7] = [
-    "#...#", "#...#", "#...#", "#...#", "#...#", "#...#", "#####",
-];
-const GLYPH_D: [&str; 7] = [
-    "####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####.",
-];
 
 #[cfg(test)]
 mod tests {
@@ -482,6 +397,54 @@ mod tests {
         assert!(text.contains("\x1b["));
         let restore = String::from_utf8_lossy(&header.restore_bytes);
         assert!(restore.contains("\x1b[r"));
+    }
+
+    #[test]
+    fn default_header_uses_bundled_hero_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let hero_path = temp.path().join("hero.jpg");
+        std::fs::write(&hero_path, HERO_CLUD_JPG).unwrap();
+
+        let default = render_header(&GraphicsConfig::default(), 24, 80)
+            .unwrap()
+            .unwrap();
+        let explicit_hero = render_header(
+            &GraphicsConfig {
+                mode: GraphicsMode::Auto,
+                image_path: Some(hero_path),
+            },
+            24,
+            80,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(default.bytes, explicit_hero.bytes);
+        assert_eq!(default.reserved_rows, explicit_hero.reserved_rows);
+    }
+
+    #[test]
+    fn explicit_header_image_override_takes_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let override_path = temp.path().join("override.png");
+        let image = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
+        image.save(&override_path).unwrap();
+
+        let default = render_header(&GraphicsConfig::default(), 24, 80)
+            .unwrap()
+            .unwrap();
+        let override_header = render_header(
+            &GraphicsConfig {
+                mode: GraphicsMode::Auto,
+                image_path: Some(override_path),
+            },
+            24,
+            80,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(default.bytes, override_header.bytes);
     }
 
     #[test]
