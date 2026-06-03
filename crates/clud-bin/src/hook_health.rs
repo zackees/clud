@@ -20,6 +20,7 @@ use toml_edit::{table, value, DocumentMut, Item};
 
 const PRE_TOOL_USE: &str = "PreToolUse";
 const CODEX_PRE_TOOL_USE_STATE: &str = "pre_tool_use";
+const CATCH_ALL_MATCHER: &str = "*";
 const FIX_HINT: &str = "Run `clud --fix-hooks`.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -316,29 +317,113 @@ pub fn plan_repairs(report: &HookHealthReport) -> Vec<RepairAction> {
 
     let claude_by_matcher = report.claude.hook_by_matcher();
     let codex_by_matcher = report.codex.hook_by_matcher();
-    for (matcher, hook) in &claude_by_matcher {
-        if !codex_by_matcher.contains_key(matcher) {
-            actions.push(RepairAction::BackendPrompt {
-                source: HookFrontend::Claude,
-                target: HookFrontend::Codex,
-                matcher: matcher.clone(),
-                source_path: hook.source_path.clone(),
-                prompt: migration_prompt(hook, HookFrontend::Codex),
-            });
-        }
-    }
-    for (matcher, hook) in &codex_by_matcher {
-        if !claude_by_matcher.contains_key(matcher) {
-            actions.push(RepairAction::BackendPrompt {
-                source: HookFrontend::Codex,
-                target: HookFrontend::Claude,
-                matcher: matcher.clone(),
-                source_path: hook.source_path.clone(),
-                prompt: migration_prompt(hook, HookFrontend::Claude),
-            });
-        }
-    }
+    plan_backend_prompts(
+        &mut actions,
+        HookFrontend::Claude,
+        HookFrontend::Codex,
+        &claude_by_matcher,
+        &codex_by_matcher,
+    );
+    plan_backend_prompts(
+        &mut actions,
+        HookFrontend::Codex,
+        HookFrontend::Claude,
+        &codex_by_matcher,
+        &claude_by_matcher,
+    );
     actions
+}
+
+fn plan_backend_prompts(
+    actions: &mut Vec<RepairAction>,
+    source: HookFrontend,
+    target: HookFrontend,
+    source_by_matcher: &BTreeMap<String, NormalizedHook>,
+    target_by_matcher: &BTreeMap<String, NormalizedHook>,
+) {
+    let missing_hooks = source_by_matcher
+        .iter()
+        .filter_map(|(matcher, hook)| {
+            (!matcher_is_covered_by(source, target_by_matcher, matcher)).then_some(hook)
+        })
+        .collect::<Vec<_>>();
+
+    if target == HookFrontend::Codex {
+        let mut handled = BTreeSet::new();
+        for hooks in codex_catch_all_groups(&missing_hooks).values() {
+            if hooks.len() < 2 {
+                continue;
+            }
+            let first = hooks[0];
+            actions.push(RepairAction::BackendPrompt {
+                source,
+                target,
+                matcher: CATCH_ALL_MATCHER.to_string(),
+                source_path: first.source_path.clone(),
+                prompt: catch_all_migration_prompt(hooks, target),
+            });
+            handled.extend(hooks.iter().map(|hook| hook.matcher.clone()));
+        }
+
+        for hook in missing_hooks {
+            if handled.contains(&hook.matcher) {
+                continue;
+            }
+            actions.push(RepairAction::BackendPrompt {
+                source,
+                target,
+                matcher: hook.matcher.clone(),
+                source_path: hook.source_path.clone(),
+                prompt: migration_prompt(hook, target),
+            });
+        }
+        return;
+    }
+
+    for hook in missing_hooks {
+        actions.push(RepairAction::BackendPrompt {
+            source,
+            target,
+            matcher: hook.matcher.clone(),
+            source_path: hook.source_path.clone(),
+            prompt: migration_prompt(hook, target),
+        });
+    }
+}
+
+fn matcher_is_covered_by(
+    source: HookFrontend,
+    target_by_matcher: &BTreeMap<String, NormalizedHook>,
+    source_matcher: &str,
+) -> bool {
+    target_by_matcher.contains_key(source_matcher)
+        || (source_matcher != CATCH_ALL_MATCHER
+            && target_by_matcher.contains_key(CATCH_ALL_MATCHER))
+        || (source == HookFrontend::Codex
+            && source_matcher == CATCH_ALL_MATCHER
+            && !target_by_matcher.is_empty())
+}
+
+fn codex_catch_all_groups<'a>(
+    hooks: &[&'a NormalizedHook],
+) -> BTreeMap<String, Vec<&'a NormalizedHook>> {
+    let mut groups = BTreeMap::new();
+    for hook in hooks {
+        if hook.matcher == CATCH_ALL_MATCHER {
+            continue;
+        }
+        let Some(command) = hook.command.as_deref().map(str::trim) else {
+            continue;
+        };
+        if command.is_empty() {
+            continue;
+        }
+        groups
+            .entry(command.to_string())
+            .or_insert_with(Vec::new)
+            .push(*hook);
+    }
+    groups
 }
 
 fn collect_claude(repo_root: &Path, home: Option<&Path>) -> FrontendHookSummary {
@@ -532,7 +617,7 @@ fn build_warnings(claude: &FrontendHookSummary, codex: &FrontendHookSummary) -> 
     let codex_matchers = codex.active_matchers();
     if !claude_matchers.is_empty()
         && !codex_matchers.is_empty()
-        && claude_matchers != codex_matchers
+        && !matcher_sets_are_compatible(&claude_matchers, &codex_matchers)
     {
         warnings.push(format!(
             "Claude and Codex PreToolUse hook matchers differ (Claude: {}; Codex: {}). {FIX_HINT}",
@@ -541,6 +626,13 @@ fn build_warnings(claude: &FrontendHookSummary, codex: &FrontendHookSummary) -> 
         ));
     }
     warnings
+}
+
+fn matcher_sets_are_compatible(
+    claude_matchers: &BTreeSet<String>,
+    codex_matchers: &BTreeSet<String>,
+) -> bool {
+    claude_matchers == codex_matchers || codex_matchers.contains(CATCH_ALL_MATCHER)
 }
 
 #[derive(Debug)]
@@ -684,6 +776,44 @@ After editing the target config, validate that the target hook config parses. If
         source_path = display_path(&hook.source_path),
         target_path = target_path,
         matcher = hook.matcher
+    )
+}
+
+fn catch_all_migration_prompt(hooks: &[&NormalizedHook], target: HookFrontend) -> String {
+    let first = hooks[0];
+    let target_path = match target {
+        HookFrontend::Claude => ".claude/settings.json",
+        HookFrontend::Codex => ".codex/hooks.json",
+    };
+    let matchers = hooks
+        .iter()
+        .map(|hook| hook.matcher.clone())
+        .collect::<BTreeSet<_>>();
+    let command = first.command.as_deref().unwrap_or("(no command recorded)");
+    format!(
+        "\
+You are fixing Claude/Codex PreToolUse hook parity for this repository.
+
+Migrate or copy these equivalent hooks from {source} to {target} as one Codex catch-all hook.
+
+Source config: {source_path}
+Target config: {target_path}
+Event: PreToolUse
+Matcher/tool pattern: {catch_all}
+Source matchers covered by the catch-all hook: {matchers}
+Shared command: {command}
+
+Use matcher \"*\" for the target Codex hook so one reviewed hook can cover all matching tools and avoid repeated Codex trust approvals for the same command. Preserve the hook intent conservatively. Claude and Codex PreToolUse hooks are similar but not full parity: permission decisions, input rewriting, context injection, matcher names, and tool coverage can differ. Do not pretend unsupported target behavior is enforceable; document unsupported semantics in the target config comment or adjacent note if needed.
+
+After editing the target config, validate that the target hook config parses. If parsing fails, fix only the affected target hook/config file and reparse. Stop when the migrated hook parses cleanly or when the migration is blocked by unsupported target semantics.
+",
+        source = first.frontend.display_name(),
+        target = target.display_name(),
+        source_path = display_path(&first.source_path),
+        target_path = target_path,
+        catch_all = CATCH_ALL_MATCHER,
+        matchers = join_matchers(&matchers),
+        command = command
     )
 }
 

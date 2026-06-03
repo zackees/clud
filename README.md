@@ -119,9 +119,10 @@ of the current terminal. Missing metadata, non-TTY attaches, blocked terminals,
 and host-name-only hints stay text-only. Use `--graphics=off` to disable the
 feature or `--graphics=sixel` to force it.
 
-By default clud renders a small bundled banner. Pass `--graphics-image <PATH>`
-to use a PNG or JPEG instead. Direct PTY launches reserve rows before the
-backend starts. Daemon-managed sessions decide at attach time, because the
+By default clud renders the bundled README hero image. Pass
+`--graphics-image <PATH>` to use a PNG or JPEG instead. Direct PTY launches
+reserve rows before the backend starts. Daemon-managed sessions decide at attach
+time, because the
 detached worker does not know which terminal will attach later; reattach and
 resize paths redraw the header where the terminal reports support.
 
@@ -150,6 +151,12 @@ Run `clud --dry-run --fix-hooks` to see the planned repair actions. Run
 `clud --fix-hooks` only when you want clud to add deterministic Codex trust
 entries or ask the selected backend to translate a missing hook between Claude
 Code and Codex.
+
+Codex hook matchers may use `*` as a catch-all. When equivalent Claude Code
+hooks use the same command across several tool matchers, the Codex repair plan
+prefers one catch-all hook instead of repeated per-tool prompts. That reduces
+duplicate Codex hook review/trust approvals while keeping per-tool hooks when
+commands differ.
 
 On Windows, Codex hook commands that call a `.cmd` or `.bat` wrapper need
 explicit exit-code propagation. If the command does not include
