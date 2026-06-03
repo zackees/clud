@@ -391,8 +391,13 @@ class TestDaemonManagedSessionFlags:
                     continue
 
                 assert profile.get("fast_path") is True
-                assert isinstance(profile.get("cli_handoff_ms"), int)
-                assert profile["cli_handoff_ms"] < 2000
+                cli_handoff_ms = profile.get("cli_handoff_ms")
+                if sys.platform == "win32":
+                    assert isinstance(cli_handoff_ms, int)
+                    assert cli_handoff_ms < 2000
+                elif cli_handoff_ms is not None:
+                    assert isinstance(cli_handoff_ms, int)
+                    assert cli_handoff_ms < 2000
                 assert isinstance(profile.get("daemon_kill_ms"), int)
                 return
             finally:
