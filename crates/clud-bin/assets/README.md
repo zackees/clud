@@ -4,7 +4,7 @@ Compile-time-embedded resources bundled directly into the `clud-bin` binary. Fil
 
 ## Layout
 
-- [`skills/`](skills/README.md) — slash-command skill definitions (`SKILL.md` files) installed per-backend into `.claude/skills/` or Codex's current `.agents/skills/` path on first run.
+- [`skills/`](skills/README.md) - slash-command skill definitions (`SKILL.md` files) installed per-backend into `.claude/skills/` or Codex's current `.agents/skills/` path on first run.
 
 ## Embedding mechanism
 

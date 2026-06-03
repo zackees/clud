@@ -24,12 +24,14 @@ This playbook is distilled from the two reference implementations:
 
 Both demonstrate the same load-bearing trick. **Use the single-image shape by default; reach for split images only when you need multiple binaries, multi-stage outputs, or a separate runtime base.**
 
-## The four hard rules
+## The five hard rules
 
 1. **Named Docker volumes for build state, never host bind mounts.** `target/`, `CARGO_HOME`, and `RUSTUP_HOME` must live in `-v <named-volume>:/path` mounts. Host bind mounts (`-v $(pwd)/target:/work/target`) on Windows + WSL2 rewrite file mtimes on every container start, defeating cargo's fingerprint check and forcing a full rebuild (~6 min on a 21-crate workspace vs ~1 s when warm).
 2. **Source is bind-mounted (read-only by default).** The repo lives at `-v $(pwd):/work:ro` (or `rw` only when you need `cargo fmt` to write back). The image carries the toolchain and apt deps; source changes are *not* a layer-cache miss — they're a cargo recompile inside the live container.
 3. **The image carries the toolchain pin.** `rust-toolchain.toml` is COPY'd into the image and `rustup default <version>` runs at build time so the per-run `cargo` command never re-downloads the toolchain. Persist a `RUSTUP_HOME` volume so `rustup component add rustfmt clippy` is paid once.
 4. **Wrap `docker run` in a Python orchestrator at `ci/perf_local.py`.** Users never type the volume flags by hand. The wrapper handles `MSYS_NO_PATHCONV=1` for Git-Bash, the no-`-it` default (Git-Bash fools `isatty`), and exposes `--wipe` / `--status` subcommands.
+
+5. **RED -> GREEN for fixes/features.** If this work includes a bug fix or feature implementation in the target repo, write or identify the focused failing test/repro before changing code, then implement until that signal is green. For the Docker harness itself, use an executable before/after check such as `ci/perf_local.py cargo test`, `cargo build`, or `cargo clippy`.
 
 ## Workflow
 

@@ -122,7 +122,8 @@ Skills and hooks:
   copies from `.codex/skills/`.
 - `skill_install.rs` - Claude global-setup installer for the `clud-*` skill
   set; compares embedded vs installed `SKILL.md` modulo whitespace and
-  overwrites divergent copies.
+  overwrites divergent copies; purges retired managed skills from
+  `PURGED_SKILLS`.
 - `hook_health.rs` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation.
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass

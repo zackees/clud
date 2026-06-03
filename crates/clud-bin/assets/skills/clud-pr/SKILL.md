@@ -1,23 +1,25 @@
 ---
 name: clud-pr
-description: Implement a GitHub issue, PR follow-up, or freeform task inside a .claude/ worktree and ship one clean PR.
+description: Implement a GitHub issue, PR follow-up, or freeform task inside a .claude/ worktree and ship one clean PR; also follow an open PR through CI/review fixes to merge when asked to land or ship it.
 triggers:
   - When the user asks to implement a GitHub issue
   - When the user gives a freeform task and asks to ship it as a PR
   - When the user passes a PR URL/number to "/clud-pr" (triage mode)
+  - When the user asks to merge, land, or ship an open PR, including legacy "/clud-pr-merge"
   - When the user says "ship", "do-pr", "/clud-pr", or references an issue URL/number with intent to deliver
 ---
 <!-- managed-by: clud -->
 
 # /clud-pr
 
-Read the user's task, plan the fix, do it, push it as one PR with no files left behind, then give the user the PR URL. The task may be an issue URL, issue number, PR URL, PR number, or a plain sentence.
+Read the user's task, express the bug fix or feature requirement as a failing test first, implement the fix until that test turns green, push it as one PR with no files left behind, then give the user the PR URL. The task may be an issue URL, issue number, PR URL, PR number, or a plain sentence.
 
-Three hard rules:
+Four hard rules:
 
 1. **Use a disposable worktree.** Do all PR work inside `.claude/worktrees/<branch>/`, never on the main checkout.
 2. **Push the PR.** Finish with `gh pr create`; a local branch or commit is not the deliverable.
 3. **Leave nothing behind.** After the PR exists, remove the worktree and verify the main checkout's `git status` is clean.
+4. **RED -> GREEN for code changes.** Before implementing a bug fix or feature, add or identify an automated test that fails because the requirement is unmet. Run the focused test and capture the RED failure. Then implement until that test is GREEN. If no automated test is practical, document the reason and use the closest executable repro/check before coding.
 
 ## Worktree Workspace
 
@@ -33,7 +35,20 @@ Three hard rules:
 Look at the input first:
 
 - **PR URL / number** -> run **PR triage mode**. Do not branch or code until triage decides what to do.
+- **Merge / land / ship current PR** -> run **PR merge mode**.
 - **Issue URL / number / freeform task sentence** -> run **task to PR workflow**.
+
+## PR Merge Mode
+
+Use this when the user asks to merge, land, or ship an already-open PR.
+
+1. **Resolve the PR.** `gh pr view --json number,headRefName,baseRefName,state,mergeable,statusCheckRollup,url`. Refuse if state is not `OPEN` or mergeability is a clear blocker.
+2. **Poll with a cap and visible status.** Estimate recent CI duration from `gh run list --branch <default> --limit 10 --json conclusion,startedAt,updatedAt`; announce the cap before waiting. Poll every 30 seconds, and check `gh pr view <num> --json state` first every time so a manually merged/closed PR exits immediately.
+3. **Classify CI failures.** A check passing on default but failing on the PR is a regression. A check already failing on default is pre-existing and not merge-blocking. A PR-only check missing on default must be compared against recent PRs before calling it pre-existing.
+4. **Collect review findings.** Pull CodeRabbit review comments and unresolved substantive review comments. Skip praise, nits, resolved/outdated threads, and comments explicitly out of scope.
+5. **Fix rounds, max 3.** For each regression or actionable review finding, follow RED -> GREEN: add or identify the focused failing test/repro/CI check first, capture the RED failure, implement only the scoped fix, then verify that focused signal is GREEN before running `bash lint` and `bash test`. Commit and push each completed round.
+6. **Merge only when gates are green.** Never merge with PR regressions, unresolved substantive review comments, merge conflicts, required human reviews, or timed-out CI. If `gh pr merge` reports the PR was already merged, treat that as success.
+7. **Final response.** Give the merged PR URL and the checks/fix rounds that mattered.
 
 ## PR Triage Mode
 
@@ -57,13 +72,14 @@ Look at the input first:
    - If the issue is blocked by same-repo dependencies, take those first in dependency order unless the user overrides. Cross-repo dependencies require explicit user approval per repo.
 3. **Set up the worktree.** Follow the Worktree Workspace section.
 4. **Plan the fix.** Identify touched files and decide whether independent chunks can run in parallel. Use parallel agents only for genuinely independent file-scoped work; otherwise implement directly.
-5. **Implement.** Give any agent its exact scope, owned files, worktree path, and instruction not to touch files outside scope.
-6. **Lint and test.** Run the repo's normal lint and test commands inside the worktree. Do not use `--no-verify`; fix hook failures.
-7. **Clean tree gate.** Run `git status` inside the worktree. Commit source changes that belong in the PR. Delete tmp, scratch, and build artifacts. The worktree must be clean before push.
-8. **Commit.** Use a conventional commit. Reference the issue when one exists (`Closes #<num>` in the commit body or PR body). For freeform tasks, summarize the task instead.
-9. **Push and open PR.** `git push -u origin <branch>`, then `gh pr create`. The body should include the issue link when present, a concise summary, and tests run.
-10. **Remove the worktree.** Run `git worktree remove .claude/worktrees/<branch>`, then `git worktree prune`, confirm it is gone, then verify the main checkout's `git status` is clean.
-11. **Final response.** Give the PR URL and any essential test note. Keep it short.
+5. **Prove RED.** For a bug, add a regression test that fails on the current behavior. For a feature, add or update the narrowest unit/integration/e2e test that encodes the acceptance criteria and fails before the implementation. Run the focused test before coding and keep the failure output for the PR/testing note.
+6. **Implement to GREEN.** Give any agent its exact scope, owned files, worktree path, the RED test command/output, and instruction not to touch files outside scope. Implement only enough to satisfy the requirement, then re-run the focused test until it passes.
+7. **Lint and test.** Run the repo's normal lint and test commands inside the worktree after the focused RED test is GREEN. Do not use `--no-verify`; fix hook failures.
+8. **Clean tree gate.** Run `git status` inside the worktree. Commit source changes that belong in the PR. Delete tmp, scratch, and build artifacts. The worktree must be clean before push.
+9. **Commit.** Use a conventional commit. Reference the issue when one exists (`Closes #<num>` in the commit body or PR body). For freeform tasks, summarize the task instead.
+10. **Push and open PR.** `git push -u origin <branch>`, then `gh pr create`. The body should include the issue link when present, a concise summary, and tests run.
+11. **Remove the worktree.** Run `git worktree remove .claude/worktrees/<branch>`, then `git worktree prune`, confirm it is gone, then verify the main checkout's `git status` is clean.
+12. **Final response.** Give the PR URL and any essential test note. Keep it short.
 
 ## Failure Modes To Avoid
 
@@ -72,6 +88,7 @@ Look at the input first:
 - Implementing a closed issue or an issue already resolved on the default branch.
 - Calling an issue resolved when its PR merged only into a stack branch.
 - Creating multiple PRs for one requested task.
+- Implementing before proving RED, or claiming coverage from a test that never failed for the bug/requirement.
 - Pushing with a dirty worktree or leaving `.claude/worktrees/<branch>/` behind.
 - Skipping lint, tests, or failing hooks.
 - Auto-deleting stale worktrees without asking.

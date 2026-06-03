@@ -12,6 +12,10 @@ triggers:
 
 Use `clud trash` when Windows refuses to delete freshly built native artifacts.
 
+## Code Change Rule
+
+If trashing a locked artifact unblocks a bug fix or feature implementation, continue with RED -> GREEN: prove the focused test/repro fails before the code change, implement the scoped fix, then rerun that signal until it passes.
+
 ## Triggers
 
 - A delete of `*.dll`, `*.pyd`, or `*.exe` fails with `os error 32`, `being used by another process`, `Access is denied`, or similar loader/Defender lock symptoms.

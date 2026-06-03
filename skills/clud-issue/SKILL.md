@@ -16,6 +16,10 @@ File a researched GitHub issue and ship it. Four hard rules:
 3. **Decisions go in the issue body, not the chat.** Any judgment calls land under a `## Decisions` section in the issue body so the user can edit on GitHub. Never ratify-by-chat.
 4. **Post the issue.** Finish with `gh issue create`. Deliverable is the issue URL.
 
+## Code Change Rule
+
+If the issue is for a bug fix or feature implementation, acceptance criteria must require RED -> GREEN evidence: a focused failing test/repro before coding, followed by the implementation that turns that signal green.
+
 ## Workflow
 
 1. **Read the prompt at face value.** If the user named the repo, that's the repo. If they named the bug, that's the bug. Do NOT re-derive specifics the user already gave you.

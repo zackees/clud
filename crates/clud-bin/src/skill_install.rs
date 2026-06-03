@@ -14,6 +14,8 @@
 //! Each skill's source-of-truth lives at `skills/<name>/SKILL.md` in the repo
 //! and is embedded at compile time, so a fresh `clud` install always carries
 //! the current canonical copy of every bundled skill.
+//! Retired skills live in [`PURGED_SKILLS`]; their installed directories are
+//! removed only when their `SKILL.md` still carries the clud managed marker.
 //!
 //! All errors are non-fatal. A skill-install hiccup never breaks the launch
 //! path — at worst the user sees a `[clud] note: ...` line and continues.
@@ -35,10 +37,6 @@ const BUNDLED_SKILLS: &[Skill] = &[
         content: include_str!("../../../skills/clud-pr/SKILL.md"),
     },
     Skill {
-        name: "clud-pr-merge",
-        content: include_str!("../../../skills/clud-pr-merge/SKILL.md"),
-    },
-    Skill {
         name: "clud-issue",
         content: include_str!("../../../skills/clud-issue/SKILL.md"),
     },
@@ -51,6 +49,10 @@ const BUNDLED_SKILLS: &[Skill] = &[
         content: include_str!("../../../skills/clud-extern-repos/SKILL.md"),
     },
 ];
+
+/// Retired skill names to remove from managed installs. Keep entries here
+/// after deleting the source file so upgrades can clean old user homes.
+const PURGED_SKILLS: &[&str] = &["clud-pr-merge"];
 
 /// Compatibility helper that runs the install/check using the current home
 /// directory. Production launch setup calls [`ensure_installed_at`] only for
@@ -67,6 +69,7 @@ pub fn ensure_installed_at(home: &Path) {
     for skill in BUNDLED_SKILLS {
         ensure_skill_installed_at(home, skill);
     }
+    purge_retired_skills_at(home);
 }
 
 fn ensure_skill_installed_at(home: &Path, skill: &Skill) {
@@ -116,6 +119,38 @@ fn target_path_at(home: &Path, skill_name: &str) -> PathBuf {
         .join("skills")
         .join(skill_name)
         .join("SKILL.md")
+}
+
+fn purge_retired_skills_at(home: &Path) {
+    for skill_name in PURGED_SKILLS {
+        let path = target_path_at(home, skill_name);
+        purge_retired_skill_at(&path, skill_name);
+    }
+}
+
+fn purge_retired_skill_at(path: &Path, skill_name: &str) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if !content.contains("managed-by: clud") {
+        eprintln!(
+            "[clud] note: retired /{} skill at {} is not managed by clud; leaving it in place",
+            skill_name,
+            path.display()
+        );
+        return;
+    }
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => eprintln!("\x1b[32m[clud] purged retired /{}\x1b[0m", skill_name),
+        Err(e) => eprintln!(
+            "[clud] note: could not purge retired /{} at {}: {e}",
+            skill_name,
+            dir.display()
+        ),
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -365,14 +400,25 @@ mod tests {
     }
 
     #[test]
+    fn every_bundled_skill_includes_red_green_rule() {
+        for skill in BUNDLED_SKILLS {
+            assert!(
+                skill.content.contains("RED -> GREEN"),
+                "skill {} must include the RED -> GREEN code-change rule",
+                skill.name
+            );
+        }
+    }
+
+    #[test]
     fn bundle_includes_expected_skills() {
         // The skills wired up so far. Adding more is fine; this test
         // just guards against accidental removal of any of them.
         let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
         assert!(names.contains(&"clud-pr"), "clud-pr missing from bundle");
         assert!(
-            names.contains(&"clud-pr-merge"),
-            "clud-pr-merge missing from bundle"
+            !names.contains(&"clud-pr-merge"),
+            "clud-pr-merge should be retired into PURGED_SKILLS"
         );
         assert!(
             names.contains(&"clud-issue"),
@@ -400,6 +446,50 @@ mod tests {
             names.len(),
             len_before,
             "BUNDLED_SKILLS contains duplicate names"
+        );
+    }
+
+    #[test]
+    fn purge_list_contains_retired_pr_merge_skill() {
+        assert!(
+            PURGED_SKILLS.contains(&"clud-pr-merge"),
+            "retired merge skill must stay in the purge list"
+        );
+    }
+
+    #[test]
+    fn retired_managed_skill_is_removed() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("clud-pr-merge");
+        let target = dir.join("SKILL.md");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &target,
+            "---\nname: clud-pr-merge\n---\n<!-- managed-by: clud -->\n",
+        )
+        .unwrap();
+
+        purge_retired_skill_at(&target, "clud-pr-merge");
+
+        assert!(
+            !dir.exists(),
+            "managed retired skill directory should be removed"
+        );
+    }
+
+    #[test]
+    fn retired_unmanaged_skill_is_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("clud-pr-merge");
+        let target = dir.join("SKILL.md");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&target, "user custom skill\n").unwrap();
+
+        purge_retired_skill_at(&target, "clud-pr-merge");
+
+        assert!(
+            target.exists(),
+            "unmanaged retired skill should not be deleted"
         );
     }
 

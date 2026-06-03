@@ -133,6 +133,37 @@ The Rust version of `clud` supports Codex directly. Use `--codex` to switch
 backends for interactive runs, prompt-driven execution, resume flows, and
 detachable sessions.
 
+### Codex Hook Warnings
+
+On `clud --codex` launches, clud runs a lightweight hook-health check before
+starting Codex. The check compares Claude Code and Codex `PreToolUse` hook
+coverage and inspects Codex hook trust state. These warnings are informational;
+normal launch continues unless the backend itself fails.
+
+If Codex has `PreToolUse` hooks but Claude Code does not, clud prints:
+
+```text
+[clud] warning: Codex PreToolUse hooks exist, but Claude PreToolUse hooks are missing or inactive. Run `clud --fix-hooks`.
+```
+
+Run `clud --dry-run --fix-hooks` to see the planned repair actions. Run
+`clud --fix-hooks` only when you want clud to add deterministic Codex trust
+entries or ask the selected backend to translate a missing hook between Claude
+Code and Codex.
+
+On Windows, Codex hook commands that call a `.cmd` or `.bat` wrapper need
+explicit exit-code propagation. If the command does not include
+`$LASTEXITCODE`, clud warns:
+
+```text
+[clud] warning: Codex hook command in C:\Users\you\.codex\hooks.json uses a Windows batch wrapper without explicit `$LASTEXITCODE` propagation; a blocking hook may fail open.
+```
+
+Fix the hook by invoking a native executable directly, or by making the
+PowerShell hook command end with `exit $LASTEXITCODE` after the batch wrapper.
+Without that, a hook intended to block a tool call can return success to Codex
+after the wrapper fails.
+
 ## Detached Sessions
 
 Use daemon-managed sessions when you want to disconnect and reattach later.
@@ -234,6 +265,32 @@ clud loop TASK.md                                  # Read prompt from a file
 clud loop https://github.com/org/repo/issues/42    # Fetch & iterate on a GH issue
 clud loop --loop-count 10 "fix bugs"               # Custom iteration count
 ```
+
+### `/clud-loop` for Codex
+
+`/clud-loop` is the Codex-facing polyfill for Claude-style `/loop`. Codex does
+not document arbitrary top-level custom slash-command registration, so clud
+ships this as a bundled `clud-loop` skill and installs it into Codex skill
+locations. If your Codex surface does not show `/clud-loop` directly, invoke the
+skill through `/skills` or `$clud-loop`.
+
+```text
+/clud-loop [interval] [prompt]
+/clud-loop 30m check CI and fix new failures
+/clud-loop check CI and fix new failures
+```
+
+The skill keeps the durable task and work journal in `.clud/loop/LOOP.md`.
+With an interval, it starts a daemon repeat job equivalent to:
+
+```bash
+clud --codex loop --repeat 30m --loop-count 1 --no-done .clud/loop/LOOP.md
+```
+
+Without an interval, it asks Codex to delegate the loop work to a worker
+subagent when available, with that worker reading and updating
+`.clud/loop/LOOP.md`, and otherwise runs `clud --codex loop .clud/loop/LOOP.md`
+directly.
 
 ### Task input modes
 

@@ -2,7 +2,7 @@
 
 This doc is the inventory of every place `clud` has Windows-specific code,
 with the symptom each piece solves and the `file:line` where it lives. There
-are nine such carve-outs today: a self-rename trampoline so `pip install`
+are ten such carve-outs today: a self-rename trampoline so `pip install`
 can overwrite a running `clud.exe`, the BatBadBat `.cmd`/`.bat` rewrite
 mandated by Rust 1.77+, an RAII guard for `ENABLE_VIRTUAL_TERMINAL_INPUT`, a
 `ReadConsoleInputW` translator that disambiguates Shift+Enter from plain
@@ -11,22 +11,25 @@ overwrite it, an OLE `IDropTarget` adapter so dragging a file onto the
 console window actually drops paths into the prompt, `CREATE_NO_WINDOW` for
 daemon-helper subprocesses that would otherwise flash a conhost window, a
 `whisper-rs` carve-out on `aarch64-pc-windows-msvc` where the sys-crate
-doesn't build, and a Ctrl+C descendant-tree teardown that reaps orphaned
-backend grandchildren without tripping cmd.exe's batch-job prompt. All nine
-degrade to no-ops (or different mechanisms entirely) on POSIX.
+doesn't build, a Ctrl+C descendant-tree teardown that reaps orphaned backend
+grandchildren without tripping cmd.exe's batch-job prompt, and a Codex
+`PreToolUse` hook diagnostic for batch wrappers that do not propagate
+`$LASTEXITCODE`. All ten degrade to no-ops (or different mechanisms entirely)
+on POSIX.
 
 ## Why so many?
 
 Each of these is individually small. Cumulatively they exist because Windows
-differs from POSIX in five distinct ways `clud` cares about: ConPTY
+differs from POSIX in six distinct ways `clud` cares about: ConPTY
 semantics are not VT100 (so we have to opt into virtual-terminal input and
 re-translate console input records); COM (`IDropTarget`, `OleInitialize`)
 is the only supported integration point for drag-and-drop into a console
 window; running executables are file-locked, so the standard
 `pip install --force-reinstall` overwrite path silently fails; cmd.exe's
 command-line parser is idiosyncratic enough that Rust's stdlib
-(post-CVE-2024-24576) refuses to launch a `.cmd` directly; and the console
-process group sends `CTRL_C_EVENT` to every attached process, including
+(post-CVE-2024-24576) refuses to launch a `.cmd` directly; PowerShell and
+batch-wrapper exit-code propagation can mask a failed native hook; and the
+console process group sends `CTRL_C_EVENT` to every attached process, including
 grandchildren we don't directly control. None of these are bugs in `clud`;
 they are platform contracts that we absorb in one module each so the rest of
 the codebase stays portable.
@@ -345,6 +348,36 @@ the codebase stays portable.
   (`kill_tree_terminates_real_descendant_on_unix`) spawns
   `sh -c 'sleep 30'` to mirror the `clud → cmd → child` shape and
   asserts the parent is reaped within 5 s.
+
+### (j) Codex hook batch wrappers need `$LASTEXITCODE`
+
+- **Symptom**: `clud --codex` prints:
+
+  ```text
+  [clud] warning: Codex hook command in ...\.codex\hooks.json uses a Windows batch wrapper without explicit `$LASTEXITCODE` propagation; a blocking hook may fail open.
+  ```
+
+  This is not a backend launch failure. It is a hook-health warning for Codex
+  `PreToolUse` commands that mention `.cmd` or `.bat` without also mentioning
+  `$LASTEXITCODE`. On Windows, many npm-installed tools are batch wrappers,
+  and a PowerShell hook command that does not explicitly exit with the native
+  command's last exit code can report success to Codex after the wrapped hook
+  failed. For a blocking hook, that is a fail-open permission path.
+
+- **Solution**: `hook_health::warn_on_powershell_exit_code_risk` scans Codex
+  hook command strings during the `--codex` launch parity check. The diagnostic
+  is warning-only; clud never edits `hooks.json` for this case because the safe
+  repair depends on the user's hook command. The user should either call a
+  native executable directly or make the PowerShell command end with
+  `exit $LASTEXITCODE` after invoking the batch wrapper.
+
+- **File**: `crates/clud-bin/src/hook_health.rs:641`
+  (`warn_on_powershell_exit_code_risk`); launch gating at
+  `hook_health.rs:167` (`should_check_launch`). The unit coverage for hook
+  parity lives in `crates/clud-bin/src/hook_health_tests.rs`.
+
+- **POSIX behavior**: No-op. The scanner returns immediately unless
+  `cfg!(target_os = "windows")` is true.
 
 ## Cross-cutting patterns
 

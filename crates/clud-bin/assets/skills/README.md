@@ -9,6 +9,9 @@ do not write persistent skill files. Older clud-managed copies under
 
 ## Skills
 
+- [clud-loop/](clud-loop/README.md) - Polyfill Claude-style `/loop` behavior
+  for Codex by keeping loop work in `.clud/loop/LOOP.md` and driving
+  `clud --codex loop` / `--repeat`.
 - [clud-issue/](clud-issue/README.md) - File a deeply-researched GitHub issue
   via investigate -> interview -> investigate -> post, returning a summary plus
   the issue URL.
@@ -16,7 +19,8 @@ do not write persistent skill files. Older clud-managed copies under
   close ones that are clearly resolved and silently file follow-ups for
   un-addressed CodeRabbit comments; supports single, last-week, or all.
 - [clud-pr/](clud-pr/README.md) - Implement a GitHub issue, PR follow-up, or
-  freeform task inside a `.claude/` worktree and ship one clean PR.
+  freeform task inside a `.claude/` worktree, or take an open PR through
+  CI/review fixes to merge; code changes follow RED -> GREEN.
 - [clud-tag-release/](clud-tag-release/README.md) - Tag a release after
   validating version match, clean `main`, and no duplicate tag, then push and
   surface the auto-release workflow URL.
@@ -37,7 +41,8 @@ out during global setup. Two installer implementations are registered behind
   overwrites user edits, reads from this directory.
 - **`crates/clud-bin/src/skill_install.rs`** - Claude-only global setup,
   overwrites on semantic divergence, reads from a separate top-level `skills/`
-  directory in the repo.
+  directory in the repo, and purges retired managed skills listed in
+  `PURGED_SKILLS`.
 
 The two source trees ship different subsets. See
 [docs/architecture/skill-system.md](../../../../docs/architecture/skill-system.md)

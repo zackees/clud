@@ -18,6 +18,10 @@ Tag a release the way `zackees/zccache` does it: the tag is the trigger, the wor
 4. **Push the tag — don't `gh release create`.** `gh release create` creates the release record directly and bypasses the auto-release workflow's preflight (version validation, idempotency check, registry skip-existing). The deliverable is an annotated tag pushed to origin; the workflow does everything else.
 5. **Verify the workflow kicked off.** After push, find the run, surface its URL, and confirm it transitioned to `in_progress` (or queued). A push that doesn't trigger a run means the workflow isn't wired up — surface that.
 
+## Code Change Rule
+
+This skill should not implement fixes or features. If the release is blocked by a code bug or missing feature, stop and send the user to `/clud-pr`; that work must use RED -> GREEN before this tag-release flow resumes.
+
 ## Workflow
 
 1. **Detect the version source.** In repo root, in this order:
