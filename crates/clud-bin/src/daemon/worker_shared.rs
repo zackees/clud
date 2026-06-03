@@ -13,13 +13,13 @@ use running_process::telemetry::{
 
 use crate::capture::TerminalCapture;
 
-use super::io_helpers::write_json_file;
+use super::io_helpers::{read_json_file, write_json_file};
 use super::paths::{session_log_path, session_snapshot_path};
 #[cfg(test)]
 use super::types::DEFAULT_BACKLOG_LIMIT_BYTES;
 use super::types::{
-    AttachClientResult, AttachedClient, BacklogState, SessionKind, SessionSnapshot,
-    WorkerServerMessage, LOG_ROTATE_BYTES,
+    unix_millis_now, AttachClientResult, AttachedClient, BacklogState, CtrlCProfile, SessionKind,
+    SessionSnapshot, WorkerServerMessage, LOG_ROTATE_BYTES,
 };
 
 /// Probe whether the peer of `stream` has closed the connection, without
@@ -288,13 +288,16 @@ impl WorkerShared {
         let _ = self.persist_snapshot(&snapshot);
     }
 
-    pub(super) fn set_exit_code(&self, exit_code: i32) {
+    pub(super) fn set_exit_code(&self, exit_code: i32) -> i32 {
         let snapshot = {
             let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
-            guard.exit_code = Some(exit_code);
+            if guard.exit_code.is_none() {
+                guard.exit_code = Some(exit_code);
+            }
             guard.clone()
         };
         let _ = self.persist_snapshot(&snapshot);
+        snapshot.exit_code.unwrap_or(exit_code)
     }
 
     pub(super) fn set_background(&self, background: bool) {
@@ -314,6 +317,55 @@ impl WorkerShared {
             let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
             guard.repeat_running = running;
             guard.repeat_next_run_at = next_run_at;
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
+    }
+
+    pub(super) fn record_ctrl_c_handoff(&self, mut profile: CtrlCProfile) {
+        profile.fast_path = true;
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            let current = guard.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+            merge_ctrl_c_profile(current, profile);
+            if current.daemon_received_at_ms.is_none() {
+                current.daemon_received_at_ms = Some(unix_millis_now());
+            }
+            current.fast_path = true;
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
+    }
+
+    pub(super) fn record_ctrl_c_kill_started(&self) -> u64 {
+        let now = unix_millis_now();
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            let current = guard.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+            if current.daemon_received_at_ms.is_none() {
+                current.daemon_received_at_ms = Some(now);
+            }
+            if current.daemon_kill_started_at_ms.is_none() {
+                current.daemon_kill_started_at_ms = Some(now);
+            }
+            current.fast_path = true;
+            guard.clone()
+        };
+        let _ = self.persist_snapshot(&snapshot);
+        now
+    }
+
+    pub(super) fn record_ctrl_c_kill_finished(&self, started_at_ms: u64) {
+        let now = unix_millis_now();
+        let snapshot = {
+            let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
+            let current = guard.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+            if current.daemon_kill_started_at_ms.is_none() {
+                current.daemon_kill_started_at_ms = Some(started_at_ms);
+            }
+            current.daemon_kill_finished_at_ms = Some(now);
+            current.daemon_kill_ms = Some(now.saturating_sub(started_at_ms));
+            current.fast_path = true;
             guard.clone()
         };
         let _ = self.persist_snapshot(&snapshot);
@@ -442,7 +494,7 @@ impl WorkerShared {
     }
 
     pub(super) fn broadcast_exit(&self, exit_code: i32) {
-        self.set_exit_code(exit_code);
+        let exit_code = self.set_exit_code(exit_code);
         self.stop_accepting.store(true, Ordering::Release);
         self.send_to_client(WorkerServerMessage::Exited { exit_code });
     }
@@ -459,12 +511,58 @@ impl WorkerShared {
         }
     }
 
-    fn persist_snapshot(&self, snapshot: &SessionSnapshot) -> io::Result<()> {
-        write_json_file(
-            &session_snapshot_path(&self.state_dir, &self.session_id),
-            snapshot,
-        )
+    pub(super) fn persist_current_snapshot(&self) -> io::Result<()> {
+        let snapshot = self.snapshot();
+        self.persist_snapshot(&snapshot)
     }
+
+    fn persist_snapshot(&self, snapshot: &SessionSnapshot) -> io::Result<()> {
+        let path = session_snapshot_path(&self.state_dir, &self.session_id);
+        let mut snapshot = snapshot.clone();
+        if let Ok(current) = read_json_file::<SessionSnapshot>(&path) {
+            if let Some(profile) = current.ctrl_c {
+                let target = snapshot.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+                let fast_path = profile.fast_path;
+                merge_ctrl_c_profile(target, profile);
+                if fast_path && current.exit_code.is_some() {
+                    snapshot.exit_code = current.exit_code;
+                    snapshot.background = current.background;
+                }
+            }
+        }
+        write_json_file(&path, &snapshot)
+    }
+}
+
+fn merge_ctrl_c_profile(current: &mut CtrlCProfile, update: CtrlCProfile) {
+    if update.cli_pid.is_some() {
+        current.cli_pid = update.cli_pid;
+    }
+    if update.cli_observed_at_ms.is_some() {
+        current.cli_observed_at_ms = update.cli_observed_at_ms;
+    }
+    if update.cli_handoff_at_ms.is_some() {
+        current.cli_handoff_at_ms = update.cli_handoff_at_ms;
+    }
+    if update.cli_return_ready_at_ms.is_some() {
+        current.cli_return_ready_at_ms = update.cli_return_ready_at_ms;
+    }
+    if update.cli_handoff_ms.is_some() {
+        current.cli_handoff_ms = update.cli_handoff_ms;
+    }
+    if update.daemon_received_at_ms.is_some() {
+        current.daemon_received_at_ms = update.daemon_received_at_ms;
+    }
+    if update.daemon_kill_started_at_ms.is_some() {
+        current.daemon_kill_started_at_ms = update.daemon_kill_started_at_ms;
+    }
+    if update.daemon_kill_finished_at_ms.is_some() {
+        current.daemon_kill_finished_at_ms = update.daemon_kill_finished_at_ms;
+    }
+    if update.daemon_kill_ms.is_some() {
+        current.daemon_kill_ms = update.daemon_kill_ms;
+    }
+    current.fast_path |= update.fast_path;
 }
 
 impl Drop for WorkerShared {
@@ -531,6 +629,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            ctrl_c: None,
         };
         Arc::new(WorkerShared::new(
             state_dir.to_path_buf(),
@@ -557,6 +656,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            ctrl_c: None,
         };
         let shared = Arc::new(WorkerShared::new(tmp.path().to_path_buf(), id.into(), snap));
         shared.init_log_file();
@@ -693,6 +793,62 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_profile_records_handoff_and_daemon_kill_timings() {
+        let tmp = TempDir::new().unwrap();
+        let shared = test_shared(tmp.path(), SessionKind::Subprocess);
+        shared.record_ctrl_c_handoff(CtrlCProfile {
+            cli_pid: Some(123),
+            cli_observed_at_ms: Some(1000),
+            cli_handoff_at_ms: Some(1015),
+            cli_return_ready_at_ms: Some(1015),
+            cli_handoff_ms: Some(15),
+            fast_path: true,
+            ..CtrlCProfile::default()
+        });
+        let started_at_ms = shared.record_ctrl_c_kill_started();
+        shared.record_ctrl_c_kill_finished(started_at_ms);
+
+        let profile = shared.snapshot().ctrl_c.expect("ctrl-c profile");
+        assert_eq!(profile.cli_pid, Some(123));
+        assert_eq!(profile.cli_handoff_ms, Some(15));
+        assert!(profile.daemon_received_at_ms.is_some());
+        assert!(profile.daemon_kill_started_at_ms.is_some());
+        assert!(profile.daemon_kill_finished_at_ms.is_some());
+        assert!(profile.daemon_kill_ms.is_some());
+        assert!(profile.fast_path);
+    }
+
+    #[test]
+    fn worker_exit_preserves_daemon_written_ctrl_c_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let shared = test_shared(tmp.path(), SessionKind::Subprocess);
+        shared.persist_current_snapshot().unwrap();
+
+        let path = session_snapshot_path(tmp.path(), "test-session");
+        let mut daemon_snapshot = shared.snapshot();
+        daemon_snapshot.exit_code = Some(130);
+        daemon_snapshot.background = false;
+        daemon_snapshot.ctrl_c = Some(CtrlCProfile {
+            cli_pid: Some(321),
+            cli_handoff_ms: Some(12),
+            daemon_received_at_ms: Some(100),
+            fast_path: true,
+            ..CtrlCProfile::default()
+        });
+        write_json_file(&path, &daemon_snapshot).unwrap();
+
+        shared.set_exit_code(1);
+
+        let persisted: SessionSnapshot = read_json_file(&path).unwrap();
+        assert_eq!(persisted.exit_code, Some(130));
+        assert_eq!(persisted.background, false);
+        let profile = persisted.ctrl_c.expect("ctrl-c profile should survive");
+        assert_eq!(profile.cli_pid, Some(321));
+        assert_eq!(profile.cli_handoff_ms, Some(12));
+        assert!(profile.fast_path);
+    }
+
+    #[test]
     fn transcript_file_receives_output_through_running_process_tee() {
         let tmp = TempDir::new().unwrap();
         let shared = test_shared(tmp.path(), SessionKind::Pty);
@@ -751,6 +907,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            ctrl_c: None,
         };
         let shared = Arc::new(WorkerShared::new_with_backlog(
             tmp.path().to_path_buf(),

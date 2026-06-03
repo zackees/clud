@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use running_process::pty::NativePtyProcess;
 use running_process::{NativeProcess, TerminalCapabilities};
@@ -34,6 +34,13 @@ pub(super) const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 
 pub(super) fn default_attachable() -> bool {
     true
+}
+
+pub(super) fn unix_millis_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +96,36 @@ pub(super) struct SessionSnapshot {
     pub(super) worker_port: u16,
     pub(super) root_pid: Option<u32>,
     pub(super) exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) ctrl_c: Option<CtrlCProfile>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct CtrlCProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cli_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cli_observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cli_handoff_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cli_return_ready_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cli_handoff_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) daemon_received_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) daemon_kill_started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) daemon_kill_finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) daemon_kill_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) fast_path: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +172,10 @@ pub(super) enum DaemonRequest {
     Terminate {
         session_id: String,
     },
+    Interrupt {
+        session_id: String,
+        profile: CtrlCProfile,
+    },
     /// Issue #135: GC ops served by the registry worker thread (see
     /// `gc_service.rs`). Carry the original `gc.*` op inside a single
     /// enum variant so the wire format and the registry-worker dispatch
@@ -160,6 +201,9 @@ pub(super) enum DaemonResponse {
         paths: Vec<PathBuf>,
     },
     Terminated {
+        session: SessionSnapshot,
+    },
+    Interrupted {
         session: SessionSnapshot,
     },
     Gc {
@@ -289,7 +333,10 @@ pub(super) enum WorkerClientMessage {
         rows: u16,
         cols: u16,
     },
-    Interrupt,
+    Interrupt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<CtrlCProfile>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,17 +359,6 @@ impl SessionRuntime {
         match self {
             Self::Subprocess(process) => process.pid(),
             Self::Pty(process) => process.pid().ok().flatten(),
-        }
-    }
-
-    pub(super) fn interrupt(&self) {
-        match self {
-            Self::Subprocess(process) => {
-                let _ = process.kill();
-            }
-            Self::Pty(process) => {
-                let _ = process.send_interrupt_impl();
-            }
         }
     }
 
@@ -368,7 +404,26 @@ pub(super) type AttachClientResult = (
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalAttachResult {
     Completed(i32),
-    InterruptRequested,
+    InterruptRequested(LocalInterruptProfile),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LocalInterruptProfile {
+    pub(super) observed_at_ms: u64,
+    observed_at: Instant,
+}
+
+impl LocalInterruptProfile {
+    pub(super) fn now() -> Self {
+        Self {
+            observed_at_ms: unix_millis_now(),
+            observed_at: Instant::now(),
+        }
+    }
+
+    pub(super) fn elapsed_ms(&self) -> u64 {
+        self.observed_at.elapsed().as_millis() as u64
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +532,34 @@ mod tests {
                 cols: None
             }
         ));
+    }
+
+    #[test]
+    fn interrupt_request_accepts_legacy_unit_shape() {
+        let parsed: WorkerClientMessage = serde_json::from_str(r#"{"op":"interrupt"}"#).unwrap();
+        assert!(matches!(
+            parsed,
+            WorkerClientMessage::Interrupt { profile: None }
+        ));
+    }
+
+    #[test]
+    fn interrupt_request_serializes_ctrl_c_profile() {
+        let wire = serde_json::to_string(&WorkerClientMessage::Interrupt {
+            profile: Some(CtrlCProfile {
+                cli_pid: Some(42),
+                cli_observed_at_ms: Some(1000),
+                cli_handoff_at_ms: Some(1010),
+                cli_return_ready_at_ms: Some(1010),
+                cli_handoff_ms: Some(10),
+                fast_path: true,
+                ..CtrlCProfile::default()
+            }),
+        })
+        .unwrap();
+        assert!(wire.contains(r#""op":"interrupt""#));
+        assert!(wire.contains(r#""cli_handoff_ms":10"#));
+        assert!(wire.contains(r#""fast_path":true"#));
     }
 
     #[test]

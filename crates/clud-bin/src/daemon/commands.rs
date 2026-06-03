@@ -384,6 +384,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code,
+            ctrl_c: None,
         };
         write_json_file(&session_snapshot_path(state_dir, id), &snap).unwrap();
     }

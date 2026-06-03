@@ -18,8 +18,8 @@ use super::paths::{
 };
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
-    DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit, SessionSnapshot,
-    WorkerClientMessage,
+    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit,
+    SessionSnapshot, WorkerClientMessage,
 };
 
 /// Idempotent best-effort daemon spawn (issue #135). Always called via
@@ -186,6 +186,27 @@ pub(super) fn request_session_termination(
         },
     )? {
         DaemonResponse::Terminated { session } => Ok(session),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
+pub(super) fn request_session_interrupt(
+    state_dir: &Path,
+    session_id: &str,
+    profile: CtrlCProfile,
+) -> io::Result<SessionSnapshot> {
+    match send_daemon_request(
+        state_dir,
+        &DaemonRequest::Interrupt {
+            session_id: session_id.to_string(),
+            profile,
+        },
+    )? {
+        DaemonResponse::Interrupted { session } => Ok(session),
         DaemonResponse::Error { message } => Err(io::Error::other(message)),
         response => Err(io::Error::new(
             io::ErrorKind::InvalidData,

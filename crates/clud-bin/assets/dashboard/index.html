@@ -85,6 +85,7 @@
     }
     th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
     td.path, td.id { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; word-break: break-all; }
+    td.metric { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; white-space: nowrap; }
     .badge {
       display: inline-block;
       padding: 1px 6px;
@@ -190,11 +191,25 @@
       if (m > 0) return `${m}m ${sec}s`;
       return `${sec}s`;
     }
+    function fmtMs(ms) {
+      if (ms === null || ms === undefined) return '-';
+      if (ms < 1000) return `${ms}ms`;
+      return `${(ms / 1000).toFixed(2)}s`;
+    }
     function esc(s) {
       if (s === null || s === undefined) return '';
       return String(s).replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
       })[c]);
+    }
+
+    function renderCtrlC(profile) {
+      if (!profile) return '-';
+      const cli = fmtMs(profile.cli_handoff_ms);
+      const daemon = profile.daemon_kill_ms === null || profile.daemon_kill_ms === undefined
+        ? 'killing'
+        : fmtMs(profile.daemon_kill_ms);
+      return `${esc(cli)} cli / ${esc(daemon)} daemon`;
     }
 
     function renderHeader(state) {
@@ -227,12 +242,13 @@
             ? '<span class="badge live">live</span>'
             : `<span class="badge gone">exit ${esc(s.exit_code ?? '?')}</span>`}</td>
           <td>${esc(fmtAge(s.created_at))}</td>
+          <td class="metric">${renderCtrlC(s.ctrl_c)}</td>
           <td class="path">${esc(s.cwd || '-')}</td>
         </tr>`).join('');
       document.getElementById('sessions-body').innerHTML = `
         <table>
           <thead><tr>
-            <th>id</th><th>name</th><th>kind</th><th>state</th><th>age</th><th>cwd</th>
+            <th>id</th><th>name</th><th>kind</th><th>state</th><th>age</th><th>ctrl-c</th><th>cwd</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;

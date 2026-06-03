@@ -360,6 +360,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         }
         DaemonResponse::Session { .. }
         | DaemonResponse::Terminated { .. }
+        | DaemonResponse::Interrupted { .. }
         | DaemonResponse::Gc { .. }
         | DaemonResponse::LiveCwds { .. }
         | DaemonResponse::ShutdownAck { .. } => 1,

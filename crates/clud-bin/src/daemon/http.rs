@@ -28,7 +28,9 @@ use super::gc_service::{GcRequestMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::read_json_file;
 use super::paths::{daemon_info_path, sessions_dir};
 use super::process_utils::pid_is_alive;
-use super::types::{DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot};
+use super::types::{
+    CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
+};
 use crate::session_registry::LiveSession;
 
 /// Supplier of live session-registry rows. Injected at the dashboard
@@ -99,6 +101,21 @@ pub struct SessionView {
     pub exit_code: Option<i32>,
     pub worker_port: u16,
     pub live: bool,
+    pub ctrl_c: Option<CtrlCProfileView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CtrlCProfileView {
+    pub cli_pid: Option<u32>,
+    pub cli_observed_at_ms: Option<u64>,
+    pub cli_handoff_at_ms: Option<u64>,
+    pub cli_return_ready_at_ms: Option<u64>,
+    pub cli_handoff_ms: Option<u64>,
+    pub daemon_received_at_ms: Option<u64>,
+    pub daemon_kill_started_at_ms: Option<u64>,
+    pub daemon_kill_finished_at_ms: Option<u64>,
+    pub daemon_kill_ms: Option<u64>,
+    pub fast_path: bool,
 }
 
 /// Counts derived from the rest of the document.
@@ -422,6 +439,7 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
             exit_code: snap.exit_code,
             worker_port: snap.worker_port,
             live,
+            ctrl_c: snap.ctrl_c.map(ctrl_c_profile_view),
         });
     }
     // Newest first.
@@ -462,11 +480,27 @@ fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<L
             worker_port: 0,
             // The registry already filtered by OS PID liveness probe.
             live: true,
+            ctrl_c: None,
         });
     }
 
     // Newest first across the merged list.
     sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+}
+
+fn ctrl_c_profile_view(profile: CtrlCProfile) -> CtrlCProfileView {
+    CtrlCProfileView {
+        cli_pid: profile.cli_pid,
+        cli_observed_at_ms: profile.cli_observed_at_ms,
+        cli_handoff_at_ms: profile.cli_handoff_at_ms,
+        cli_return_ready_at_ms: profile.cli_return_ready_at_ms,
+        cli_handoff_ms: profile.cli_handoff_ms,
+        daemon_received_at_ms: profile.daemon_received_at_ms,
+        daemon_kill_started_at_ms: profile.daemon_kill_started_at_ms,
+        daemon_kill_finished_at_ms: profile.daemon_kill_finished_at_ms,
+        daemon_kill_ms: profile.daemon_kill_ms,
+        fast_path: profile.fast_path,
+    }
 }
 
 // ---------- IPC plumbing ----------
@@ -613,7 +647,7 @@ fn current_unix() -> i64 {
 mod tests {
     use super::*;
     use crate::daemon::gc_service::spawn_registry_worker_with;
-    use crate::daemon::types::{SessionKind, SessionSnapshot};
+    use crate::daemon::types::{CtrlCProfile, SessionKind, SessionSnapshot};
     use crate::gc::Registry;
     use std::io::Write;
 
@@ -644,6 +678,7 @@ mod tests {
             worker_port: 12345,
             root_pid: None,
             exit_code: None,
+            ctrl_c: None,
         }
     }
 
@@ -764,6 +799,31 @@ mod tests {
         assert!(json.get("daemon_pid").is_none());
         assert!(json.get("worker_pid").is_none());
         assert!(json.get("root_pid").is_none());
+    }
+
+    #[test]
+    fn build_state_includes_ctrl_c_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snap = fake_snapshot("sess-ctrl-c", "interrupt", "/dev/ctrl-c");
+        snap.ctrl_c = Some(CtrlCProfile {
+            cli_pid: Some(777),
+            cli_observed_at_ms: Some(10_000),
+            cli_handoff_at_ms: Some(10_025),
+            cli_return_ready_at_ms: Some(10_025),
+            cli_handoff_ms: Some(25),
+            daemon_received_at_ms: Some(10_026),
+            daemon_kill_started_at_ms: Some(10_026),
+            daemon_kill_finished_at_ms: Some(10_090),
+            daemon_kill_ms: Some(64),
+            fast_path: true,
+        });
+        write_fake_session(dir.path(), "sess-ctrl-c", snap);
+
+        let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
+        let profile = state.sessions[0].ctrl_c.as_ref().expect("profile");
+        assert_eq!(profile.cli_handoff_ms, Some(25));
+        assert_eq!(profile.daemon_kill_ms, Some(64));
+        assert!(profile.fast_path);
     }
 
     #[test]

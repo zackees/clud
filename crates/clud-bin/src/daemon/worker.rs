@@ -15,12 +15,12 @@ use crate::graphics::GraphicsConfig;
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
-use super::io_helpers::{child_env, read_json_file, write_json_file, write_json_line};
-use super::paths::{session_snapshot_path, spec_path};
+use super::io_helpers::{child_env, read_json_file, write_json_line};
+use super::paths::spec_path;
 use super::process_utils::pid_is_alive;
 use super::types::{
-    SessionKind, SessionRuntime, SessionSnapshot, WorkerClientMessage, WorkerLaunchSpec,
-    WorkerServerMessage, DEFAULT_BACKLOG_LIMIT_BYTES,
+    CtrlCProfile, SessionKind, SessionRuntime, SessionSnapshot, WorkerClientMessage,
+    WorkerLaunchSpec, WorkerServerMessage, DEFAULT_BACKLOG_LIMIT_BYTES,
 };
 use super::worker_shared::WorkerShared;
 
@@ -77,6 +77,7 @@ pub(super) fn run_worker(
         worker_port,
         root_pid: None,
         exit_code: None,
+        ctrl_c: None,
     };
     let backlog_limit = spec.backlog_bytes.unwrap_or(DEFAULT_BACKLOG_LIMIT_BYTES);
     let shared = Arc::new(WorkerShared::new_with_backlog(
@@ -213,6 +214,7 @@ fn run_repeat_worker(
         worker_port: 0,
         root_pid: None,
         exit_code: None,
+        ctrl_c: None,
     };
     let shared = Arc::new(WorkerShared::new_with_backlog(
         state_dir.to_path_buf(),
@@ -500,7 +502,7 @@ fn handle_worker_client(
         ),
         WorkerClientMessage::Input { .. }
         | WorkerClientMessage::Resize { .. }
-        | WorkerClientMessage::Interrupt => {
+        | WorkerClientMessage::Interrupt { .. } => {
             return write_json_line(
                 &mut stream,
                 &WorkerServerMessage::Error {
@@ -654,7 +656,10 @@ fn handle_worker_client(
                         runtime.resize(effective_rows, cols);
                         shared.resize_capture(effective_rows, cols);
                     }
-                    WorkerClientMessage::Interrupt => runtime.interrupt(),
+                    WorkerClientMessage::Interrupt { profile } => {
+                        start_interrupt_fast_path(shared, runtime, profile);
+                        break;
+                    }
                 }
             }
         }
@@ -663,6 +668,22 @@ fn handle_worker_client(
     shared.detach_client(client_id);
     let _ = writer_thread.join();
     Ok(())
+}
+
+fn start_interrupt_fast_path(
+    shared: &Arc<WorkerShared>,
+    runtime: &SessionRuntime,
+    profile: Option<CtrlCProfile>,
+) {
+    shared.record_ctrl_c_handoff(profile.unwrap_or_default());
+    let shared = Arc::clone(shared);
+    let runtime = runtime.clone();
+    thread::spawn(move || {
+        let started_at_ms = shared.record_ctrl_c_kill_started();
+        runtime.cleanup_tree();
+        shared.record_ctrl_c_kill_finished(started_at_ms);
+        shared.broadcast_exit(130);
+    });
 }
 
 fn read_worker_line(
@@ -691,14 +712,11 @@ fn read_worker_line(
 }
 
 fn persist_snapshot(
-    state_dir: &Path,
-    session_id: &str,
+    _state_dir: &Path,
+    _session_id: &str,
     shared: &Arc<WorkerShared>,
 ) -> io::Result<()> {
-    write_json_file(
-        &session_snapshot_path(state_dir, session_id),
-        &shared.snapshot(),
-    )
+    shared.persist_current_snapshot()
 }
 
 // Silence import warnings for items consumed only by the `Write` trait or
