@@ -841,7 +841,7 @@ mod tests {
 
         let persisted: SessionSnapshot = read_json_file(&path).unwrap();
         assert_eq!(persisted.exit_code, Some(130));
-        assert_eq!(persisted.background, false);
+        assert!(!persisted.background);
         let profile = persisted.ctrl_c.expect("ctrl-c profile should survive");
         assert_eq!(profile.cli_pid, Some(321));
         assert_eq!(profile.cli_handoff_ms, Some(12));

@@ -524,7 +524,7 @@ fn handle_worker_client(
     write_json_line(
         &mut writer,
         &WorkerServerMessage::Attached {
-            session: snapshot.clone(),
+            session: Box::new(snapshot.clone()),
         },
     )?;
     let mut header_restore = None;

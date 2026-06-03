@@ -342,7 +342,7 @@ pub(super) enum WorkerClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(super) enum WorkerServerMessage {
-    Attached { session: SessionSnapshot },
+    Attached { session: Box<SessionSnapshot> },
     Output { data_b64: String },
     Exited { exit_code: i32 },
     Error { message: String },
