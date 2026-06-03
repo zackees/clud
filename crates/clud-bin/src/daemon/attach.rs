@@ -10,7 +10,7 @@ use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 
 use super::client::{
-    ensure_daemon, request_session_termination, send_daemon_request, send_worker_message,
+    ensure_daemon, request_session_interrupt, send_daemon_request, send_worker_message,
     shutdown_worker_connection,
 };
 use super::io_helpers::write_json_line;
@@ -18,12 +18,14 @@ use super::keys::translate_key_event;
 use super::process_utils::pid_is_alive;
 use super::sessions::resolve_session_id;
 use super::types::{
-    BackgroundPromptDecision, DaemonRequest, DaemonResponse, KeyAction, LocalAttachResult,
-    RawTerminalGuard, SessionKind, SessionSnapshot, WorkerClientMessage, WorkerServerMessage,
-    BACKGROUND_PROMPT_TIMEOUT,
+    unix_millis_now, BackgroundPromptDecision, CtrlCProfile, DaemonRequest, DaemonResponse,
+    KeyAction, LocalAttachResult, LocalInterruptProfile, RawTerminalGuard, SessionKind,
+    SessionSnapshot, WorkerClientMessage, WorkerServerMessage, BACKGROUND_PROMPT_TIMEOUT,
 };
 use crate::session::{InteractiveHooks, PtyInputSink};
 use crate::voice::VoiceMode;
+
+const INTERRUPT_EXIT_GRACE: Duration = Duration::from_millis(500);
 
 /// `PtyInputSink` impl that forwards bytes to the daemon-owned PTY as a
 /// `WorkerClientMessage::Input` TCP frame. This is what lets centralized
@@ -87,6 +89,7 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
         }
         DaemonResponse::Created { .. }
         | DaemonResponse::Terminated { .. }
+        | DaemonResponse::Interrupted { .. }
         | DaemonResponse::Gc { .. }
         | DaemonResponse::LiveCwds { .. }
         | DaemonResponse::ShutdownAck { .. } => 1,
@@ -257,7 +260,7 @@ pub(super) fn attach_to_session(
 
     let (local_result, backgrounded) = match local_result {
         LocalAttachResult::Completed(code) => (code, false),
-        LocalAttachResult::InterruptRequested => {
+        LocalAttachResult::InterruptRequested(interrupt) => {
             interrupted.store(false, Ordering::SeqCst);
             if session.detachable {
                 match prompt_continue_in_background(interrupted) {
@@ -268,15 +271,12 @@ pub(super) fn attach_to_session(
                     }
                     BackgroundPromptDecision::EndSession => {
                         eprintln!("[clud] ending session {}", session.id);
-                        let _ = request_session_termination(state_dir, &session.id);
-                        let _ = shutdown_worker_connection(&writer);
+                        send_interrupt_fast_path(state_dir, &session.id, &writer, interrupt);
                         (130, false)
                     }
                 }
             } else {
-                let _ = send_worker_message(&writer, &WorkerClientMessage::Interrupt);
-                wait_for_remote_exit(&exit_code, Duration::from_secs(5));
-                let _ = shutdown_worker_connection(&writer);
+                send_interrupt_fast_path(state_dir, &session.id, &writer, interrupt);
                 (130, false)
             }
         }
@@ -294,6 +294,36 @@ pub(super) fn attach_to_session(
         .expect("exit code mutex poisoned")
         .unwrap_or(local_result);
     final_exit_code
+}
+
+fn send_interrupt_fast_path(
+    state_dir: &Path,
+    session_id: &str,
+    writer: &Arc<Mutex<TcpStream>>,
+    interrupt: LocalInterruptProfile,
+) {
+    let now = unix_millis_now();
+    let profile = CtrlCProfile {
+        cli_pid: Some(std::process::id()),
+        cli_observed_at_ms: Some(interrupt.observed_at_ms),
+        cli_handoff_at_ms: Some(now),
+        cli_return_ready_at_ms: Some(now),
+        cli_handoff_ms: Some(interrupt.elapsed_ms()),
+        fast_path: true,
+        ..CtrlCProfile::default()
+    };
+    if let Err(err) = request_session_interrupt(state_dir, session_id, profile.clone()) {
+        eprintln!("[clud] warning: failed to hand Ctrl+C to daemon: {err}");
+        if let Err(err) = send_worker_message(
+            writer,
+            &WorkerClientMessage::Interrupt {
+                profile: Some(profile),
+            },
+        ) {
+            eprintln!("[clud] warning: failed to hand Ctrl+C to daemon worker: {err}");
+        }
+    }
+    let _ = shutdown_worker_connection(writer);
 }
 
 fn run_remote_interactive(
@@ -333,7 +363,7 @@ fn run_remote_interactive(
         (None, None);
     loop {
         if interrupted.load(Ordering::SeqCst) {
-            return LocalAttachResult::InterruptRequested;
+            return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
         }
         match event::poll(Duration::from_millis(25)) {
             Ok(true) => match event::read() {
@@ -349,7 +379,7 @@ fn run_remote_interactive(
                         );
                     }
                     KeyAction::Interrupt => {
-                        return LocalAttachResult::InterruptRequested;
+                        return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
                     }
                     KeyAction::F3Press => {
                         if voice.intercept_f3() {
@@ -427,24 +457,27 @@ fn wait_for_remote_or_interrupt(
         thread::sleep(Duration::from_millis(25));
     }
     if interrupted.load(Ordering::SeqCst) {
-        LocalAttachResult::InterruptRequested
+        LocalAttachResult::InterruptRequested(LocalInterruptProfile::now())
+    } else if exit_code
+        .lock()
+        .expect("exit code mutex poisoned")
+        .is_some()
+    {
+        wait_for_late_interrupt(interrupted)
     } else {
         LocalAttachResult::Completed(0)
     }
 }
 
-fn wait_for_remote_exit(exit_code: &Arc<Mutex<Option<i32>>>, timeout: Duration) {
+fn wait_for_late_interrupt(interrupted: &AtomicBool) -> LocalAttachResult {
     let started = Instant::now();
-    while started.elapsed() < timeout {
-        if exit_code
-            .lock()
-            .expect("exit code mutex poisoned")
-            .is_some()
-        {
-            break;
+    while started.elapsed() < INTERRUPT_EXIT_GRACE {
+        if interrupted.load(Ordering::SeqCst) {
+            return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
         }
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(10));
     }
+    LocalAttachResult::Completed(0)
 }
 
 fn prompt_continue_in_background(interrupted: &AtomicBool) -> BackgroundPromptDecision {

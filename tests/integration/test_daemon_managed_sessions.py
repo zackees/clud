@@ -11,6 +11,7 @@ import pytest
 
 from ._daemon_helpers import (
     DETACH_EXIT_TIMEOUT,
+    daemon_env,
     kill_daemon_for_session,
     launch_detached,
     managed_env,
@@ -321,6 +322,87 @@ class TestDaemonManagedSessionFlags:
         assert session_id in listed.stdout
 
         kill_daemon_for_session(state_dir, session_id)
+
+    def test_foreground_ctrl_c_fast_paths_daemon_kill_and_profiles(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        errors: list[str] = []
+        attempts = 5 if sys.platform == "win32" else 1
+
+        for attempt in range(attempts):
+            state_dir = tmp_path / f"daemon-state-{attempt}"
+            env = daemon_env(mock_env, state_dir)
+            kwargs: dict[str, object] = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            proc = subprocess.Popen(
+                [
+                    str(clud_binary),
+                    "--codex",
+                    "-p",
+                    "fast-ctrl-c",
+                    "--",
+                    "--mock-sleep-ms",
+                    "30000",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                text=True,
+                env=env,
+                **kwargs,
+            )
+
+            session_id = ""
+            try:
+                session_id = read_session_id(proc)
+                time.sleep(0.5)
+                started = time.perf_counter()
+                if sys.platform == "win32":
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    proc.send_signal(signal.SIGINT)
+                proc.wait(timeout=3.0)
+                elapsed = time.perf_counter() - started
+                if proc.returncode != 130:
+                    errors.append(f"attempt {attempt}: returncode {proc.returncode}")
+                    continue
+                if elapsed >= 2.0:
+                    errors.append(f"attempt {attempt}: handoff took {elapsed:.3f}s")
+                    continue
+
+                deadline = time.time() + 10.0
+                metadata = session_metadata(state_dir, session_id)
+                profile = metadata.get("ctrl_c") or {}
+                while time.time() < deadline:
+                    metadata = session_metadata(state_dir, session_id)
+                    profile = metadata.get("ctrl_c") or {}
+                    if (
+                        metadata.get("exit_code") == 130
+                        and profile.get("daemon_kill_ms") is not None
+                    ):
+                        break
+                    time.sleep(0.1)
+                else:
+                    errors.append(
+                        f"attempt {attempt}: daemon profile incomplete: {metadata!r}"
+                    )
+                    continue
+
+                assert profile.get("fast_path") is True
+                assert isinstance(profile.get("cli_handoff_ms"), int)
+                assert profile["cli_handoff_ms"] < 2000
+                assert isinstance(profile.get("daemon_kill_ms"), int)
+                return
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                if session_id:
+                    kill_daemon_for_session(state_dir, session_id)
+
+        raise AssertionError("Ctrl-C daemon fast path did not complete: " + "; ".join(errors))
 
     def test_loop_repeat_registers_background_job_and_lists_status(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path

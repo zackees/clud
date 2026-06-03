@@ -21,7 +21,8 @@ use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_p
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::sessions::list_live_session_cwds;
 use super::types::{
-    DaemonInfo, DaemonRequest, DaemonResponse, GcReply, SessionSnapshot, WorkerLaunchSpec,
+    unix_millis_now, CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcReply,
+    SessionSnapshot, WorkerLaunchSpec,
 };
 
 fn current_unix() -> i64 {
@@ -174,6 +175,15 @@ fn handle_daemon_connection(
                 },
             }
         }
+        DaemonRequest::Interrupt {
+            session_id,
+            profile,
+        } => match daemon_interrupt_session(state_dir, workers, &session_id, profile) {
+            Ok(session) => DaemonResponse::Interrupted { session },
+            Err(err) => DaemonResponse::Error {
+                message: err.to_string(),
+            },
+        },
         DaemonRequest::Gc { payload } => {
             let reply = dispatch_gc_op(gc_tx.as_ref(), payload);
             DaemonResponse::Gc { reply }
@@ -365,4 +375,110 @@ fn daemon_terminate_session(
     write_json_file(&path, &session)?;
     let _ = fs::remove_file(spec_path(state_dir, session_id));
     Ok(session)
+}
+
+fn daemon_interrupt_session(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    session_id: &str,
+    profile: CtrlCProfile,
+) -> io::Result<SessionSnapshot> {
+    let path = session_snapshot_path(state_dir, session_id);
+    let mut session = read_json_file::<SessionSnapshot>(&path)?;
+    merge_ctrl_c_profile_for_daemon(&mut session, profile);
+    session.background = false;
+    session.exit_code = Some(130);
+    write_json_file(&path, &session)?;
+
+    let state_dir = state_dir.to_path_buf();
+    let workers = Arc::clone(workers);
+    let session_id = session_id.to_string();
+    thread::spawn(move || {
+        finish_daemon_interrupt_session(&state_dir, &workers, &session_id);
+    });
+
+    Ok(session)
+}
+
+fn finish_daemon_interrupt_session(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    session_id: &str,
+) {
+    let path = session_snapshot_path(state_dir, session_id);
+    let mut session = match read_json_file::<SessionSnapshot>(&path) {
+        Ok(session) => session,
+        Err(_) => return,
+    };
+    let started_at_ms = unix_millis_now();
+    {
+        let profile = session.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+        if profile.daemon_kill_started_at_ms.is_none() {
+            profile.daemon_kill_started_at_ms = Some(started_at_ms);
+        }
+        profile.fast_path = true;
+    }
+    let _ = write_json_file(&path, &session);
+
+    if let Some(root_pid) = session.root_pid {
+        signal_process_tree(root_pid, Signal::Term);
+        thread::sleep(Duration::from_millis(150));
+        signal_process_tree(root_pid, Signal::Kill);
+    }
+
+    if let Some(worker) = workers
+        .lock()
+        .expect("workers mutex poisoned")
+        .remove(session_id)
+    {
+        let _ = worker.kill();
+        let _ = worker.wait(Some(Duration::from_secs(2)));
+    } else if pid_is_alive(session.worker_pid) {
+        signal_process_tree(session.worker_pid, Signal::Term);
+        thread::sleep(Duration::from_millis(150));
+        signal_process_tree(session.worker_pid, Signal::Kill);
+    }
+
+    let finished_at_ms = unix_millis_now();
+    if let Ok(mut latest) = read_json_file::<SessionSnapshot>(&path) {
+        latest.background = false;
+        latest.exit_code = Some(130);
+        let profile = latest.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+        if profile.daemon_kill_started_at_ms.is_none() {
+            profile.daemon_kill_started_at_ms = Some(started_at_ms);
+        }
+        profile.daemon_kill_finished_at_ms = Some(finished_at_ms);
+        profile.daemon_kill_ms = Some(finished_at_ms.saturating_sub(started_at_ms));
+        profile.fast_path = true;
+        let _ = write_json_file(&path, &latest);
+    }
+    let _ = fs::remove_file(spec_path(state_dir, session_id));
+}
+
+fn merge_ctrl_c_profile_for_daemon(session: &mut SessionSnapshot, mut update: CtrlCProfile) {
+    let now = unix_millis_now();
+    update.fast_path = true;
+    if update.daemon_received_at_ms.is_none() {
+        update.daemon_received_at_ms = Some(now);
+    }
+    let current = session.ctrl_c.get_or_insert_with(CtrlCProfile::default);
+    if update.cli_pid.is_some() {
+        current.cli_pid = update.cli_pid;
+    }
+    if update.cli_observed_at_ms.is_some() {
+        current.cli_observed_at_ms = update.cli_observed_at_ms;
+    }
+    if update.cli_handoff_at_ms.is_some() {
+        current.cli_handoff_at_ms = update.cli_handoff_at_ms;
+    }
+    if update.cli_return_ready_at_ms.is_some() {
+        current.cli_return_ready_at_ms = update.cli_return_ready_at_ms;
+    }
+    if update.cli_handoff_ms.is_some() {
+        current.cli_handoff_ms = update.cli_handoff_ms;
+    }
+    if update.daemon_received_at_ms.is_some() {
+        current.daemon_received_at_ms = update.daemon_received_at_ms;
+    }
+    current.fast_path = true;
 }
