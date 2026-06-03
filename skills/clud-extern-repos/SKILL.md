@@ -11,6 +11,10 @@ triggers:
 
 Use this workflow when the current repo needs coordinated work in a dependent repository.
 
+## Code Change Rule
+
+If any parent or dependent repository change is a bug fix or feature implementation, use RED -> GREEN in that repository: write or identify the focused failing test/repro first, run it to fail, implement the scoped change, rerun it to pass, then run the broader repo checks before opening linked PRs.
+
 ## Convention
 
 Place each dependent checkout at `<current-repo>/.extern-repos/<repo-name>/`. Only immediate children of `.extern-repos/` are tracked by clud GC.

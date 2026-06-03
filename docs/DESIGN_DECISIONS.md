@@ -194,15 +194,15 @@ The separate session-cap registry (`sessions.redb`) keeps file-lock-based serial
 
 **Context:** Skills are slash-commands (`/clud-pr`, `/clud-issue`, etc.) bundled into the `clud` binary via `include_str!` and installed into the user's backend home(s) during global launch setup. Session-only launches do not write persistent skill files. Two installer implementations exist in the codebase today:
 
-- `src/skills.rs` — multi-backend (`~/.claude/skills/`, Codex `~/.agents/skills/` gated by `~/.codex`), non-overwriting (preserves user edits), reads from `crates/clud-bin/assets/skills/`, and purges stale clud-managed Codex copies from `~/.codex/skills/`.
-- `src/skill_install.rs` — Claude-only (`~/.claude/skills/`), overwrites on semantic divergence (whitespace-tolerant compare), reads from a separate top-level `skills/` directory.
+- `src/skills.rs` - multi-backend (`~/.claude/skills/`, Codex `~/.agents/skills/` gated by `~/.codex`), non-overwriting (preserves user edits), reads from `crates/clud-bin/assets/skills/`, and purges stale clud-managed Codex copies from `~/.codex/skills/`.
+- `src/skill_install.rs` - Claude-only (`~/.claude/skills/`), overwrites on semantic divergence (whitespace-tolerant compare), reads from a separate top-level `skills/` directory, and purges retired managed skills from `PURGED_SKILLS`.
 
 Their `BUNDLED_SKILLS` constants ship different subsets of skills.
 
-**Decision:** Accept the duality as interim state. Both installers remain registered behind the launch setup scope gate, and global setup runs only the selected backend's actions. Document the divergence explicitly in [skill-system.md](architecture/skill-system.md) and the dir READMEs so contributors aren't surprised. Plan to consolidate later (single installer, single source tree).
+**Decision:** Accept the remaining duality as interim state. Both installers remain registered behind the launch setup scope gate, and global setup runs only the selected backend's actions. Document the divergence explicitly in [skill-system.md](architecture/skill-system.md) and the dir READMEs so contributors aren't surprised. Retire merged skills through `skill_install.rs`'s `PURGED_SKILLS` list; `/clud-pr-merge` has already been folded into `/clud-pr` PR merge mode and added to that purge list. Plan to consolidate the remaining duplicate source trees later (single installer, single source tree).
 
 **Rationale:**
-- The two installers evolved independently — `skill_install.rs` predates `skills.rs` — and consolidating now would be a non-trivial change with its own design questions (which overwrite policy wins? which source tree?).
+- The two installers evolved independently — `skill_install.rs` predates `skills.rs` — and fully consolidating now would be a non-trivial change with its own design questions (which overwrite policy wins? which source tree?).
 - Documenting the current state immediately is cheap; consolidating prematurely risks losing user edits or shipping the wrong subset.
 - The non-overwriting behavior of `skills.rs` is the right policy for skills the user might edit; the overwrite behavior of `skill_install.rs` is the right policy for skills clud strictly owns. The eventual consolidation needs to preserve both modes.
 
@@ -215,7 +215,7 @@ Their `BUNDLED_SKILLS` constants ship different subsets of skills.
 
 **Consequences:**
 - Two installer implementations remain live, but they run only during selected-backend global setup. Session-only launches skip both.
-- Adding a new skill requires editing `BUNDLED_SKILLS` in **both** files (and possibly placing the `SKILL.md` in both source trees). [skill-system.md](architecture/skill-system.md) documents the checklist.
+- Adding a new skill may require editing one or both `BUNDLED_SKILLS` constants depending on backend coverage and drift semantics. Retiring a skill requires adding it to `PURGED_SKILLS`. [skill-system.md](architecture/skill-system.md) documents the checklist.
 - This DD should be revisited when consolidation lands; mark superseded then.
 
 ---

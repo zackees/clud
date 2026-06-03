@@ -17,6 +17,10 @@ Triage GitHub issues for closeable resolution and un-addressed CodeRabbit follow
 3. **Bulk mode = main scans, sub-agents triage in parallel git worktrees.** The main agent never does per-issue triage in bulk mode. It enumerates and filters the candidate set, then dispatches one sub-agent per issue in a single tool-use block. Each sub-agent runs in its own `.claude/worktrees/triage-<num>/`.
 4. **Nothing left in the repo when done.** Every worktree gets `git worktree remove`'d after its sub-agent finishes. Same `.gitignore` gate and stale-worktree rules as `/clud-pr`.
 
+## Code Change Rule
+
+When this skill files a follow-up issue for a bug fix or feature implementation, the follow-up must require RED -> GREEN evidence: a focused failing test/repro first, then the implementation that turns that signal green.
+
 ## Argument modes
 
 - **`/clud-issue-triage <num>` or `<url>`** → single-issue mode. Main agent does the work directly (no sub-agent — overkill for one issue).
@@ -39,7 +43,7 @@ Triage GitHub issues for closeable resolution and un-addressed CodeRabbit follow
    - Filter authors matching `coderabbitai*` (`coderabbitai`, `coderabbitai[bot]`).
    - Drop nits, praise, "consider", and threads marked `outdated` or `resolved: true`.
    - Group remaining comments by file/topic.
-6. **File follow-up issues silently.** For each cluster of substantive un-addressed CodeRabbit comments, `gh issue create --title "follow-up: <topic> from #<pr>" --body ...`. The body must include: source PR link, source comment permalinks, the CodeRabbit suggestion verbatim, and a one-line "why this matters" framing. Label `coderabbit-followup` if the repo has it; otherwise skip the label.
+6. **File follow-up issues silently.** For each cluster of substantive un-addressed CodeRabbit comments, `gh issue create --title "follow-up: <topic> from #<pr>" --body ...`. The body must include: source PR link, source comment permalinks, the CodeRabbit suggestion verbatim, a one-line "why this matters" framing, and RED -> GREEN acceptance criteria when the follow-up is a bug fix or feature implementation. Label `coderabbit-followup` if the repo has it; otherwise skip the label.
 7. **Report.** Output exactly:
    - One line: closed (yes/no) + one-line evidence or one-line reason left open.
    - One line per follow-up issue filed: `#<num> — <title> — <url>`.

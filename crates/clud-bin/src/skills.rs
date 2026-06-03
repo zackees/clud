@@ -37,6 +37,10 @@ pub struct BundledSkill {
 /// another `assets/skills/<name>/SKILL.md`.
 pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
+        name: "clud-loop",
+        skill_md: include_str!("../assets/skills/clud-loop/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-issue",
         skill_md: include_str!("../assets/skills/clud-issue/SKILL.md"),
     },
@@ -447,6 +451,7 @@ mod tests {
     #[test]
     fn bundled_includes_all_known_skills() {
         let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
+        assert!(names.contains(&"clud-loop"));
         assert!(names.contains(&"clud-issue"));
         assert!(names.contains(&"clud-issue-triage"));
         assert!(names.contains(&"clud-pr"));
@@ -454,6 +459,17 @@ mod tests {
         assert!(names.contains(&"clud-docker-rust-app-dev"));
         assert!(names.contains(&"clud-windows-trash"));
         assert!(names.contains(&"clud-extern-repos"));
+    }
+
+    #[test]
+    fn bundled_skills_include_red_green_rule() {
+        for skill in BUNDLED_SKILLS {
+            assert!(
+                skill.skill_md.contains("RED -> GREEN"),
+                "skill {} must include the RED -> GREEN code-change rule",
+                skill.name
+            );
+        }
     }
 
     #[test]
@@ -603,5 +619,24 @@ mod tests {
         assert!(second.removed.is_empty());
         assert!(second.preserved.is_empty());
         assert!(second.failed.is_empty());
+    }
+
+    #[test]
+    fn skills_dir_can_target_agents_dir_with_codex_gate() {
+        let home = tempdir().unwrap();
+        let backend = SkillBackend {
+            backend: Backend::Codex,
+            name: "Codex",
+            home_subdir: ".codex",
+            skills_home_subdir: Some(".agents"),
+            skills_subdir: "skills",
+        };
+        assert_eq!(
+            backend.skills_dir(home.path()),
+            home.path().join(".agents").join("skills")
+        );
+        assert!(!backend.root_exists(home.path()));
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        assert!(backend.root_exists(home.path()));
     }
 }

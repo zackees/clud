@@ -17,13 +17,17 @@ File a GitHub issue informed by real research and a real conversation. Four hard
 3. **Surface strong duplicates only** — search existing issues; mention related issues *only* when similarity is strong (same component + overlapping intent). Don't pad the report with weak matches.
 4. **Summary + URL last.** End with a short summary of what was filed and the URL — nothing else.
 
+## Code Change Rule
+
+If the issue is for a bug fix or feature implementation, acceptance criteria must require RED -> GREEN evidence: a focused failing test/repro before coding, followed by the implementation that turns that signal green.
+
 ## Workflow
 
 1. **Round 1 investigation (silent prep).** Read the topic. Skim the relevant code paths, existing docs, and recent git history to form a working model: what the user likely means, what's already in place, what's missing, what the obvious unknowns are. One round — don't spiral.
 2. **Interview mode.** Ask the user clarifying questions to nail scope, constraints, and acceptance criteria. For each question you can answer well from the code or from public knowledge, *offer your best-judgement answer* alongside the question and ask the user to confirm or override. Batch related questions; don't drip-feed. Keep going until ambiguity is resolved — don't post a vague issue.
 3. **Round 2 investigation.** With the user's answers in hand, do the deeper dig: confirm file paths, identify touch points, note prior art, list risks/edge cases. This round informs the actual issue body.
 4. **Search for duplicates.** `gh issue list --search "<keywords>" --state all` (open + closed). Only flag issues with strong similarity — same component *and* overlapping intent. Weak keyword matches don't count.
-5. **Draft the issue.** Title in conventional style (`feat:`, `fix:`, `chore:`, etc.). Body sections: **Context**, **Proposal**, **Acceptance criteria**, **Open questions** (if any remain), **Related issues** (only if strong matches found). No filler.
+5. **Draft the issue.** Title in conventional style (`feat:`, `fix:`, `chore:`, etc.). Body sections: **Context**, **Proposal**, **Acceptance criteria**, **Open questions** (if any remain), **Related issues** (only if strong matches found). For bug/feature work, acceptance criteria must include RED -> GREEN test evidence. No filler.
 6. **Post.** `gh issue create --title "..." --body "$(cat <<'EOF' ... EOF)"`. Use a heredoc so formatting survives.
 7. **Report.** Give the user: a 2-3 sentence summary of what was filed, then the issue URL. If strong related issues exist, mention them in one line above the URL. Nothing else.
 

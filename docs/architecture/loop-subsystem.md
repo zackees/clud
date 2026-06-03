@@ -13,6 +13,14 @@ The `--repeat <duration>` variant takes a different path: it disables
 the marker contract entirely and hands the plan to the daemon worker
 (`daemon/worker.rs`) for cron-style re-invocation.
 
+`/clud-loop` is the Codex-facing skill polyfill for Claude-style `/loop`.
+Codex does not document arbitrary top-level custom slash-command registration,
+so clud ships a `clud-loop` skill. The skill keeps durable work in
+`.clud/loop/LOOP.md`; interval mode starts `clud --codex loop --repeat
+<duration> --loop-count 1 --no-done .clud/loop/LOOP.md`, while no-interval
+mode asks Codex to delegate the foreground `clud --codex loop
+.clud/loop/LOOP.md` work to a worker subagent when available.
+
 ## Component map
 
 - `command/builder.rs` — `build_launch_plan` (line 24) builds the prompt,
