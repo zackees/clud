@@ -14,7 +14,9 @@ use sysinfo::Signal;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
-use super::gc_service::{spawn_registry_worker_for_state, GcRequestMsg, WORKER_REPLY_TIMEOUT};
+use super::gc_service::{
+    spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
+};
 use super::http::{default_live_sessions_provider, spawn_dashboard};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
@@ -138,7 +140,7 @@ fn handle_daemon_connection(
     mut stream: TcpStream,
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
-    gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
+    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -210,14 +212,17 @@ fn handle_daemon_connection(
 /// Hand a GC op to the registry worker and await the reply. Returns a
 /// `GcReply::Error` if the worker is missing (failed to spawn at daemon
 /// startup), hung up, or didn't reply within [`WORKER_REPLY_TIMEOUT`].
-fn dispatch_gc_op(gc_tx: Option<&mpsc::Sender<GcRequestMsg>>, op: super::types::GcOp) -> GcReply {
+fn dispatch_gc_op(gc_tx: Option<&mpsc::Sender<RegistryMsg>>, op: super::types::GcOp) -> GcReply {
     let Some(tx) = gc_tx else {
         return GcReply::Error {
             message: "gc registry unavailable in this daemon".to_string(),
         };
     };
     let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
-    if tx.send(GcRequestMsg { op, reply_tx }).is_err() {
+    if tx
+        .send(RegistryMsg::Op(GcRequestMsg { op, reply_tx }))
+        .is_err()
+    {
         return GcReply::Error {
             message: "gc registry worker stopped".to_string(),
         };
