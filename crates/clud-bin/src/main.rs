@@ -1,7 +1,7 @@
 use clud::{
-    args, backend, backend_bootstrap, command, console_setup, console_title, daemon, gc, graphics,
-    hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec, runner, startup,
-    trampoline, trash, ui, verbose_log, wasm, worktrees,
+    args, backend, backend_bootstrap, command, console_setup, console_title, ctrl_c_track, daemon,
+    gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec, runner,
+    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -163,6 +163,7 @@ fn main() {
 
     let interrupted = startup::install_ctrl_c_flag();
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
+        flush_ctrl_c_exit_event(ctrl_c_track::InvocationKind::Attach, exit_code);
         std::process::exit(exit_code);
     }
 
@@ -434,7 +435,26 @@ fn main() {
     if args.verbose {
         verbose_log::log(format_args!("[clud] exit: code {exit_code}"));
     }
+    let kind = if centralized {
+        ctrl_c_track::InvocationKind::Centralized
+    } else {
+        ctrl_c_track::InvocationKind::Direct
+    };
+    flush_ctrl_c_exit_event(kind, exit_code);
     std::process::exit(exit_code);
+}
+
+/// Write the cross-path Ctrl+C exit-timing event (issue: `clud ui` ctrl-c
+/// tracking) if a Ctrl+C was observed during this process's lifetime.
+/// Best-effort: resolves the state dir lazily so an unreadable home dir
+/// can't block the process exit. Errors are swallowed inside the tracker.
+fn flush_ctrl_c_exit_event(kind: ctrl_c_track::InvocationKind, exit_code: i32) {
+    if !ctrl_c_track::was_observed() {
+        return;
+    }
+    if let Ok(state_dir) = daemon::default_state_dir() {
+        ctrl_c_track::flush_on_exit(&state_dir, kind, exit_code);
+    }
 }
 
 /// Issue #183: best-effort upsert of `(repo_root, cwd)` into the daemon's

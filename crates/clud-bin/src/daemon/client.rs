@@ -194,6 +194,48 @@ pub(super) fn request_session_termination(
     }
 }
 
+/// Fire-and-forget handoff: ask the daemon to kill these process trees
+/// on a background thread so the CLI can return from a Ctrl+C teardown
+/// immediately. Returns `true` if the daemon acked the handoff. On
+/// failure the caller is expected to fall back to a synchronous kill
+/// (best behavior: same as before this op existed).
+///
+/// Uses tight read/write timeouts so a wedged daemon never blocks the
+/// CLI for more than ~250ms total — the entire point of this call is
+/// sub-100ms latency on Ctrl+C. Errors are logged at most once via the
+/// returned bool; the caller decides whether to surface them.
+pub fn try_handoff_kill_to_daemon(state_dir: &Path, pids: &[u32], reason: Option<&str>) -> bool {
+    if pids.is_empty() {
+        return true;
+    }
+    let info = match read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
+        Ok(info) => info,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], info.port)),
+        Duration::from_millis(150),
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+    let request = DaemonRequest::AdoptKill {
+        pids: pids.to_vec(),
+        reason: reason.map(|s| s.to_string()),
+    };
+    if write_json_line(&mut stream, &request).is_err() {
+        return false;
+    }
+    // We could parse the ack here, but the wire contract guarantees the
+    // daemon spawns its worker before replying; receiving any bytes back
+    // means our PIDs are queued.
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    matches!(reader.read_line(&mut line), Ok(n) if n > 0)
+}
+
 pub(super) fn request_session_interrupt(
     state_dir: &Path,
     session_id: &str,

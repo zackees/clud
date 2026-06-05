@@ -90,6 +90,7 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
         DaemonResponse::Created { .. }
         | DaemonResponse::Terminated { .. }
         | DaemonResponse::Interrupted { .. }
+        | DaemonResponse::AdoptKillAck { .. }
         | DaemonResponse::Gc { .. }
         | DaemonResponse::LiveCwds { .. }
         | DaemonResponse::ShutdownAck { .. } => 1,

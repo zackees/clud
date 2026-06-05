@@ -134,6 +134,7 @@
     <button class="tab active" data-tab="sessions">Sessions</button>
     <button class="tab" data-tab="gc">Garbage</button>
     <button class="tab" data-tab="repos">Repos</button>
+    <button class="tab" data-tab="ctrl-c">Ctrl-C</button>
   </div>
 
   <section id="sessions" class="active">
@@ -155,6 +156,13 @@
     <div class="card">
       <h2>Repos visited <span id="repos-count" class="meta"></span></h2>
       <div id="repos-body"><p class="empty">loading…</p></div>
+    </div>
+  </section>
+
+  <section id="ctrl-c">
+    <div class="card">
+      <h2>Ctrl-C exit times <span id="ctrl-c-count" class="meta"></span></h2>
+      <div id="ctrl-c-body"><p class="empty">loading…</p></div>
     </div>
   </section>
 
@@ -195,6 +203,14 @@
       if (ms === null || ms === undefined) return '-';
       if (ms < 1000) return `${ms}ms`;
       return `${(ms / 1000).toFixed(2)}s`;
+    }
+    function fmtUnixMs(ms) {
+      if (!ms) return '-';
+      const d = new Date(ms);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${hh}:${mm}:${ss}`;
     }
     function esc(s) {
       if (s === null || s === undefined) return '';
@@ -307,6 +323,32 @@
       });
     }
 
+    function renderCtrlCEvents(state) {
+      const events = state.ctrl_c_events || [];
+      document.getElementById('ctrl-c-count').textContent = events.length ? `(${events.length})` : '';
+      if (!events.length) {
+        document.getElementById('ctrl-c-body').innerHTML =
+          '<p class="empty">no Ctrl-C exits recorded yet. Press Ctrl-C in a <code>clud</code> session to populate this view.</p>';
+        return;
+      }
+      const rows = events.map(e => `
+        <tr>
+          <td class="metric">${esc(fmtUnixMs(e.exit_at_ms))}</td>
+          <td class="metric">${esc(fmtMs(e.elapsed_ms))}</td>
+          <td><span class="badge kind">${esc(e.kind)}</span></td>
+          <td>${esc(e.exit_code)}</td>
+          <td>${esc(e.pid)}</td>
+          <td class="path">${esc(e.cwd || '-')}</td>
+        </tr>`).join('');
+      document.getElementById('ctrl-c-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>exited at</th><th>elapsed</th><th>kind</th><th>exit</th><th>pid</th><th>cwd</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
     function renderRepos(state) {
       const repos = state.repos || [];
       document.getElementById('repos-count').textContent = repos.length ? `(${repos.length})` : '';
@@ -360,6 +402,7 @@
         renderSessions(state);
         renderGc(state);
         renderRepos(state);
+        renderCtrlCEvents(state);
       } catch (err) {
         document.getElementById('daemon-meta').textContent =
           `connection lost: ${err}`;
