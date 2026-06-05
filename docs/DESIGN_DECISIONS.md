@@ -336,3 +336,33 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - `clud --no-daemon` and `CLUD_NO_DAEMON=1` now skip both spawn and registry access. `clud gc *` with `--no-daemon` is an error (no read-only fallback, unchanged from prior).
 - One-time migration: users with a running pre-merge `gc_daemon` process will hit a redb lock conflict on first post-merge run; the old process idle-shuts after its 30-min window or can be killed manually. The redb file itself is forward-compatible.
 - DD-006's "single owner" promise is intact; only the process identity moved. DD-011's "centralized as interactive default" remains reverted (per PR #152) and is independent of this change.
+
+---
+
+## DD-013: rusqlite and redb coexist in clud-bin
+
+**Context:** The agent-memory subsystem (META #255) needs persistent storage with two access patterns: SQL writes against a typed schema (memories, sessions, relations, lessons, actions) and KNN over dense embeddings. The natural fit for both — and the only one with a mature loadable vector extension — is SQLite via `rusqlite` plus `sqlite-vec`. But clud already runs `redb` (DD-006, DD-012) as the always-on daemon's single-owner store for the gc/session registry, and `rusqlite` was deliberately removed from the dep graph when redb was adopted (see the comment at `crates/clud-bin/Cargo.toml:31`) to cut cold-build time and drop C-toolchain pressure on CI.
+
+**Decision:** Re-add `rusqlite = { version = "0.31", features = ["bundled", "load_extension"] }` for the memory subsystem only. The two stores coexist in the same binary with disjoint files and disjoint ownership: redb continues to own `~/.clud/state/data.redb` for the gc/session registry; rusqlite owns `~/.clud/state/memory/memory.db` for the memory store. Neither store reads or writes the other's file.
+
+**Rationale:**
+- `sqlite-vec` is the only loadable vector extension that runs inside SQLite's transaction boundary on the same connection that handles SQL writes. Keeping `memories` and `memory_vec` in one `BEGIN IMMEDIATE` is the load-bearing invariant for the storage layer (kill mid-tx must not leak a half-row).
+- Picking redb for the memory store would mean either hand-rolling KNN (no embedded vector backend in the redb ecosystem) or running two stores anyway with a foreign-key shim between them. The cost of two stores is real but bounded; the cost of a hand-rolled vector index is unbounded.
+- Migrating the gc/session registry back to SQLite would be a destructive change to a stable subsystem (DD-006, DD-012) for no net win — redb's single-process-ownership story works for that workload.
+- `rusqlite bundled` adds a `cc` build step that we accept; CI was already paying for `whisper-rs-sys`, `sqlite-vec`, `whisper-rs`, and `tantivy`'s pure-Rust compile, so adding `libsqlite3-sys` is incremental.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| One store (redb only), hand-roll KNN | Requires an embedded ANN index from scratch (hnsw / IVF in pure Rust against redb tables); large new surface area; no battle-tested option. |
+| One store (SQLite only), migrate gc registry off redb | Destructive migration on a shipped subsystem; redb's single-process invariant is exactly what gc wants; SQLite would just re-introduce the cross-process locking story we left behind in DD-006. |
+| `redb` for SQL + `qdrant`/`lance`/external for vec | Spawns or links a heavier-weight system; runs counter to the always-on-single-binary posture; daemon process model would have to host or proxy another service. |
+| Defer the entire memory subsystem | Blocks META #255 indefinitely; the architectural fit for the memory store is independent of gc/session storage. |
+
+**Consequences:**
+- Two embedded DBs in the same process: contributors must know which file owns which fact. The directory structure makes this visible (`~/.clud/state/data.redb` vs `~/.clud/state/memory/memory.db`).
+- Cold builds get the `cc` step for `libsqlite3-sys` + `sqlite-vec` back. Measured cost on Windows x64: ~25 s added to a clean compile, already amortized after one `soldr cargo` cache hit.
+- The `bundled` feature ships a vendored SQLite copy with every wheel, sidestepping system-SQLite version drift but inflating the binary by ~1.2 MB.
+- Windows-ARM may not build `sqlite-vec`; the memory module reserves a `whisper-rs`-style target-cfg carve-out (PR1 ships without it; CI on `windows-11-arm` is the decider).
+

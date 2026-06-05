@@ -16,6 +16,7 @@ re-explaining.
 | [architecture/gc-and-registry.md](architecture/gc-and-registry.md) | ~250 | always-on `clud __daemon` single-owner redb model, session cap registry, worktree scanner, GC subcommands |
 | [architecture/windows-quirks.md](architecture/windows-quirks.md) | ~300 | Windows-only platform code: trampoline, BatBadBat `.cmd` rewrite, console modes, Shift+Enter key translation, `IDropTarget`, `CREATE_NO_WINDOW`, ARM whisper carveout |
 | [architecture/launch-plan.md](architecture/launch-plan.md) | ~180 | `LaunchPlan` as the single source of truth: construction, consumers, `--dry-run` JSON |
+| [architecture/memory.md](architecture/memory.md) | ~80 | Agent-memory storage + hybrid search foundation: SqliteStore (rusqlite + sqlite-vec), LexicalIndex (tantivy BM25), RRF fusion, on-disk layout. Stub for sibling sub-issues under META #255 |
 
 ## Quick Reference
 
@@ -27,6 +28,7 @@ re-explaining.
 - **"Why is `~/.clud/data.redb` behind a daemon?"** -> [gc-and-registry.md](architecture/gc-and-registry.md)
 - **"Why does Windows do X differently?"** -> [windows-quirks.md](architecture/windows-quirks.md)
 - **"Where does the argv that clud runs come from?"** -> [launch-plan.md](architecture/launch-plan.md)
+- **"How does agent memory persist?"** -> [memory.md](architecture/memory.md)
 
 See also: [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for rationale behind the
 choices these subsystems embody.

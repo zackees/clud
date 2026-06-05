@@ -64,6 +64,24 @@ tiny_http = "0.12"
 # (~50 LOC of platform glue: macOS `open`, Linux `xdg-open`, Windows
 # `cmd /c start`). One dep beats triplicate hand-rolled code.
 open = "5"
+# Issue #256: agent-memory storage layer. `rusqlite` re-enters the dep
+# graph here for the SQLite half of the memory store; redb (above) keeps
+# owning the gc/session registry. See DD-013 for the coexistence rationale.
+# `bundled` ships SQLite with us so the wheel works without a system
+# library; `load_extension` is required to register `sqlite-vec` on the
+# same connection that handles the SQL writes (one-transaction invariant).
+rusqlite = { version = "0.31", features = ["bundled", "load_extension"] }
+# Issue #256: vec0 virtual table providing kNN search inside SQLite.
+# Loaded as a runtime extension via `sqlite3_auto_extension` so SQL writes
+# to `memories` and `memory_vec` participate in one BEGIN IMMEDIATE.
+sqlite-vec = "0.1"
+# Issue #256: BM25 lexical index for the hybrid search path. Pure-Rust;
+# no C toolchain pressure on top of what rusqlite-bundled already adds.
+tantivy = "0.22"
+# Issue #256: uuidv7 ids for memory rows (sortable, monotonic-ish).
+uuid = { version = "1", features = ["v7"] }
+# Issue #256: ergonomic error enum for the memory module.
+thiserror = "1"
 
 [dev-dependencies]
 serde_yaml = "0.9"
