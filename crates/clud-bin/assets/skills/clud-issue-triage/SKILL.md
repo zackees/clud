@@ -30,21 +30,22 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 ## Single-issue workflow
 
 1. **Resolve the input.** Accept a bare number, a `#NNN`, or a full GitHub URL. `gh issue view <num> --json number,state,title,body,url,labels,closedByPullRequestsReferences,timelineItems`. If the call fails, say so and stop.
-2. **If already CLOSED** → don't re-close. But still run step 5 (CodeRabbit follow-ups) against any linked PRs, then report.
-3. **Find resolving PRs.** Scan `closedByPullRequestsReferences`, the timeline `cross-referenced` events, and `gh search prs "Closes #<num>" OR "Fixes #<num>" OR "Resolves #<num>" --repo <owner>/<repo>`. For each candidate:
+2. **Set the goal.** Invoke `/goal Triage issue #<num>: close if unambiguously resolved, file CodeRabbit follow-ups for any un-addressed substantive threads, or report exactly why neither happened.` so the harness Stop hook blocks until the closure decision is made and follow-ups are filed. The goal auto-clears once the final report is emitted.
+3. **If already CLOSED** → don't re-close. But still run step 6 (CodeRabbit follow-ups) against any linked PRs, then report.
+4. **Find resolving PRs.** Scan `closedByPullRequestsReferences`, the timeline `cross-referenced` events, and `gh search prs "Closes #<num>" OR "Fixes #<num>" OR "Resolves #<num>" --repo <owner>/<repo>`. For each candidate:
    - `gh pr view <pr> --json state,merged,mergeCommit,baseRefName,files`.
    - Confirm `merged == true` AND `baseRefName == <default-branch>` (else the code didn't reach main — see `/clud-pr` step 3).
    - Read the diff (`gh pr diff <pr>`) and confirm it actually implements the issue's acceptance criteria. Don't trust the PR title or "Closes #" mention alone.
-4. **Decide closure.** Bias toward caution:
+5. **Decide closure.** Bias toward caution:
    - Resolved unambiguously (merged + on default branch + diff matches criteria) → `gh issue close <num> --comment "Resolved by #<pr>. Verified: <one-line evidence>."`
    - Anything ambiguous (partial implementation, stack-base merge, criteria not fully met, no clear PR) → leave open. Don't comment unless the user asked you to triage-comment.
-5. **Scan for un-addressed CodeRabbit comments.** For every PR linked to this issue (resolving or merely referencing):
+6. **Scan for un-addressed CodeRabbit comments.** For every PR linked to this issue (resolving or merely referencing):
    - `gh api repos/<owner>/<repo>/pulls/<pr>/comments` (review-thread comments) and `gh pr view <pr> --json reviews,comments`.
    - Filter authors matching `coderabbitai*` (`coderabbitai`, `coderabbitai[bot]`).
    - Drop nits, praise, "consider", and threads marked `outdated` or `resolved: true`.
    - Group remaining comments by file/topic.
-6. **File follow-up issues silently.** For each cluster of substantive un-addressed CodeRabbit comments, `gh issue create --title "follow-up: <topic> from #<pr>" --body ...`. The body must include: source PR link, source comment permalinks, the CodeRabbit suggestion verbatim, a one-line "why this matters" framing, and RED -> GREEN acceptance criteria when the follow-up is a bug fix or feature implementation. Label `coderabbit-followup` if the repo has it; otherwise skip the label.
-7. **Report.** Output exactly:
+7. **File follow-up issues silently.** For each cluster of substantive un-addressed CodeRabbit comments, `gh issue create --title "follow-up: <topic> from #<pr>" --body ...`. The body must include: source PR link, source comment permalinks, the CodeRabbit suggestion verbatim, a one-line "why this matters" framing, and RED -> GREEN acceptance criteria when the follow-up is a bug fix or feature implementation. Label `coderabbit-followup` if the repo has it; otherwise skip the label.
+8. **Report.** Output exactly:
    - One line: closed (yes/no) + one-line evidence or one-line reason left open.
    - One line per follow-up issue filed: `#<num> — <title> — <url>`.
    - Nothing else.
@@ -55,16 +56,17 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
    - No arg → `gh issue list --state open --limit 200 --search "created:>=$(date -d '7 days ago' --iso-8601 2>/dev/null || date -v-7d +%Y-%m-%d)" --json number,title,labels,createdAt,updatedAt`.
    - `all` → `gh issue list --state open --limit 1000 --json number,title,labels,createdAt,updatedAt`.
 2. **Filter (main agent, fast pass).** Drop issues that are obviously not triage candidates: anything labeled `discussion`, `meta`, `roadmap`, `wontfix`, `duplicate`, `question`; anything updated in the last 24h (active conversation); anything with zero linked PRs/cross-references. The remainder is the work set.
-3. **Stale-worktree prompt + .gitignore gate.** Same as `/clud-pr`'s **Worktree workspace** section. Confirm `.gitignore` covers `.claude/`. Ask the user about deleting any stale `.claude/worktrees/triage-*` older than 24h before starting.
-4. **Plan worktrees.** One worktree per issue: `.claude/worktrees/triage-<num>/`. Branch off `origin/<default>` (read-only — these worktrees only inspect, they don't commit code). `git fetch origin && git worktree add --detach .claude/worktrees/triage-<num> origin/<default>` for each.
-5. **Dispatch sub-agents in parallel.** Single tool-use block, one Agent call per issue. Each sub-agent gets:
+3. **Set the goal.** With `<N>` candidates known, invoke `/goal Triage <N> candidate issues; for each: close if unambiguously resolved or file CodeRabbit follow-ups, then report aggregate Closed/Follow-ups counts and tear down every worktree.` so the harness Stop hook blocks until the aggregate report is emitted and every worktree is gone. If the filtered set is empty, report that and clear the goal — do not set it.
+4. **Stale-worktree prompt + .gitignore gate.** Same as `/clud-pr`'s **Worktree workspace** section. Confirm `.gitignore` covers `.claude/`. Ask the user about deleting any stale `.claude/worktrees/triage-*` older than 24h before starting.
+5. **Plan worktrees.** One worktree per issue: `.claude/worktrees/triage-<num>/`. Branch off `origin/<default>` (read-only — these worktrees only inspect, they don't commit code). `git fetch origin && git worktree add --detach .claude/worktrees/triage-<num> origin/<default>` for each.
+6. **Dispatch sub-agents in parallel.** Single tool-use block, one Agent call per issue. Each sub-agent gets:
    - The issue number and URL
    - The repo `<owner>/<repo>`
    - Its dedicated worktree path
-   - Instruction: run the **Single-issue workflow** (steps 1–6 above) for this issue, in this worktree, and return a structured report (closed: bool, reason, follow-ups: list of {num, title, url})
+   - Instruction: run the **Single-issue workflow** (steps 1–7 above, skipping the per-issue `/goal` step since the bulk goal already covers it) for this issue, in this worktree, and return a structured report (closed: bool, reason, follow-ups: list of {num, title, url})
    - Hard constraint: do not touch any path outside the assigned worktree; do not modify code in the main checkout
-6. **Aggregate.** Collect every sub-agent's report. Tear down every worktree (`git worktree remove .claude/worktrees/triage-<num>` per issue). Confirm `git worktree list` shows none of them and `.claude/worktrees/` is empty (or holds only unrelated entries).
-7. **Report (main agent).** Two sections:
+7. **Aggregate.** Collect every sub-agent's report. Tear down every worktree (`git worktree remove .claude/worktrees/triage-<num>` per issue). Confirm `git worktree list` shows none of them and `.claude/worktrees/` is empty (or holds only unrelated entries).
+8. **Report (main agent).** Two sections:
    - **Closed (N):** one line per closed issue: `#<num> — <title> — resolved by #<pr>`.
    - **Follow-ups filed (M):** one line per filed follow-up: `#<num> — <title> — <url>`.
    - If both sections are empty, say so in one line. Nothing else.
