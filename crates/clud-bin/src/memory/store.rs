@@ -269,6 +269,24 @@ impl SqliteStore {
         Ok(n > 0)
     }
 
+    pub fn list_by_tier(&self, tier: Tier) -> Result<Vec<MemoryRow>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, tier, content,
+                    created_at_ms, updated_at_ms, tier_change_at_ms,
+                    access_count, last_access_at_ms, metadata_json,
+                    scope_key, branch_name, is_orphan
+               FROM memories
+              WHERE tier = ?1
+              ORDER BY id",
+        )?;
+        let mut rows = stmt.query(params![tier.as_i64()])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(row_from_sqlite(r)?);
+        }
+        Ok(out)
+    }
+
     pub fn promote_tier(
         &mut self,
         id: &MemoryId,
