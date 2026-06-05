@@ -580,6 +580,9 @@ class TestInterruptReporting:
         # the message to check against. Without `--verbose` the diagnostic is
         # silenced by design and the test had been failing on every platform's
         # integration run since #145 landed.
+        # PR #251 added a second variant on the daemon-handoff path
+        # ("(pty, handed to daemon)"). The assertion below matches the common
+        # prefix "(pty" so it accepts both forms.
         proc = subprocess.Popen(
             [
                 str(clud_binary),
@@ -616,7 +619,7 @@ class TestInterruptReporting:
             assert proc.returncode == 130
 
         if proc.returncode == 130:
-            assert "[clud] interrupted via Ctrl+C (pty)" in stderr
+            assert "[clud] interrupted via Ctrl+C (pty" in stderr
 
 
 class TestStdinForwarding:
