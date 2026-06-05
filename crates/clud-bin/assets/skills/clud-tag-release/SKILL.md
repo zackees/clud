@@ -33,7 +33,8 @@ This skill should not implement fixes or features. If the release is blocked by 
 3. **Resolve the tag to push.**
    - No arg → use the detected version verbatim. Tell the user: "I'll tag `<version>` (or `v<version>` if your existing tags use that prefix)." Pick the prefix that matches the most recent existing release tag; default to bare (no `v`) if there are no prior releases.
    - Arg `<version>` or `v<version>` → use as given, but validate it matches the workspace version. On mismatch: stop and tell the user to bump (`crates/.../Cargo.toml` or `pyproject.toml`) first.
-4. **Pre-flight gates.** Every gate is blocking. Run them in parallel where possible (`git fetch` and `gh api` calls). Report the first failure and stop:
+4. **Set the goal.** With the resolved tag known, invoke `/goal Tag <tag> and confirm the auto-release workflow transitioned to in_progress or queued; report the run URL.` so the harness Stop hook blocks until the workflow run is located and surfaced. If any pre-flight gate (step 5) fails the skill aborts before pushing — clear the goal then.
+5. **Pre-flight gates.** Every gate is blocking. Run them in parallel where possible (`git fetch` and `gh api` calls). Report the first failure and stop:
    - `git rev-parse --abbrev-ref HEAD` is `main` (or the repo's default — `gh api repos/<owner>/<repo> --jq .default_branch`).
    - `git status --porcelain` is empty.
    - `git fetch origin && git rev-list HEAD...origin/<default>` is empty (in sync, no diverging commits).
@@ -41,17 +42,17 @@ This skill should not implement fixes or features. If the release is blocked by 
    - `git ls-remote --tags origin <tag>` and same with `v<tag>` are empty (no remote tag).
    - `gh api repos/<owner>/<repo>/releases/tags/<tag>` returns 404 (no published release).
    - Last CI run on `<default>` is green: `gh run list --branch <default> --limit 1 --json conclusion,headSha`. If red or in progress, surface and ask before proceeding — don't silently ship a broken main.
-5. **Confirm with the user.** Show:
+6. **Confirm with the user.** Show:
    - Tag to push: `<tag>`
    - HEAD SHA: `<sha>` (and one-line commit subject)
    - Workflow that will fire: `<release-workflow-path>`
    - Last CI status on `<default>`: green/red/in-progress
    Wait for explicit confirmation. Don't proceed on silence.
-6. **Tag and push.**
+7. **Tag and push.**
    - `git tag -a <tag> -m "Release <version>"` — **annotated**, not lightweight, so `git describe` works downstream.
    - `git push origin <tag>` — push *just the tag*, not `--tags` (which would push every local tag).
-7. **Locate the triggered run.** Poll `gh run list --workflow=<release-workflow-file> --event=push --limit 5 --json databaseId,headSha,status,url` for up to 30 seconds, looking for a run whose `headSha` matches the tagged commit's SHA. The workflow can take a few seconds to register. If none appears after 30s, surface that — the workflow may not be configured to trigger on this tag pattern.
-8. **Report.** Output exactly:
+8. **Locate the triggered run.** Poll `gh run list --workflow=<release-workflow-file> --event=push --limit 5 --json databaseId,headSha,status,url` for up to 30 seconds, looking for a run whose `headSha` matches the tagged commit's SHA. The workflow can take a few seconds to register. If none appears after 30s, surface that — the workflow may not be configured to trigger on this tag pattern.
+9. **Report.** Output exactly:
    - Tag pushed: `<tag>` → `<sha>`
    - Workflow run: `<url>` (status: `<queued|in_progress>`)
    - One line on what the workflow will do (build, publish to PyPI/crates.io, attach release artifacts) — pulled from the workflow file's job names, not invented.
