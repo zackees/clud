@@ -366,3 +366,34 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - The `bundled` feature ships a vendored SQLite copy with every wheel, sidestepping system-SQLite version drift but inflating the binary by ~1.2 MB.
 - Windows-ARM may not build `sqlite-vec`; the memory module reserves a `whisper-rs`-style target-cfg carve-out (PR1 ships without it; CI on `windows-11-arm` is the decider).
 
+
+---
+
+## DD-014: Repo URL as primary memory scope; branch as metadata, not partition
+
+**Context:** Agent memory needs to answer "is this fact about *this* project?" without leaking facts across unrelated clones, and without locking memories away on a single branch. Common cases: (a) the user records "auth uses HS256 from vault" on `feature/oauth`, then merges to `main`, and expects the memory to still apply on `main`; (b) the same user runs `clud` in two checkouts of the same clone (worktree, or a separate `git clone`) and expects the same memory bucket; (c) a fork (`other/clud` vs `zackees/clud`) is a *different* project until explicitly bridged.
+
+**Decision:** The agent-memory scope partition key is the **normalized `origin` URL** (`repo://<host>/<owner>/<repo>` after `normalize_origin_url`), with a `dir://<canonical-common-dir>` fallback for repos with no remote. Branch is recorded as `branch_name` provenance metadata but is **not** part of the partition key by default. Worktrees of one clone resolve to the same key automatically via `git rev-parse --git-common-dir`. The user opts out per-branch by creating `<common_dir>/.clud/memory-branch-isolate`, which appends `#branch=<branch>` to the scope key for that working tree.
+
+**Rationale:**
+- Cross-branch continuity is the common case for project facts: build commands, library choices, conventions. Partitioning by branch would silently hide those facts whenever the user switches branches, defeating the purpose of long-lived memory.
+- Cross-repo isolation (forks, unrelated projects) is the *other* common case. Origin URL is the only stable identifier that distinguishes a fork from its upstream without false negatives (paths differ between machines; remote names differ between users).
+- Worktree convergence falls out for free: `--git-common-dir` already points at the primary's `.git` from any linked worktree, so one normalize-step gives identical keys.
+- Orphan branches are still parented to the clone's `origin` — the orphan's contents are likely still about the same project, and the user can opt out per-branch if not.
+- The opt-out is a single marker file (not a config-key, not a sub-database), so it travels with the repo if the user commits it, and is a one-line decision to make or revoke.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Branch as part of the partition key by default | Switching branches hides project facts. Promotion logic would need a "branch-agnostic" tier anyway, recreating today's behavior with extra steps. |
+| Path-based key only (`canonical-working-dir`) | Different machines have different paths; the same clone moves between checkouts; loses cross-machine continuity that the origin URL gives for free. |
+| One memory bucket per machine, branch-agnostic | Cross-repo pollution: memories from `~/other/foo` would leak into `~/this/bar` whenever the user runs `clud` in either. |
+| Per-branch scope unless user opts *in* to sharing | Inverts the common case — most facts are cross-branch project facts, not branch facts. The bias should make the common case free. |
+| Treat orphan branches as their own scope by default | The orphan's contents are still about the same project most of the time (try/throwaway branches, doc-only branches). Forced isolation costs the user expected continuity; the opt-out marker is the right granularity. |
+
+**Consequences:**
+- A user who genuinely wants per-branch isolation (e.g., spike branches that contradict main's conventions) has to run `clud memory branch-isolate` once per branch.
+- Renaming a remote (e.g., `zackees/clud-old` → `zackees/clud`) produces a new partition. We accept the user-visible rename as the trigger for a deliberate `clud memory rekey` (deferred to v0.5; out of scope for #267).
+- Forks are isolated by default — exactly what the user wants. Bridging two forks requires the explicit `--repo-glob` flag at query time (consumer wiring in #259 / #262).
+- The marker file lives at `<common_dir>/.clud/memory-branch-isolate` instead of inside the SQLite store. That's deliberate: the decision should travel with the working tree via `git`, not be hidden in a per-user database.
