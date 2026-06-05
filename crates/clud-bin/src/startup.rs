@@ -161,6 +161,10 @@ pub fn install_ctrl_c_flag() -> Arc<AtomicBool> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&interrupted);
     if let Err(e) = ctrlc::set_handler(move || {
+        // Stamp the first-Ctrl+C wall-clock observation before we flip
+        // the flag the rest of the process polls, so the elapsed-time
+        // measurement covers everything from signal-delivery onward.
+        crate::ctrl_c_track::record_observed();
         handler_flag.store(true, Ordering::SeqCst);
     }) {
         eprintln!("[clud] warning: failed to install Ctrl+C handler: {}", e);

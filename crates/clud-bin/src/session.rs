@@ -1030,9 +1030,34 @@ fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
 /// pump has observed the flag. Platform-split because `send_interrupt_impl`
 /// is a byte-write on Windows (duplicates the 0x03 already forwarded via
 /// raw-mode stdin) and a pgroup-SIGINT on POSIX (cooperative, no duplicate).
+///
+/// Both branches now try a fire-and-forget daemon handoff first so the
+/// CLI can return to the shell in sub-100ms instead of blocking on
+/// `process.wait_impl(Some(2.0))` (POSIX) or the ConPTY close-event
+/// chain that occasionally lets cmd.exe surface the `Terminate batch job
+/// (Y/N)?` prompt (Windows). The daemon's background thread does the
+/// real kill_tree from out of the user's hot path.
 fn interrupt_pty_process(process: &NativePtyProcess, verbose: bool) -> i32 {
+    let pid = process.pid().ok().flatten();
+    let handed_off = pid.is_some_and(|pid| {
+        if let Ok(state_dir) = crate::daemon::default_state_dir() {
+            crate::daemon::try_handoff_kill_to_daemon(&state_dir, &[pid], Some("ctrl_c_pty"))
+        } else {
+            false
+        }
+    });
+
     #[cfg(windows)]
     {
+        if handed_off {
+            // Daemon owns the kill. Skip ConPTY close so cmd.exe doesn't
+            // get a chance to print "Terminate batch job (Y/N)?" before
+            // the Job Object reaps it on our process exit.
+            if verbose {
+                verbose_log::log("[clud] interrupted via Ctrl+C (pty, handed to daemon)");
+            }
+            return 130;
+        }
         // Closing the PTY triggers ConPTY's CTRL_CLOSE_EVENT path and
         // tears the child down without writing a second 0x03 byte.
         let _ = process.close_impl();
@@ -1043,6 +1068,14 @@ fn interrupt_pty_process(process: &NativePtyProcess, verbose: bool) -> i32 {
     }
     #[cfg(not(windows))]
     {
+        if handed_off {
+            // Daemon will SIGKILL the tree; skip the 2s blocking wait.
+            let _ = process.close_impl();
+            if verbose {
+                verbose_log::log("[clud] interrupted via Ctrl+C (pty, handed to daemon)");
+            }
+            return 130;
+        }
         // Belt-and-braces: portable-pty's `send_interrupt` queries
         // `tcgetpgrp(master_fd)` to find the FG pgroup and signals it.
         // If that query returns None (no controlling-terminal coupling

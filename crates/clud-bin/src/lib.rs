@@ -13,6 +13,7 @@ pub mod command;
 pub mod console_input;
 pub mod console_setup;
 pub mod console_title;
+pub mod ctrl_c_track;
 pub mod daemon;
 pub mod dnd;
 pub mod gc;

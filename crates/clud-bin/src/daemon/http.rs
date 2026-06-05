@@ -31,6 +31,7 @@ use super::process_utils::pid_is_alive;
 use super::types::{
     CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
 };
+use crate::ctrl_c_track::{self, CtrlCEvent};
 use crate::session_registry::LiveSession;
 
 /// Supplier of live session-registry rows. Injected at the dashboard
@@ -69,6 +70,12 @@ pub struct DashboardState {
     pub sessions: Vec<SessionView>,
     pub gc: Vec<ListRow>,
     pub repos: Vec<RepoVisit>,
+    /// Recent cross-path Ctrl+C exit events. Each entry is one CLI
+    /// process that observed Ctrl+C and recorded the elapsed wall-clock
+    /// time from observation to process-exit. Capped at
+    /// [`ctrl_c_track::DASHBOARD_EVENT_LIMIT`], newest first.
+    #[serde(default)]
+    pub ctrl_c_events: Vec<CtrlCEvent>,
     pub stats: Stats,
 }
 
@@ -379,6 +386,9 @@ fn build_dashboard_state(
         *gc_by_kind.entry(row.kind.clone()).or_insert(0) += 1;
     }
 
+    let ctrl_c_events =
+        ctrl_c_track::read_recent_events(state_dir, ctrl_c_track::DASHBOARD_EVENT_LIMIT);
+
     let stats = Stats {
         session_count: sessions.len(),
         live_session_count,
@@ -400,6 +410,7 @@ fn build_dashboard_state(
         sessions,
         gc: gc_rows,
         repos,
+        ctrl_c_events,
         stats,
     })
 }
@@ -799,6 +810,32 @@ mod tests {
         assert!(json.get("daemon_pid").is_none());
         assert!(json.get("worker_pid").is_none());
         assert!(json.get("root_pid").is_none());
+    }
+
+    #[test]
+    fn build_state_includes_ctrl_c_events_when_present() {
+        use crate::ctrl_c_track::{events_dir, CtrlCEvent, InvocationKind};
+        let dir = tempfile::tempdir().unwrap();
+        let edir = events_dir(dir.path());
+        std::fs::create_dir_all(&edir).unwrap();
+        for i in 0..3u64 {
+            let event = CtrlCEvent {
+                pid: 1_000 + i as u32,
+                observed_at_ms: 1_700_000_000_000 + i * 1000,
+                exit_at_ms: 1_700_000_000_500 + i * 1000,
+                elapsed_ms: 500 + i,
+                kind: InvocationKind::Direct,
+                exit_code: 130,
+                cwd: Some(format!("/tmp/a{i}")),
+            };
+            let path = edir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
+            std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
+        }
+        let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
+        assert_eq!(state.ctrl_c_events.len(), 3);
+        // Newest first
+        assert_eq!(state.ctrl_c_events[0].exit_at_ms, 1_700_000_000_500 + 2_000);
+        assert_eq!(state.ctrl_c_events[2].exit_at_ms, 1_700_000_000_500);
     }
 
     #[test]

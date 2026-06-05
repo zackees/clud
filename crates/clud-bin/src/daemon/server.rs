@@ -184,6 +184,12 @@ fn handle_daemon_connection(
                 message: err.to_string(),
             },
         },
+        DaemonRequest::AdoptKill { pids, reason } => {
+            spawn_adopt_kill_worker(pids.clone(), reason);
+            DaemonResponse::AdoptKillAck {
+                accepted: pids.len(),
+            }
+        }
         DaemonRequest::Gc { payload } => {
             let reply = dispatch_gc_op(gc_tx.as_ref(), payload);
             DaemonResponse::Gc { reply }
@@ -343,6 +349,30 @@ fn reap_worker_when_done(
     });
 }
 
+/// Background `kill_tree` for [`DaemonRequest::AdoptKill`].
+///
+/// The CLI hands us a list of root PIDs it was about to wait on and we
+/// finish the job from out here so the foreground `clud` can drop the
+/// user back to the shell immediately. Best-effort and fire-and-forget:
+/// failures are silent because the parent CLI already returned 130 and
+/// nobody is on the other end to receive a reply. The kill walk uses
+/// `process_tree::kill_tree` for parity with the synchronous path it
+/// replaces (see `runner::teardown_interrupted_child`).
+fn spawn_adopt_kill_worker(pids: Vec<u32>, reason: Option<String>) {
+    let _ = thread::Builder::new()
+        .name("clud-adopt-kill".to_string())
+        .spawn(move || {
+            for pid in pids {
+                crate::process_tree::kill_tree(pid);
+            }
+            // `reason` is for telemetry / future event-logging — hold a
+            // reference so the field doesn't get optimized out and so a
+            // future change can route it into `ctrl_c_events` without
+            // touching the wire format again.
+            let _ = reason;
+        });
+}
+
 fn daemon_terminate_session(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
@@ -481,4 +511,35 @@ fn merge_ctrl_c_profile_for_daemon(session: &mut SessionSnapshot, mut update: Ct
         current.daemon_received_at_ms = update.daemon_received_at_ms;
     }
     current.fast_path = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// `spawn_adopt_kill_worker` must return immediately — the whole
+    /// point of the AdoptKill IPC is that the CLI's wait time is bounded
+    /// by an `mpsc` thread-spawn, not by the eventual `kill_tree` walk.
+    /// Hand it a PID that's almost certainly dead so `kill_tree` returns
+    /// fast, and pin the spawn-side latency below 100ms even on slow CI.
+    #[test]
+    fn spawn_adopt_kill_worker_returns_promptly() {
+        let started = Instant::now();
+        spawn_adopt_kill_worker(vec![u32::MAX], Some("test".to_string()));
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "spawn took too long: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn spawn_adopt_kill_worker_accepts_empty_pids() {
+        // Zero-PID payload is valid wire data (the CLI may have lost the
+        // root PID); the worker must still spawn without panicking.
+        let started = Instant::now();
+        spawn_adopt_kill_worker(Vec::new(), None);
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
 }

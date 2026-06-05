@@ -332,45 +332,44 @@ enum ProcessOutcome {
 /// Tear down a backend child that has not exited yet because the user
 /// just hit Ctrl+C.
 ///
-/// Sequence:
-///
-/// 1. Windows-only, when the direct child is a native executable: send
-///    `CTRL_BREAK_EVENT` to the child's console process group. The
-///    backend is spawned with
-///    `CREATE_NEW_PROCESS_GROUP` so the OS does *not* deliver the
-///    user's `CTRL_C_EVENT` to it — that prevents stray
-///    `KeyboardInterrupt` tracebacks from blocking `subprocess` waits
-///    in the `nodejs-wheel` Python launcher used by some Claude Code
-///    installs. The break we send here is the cooperative path for any
-///    backend that *does* install a Ctrl+Break handler. Failures and
-///    non-Windows targets short-circuit silently and we proceed to the
-///    hard kill.
-///
-///    When the direct child is `cmd.exe` running a `.cmd` / `.bat`
-///    backend wrapper, skip this step. Ctrl+Break makes cmd's batch
-///    interpreter display `Terminate batch job (Y/N)?` and wait on
-///    stdin, so the clean interrupt path must go straight to `kill_tree`.
-/// 2. `kill_tree`: snapshot the PID *before* killing the direct child
-///    so we can walk descendants. On Windows the direct child is
-///    cmd.exe (BatBadBat wrapper, see `subprocess.rs`) and the real
-///    agent (node.exe for codex / claude) is a grandchild — plain
-///    `process.kill()` would only TerminateProcess the cmd.exe and the
-///    orphan would keep writing to the console until our Job Object
-///    closes, producing the multi-second hang users reported.
-/// 3. `process.kill()` + `process.wait(2s)`: final TerminateProcess on
-///    the direct handle and a bounded wait so we don't return while
-///    the child is still draining.
+/// **Goal: sub-100ms return to shell.** The legacy path did a synchronous
+/// `kill_tree` + bounded `process.wait(2s)`, which produced the user-
+/// reported up-to-4s Ctrl+C lag (kill_tree's sysinfo refresh plus the
+/// blocking wait; in the stream-JSON path the post-loop `process.wait(2s)`
+/// could add a second 2s window). We now hand the root PID to the always-
+/// on daemon over a fire-and-forget IPC, then return immediately and let
+/// the kill-on-close Job Object (running-process-core 3.4+) TerminateProcess
+/// the direct child as our process exits. `TerminateProcess` is synchronous
+/// and silent — no signal, so cmd.exe never gets a chance to print
+/// `Terminate batch job (Y/N)?`. If the daemon isn't available we fall
+/// back to the old synchronous path (with the cooperative Ctrl+Break +
+/// `kill_tree` + bounded wait) so `--no-daemon` users still get cleanup.
 fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wrapped: bool) {
     if let Some(pid) = process.pid() {
-        // Cooperative Ctrl+Break first when it is safe. No-op on POSIX
-        // (returns false), and any Windows failure is non-fatal because
-        // the hard kill below always runs.
+        if let Ok(state_dir) = crate::daemon::default_state_dir() {
+            if crate::daemon::try_handoff_kill_to_daemon(
+                &state_dir,
+                &[pid],
+                Some("ctrl_c_subprocess"),
+            ) {
+                // The daemon will kill_tree on a background thread; our
+                // job is just to get out of the way so the user gets
+                // their shell back. The Job Object reaps the direct
+                // child via TerminateProcess as we exit.
+                return;
+            }
+        }
+        // Daemon-less fallback: keep the legacy synchronous behavior so
+        // `--no-daemon` invocations still leave the process tree clean.
         if process_tree::should_cooperative_break(batch_wrapped) {
             let _ = process_tree::try_break_group(pid);
         }
         process_tree::kill_tree(pid);
     }
     let _ = process.kill();
+    // Daemon-less fallback only: bounded wait so the legacy path doesn't
+    // race itself. Skipped when we successfully handed off above — that's
+    // the whole point of the fast return.
     let _ = process.wait(Some(std::time::Duration::from_secs(2)));
 }
 

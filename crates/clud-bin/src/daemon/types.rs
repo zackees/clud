@@ -176,6 +176,18 @@ pub(super) enum DaemonRequest {
         session_id: String,
         profile: CtrlCProfile,
     },
+    /// Fire-and-forget handoff: the CLI is exiting and wants the daemon
+    /// to kill these process trees on a background thread so the user-
+    /// visible Ctrl+C-to-shell latency stays sub-100ms. The daemon
+    /// replies `AdoptKillAck` immediately (before doing the kill) so the
+    /// CLI's `send_daemon_request` call returns ASAP. PIDs are typically
+    /// the root spawned by `runner::run_plan_subprocess` /
+    /// `run_plan_pty`.
+    AdoptKill {
+        pids: Vec<u32>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
     /// Issue #135: GC ops served by the registry worker thread (see
     /// `gc_service.rs`). Carry the original `gc.*` op inside a single
     /// enum variant so the wire format and the registry-worker dispatch
@@ -205,6 +217,11 @@ pub(super) enum DaemonResponse {
     },
     Interrupted {
         session: SessionSnapshot,
+    },
+    /// Ack for [`DaemonRequest::AdoptKill`]. Returned before the daemon
+    /// actually performs the kill, so the CLI can exit immediately.
+    AdoptKillAck {
+        accepted: usize,
     },
     Gc {
         reply: GcReply,
@@ -560,6 +577,58 @@ mod tests {
         assert!(wire.contains(r#""op":"interrupt""#));
         assert!(wire.contains(r#""cli_handoff_ms":10"#));
         assert!(wire.contains(r#""fast_path":true"#));
+    }
+
+    #[test]
+    fn adopt_kill_request_roundtrips_pids_and_reason() {
+        let request = DaemonRequest::AdoptKill {
+            pids: vec![1234, 5678],
+            reason: Some("ctrl_c_handoff".to_string()),
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(wire.contains(r#""op":"adopt_kill""#));
+        assert!(wire.contains(r#""pids":[1234,5678]"#));
+        let parsed: DaemonRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonRequest::AdoptKill { pids, reason } => {
+                assert_eq!(pids, vec![1234, 5678]);
+                assert_eq!(reason.as_deref(), Some("ctrl_c_handoff"));
+            }
+            other => panic!("expected AdoptKill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adopt_kill_request_omits_reason_when_none() {
+        let request = DaemonRequest::AdoptKill {
+            pids: vec![99],
+            reason: None,
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(wire.contains(r#""pids":[99]"#));
+        // `reason` is `#[serde(default)]`; absence on the wire round-trips.
+        let parsed: DaemonRequest =
+            serde_json::from_str(r#"{"op":"adopt_kill","pids":[99]}"#).unwrap();
+        match parsed {
+            DaemonRequest::AdoptKill { pids, reason } => {
+                assert_eq!(pids, vec![99]);
+                assert!(reason.is_none());
+            }
+            other => panic!("expected AdoptKill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adopt_kill_ack_response_roundtrips() {
+        let response = DaemonResponse::AdoptKillAck { accepted: 2 };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(wire.contains(r#""op":"adopt_kill_ack""#));
+        assert!(wire.contains(r#""accepted":2"#));
+        let parsed: DaemonResponse = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(
+            parsed,
+            DaemonResponse::AdoptKillAck { accepted: 2 }
+        ));
     }
 
     #[test]
