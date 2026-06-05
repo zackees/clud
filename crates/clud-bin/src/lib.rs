@@ -24,6 +24,7 @@ pub mod launch_setup;
 pub mod loop_artifacts;
 pub mod loop_check;
 pub mod loop_spec;
+pub mod memory;
 pub mod process_tree;
 pub mod runner;
 pub mod session;
