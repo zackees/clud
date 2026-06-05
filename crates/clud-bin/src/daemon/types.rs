@@ -298,8 +298,26 @@ pub(crate) enum GcReply {
     ListOk {
         rows: Vec<ListRow>,
     },
+    /// Synchronous purge result. Used by `Purge { dry_run: true }` and
+    /// `DeleteById` — both finish on the registry worker thread before
+    /// replying, so the caller learns the exact outcome inline.
     PurgeOk {
         removed: usize,
+        skipped: usize,
+    },
+    /// Issue #268: a non-dry-run bulk `Purge` returns the moment the
+    /// worker has dispatched every purgeable entry onto the parallel
+    /// purge pool. The filesystem `remove_dir_all` and the matching
+    /// `registry.delete(id)` happen asynchronously; this reply only
+    /// reports how many tasks were dispatched (`dispatched`) and how
+    /// many candidates the worker filtered out as live or non-purgeable
+    /// (`skipped`). Completions stream into the worker's mpsc as
+    /// `RegistryMsg::PurgeCompletion(..)` items and are logged to the
+    /// daemon log. The redb registry is eventually consistent with the
+    /// filesystem — stale rows during/after a partial purge are
+    /// acceptable and get reconciled by the next list/purge.
+    PurgeStarted {
+        dispatched: usize,
         skipped: usize,
     },
     ReconcileOk {

@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,7 +27,10 @@ use crate::worktrees;
 use super::types::{GcOp, GcReply, ListRow};
 
 /// How long a connection thread waits for the registry worker before
-/// giving up. Generous because purge can rm-rf large trees synchronously.
+/// giving up. Since #268 the worker no longer runs `remove_dir_all`
+/// inline — bulk purges fan out to the purge pool and reply
+/// `PurgeStarted` within milliseconds — so this timeout protects only
+/// against a genuinely wedged worker thread.
 pub(super) const WORKER_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ENV_GC_TICK_SECS: &str = "CLUD_GC_TICK_SECS";
@@ -36,39 +39,137 @@ const ENV_GC_WARN_FREE_GB: &str = "CLUD_GC_WARN_FREE_GB";
 const ENV_GC_AUTO_PURGE_FREE_GB: &str = "CLUD_GC_AUTO_PURGE_FREE_GB";
 const ENV_GC_MIN_AGE_HOURS: &str = "CLUD_GC_MIN_AGE_HOURS";
 const ENV_GC_AUTO_PURGE_ENABLED: &str = "CLUD_GC_AUTO_PURGE_ENABLED";
+/// Issue #268: per-daemon cap on parallel `remove_dir_all` workers
+/// servicing the purge pool. Defaults to `min(num_cpus, 8)`. Setting
+/// `0` falls back to the default (not synchronous-mode); to truly
+/// disable parallelism the user should set it to `1`.
+const ENV_GC_PURGE_CONCURRENCY: &str = "CLUD_GC_PURGE_CONCURRENCY";
 const DEFAULT_GC_TICK_SECS: u64 = 3600;
 const DEFAULT_EXTERN_REPO_STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_GC_WARN_FREE_GB: u64 = 10;
 const DEFAULT_GC_AUTO_PURGE_FREE_GB: u64 = 5;
 const DEFAULT_GC_MIN_AGE_HOURS: u64 = 24;
 const DEFAULT_GC_AUTO_PURGE_ENABLED: bool = true;
+const DEFAULT_GC_PURGE_CONCURRENCY_CAP: usize = 8;
 const PERIODIC_GC_WORKTREE_STALE_AFTER: &str = "48h";
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
 
 #[cfg(test)]
 const ENV_TEST_GH_BIN: &str = "CLUD_TEST_GH_BIN";
 
-/// One request handed from a connection thread to the registry worker.
+/// One client-initiated GC op handed from a connection thread (or HTTP
+/// handler) to the registry worker. The worker processes it inline and
+/// fires `reply_tx` exactly once with the resulting `GcReply`.
 pub(super) struct GcRequestMsg {
     pub(super) op: GcOp,
     pub(super) reply_tx: mpsc::SyncSender<GcReply>,
 }
 
+/// Issue #268: the worker's mpsc carries two kinds of message. Client
+/// ops (`Op`) are fast — they touch redb only — and reply on
+/// `GcRequestMsg::reply_tx`. Purge completions (`PurgeCompletion`) are
+/// fire-and-forget callbacks from the purge-pool threads: they tell the
+/// worker that the filesystem half of one entry's deletion has finished
+/// (success or failure) so the worker can run `registry.delete(id)`
+/// — also fast — and log the outcome.
+pub(super) enum RegistryMsg {
+    Op(GcRequestMsg),
+    PurgeCompletion(PurgeCompletion),
+}
+
+/// Issue #268: result of one entry's parallel filesystem deletion,
+/// delivered back to the registry worker so it can drop the
+/// corresponding redb row on success or log+keep on failure.
+pub(super) struct PurgeCompletion {
+    pub(super) id: i64,
+    pub(super) path: String,
+    pub(super) kind: String,
+    pub(super) result: Result<(), String>,
+}
+
+/// One unit of work for the purge pool — the entry to remove plus the
+/// channel a completion message should be sent back on. `completion_tx`
+/// is a clone of the registry worker's own `RegistryMsg` sender; the
+/// pool thread sends `RegistryMsg::PurgeCompletion(..)` into it, so
+/// completions land in the same queue the worker is already draining.
+struct PurgeJob {
+    entry: TrackedEntry,
+    completion_tx: mpsc::Sender<RegistryMsg>,
+}
+
 type LiveCwdsProvider = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync + 'static>;
+
+fn purge_concurrency_from_env() -> usize {
+    purge_concurrency_from_raw(std::env::var(ENV_GC_PURGE_CONCURRENCY).ok().as_deref())
+}
+
+fn purge_concurrency_from_raw(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(default_purge_concurrency)
+}
+
+fn default_purge_concurrency() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    cpus.clamp(1, DEFAULT_GC_PURGE_CONCURRENCY_CAP)
+}
+
+/// Spawn N long-lived pool threads, each pulling `PurgeJob` items off
+/// a shared mpsc and running `remove_entry_filesystem` in parallel.
+/// Returns the sender every dispatch site uses to enqueue jobs.
+/// Dropping the sender signals the pool threads to exit.
+fn spawn_purge_pool(concurrency: usize) -> mpsc::Sender<PurgeJob> {
+    let (tx, rx) = mpsc::channel::<PurgeJob>();
+    let shared_rx = Arc::new(Mutex::new(rx));
+    for i in 0..concurrency {
+        let rx = Arc::clone(&shared_rx);
+        let _ = thread::Builder::new()
+            .name(format!("clud-gc-purge-{i}"))
+            .spawn(move || purge_pool_worker(rx));
+    }
+    tx
+}
+
+fn purge_pool_worker(rx: Arc<Mutex<mpsc::Receiver<PurgeJob>>>) {
+    loop {
+        let job = {
+            let guard = match rx.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.recv()
+        };
+        let Ok(job) = job else { return };
+        let result = remove_entry_filesystem(&job.entry);
+        let completion = PurgeCompletion {
+            id: job.entry.id,
+            path: job.entry.path.clone(),
+            kind: job.entry.kind.clone(),
+            result,
+        };
+        // If the worker has hung up we just drop the completion;
+        // there's nothing left to apply it against.
+        let _ = job
+            .completion_tx
+            .send(RegistryMsg::PurgeCompletion(completion));
+    }
+}
 
 /// Open the registry and spawn the single worker thread. Returns the
 /// sender every connection thread uses to dispatch GC ops. Caller keeps
 /// the sender alive for the daemon's lifetime; dropping it stops the
 /// worker.
 #[cfg(test)]
-pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
+pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
     spawn_registry_worker_with(registry)
 }
 
 pub(super) fn spawn_registry_worker_for_state(
     state_dir: PathBuf,
-) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
+) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
     spawn_registry_worker_with_live_cwds(
         registry,
@@ -82,19 +183,30 @@ pub(super) fn spawn_registry_worker_for_state(
 #[cfg(test)]
 pub(super) fn spawn_registry_worker_with(
     registry: Registry,
-) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
+) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     spawn_registry_worker_with_live_cwds(registry, Arc::new(Vec::<PathBuf>::new))
 }
 
 fn spawn_registry_worker_with_live_cwds(
     registry: Registry,
     live_cwds_provider: LiveCwdsProvider,
-) -> std::io::Result<mpsc::Sender<GcRequestMsg>> {
-    let (tx, rx) = mpsc::channel::<GcRequestMsg>();
+) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
+    let (tx, rx) = mpsc::channel::<RegistryMsg>();
+    let pool_tx = spawn_purge_pool(purge_concurrency_from_env());
+    let completion_tx = tx.clone();
     let tick_cadence = gc_tick_cadence_from_env();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
-        .spawn(move || run_worker_loop(registry, rx, tick_cadence, live_cwds_provider))?;
+        .spawn(move || {
+            run_worker_loop(
+                registry,
+                rx,
+                completion_tx,
+                pool_tx,
+                tick_cadence,
+                live_cwds_provider,
+            )
+        })?;
     Ok(tx)
 }
 
@@ -184,13 +296,21 @@ fn parse_bool_setting(raw: Option<&str>, default: bool) -> bool {
 
 fn run_worker_loop(
     registry: Registry,
-    rx: mpsc::Receiver<GcRequestMsg>,
+    rx: mpsc::Receiver<RegistryMsg>,
+    completion_tx: mpsc::Sender<RegistryMsg>,
+    pool_tx: mpsc::Sender<PurgeJob>,
     tick_cadence: Option<Duration>,
     live_cwds_provider: LiveCwdsProvider,
 ) {
     let Some(tick_cadence) = tick_cadence else {
         while let Ok(msg) = rx.recv() {
-            handle_worker_msg(&registry, msg, &live_cwds_provider);
+            handle_registry_msg(
+                &registry,
+                &pool_tx,
+                &completion_tx,
+                msg,
+                &live_cwds_provider,
+            );
         }
         return;
     };
@@ -200,14 +320,25 @@ fn run_worker_loop(
         let timeout = next_tick.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
             Ok(msg) => {
-                handle_worker_msg(&registry, msg, &live_cwds_provider);
+                handle_registry_msg(
+                    &registry,
+                    &pool_tx,
+                    &completion_tx,
+                    msg,
+                    &live_cwds_provider,
+                );
                 if Instant::now() >= next_tick {
-                    run_periodic_purge_tick(&registry, &live_cwds_provider);
+                    run_periodic_purge_tick(
+                        &registry,
+                        &pool_tx,
+                        &completion_tx,
+                        &live_cwds_provider,
+                    );
                     next_tick = Instant::now() + tick_cadence;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                run_periodic_purge_tick(&registry, &live_cwds_provider);
+                run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
                 next_tick = Instant::now() + tick_cadence;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -215,20 +346,62 @@ fn run_worker_loop(
     }
 }
 
-fn handle_worker_msg(
+fn handle_registry_msg(
     registry: &Registry,
-    msg: GcRequestMsg,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    msg: RegistryMsg,
     live_cwds_provider: &LiveCwdsProvider,
 ) {
-    let reply = process_op_with_live_cwds(registry, msg.op, live_cwds_provider());
-    // Hung-up callers are fine — the worker keeps serving the rest.
-    let _ = msg.reply_tx.send(reply);
+    match msg {
+        RegistryMsg::Op(req) => {
+            let reply = process_op(
+                registry,
+                pool_tx,
+                completion_tx,
+                req.op,
+                live_cwds_provider(),
+            );
+            // Hung-up callers are fine — the worker keeps serving the rest.
+            let _ = req.reply_tx.send(reply);
+        }
+        RegistryMsg::PurgeCompletion(c) => apply_purge_completion(registry, c),
+    }
 }
 
-fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsProvider) {
+/// Apply one parallel-purge completion: on success, drop the redb row
+/// for the removed entry; on failure, log and keep the row so the next
+/// purge attempt retries. Stale rows during/after a partial purge are
+/// acceptable — eventual consistency by design (#268).
+fn apply_purge_completion(registry: &Registry, c: PurgeCompletion) {
+    match c.result {
+        Ok(()) => match registry.delete(c.id) {
+            Ok(()) => eprintln!("[gc] purge: removed {} ({})", c.path, c.kind),
+            Err(err) => eprintln!(
+                "[gc] purge: removed dir but failed to delete redb row id={} path={} ({}): {err}",
+                c.id, c.path, c.kind
+            ),
+        },
+        Err(message) => {
+            eprintln!(
+                "[gc] purge: failed to remove {} ({}): {message}",
+                c.path, c.kind
+            );
+        }
+    }
+}
+
+fn run_periodic_purge_tick(
+    registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    live_cwds_provider: &LiveCwdsProvider,
+) {
     let config = GcDiskWatchdogConfig::from_env();
     run_periodic_purge_tick_with_free_space(
         registry,
+        pool_tx,
+        completion_tx,
         live_cwds_provider,
         &config,
         &free_space_bytes_for_path,
@@ -237,16 +410,27 @@ fn run_periodic_purge_tick(registry: &Registry, live_cwds_provider: &LiveCwdsPro
 
 fn run_periodic_purge_tick_with_free_space<F>(
     registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
     live_cwds_provider: &LiveCwdsProvider,
     disk_config: &GcDiskWatchdogConfig,
     free_space: &F,
 ) where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
 {
-    run_disk_watchdog_tick(registry, live_cwds_provider, disk_config, free_space);
-
-    let worktree_reply = process_op_with_live_cwds(
+    run_disk_watchdog_tick(
         registry,
+        pool_tx,
+        completion_tx,
+        live_cwds_provider,
+        disk_config,
+        free_space,
+    );
+
+    let worktree_reply = process_op(
+        registry,
+        pool_tx,
+        completion_tx,
         GcOp::Purge {
             duration: Some(PERIODIC_GC_WORKTREE_STALE_AFTER.to_string()),
             kind: Some(WORKTREE_KIND.to_string()),
@@ -256,8 +440,10 @@ fn run_periodic_purge_tick_with_free_space<F>(
     );
     log_periodic_purge_reply(WORKTREE_KIND, worktree_reply);
 
-    let extern_reply = process_op_with_live_cwds(
+    let extern_reply = process_op(
         registry,
+        pool_tx,
+        completion_tx,
         GcOp::Purge {
             duration: None,
             kind: Some(EXTERN_REPO_KIND.to_string()),
@@ -294,6 +480,8 @@ fn disk_watchdog_decision(config: &GcDiskWatchdogConfig, free_bytes: u64) -> Dis
 
 fn run_disk_watchdog_tick<F>(
     registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
     live_cwds_provider: &LiveCwdsProvider,
     config: &GcDiskWatchdogConfig,
     free_space: &F,
@@ -339,6 +527,8 @@ fn run_disk_watchdog_tick<F>(
     }
     let purge_reply = purge_old_reclaimable_entries_for_roots(
         registry,
+        pool_tx,
+        completion_tx,
         live_cwds_provider,
         &purge_roots,
         config.min_age,
@@ -374,6 +564,8 @@ fn tracked_entry_root(entry: &TrackedEntry) -> PathBuf {
 
 fn purge_old_reclaimable_entries_for_roots(
     registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
     live_cwds_provider: &LiveCwdsProvider,
     roots: &[PathBuf],
     min_age: Duration,
@@ -392,7 +584,7 @@ fn purge_old_reclaimable_entries_for_roots(
         .filter(|entry| entry.kind == WORKTREE_KIND || entry.kind == SIBLING_CLONE_KIND)
         .filter(|entry| tracked_entry_matches_any_root(entry, roots))
         .collect();
-    purge_entries(registry, candidates, live_cwds_provider(), false)
+    dispatch_purge_entries(pool_tx, completion_tx, candidates, live_cwds_provider())
 }
 
 fn tracked_entry_matches_any_root(entry: &TrackedEntry, roots: &[PathBuf]) -> bool {
@@ -417,6 +609,15 @@ fn log_disk_watchdog_purge_reply(
     reply: GcReply,
 ) {
     match reply {
+        GcReply::PurgeStarted {
+            dispatched,
+            skipped,
+        } => {
+            eprintln!(
+                "[clud] gc tick disk: auto-purge checked {low_root_count} low root(s), min age {}h, dispatched {dispatched}, skipped {skipped}",
+                config.min_age.as_secs() / (60 * 60)
+            );
+        }
         GcReply::PurgeOk { removed, skipped } => {
             eprintln!(
                 "[clud] gc tick disk: auto-purge checked {low_root_count} low root(s), min age {}h, removed {removed}, skipped {skipped}",
@@ -469,6 +670,12 @@ fn disk_probe_path(path: &Path) -> Result<PathBuf, String> {
 
 fn log_periodic_purge_reply(kind: &str, reply: GcReply) {
     match reply {
+        GcReply::PurgeStarted {
+            dispatched,
+            skipped,
+        } => {
+            eprintln!("[clud] gc tick {kind}: dispatched {dispatched}, skipped {skipped}");
+        }
         GcReply::PurgeOk { removed, skipped } => {
             eprintln!("[clud] gc tick {kind}: removed {removed}, skipped {skipped}");
         }
@@ -481,7 +688,13 @@ fn log_periodic_purge_reply(kind: &str, reply: GcReply) {
     }
 }
 
-fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathBuf>) -> GcReply {
+fn process_op(
+    registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    op: GcOp,
+    live_cwds: Vec<PathBuf>,
+) -> GcReply {
     match op {
         GcOp::List { kind } => match registry.list(kind.as_deref()) {
             Ok(rows) => {
@@ -533,7 +746,11 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
                     };
                 }
             };
-            purge_entries(registry, candidates, live_cwds, dry_run)
+            if dry_run {
+                dry_run_purge_entries(candidates, live_cwds)
+            } else {
+                dispatch_purge_entries(pool_tx, completion_tx, candidates, live_cwds)
+            }
         }
 
         GcOp::Reconcile { repo_root } => {
@@ -628,12 +845,14 @@ fn process_op_with_live_cwds(registry: &Registry, op: GcOp, live_cwds: Vec<PathB
     }
 }
 
-fn purge_entries(
-    registry: &Registry,
+/// Filter `candidates` down to entries that are safe to purge. Returns
+/// `(purgeable, skipped)`. Centralizes the live-lock / live-cwd /
+/// kind-allows-purge gates so the dry-run and dispatch paths agree on
+/// what counts as eligible.
+fn partition_purgeable(
     candidates: Vec<TrackedEntry>,
     live_cwds: Vec<PathBuf>,
-    dry_run: bool,
-) -> GcReply {
+) -> (Vec<TrackedEntry>, usize) {
     let live_locks = collect_live_lock_paths();
     let live_cwds = canonicalize_live_cwds(live_cwds);
     let mut purgeable = Vec::new();
@@ -649,19 +868,55 @@ fn purge_entries(
         }
         purgeable.push(candidate);
     }
-    if dry_run {
-        return GcReply::PurgeOk {
-            removed: purgeable.len(),
-            skipped,
+    (purgeable, skipped)
+}
+
+fn dry_run_purge_entries(candidates: Vec<TrackedEntry>, live_cwds: Vec<PathBuf>) -> GcReply {
+    let (purgeable, skipped) = partition_purgeable(candidates, live_cwds);
+    GcReply::PurgeOk {
+        removed: purgeable.len(),
+        skipped,
+    }
+}
+
+/// Issue #268: fan out each purgeable entry to the purge pool and
+/// return immediately with `PurgeStarted`. The pool threads each run
+/// `remove_entry_filesystem` in parallel and report completion via
+/// `RegistryMsg::PurgeCompletion`, which the registry worker applies
+/// to redb asynchronously. Bias: delete first, update index after —
+/// the redb writer never blocks on filesystem work.
+fn dispatch_purge_entries(
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    candidates: Vec<TrackedEntry>,
+    live_cwds: Vec<PathBuf>,
+) -> GcReply {
+    let (purgeable, skipped) = partition_purgeable(candidates, live_cwds);
+    let mut dispatched = 0usize;
+    for entry in purgeable {
+        let job = PurgeJob {
+            entry,
+            completion_tx: completion_tx.clone(),
         };
-    }
-    let mut removed = 0usize;
-    for entry in &purgeable {
-        if remove_entry_and_delete_row(registry, entry).is_ok() {
-            removed += 1;
+        if pool_tx.send(job).is_err() {
+            // Pool hung up — likely daemon teardown. Report what we
+            // managed to enqueue plus an explanatory error so the
+            // caller doesn't silently think the rest of the purge is
+            // still in flight.
+            return GcReply::Error {
+                message: format!(
+                    "gc purge pool stopped after dispatching {dispatched} of {} entr{}",
+                    dispatched + 1,
+                    if dispatched == 0 { "y" } else { "ies" }
+                ),
+            };
         }
+        dispatched += 1;
     }
-    GcReply::PurgeOk { removed, skipped }
+    GcReply::PurgeStarted {
+        dispatched,
+        skipped,
+    }
 }
 
 fn canonicalize_live_cwds(live_cwds: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -919,19 +1174,33 @@ fn collect_live_lock_paths() -> HashSet<String> {
     out
 }
 
-fn remove_entry_and_delete_row(registry: &Registry, entry: &TrackedEntry) -> Result<(), String> {
+/// Filesystem-only half of removing one tracked entry. Used by both
+/// the synchronous path (`DeleteById`) and the parallel purge pool
+/// (`PurgeJob`). Safe to call from any thread — does not touch redb.
+fn remove_entry_filesystem(entry: &TrackedEntry) -> Result<(), String> {
     if entry.kind == "worktree" {
         let main_root = entry.repo_root.clone().unwrap_or_else(|| ".".to_string());
         let _ =
             worktrees::remove_worktree_path(Path::new(&main_root), Path::new(&entry.path), true)?;
+        Ok(())
     } else if entry.kind == "trash" {
-        std::fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())?;
+        std::fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())
     } else {
         let p = Path::new(&entry.path);
         if p.exists() {
-            std::fs::remove_dir_all(p).map_err(|e| e.to_string())?;
+            std::fs::remove_dir_all(p).map_err(|e| e.to_string())
+        } else {
+            Ok(())
         }
     }
+}
+
+/// Synchronous "remove filesystem entry, then drop redb row" — used by
+/// the per-row `GcOp::DeleteById` path which still needs the dashboard
+/// to see the row gone before the response returns. Bulk purges use
+/// the async fan-out path via `dispatch_purge_entries` instead.
+fn remove_entry_and_delete_row(registry: &Registry, entry: &TrackedEntry) -> Result<(), String> {
+    remove_entry_filesystem(entry)?;
     registry.delete(entry.id).map_err(|e| e.to_string())
 }
 
@@ -978,7 +1247,7 @@ mod tests {
     fn spawn_test_worker(
         db_path: &Path,
     ) -> (
-        mpsc::Sender<GcRequestMsg>,
+        mpsc::Sender<RegistryMsg>,
         std::sync::MutexGuard<'static, ()>,
     ) {
         spawn_test_worker_with_tick(db_path, "0")
@@ -988,7 +1257,7 @@ mod tests {
         db_path: &Path,
         tick_secs: &str,
     ) -> (
-        mpsc::Sender<GcRequestMsg>,
+        mpsc::Sender<RegistryMsg>,
         std::sync::MutexGuard<'static, ()>,
     ) {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1006,7 +1275,7 @@ mod tests {
     fn spawn_test_worker_with_live_cwds(
         db_path: &Path,
         live_cwds: Vec<PathBuf>,
-    ) -> mpsc::Sender<GcRequestMsg> {
+    ) -> mpsc::Sender<RegistryMsg> {
         let registry = Registry::open_at(db_path).expect("open registry");
         spawn_registry_worker_with_live_cwds(registry, Arc::new(move || live_cwds.clone()))
             .expect("spawn registry worker")
@@ -1038,10 +1307,72 @@ mod tests {
         }
     }
 
-    fn call(tx: &mpsc::Sender<GcRequestMsg>, op: GcOp) -> GcReply {
+    fn call(tx: &mpsc::Sender<RegistryMsg>, op: GcOp) -> GcReply {
         let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
-        tx.send(GcRequestMsg { op, reply_tx }).unwrap();
+        tx.send(RegistryMsg::Op(GcRequestMsg { op, reply_tx }))
+            .unwrap();
         reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    /// Block (polling `GcOp::List`) until the worker reports
+    /// `target_count` rows of the given kind, or `timeout` elapses.
+    /// Used to bridge the asynchronous gap between a bulk
+    /// `PurgeStarted` reply and the matching completions reaching the
+    /// worker thread.
+    fn wait_for_row_count(
+        tx: &mpsc::Sender<RegistryMsg>,
+        kind: Option<&str>,
+        target_count: usize,
+        timeout: Duration,
+    ) -> Vec<ListRow> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let rows = match call(
+                tx,
+                GcOp::List {
+                    kind: kind.map(String::from),
+                },
+            ) {
+                GcReply::ListOk { rows } => rows,
+                other => panic!("unexpected reply: {other:?}"),
+            };
+            if rows.len() == target_count || Instant::now() >= deadline {
+                return rows;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Drain `RegistryMsg::PurgeCompletion(..)` items from `rx` until
+    /// either no completion arrives within `quiet_for` or `timeout`
+    /// elapses, applying each one against `registry`. Used by tests
+    /// that drive the periodic-tick helpers directly — outside the
+    /// worker loop the test plays the role of the worker.
+    fn drain_purge_completions(
+        registry: &Registry,
+        rx: &mpsc::Receiver<RegistryMsg>,
+        quiet_for: Duration,
+        timeout: Duration,
+    ) -> usize {
+        let deadline = Instant::now() + timeout;
+        let mut drained = 0usize;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return drained;
+            }
+            let wait = quiet_for.min(remaining);
+            match rx.recv_timeout(wait) {
+                Ok(RegistryMsg::PurgeCompletion(c)) => {
+                    apply_purge_completion(registry, c);
+                    drained += 1;
+                }
+                Ok(RegistryMsg::Op(_)) => {
+                    // Tests don't drive ops through this channel; ignore.
+                }
+                Err(_) => return drained,
+            }
+        }
     }
 
     fn write_mock_gh(dir: &Path, json: &str) -> PathBuf {
@@ -1242,18 +1573,22 @@ mod tests {
             },
         );
         match resp {
-            GcReply::PurgeOk { removed, skipped } => {
-                assert_eq!(removed, 2);
+            GcReply::PurgeStarted {
+                dispatched,
+                skipped,
+            } => {
+                assert_eq!(dispatched, 2);
                 assert_eq!(skipped, 0);
             }
             other => panic!("unexpected reply: {other:?}"),
         }
 
-        let resp = call(&tx, GcOp::List { kind: None });
-        match resp {
-            GcReply::ListOk { rows } => assert!(rows.is_empty()),
-            other => panic!("unexpected reply: {other:?}"),
-        }
+        // Issue #268: bulk purge dispatches to the pool and returns
+        // immediately. Wait for the pool to finish + the worker to
+        // apply the completions before asserting the registry is
+        // empty.
+        let rows = wait_for_row_count(&tx, None, 0, Duration::from_secs(5));
+        assert!(rows.is_empty(), "expected registry to drain, got {rows:?}");
     }
 
     #[test]
@@ -1325,21 +1660,22 @@ mod tests {
             },
         );
         match resp {
-            GcReply::PurgeOk { removed, skipped } => {
-                assert_eq!(removed, 1);
+            GcReply::PurgeStarted {
+                dispatched,
+                skipped,
+            } => {
+                assert_eq!(dispatched, 1);
                 assert_eq!(skipped, 1);
             }
             other => panic!("unexpected reply: {other:?}"),
         }
 
-        assert!(path_a.exists(), "live cwd entry should remain on disk");
-        assert!(!path_b.exists(), "non-live entry should be deleted");
-        let rows = match call(&tx, GcOp::List { kind: None }) {
-            GcReply::ListOk { rows } => rows,
-            other => panic!("unexpected reply: {other:?}"),
-        };
+        // Wait for the async delete of path_b to land in redb.
+        let rows = wait_for_row_count(&tx, None, 1, Duration::from_secs(5));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, path_a.to_string_lossy().to_string());
+        assert!(path_a.exists(), "live cwd entry should remain on disk");
+        assert!(!path_b.exists(), "non-live entry should be deleted");
     }
 
     #[test]
@@ -1372,8 +1708,11 @@ mod tests {
             },
         );
         match resp {
-            GcReply::PurgeOk { removed, skipped } => {
-                assert_eq!(removed, 0);
+            GcReply::PurgeStarted {
+                dispatched,
+                skipped,
+            } => {
+                assert_eq!(dispatched, 0);
                 assert_eq!(skipped, 1);
             }
             other => panic!("unexpected reply: {other:?}"),
@@ -1429,9 +1768,29 @@ mod tests {
             auto_purge_enabled: true,
         };
         let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
-        run_periodic_purge_tick_with_free_space(&registry, &live_cwds_provider, &config, &|_| {
-            Ok(4 * BYTES_PER_GB)
-        });
+        let pool_tx = spawn_purge_pool(2);
+        let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
+        run_periodic_purge_tick_with_free_space(
+            &registry,
+            &pool_tx,
+            &completion_tx,
+            &live_cwds_provider,
+            &config,
+            &|_| Ok(4 * BYTES_PER_GB),
+        );
+        // Outside the worker loop the test plays the role of the
+        // registry-writer thread: drain the pool's completion
+        // callbacks and apply them to redb directly.
+        let drained = drain_purge_completions(
+            &registry,
+            &completion_rx,
+            Duration::from_millis(250),
+            Duration::from_secs(5),
+        );
+        assert!(
+            drained >= 2,
+            "expected at least 2 completions, got {drained}"
+        );
 
         assert!(registry.list(Some(WORKTREE_KIND)).unwrap().is_empty());
         assert!(registry.list(Some(SIBLING_CLONE_KIND)).unwrap().is_empty());
@@ -1465,9 +1824,25 @@ mod tests {
             auto_purge_enabled: true,
         };
         let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
-        run_periodic_purge_tick_with_free_space(&registry, &live_cwds_provider, &config, &|_| {
-            Ok(20 * BYTES_PER_GB)
-        });
+        let pool_tx = spawn_purge_pool(1);
+        let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
+        run_periodic_purge_tick_with_free_space(
+            &registry,
+            &pool_tx,
+            &completion_tx,
+            &live_cwds_provider,
+            &config,
+            &|_| Ok(20 * BYTES_PER_GB),
+        );
+        // Healthy disk → no dispatches expected, so no completions
+        // should land.
+        let drained = drain_purge_completions(
+            &registry,
+            &completion_rx,
+            Duration::from_millis(150),
+            Duration::from_millis(500),
+        );
+        assert_eq!(drained, 0);
 
         assert_eq!(registry.list(Some(WORKTREE_KIND)).unwrap().len(), 1);
         assert!(old_path.exists());
@@ -1563,7 +1938,15 @@ mod tests {
             .expect("insert extern repo");
 
         let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
-        run_periodic_purge_tick(&registry, &live_cwds_provider);
+        let pool_tx = spawn_purge_pool(1);
+        let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
+        run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+        let _drained = drain_purge_completions(
+            &registry,
+            &completion_rx,
+            Duration::from_millis(250),
+            Duration::from_secs(5),
+        );
 
         let rows = registry.list(Some(EXTERN_REPO_KIND)).expect("list");
         assert!(rows.is_empty(), "merged extern-repo row should be deleted");
@@ -1682,6 +2065,222 @@ mod tests {
         // Siblings should still be on disk.
         assert!(std::path::Path::new(&paths[0]).exists());
         assert!(std::path::Path::new(&paths[2]).exists());
+    }
+
+    /// Issue #268: the env-driven purge-pool concurrency knob.
+    #[test]
+    fn purge_concurrency_from_raw_picks_user_value_and_falls_back() {
+        let default = default_purge_concurrency();
+        assert!((1..=DEFAULT_GC_PURGE_CONCURRENCY_CAP).contains(&default));
+        assert_eq!(purge_concurrency_from_raw(None), default);
+        assert_eq!(purge_concurrency_from_raw(Some("4")), 4);
+        // Empty / zero / non-numeric all fall back to the default.
+        assert_eq!(purge_concurrency_from_raw(Some(" ")), default);
+        assert_eq!(purge_concurrency_from_raw(Some("0")), default);
+        assert_eq!(purge_concurrency_from_raw(Some("bad")), default);
+    }
+
+    /// Issue #268: dispatch returns `PurgeStarted` with the count of
+    /// jobs enqueued plus the count filtered out by the live/kind
+    /// gates, not the count actually removed.
+    #[test]
+    fn dispatch_purge_entries_returns_purge_started_with_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_keep = dir.path().join("keep");
+        let path_a = dir.path().join("a");
+        let path_b = dir.path().join("b");
+        for p in [&path_keep, &path_a, &path_b] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let candidates = vec![
+            TrackedEntry {
+                id: 1,
+                kind: "cache".to_string(),
+                path: path_a.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                created_unix: 100,
+            },
+            TrackedEntry {
+                id: 2,
+                kind: "cache".to_string(),
+                path: path_b.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                created_unix: 100,
+            },
+            // path_keep is "live" via the live-cwd filter below.
+            TrackedEntry {
+                id: 3,
+                kind: "cache".to_string(),
+                path: path_keep.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                created_unix: 100,
+            },
+        ];
+        let pool_tx = spawn_purge_pool(2);
+        let (completion_tx, _completion_rx) = mpsc::channel::<RegistryMsg>();
+        let reply = dispatch_purge_entries(
+            &pool_tx,
+            &completion_tx,
+            candidates,
+            vec![path_keep.clone()],
+        );
+        match reply {
+            GcReply::PurgeStarted {
+                dispatched,
+                skipped,
+            } => {
+                assert_eq!(dispatched, 2);
+                assert_eq!(skipped, 1);
+            }
+            other => panic!("expected PurgeStarted, got {other:?}"),
+        }
+    }
+
+    /// Issue #268: a successful completion drops the row; a failed one
+    /// leaves it in place so the next purge tries again.
+    #[test]
+    fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("apply-completion.redb");
+        let registry = Registry::open_at(&db_path).unwrap();
+        let ok_path = dir.path().join("ok");
+        let fail_path = dir.path().join("fail");
+        std::fs::create_dir_all(&ok_path).unwrap();
+        std::fs::create_dir_all(&fail_path).unwrap();
+        registry
+            .insert_if_new(&InsertInput {
+                kind: "cache".to_string(),
+                path: ok_path.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                now_unix: 100,
+            })
+            .unwrap();
+        registry
+            .insert_if_new(&InsertInput {
+                kind: "cache".to_string(),
+                path: fail_path.to_string_lossy().to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                now_unix: 100,
+            })
+            .unwrap();
+        let rows = registry.list(None).unwrap();
+        let ok_path_str = ok_path.to_string_lossy();
+        let fail_path_str = fail_path.to_string_lossy();
+        let ok_id = rows.iter().find(|r| r.path == ok_path_str).unwrap().id;
+        let fail_id = rows.iter().find(|r| r.path == fail_path_str).unwrap().id;
+
+        apply_purge_completion(
+            &registry,
+            PurgeCompletion {
+                id: ok_id,
+                path: ok_path.to_string_lossy().to_string(),
+                kind: "cache".to_string(),
+                result: Ok(()),
+            },
+        );
+        apply_purge_completion(
+            &registry,
+            PurgeCompletion {
+                id: fail_id,
+                path: fail_path.to_string_lossy().to_string(),
+                kind: "cache".to_string(),
+                result: Err("locked".to_string()),
+            },
+        );
+        let remaining: Vec<_> = registry
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(remaining, vec![fail_path.to_string_lossy().to_string()]);
+    }
+
+    /// Issue #268: while the pool is grinding through a purge the
+    /// registry worker MUST keep serving cheap client ops. Earlier
+    /// inline-rm-rf design blocked the worker for the whole purge and
+    /// blew past the 30s `WORKER_REPLY_TIMEOUT`.
+    #[test]
+    fn bulk_purge_keeps_serving_list_while_pool_grinds_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("parallel-serve.redb");
+        let (tx, _g) = spawn_test_worker(&db_path);
+
+        // Insert 50 entries pointing at real (but small) tempdirs so
+        // the pool actually has to call remove_dir_all.
+        let mut paths = Vec::new();
+        for i in 0..50 {
+            let p = dir.path().join(format!("e-{i}"));
+            std::fs::create_dir_all(&p).unwrap();
+            paths.push(p.to_string_lossy().to_string());
+            call(
+                &tx,
+                GcOp::Insert {
+                    kind: "cache".to_string(),
+                    path: p.to_string_lossy().to_string(),
+                    repo_root: None,
+                    branch: None,
+                    agent_id: None,
+                    created_unix: Some(100),
+                },
+            );
+        }
+
+        // Bulk purge: should return PurgeStarted quickly.
+        let started = Instant::now();
+        let reply = call(
+            &tx,
+            GcOp::Purge {
+                duration: None,
+                kind: None,
+                dry_run: false,
+            },
+        );
+        let purge_latency = started.elapsed();
+        match reply {
+            GcReply::PurgeStarted {
+                dispatched,
+                skipped,
+            } => {
+                assert_eq!(dispatched, 50);
+                assert_eq!(skipped, 0);
+            }
+            other => panic!("expected PurgeStarted, got {other:?}"),
+        }
+        // The dispatch path is O(candidates) redb reads + N channel
+        // sends — should complete well under a second even on slow
+        // CI runners.
+        assert!(
+            purge_latency < Duration::from_secs(2),
+            "Purge IPC should return immediately, took {purge_latency:?}"
+        );
+
+        // Issue a `List` while completions are still landing. The
+        // worker must serve it without blocking.
+        let list_started = Instant::now();
+        let _ = call(&tx, GcOp::List { kind: None });
+        let list_latency = list_started.elapsed();
+        assert!(
+            list_latency < Duration::from_secs(2),
+            "List during parallel purge should not block, took {list_latency:?}"
+        );
+
+        // Eventually all rows drain.
+        let rows = wait_for_row_count(&tx, None, 0, Duration::from_secs(10));
+        assert!(rows.is_empty(), "expected drain, got {rows:?}");
+        for p in &paths {
+            assert!(!std::path::Path::new(p).exists(), "leftover {p}");
+        }
     }
 
     /// Deleting a non-existent id is idempotent (`removed=0, skipped=0`).

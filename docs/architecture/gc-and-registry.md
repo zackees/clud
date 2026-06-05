@@ -128,12 +128,22 @@ All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
 - **`clud gc purge [--duration 7d] [--kind worktree] [--dry-run] [--yes]`** — `cmd_purge`
   pre-validates the duration string locally, then calls `daemon::gc_client_purge`. The daemon
   selects candidates (all rows, or rows older than `now - duration`), partitions out
-  live-locked worktrees or live session CWD ancestors, and either reports the count (dry-run) or
-  runs verified removal. Worktree rows use `git worktree remove --force`; if git fails or reports
-  success while the directory survives, clud falls back to direct removal plus `git worktree prune`.
-  Bare
+  live-locked worktrees or live session CWD ancestors, and:
+  - `--dry-run` reports `removed` (the number that *would* be deleted) plus `skipped`. Replies
+    `GcReply::PurgeOk { removed, skipped }` synchronously.
+  - Non-dry-run **bulk** purge fans every purgeable entry out to the daemon's parallel purge pool
+    (capped by `CLUD_GC_PURGE_CONCURRENCY`, default `min(num_cpus, 8)`) and returns
+    immediately with `GcReply::PurgeStarted { dispatched, skipped }`. Each pool thread runs
+    `remove_dir_all` / `git worktree remove --force` independently; on completion it sends a
+    `RegistryMsg::PurgeCompletion(..)` back to the registry worker, which drops the matching
+    redb row asynchronously. The redb writer never blocks on filesystem work — see #268.
+  - Per-row delete (`GcOp::DeleteById`, dashboard "delete" button) stays on the synchronous path
+    and replies `GcReply::PurgeOk { removed, skipped }` — exactly one entry, fast.
+  Worktree rows use `git worktree remove --force`; if git fails or reports success while the
+  directory survives, clud falls back to direct removal plus `git worktree prune`. Bare
   `clud gc purge` (no `--duration`) is interactive and asks for `y/N` confirmation unless
-  `--yes`.
+  `--yes`. Stale rows during/after a partial purge are tolerated — eventual consistency, not
+  transactional; the next purge or list reconciles.
 - **`clud gc reconcile`** — `cmd_reconcile` calls `daemon::gc_client_reconcile` with the
   current repo root. The daemon walks `<repo>/.claude/worktrees/`, `<repo>/.extern-repos/`, and
   conservative sibling temp-clone names next to the repo. Returns the count of new rows.
@@ -208,7 +218,13 @@ GC store / daemon:
 - `ListRow` (`crates/clud-bin/src/daemon/types.rs`) — public JSON row shape returned by
   `gc.list` and serialized by `clud gc list --json`.
 - `GcOp`, `GcReply` (`crates/clud-bin/src/daemon/types.rs`) — IPC payload enums carried inside
-  `DaemonRequest::Gc` / `DaemonResponse::Gc`.
+  `DaemonRequest::Gc` / `DaemonResponse::Gc`. `GcReply::PurgeOk { removed, skipped }` is the
+  synchronous outcome (dry-run + DeleteById); `GcReply::PurgeStarted { dispatched, skipped }`
+  is the bulk-purge fan-out outcome.
+- `RegistryMsg`, `GcRequestMsg`, `PurgeCompletion`, `PurgeJob` (`crates/clud-bin/src/daemon/gc_service.rs`)
+  — the worker's internal mpsc carries both client ops (`RegistryMsg::Op(GcRequestMsg)`) and
+  fire-and-forget purge-pool callbacks (`RegistryMsg::PurgeCompletion`). The pool's job queue
+  is `mpsc::Sender<PurgeJob>`.
 
 `--clean-worktrees`:
 

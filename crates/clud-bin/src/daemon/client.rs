@@ -431,13 +431,24 @@ pub fn gc_client_list(state_dir: &Path, kind: Option<&str>) -> io::Result<Vec<Li
     }
 }
 
+/// Outcome of a `gc.purge` IPC call. Bulk non-dry-run purges fan out
+/// to the daemon's parallel purge pool and return as
+/// `Started { dispatched, skipped }`; dry-run and the per-row
+/// `DeleteById` paths complete synchronously and return
+/// `Completed { removed, skipped }` (#268).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcPurgeOutcome {
+    Completed { removed: usize, skipped: usize },
+    Started { dispatched: usize, skipped: usize },
+}
+
 /// `gc.purge` — purge entries. `duration = None` -> purge all non-live-locked.
 pub fn gc_client_purge(
     state_dir: &Path,
     duration: Option<&str>,
     kind: Option<&str>,
     dry_run: bool,
-) -> io::Result<(usize, usize)> {
+) -> io::Result<GcPurgeOutcome> {
     match send_gc(
         state_dir,
         GcOp::Purge {
@@ -446,7 +457,14 @@ pub fn gc_client_purge(
             dry_run,
         },
     )? {
-        GcReply::PurgeOk { removed, skipped } => Ok((removed, skipped)),
+        GcReply::PurgeOk { removed, skipped } => Ok(GcPurgeOutcome::Completed { removed, skipped }),
+        GcReply::PurgeStarted {
+            dispatched,
+            skipped,
+        } => Ok(GcPurgeOutcome::Started {
+            dispatched,
+            skipped,
+        }),
         GcReply::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
     }

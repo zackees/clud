@@ -1002,12 +1002,28 @@ fn cmd_purge(
     }
 
     match crate::daemon::gc_client_purge(state_dir, duration, kind_filter, dry_run) {
-        Ok((removed, skipped)) => {
+        Ok(crate::daemon::GcPurgeOutcome::Completed { removed, skipped }) => {
             if dry_run {
                 println!("--dry-run: would remove {removed}, skip {skipped}.");
             } else {
                 println!("summary: removed {removed}, skipped {skipped}.");
             }
+            0
+        }
+        Ok(crate::daemon::GcPurgeOutcome::Started {
+            dispatched,
+            skipped,
+        }) => {
+            // Issue #268: bulk purges fan out across the daemon's
+            // purge pool; the actual `remove_dir_all` calls and the
+            // matching redb deletes happen in the background. The
+            // daemon's stderr log records each completion; running
+            // `clud gc list` again will show the registry shrinking.
+            println!(
+                "purge: dispatched {dispatched} delete{} in background, skipped {skipped}.",
+                if dispatched == 1 { "" } else { "s" }
+            );
+            println!("(deletes happen asynchronously; re-run `clud gc list` to watch the registry shrink)");
             0
         }
         Err(e) => {

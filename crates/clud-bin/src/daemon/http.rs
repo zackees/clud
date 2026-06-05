@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-use super::gc_service::{GcRequestMsg, WORKER_REPLY_TIMEOUT};
+use super::gc_service::{GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::read_json_file;
 use super::paths::{daemon_info_path, sessions_dir};
 use super::process_utils::pid_is_alive;
@@ -144,10 +144,19 @@ pub struct PurgeRequest {
     pub kind: Option<String>,
 }
 
-/// Response body of `POST /gc/purge`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Response body of `POST /gc/purge`. The synchronous per-row delete
+/// (`{id: N}`) populates `removed`; the bulk async purge (no `id`)
+/// populates `dispatched`. `skipped` is always the count of candidates
+/// the worker filtered out as live or non-purgeable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PurgeResponse {
-    pub removed: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<usize>,
+    /// Issue #268: tasks handed to the parallel purge pool. The
+    /// matching filesystem removals and redb row deletes happen
+    /// asynchronously; poll `/state.json` to watch counts drop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched: Option<usize>,
     pub skipped: usize,
 }
 
@@ -156,7 +165,7 @@ pub struct PurgeResponse {
 /// up — logged once and the daemon continues without a dashboard).
 pub(super) fn spawn_dashboard(
     state_dir: PathBuf,
-    gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
+    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
@@ -199,7 +208,7 @@ pub(super) fn spawn_dashboard(
 fn run_dashboard_loop(
     server: Server,
     state_dir: PathBuf,
-    gc_tx: Option<mpsc::Sender<GcRequestMsg>>,
+    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
@@ -237,7 +246,7 @@ fn run_dashboard_loop(
 fn handle_state(
     request: Request,
     state_dir: &Path,
-    gc_tx: Option<&mpsc::Sender<GcRequestMsg>>,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: &(dyn Fn() -> Vec<LiveSession> + Send + Sync),
@@ -258,7 +267,7 @@ fn handle_state(
     }
 }
 
-fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<GcRequestMsg>>) {
+fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>) {
     let body = match read_body(&mut request) {
         Ok(b) => b,
         Err(err) => {
@@ -317,8 +326,24 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<GcRequestMsg>>
 fn respond_purge_reply(request: Request, reply: GcReply) {
     match reply {
         GcReply::PurgeOk { removed, skipped } => {
-            let body = serde_json::to_vec(&PurgeResponse { removed, skipped })
-                .unwrap_or_else(|_| b"{}".to_vec());
+            let body = serde_json::to_vec(&PurgeResponse {
+                removed: Some(removed),
+                dispatched: None,
+                skipped,
+            })
+            .unwrap_or_else(|_| b"{}".to_vec());
+            respond_json(request, 200, &body);
+        }
+        GcReply::PurgeStarted {
+            dispatched,
+            skipped,
+        } => {
+            let body = serde_json::to_vec(&PurgeResponse {
+                removed: None,
+                dispatched: Some(dispatched),
+                skipped,
+            })
+            .unwrap_or_else(|_| b"{}".to_vec());
             respond_json(request, 200, &body);
         }
         GcReply::Error { message } => {
@@ -338,7 +363,7 @@ fn respond_purge_reply(request: Request, reply: GcReply) {
 
 fn build_dashboard_state(
     state_dir: &Path,
-    gc_tx: Option<&mpsc::Sender<GcRequestMsg>>,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions: Vec<LiveSession>,
@@ -516,9 +541,9 @@ fn ctrl_c_profile_view(profile: CtrlCProfile) -> CtrlCProfileView {
 
 // ---------- IPC plumbing ----------
 
-fn send_gc_op(tx: &mpsc::Sender<GcRequestMsg>, op: GcOp) -> Result<GcReply, String> {
+fn send_gc_op(tx: &mpsc::Sender<RegistryMsg>, op: GcOp) -> Result<GcReply, String> {
     let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
-    tx.send(GcRequestMsg { op, reply_tx })
+    tx.send(RegistryMsg::Op(GcRequestMsg { op, reply_tx }))
         .map_err(|_| "gc registry worker stopped".to_string())?;
     reply_rx
         .recv_timeout(WORKER_REPLY_TIMEOUT)
@@ -880,7 +905,7 @@ mod tests {
         let gc_tx = spawn_registry_worker_with(registry).expect("worker");
         let (rx_t, rx) = mpsc::sync_channel::<GcReply>(1);
         gc_tx
-            .send(GcRequestMsg {
+            .send(RegistryMsg::Op(GcRequestMsg {
                 op: GcOp::Insert {
                     kind: "worktree".to_string(),
                     path: "/tmp/wt-x".to_string(),
@@ -890,20 +915,20 @@ mod tests {
                     created_unix: Some(1000),
                 },
                 reply_tx: rx_t,
-            })
+            }))
             .unwrap();
         let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
         let (rx_t, rx) = mpsc::sync_channel::<GcReply>(1);
         gc_tx
-            .send(GcRequestMsg {
+            .send(RegistryMsg::Op(GcRequestMsg {
                 op: GcOp::RecordRepoVisit {
                     repo_root: "/dev/repo".to_string(),
                     cwd: "/dev/repo".to_string(),
                     now_unix: Some(2000),
                 },
                 reply_tx: rx_t,
-            })
+            }))
             .unwrap();
         let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
 
@@ -943,7 +968,7 @@ mod tests {
         for p in ["/tmp/p-a", "/tmp/p-b"] {
             let (rx_t, rx) = mpsc::sync_channel::<GcReply>(1);
             gc_tx
-                .send(GcRequestMsg {
+                .send(RegistryMsg::Op(GcRequestMsg {
                     op: GcOp::Insert {
                         kind: "cache".to_string(),
                         path: p.to_string(),
@@ -953,7 +978,7 @@ mod tests {
                         created_unix: Some(1000),
                     },
                     reply_tx: rx_t,
-                })
+                }))
                 .unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
@@ -967,7 +992,7 @@ mod tests {
         )
         .expect("dashboard spawned");
 
-        // POST /gc/purge {"kind":"cache"}
+        // POST /gc/purge {"kind":"cache"} — bulk async purge.
         let body = fetch_path(
             port,
             "POST",
@@ -976,13 +1001,31 @@ mod tests {
         )
         .expect("purge");
         let resp: PurgeResponse = serde_json::from_str(&body).expect("parse");
-        assert_eq!(resp.removed, 2);
+        // Issue #268: bulk purge replies `dispatched`, not `removed`.
+        // The two entries point at /tmp/p-a and /tmp/p-b, which do not
+        // exist on disk → `remove_dir_all` short-circuits to Ok and the
+        // worker drops the redb rows once the completions land.
+        assert_eq!(resp.dispatched, Some(2));
+        assert_eq!(resp.removed, None);
         assert_eq!(resp.skipped, 0);
 
-        // Verify the registry is now empty for that kind.
-        let state_body = fetch_state_json(port).expect("re-fetch state");
-        let state: DashboardState = serde_json::from_str(&state_body).expect("parse state");
-        assert_eq!(state.stats.gc_count, 0);
+        // Async deletes land slightly after the HTTP response — poll
+        // until the registry shrinks rather than racing against it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state_body = fetch_state_json(port).expect("re-fetch state");
+            let state: DashboardState = serde_json::from_str(&state_body).expect("parse state");
+            if state.stats.gc_count == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "registry never drained after bulk purge (gc_count={})",
+                    state.stats.gc_count
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// Per-row Delete button on the dashboard: `POST /gc/purge {id: N}`
@@ -1009,7 +1052,7 @@ mod tests {
         for p in &paths {
             let (rx_t, rx) = mpsc::sync_channel::<GcReply>(1);
             gc_tx
-                .send(GcRequestMsg {
+                .send(RegistryMsg::Op(GcRequestMsg {
                     op: GcOp::Insert {
                         kind: "cache".to_string(),
                         path: p.clone(),
@@ -1019,7 +1062,7 @@ mod tests {
                         created_unix: Some(1000),
                     },
                     reply_tx: rx_t,
-                })
+                }))
                 .unwrap();
             let _ = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
@@ -1051,7 +1094,10 @@ mod tests {
         )
         .expect("delete");
         let resp: PurgeResponse = serde_json::from_str(&body).expect("parse");
-        assert_eq!(resp.removed, 1);
+        // Per-row Delete uses the synchronous `DeleteById` path —
+        // response shape stays `removed`, not `dispatched`.
+        assert_eq!(resp.removed, Some(1));
+        assert_eq!(resp.dispatched, None);
         assert_eq!(resp.skipped, 0);
 
         // The two siblings must survive.
