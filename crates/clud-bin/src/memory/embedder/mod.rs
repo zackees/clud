@@ -265,6 +265,9 @@ mod tests {
         MemoryRow {
             id,
             session_id: None,
+            scope_key: None,
+            branch_name: None,
+            is_orphan: false,
             tier: Tier::Working,
             content: content.to_string(),
             created_at_ms: 1,
