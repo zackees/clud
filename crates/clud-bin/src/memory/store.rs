@@ -49,6 +49,16 @@ pub struct MemoryRow {
     pub access_count: u32,
     pub last_access_at_ms: u64,
     pub metadata_json: Option<String>,
+    /// Repo-level scope key produced by `memory::identity::scope_key`.
+    /// `None` for global / pre-#267 rows (matches `session_id = NULL`
+    /// semantics: null filters do not partition).
+    pub scope_key: Option<String>,
+    /// Current branch name when the row was recorded. Provenance metadata
+    /// only; branch is NOT a partition key by default (DD-014).
+    pub branch_name: Option<String>,
+    /// True iff the recording branch was detected as an orphan branch
+    /// at save time. Provenance only.
+    pub is_orphan: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,8 +169,9 @@ impl SqliteStore {
             "INSERT INTO memories(
                 id, session_id, tier, content,
                 created_at_ms, updated_at_ms, tier_change_at_ms,
-                access_count, last_access_at_ms, metadata_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                access_count, last_access_at_ms, metadata_json,
+                scope_key, branch_name, is_orphan
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 row.id.as_str(),
                 row.session_id,
@@ -172,6 +183,9 @@ impl SqliteStore {
                 row.access_count as i64,
                 row.last_access_at_ms as i64,
                 row.metadata_json,
+                row.scope_key,
+                row.branch_name,
+                row.is_orphan as i64,
             ],
         )?;
 
@@ -189,7 +203,8 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, tier, content,
                     created_at_ms, updated_at_ms, tier_change_at_ms,
-                    access_count, last_access_at_ms, metadata_json
+                    access_count, last_access_at_ms, metadata_json,
+                    scope_key, branch_name, is_orphan
                FROM memories WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id.as_str()])?;
@@ -258,6 +273,7 @@ impl SqliteStore {
         k: usize,
         session_id: Option<&str>,
         tier_floor: Option<Tier>,
+        scope_key: Option<&str>,
     ) -> Result<Vec<KnnHit>, MemoryError> {
         if query.len() != self.embed_dim {
             return Err(MemoryError::DimMismatch {
@@ -267,8 +283,8 @@ impl SqliteStore {
         }
 
         // vec0 KNN: filter on the virtual table side first (cheapest), then
-        // join against memories to apply session/tier filters. The join is
-        // done in SQL — vec0 only knows the embedding column.
+        // join against memories to apply session/tier/scope filters. The
+        // join is done in SQL — vec0 only knows the embedding column.
         let mut sql = String::from(
             "SELECT v.id, v.distance
                FROM memory_vec v
@@ -288,6 +304,11 @@ impl SqliteStore {
             sql.push_str(" AND m.tier >= ?");
             sql.push_str(&(params_vec.len() + 1).to_string());
             params_vec.push(Box::new(floor.as_i64()));
+        }
+        if let Some(sk) = scope_key {
+            sql.push_str(" AND m.scope_key = ?");
+            sql.push_str(&(params_vec.len() + 1).to_string());
+            params_vec.push(Box::new(sk.to_string()));
         }
         sql.push_str(" ORDER BY v.distance ASC");
 
@@ -331,6 +352,9 @@ fn row_from_sqlite(r: &rusqlite::Row<'_>) -> Result<MemoryRow, MemoryError> {
     let access_count: i64 = r.get(7)?;
     let last_access_at_ms: i64 = r.get(8)?;
     let metadata_json: Option<String> = r.get(9)?;
+    let scope_key: Option<String> = r.get(10)?;
+    let branch_name: Option<String> = r.get(11)?;
+    let is_orphan_i: i64 = r.get(12)?;
     Ok(MemoryRow {
         id: MemoryId::parse(&id)?,
         session_id,
@@ -342,6 +366,9 @@ fn row_from_sqlite(r: &rusqlite::Row<'_>) -> Result<MemoryRow, MemoryError> {
         access_count: access_count as u32,
         last_access_at_ms: last_access_at_ms as u64,
         metadata_json,
+        scope_key,
+        branch_name,
+        is_orphan: is_orphan_i != 0,
     })
 }
 
@@ -361,6 +388,33 @@ mod tests {
             access_count: 0,
             last_access_at_ms: 1_000,
             metadata_json: None,
+            scope_key: None,
+            branch_name: None,
+            is_orphan: false,
+        }
+    }
+
+    fn row_scoped(
+        id: MemoryId,
+        session_id: Option<&str>,
+        scope_key: Option<&str>,
+        tier: Tier,
+        content: &str,
+    ) -> MemoryRow {
+        MemoryRow {
+            id,
+            session_id: session_id.map(|s| s.to_string()),
+            tier,
+            content: content.to_string(),
+            created_at_ms: 1_000,
+            updated_at_ms: 1_000,
+            tier_change_at_ms: 1_000,
+            access_count: 0,
+            last_access_at_ms: 1_000,
+            metadata_json: None,
+            scope_key: scope_key.map(|s| s.to_string()),
+            branch_name: None,
+            is_orphan: false,
         }
     }
 
@@ -369,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn open_creates_schema_at_user_version_1() {
+    fn open_creates_schema_at_target_user_version() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("memory.db");
         let store = SqliteStore::open(&db, 384).expect("open");
@@ -377,7 +431,11 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(uv, 1, "schema migration must set user_version=1");
+        assert_eq!(
+            uv,
+            crate::memory::schema::TARGET_USER_VERSION,
+            "schema migration must reach target user_version"
+        );
         let tables: Vec<String> = store
             .conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -483,7 +541,7 @@ mod tests {
                 &vec384(0.2),
             )
             .unwrap();
-        let hits = store.knn(&vec384(0.1), 10, Some("A"), None).unwrap();
+        let hits = store.knn(&vec384(0.1), 10, Some("A"), None, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id_a);
     }
@@ -501,10 +559,77 @@ mod tests {
             .insert(&row(id_s.clone(), None, Tier::Semantic, "s"), &vec384(0.11))
             .unwrap();
         let hits = store
-            .knn(&vec384(0.1), 10, None, Some(Tier::Episodic))
+            .knn(&vec384(0.1), 10, None, Some(Tier::Episodic), None)
             .unwrap();
         assert!(hits.iter().all(|h| h.id != id_w));
         assert!(hits.iter().any(|h| h.id == id_s));
+    }
+
+    #[test]
+    fn knn_filters_by_scope_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(&tmp.path().join("memory.db"), 384).unwrap();
+        let id_a = MemoryId::new_v7();
+        let id_b = MemoryId::new_v7();
+        let id_global = MemoryId::new_v7();
+        store
+            .insert(
+                &row_scoped(id_a.clone(), None, Some("repo://A"), Tier::Working, "a"),
+                &vec384(0.1),
+            )
+            .unwrap();
+        store
+            .insert(
+                &row_scoped(id_b.clone(), None, Some("repo://B"), Tier::Working, "b"),
+                &vec384(0.11),
+            )
+            .unwrap();
+        // A row with no scope at all (global): must not leak into a
+        // scope-filtered query.
+        store
+            .insert(
+                &row(id_global.clone(), None, Tier::Working, "g"),
+                &vec384(0.12),
+            )
+            .unwrap();
+        let hits = store
+            .knn(&vec384(0.1), 10, None, None, Some("repo://A"))
+            .unwrap();
+        let ids: Vec<&MemoryId> = hits.iter().map(|h| &h.id).collect();
+        assert!(
+            ids.contains(&&id_a),
+            "scoped query must include scope match"
+        );
+        assert!(
+            !ids.contains(&&id_b),
+            "scoped query must exclude other scope"
+        );
+        assert!(
+            !ids.contains(&&id_global),
+            "scoped query must exclude global rows"
+        );
+        // No scope filter → all rows visible.
+        let all = store.knn(&vec384(0.1), 10, None, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn insert_with_scope_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(&tmp.path().join("memory.db"), 384).unwrap();
+        let id = MemoryId::new_v7();
+        let mut written = row_scoped(
+            id.clone(),
+            Some("sess"),
+            Some("repo://https://github.com/foo/bar"),
+            Tier::Working,
+            "hello",
+        );
+        written.branch_name = Some("feature/x".to_string());
+        written.is_orphan = true;
+        store.insert(&written, &vec384(0.5)).unwrap();
+        let fetched = store.fetch(&id).unwrap().expect("row");
+        assert_eq!(fetched, written);
     }
 
     #[test]
