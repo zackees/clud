@@ -88,6 +88,7 @@ fn marker(selected: bool) -> &'static str {
 
 pub fn should_prompt_for_scope(args: &Args, interactive_terminal: bool) -> bool {
     interactive_terminal
+        && (args.claude || args.codex)
         && !args.dry_run
         && args.prompt.is_none()
         && args.message.is_none()
@@ -368,6 +369,7 @@ mod tests {
     fn prompt_scope_only_for_interactive_bare_launches() {
         assert!(should_prompt_for_scope(&parse(&["clud", "--codex"]), true));
         assert!(should_prompt_for_scope(&parse(&["clud", "--claude"]), true));
+        assert!(!should_prompt_for_scope(&parse(&["clud"]), true));
         assert!(!should_prompt_for_scope(
             &parse(&["clud", "--codex"]),
             false

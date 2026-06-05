@@ -5,7 +5,8 @@ before clud starts a backend. It lives in `crates/clud-bin/src/launch_setup.rs`.
 
 ## Scope Selector
 
-Bare interactive TUI launches prompt on stderr before the backend starts:
+Interactive TUI launches that explicitly choose a backend with `--claude` or
+`--codex` prompt on stderr before the backend starts:
 
 ```text
 [x] Session only
@@ -13,9 +14,10 @@ Bare interactive TUI launches prompt on stderr before the backend starts:
 ```
 
 The default is session-only. Enter accepts the highlighted option, Up selects
-session-only, and Down selects global. Non-interactive launches, piped stdin,
-`--dry-run`, one-shot prompt launches (`-p` / `-m`), continuations, resumes,
-and maintenance commands do not prompt; they use session-only.
+session-only, and Down selects global. A bare `clud` invocation (no `--claude`
+or `--codex`), non-interactive launches, piped stdin, `--dry-run`, one-shot
+prompt launches (`-p` / `-m`), continuations, resumes, and maintenance commands
+do not prompt; they use session-only.
 
 Session-only launches skip persistent setup. They must not create or modify
 agent home setup files under `~/.claude`, `~/.codex`, `~/.agents`, or

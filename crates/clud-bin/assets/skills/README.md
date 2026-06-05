@@ -29,6 +29,9 @@ do not write persistent skill files. Older clud-managed copies under
   fast incremental cargo builds via named volumes for `target/` + `CARGO_HOME`
   + `RUSTUP_HOME`, source bind-mounted, soldr-wrapped cargo, and a Python
   orchestrator.
+- [clud-improve/](clud-improve/SKILL.md) - Ask the user "how can clud improve?
+  be as specific as possible" and file the response as a GitHub issue against
+  `zackees/clud` when `gh auth status` succeeds.
 
 ## How Skills Ship
 
