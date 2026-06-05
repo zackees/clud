@@ -2,9 +2,10 @@
 
 Agent-memory storage layer: SQLite + sqlite-vec for content + KNN,
 tantivy for BM25 lexical, and RRF over the two. Pure storage; tier
-lifecycle, embeddings, MCP server, daemon IPC, and CLI verbs all live
+lifecycle, MCP server, daemon IPC, and CLI verbs all live
 in sibling sub-issues under META #255 — this directory only owns the
-durable on-disk layer and the hybrid-search math.
+durable on-disk layer, the hybrid-search math, and (as of #257) the
+embedder abstraction that produces the dense vectors storage stores.
 
 See [`docs/architecture/memory.md`](../../../../docs/architecture/memory.md)
 for the cross-cutting subsystem sketch and
@@ -15,10 +16,16 @@ for the rationale on rusqlite + redb coexistence.
 
 - `mod.rs` — public surface; re-exports `SqliteStore`, `LexicalIndex`,
   `HybridSearchConfig`, `MemoryRow`, `Tier`, `MemoryId`, `MemoryError`,
-  `KnnHit`, `LexicalHit`, `FusedHit`, `rrf_fuse`, plus the identity
-  surface: `RepoScope`, `resolve_repo_scope`, `normalize_origin_url`,
+  `KnnHit`, `LexicalHit`, `FusedHit`, `rrf_fuse`; the identity surface
+  `RepoScope`, `resolve_repo_scope`, `normalize_origin_url`,
   `scope_key`, `branch_isolate`, `branch_unisolate`,
-  `cross_repo_glob_filter`.
+  `cross_repo_glob_filter`; and (from `embedder/`) `Embedder`,
+  `EmbedderTrait`, `RemoteEmbedder`, `RemoteProvider`,
+  `embedder_from_env`, `reembed_all`, `EMBED_DIM_MINILM_L6_V2`.
+- `embedder/` — embedder abstraction (`Local` / `Remote` / `Disabled`),
+  fastembed wrapper, four-provider HTTP client, deterministic
+  `TestEmbedder`. Carved out on Windows-ARM. See
+  [`embedder/README.md`](embedder/README.md).
 - `error.rs:3` `MemoryError` — thiserror enum; `Tantivy(String)` is
   intentionally stringified because some tantivy variants are not
   `Send + 'static`.
