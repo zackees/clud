@@ -488,3 +488,34 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - The consolidation timer holds the SQLite + lexical locks for the duration of one tick. Saves and searches are blocked for the tick's duration — typically tens of ms on a small store, bounded by `O(N)` in the worst case where the entire Working tier is being promoted in one round. Acceptable for v1; if it bites, future work can split the lock or batch the apply.
 - The reconciliation pass on startup is `O(N)` upserts plus one tantivy commit; bounded by row count and cheap on a clean daemon. Documents the cost in `crates/clud-bin/src/daemon/memory_service.rs` so future readers know the bound.
 - The HTTP `/memory/*` route bodies are stubs in this PR (#261); the real implementations land in #263. The seam is `MemoryService` references in each handler — no new IPC needs to be added when #263 lands.
+
+---
+
+## DD-018: MCP server embedded in clud daemon vs sidecar binary
+
+**Context:** Issue #259 needed to expose the agent-memory subsystem to MCP clients (Claude Code, Codex). The choice was between (a) shipping a separate `clud-memory-mcp` sidecar binary that MCP hosts spawn directly and which opens its own SQLite/tantivy handles, and (b) folding the MCP server into the existing `clud` daemon next to the GC registry, the dashboard, and the memory consolidation timer. The MCP client integration is a thin `clud mcp` stdio bridge in either case; what differs is who owns the storage handles.
+
+**Decision:** Embed the MCP server in the clud daemon. `daemon::memory_mcp::spawn_mcp_server(memory: Arc<MemoryService>)` runs alongside `spawn_dashboard` and the consolidation timer from `daemon::server::run_daemon`, binds an ephemeral loopback TCP port, and writes that port into `DaemonInfo.memory_mcp_port`. The `clud mcp` subcommand is a thin stdio↔TCP bridge that calls `daemon::ensure_daemon` and proxies bytes to the loopback port.
+
+**Rationale:**
+- Single source of truth for `MemoryService`. The dashboard, the consolidation timer, the hook subcommands (#260), and the MCP server all share one `Arc<MemoryService>`. A sidecar would have to re-open SQLite (single-writer constraint! cross-process locking!), re-open tantivy (per-directory `LockBusy`), and re-load the embedder (the ~80 MB ONNX session at first run). Net: more code, slower cold-start, and a real concurrency problem to solve, with no upside.
+- Lifecycle is already solved. The daemon's `ensure_daemon` + bringup lock + version skew detection (DD-012) already handles "is there one of these per user, and is it the current version?". A sidecar would re-do all of that.
+- IPC overhead is already paid. The dashboard's `/memory/*` routes go through the same `MemoryService` Arc; a sidecar would need a second IPC path to call back into the dashboard's data, or the dashboard would have to learn to talk to the sidecar via TCP, doubling the surface area.
+- The `clud mcp` bridge is pure `std::net` + two `std::thread`s. No tokio runtime, no rmcp dependency churn. Adding 200 LOC of std-only bridge code is strictly cheaper than introducing async to the daemon process.
+- Failure isolation is preserved. If the memory subsystem fails to start, `memory_service: None`, and `memory_mcp_port` stays `None`. The bridge emits a clear JSON-RPC error (`-32099`) and exits 1 rather than hanging. Sessions, GC, and the dashboard keep running.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Sidecar `clud-memory-mcp` binary | Cross-process SQLite handle ownership is the actual blocker — sqlite-vec's single-writer rule means only one process can have the write handle. We'd either need IPC from the sidecar to the daemon for every write (defeating the sidecar) or move the daemon's writes into the sidecar (turning the daemon into the sidecar's IPC client). Lose-lose. |
+| In-process but on a tokio runtime via `rmcp` | rmcp 1.7 pulls in tokio + tokio-util + schemars + (transitively) hyper-bits. The MCP wire protocol is line-delimited JSON-RPC 2.0; it doesn't need any of that. A 350-line hand-rolled NDJSON dispatcher on `std::net::TcpListener` covers initialize / tools/list / tools/call. Saves ~50s of cold-build time × 6 CI targets and keeps the daemon's "no async runtime" property (DD-017). |
+| Defer MCP entirely; only ship CLI verbs | Forces every prompt-time memory access through `clud memory search` subprocess hops. MCP is what Claude Code and Codex already speak; missing it is a v0.1 regression. |
+| Streamable HTTP transport instead of TCP | MCP supports HTTP + SSE, useful for team-shared memory hosts later. Loopback TCP is simpler, has no auth surface, and matches the daemon's existing pattern. Streamable HTTP can be added in v0.5 without breaking the TCP transport. |
+
+**Consequences:**
+- Adding new MCP tools is a one-place edit in `daemon::memory_mcp` — no IPC schema to extend, no sidecar binary to rev.
+- The `clud mcp` bridge depends on `daemon::ensure_daemon` succeeding. A daemon-down case shows up as a stdout JSON-RPC error to the MCP host within ~5s (the `ensure_daemon` timeout); never silently hangs.
+- We carry the JSON-RPC wire protocol ourselves. Cheap (single file, fully unit-tested) but it does mean tracking the MCP protocol version manually. The advertised version (`2024-11-05`) is the one Claude Code's MCP host currently negotiates.
+- Adopting `rmcp` later is non-breaking — the file is self-contained and the wire shape (`{ content: [{type: "text", text: "<json>"}] }`) is exactly what `rmcp` emits. A future migration is a behind-the-curtain rewrite, not a public-API change.
+- `memory_reflect` ships as a documented stub returning a `-32603` internal error with a `v0.5` note. The reflect tool depends on knowledge graph (deferred past v1 per META #255) and an LLM provider (#257 v0.5 ladder), neither of which is on main yet. The stub means MCP hosts get a clean error today instead of a missing-tool error.

@@ -147,3 +147,59 @@ semantics).
 Out of scope for this directory; daemon-integration sub-issue wires
 `Mutex<SqliteStore>` lifetime inside `__daemon` and exposes
 `checkpoint_truncate` to the GC tick.
+
+## MCP server
+
+The agent-memory subsystem is surfaced to Claude Code / Codex via an
+in-daemon MCP server (issue #259). Implementation lives in
+[`crates/clud-bin/src/daemon/memory_mcp.rs`](../daemon/memory_mcp.rs);
+the stdio bridge lives in
+[`crates/clud-bin/src/mcp_bridge.rs`](../mcp_bridge.rs).
+
+The 8 ESSENTIAL_TOOLS exposed (verbatim from agentmemory):
+
+- `memory_save` — embed + persist a memory row.
+- `memory_recall` — fetch one row by id.
+- `memory_smart_search` — hybrid RRF (BM25 + vector) search.
+- `memory_sessions` — distinct `session_id` values.
+- `memory_consolidate` — drive one consolidation tick on demand.
+- `memory_diagnose` — basic health (embedder, dim, row count, schema
+  user_version). Subsystem-level checks (actions/leases/sentinels/…)
+  land in a future PR.
+- `memory_lesson_save` — insert into the `lessons` table.
+- `memory_reflect` — **documented stub** until v0.5; returns an
+  `unimplemented` JSON-RPC error today. Knowledge-graph + LLM reflection
+  lands with the v0.5 release per META #255.
+
+Scope filter wiring (`scope_key` end-to-end) lands in #267 and is
+already on main; this MCP surface accepts the `scope_key` argument on
+`memory_smart_search` and forwards it to `SqliteStore::knn` and
+`LexicalIndex::search`.
+
+### Manual MCP registration (v0.1)
+
+Auto-registration of `~/.claude.json` / `~/.codex/config.toml` is owned
+by sibling #265. For v0.1 the user adds an entry by hand:
+
+```jsonc
+// ~/.claude.json
+{
+  "mcpServers": {
+    "clud-memory": {
+      "command": "clud",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.clud-memory]
+command = "clud"
+args = ["mcp"]
+```
+
+`clud mcp` calls `daemon::ensure_daemon` so a cold first launch
+transparently brings the clud daemon up; subsequent connects are
+loopback TCP only.
