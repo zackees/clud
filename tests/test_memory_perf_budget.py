@@ -277,7 +277,7 @@ def daemon(clud_binary: Path):
     with tempfile.TemporaryDirectory(prefix="clud-perf-") as tmp:
         state_dir = Path(tmp) / "state"
         handle = _DaemonHandle(clud_binary, state_dir, embedder_disabled=False)
-        status, body = _fetch(f"http://127.0.0.1:{handle.port}/memory/stats")
+        status, _body = _fetch(f"http://127.0.0.1:{handle.port}/memory/stats")
         if status == 503:
             handle.close()
             pytest.skip("memory subsystem unavailable on this host")
@@ -297,7 +297,7 @@ def daemon_no_embedder(clud_binary: Path):
     with tempfile.TemporaryDirectory(prefix="clud-perf-nm-") as tmp:
         state_dir = Path(tmp) / "state"
         handle = _DaemonHandle(clud_binary, state_dir, embedder_disabled=True)
-        status, body = _fetch(f"http://127.0.0.1:{handle.port}/memory/stats")
+        status, _body = _fetch(f"http://127.0.0.1:{handle.port}/memory/stats")
         if status == 503:
             handle.close()
             pytest.skip("memory subsystem unavailable on this host")
