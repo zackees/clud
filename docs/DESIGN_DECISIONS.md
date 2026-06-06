@@ -686,3 +686,34 @@ A new tab is the second-largest UI change the dashboard has ever taken (after th
 - `clud --setup --dry-run` prints a four-file summary without writing — useful for users to preview what the action will touch.
 - The `MemoryConfig` variant added to `SetupError` is propagated through `main.rs`'s `[clud] note: global setup failed: ...` path, matching the existing skill/hook setup failure handling. Setup failures are non-fatal.
 - `clud memory uninstall` (a future verb under META #255) re-uses the symmetric `remove_*` helpers in `mcp_config.rs` to strip the managed entries while preserving any user-defined siblings — the lock pattern and atomic write keep the operation safe even mid-session.
+
+---
+
+## DD-024: Memory perf budgets enforced as Python tests with explicit thresholds
+
+**Context:** Issue #266 calls for performance budgets on the memory subsystem (`memory_save` p50 ≤ 30 ms, `memory_smart_search` p50 ≤ 25 ms, daemon RSS ≤ 60 MB without the local embedder, disk ≤ 15 MB per 1k memories). The options were (A) `criterion`-based Rust benches, (B) hand-rolled Rust timing under `cargo test --release`, (C) Python subprocess tests that drive the live `clud` binary, (D) external monitoring after release.
+
+**Decision:** Encode the budgets as Python `pytest` tests under `tests/test_memory_perf_budget.py`, gated behind a `perf_budget` marker, with `psutil` for RSS and `time.perf_counter_ns()` for latency. Each budget has a smoke variant (one iteration, no threshold) that runs in the default `bash test` suite and a heavy variant (100–1000 iterations with the threshold assertion) that runs only under `pytest -m perf_budget` or `CLUD_PERF_BUDGET=1`. Budgets self-skip on hosts with < 4 GB free RAM to avoid CI flakes from GC pauses and swap pressure.
+
+**Rationale:**
+- **Catches regressions without re-tooling CI.** The matrix already runs Python tests on all 6 platforms; the `perf_budget` marker is `addopts`-controlled, so opting in is a single env var or `-m` flag. No new workflow, no new build job, no separate runner pool.
+- **Drives the real product surface.** Latency for users is the round-trip through `clud memory save` (subprocess fork + HTTP) and the `/memory/save` route end-to-end, not just the `SqliteStore::insert` call site. A Rust microbenchmark would assert a tighter lower bound on a smaller surface and miss the spawn/HTTP overhead that the user actually pays.
+- **Opt-in by default keeps the PR-blocking matrix fast.** The 100-iter save loop and the 1000-iter disk loop together add ~30 s on a quiet Linux host. The 24-job PR matrix already takes ~30 min wall-clock; adding 30 s × 24 = 12 min runner-time to every PR for a low-signal regression check is a bad trade. Run nightly + on PRs that change the memory subsystem instead.
+- **Smoke variant is the load-bearing pre-merge check.** A test that proves the perf harness wires up correctly catches the most common breakage (route renamed, payload shape changed) at zero perf-budget cost. The threshold assertions are the secondary signal.
+- **`psutil` is already a transitive dep.** Some integration tests already use it for process-tree inspection; no new pip dep.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| `criterion`-based Rust benches | Adds ~25 transitive crates (rayon, plotters, …) → measurable cold-build time on Windows-ARM. We don't need regression-vs-baseline; we need pass/fail budgets. |
+| Hand-rolled Rust timing under `cargo test --release` | Closer to the spec target (no spawn/HTTP overhead) but doesn't catch user-visible regressions in the spawn/HTTP path. Useful as a future addition; not the right first stop. |
+| External monitoring (Prometheus, Grafana) | Catches only what reaches prod. Latency regressions need to fail PRs, not pages. |
+| Hard-fail every PR | Noisy CI workers (GC pauses, sccache backoff, sccache server stall) inevitably hit a p50 spike. Opt-in keeps signal-to-noise high. |
+
+**Consequences:**
+- The smoke variants of every budget run on every PR. The heavy budgets run on nightly + when developers explicitly opt in (`pytest tests/test_memory_perf_budget.py -m perf_budget -v`).
+- The `conftest.py` `pytest_collection_modifyitems` hook is the single seam that gates both `integration` and `perf_budget` markers — one consistent pattern.
+- Budgets are constants at the top of `tests/test_memory_perf_budget.py`; loosening one is a one-line PR with a comment pointing at the regression that justified it.
+- The `< 4 GB free RAM` skip means a noisy laptop developer or a heavily-loaded CI worker doesn't fail the test — they get a skip notice and the suite stays green. The smoke variant still runs to catch shape-level regressions.
+- The `daemon_ram` budget targets the no-model floor and forces `CLUD_MEMORY_EMBEDDER=disabled` for that test alone (the loaded MiniLM model adds 30+ MB by design). The save / search / disk budget tests use a separate fixture that lets the daemon pick its default embedder so the latency and on-disk footprint reflect what a user actually sees; they skip gracefully when the embedder cannot start.

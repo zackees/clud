@@ -73,6 +73,7 @@ timeout = 90
 timeout_method = "thread"
 markers = [
     "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
+    "perf_budget: enforce memory subsystem perf budgets (#266); opt-in via `pytest -m perf_budget`",
 ]
 
 [tool.ruff]
