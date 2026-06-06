@@ -7,6 +7,7 @@
 //! `LexicalIndex::upsert` accepts an explicit `Tier` instead of inferring
 //! one.
 
+pub mod cli;
 pub mod embedder;
 pub mod error;
 pub mod identity;

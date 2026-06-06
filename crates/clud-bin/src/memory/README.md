@@ -203,3 +203,32 @@ args = ["mcp"]
 `clud mcp` calls `daemon::ensure_daemon` so a cold first launch
 transparently brings the clud daemon up; subsequent connects are
 loopback TCP only.
+
+## CLI surface (#262)
+
+`cli.rs` dispatches `clud memory <verb>` to thin handlers that proxy
+through the daemon's `/memory/*` HTTP routes. The daemon owns the
+single SQLite writer per process; the CLI's job is to embed the user's
+text where needed, hit HTTP, and pretty-print the JSON response. See
+[DD-018](../../../../docs/DESIGN_DECISIONS.md#dd-018-clud-memory-cli-verbs-proxy-mutating-ops-through-the-daemon).
+
+| Verb | Action | Daemon route |
+|---|---|---|
+| `init` | Best-effort embedder warm; prints resolved paths + embed_dim | `GET /memory/stats` |
+| `status [--json]` | Tier counts, embedder name + dim, schema user_version | `GET /memory/stats` |
+| `search <q> [-k N] [--session-id] [--tier-floor] [--scope-key] [--json]` | RRF hybrid BM25 + KNN search | `GET /memory/search?q=&k=&...` |
+| `save <content> [--tier] [--session-id] [--metadata] [--json]` | Embed + insert | `POST /memory/save` |
+| `forget <id> [--json]` | Delete row, cascade to vec + tantivy | `POST /memory/forget/<id>` |
+| `export [--to-stdout]` | Dump recent rows as JSON-lines | `GET /memory/recent?limit=100000` |
+| `export --to-disk` | Stub — deferred to #264 | (none) |
+| `import --from-stdin` | Read JSON-lines from stdin, re-save each | `POST /memory/save` per line |
+| `import --from-disk` | Stub — deferred to #264 | (none) |
+| `ui [--no-open]` | Open dashboard at `#memory` | reads daemon-info |
+| `reembed [--model] [--dry-run]` | Count rows (dry-run) or note that live reembed needs the daemon stopped | `GET /memory/stats` |
+| `branch-isolate` | Write `<common-dir>/.clud/memory-branch-isolate` | none — local fs |
+| `branch-unisolate` | Remove the marker | none — local fs |
+
+Exit codes: `0` success, `1` user error (validation / missing query /
+empty content), `2` internal error (HTTP 5xx / JSON decode failure /
+non-git repo for branch-isolate), `3` daemon unavailable (including
+`--no-daemon`).

@@ -1,7 +1,7 @@
 use clud::{
     args, backend, backend_bootstrap, command, console_setup, console_title, ctrl_c_track, daemon,
     gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec,
-    mcp_bridge, runner, startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    mcp_bridge, memory, runner, startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -83,6 +83,13 @@ fn main() {
     // frames to the daemon's memory_mcp_port.
     if let Some(args::Command::Mcp) = &args.command {
         std::process::exit(mcp_bridge::run());
+    }
+
+    // Issue #262: `clud memory <sub>` is self-contained maintenance.
+    // Never launches a backend; talks to the daemon's HTTP routes for
+    // mutating ops (single SQLite writer per process).
+    if let Some(args::Command::Memory { subcommand }) = &args.command {
+        std::process::exit(memory::cli::run(&args, subcommand.clone()));
     }
 
     // Issue #182: `clud trash` is self-contained maintenance. Dispatch

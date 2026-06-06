@@ -885,3 +885,171 @@ fn test_daemon_restart_subcommand_parses() {
         other => panic!("expected Daemon::Restart, got {other:?}"),
     }
 }
+
+// ---------- issue #262: clud memory verb parsing ----------
+
+#[test]
+fn memory_save_parses_basic() {
+    let args = parse(&["clud", "memory", "save", "hello world"]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand:
+                Some(MemorySubcommand::Save {
+                    content,
+                    tier,
+                    session_id,
+                    metadata,
+                    json,
+                }),
+        }) => {
+            assert_eq!(content, "hello world");
+            assert_eq!(tier, "working");
+            assert!(session_id.is_none());
+            assert!(metadata.is_none());
+            assert!(!json);
+        }
+        other => panic!("expected Memory::Save, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_save_parses_tier_and_session() {
+    let args = parse(&[
+        "clud",
+        "memory",
+        "save",
+        "fact",
+        "--tier",
+        "semantic",
+        "--session-id",
+        "abc",
+    ]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand:
+                Some(MemorySubcommand::Save {
+                    content,
+                    tier,
+                    session_id,
+                    ..
+                }),
+        }) => {
+            assert_eq!(content, "fact");
+            assert_eq!(tier, "semantic");
+            assert_eq!(session_id.as_deref(), Some("abc"));
+        }
+        other => panic!("expected Memory::Save with filters, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_search_parses_filters() {
+    let args = parse(&[
+        "clud",
+        "memory",
+        "search",
+        "needle",
+        "-k",
+        "5",
+        "--tier-floor",
+        "episodic",
+        "--scope-key",
+        "repo://x",
+        "--json",
+    ]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand:
+                Some(MemorySubcommand::Search {
+                    query,
+                    k,
+                    session_id,
+                    tier_floor,
+                    scope_key,
+                    json,
+                }),
+        }) => {
+            assert_eq!(query, "needle");
+            assert_eq!(k, 5);
+            assert!(session_id.is_none());
+            assert_eq!(tier_floor.as_deref(), Some("episodic"));
+            assert_eq!(scope_key.as_deref(), Some("repo://x"));
+            assert!(json);
+        }
+        other => panic!("expected Memory::Search, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_reembed_parses_dry_run() {
+    let args = parse(&["clud", "memory", "reembed", "--dry-run"]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand: Some(MemorySubcommand::Reembed { model, dry_run }),
+        }) => {
+            assert!(model.is_none());
+            assert!(dry_run);
+        }
+        other => panic!("expected Memory::Reembed, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_branch_isolate_parses() {
+    let args = parse(&["clud", "memory", "branch-isolate"]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand: Some(MemorySubcommand::BranchIsolate),
+        }) => {}
+        other => panic!("expected Memory::BranchIsolate, got {other:?}"),
+    }
+
+    let args = parse(&["clud", "memory", "branch-unisolate"]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand: Some(MemorySubcommand::BranchUnisolate),
+        }) => {}
+        other => panic!("expected Memory::BranchUnisolate, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_bare_parses_to_help_variant() {
+    let args = parse(&["clud", "memory"]);
+    match args.command {
+        Some(Command::Memory { subcommand: None }) => {}
+        other => panic!("expected Memory with no subcommand, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_forget_parses() {
+    let args = parse(&[
+        "clud",
+        "memory",
+        "forget",
+        "0190abcd-0000-7000-8000-000000000000",
+    ]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand: Some(MemorySubcommand::Forget { id, json }),
+        }) => {
+            assert_eq!(id, "0190abcd-0000-7000-8000-000000000000");
+            assert!(!json);
+        }
+        other => panic!("expected Memory::Forget, got {other:?}"),
+    }
+}
+
+#[test]
+fn memory_status_parses_json_flag() {
+    let args = parse(&["clud", "memory", "status", "--json"]);
+    match args.command {
+        Some(Command::Memory {
+            subcommand: Some(MemorySubcommand::Status { json }),
+        }) => {
+            assert!(json);
+        }
+        other => panic!("expected Memory::Status, got {other:?}"),
+    }
+}
