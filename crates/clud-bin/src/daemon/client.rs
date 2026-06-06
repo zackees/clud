@@ -84,7 +84,7 @@ fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
                 return Ok(());
             }
         }
-        if started.elapsed() > Duration::from_secs(5) {
+        if started.elapsed() > Duration::from_secs(60) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timed out waiting for daemon startup",

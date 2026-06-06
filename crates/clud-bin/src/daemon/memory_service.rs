@@ -61,6 +61,12 @@ pub struct MemoryService {
     /// Held inside an `Arc` so the timer thread can observe the same
     /// flag the service drops on the way out.
     shutdown: Arc<AtomicBool>,
+    /// JoinHandle for the consolidation timer thread. `shutdown()` joins
+    /// this so callers can deterministically wait for the timer to
+    /// release its `Arc<Mutex<LexicalIndex>>` clone — tests reopen the
+    /// same on-disk index immediately and would otherwise hit tantivy's
+    /// per-directory `LockBusy`.
+    timer: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for MemoryService {
@@ -84,6 +90,11 @@ impl MemoryService {
     /// few seconds on a default-tuned daemon.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        if let Ok(mut slot) = self.timer.lock() {
+            if let Some(handle) = slot.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     /// Tick used by tests: drives one round of promote → apply →
@@ -202,8 +213,11 @@ pub fn spawn_memory_service(state_dir: &Path) -> Result<MemoryService, MemoryErr
     // 8. Consolidation timer thread. Cheap-clones of the Arcs keep the
     //    store + lexical alive even if the daemon dropped its outer
     //    `Arc<MemoryService>` early; once `shutdown` is set the thread
-    //    drops them on its way out.
-    spawn_consolidation_thread(
+    //    drops them on its way out. The JoinHandle is held in
+    //    `MemoryService.timer` so `shutdown()` can deterministically
+    //    join, which matters for tests that reopen the same tantivy
+    //    directory (tantivy holds a per-directory `LockBusy`).
+    let timer = spawn_consolidation_thread(
         Arc::clone(&store),
         Arc::clone(&lexical),
         tier_config,
@@ -219,6 +233,7 @@ pub fn spawn_memory_service(state_dir: &Path) -> Result<MemoryService, MemoryErr
         tier_config,
         consolidate_interval_ms,
         shutdown,
+        timer: Mutex::new(timer),
     })
 }
 
@@ -253,14 +268,19 @@ fn spawn_consolidation_thread(
     interval_ms: u64,
     checkpoint_every_n_ticks: u64,
     shutdown: Arc<AtomicBool>,
-) {
+) -> Option<thread::JoinHandle<()>> {
     let res = thread::Builder::new()
         .name("clud-memory-consolidate".to_string())
         .spawn(move || {
             let mut tick: u64 = 0;
-            // Poll the shutdown flag at a finer cadence so cooperative
-            // shutdown wakes within seconds, not minutes.
-            let poll_step = Duration::from_millis((interval_ms / 10).max(50));
+            // Bounded poll cadence: tests calling `shutdown()` need the
+            // thread to release its `Arc<Mutex<LexicalIndex>>` clone
+            // within ~half a second so the test's reopen doesn't race
+            // tantivy's per-directory `LockBusy`. Production with a
+            // 5-minute interval still ticks every 5 minutes; the bound
+            // only governs shutdown latency.
+            let poll_step =
+                Duration::from_millis((interval_ms / 10).max(50).min(500));
             let mut next_due = std::time::Instant::now() + Duration::from_millis(interval_ms);
             while !shutdown.load(Ordering::SeqCst) {
                 thread::sleep(poll_step);
@@ -296,8 +316,12 @@ fn spawn_consolidation_thread(
                 );
             }
         });
-    if let Err(err) = res {
-        eprintln!("[clud] note: memory consolidation thread spawn failed: {err}");
+    match res {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            eprintln!("[clud] note: memory consolidation thread spawn failed: {err}");
+            None
+        }
     }
 }
 
