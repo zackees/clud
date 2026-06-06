@@ -398,6 +398,45 @@ by sibling #265 and is not in #259. For v0.1 the user adds an entry by
 hand — see
 [`crates/clud-bin/src/memory/README.md`](../../crates/clud-bin/src/memory/README.md#manual-mcp-registration-v01).
 
+## Dashboard (#263)
+
+The daemon's bundled SPA — `crates/clud-bin/assets/dashboard/index.html`,
+served at `GET /` by `daemon::http` — gains a fifth "Memory" tab. Pure
+vanilla JS by design, see
+[DD-020](../DESIGN_DECISIONS.md#dd-020-memory-dashboard-tab-stays-in-the-vanilla-js-spa-pattern)
+for why no React / no build step.
+
+The tab consumes the four read routes already shipped by #261/#262:
+
+- `GET /memory/stats` drives the stats card (total rows, per-tier
+  counts, embedder status with `ready` / `disabled` / `dim-mismatch`
+  pill, schema `user_version`).
+- `GET /memory/recent?limit=50` drives the recent-rows table.
+- `GET /memory/search?q=&k=` drives the search card.
+- `POST /memory/save` is wired to a collapsed `<details>` "Save a new
+  memory" card.
+- `POST /memory/forget/<id>` is wired to a per-row `×` button gated
+  by `confirm()`.
+
+Auto-refresh is folded into the main 5s `/state.json` poller — when the
+Memory tab is the active section, `refresh()` also calls
+`refreshMemoryTab()`. Other tabs do not poll the memory routes, so the
+SQLite mutex stays cold for users who never open the tab.
+
+Anchor routing: `#memory` selects the tab on load and on `hashchange`.
+The CLI verb `clud memory ui` (issue #262) opens the dashboard at
+`http://127.0.0.1:<port>/#memory` so users land directly on the tab.
+
+Tests:
+
+- Rust `daemon::http::tests::dashboard_html_contains_memory_tab_markup`
+  asserts the bundled HTML carries the tab + endpoint refs.
+- Rust `daemon::http::tests::memory_routes_serve_realistic_payloads_for_dashboard`
+  pushes a row through `SqliteStore::insert` and asserts
+  `/memory/recent` returns the field shape the dashboard reads.
+- Python `tests/test_memory_dashboard.py` exercises both the served
+  HTML and `/memory/stats` against a real daemon process.
+
 ## Sibling sub-issues (META #255)
 
 - ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257.
@@ -407,7 +446,7 @@ hand — see
 - Hook subcommands — #260.
 - `clud memory search` / `save` CLI verbs (including
   `clud memory branch-isolate`) — #262.
-- Dashboard JS for the `/memory/*` routes — #263.
+- ~~Dashboard JS for the `/memory/*` routes~~ — #263.
 - Cross-process persistence test.
 - Knowledge graph (deferred past v1).
 

@@ -551,3 +551,38 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - The dashboard's `/memory/*` route bodies are no longer stubs — they delegate to the live `MemoryService` they already received. #261's `MemoryService` parameter is now load-bearing.
 - `--no-daemon memory <verb>` exits 3 with a clear message; there is no "offline" mode for the memory CLI. The two verbs that don't need the daemon (`branch-isolate`, `branch-unisolate`) handle `--no-daemon` implicitly by never calling `ensure_daemon`.
 - Live `clud memory reembed` against a running daemon is intentionally not implemented in v1 — the route would need to hold the SQLite mutex for the duration of an O(N) walk and would starve other ops. The CLI's `reembed --dry-run` reports counts, and the user is pointed at stopping the daemon for the real rewrite. A dedicated `POST /memory/reembed` with batching is future work.
+
+---
+
+## DD-020: Memory dashboard tab stays in the vanilla-JS SPA pattern
+
+**Context:** Issue #263 needs to add a "Memory" tab to the daemon dashboard so users can browse stats, recent rows, search hits, and a forget action without dropping into the CLI. The existing four tabs (Sessions / Garbage / Repos / Ctrl-C) live in a single `index.html` file under `crates/clud-bin/assets/dashboard/`, served via `include_str!` from `daemon::http`. There is no build step, no `npm`, no bundler — the file is loaded by the browser exactly as it sits on disk.
+
+A new tab is the second-largest UI change the dashboard has ever taken (after the original tab system itself). The temptation to "do it right" with React + a build step is real: the Memory tab has five cards, a poller, a search input, a forget confirmation, and a save form. That's the threshold at which most teams reach for a framework.
+
+**Decision:** The Memory tab is plain vanilla JS in the existing `index.html`. No React, no Vue, no Lit, no bundler, no TypeScript. The tab is appended in-place to the existing single-file dashboard, reusing the same CSS variables, the same `esc()` helper, the same `fetch()` calls, and the same 5s polling loop as the four existing tabs.
+
+**Rationale:**
+
+- **No version skew between the Rust binary and the bundled JS.** The HTML ships inside `include_str!` so the asset travels in lockstep with the binary. A bundler would introduce a build artifact that has to be regenerated whenever the JS changes; forgetting to rebuild produces a binary that disagrees with the source tree, and the failure mode is silent — the page just renders stale UI.
+- **No npm in the Rust build.** The CI matrix is 24 jobs across 6 platforms. Adding a Node toolchain to those jobs doubles the cold-start cost on every PR for a tab that is fundamentally five fetch calls and three `innerHTML` writes.
+- **The existing tabs are the style guide.** Sessions / Garbage / Repos / Ctrl-C are all renderer functions that take a `state` blob and write to a DOM container. The Memory tab follows the same shape: `pollMemoryStats()`, `pollMemoryRecent()`, `renderMemoryStats()`, `renderMemoryRecent()`. Anyone who can read the existing four tabs can read the fifth one.
+- **File size is still tractable.** Post-#263 the dashboard is ~870 LOC including CSS, well under the 1k threshold past which agents start to thrash on file reads. If the tab grows another 500 LOC the per-tab split becomes worth the cost; today it isn't.
+- **Auto-refresh folds into the existing 5s tick.** The four other tabs already poll `/state.json` every 5s; the Memory tab polls `/memory/stats` and `/memory/recent` on the *same* tick, gated by "is the Memory tab the active section?" so the SQLite mutex stays cold for users on other tabs.
+- **Anchor routing comes for free.** Six lines of JS map `#memory` → activate the Memory tab on load and on `hashchange`. The CLI verb `clud memory ui` (issue #262) opens `http://127.0.0.1:<port>/#memory` so users land on the tab directly. No router library needed.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| React + Vite build step bundled into the binary | Adds a Node toolchain to all 24 CI jobs; introduces a build artifact (`dist/index.html`) that has to stay in sync with the source tree; the version-skew failure mode is silent. |
+| Lit / Vue / Svelte single-file component | Same toolchain cost; no obvious win over vanilla JS for a tab whose state model is "five fetch calls and three renderers". |
+| Move the dashboard out of the binary entirely (serve from disk) | Breaks the single-binary distribution model. Users would have to install the dashboard separately, or the binary would need a "first-run extract" pass that nobody wants to debug on Windows. |
+| Make the Memory tab a separate `index-memory.html` page | Doubles the polling traffic (two `/state.json` consumers), forces users to switch URLs instead of tabs, and makes deep-linking (`#memory`) impossible. |
+
+**Consequences:**
+
+- The dashboard file grows from ~416 to ~870 LOC. Still trivially `include_str!`-able. The next tab can fit in the same file; the tab after that probably warrants a `assets/dashboard/memory.js` split, served as a separate route.
+- The dashboard's CSS surface area grows with the new tier-badge classes (`tier-working` / `tier-episodic` / `tier-semantic`) and the embedder-status pill (`embedder-ready` / `embedder-warn`). All new classes reuse the existing `--accent` / `--live` / `--warn` palette tokens; no new tokens were added.
+- The Memory tab handles "daemon unreachable" via the same `try { ... } catch { ... }` shape used by `refresh()` — the error message is rendered in a banner above the stats card with a retry button. No special offline mode; the page just shows the error and the next poll either recovers or paints the error again.
+- Two new tests pin the contract: a Rust unit test asserts the bundled HTML carries the tab + endpoint references, and a Python integration test boots the daemon and asserts `/memory/stats` returns the field shape the JS reads. The JS itself is not unit-tested; the Playwright suite (`tests/integration/test_ui_dashboard_playwright.py`) is the appropriate place for that, future-tense, once it grows a Memory-tab section.
