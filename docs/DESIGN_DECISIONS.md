@@ -456,3 +456,35 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - Users who outgrow Working scratch must manually delete (via the eventual MCP delete verb) or wait for the TTL. There is no "decay-driven forget" escape hatch in v1.
 - `retention_score` returning a low value is informative, not actionable on the storage path — sibling sub-issues may build surfacing UIs from it (forget-candidate review).
 - This DD is at the policy layer, not the API layer: `SqliteStore::delete` still accepts any id. The tier-gated rule lives inside `tiers::forget_expired` and is the only daemon-driven caller.
+
+---
+
+## DD-017: Memory service runs in-process inside the existing clud daemon
+
+**Context:** The agent-memory subsystem (META #255) needs a process to own four resources: the SQLite store, the tantivy `IndexWriter`, the embedder, and the consolidation timer. The natural choice is between a sidecar `clud-memory` process (mirroring how Phase 1 of #135 ran the standalone `gc_daemon`) and folding it into the existing `clud` daemon next to the GC registry worker and the dashboard's `tiny_http` listener.
+
+**Decision:** Spawn the memory subsystem in-process inside `clud`'s session daemon. `daemon::memory_service::spawn_memory_service(state_dir)` runs alongside `gc_service::spawn_registry_worker_for_state` and `http::spawn_dashboard` from `daemon::server::run_daemon`, before the daemon's IPC accept loop. The result is held as `Option<Arc<MemoryService>>` and shared with the dashboard's HTTP handlers (and, in future PRs, the MCP server and the hook subcommands). Each resource is held inside the service: `Arc<Mutex<SqliteStore>>`, `Arc<Mutex<LexicalIndex>>`, `Arc<Embedder>`, and `TierConfig`.
+
+**Rationale:**
+- One daemon per user is already the established pattern (issue #135 merged the standalone `gc_daemon` into the session daemon for exactly this reason). Adding a second sidecar would re-introduce the multi-process orchestration problem #135 closed: bringup ordering, lockfile coordination, version skew across upgrades, and stale-pid cleanup.
+- The dashboard's HTTP server already runs in-process and already needs every resource the memory service owns. A sidecar would have to expose its own IPC for the dashboard to call back into.
+- The embedder load cost (fastembed model download + ONNX session init on first run, plus a few hundred ms warm) is one-shot per daemon lifetime. Doing it once at daemon start is cheaper than per-request and avoids the cold-start tax every hook subcommand or MCP request would otherwise pay.
+- `Arc<Embedder>` is cheap to share. The embedder type is `Send + Sync` with no internal mutex; the timer thread, every HTTP handler, and every future MCP request all read from the same `Arc` clone.
+- The consolidation timer is a thin loop that takes the SQLite + lexical mutexes for the duration of one round of `promote_candidates → apply_promotions → forget_expired`. Cross-process orchestration of that loop from a sidecar would be strictly worse — more code, more failure modes, no upside.
+- Failure of any single piece must not take the daemon down: a bad embedder env falls back to `Embedder::Disabled`; an unopenable SQLite leaves `memory_service: None`; HTTP routes return 503. The session daemon's other duties keep running.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Sidecar `clud-memory` process | Re-introduces the multi-process bringup problem #135 closed. The dashboard would need a second IPC path to call into memory; tests would need to spawn and reap a second binary. No upside that justifies the cost. |
+| Memory subsystem lazily loaded on first MCP request | Pushes the embedder cold-start onto the user's first save / search; defeats the "instantly searchable" UX the embedder choice was made to protect (see DD-015). The 100% case is "memory is enabled," so eager load wins on the common path. |
+| Memory subsystem inside the per-session worker process | Each session would have to load its own embedder and open its own SQLite handle — embeddings would be N× the disk + RAM cost, and SQLite writes from N workers would need cross-process locking. Defeats the single-writer invariant the storage layer relies on (memory.md). |
+| Tokio runtime for the timer + handlers | The daemon already uses `std::thread` everywhere (GC, dashboard); adding a runtime just to drive a 5-minute timer is the wrong tool. The future MCP server (sub-issue #259) may pull tokio in, but it can contain it inside its own thread; this PR doesn't preempt that choice. |
+
+**Consequences:**
+- Daemon startup runs the embedder load — first run pays the model download (~80 MB MiniLM ONNX); subsequent runs hit the on-disk cache. Logged but not fatal.
+- `DaemonInfo.memory_mcp_port` is reserved as `Option<u16>` so issue #259 can populate it without a wire-format break.
+- The consolidation timer holds the SQLite + lexical locks for the duration of one tick. Saves and searches are blocked for the tick's duration — typically tens of ms on a small store, bounded by `O(N)` in the worst case where the entire Working tier is being promoted in one round. Acceptable for v1; if it bites, future work can split the lock or batch the apply.
+- The reconciliation pass on startup is `O(N)` upserts plus one tantivy commit; bounded by row count and cheap on a clean daemon. Documents the cost in `crates/clud-bin/src/daemon/memory_service.rs` so future readers know the bound.
+- The HTTP `/memory/*` route bodies are stubs in this PR (#261); the real implementations land in #263. The seam is `MemoryService` references in each handler — no new IPC needs to be added when #263 lands.

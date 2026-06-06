@@ -26,12 +26,14 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use super::gc_service::{GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::read_json_file;
+use super::memory_service::MemoryService;
 use super::paths::{daemon_info_path, sessions_dir};
 use super::process_utils::pid_is_alive;
 use super::types::{
     CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
 };
 use crate::ctrl_c_track::{self, CtrlCEvent};
+use crate::memory::embedder::EmbedderTrait;
 use crate::session_registry::LiveSession;
 
 /// Supplier of live session-registry rows. Injected at the dashboard
@@ -169,6 +171,7 @@ pub(super) fn spawn_dashboard(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
+    memory: Option<std::sync::Arc<MemoryService>>,
 ) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -194,6 +197,7 @@ pub(super) fn spawn_dashboard(
                 ipc_port,
                 started_at_unix,
                 live_sessions_provider,
+                memory,
             )
         });
     match res {
@@ -212,6 +216,7 @@ fn run_dashboard_loop(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
+    memory: Option<std::sync::Arc<MemoryService>>,
 ) {
     for request in server.incoming_requests() {
         let method = request.method().clone();
@@ -233,6 +238,26 @@ fn run_dashboard_loop(
             }
             (Method::Post, "/gc/purge") => {
                 handle_purge(request, gc_tx.as_ref());
+            }
+            // Issue #261: scaffolding for the memory dashboard routes.
+            // Bodies are stubs in this PR; the real reads (recent
+            // memories, BM25 + KNN hybrid search, tier counts) land in
+            // #263 alongside the dashboard JS.
+            (Method::Get, "/memory/recent") => {
+                handle_memory_recent(request, memory.as_ref());
+            }
+            (Method::Get, "/memory/search") => {
+                handle_memory_search(request, memory.as_ref());
+            }
+            (Method::Get, "/memory/stats") => {
+                handle_memory_stats(request, memory.as_ref());
+            }
+            (Method::Post, "/memory/save") => {
+                handle_memory_save(request, memory.as_ref());
+            }
+            (m, p) if m == Method::Post && p.starts_with("/memory/forget/") => {
+                let id = p.trim_start_matches("/memory/forget/").to_string();
+                handle_memory_forget(request, &id, memory.as_ref());
             }
             _ => {
                 respond_text(request, 404, b"not found");
@@ -357,6 +382,109 @@ fn respond_purge_reply(request: Request, reply: GcReply) {
             );
         }
     }
+}
+
+// ---------- memory route stubs (issue #261) ----------
+//
+// All five routes are wired to the live `Arc<MemoryService>` so #263 can
+// fill in the bodies in a follow-up without touching this file's match
+// arms. On `memory.is_none()` (memory subsystem failed to start) every
+// route returns 503 — the daemon keeps serving session + GC traffic.
+
+fn handle_memory_recent(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
+    if memory.is_none() {
+        respond_json(
+            request,
+            503,
+            json_error_bytes("memory subsystem unavailable").as_slice(),
+        );
+        return;
+    }
+    // TODO(#263): pull recent rows from `MemoryService::store` and
+    // render them as `[{id, tier, content, created_at_ms}]`. Empty array
+    // until then so the dashboard's JS can already poll the route.
+    respond_json(request, 200, b"[]");
+}
+
+fn handle_memory_search(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
+    if memory.is_none() {
+        respond_json(
+            request,
+            503,
+            json_error_bytes("memory subsystem unavailable").as_slice(),
+        );
+        return;
+    }
+    // TODO(#263): parse `?q=` + `?k=`, run hybrid search via embedder +
+    // store + lexical, return `[{id, tier, content, score}]`.
+    respond_json(request, 200, b"[]");
+}
+
+fn handle_memory_stats(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
+    let Some(svc) = memory else {
+        respond_json(
+            request,
+            503,
+            json_error_bytes("memory subsystem unavailable").as_slice(),
+        );
+        return;
+    };
+    // The embedder name is cheap and useful even before #263 ships, so
+    // populate it now. Counts stay at 0 until #263 wires them up.
+    let embedder_status =
+        <crate::memory::Embedder as EmbedderTrait>::name(svc.embedder.as_ref()).to_string();
+    let body = serde_json::json!({
+        "tier_counts": {
+            "working": 0,
+            "episodic": 0,
+            "semantic": 0,
+        },
+        "embedder_status": embedder_status,
+        "consolidate_interval_ms": svc.consolidate_interval_ms,
+    });
+    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
+    respond_json(request, 200, &bytes);
+}
+
+fn handle_memory_save(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
+    if memory.is_none() {
+        respond_json(
+            request,
+            503,
+            json_error_bytes("memory subsystem unavailable").as_slice(),
+        );
+        return;
+    }
+    // TODO(#263): parse `{content, tier, session_id?, scope_key?}`,
+    // embed, store, lexical-upsert, return `{id}`. Stub returns 501 so
+    // the dashboard's save form gets a deterministic error until then.
+    respond_json(
+        request,
+        501,
+        json_error_bytes("memory save not implemented in this build (see #263)").as_slice(),
+    );
+}
+
+fn handle_memory_forget(
+    request: Request,
+    _id: &str,
+    memory: Option<&std::sync::Arc<MemoryService>>,
+) {
+    if memory.is_none() {
+        respond_json(
+            request,
+            503,
+            json_error_bytes("memory subsystem unavailable").as_slice(),
+        );
+        return;
+    }
+    // TODO(#263): validate id, call `SqliteStore::delete` +
+    // `LexicalIndex::delete`, return `{deleted: true}`.
+    respond_json(
+        request,
+        501,
+        json_error_bytes("memory forget not implemented in this build (see #263)").as_slice(),
+    );
 }
 
 // ---------- state aggregation ----------
@@ -939,6 +1067,7 @@ mod tests {
             9999,
             100,
             empty_live_provider(),
+            None,
         )
         .expect("dashboard spawned");
 
@@ -989,6 +1118,7 @@ mod tests {
             9999,
             100,
             empty_live_provider(),
+            None,
         )
         .expect("dashboard spawned");
 
@@ -1073,6 +1203,7 @@ mod tests {
             9999,
             100,
             empty_live_provider(),
+            None,
         )
         .expect("dashboard spawned");
 
@@ -1118,6 +1249,18 @@ mod tests {
     /// Tiny HTTP/1.0 client for tests. Connect, send a request, read the
     /// body. Avoids pulling in a real HTTP client dep just for tests.
     fn fetch_path(port: u16, method: &str, path: &str, body: Option<String>) -> io::Result<String> {
+        fetch_path_with_status(port, method, path, body).map(|(_, body)| body)
+    }
+
+    /// Same as `fetch_path` but also returns the HTTP status code from the
+    /// status line — required by the issue #261 stub-route tests that
+    /// assert 503 / 501 / 200 outcomes.
+    fn fetch_path_with_status(
+        port: u16,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> io::Result<(u16, String)> {
         let mut stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -1136,9 +1279,138 @@ mod tests {
         stream.flush()?;
         let mut buf = Vec::with_capacity(4096);
         stream.read_to_end(&mut buf)?;
+        let status_line_end = buf
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .or_else(|| buf.windows(1).position(|w| w == b"\n"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no status line"))?;
+        let status_line = std::str::from_utf8(&buf[..status_line_end])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no status code"))?;
         let body_start = find_body_start(&buf)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no header terminator"))?;
-        String::from_utf8(buf[body_start..].to_vec())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        let body = String::from_utf8(buf[body_start..].to_vec())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok((status, body))
+    }
+
+    // ---------- issue #261: memory-route stub coverage ----------
+
+    /// With `memory: None`, every memory route must return 503 with a
+    /// JSON error body. The daemon keeps serving session + GC traffic.
+    #[test]
+    fn memory_routes_return_503_when_subsystem_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = spawn_dashboard(
+            dir.path().to_path_buf(),
+            None,
+            9999,
+            100,
+            empty_live_provider(),
+            None,
+        )
+        .expect("dashboard spawned");
+
+        for (method, path) in [
+            ("GET", "/memory/recent"),
+            ("GET", "/memory/search?q=foo"),
+            ("GET", "/memory/stats"),
+        ] {
+            let (status, body) = fetch_path_with_status(port, method, path, None).expect("fetch");
+            assert_eq!(status, 503, "{method} {path}");
+            assert!(body.contains("memory subsystem unavailable"), "body={body}");
+        }
+        let (status, _) =
+            fetch_path_with_status(port, "POST", "/memory/save", Some("{}".to_string()))
+                .expect("save");
+        assert_eq!(status, 503);
+        let (status, _) =
+            fetch_path_with_status(port, "POST", "/memory/forget/abc", Some("{}".to_string()))
+                .expect("forget");
+        assert_eq!(status, 503);
+    }
+
+    /// With a live `MemoryService`, the stub bodies #263 will replace
+    /// are wired through: stats returns 200 with the documented JSON
+    /// shape; recent/search return 200 with an empty array; save/forget
+    /// return 501 until #263 implements them.
+    #[test]
+    fn memory_routes_serve_stubs_when_subsystem_present() {
+        // Force the embedder to `Disabled` so the test doesn't try to
+        // download a fastembed model.
+        let saved: Vec<(&str, Option<String>)> = [
+            "CLUD_MEMORY_EMBEDDER",
+            "CLUD_MEMORY_EMBEDDER_PROVIDER",
+            "CLUD_MEMORY_EMBEDDER_URL",
+            "CLUD_MEMORY_EMBEDDER_API_KEY",
+            "CLUD_MEMORY_EMBEDDER_MODEL",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(*k).ok()))
+        .collect();
+        for (k, _) in &saved {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+        unsafe {
+            std::env::set_var("CLUD_MEMORY_EMBEDDER", "disabled");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let svc = crate::daemon::memory_service::spawn_memory_service(dir.path())
+            .expect("memory service");
+        let svc = std::sync::Arc::new(svc);
+
+        let port = spawn_dashboard(
+            dir.path().to_path_buf(),
+            None,
+            9999,
+            100,
+            empty_live_provider(),
+            Some(svc.clone()),
+        )
+        .expect("dashboard spawned");
+
+        let (status, body) =
+            fetch_path_with_status(port, "GET", "/memory/stats", None).expect("stats");
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+        assert!(parsed.get("tier_counts").is_some(), "body={body}");
+        assert!(parsed.get("embedder_status").is_some(), "body={body}");
+
+        let (status, body) =
+            fetch_path_with_status(port, "GET", "/memory/recent", None).expect("recent");
+        assert_eq!(status, 200);
+        assert_eq!(body.trim(), "[]");
+
+        let (status, body) =
+            fetch_path_with_status(port, "GET", "/memory/search?q=foo", None).expect("search");
+        assert_eq!(status, 200);
+        assert_eq!(body.trim(), "[]");
+
+        let (status, _) =
+            fetch_path_with_status(port, "POST", "/memory/save", Some("{}".to_string()))
+                .expect("save");
+        assert_eq!(status, 501);
+
+        let (status, _) =
+            fetch_path_with_status(port, "POST", "/memory/forget/abc", Some("{}".to_string()))
+                .expect("forget");
+        assert_eq!(status, 501);
+
+        svc.shutdown();
+
+        // Restore env.
+        for (k, v) in saved {
+            match v {
+                Some(val) => unsafe { std::env::set_var(k, val) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
     }
 }

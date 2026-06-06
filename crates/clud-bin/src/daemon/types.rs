@@ -67,6 +67,13 @@ pub(super) struct DaemonInfo {
     /// `None` for daemon.json files written by clud <= 2.0.14.
     #[serde(default)]
     pub(super) version: Option<String>,
+    /// Issue #261: loopback port for the agent-memory MCP server. The
+    /// listener is bound by #259; this PR reserves the field so the wire
+    /// format stays stable across the rollout. `None` while the MCP
+    /// server is not running, e.g. on this PR or when the memory
+    /// subsystem failed to start.
+    #[serde(default)]
+    pub(super) memory_mcp_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

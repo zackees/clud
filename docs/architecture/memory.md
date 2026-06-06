@@ -225,16 +225,106 @@ Env-var knobs (read by `TierConfig::from_env`):
 - `CLUD_MEMORY_PROMOTE_DWELL_MS` (default 3_600_000)
 - `CLUD_MEMORY_DECAY_HALF_LIFE_MS` (default 604_800_000)
 
+## Daemon integration (issue #261)
+
+The memory subsystem runs **in-process** inside the existing `clud`
+daemon, not as a sidecar. One daemon owns the whole subsystem; the GC
+service and dashboard listener already established that pattern
+([DD-017](../DESIGN_DECISIONS.md#dd-017-memory-service-runs-in-process-inside-the-existing-clud-daemon)).
+
+`daemon::memory_service::spawn_memory_service(state_dir)` opens every
+resource the rest of the daemon needs:
+
+1. Resolve `<state_dir>/memory/{memory.db, tantivy/}` and create the
+   directories if missing.
+2. Resolve the embedder via `embedder_from_env()`. The embedder's `dim`
+   drives the SQLite vec0 column width on first open; on subsequent
+   opens a mismatch is logged as a warning and the daemon keeps going
+   (`clud memory reembed` — #262 — is the manual fix).
+3. Open `SqliteStore` (runs schema migrations to user_version 2) and
+   run `PRAGMA wal_checkpoint(TRUNCATE)` for WAL recovery on every
+   start.
+4. Open `LexicalIndex` (tantivy half-segments from a crash are dropped
+   on open).
+5. **Reconciliation pass**: walk every SQLite row by tier and re-upsert
+   it into tantivy. Bounded by row count; cheap on a clean daemon. The
+   pass self-heals the eventual-consistency window between SQLite
+   commit and tantivy commit so a daemon kill mid-write doesn't leave
+   BM25 permanently missing the row.
+6. Wrap `SqliteStore` and `LexicalIndex` in `Arc<Mutex<...>>`; wrap
+   `Embedder` in `Arc<_>` (no internal mutex — `Embedder` is
+   `Send + Sync`). Resolve `TierConfig::from_env`. Return
+   `MemoryService { store, lexical, embedder, tier_config,
+   consolidate_interval_ms }`.
+
+### Consolidation timer
+
+A named thread `clud-memory-consolidate` ticks every
+`CLUD_MEMORY_CONSOLIDATE_INTERVAL_MS` (default 300_000 = 5 min). Per
+tick:
+
+1. `promote_candidates(&store, now_ms, &cfg)`.
+2. `apply_promotions(&mut store, &mut lexical, &promotions, now_ms)`.
+3. `forget_expired(&mut store, &mut lexical, now_ms, &cfg)`.
+4. Every `CLUD_MEMORY_CHECKPOINT_EVERY_N_TICKS` ticks (default 12 = 1
+   hour at the default cadence), `store.checkpoint_truncate()` to
+   truncate the WAL.
+5. Log a structured one-liner with promoted / forgotten counts and the
+   checkpoint flag.
+
+The orchestration loop polls the shared shutdown flag at one-tenth the
+interval so cooperative shutdown wakes within seconds. The
+`run_one_consolidation_tick` helper is `pub(crate)` so tests can drive
+the lifecycle math with a deterministic `now_ms`.
+
+### Concurrency
+
+| Resource | Lock kind | Writers | Readers |
+|---|---|---|---|
+| `SqliteStore` | `Arc<Mutex<...>>` | one at a time (the timer thread + HTTP save handler) | through the same mutex; WAL still allows multi-reader inside the same process |
+| `LexicalIndex` | `Arc<Mutex<...>>` | one `IndexWriter` per process | reader is materialized inside the lock |
+| `Embedder` | `Arc<...>` | none — no internal mutex | shared across the timer + every HTTP handler |
+
+Order matters on a save: take SQLite first, commit, drop, then take
+tantivy. The reconciliation pass on next boot covers the eventual-
+consistency window if a crash happens between the two commits.
+
+### HTTP route scaffolding
+
+The dashboard's existing `tiny_http` server (issue #183) carries five
+new routes wired to the live `Arc<MemoryService>`:
+
+- `GET /memory/recent` — returns `[]` (stub for #263).
+- `GET /memory/search?q=` — returns `[]` (stub for #263).
+- `GET /memory/stats` — returns `{tier_counts, embedder_status,
+  consolidate_interval_ms}`. The embedder name is real; counts stay at
+  0 until #263.
+- `POST /memory/save` — 501 until #263.
+- `POST /memory/forget/<id>` — 501 until #263.
+
+When `MemoryService` is `None` (subsystem failed to start) every route
+returns 503 with a JSON error body. The daemon keeps serving sessions
+and GC traffic.
+
+The MCP server itself (`#259`) and the hook subcommands (`#260`) plug
+into `MemoryService` from outside; this PR just shares the four handles
+the way #135 shared the GC mpsc channel.
+
+`DaemonInfo.memory_mcp_port` is reserved as `Option<u16>` so #259 can
+populate the field without a wire-format break.
+
 ## Sibling sub-issues (META #255)
 
-- ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257 (this PR).
-- Tier lifecycle (Working / Episodic / Semantic + decay + promotion)
-- MCP server in daemon + `clud mcp` stdio bridge
-- Daemon HTTP/IPC routes for memory ops
+- ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257.
+- ~~Tier lifecycle (Working / Episodic / Semantic + decay + promotion)~~ — #258.
+- ~~Daemon integration (lifecycle, consolidation timer, HTTP route stubs)~~ — #261 (this PR).
+- MCP server in daemon + `clud mcp` stdio bridge — #259.
+- Hook subcommands — #260.
 - `clud memory search` / `save` CLI verbs (including
-  `clud memory branch-isolate`)
-- Cross-process persistence test
-- Knowledge graph (deferred past v1)
+  `clud memory branch-isolate`) — #262.
+- Dashboard JS for the `/memory/*` routes — #263.
+- Cross-process persistence test.
+- Knowledge graph (deferred past v1).
 
 Each sub-issue lands on top of the public surface this PR exposes from
 [`memory/mod.rs`](../../crates/clud-bin/src/memory/mod.rs); none of

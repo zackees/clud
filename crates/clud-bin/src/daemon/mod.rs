@@ -6,6 +6,7 @@ mod gc_service;
 mod http;
 mod io_helpers;
 mod keys;
+mod memory_service;
 mod paths;
 mod process_utils;
 mod server;

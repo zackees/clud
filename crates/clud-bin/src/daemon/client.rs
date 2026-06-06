@@ -552,6 +552,7 @@ mod tests {
             port: 0,
             dashboard_port: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            memory_mcp_port: None,
         };
         assert!(daemon_version_matches(&info));
     }
@@ -566,6 +567,7 @@ mod tests {
             port: 0,
             dashboard_port: None,
             version: Some("0.0.0-not-the-current".to_string()),
+            memory_mcp_port: None,
         };
         assert!(!daemon_version_matches(&info));
     }
@@ -581,6 +583,7 @@ mod tests {
             port: 0,
             dashboard_port: None,
             version: None,
+            memory_mcp_port: None,
         };
         assert!(!daemon_version_matches(&info));
     }
@@ -592,6 +595,7 @@ mod tests {
             port,
             dashboard_port: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            memory_mcp_port: None,
         };
         super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();
     }
