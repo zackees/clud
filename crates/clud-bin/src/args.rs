@@ -257,6 +257,17 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: Option<MemorySubcommand>,
     },
+    /// Issue #260: agent-memory hook subcommands invoked by Claude
+    /// Code / Codex at session lifecycle events. Each verb reads a
+    /// JSON payload from stdin, talks HTTP to the daemon's `/memory/*`
+    /// routes, and exits 0 unconditionally — a hook failure must never
+    /// block the agent. Registered to `~/.claude/settings.json` /
+    /// `~/.codex/hooks.json` by sibling #265. Hidden from `--help`.
+    #[command(name = "hook", hide = true)]
+    Hook {
+        #[command(subcommand)]
+        subcommand: HookSubcommand,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -375,6 +386,30 @@ pub enum MemorySubcommand {
     BranchUnisolate,
 }
 
+/// Subcommands under `clud hook`. See `crates/clud-bin/src/hooks.rs`.
+///
+/// Hook payload schemas live with the handlers; every variant reads its
+/// JSON payload from stdin. Output (a `<context>` block from
+/// `session-start`) goes to stdout; everything else writes nothing on
+/// success.
+#[derive(Subcommand, Debug, Clone)]
+pub enum HookSubcommand {
+    /// Claude Code `SessionStart` / Codex `session_start`: emit a
+    /// `<context>` block of recalled memories on stdout for injection
+    /// into the agent's first turn.
+    SessionStart,
+    /// Claude Code `UserPromptSubmit` / Codex `user_prompt_submit`:
+    /// opt-in `remember:` / `save this:` directives are saved to the
+    /// daemon. Otherwise a no-op.
+    UserPromptSubmit,
+    /// Claude Code `PostToolUse` / Codex `post_tool_use`: logged no-op
+    /// in v0.1; tool-output classification lands in v0.5.
+    PostToolUse,
+    /// Claude Code `Stop` / Codex `session_end`: optionally drives
+    /// consolidation via `CLUD_MEMORY_AUTO_CONSOLIDATE_ON_STOP=1`.
+    Stop,
+}
+
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc.rs`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
@@ -489,7 +524,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui", "mcp",
-        "memory", "trash", "daemon", "__daemon", "__worker",
+        "memory", "hook", "trash", "daemon", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
