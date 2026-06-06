@@ -279,7 +279,7 @@ fn spawn_consolidation_thread(
             // tantivy's per-directory `LockBusy`. Production with a
             // 5-minute interval still ticks every 5 minutes; the bound
             // only governs shutdown latency.
-            let poll_step = Duration::from_millis((interval_ms / 10).max(50).min(500));
+            let poll_step = Duration::from_millis((interval_ms / 10).clamp(50, 500));
             let mut next_due = std::time::Instant::now() + Duration::from_millis(interval_ms);
             while !shutdown.load(Ordering::SeqCst) {
                 thread::sleep(poll_step);
