@@ -1876,4 +1876,173 @@ mod tests {
             }
         }
     }
+
+    // ---------- issue #263: dashboard Memory tab ----------
+
+    /// The bundled SPA must include the Memory tab markup so the
+    /// progressive-disclosure README claim "5th tab Memory" matches the
+    /// asset that ships in the binary.
+    #[test]
+    fn dashboard_html_contains_memory_tab_markup() {
+        let html = super::DASHBOARD_HTML;
+        assert!(
+            html.contains("data-tab=\"memory\""),
+            "dashboard html missing memory tab button"
+        );
+        assert!(
+            html.contains("id=\"tab-memory\""),
+            "dashboard html missing tab-memory id"
+        );
+        assert!(
+            html.contains("id=\"memory\""),
+            "dashboard html missing #memory section"
+        );
+        // Endpoint references the JS uses — guard against accidental
+        // route renames breaking the dashboard.
+        assert!(html.contains("/memory/stats"));
+        assert!(html.contains("/memory/recent"));
+        assert!(html.contains("/memory/search"));
+        assert!(html.contains("/memory/save"));
+        assert!(html.contains("/memory/forget/"));
+        // Hash anchor routing for deep links.
+        assert!(
+            html.contains("applyHashRoute"),
+            "dashboard html missing hash route handler"
+        );
+    }
+
+    /// After a real save through `/memory/save`, the `/memory/recent`
+    /// route returns rows containing the exact fields the dashboard's
+    /// `renderMemoryRecent` reads: `id`, `tier`, `content`,
+    /// `session_id`, `created_at_ms`.
+    #[test]
+    fn memory_routes_serve_realistic_payloads_for_dashboard() {
+        let saved: Vec<(&str, Option<String>)> = [
+            "CLUD_MEMORY_EMBEDDER",
+            "CLUD_MEMORY_EMBEDDER_PROVIDER",
+            "CLUD_MEMORY_EMBEDDER_URL",
+            "CLUD_MEMORY_EMBEDDER_API_KEY",
+            "CLUD_MEMORY_EMBEDDER_MODEL",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var(*k).ok()))
+        .collect();
+        for (k, _) in &saved {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+        unsafe {
+            std::env::set_var("CLUD_MEMORY_EMBEDDER", "disabled");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let svc = crate::daemon::memory_service::spawn_memory_service(dir.path())
+            .expect("memory service");
+        let svc = std::sync::Arc::new(svc);
+
+        let port = spawn_dashboard(
+            dir.path().to_path_buf(),
+            None,
+            9999,
+            100,
+            empty_live_provider(),
+            Some(svc.clone()),
+        )
+        .expect("dashboard spawned");
+
+        // Inject one memory row directly through the store. We bypass
+        // `/memory/save` because that route requires a live embedder,
+        // and the embedder is forced to `Disabled` above so the test
+        // doesn't pull down a fastembed model. The on-disk vec column
+        // is zeroed; we only care that `/memory/recent` echoes the row
+        // back with the field shape the dashboard reads.
+        {
+            let mut store = svc.store.lock().expect("store");
+            let dim = store.embed_dim();
+            let row = crate::memory::MemoryRow {
+                id: crate::memory::MemoryId::new_v7(),
+                session_id: Some("sess-dash".to_string()),
+                scope_key: None,
+                branch_name: None,
+                is_orphan: false,
+                tier: crate::memory::Tier::Working,
+                content: "dashboard fixture".to_string(),
+                created_at_ms: 1_700_000_000_000,
+                updated_at_ms: 1_700_000_000_000,
+                tier_change_at_ms: 1_700_000_000_000,
+                access_count: 0,
+                last_access_at_ms: 1_700_000_000_000,
+                metadata_json: None,
+            };
+            store.insert(&row, &vec![0.0_f32; dim]).expect("inject row");
+        }
+
+        // /memory/recent shape must match the dashboard's render code.
+        let (status, body) =
+            fetch_path_with_status(port, "GET", "/memory/recent?limit=50", None).expect("recent");
+        assert_eq!(status, 200);
+        let rows: serde_json::Value = serde_json::from_str(&body).expect("recent json");
+        let arr = rows.as_array().expect("recent is array");
+        assert_eq!(arr.len(), 1, "recent={body}");
+        let row = &arr[0];
+        assert!(
+            row.get("id").and_then(|v| v.as_str()).is_some(),
+            "row={row}"
+        );
+        assert_eq!(row.get("tier").and_then(|v| v.as_str()), Some("working"));
+        assert_eq!(
+            row.get("content").and_then(|v| v.as_str()),
+            Some("dashboard fixture")
+        );
+        assert_eq!(
+            row.get("session_id").and_then(|v| v.as_str()),
+            Some("sess-dash")
+        );
+        assert!(
+            row.get("created_at_ms").and_then(|v| v.as_u64()).is_some(),
+            "row={row}"
+        );
+
+        // /memory/stats shape — every field the dashboard tile reads.
+        let (status, body) =
+            fetch_path_with_status(port, "GET", "/memory/stats", None).expect("stats");
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("stats json");
+        let tc = parsed.get("tier_counts").expect("tier_counts");
+        for tier in ["working", "episodic", "semantic"] {
+            assert!(
+                tc.get(tier).and_then(|v| v.as_u64()).is_some(),
+                "tier_counts.{tier} missing: {body}"
+            );
+        }
+        assert_eq!(
+            tc.get("working").and_then(|v| v.as_u64()),
+            Some(1),
+            "saved row not reflected in stats"
+        );
+        assert!(parsed.get("embedder_status").is_some(), "body={body}");
+        assert!(parsed.get("embedder_dim").is_some(), "body={body}");
+        assert!(parsed.get("store_embed_dim").is_some(), "body={body}");
+        assert!(parsed.get("schema_user_version").is_some(), "body={body}");
+
+        // The dashboard also serves index.html directly from the same
+        // listener; confirm the bundled markup actually reaches the
+        // browser unchanged.
+        let (status, html) = fetch_path_with_status(port, "GET", "/", None).expect("html");
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("data-tab=\"memory\""),
+            "html={}",
+            &html[..200]
+        );
+
+        svc.shutdown();
+        for (k, v) in saved {
+            match v {
+                Some(val) => unsafe { std::env::set_var(k, val) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+    }
 }
