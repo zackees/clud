@@ -3,6 +3,16 @@
 //! Session-only launches are the default for automation and one-shot prompt
 //! paths. Interactive TUI launches can opt into global setup before the backend
 //! starts.
+//!
+//! The selector exposes three rows: "Session only", "Globally", and
+//! "Globally + clud memory (recommended)". The third row is identical to
+//! "Globally" plus two extra setup actions ([`MemoryMcpRegistrationAction`]
+//! and [`MemoryHookRegistrationAction`]) that register the `clud-memory`
+//! MCP server and the four `clud hook` entries into the backend's user
+//! config files (`~/.claude.json`, `~/.codex/config.toml`,
+//! `~/.claude/settings.json`, `~/.codex/hooks.json`). Both actions are
+//! idempotent and refuse to clobber hand-edited user blocks; see
+//! [`crate::memory::mcp_config`] for the upsert primitives.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -12,12 +22,18 @@ use crossterm::terminal;
 
 use crate::args::Args;
 use crate::backend::Backend;
+use crate::memory::mcp_config;
 use crate::{codex_hook_normalize, skill_install, skills};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchSetupScope {
     SessionOnly,
     Global,
+    /// Global setup PLUS native-memory registration (issue #265).
+    /// Runs the same actions as `Global`, then registers the `clud-memory`
+    /// MCP server and the four `clud hook` entries into the selected
+    /// backend's user config files.
+    GlobalWithMemory,
 }
 
 impl LaunchSetupScope {
@@ -25,7 +41,19 @@ impl LaunchSetupScope {
         match self {
             LaunchSetupScope::SessionOnly => "session-only",
             LaunchSetupScope::Global => "global",
+            LaunchSetupScope::GlobalWithMemory => "global+memory",
         }
+    }
+
+    /// `true` for the two scopes that run the existing global actions
+    /// (`Global` and `GlobalWithMemory`). Existing actions can keep their
+    /// `matches!(scope, LaunchSetupScope::Global)` check by switching to
+    /// this helper to opt into both scopes.
+    pub fn runs_global_actions(self) -> bool {
+        matches!(
+            self,
+            LaunchSetupScope::Global | LaunchSetupScope::GlobalWithMemory
+        )
     }
 }
 
@@ -36,43 +64,59 @@ pub enum SelectorEvent {
     Enter,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScopeSelector {
-    selected: LaunchSetupScope,
-}
+const SELECTOR_ROWS: [LaunchSetupScope; 3] = [
+    LaunchSetupScope::SessionOnly,
+    LaunchSetupScope::Global,
+    LaunchSetupScope::GlobalWithMemory,
+];
 
-impl Default for ScopeSelector {
-    fn default() -> Self {
-        Self {
-            selected: LaunchSetupScope::SessionOnly,
-        }
-    }
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeSelector {
+    index: usize,
 }
 
 impl ScopeSelector {
+    /// Build a selector that highlights "Globally + clud memory" by default
+    /// when memory is not yet registered, falling back to "Session only" once
+    /// memory is already configured. The memory check probes
+    /// `~/.claude.json` / `~/.codex/config.toml` via
+    /// [`mcp_config::memory_already_registered`].
+    pub fn for_home(home: &Path) -> Self {
+        if mcp_config::memory_already_registered(home) {
+            Self { index: 0 }
+        } else {
+            Self { index: 2 }
+        }
+    }
+
     pub fn selected(self) -> LaunchSetupScope {
-        self.selected
+        SELECTOR_ROWS[self.index]
     }
 
     pub fn handle(&mut self, event: SelectorEvent) -> Option<LaunchSetupScope> {
         match event {
-            SelectorEvent::Up => self.selected = LaunchSetupScope::SessionOnly,
-            SelectorEvent::Down => self.selected = LaunchSetupScope::Global,
-            SelectorEvent::Enter => return Some(self.selected),
+            SelectorEvent::Up => {
+                self.index = if self.index == 0 {
+                    SELECTOR_ROWS.len() - 1
+                } else {
+                    self.index - 1
+                };
+            }
+            SelectorEvent::Down => {
+                self.index = (self.index + 1) % SELECTOR_ROWS.len();
+            }
+            SelectorEvent::Enter => return Some(self.selected()),
         }
         None
     }
 
     pub fn render<W: Write>(&self, out: &mut W) -> io::Result<()> {
+        writeln!(out, "{} Session only", marker(self.index == 0))?;
+        writeln!(out, "{} Globally", marker(self.index == 1))?;
         writeln!(
             out,
-            "{} Session only",
-            marker(self.selected == LaunchSetupScope::SessionOnly)
-        )?;
-        writeln!(
-            out,
-            "{} Globally",
-            marker(self.selected == LaunchSetupScope::Global)
+            "{} Globally + clud memory (recommended)",
+            marker(self.index == 2)
         )?;
         out.flush()
     }
@@ -105,8 +149,12 @@ pub fn scope_for_non_prompting_launch(
 }
 
 pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
+    let home = home_dir();
     let _raw = RawModeGuard::enable()?;
-    let mut selector = ScopeSelector::default();
+    let mut selector = match home.as_deref() {
+        Some(h) => ScopeSelector::for_home(h),
+        None => ScopeSelector::default(),
+    };
     selector.render(out)?;
 
     loop {
@@ -124,7 +172,7 @@ pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
             out.flush()?;
             return Ok(scope);
         }
-        write!(out, "\x1b[2A")?;
+        write!(out, "\x1b[3A")?;
         selector.render(out)?;
     }
 }
@@ -149,6 +197,7 @@ pub enum SetupError {
     NoHomeDir,
     Skills(skills::InstallError),
     Io(io::Error),
+    MemoryConfig(mcp_config::Error),
 }
 
 impl std::fmt::Display for SetupError {
@@ -157,6 +206,7 @@ impl std::fmt::Display for SetupError {
             SetupError::NoHomeDir => write!(f, "could not resolve user home directory"),
             SetupError::Skills(error) => write!(f, "{error}"),
             SetupError::Io(error) => write!(f, "{error}"),
+            SetupError::MemoryConfig(error) => write!(f, "{error}"),
         }
     }
 }
@@ -175,6 +225,12 @@ impl From<io::Error> for SetupError {
     }
 }
 
+impl From<mcp_config::Error> for SetupError {
+    fn from(error: mcp_config::Error) -> Self {
+        SetupError::MemoryConfig(error)
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SetupReport {
     pub ran: Vec<&'static str>,
@@ -190,6 +246,7 @@ pub trait HarnessSetupAction {
 pub struct SetupContext<'a> {
     pub home: &'a Path,
     pub verbose: bool,
+    pub dry_run: bool,
     pub out: &'a mut dyn Write,
 }
 
@@ -207,10 +264,13 @@ impl HarnessSetupAction for BundledSkillsAction {
     }
 
     fn supports(&self, scope: LaunchSetupScope) -> bool {
-        matches!(scope, LaunchSetupScope::Global)
+        scope.runs_global_actions()
     }
 
     fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        if ctx.dry_run {
+            return Ok(());
+        }
         let _ = skills::ensure_installed_for_backend_at(ctx.home, self.backend)?;
         Ok(())
     }
@@ -228,10 +288,13 @@ impl HarnessSetupAction for ClaudeDriftSkillsAction {
     }
 
     fn supports(&self, scope: LaunchSetupScope) -> bool {
-        matches!(scope, LaunchSetupScope::Global)
+        scope.runs_global_actions()
     }
 
     fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        if ctx.dry_run {
+            return Ok(());
+        }
         skill_install::ensure_installed_at(ctx.home);
         Ok(())
     }
@@ -249,10 +312,13 @@ impl HarnessSetupAction for CodexHookNormalizeAction {
     }
 
     fn supports(&self, scope: LaunchSetupScope) -> bool {
-        matches!(scope, LaunchSetupScope::Global)
+        scope.runs_global_actions()
     }
 
     fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        if ctx.dry_run {
+            return Ok(());
+        }
         let clud_dir = ctx.home.join(".clud");
         let hooks_path = ctx.home.join(".codex").join("hooks.json");
         if let Err(error) =
@@ -266,6 +332,95 @@ impl HarnessSetupAction for CodexHookNormalizeAction {
     }
 }
 
+/// Issue #265: register the `clud-memory` MCP server in the selected
+/// backend's user config file. Only runs under
+/// [`LaunchSetupScope::GlobalWithMemory`] — opting into memory is its own
+/// scope, intentionally not folded into the existing `Global` row.
+struct MemoryMcpRegistrationAction {
+    backend: Backend,
+}
+
+impl HarnessSetupAction for MemoryMcpRegistrationAction {
+    fn name(&self) -> &'static str {
+        "memory-mcp-registration"
+    }
+
+    fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    fn supports(&self, scope: LaunchSetupScope) -> bool {
+        matches!(scope, LaunchSetupScope::GlobalWithMemory)
+    }
+
+    fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        if ctx.dry_run {
+            return Ok(());
+        }
+        let version = env!("CARGO_PKG_VERSION");
+        let result = match self.backend {
+            Backend::Claude => mcp_config::ensure_claude_mcp(ctx.home, version, ctx.out),
+            Backend::Codex => mcp_config::ensure_codex_mcp(ctx.home, version, ctx.out),
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(mcp_config::Error::UserDefined { path, key }) => {
+                let _ = writeln!(
+                    ctx.out,
+                    "[clud] note: refusing to overwrite user-defined `{key}` in {}; re-run `clud --setup` after renaming the block",
+                    path.display()
+                );
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// Issue #265: register the four `clud hook` entries in the selected
+/// backend's user hook-config file (Claude: `~/.claude/settings.json`,
+/// Codex: `~/.codex/hooks.json`).
+struct MemoryHookRegistrationAction {
+    backend: Backend,
+}
+
+impl HarnessSetupAction for MemoryHookRegistrationAction {
+    fn name(&self) -> &'static str {
+        "memory-hook-registration"
+    }
+
+    fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    fn supports(&self, scope: LaunchSetupScope) -> bool {
+        matches!(scope, LaunchSetupScope::GlobalWithMemory)
+    }
+
+    fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        if ctx.dry_run {
+            return Ok(());
+        }
+        let version = env!("CARGO_PKG_VERSION");
+        let result = match self.backend {
+            Backend::Claude => mcp_config::ensure_claude_hooks(ctx.home, version, ctx.out),
+            Backend::Codex => mcp_config::ensure_codex_hooks(ctx.home, version, ctx.out),
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(mcp_config::Error::UserDefined { path, key }) => {
+                let _ = writeln!(
+                    ctx.out,
+                    "[clud] note: refusing to overwrite user-defined `{key}` in {}; re-run `clud --setup` after renaming the block",
+                    path.display()
+                );
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
 pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
     vec![
         Box::new(BundledSkillsAction {
@@ -276,6 +431,18 @@ pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
         }),
         Box::new(ClaudeDriftSkillsAction),
         Box::new(CodexHookNormalizeAction),
+        Box::new(MemoryMcpRegistrationAction {
+            backend: Backend::Claude,
+        }),
+        Box::new(MemoryMcpRegistrationAction {
+            backend: Backend::Codex,
+        }),
+        Box::new(MemoryHookRegistrationAction {
+            backend: Backend::Claude,
+        }),
+        Box::new(MemoryHookRegistrationAction {
+            backend: Backend::Codex,
+        }),
     ]
 }
 
@@ -296,12 +463,33 @@ pub fn run_setup_at(
     verbose: bool,
     out: &mut dyn Write,
 ) -> Result<SetupReport, SetupError> {
+    run_setup_at_with_options(home, scope, backend, verbose, false, out)
+}
+
+/// Issue #265: dry-run variant — prints the four-file summary and skips all
+/// disk writes. Same return shape as [`run_setup_at`] so the caller can
+/// rely on `report.ran` to confirm which actions matched.
+pub fn run_setup_at_with_options(
+    home: &Path,
+    scope: LaunchSetupScope,
+    backend: Backend,
+    verbose: bool,
+    dry_run: bool,
+    out: &mut dyn Write,
+) -> Result<SetupReport, SetupError> {
     if matches!(scope, LaunchSetupScope::SessionOnly) {
         return Ok(SetupReport::default());
     }
-
+    if dry_run && matches!(scope, LaunchSetupScope::GlobalWithMemory) {
+        let _ = mcp_config::print_dry_run_summary(home, out);
+    }
     let mut report = SetupReport::default();
-    let mut ctx = SetupContext { home, verbose, out };
+    let mut ctx = SetupContext {
+        home,
+        verbose,
+        dry_run,
+        out,
+    };
     for action in setup_actions() {
         if action.backend() == backend && action.supports(scope) {
             action.run(&mut ctx)?;
@@ -348,7 +536,7 @@ mod tests {
         selector.render(&mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "[x] Session only\n[ ] Globally\n"
+            "[x] Session only\n[ ] Globally\n[ ] Globally + clud memory (recommended)\n"
         );
     }
 
@@ -363,6 +551,140 @@ mod tests {
             selector.handle(SelectorEvent::Enter),
             Some(LaunchSetupScope::SessionOnly)
         );
+    }
+
+    #[test]
+    fn selector_renders_three_rows_when_memory_unconfigured() {
+        let home = tempdir().unwrap();
+        let selector = ScopeSelector::for_home(home.path());
+        let mut out = Vec::new();
+        selector.render(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Session only"));
+        assert!(text.contains("Globally\n"));
+        assert!(text.contains("Globally + clud memory (recommended)"));
+    }
+
+    #[test]
+    fn selector_defaults_to_global_with_memory_when_memory_unconfigured() {
+        let home = tempdir().unwrap();
+        let selector = ScopeSelector::for_home(home.path());
+        assert_eq!(selector.selected(), LaunchSetupScope::GlobalWithMemory);
+    }
+
+    #[test]
+    fn selector_defaults_to_session_only_when_memory_already_registered() {
+        let home = tempdir().unwrap();
+        let mut out = Vec::new();
+        mcp_config::ensure_claude_mcp(home.path(), "0.0.0", &mut out).unwrap();
+        let selector = ScopeSelector::for_home(home.path());
+        assert_eq!(selector.selected(), LaunchSetupScope::SessionOnly);
+    }
+
+    #[test]
+    fn selector_wraps_up_from_row_zero_to_row_two() {
+        let mut selector = ScopeSelector::default();
+        assert_eq!(selector.selected(), LaunchSetupScope::SessionOnly);
+        selector.handle(SelectorEvent::Up);
+        assert_eq!(selector.selected(), LaunchSetupScope::GlobalWithMemory);
+    }
+
+    #[test]
+    fn selector_wraps_down_from_row_two_to_row_zero() {
+        let mut selector = ScopeSelector { index: 2 };
+        assert_eq!(selector.selected(), LaunchSetupScope::GlobalWithMemory);
+        selector.handle(SelectorEvent::Down);
+        assert_eq!(selector.selected(), LaunchSetupScope::SessionOnly);
+    }
+
+    #[test]
+    fn scope_selector_third_row_dispatches_both_actions() {
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+        let mut out = Vec::new();
+        let report = run_setup_at(
+            home.path(),
+            LaunchSetupScope::GlobalWithMemory,
+            Backend::Claude,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(report.ran.contains(&"memory-mcp-registration"));
+        assert!(report.ran.contains(&"memory-hook-registration"));
+        assert!(home.path().join(".claude.json").is_file());
+        assert!(home.path().join(".claude/settings.json").is_file());
+    }
+
+    #[test]
+    fn scope_selector_third_row_does_codex_actions_too() {
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+        let mut out = Vec::new();
+        let report = run_setup_at(
+            home.path(),
+            LaunchSetupScope::GlobalWithMemory,
+            Backend::Codex,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(report.ran.contains(&"memory-mcp-registration"));
+        assert!(report.ran.contains(&"memory-hook-registration"));
+        assert!(home.path().join(".codex/config.toml").is_file());
+        assert!(home.path().join(".codex/hooks.json").is_file());
+    }
+
+    #[test]
+    fn global_scope_skips_memory_actions() {
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+        let mut out = Vec::new();
+        let report = run_setup_at(
+            home.path(),
+            LaunchSetupScope::Global,
+            Backend::Claude,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(!report.ran.contains(&"memory-mcp-registration"));
+        assert!(!report.ran.contains(&"memory-hook-registration"));
+        assert!(!home.path().join(".claude.json").exists());
+    }
+
+    #[test]
+    fn dry_run_emits_summary_and_does_not_write() {
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+        let mut out = Vec::new();
+        run_setup_at_with_options(
+            home.path(),
+            LaunchSetupScope::GlobalWithMemory,
+            Backend::Claude,
+            false,
+            true,
+            &mut out,
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("would write to"), "{text}");
+        assert!(text.contains("mcpServers.clud-memory"), "{text}");
+        assert!(text.contains("hooks.SessionStart"), "{text}");
+        assert!(!home.path().join(".claude.json").exists());
+        assert!(!home.path().join(".claude/settings.json").exists());
     }
 
     #[test]
