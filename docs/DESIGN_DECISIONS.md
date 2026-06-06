@@ -586,3 +586,37 @@ A new tab is the second-largest UI change the dashboard has ever taken (after th
 - The dashboard's CSS surface area grows with the new tier-badge classes (`tier-working` / `tier-episodic` / `tier-semantic`) and the embedder-status pill (`embedder-ready` / `embedder-warn`). All new classes reuse the existing `--accent` / `--live` / `--warn` palette tokens; no new tokens were added.
 - The Memory tab handles "daemon unreachable" via the same `try { ... } catch { ... }` shape used by `refresh()` — the error message is rendered in a banner above the stats card with a retry button. No special offline mode; the page just shows the error and the next poll either recovers or paints the error again.
 - Two new tests pin the contract: a Rust unit test asserts the bundled HTML carries the tab + endpoint references, and a Python integration test boots the daemon and asserts `/memory/stats` returns the field shape the JS reads. The JS itself is not unit-tested; the Playwright suite (`tests/integration/test_ui_dashboard_playwright.py`) is the appropriate place for that, future-tense, once it grows a Memory-tab section.
+
+---
+
+## DD-021: Git-artifact format — per-file Markdown with YAML frontmatter; Semantic-only by default
+
+**Context:** Agent memory in the SQLite store ([DD-013](#dd-013-rusqlite-and-redb-coexist-in-clud-bin)) is durable but not portable: there is no way for a teammate to inherit "the project knows `auth uses HS256 JWTs from vault`" short of copying `~/.clud/state/memory/memory.db`. Issue #264 (sub-issue 9 of META #255) needs a serialization format that (a) survives `git pull` cleanly, (b) is human-reviewable so users can see what is about to be committed, (c) defaults conservatively on privacy, and (d) supports tier-gated visibility so transient Working-tier rows never leak into the repo.
+
+**Decision:** Serialize each exportable memory as a standalone Markdown file under `<git-root>/.clud/memory/<tier>/<ULID>-<slug>.md`. The file body is one YAML frontmatter block (every column from `memories` plus a `private` flag) followed by the raw memory content. A sibling `relations.jsonl` carries the append-only edge log. A `<root>/.cludignore` file applies a conservative privacy filter (regex body-blacklist + scope/session globs) and a `private: true` frontmatter flag wins unconditionally. Default tier policy is Semantic-only; Episodic widens via env var or CLI flag; Working never exports.
+
+**Rationale:**
+- **Git-friendly diffs.** One memory per file means a `git diff` shows exactly what changed. A monolithic JSON-lines export would re-write a 10 MB file on every save and produce unreadable diffs.
+- **Human-reviewable.** YAML frontmatter + Markdown body is the format every developer already reads when looking at GitHub READMEs, Jekyll blogs, and Obsidian vaults. The user can `cat .clud/memory/semantic/*.md` and understand what is about to be committed without parsing tools.
+- **Conservative privacy default.** Body-regex blacklist + scope/session globs + `private: true` override gives three independent layers. Defaults ship aggressive secret-shaped patterns (AKIA / sk- / Bearer / PEM blocks / etc.) so the failure mode of a too-loose `.cludignore` is "fewer rows on disk" not "secrets in the repo." The user-visible escape hatch (`--allow-private`) requires explicit opt-in.
+- **Semantic-only by default.** Working is transient by definition (DD-016 already exempted it from auto-forget for Episodic / Semantic; same boundary). Episodic captures session-summarized text that's almost always specific to one teammate's session — not durable knowledge — so it opts in via CLUD_MEMORY_EXPORT_EPISODIC / --include-episodic. Semantic is the durable-cross-session tier; exporting it by default is what gives the format its value.
+- **ULID prefix in the filename, uuidv7 id in the frontmatter.** Filename-prefix ULID gives filesystem-sortable listings ("what got exported recently?"). The canonical id stays the original uuidv7 so cross-machine `import_from_disk` is keyed on a stable id that does not change per export.
+- **`relations.jsonl` append-only.** Edges are small structured records; one file with `OpenOptions::append(true)` 3-way merges trivially. The dedup-on-import path keys on `(src_id, dst_id, kind)` so hand-edits and merge artifacts are tolerated.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| Single `memory.jsonl` export | Every save rewrites the whole file → noisy diffs, hostile merge conflicts. No per-row review path. |
+| SQLite dump (`.dump`) committed | Not human-reviewable. Defeats the privacy-review use case. Re-imports require running SQL against a fresh store. |
+| Per-tier single Markdown files | Same diff/merge problem as a single JSONL but with a less efficient parser. |
+| Export every tier by default | Working tier is per-session scratch ("what did the user just type?") — leaking that to git would dump session history into the repo. Conservative default makes the format usable without configuration. |
+| Whitelist-by-tag instead of blacklist | Forces the user to tag every row that should be exported. The 99% case is "this fact is generic project knowledge"; whitelisting penalizes that case. Aggressive blacklist + explicit `private: true` covers the secret-leakage failure mode without forcing per-row tagging. |
+| Encrypted artifacts | Out of scope. Teams that want encryption use `git-crypt` or similar over the top of the directory; the layout doesn't preclude it. |
+
+**Consequences:**
+- Adopting the format is one `clud memory export --to-disk` away. No daemon required for the export verb (read-only WAL walk).
+- `.clud/memory/` is the single directory teams add to git; `.cludignore` lives at the same level as `.gitignore`.
+- Filename diffs across re-exports of the same row are noisy because the ULID prefix changes per export. Mitigation: rows whose `id` is already on disk are not re-emitted (`scan_existing_ids`). A future enhancement could stabilize the ULID prefix to the row's `created_at_ms`.
+- The Stop-hook auto-export wiring is owned by sibling #260; this PR exposes `export_to_disk` as the seam.
+- The format is versioned implicitly via the frontmatter shape. A future v2 will add `#[serde(rename = "schema-version")]` to the frontmatter if a breaking change is needed; today's reader uses `serde(default)` so additive frontmatter fields are non-breaking.
