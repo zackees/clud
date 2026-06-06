@@ -327,21 +327,34 @@ pub enum MemorySubcommand {
         #[arg(long = "json")]
         json: bool,
     },
-    /// Export rows as JSON-lines. Default destination is stdout;
-    /// `--to-disk` stubs to #264.
+    /// Export rows as JSON-lines (stdout) or as a `.clud/memory/` tree
+    /// of YAML-frontmatter Markdown files (`--to-disk`, #264).
     Export {
         #[arg(long = "to-disk", conflicts_with = "to_stdout")]
         to_disk: bool,
         #[arg(long = "to-stdout")]
         to_stdout: bool,
+        /// Widen the tier policy so Episodic rows are also exported.
+        /// Honored only with `--to-disk`. Mirrors
+        /// `CLUD_MEMORY_EXPORT_EPISODIC=1`.
+        #[arg(long = "include-episodic")]
+        include_episodic: bool,
+        /// Disable the `.cludignore` + `private:` privacy filter when
+        /// writing to disk. Honored only with `--to-disk`.
+        #[arg(long = "allow-private")]
+        allow_private: bool,
     },
-    /// Import rows from JSON-lines. `--from-stdin` reads JSON-lines from
-    /// stdin; `--from-disk` stubs to #264.
+    /// Import rows from JSON-lines (`--from-stdin`) or from a
+    /// `.clud/memory/` tree (`--from-disk`, #264).
     Import {
         #[arg(long = "from-disk", conflicts_with = "from_stdin")]
         from_disk: bool,
         #[arg(long = "from-stdin")]
         from_stdin: bool,
+        /// Also pull in `<root>/episodic/` files. Honored only with
+        /// `--from-disk`.
+        #[arg(long = "include-episodic")]
+        include_episodic: bool,
     },
     /// Open the dashboard in a browser at the `#memory` anchor.
     Ui {
