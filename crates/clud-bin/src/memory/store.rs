@@ -269,6 +269,57 @@ impl SqliteStore {
         Ok(n > 0)
     }
 
+    /// Count rows by tier. Cheap aggregate query used by the CLI's
+    /// `clud memory status` verb and the daemon's `/memory/stats`
+    /// dashboard route.
+    pub fn count_by_tier(&self) -> Result<(usize, usize, usize), MemoryError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tier, COUNT(*) FROM memories GROUP BY tier")?;
+        let mut working = 0usize;
+        let mut episodic = 0usize;
+        let mut semantic = 0usize;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let tier_i: i64 = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            match Tier::from_i64(tier_i)? {
+                Tier::Working => working = count as usize,
+                Tier::Episodic => episodic = count as usize,
+                Tier::Semantic => semantic = count as usize,
+            }
+        }
+        Ok((working, episodic, semantic))
+    }
+
+    /// Schema `user_version`. Surfaced by `clud memory status`.
+    pub fn user_version(&self) -> Result<i32, MemoryError> {
+        let v: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    /// Newest-first list across all tiers, capped at `limit`. Used by
+    /// `/memory/recent` and the CLI's `clud memory export` verb.
+    pub fn list_recent(&self, limit: usize) -> Result<Vec<MemoryRow>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, tier, content,
+                    created_at_ms, updated_at_ms, tier_change_at_ms,
+                    access_count, last_access_at_ms, metadata_json,
+                    scope_key, branch_name, is_orphan
+               FROM memories
+              ORDER BY created_at_ms DESC
+              LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(row_from_sqlite(r)?);
+        }
+        Ok(out)
+    }
+
     pub fn list_by_tier(&self, tier: Tier) -> Result<Vec<MemoryRow>, MemoryError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, tier, content,
