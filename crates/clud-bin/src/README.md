@@ -133,6 +133,13 @@ Skills and hooks:
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
+- `hooks.rs` - issue #260: agent-memory hook subcommands (`clud hook
+  session-start | user-prompt-submit | post-tool-use | stop`). Each
+  handler reads JSON from stdin, talks HTTP to the daemon's
+  `/memory/*` routes, and exits 0 unconditionally. Dispatched from
+  `main.rs` before `console_title::set_for_current_cwd()` and
+  `ensure_daemon`. Hidden from `--help`; registration to
+  `~/.claude/settings.json` / `~/.codex/hooks.json` is owned by #265.
 
 Diagnostics and misc:
 
@@ -156,6 +163,8 @@ Quick lookup, which file owns a given subcommand:
 - `clud --fix-hooks` -> `hook_health.rs`.
 - `clud mcp` -> `mcp_bridge.rs` (stdio↔TCP proxy) -> `daemon/memory_mcp.rs`
   (in-process MCP server, issue #259).
+- `clud hook session-start | user-prompt-submit | post-tool-use | stop`
+  -> `hooks.rs` (issue #260).
 
 ## Cross-Cutting Subsystems
 

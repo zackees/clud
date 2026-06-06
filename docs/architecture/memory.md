@@ -415,6 +415,60 @@ the way #135 shared the GC mpsc channel.
 `DaemonInfo.memory_mcp_port` is now populated by #259 — see "MCP server"
 below.
 
+## Hook subcommands (#260)
+
+`clud hook <verb>` exposes four hidden subcommands that Claude Code /
+Codex invoke at session lifecycle events. Handlers live in
+[`crates/clud-bin/src/hooks.rs`](../../crates/clud-bin/src/hooks.rs);
+file-by-file detail and payload shapes are in
+[`crates/clud-bin/src/memory/README.md`](../../crates/clud-bin/src/memory/README.md#hooks-260).
+
+Why a CLI verb and not direct daemon shell-out? Same rationale as
+[DD-019](../DESIGN_DECISIONS.md#dd-019-clud-memory-cli-verbs-proxy-mutating-ops-through-the-daemon)
+(and the new DD-020): hooks are short-lived subprocesses; the daemon
+is the single SQLite writer. HTTP keeps the wire seam aligned with the
+`clud memory` CLI and the dashboard.
+
+### Lifecycle
+
+1. **`session-start`** — Claude/Codex invokes once when a session
+   opens. The handler reads the payload, calls `/memory/recent`
+   client-side filtered by `session_id`, and writes a
+   `<context source="clud-memory">` block to stdout. Claude injects the
+   block into the system prompt; Codex surfaces it as a visible system
+   message.
+2. **`user-prompt-submit`** — invoked per user prompt. The handler
+   looks for an opt-in directive (`remember:`, `save this:`, …) and
+   POSTs `/memory/save` only when one is present. Otherwise no-op. The
+   defaults are conservative so the hook does not silently log every
+   prompt.
+3. **`post-tool-use`** — invoked after every tool call. v0.1 is a
+   logged no-op; tool-output classification lands in v0.5 alongside a
+   `/memory/working/append` route.
+4. **`stop`** — invoked at session end (Claude `Stop`; Codex
+   `session_end`). When `CLUD_MEMORY_AUTO_CONSOLIDATE_ON_STOP=1` the
+   handler will POST to `/memory/consolidate` once that route exists
+   (TODO; the consolidation timer in the daemon owns the schedule
+   today). Default off.
+
+### Failure model
+
+Every hook **exits 0 unconditionally**. A failing hook must never
+block the agent. Stdin payload errors, daemon-unreachable errors, and
+HTTP 5xx all silently exit 0; the only way to see diagnostics is to
+set `CLUD_MEMORY_DEBUG_HOOKS=1`, which routes one structured line per
+hook to stderr (parse failure, daemon unreachable, save failure).
+Auto-export of recalled rows to disk and the `post-tool-use`
+classifier are owned by siblings #264 and v0.5 respectively.
+
+### Registration
+
+Out of scope for #260. Sibling #265 owns writing the per-frontend
+hook config (`~/.claude/settings.json` for Claude Code,
+`~/.codex/hooks.json` for Codex). The four `clud hook` subcommands are
+hidden from `--help` (registered with `clap`'s `hide = true`) because
+they are not user-facing CLI verbs.
+
 ## MCP server
 
 Issue #259 surfaces the agent-memory subsystem as an MCP server,
@@ -519,8 +573,8 @@ Tests:
 - ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257.
 - ~~Tier lifecycle (Working / Episodic / Semantic + decay + promotion)~~ — #258.
 - ~~Daemon integration (lifecycle, consolidation timer, HTTP route stubs)~~ — #261.
-- ~~MCP server in daemon + `clud mcp` stdio bridge~~ — #259 (this PR).
-- Hook subcommands — #260.
+- ~~MCP server in daemon + `clud mcp` stdio bridge~~ — #259.
+- ~~Hook subcommands~~ — #260 (this PR).
 - `clud memory search` / `save` CLI verbs (including
   `clud memory branch-isolate`) — #262.
 - ~~Dashboard JS for the `/memory/*` routes~~ — #263.
