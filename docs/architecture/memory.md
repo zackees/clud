@@ -568,6 +568,48 @@ Tests:
 - Python `tests/test_memory_dashboard.py` exercises both the served
   HTML and `/memory/stats` against a real daemon process.
 
+## Launch-setup integration (#265)
+
+The opt-in surface for native memory is the third row of the launch-setup
+scope selector — `Globally + clud memory (recommended)`. Selecting it runs
+the existing `Global` actions (bundled skills, drift skills, hook timeout
+normalization) AND two new actions registered for the selected backend only:
+
+- `MemoryMcpRegistrationAction` — upserts the `clud-memory` MCP block into
+  `~/.claude.json` (Claude) or `~/.codex/config.toml` (Codex).
+- `MemoryHookRegistrationAction` — upserts the four `clud hook <verb>`
+  entries into `~/.claude/settings.json` (Claude) or `~/.codex/hooks.json`
+  (Codex).
+
+Both actions live in `crates/clud-bin/src/launch_setup.rs` and delegate to
+the idempotent upsert helpers in
+[`crates/clud-bin/src/memory/mcp_config.rs`](../../crates/clud-bin/src/memory/mcp_config.rs):
+`ensure_claude_mcp` / `ensure_codex_mcp` / `ensure_claude_hooks` /
+`ensure_codex_hooks` (plus the four symmetric `remove_*` helpers used by
+`clud memory uninstall` once that verb lands). Each helper acquires an
+advisory `~/.clud/memory-{backend}-{kind}.lock` lock, parses the existing
+config with `serde_json` (JSON) or `toml_edit` (TOML, so user comments
+survive), upserts the managed block, and writes atomically via a temp
+file + rename in the same directory. JSON entries carry a sibling
+`_clud_managed: true` field; TOML entries carry a `# managed-by: clud-memory`
+lead comment. An existing `clud-memory` key without the managed marker is
+treated as user-defined: the helper returns `Error::UserDefined { path, key }`,
+the action surfaces a `[clud] note: refusing to ...` line and continues without
+writing.
+
+The selector default flips based on whether memory is already registered
+(`mcp_config::memory_already_registered(home)` — one stat + one parse), so a
+fresh install opens on row 2 (the recommended row) and a repeat launch opens on
+row 0. See
+[`docs/architecture/launch-setup.md`](launch-setup.md) for the row-level
+details and [DD-023](../DESIGN_DECISIONS.md#dd-023-scope-selector-third-row-enables-memory-mcphooks-in-one-action-refuse-to-clobber-semantics)
+for the rationale on refuse-to-clobber semantics.
+
+A `--dry-run` flag on `run_setup_at_with_options` emits a four-file preview
+without touching disk; the same flag is exposed to users via
+`clud --setup --dry-run` (no writes; prints the file paths and entries that
+would be added).
+
 ## Sibling sub-issues (META #255)
 
 - ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257.

@@ -179,10 +179,27 @@ already on main; this MCP surface accepts the `scope_key` argument on
 `memory_smart_search` and forwards it to `SqliteStore::knn` and
 `LexicalIndex::search`.
 
-### Manual MCP registration (v0.1)
+### Auto-registration via launch setup (#265)
 
-Auto-registration of `~/.claude.json` / `~/.codex/config.toml` is owned
-by sibling #265. For v0.1 the user adds an entry by hand:
+The recommended path is the third row of the launch-setup scope
+selector — `Globally + clud memory (recommended)` — which runs the
+`MemoryMcpRegistrationAction` for the selected backend. The action
+upserts the `clud-memory` block into `~/.claude.json` (JSON) or
+`~/.codex/config.toml` (TOML preserving comments via `toml_edit`).
+The block carries a managed-marker (`_clud_managed: true` in JSON, a
+`# managed-by: clud-memory` lead comment in TOML) so re-running is a
+no-op; a hand-edited `clud-memory` key without the marker is **not
+overwritten** — the action logs a `[clud] note: refusing to ...` line
+and skips. Implementation lives in
+[`mcp_config.rs`](mcp_config.rs); see
+[`docs/architecture/launch-setup.md`](../../../../docs/architecture/launch-setup.md)
+for the cross-cutting flow.
+
+### Manual MCP registration (escape hatch)
+
+If you have a custom `clud-memory` block that the action refuses to
+clobber, or you want to wire the MCP server without taking the rest of
+the global setup, you can hand-edit:
 
 ```jsonc
 // ~/.claude.json
@@ -378,9 +395,18 @@ invoke at session lifecycle events. Implementation lives in
 payload from stdin, talk HTTP to the daemon's `/memory/*` routes
 ([DD-019](../../../../docs/DESIGN_DECISIONS.md#dd-019-clud-memory-cli-verbs-proxy-mutating-ops-through-the-daemon)
 + DD-020), and **exit 0 unconditionally** — a hook failure must never
-block the agent. The handlers are hidden from `--help`; registration
-into `~/.claude/settings.json` / `~/.codex/hooks.json` is owned by
-sibling #265.
+block the agent. The handlers are hidden from `--help`.
+
+Registration of all four hook entries into `~/.claude/settings.json`
+and `~/.codex/hooks.json` happens via the
+`MemoryHookRegistrationAction` (issue #265), gated on the
+`GlobalWithMemory` launch-setup scope. The action is idempotent and
+refuses to clobber hand-edited `clud hook ...` commands — see
+[`mcp_config.rs`](mcp_config.rs) for the upsert primitives and
+[`docs/architecture/launch-setup.md`](../../../../docs/architecture/launch-setup.md)
+for the cross-cutting flow. Manual installation by hand-editing the
+JSON files is still supported as an escape hatch (the action will
+detect and preserve any user-defined entries).
 
 | Verb | Trigger | Reads stdin? | Writes stdout? |
 |---|---|---|---|
