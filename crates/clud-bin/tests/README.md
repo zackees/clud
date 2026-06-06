@@ -19,3 +19,15 @@ soldr cargo test -p clud-bin --test pty_behavior -- --nocapture   # see canary-s
 ```
 
 All `cargo`/`rustc`/`rustfmt` invocations must go through `soldr` (see root `CLAUDE.md`). The mock-agent is auto-built on first run via `cargo build -p mock-agent --message-format json`.
+
+## Memory subsystem tests
+
+The memory subsystem's per-module unit tests live next to each `.rs` file under `crates/clud-bin/src/memory/` and `crates/clud-bin/src/daemon/{memory_service.rs, memory_mcp.rs, http.rs}`. Their `#[test]` blocks (search for `mod tests { ... }`) cover store inserts, hybrid search RRF math, tier transitions, the HTTP route bodies, hook handlers, MCP tools, and git-artifact roundtrips.
+
+Cross-cutting tests that span modules — and therefore can't live in any one source file — sit on the Python side under [`tests/`](../../../tests/):
+
+- [`tests/test_memory_cross_process.py`](../../../tests/test_memory_cross_process.py) — save in one daemon, kill it, recall in the next. Canonical RED test from META #255 (issue #266).
+- [`tests/test_memory_perf_budget.py`](../../../tests/test_memory_perf_budget.py) — 30 ms / 25 ms / 60 MB / 15 MB-per-1k budgets. Smoke variants always run; heavy iterations gated on `pytest -m perf_budget`.
+- [`tests/integration/test_memory_e2e.py`](../../../tests/integration/test_memory_e2e.py) — full Claude / Codex session lifecycle through the four hook subcommands.
+
+Hook payload fixtures live under [`testbins/mock-hooks-payloads/fixtures/`](../../../testbins/mock-hooks-payloads/README.md) — JSON files named `<hook_verb>_<variant>.json` covering Claude + Codex shapes.

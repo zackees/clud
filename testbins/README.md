@@ -8,6 +8,10 @@ They live outside `crates/` to keep production code clearly separated from test-
 
 - [`mock-agent/`](mock-agent/README.md) — Stand-in for the `claude` and `codex` backends, used by Python integration tests to exercise `clud`'s command-building and execution paths without invoking a real agent.
 
+## Fixtures
+
+- [`mock-hooks-payloads/`](mock-hooks-payloads/README.md) — Canned JSON payloads for the four `clud hook` subcommands (Claude + Codex variants). Used by `tests/integration/test_memory_e2e.py` and other hook-driven tests; not a binary.
+
 ## How they're built
 
 Each subdirectory is a regular Cargo workspace member declared in the root [`Cargo.toml`](../Cargo.toml). Build any of them explicitly with:

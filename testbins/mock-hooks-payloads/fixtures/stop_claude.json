@@ -1,0 +1,6 @@
+{
+  "session_id": "sess-claude-0001",
+  "reason": "user_quit",
+  "stop_hook_active": false,
+  "cwd": "/Users/dev/projects/clud"
+}
