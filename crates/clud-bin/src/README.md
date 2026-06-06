@@ -154,6 +154,8 @@ Quick lookup, which file owns a given subcommand:
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud --fix-hooks` -> `hook_health.rs`.
+- `clud mcp` -> `mcp_bridge.rs` (stdio↔TCP proxy) -> `daemon/memory_mcp.rs`
+  (in-process MCP server, issue #259).
 
 ## Cross-Cutting Subsystems
 

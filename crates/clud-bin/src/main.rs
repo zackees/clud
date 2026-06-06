@@ -1,7 +1,7 @@
 use clud::{
     args, backend, backend_bootstrap, command, console_setup, console_title, ctrl_c_track, daemon,
-    gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec, runner,
-    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec,
+    mcp_bridge, runner, startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -75,6 +75,14 @@ fn main() {
     // never launches a backend.
     if let Some(args::Command::Ui { json, no_open }) = &args.command {
         std::process::exit(ui::run(*json, *no_open));
+    }
+
+    // Issue #259: `clud mcp` is the MCP stdio bridge for Claude Code /
+    // Codex. Self-contained; never launches a backend. Brings the
+    // always-on daemon up if it isn't running and proxies JSON-RPC
+    // frames to the daemon's memory_mcp_port.
+    if let Some(args::Command::Mcp) = &args.command {
+        std::process::exit(mcp_bridge::run());
     }
 
     // Issue #182: `clud trash` is self-contained maintenance. Dispatch
