@@ -18,7 +18,6 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn), `send_daemon_request`, `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
 - `server.rs` — daemon-process entry: binds the loopback listener, spawns the GC registry worker, accepts `Create`/`Session`/`Terminate`/`Gc` requests, spawns worker subprocesses, reaps them.
 - `gc_service.rs` — single-owner registry worker thread (issue #135): opens `~/.clud/data.redb` once, serializes every `gc.*` op through an `mpsc::Receiver<GcRequestMsg>`. Replaces the standalone `gc_daemon` process that shipped in Phase 1.
-- `memory_service.rs` — agent-memory service running in-process (issue #261). Owns `Arc<Mutex<SqliteStore>>`, `Arc<Mutex<LexicalIndex>>`, `Arc<Embedder>`, and `TierConfig`. Runs a consolidation timer thread (`promote_candidates` → `apply_promotions` → `forget_expired` every 5 min, env-tunable) and an hourly `PRAGMA wal_checkpoint(TRUNCATE)`. Reconciliation pass on startup re-upserts every SQLite row into tantivy so a crash between SQLite commit and tantivy commit self-heals on next boot. Loaded by `server::run_daemon` alongside the GC service and the dashboard.
 - `worker.rs` — worker-process entry: starts the backend (subprocess or PTY), serves attach connections, runs the repeat-job loop.
 - `worker_shared.rs` — per-worker shared state: snapshot, in-memory backlog, optional `TerminalCapture` for PTY attach-replay, log file rotation, single-client attach gate.
 - `attach.rs` — interactive client-side attach loop: handshake, raw-terminal keyboard forwarding, Ctrl-C → background-prompt flow, exit-code propagation.
@@ -46,8 +45,6 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `const DEFAULT_BACKLOG_LIMIT_BYTES = 256 KiB` — `types.rs:20`
 - `const LOG_ROTATE_BYTES = 10 MiB` — `types.rs:28`
 - `fn run_daemon(&Path) -> i32` — `server.rs:23`
-- `pub fn spawn_memory_service(&Path) -> Result<MemoryService, MemoryError>` — `memory_service.rs:114`
-- `pub struct MemoryService { store, lexical, embedder, tier_config, consolidate_interval_ms }` — `memory_service.rs:52`
 - `fn run_worker(&Path, &str, u32, &Path) -> i32` — `worker.rs:28`
 - `fn ensure_daemon(&Path) -> io::Result<()>` — `client.rs:18`
 - `fn send_daemon_request(&Path, &DaemonRequest)` — `client.rs:51`
