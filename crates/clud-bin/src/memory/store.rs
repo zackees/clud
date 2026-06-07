@@ -153,40 +153,6 @@ impl SqliteStore {
         &self.conn
     }
 
-    // Issue #257: the embedder module's `reembed_all` walks rows then
-    // rewrites the vec table. It owns its own transactions so it asks for
-    // both a read-only handle (to enumerate ids+content) and a mutable
-    // handle (to start `BEGIN IMMEDIATE` per row). These accessors keep
-    // the connection encapsulated everywhere else.
-    pub(crate) fn conn_ref(&self) -> &Connection {
-        &self.conn
-    }
-
-    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fetch_vec_for_test(&self, id: &MemoryId) -> Result<Vec<f32>, MemoryError> {
-        let blob: Vec<u8> = self.conn.query_row(
-            "SELECT embedding FROM memory_vec WHERE id = ?1",
-            params![id.as_str()],
-            |r| r.get(0),
-        )?;
-        if blob.len() % 4 != 0 {
-            return Err(MemoryError::Migration(format!(
-                "vec blob length {} is not a multiple of 4",
-                blob.len()
-            )));
-        }
-        let mut out = Vec::with_capacity(blob.len() / 4);
-        for chunk in blob.chunks_exact(4) {
-            let bytes: [u8; 4] = chunk.try_into().unwrap();
-            out.push(f32::from_le_bytes(bytes));
-        }
-        Ok(out)
-    }
-
     pub fn insert(&mut self, row: &MemoryRow, embedding: &[f32]) -> Result<(), MemoryError> {
         if embedding.len() != self.embed_dim {
             return Err(MemoryError::DimMismatch {

@@ -7,7 +7,6 @@
 //! `LexicalIndex::upsert` accepts an explicit `Tier` instead of inferring
 //! one.
 
-pub mod embedder;
 pub mod error;
 pub mod identity;
 pub mod ids;
@@ -17,10 +16,6 @@ pub mod schema;
 pub mod search;
 pub mod store;
 
-pub use embedder::{
-    embedder_from_env, reembed_all, Embedder, EmbedderTrait, RemoteEmbedder, RemoteProvider,
-    EMBED_DIM_MINILM_L6_V2,
-};
 pub use error::MemoryError;
 pub use identity::{
     branch_isolate, branch_unisolate, cross_repo_glob_filter, normalize_origin_url,

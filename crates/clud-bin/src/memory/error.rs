@@ -20,13 +20,4 @@ pub enum MemoryError {
     NotFound(MemoryId),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    // Issue #257: embedder couldn't service the request. `Disabled` carries
-    // the four-path remediation message; `RemoteFailure` wraps provider HTTP
-    // errors with a short body excerpt for diagnostics.
-    #[error("embedder disabled: {0}")]
-    EmbedderDisabled(String),
-    #[error("embedder remote failure ({provider}): {message}")]
-    EmbedderRemoteFailure { provider: String, message: String },
-    #[error("embedder model load: {0}")]
-    EmbedderModelLoad(String),
 }

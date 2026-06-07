@@ -124,61 +124,9 @@ Plus `idx_memories_scope ON memories(scope_key)`.
 filters. `rrf_fuse` stays scope-unaware (pure rank math) — the filter
 is applied upstream on both ranking sources.
 
-## Embedder
-
-PR2 (#257) adds the embedder abstraction under
-[`crates/clud-bin/src/memory/embedder/`](../../crates/clud-bin/src/memory/embedder/README.md).
-Three kinds:
-
-- `Local(LocalEmbedder)` — `fastembed::TextEmbedding` with
-  MiniLM-L6-v2 (384-dim). Cached under `<state_dir>/memory/models/`.
-  Gated on the `memory_local_embed` Cargo feature and on
-  `cfg(not(all(target_arch = "aarch64", target_os = "windows")))` —
-  no ort prebuilt for Windows-ARM today; same carve-out shape
-  `whisper-rs` uses ([DD-015](../DESIGN_DECISIONS.md#dd-015-local-embedder-via-fastembed--windows-arm-carve-out)).
-- `Remote(RemoteEmbedder)` — pure-`ureq` HTTP client. Four providers:
-  Anthropic (Voyage), OpenAI, Gemini, Ollama. Selected via
-  `CLUD_MEMORY_EMBEDDER_PROVIDER`.
-- `Disabled { reason }` — explicit no-op. `embed()` returns
-  `MemoryError::EmbedderDisabled` with the four-path remediation
-  message (remote API key / Ollama on LAN / WSL2 / wait for ort 2.0).
-
-`embedder_from_env()` picks one based on the documented env var
-ladder. Storage layer does not own the embedder — `SqliteStore` still
-takes `&[f32]` slices. The library primitive `reembed_all(store,
-embedder)` walks every row and rewrites the vec table; the
-`clud memory reembed` CLI verb lands in #262 and wraps this with
-`--resume` checkpointing.
-
-### Recipe: Ollama on a sibling x86/Linux/macOS box (Windows-ARM workaround)
-
-On the sibling (Linux / macOS / Windows-x64):
-
-```
-ollama pull nomic-embed-text
-OLLAMA_HOST=0.0.0.0:11434 ollama serve
-```
-
-Verify reachable:
-
-```
-curl http://<host>:11434/api/tags
-```
-
-On the Windows-ARM clud client:
-
-```
-setx CLUD_MEMORY_EMBEDDER_PROVIDER ollama
-setx CLUD_MEMORY_EMBEDDER_URL      http://<host>:11434/api/embeddings
-```
-
-Restart the daemon. Switching the embedder model after rows exist
-will need `clud memory reembed --model nomic-embed-text` (#262) to
-rewrite the vec table at the new 768-dim.
-
 ## Sibling sub-issues (META #255)
 
-- ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257 (this PR).
+- Embeddings (local + remote + Windows-ARM strategy)
 - Tier lifecycle (Working / Episodic / Semantic + decay + promotion)
 - MCP server in daemon + `clud mcp` stdio bridge
 - Daemon HTTP/IPC routes for memory ops
