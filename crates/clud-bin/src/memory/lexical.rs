@@ -20,7 +20,6 @@ fn map_tantivy<E: std::fmt::Display>(e: E) -> MemoryError {
 struct SchemaFields {
     id: Field,
     session_id: Field,
-    scope_key: Field,
     tier: Field,
     content: Field,
 }
@@ -29,7 +28,6 @@ fn build_schema() -> (Schema, SchemaFields) {
     let mut sb = Schema::builder();
     let id = sb.add_text_field("id", STRING | STORED);
     let session_id = sb.add_text_field("session_id", STRING | STORED);
-    let scope_key = sb.add_text_field("scope_key", STRING | STORED);
     let tier = sb.add_u64_field("tier", INDEXED | STORED | FAST);
     let content = sb.add_text_field("content", TEXT);
     let schema = sb.build();
@@ -38,7 +36,6 @@ fn build_schema() -> (Schema, SchemaFields) {
         SchemaFields {
             id,
             session_id,
-            scope_key,
             tier,
             content,
         },
@@ -85,7 +82,6 @@ impl LexicalIndex {
         &mut self,
         id: &MemoryId,
         session_id: Option<&str>,
-        scope_key: Option<&str>,
         tier: Tier,
         content: &str,
     ) -> Result<(), MemoryError> {
@@ -97,9 +93,6 @@ impl LexicalIndex {
         doc.add_text(self.fields.id, id.as_str());
         if let Some(sid) = session_id {
             doc.add_text(self.fields.session_id, sid);
-        }
-        if let Some(sk) = scope_key {
-            doc.add_text(self.fields.scope_key, sk);
         }
         doc.add_u64(self.fields.tier, tier.as_i64() as u64);
         doc.add_text(self.fields.content, content);
@@ -125,7 +118,6 @@ impl LexicalIndex {
         k: usize,
         session_id: Option<&str>,
         tier_floor: Option<Tier>,
-        scope_key: Option<&str>,
     ) -> Result<Vec<LexicalHit>, MemoryError> {
         let searcher = self.reader.searcher();
         let parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
@@ -137,13 +129,6 @@ impl LexicalIndex {
             clauses.push((
                 Occur::Must,
                 Box::new(TermQuery::new(sid_term, IndexRecordOption::Basic)),
-            ));
-        }
-        if let Some(sk) = scope_key {
-            let sk_term = Term::from_field_text(self.fields.scope_key, sk);
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(sk_term, IndexRecordOption::Basic)),
             ));
         }
         if let Some(floor) = tier_floor {
@@ -190,10 +175,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut idx = ix(&tmp);
         let id = MemoryId::new_v7();
-        idx.upsert(&id, None, None, Tier::Working, "the quick brown fox")
+        idx.upsert(&id, None, Tier::Working, "the quick brown fox")
             .unwrap();
         idx.commit().unwrap();
-        let hits = idx.search("quick", 10, None, None, None).unwrap();
+        let hits = idx.search("quick", 10, None, None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id);
         assert!(hits[0].bm25 > 0.0);
@@ -204,12 +189,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut idx = ix(&tmp);
         let id = MemoryId::new_v7();
-        idx.upsert(&id, None, None, Tier::Working, "alpha beta")
-            .unwrap();
+        idx.upsert(&id, None, Tier::Working, "alpha beta").unwrap();
         idx.commit().unwrap();
         idx.delete(&id).unwrap();
         idx.commit().unwrap();
-        let hits = idx.search("alpha", 10, None, None, None).unwrap();
+        let hits = idx.search("alpha", 10, None, None).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -219,12 +203,12 @@ mod tests {
         let mut idx = ix(&tmp);
         let a = MemoryId::new_v7();
         let b = MemoryId::new_v7();
-        idx.upsert(&a, Some("sess-a"), None, Tier::Working, "shared word zeta")
+        idx.upsert(&a, Some("sess-a"), Tier::Working, "shared word zeta")
             .unwrap();
-        idx.upsert(&b, Some("sess-b"), None, Tier::Working, "shared word zeta")
+        idx.upsert(&b, Some("sess-b"), Tier::Working, "shared word zeta")
             .unwrap();
         idx.commit().unwrap();
-        let hits = idx.search("zeta", 10, Some("sess-a"), None, None).unwrap();
+        let hits = idx.search("zeta", 10, Some("sess-a"), None).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, a);
     }
@@ -235,13 +219,13 @@ mod tests {
         let mut idx = ix(&tmp);
         let working = MemoryId::new_v7();
         let semantic = MemoryId::new_v7();
-        idx.upsert(&working, None, None, Tier::Working, "needle haystack")
+        idx.upsert(&working, None, Tier::Working, "needle haystack")
             .unwrap();
-        idx.upsert(&semantic, None, None, Tier::Semantic, "needle haystack")
+        idx.upsert(&semantic, None, Tier::Semantic, "needle haystack")
             .unwrap();
         idx.commit().unwrap();
         let hits = idx
-            .search("needle", 10, None, Some(Tier::Episodic), None)
+            .search("needle", 10, None, Some(Tier::Episodic))
             .unwrap();
         assert!(hits.iter().all(|h| h.id != working));
         assert!(hits.iter().any(|h| h.id == semantic));
@@ -252,52 +236,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut idx = ix(&tmp);
         let id = MemoryId::new_v7();
-        idx.upsert(&id, None, None, Tier::Working, "before commit")
+        idx.upsert(&id, None, Tier::Working, "before commit")
             .unwrap();
         // Before commit, the reader should not see the doc.
-        let pre = idx.search("before", 10, None, None, None).unwrap();
+        let pre = idx.search("before", 10, None, None).unwrap();
         assert!(pre.is_empty());
         idx.commit().unwrap();
-        let post = idx.search("before", 10, None, None, None).unwrap();
+        let post = idx.search("before", 10, None, None).unwrap();
         assert_eq!(post.len(), 1);
         assert_eq!(post[0].id, id);
-    }
-
-    #[test]
-    fn search_filters_by_scope_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut idx = ix(&tmp);
-        let a = MemoryId::new_v7();
-        let b = MemoryId::new_v7();
-        let global = MemoryId::new_v7();
-        idx.upsert(
-            &a,
-            None,
-            Some("repo://A"),
-            Tier::Working,
-            "scoped word omega",
-        )
-        .unwrap();
-        idx.upsert(
-            &b,
-            None,
-            Some("repo://B"),
-            Tier::Working,
-            "scoped word omega",
-        )
-        .unwrap();
-        idx.upsert(&global, None, None, Tier::Working, "scoped word omega")
-            .unwrap();
-        idx.commit().unwrap();
-        let hits = idx
-            .search("omega", 10, None, None, Some("repo://A"))
-            .unwrap();
-        let ids: Vec<&MemoryId> = hits.iter().map(|h| &h.id).collect();
-        assert!(ids.contains(&&a));
-        assert!(!ids.contains(&&b));
-        assert!(!ids.contains(&&global));
-        // Sanity: with no scope filter all three are visible.
-        let all = idx.search("omega", 10, None, None, None).unwrap();
-        assert_eq!(all.len(), 3);
     }
 }

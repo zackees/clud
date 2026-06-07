@@ -8,7 +8,6 @@
 //! one.
 
 pub mod error;
-pub mod identity;
 pub mod ids;
 pub mod lexical;
 pub mod paths;
@@ -17,10 +16,6 @@ pub mod search;
 pub mod store;
 
 pub use error::MemoryError;
-pub use identity::{
-    branch_isolate, branch_unisolate, cross_repo_glob_filter, normalize_origin_url,
-    resolve_repo_scope, scope_key, RepoScope, BRANCH_ISOLATE_MARKER,
-};
 pub use ids::MemoryId;
 pub use lexical::{LexicalHit, LexicalIndex};
 pub use search::{rrf_fuse, FusedHit, HybridSearchConfig};
