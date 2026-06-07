@@ -1,7 +1,7 @@
 use clud::{
     args, backend, backend_bootstrap, command, console_setup, console_title, ctrl_c_track, daemon,
-    gc, graphics, hook_health, hooks, large_file_guard, launch_setup, loop_artifacts, loop_spec,
-    mcp_bridge, memory, runner, startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec, runner,
+    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -11,20 +11,6 @@ fn main() {
 
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();
-
-    // Issue #260: hook subcommands are short-lived subprocesses fired
-    // by Claude Code / Codex mid-session. Dispatch BEFORE
-    // `console_title::set_for_current_cwd()` (a hook call must never
-    // retitle the user's terminal window mid-session) and BEFORE
-    // `ensure_daemon` (a hook never spawns a daemon — hook handlers
-    // exit 0 silently when the daemon is unreachable). We peek the raw
-    // argv here rather than running clap because clap's `--version`
-    // exit path would skip past the console-title stamp downstream;
-    // the cheap peek leaves the normal `clud --version` flow
-    // untouched.
-    if let Some(sub) = hooks::peek_hook_subcommand_from_argv(std::env::args()) {
-        std::process::exit(hooks::dispatch(sub));
-    }
 
     // Stamp the console title with `clud <cwd-name>` so the active
     // window is identifiable at a glance. Windows-only effective; a
@@ -89,21 +75,6 @@ fn main() {
     // never launches a backend.
     if let Some(args::Command::Ui { json, no_open }) = &args.command {
         std::process::exit(ui::run(*json, *no_open));
-    }
-
-    // Issue #259: `clud mcp` is the MCP stdio bridge for Claude Code /
-    // Codex. Self-contained; never launches a backend. Brings the
-    // always-on daemon up if it isn't running and proxies JSON-RPC
-    // frames to the daemon's memory_mcp_port.
-    if let Some(args::Command::Mcp) = &args.command {
-        std::process::exit(mcp_bridge::run());
-    }
-
-    // Issue #262: `clud memory <sub>` is self-contained maintenance.
-    // Never launches a backend; talks to the daemon's HTTP routes for
-    // mutating ops (single SQLite writer per process).
-    if let Some(args::Command::Memory { subcommand }) = &args.command {
-        std::process::exit(memory::cli::run(&args, subcommand.clone()));
     }
 
     // Issue #182: `clud trash` is self-contained maintenance. Dispatch
@@ -294,7 +265,7 @@ fn main() {
             }
         }
     };
-    if setup_scope.runs_global_actions() {
+    if matches!(setup_scope, launch_setup::LaunchSetupScope::Global) {
         let mut err = io::stderr().lock();
         if let Err(error) = launch_setup::run_setup(setup_scope, backend, args.verbose, &mut err) {
             eprintln!("[clud] note: global setup failed: {error}");

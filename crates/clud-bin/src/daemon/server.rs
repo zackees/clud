@@ -19,8 +19,6 @@ use super::gc_service::{
 };
 use super::http::{default_live_sessions_provider, spawn_dashboard};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
-use super::memory_mcp::spawn_mcp_server;
-use super::memory_service::{spawn_memory_service, MemoryService};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::sessions::list_live_session_cwds;
@@ -69,33 +67,6 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         }
     };
 
-    // Issue #261: agent-memory subsystem. Opens the SQLite store, tantivy
-    // index, and embedder in-process, and runs a consolidation timer.
-    // Failures are non-fatal — the rest of the daemon (sessions, GC,
-    // dashboard) still works; memory-dependent routes return 503.
-    let memory_service: Option<Arc<MemoryService>> = match spawn_memory_service(state_dir) {
-        Ok(svc) => Some(Arc::new(svc)),
-        Err(err) => {
-            eprintln!("[clud] note: memory subsystem unavailable: {err}");
-            None
-        }
-    };
-
-    // Issue #259: agent-memory MCP server. Bound on a loopback port and
-    // surfaced via `daemon.json` so the `clud mcp` stdio bridge can find
-    // it. Bind failures are non-fatal — the rest of the daemon still
-    // works; `clud mcp` will print a clear error if the field is `None`.
-    let memory_mcp_port = match memory_service.as_ref() {
-        Some(svc) => match spawn_mcp_server(Arc::clone(svc)) {
-            Ok(server) => Some(server.port),
-            Err(err) => {
-                eprintln!("[clud] note: memory mcp server unavailable: {err}");
-                None
-            }
-        },
-        None => None,
-    };
-
     // Issue #183: in-process HTTP dashboard. Bind a second loopback port
     // alongside the IPC listener and run a `tiny_http` server on a worker
     // thread. The port is recorded in `daemon.json` so `clud ui` can
@@ -108,7 +79,6 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         port,
         started_at_unix,
         default_live_sessions_provider(),
-        memory_service.clone(),
     );
 
     let info = DaemonInfo {
@@ -116,7 +86,6 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         port,
         dashboard_port,
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        memory_mcp_port,
     };
     if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {
         eprintln!("[clud] failed to persist daemon info: {}", err);

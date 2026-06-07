@@ -84,7 +84,7 @@ fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
                 return Ok(());
             }
         }
-        if started.elapsed() > Duration::from_secs(60) {
+        if started.elapsed() > Duration::from_secs(5) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "timed out waiting for daemon startup",
@@ -552,7 +552,6 @@ mod tests {
             port: 0,
             dashboard_port: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            memory_mcp_port: None,
         };
         assert!(daemon_version_matches(&info));
     }
@@ -567,7 +566,6 @@ mod tests {
             port: 0,
             dashboard_port: None,
             version: Some("0.0.0-not-the-current".to_string()),
-            memory_mcp_port: None,
         };
         assert!(!daemon_version_matches(&info));
     }
@@ -583,7 +581,6 @@ mod tests {
             port: 0,
             dashboard_port: None,
             version: None,
-            memory_mcp_port: None,
         };
         assert!(!daemon_version_matches(&info));
     }
@@ -595,7 +592,6 @@ mod tests {
             port,
             dashboard_port: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            memory_mcp_port: None,
         };
         super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();
     }

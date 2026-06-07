@@ -121,105 +121,6 @@
       flex-wrap: wrap;
     }
     .stats b { color: var(--fg); font-weight: 600; }
-
-    /* Memory tab additions (#263). Reuses existing palette tokens. */
-    .memory-status {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 10px;
-    }
-    .memory-status .stat {
-      padding: 8px 10px;
-      background: color-mix(in srgb, var(--accent) 6%, transparent);
-      border-radius: 6px;
-    }
-    .memory-status .stat .label {
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .memory-status .stat .value {
-      font-family: ui-monospace, "Menlo", "Consolas", monospace;
-      font-size: 14px;
-      margin-top: 2px;
-    }
-    .badge.tier-working {
-      background: color-mix(in srgb, var(--gone) 24%, transparent);
-      color: var(--fg);
-    }
-    .badge.tier-episodic {
-      background: color-mix(in srgb, var(--accent) 18%, transparent);
-      color: var(--accent);
-    }
-    .badge.tier-semantic {
-      background: color-mix(in srgb, var(--live) 18%, transparent);
-      color: var(--live);
-    }
-    .badge.embedder-ready {
-      background: color-mix(in srgb, var(--live) 18%, transparent);
-      color: var(--live);
-    }
-    .badge.embedder-warn {
-      background: color-mix(in srgb, var(--warn) 18%, transparent);
-      color: var(--warn);
-    }
-    .memory-search-bar {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .memory-search-bar input[type="search"],
-    .memory-save-form textarea,
-    .memory-save-form select {
-      padding: 6px 10px;
-      background: var(--bg);
-      color: var(--fg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      font: inherit;
-    }
-    .memory-search-bar input[type="search"] { flex: 1 1 240px; }
-    .memory-save-form { display: grid; gap: 8px; margin-top: 8px; }
-    .memory-save-form textarea { min-height: 80px; resize: vertical; font-family: ui-monospace, "Menlo", "Consolas", monospace; }
-    .memory-save-form .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .memory-snippet { white-space: pre-wrap; word-break: break-word; max-width: 540px; }
-    .memory-banner {
-      background: color-mix(in srgb, var(--warn) 16%, transparent);
-      color: var(--warn);
-      padding: 8px 12px;
-      border-radius: 6px;
-      margin-bottom: 10px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-    }
-    .memory-banner.error { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
-    details.memory-save-card > summary {
-      cursor: pointer;
-      font-size: 14px;
-      font-weight: 600;
-      list-style: none;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    details.memory-save-card > summary::-webkit-details-marker { display: none; }
-    details.memory-save-card > summary::before {
-      content: "+";
-      display: inline-block;
-      width: 16px;
-      color: var(--accent);
-      font-weight: 600;
-    }
-    details.memory-save-card[open] > summary::before { content: "\2212"; }
-    .memory-score {
-      font-family: ui-monospace, "Menlo", "Consolas", monospace;
-      color: var(--muted);
-      font-size: 11px;
-    }
   </style>
 </head>
 <body>
@@ -234,7 +135,6 @@
     <button class="tab" data-tab="gc">Garbage</button>
     <button class="tab" data-tab="repos">Repos</button>
     <button class="tab" data-tab="ctrl-c">Ctrl-C</button>
-    <button class="tab" data-tab="memory" id="tab-memory">Memory</button>
   </div>
 
   <section id="sessions" class="active">
@@ -266,52 +166,6 @@
     </div>
   </section>
 
-  <section id="memory" aria-labelledby="memory-heading">
-    <div id="memory-banner-host"></div>
-    <div class="card">
-      <h2 id="memory-heading">Memory <span id="memory-count" class="meta"></span></h2>
-      <div id="memory-status" class="memory-status" aria-busy="true">
-        <p class="empty">loading…</p>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Search <span class="meta">RRF hybrid (BM25 + vector)</span></h2>
-      <form id="memory-search-form" class="memory-search-bar" autocomplete="off">
-        <input id="memory-search-input" type="search" placeholder="search memories…" aria-label="Search memories">
-        <select id="memory-search-k" aria-label="Top-K results">
-          <option>10</option><option selected>25</option><option>50</option>
-        </select>
-        <button type="submit" class="button">Search</button>
-      </form>
-      <div id="memory-search-body"><p class="empty">type a query and press Search to find memories.</p></div>
-    </div>
-
-    <details class="card memory-save-card" id="memory-save-card">
-      <summary>Save a new memory</summary>
-      <form class="memory-save-form" id="memory-save-form">
-        <textarea id="memory-save-content" placeholder="memory content…" required></textarea>
-        <div class="row">
-          <label for="memory-save-tier" class="meta">tier:</label>
-          <select id="memory-save-tier">
-            <option value="working" selected>working</option>
-            <option value="episodic">episodic</option>
-            <option value="semantic">semantic</option>
-          </select>
-          <button type="submit" class="button">Save</button>
-          <span id="memory-save-status" class="meta"></span>
-        </div>
-      </form>
-    </details>
-
-    <div class="card">
-      <h2>Recent memories <span class="meta">auto-refresh 5s</span></h2>
-      <div id="memory-recent-body" aria-live="polite">
-        <p class="empty">loading…</p>
-      </div>
-    </div>
-  </section>
-
   <div class="footer">
     Polling <code>/state.json</code> every 5s. Loopback only — no authentication.
   </div>
@@ -320,49 +174,14 @@
     const POLL_MS = 5000;
     let lastState = null;
 
-    function activateTab(name) {
-      const tab = document.querySelector(`.tab[data-tab="${name}"]`);
-      const section = document.getElementById(name);
-      if (!tab || !section) return false;
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
-      tab.classList.add('active');
-      section.classList.add('active');
-      // Side effect: on entering the Memory tab, refresh its data once
-      // immediately so the user does not wait for the 5s tick. The
-      // poller continues to run regardless via the main refresh() loop.
-      if (name === 'memory') { void refreshMemoryTab(); }
-      return true;
-    }
-
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
-        const name = tab.dataset.tab;
-        if (activateTab(name)) {
-          // Mirror the active tab into the URL hash so deep links work
-          // and back/forward navigation toggles tabs.
-          if (window.location.hash !== `#${name}`) {
-            history.replaceState(null, '', `#${name}`);
-          }
-        }
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
       });
     });
-
-    function currentMemoryTabActive() {
-      const sec = document.getElementById('memory');
-      return !!sec && sec.classList.contains('active');
-    }
-
-    // Hash routing: select the tab named by `#<tab>` on load and on
-    // hashchange. Falls back to the default `sessions` tab if the hash
-    // does not match a known tab.
-    function applyHashRoute() {
-      const hash = (window.location.hash || '').replace(/^#/, '');
-      if (hash && document.querySelector(`.tab[data-tab="${hash}"]`)) {
-        activateTab(hash);
-      }
-    }
-    window.addEventListener('hashchange', applyHashRoute);
 
     function fmtAge(unix) {
       if (!unix) return '-';
@@ -554,266 +373,6 @@
         </table>`;
     }
 
-    // ---------- Memory tab (#263) ----------
-    //
-    // Talks to the daemon's `/memory/*` routes wired up in #261/#262.
-    // The dashboard never writes to the SQLite store directly — every
-    // mutation flows through the daemon as JSON over loopback HTTP,
-    // matching DD-018.
-
-    function truncate(s, n) {
-      if (s == null) return '';
-      const str = String(s);
-      return str.length > n ? str.slice(0, n - 1) + '…' : str;
-    }
-
-    function shortId(id) {
-      if (!id) return '';
-      const s = String(id);
-      return s.length > 8 ? s.slice(0, 8) : s;
-    }
-
-    function tierBadgeClass(tier) {
-      const t = String(tier || '').toLowerCase();
-      if (t === 'episodic') return 'badge tier-episodic';
-      if (t === 'semantic') return 'badge tier-semantic';
-      return 'badge tier-working';
-    }
-
-    function showMemoryBanner(msg, kind) {
-      const host = document.getElementById('memory-banner-host');
-      if (!host) return;
-      const cls = kind === 'error' ? 'memory-banner error' : 'memory-banner';
-      host.innerHTML = `
-        <div class="${cls}">
-          <span>${esc(msg)}</span>
-          <button class="button subtle" id="memory-banner-retry">retry</button>
-        </div>`;
-      const btn = document.getElementById('memory-banner-retry');
-      if (btn) btn.addEventListener('click', refreshMemoryTab);
-    }
-
-    function clearMemoryBanner() {
-      const host = document.getElementById('memory-banner-host');
-      if (host) host.innerHTML = '';
-    }
-
-    function renderMemoryStats(stats) {
-      const tc = stats.tier_counts || {};
-      const working = tc.working ?? 0;
-      const episodic = tc.episodic ?? 0;
-      const semantic = tc.semantic ?? 0;
-      const total = working + episodic + semantic;
-      document.getElementById('memory-count').textContent = `(${total})`;
-
-      const embStatus = String(stats.embedder_status || stats.embedder || 'unknown');
-      const embDim = stats.embedder_dim;
-      const storeDim = stats.store_embed_dim;
-      let embedderBadge;
-      if (embStatus === 'disabled' || embedderStatusIsDisabled(embStatus)) {
-        embedderBadge = '<span class="badge embedder-warn">disabled</span>';
-      } else if (storeDim && embDim && storeDim !== embDim) {
-        embedderBadge = '<span class="badge embedder-warn">dim-mismatch</span>';
-      } else {
-        embedderBadge = '<span class="badge embedder-ready">ready</span>';
-      }
-
-      const host = document.getElementById('memory-status');
-      host.setAttribute('aria-busy', 'false');
-      host.innerHTML = `
-        <div class="stat"><div class="label">Total rows</div><div class="value">${esc(total)}</div></div>
-        <div class="stat"><div class="label">Working</div><div class="value"><span class="${tierBadgeClass('working')}">${esc(working)}</span></div></div>
-        <div class="stat"><div class="label">Episodic</div><div class="value"><span class="${tierBadgeClass('episodic')}">${esc(episodic)}</span></div></div>
-        <div class="stat"><div class="label">Semantic</div><div class="value"><span class="${tierBadgeClass('semantic')}">${esc(semantic)}</span></div></div>
-        <div class="stat"><div class="label">Embedder</div><div class="value">${embedderBadge} ${esc(embStatus)}${embDim ? ` <span class="meta">dim ${esc(embDim)}</span>` : ''}</div></div>
-        <div class="stat"><div class="label">Schema</div><div class="value">v${esc(stats.schema_user_version ?? '?')}</div></div>
-      `;
-    }
-
-    function embedderStatusIsDisabled(s) {
-      const t = String(s || '').toLowerCase();
-      return t.includes('disabled') || t === 'off' || t === 'none';
-    }
-
-    function renderMemoryRecent(rows) {
-      const host = document.getElementById('memory-recent-body');
-      host.setAttribute('aria-busy', 'false');
-      if (!rows.length) {
-        host.innerHTML =
-          '<p class="empty">no memories yet. Use <code>clud memory save "&lt;text&gt;"</code> or open the "Save a new memory" card above.</p>';
-        return;
-      }
-      const html = rows.map(r => {
-        const content = String(r.content ?? '');
-        const created = r.created_at_ms ? Math.floor(r.created_at_ms / 1000) : null;
-        return `
-          <tr>
-            <td><span class="${tierBadgeClass(r.tier)}">${esc(r.tier)}</span></td>
-            <td class="memory-snippet" title="${esc(content)}">${esc(truncate(content, 80))}</td>
-            <td class="id">${esc(shortId(r.session_id || ''))}</td>
-            <td>${esc(fmtAge(created))}</td>
-            <td class="row-actions">
-              <button class="button subtle" data-forget="${esc(r.id)}" title="forget this memory">&times;</button>
-            </td>
-          </tr>`;
-      }).join('');
-      host.innerHTML = `
-        <table>
-          <thead><tr>
-            <th>tier</th><th>content</th><th>session</th><th>age</th><th></th>
-          </tr></thead>
-          <tbody>${html}</tbody>
-        </table>`;
-      host.querySelectorAll('button[data-forget]').forEach(btn => {
-        btn.addEventListener('click', () => forgetMemory(btn.dataset.forget, btn));
-      });
-    }
-
-    function renderMemorySearch(hits) {
-      const host = document.getElementById('memory-search-body');
-      if (!hits.length) {
-        host.innerHTML = '<p class="empty">no hits.</p>';
-        return;
-      }
-      const html = hits.map(h => {
-        const content = String(h.content ?? '');
-        return `
-          <tr>
-            <td><span class="${tierBadgeClass(h.tier)}">${esc(h.tier)}</span></td>
-            <td class="memory-snippet" title="${esc(content)}">${esc(truncate(content, 120))}</td>
-            <td class="memory-score">${esc(h.score != null ? h.score.toFixed(4) : '-')}</td>
-          </tr>`;
-      }).join('');
-      host.innerHTML = `
-        <table>
-          <thead><tr>
-            <th>tier</th><th>content</th><th>score</th>
-          </tr></thead>
-          <tbody>${html}</tbody>
-        </table>`;
-    }
-
-    async function pollMemoryStats() {
-      const resp = await fetch('/memory/stats');
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        throw new Error(`/memory/stats HTTP ${resp.status}: ${body.slice(0, 200)}`);
-      }
-      const stats = await resp.json();
-      renderMemoryStats(stats);
-      return stats;
-    }
-
-    async function pollMemoryRecent() {
-      const resp = await fetch('/memory/recent?limit=50');
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        throw new Error(`/memory/recent HTTP ${resp.status}: ${body.slice(0, 200)}`);
-      }
-      const rows = await resp.json();
-      renderMemoryRecent(rows);
-    }
-
-    async function refreshMemoryTab() {
-      try {
-        await Promise.all([pollMemoryStats(), pollMemoryRecent()]);
-        clearMemoryBanner();
-      } catch (err) {
-        const msg = err && err.message ? err.message : String(err);
-        if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
-          showMemoryBanner('memory daemon offline — retry?', 'error');
-        } else {
-          showMemoryBanner(`memory error: ${msg}`, 'error');
-        }
-      }
-    }
-
-    async function runMemorySearch() {
-      const q = (document.getElementById('memory-search-input').value || '').trim();
-      const k = document.getElementById('memory-search-k').value || '25';
-      const host = document.getElementById('memory-search-body');
-      if (!q) {
-        host.innerHTML = '<p class="empty">type a query and press Search to find memories.</p>';
-        return;
-      }
-      host.innerHTML = '<p class="empty">searching…</p>';
-      try {
-        const url = `/memory/search?q=${encodeURIComponent(q)}&k=${encodeURIComponent(k)}`;
-        const resp = await fetch(url);
-        if (!resp.ok) {
-          const body = await resp.text().catch(() => '');
-          host.innerHTML = `<p class="empty">search failed: ${esc(body.slice(0, 200) || resp.statusText)}</p>`;
-          return;
-        }
-        const hits = await resp.json();
-        renderMemorySearch(hits);
-      } catch (err) {
-        host.innerHTML = `<p class="empty">search failed: ${esc(String(err))}</p>`;
-      }
-    }
-
-    async function forgetMemory(id, btn) {
-      if (!id) return;
-      if (!confirm(`Forget memory ${shortId(id)}?\n\nThis removes the row from SQLite and the lexical index.`)) {
-        return;
-      }
-      if (btn) btn.disabled = true;
-      try {
-        const resp = await fetch(`/memory/forget/${encodeURIComponent(id)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: '{}',
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          alert(`forget failed: ${data.error || resp.statusText}`);
-          if (btn) btn.disabled = false;
-          return;
-        }
-        // Remove the row from the DOM immediately; the next poll will
-        // re-render the table from scratch so this just keeps the UI
-        // snappy.
-        if (btn) {
-          const tr = btn.closest('tr');
-          if (tr) tr.remove();
-        }
-        // Refresh stats so the tier counts decrement right away.
-        try { await pollMemoryStats(); } catch (_) { /* tolerated */ }
-      } catch (err) {
-        alert(`forget failed: ${err}`);
-        if (btn) btn.disabled = false;
-      }
-    }
-
-    async function saveMemory(ev) {
-      ev.preventDefault();
-      const content = document.getElementById('memory-save-content').value || '';
-      const tier = document.getElementById('memory-save-tier').value || 'working';
-      const status = document.getElementById('memory-save-status');
-      if (!content.trim()) {
-        status.textContent = 'content cannot be empty';
-        return;
-      }
-      status.textContent = 'saving…';
-      try {
-        const resp = await fetch('/memory/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content, tier }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          status.textContent = `save failed: ${data.error || resp.statusText}`;
-          return;
-        }
-        status.textContent = `saved ${shortId(data.id || '')}`;
-        document.getElementById('memory-save-content').value = '';
-        await refreshMemoryTab();
-      } catch (err) {
-        status.textContent = `save failed: ${err}`;
-      }
-    }
-
     async function doPurge(body, prompt) {
       if (!confirm(prompt)) return;
       try {
@@ -848,24 +407,8 @@
         document.getElementById('daemon-meta').textContent =
           `connection lost: ${err}`;
       }
-      // Memory tab polls its own routes — fold it into the same 5s
-      // cadence so users don't see stale tier counts when they switch
-      // tabs. We only fetch when the tab is currently visible to avoid
-      // load on the SQLite mutex when nobody is looking.
-      if (currentMemoryTabActive()) {
-        void refreshMemoryTab();
-      }
     }
 
-    // Wire form listeners once at startup. The tab content lives in the
-    // same DOM tree for the page lifetime — no need to re-bind on tab
-    // switches.
-    const searchForm = document.getElementById('memory-search-form');
-    if (searchForm) searchForm.addEventListener('submit', (e) => { e.preventDefault(); runMemorySearch(); });
-    const saveForm = document.getElementById('memory-save-form');
-    if (saveForm) saveForm.addEventListener('submit', saveMemory);
-
-    applyHashRoute();
     refresh();
     setInterval(refresh, POLL_MS);
   </script>

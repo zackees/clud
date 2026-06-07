@@ -8,14 +8,6 @@ repository.workspace = true
 homepage.workspace = true
 description = "Fast CLI for running Claude Code and Codex in YOLO mode"
 
-[features]
-# Issue #257: gate the in-process ONNX embedder (fastembed + ort) behind
-# a feature so the `aarch64-pc-windows-msvc` target — which lacks an ort
-# prebuilt — can build with `--no-default-features`. Mirrors the
-# `whisper-rs` carve-out at the bottom of this file.
-default = ["memory_local_embed"]
-memory_local_embed = ["dep:fastembed"]
-
 [dependencies]
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
@@ -72,33 +64,9 @@ tiny_http = "0.12"
 # (~50 LOC of platform glue: macOS `open`, Linux `xdg-open`, Windows
 # `cmd /c start`). One dep beats triplicate hand-rolled code.
 open = "5"
-# Issue #256: agent-memory storage layer. `rusqlite` re-enters the dep
-# graph here for the SQLite half of the memory store; redb (above) keeps
-# owning the gc/session registry. See DD-013 for the coexistence rationale.
-# `bundled` ships SQLite with us so the wheel works without a system
-# library; `load_extension` is required to register `sqlite-vec` on the
-# same connection that handles the SQL writes (one-transaction invariant).
-rusqlite = { version = "0.31", features = ["bundled", "load_extension"] }
-# Issue #256: vec0 virtual table providing kNN search inside SQLite.
-# Loaded as a runtime extension via `sqlite3_auto_extension` so SQL writes
-# to `memories` and `memory_vec` participate in one BEGIN IMMEDIATE.
-sqlite-vec = "0.1"
-# Issue #256: BM25 lexical index for the hybrid search path. Pure-Rust;
-# no C toolchain pressure on top of what rusqlite-bundled already adds.
-tantivy = "0.22"
-# Issue #256: uuidv7 ids for memory rows (sortable, monotonic-ish).
-uuid = { version = "1", features = ["v7"] }
-# Issue #256: ergonomic error enum for the memory module.
-thiserror = "1"
-# Issue #264: git-artifact serialization. YAML frontmatter on the
-# .clud/memory/*.md files (promoted from [dev-dependencies]), ULID
-# filename prefixes for filesystem-sortable artifact listings, regex
-# matching for the `.cludignore` body-blacklist lines, RFC3339
-# timestamps in frontmatter, and atomic `tempfile`-then-rename writes.
+
+[dev-dependencies]
 serde_yaml = "0.9"
-ulid = { version = "1", features = ["serde"] }
-regex = "1"
-chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 tempfile = "3"
 
 [lib]
@@ -116,26 +84,6 @@ path = "tests/pty_behavior.rs"
 # (see `voice.rs`).
 [target.'cfg(not(all(target_arch = "aarch64", target_os = "windows")))'.dependencies]
 whisper-rs = "0.16"
-# Issue #257: in-process ONNX embedder (MiniLM-L6-v2, 384-dim). Gated to
-# the same target list as whisper-rs because the underlying `ort` ONNX
-# Runtime crate does not yet ship prebuilts for aarch64-pc-windows-msvc.
-# Optional + behind the `memory_local_embed` feature so Windows-ARM CI
-# can build with `--no-default-features` and fall through to the remote
-# or disabled embedder at runtime.
-#
-# `default-features = false` disables fastembed's default `hf-hub-native-tls`,
-# which transitively pulls `native-tls → openssl-sys → libssl.so.3`. The
-# maturin-built `clud` binary does not co-distribute the resulting hashed
-# `libssl-<hash>.so.3` artifact, so the Linux wheel would crash at startup
-# with "error while loading shared libraries". `hf-hub-rustls-tls` routes
-# hf-hub through `reqwest`'s rustls backend (pure Rust, no system OpenSSL).
-# `ort-download-binaries` is re-enabled here because it is also part of
-# fastembed's default feature set and provides the prebuilt ONNX Runtime
-# shared library that ort dynamically loads at runtime.
-fastembed = { version = "4", optional = true, default-features = false, features = [
-    "hf-hub-rustls-tls",
-    "ort-download-binaries",
-] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpal = "0.16"

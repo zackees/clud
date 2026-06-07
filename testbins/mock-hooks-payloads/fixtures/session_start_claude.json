@@ -1,7 +1,0 @@
-{
-  "session_id": "sess-claude-0001",
-  "cwd": "/Users/dev/projects/clud",
-  "model": "claude-opus-4-7",
-  "source": "claude-code",
-  "transcript_path": "/Users/dev/.claude/transcripts/sess-claude-0001.jsonl"
-}

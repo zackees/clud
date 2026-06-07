@@ -91,29 +91,6 @@ jobs:
           fi
           uv run --no-editable -m ci.lint
 
-      # Issue #266: feature carve-out gate for the memory subsystem.
-      # On Windows-ARM (`windows-11-arm`) build with --no-default-features
-      # to prove the `memory_local_embed` cfg carve-out compiles cleanly.
-      # On the other 5 platforms build with --features memory_local_embed
-      # to prove the embedder builds end-to-end. These are explicit
-      # assertions on top of `bash test` so a regression in either path
-      # fails the matrix loudly.
-      - name: Feature carve-out gate (Windows-ARM, --no-default-features)
-        if: ${{ inputs.runs-on == 'windows-11-arm' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          soldr cargo build -p clud --no-default-features
-      - name: Feature carve-out gate (others, --features memory_local_embed)
-        if: ${{ inputs.runs-on != 'windows-11-arm' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${RUNNER_OS}" = "Linux" ]; then
-            ulimit -v 13000000
-          fi
-          soldr cargo build -p clud --features memory_local_embed
-
       - name: Unit Tests
         shell: bash
         run: |

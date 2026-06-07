@@ -1,5 +1,0 @@
-{
-  "session_id": "sess-claude-0001",
-  "prompt": "remember: the production database lives at db.internal:5432 and uses SCRAM-SHA-256 auth",
-  "cwd": "/Users/dev/projects/clud"
-}

@@ -26,10 +26,6 @@ the integration tests.
 - [voice/](voice/README.md) - F3 push-to-talk voice mode: mic capture,
   start/stop cues, `whisper-rs` worker thread, transcript injection into the
   backend PTY.
-- [memory/](memory/README.md) - agent-memory storage foundation: `SqliteStore`
-  (rusqlite + sqlite-vec) for content + KNN, `LexicalIndex` (tantivy BM25),
-  RRF fusion. Pure storage; tier lifecycle, embedder, MCP, daemon-IPC, and
-  CLI verbs live in sibling sub-issues under META #255.
 
 ## Top-Level Modules
 
@@ -113,11 +109,9 @@ Platform glue:
   sites stay portable.
 - `large_file_guard.rs` - startup-time `ignore`-crate walker that warns about
   source files large enough to choke agents (issue #132); hard 1 s deadline.
-- `launch_setup.rs` - session-only/global/global+memory setup selector plus
-  selected-backend persistent setup actions for skills, Codex hook
-  normalization, and (issue #265) memory MCP+hook registration via
-  `memory::mcp_config`. The third selector row defaults on when memory is
-  not yet registered.
+- `launch_setup.rs` - session-only/global setup selector plus
+  selected-backend persistent setup actions for skills and Codex hook
+  normalization.
 
 Skills and hooks:
 
@@ -135,13 +129,6 @@ Skills and hooks:
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
-- `hooks.rs` - issue #260: agent-memory hook subcommands (`clud hook
-  session-start | user-prompt-submit | post-tool-use | stop`). Each
-  handler reads JSON from stdin, talks HTTP to the daemon's
-  `/memory/*` routes, and exits 0 unconditionally. Dispatched from
-  `main.rs` before `console_title::set_for_current_cwd()` and
-  `ensure_daemon`. Hidden from `--help`; registration to
-  `~/.claude/settings.json` / `~/.codex/hooks.json` is owned by #265.
 
 Diagnostics and misc:
 
@@ -163,10 +150,6 @@ Quick lookup, which file owns a given subcommand:
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud --fix-hooks` -> `hook_health.rs`.
-- `clud mcp` -> `mcp_bridge.rs` (stdio↔TCP proxy) -> `daemon/memory_mcp.rs`
-  (in-process MCP server, issue #259).
-- `clud hook session-start | user-prompt-submit | post-tool-use | stop`
-  -> `hooks.rs` (issue #260).
 
 ## Cross-Cutting Subsystems
 
