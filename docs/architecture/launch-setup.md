@@ -9,12 +9,16 @@ Interactive TUI launches that explicitly choose a backend with `--claude` or
 `--codex` prompt on stderr before the backend starts:
 
 ```text
+Launch setup scope (Up/Down, Enter):
 [x] Session only
 [ ] Globally
 ```
 
-The default is session-only. Enter accepts the highlighted option, Up selects
-session-only, and Down selects global. A bare `clud` invocation (no `--claude`
+The default is session-only. The selector drains any key events that were
+already pending when it appeared, so the Enter key used to submit the `clud`
+command is not reused as the selector confirmation. Enter accepts the
+highlighted option, Up selects session-only, and Down selects global. A bare
+`clud` invocation (no `--claude`
 or `--codex`), non-interactive launches, piped stdin, `--dry-run`, one-shot
 prompt launches (`-p` / `-m`), continuations, resumes, and maintenance commands
 do not prompt; they use session-only.

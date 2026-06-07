@@ -6,6 +6,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal;
@@ -64,6 +65,7 @@ impl ScopeSelector {
     }
 
     pub fn render<W: Write>(&self, out: &mut W) -> io::Result<()> {
+        writeln!(out, "Launch setup scope (Up/Down, Enter):")?;
         writeln!(
             out,
             "{} Session only",
@@ -108,6 +110,7 @@ pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
     let _raw = RawModeGuard::enable()?;
     let mut selector = ScopeSelector::default();
     selector.render(out)?;
+    let _ = drain_pending_terminal_events();
 
     loop {
         let Event::Key(key) = event::read()? else {
@@ -124,9 +127,26 @@ pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
             out.flush()?;
             return Ok(scope);
         }
-        write!(out, "\x1b[2A")?;
+        write!(out, "\x1b[3A")?;
         selector.render(out)?;
     }
+}
+
+fn drain_pending_terminal_events() -> io::Result<usize> {
+    drain_pending_events(|| event::poll(Duration::from_millis(0)), event::read)
+}
+
+fn drain_pending_events<P, R>(mut poll: P, mut read: R) -> io::Result<usize>
+where
+    P: FnMut() -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
+{
+    let mut drained = 0;
+    while poll()? {
+        let _ = read()?;
+        drained += 1;
+    }
+    Ok(drained)
 }
 
 struct RawModeGuard;
@@ -348,7 +368,7 @@ mod tests {
         selector.render(&mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "[x] Session only\n[ ] Globally\n"
+            "Launch setup scope (Up/Down, Enter):\n[x] Session only\n[ ] Globally\n"
         );
     }
 
@@ -363,6 +383,27 @@ mod tests {
             selector.handle(SelectorEvent::Enter),
             Some(LaunchSetupScope::SessionOnly)
         );
+    }
+
+    #[test]
+    fn pending_enter_is_drained_before_prompt_accepts_input() {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        let events = RefCell::new(VecDeque::from([Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))]));
+
+        let drained = drain_pending_events(
+            || Ok(!events.borrow().is_empty()),
+            || Ok(events.borrow_mut().pop_front().unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(drained, 1);
+        assert!(events.borrow().is_empty());
     }
 
     #[test]
