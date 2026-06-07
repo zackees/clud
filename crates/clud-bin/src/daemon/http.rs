@@ -852,6 +852,12 @@ mod tests {
                 kind: InvocationKind::Direct,
                 exit_code: 130,
                 cwd: Some(format!("/tmp/a{i}")),
+                handed_off: Some(i % 2 == 0),
+                handoff_reason: Some(if i % 2 == 0 {
+                    "ctrl_c_subprocess".to_string()
+                } else {
+                    "daemon_unreachable".to_string()
+                }),
             };
             let path = edir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
             std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();

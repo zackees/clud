@@ -763,6 +763,18 @@ impl WorktreeScanner {
         }
     }
 
+    /// Signal cancellation **without** waiting for the worker thread.
+    ///
+    /// Issue #285 rec 3: callers that hold several scanners (the main
+    /// launch path holds three) can call `signal_cancel` on all of them
+    /// first, then drop each guard, so the joins overlap rather than
+    /// serializing 3 × poll-interval of latency into the Ctrl-C exit
+    /// path. Safe to call from `&self` because the only state mutated
+    /// is the cancel `AtomicBool`.
+    pub fn signal_cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
     /// Signal cancellation and wait for the worker thread to exit.
     pub fn cancel(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
@@ -849,13 +861,16 @@ fn run_scanner_loop(
                 ipc_failed = true;
             }
         }
-        // Interruptible sleep: 20 × 100ms = ~2s, but cancellable within
-        // 100ms.
-        for _ in 0..20 {
+        // Interruptible sleep: 80 × 25ms = ~2s outer cycle, but
+        // cancellable within ~25ms. Issue #285 rec 3 dropped this from
+        // 100ms granularity so the Ctrl-C teardown's scanner joins
+        // don't add up to several hundred ms of dead time before the
+        // shell returns.
+        for _ in 0..80 {
             if cancel.load(Ordering::SeqCst) {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 }

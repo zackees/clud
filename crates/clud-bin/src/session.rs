@@ -1039,13 +1039,34 @@ fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
 /// real kill_tree from out of the user's hot path.
 fn interrupt_pty_process(process: &NativePtyProcess, verbose: bool) -> i32 {
     let pid = process.pid().ok().flatten();
-    let handed_off = pid.is_some_and(|pid| {
-        if let Ok(state_dir) = crate::daemon::default_state_dir() {
-            crate::daemon::try_handoff_kill_to_daemon(&state_dir, &[pid], Some("ctrl_c_pty"))
-        } else {
+    let handed_off = match pid {
+        Some(pid) => match crate::daemon::default_state_dir() {
+            Ok(state_dir) => {
+                let ok = crate::daemon::try_handoff_kill_to_daemon(
+                    &state_dir,
+                    &[pid],
+                    Some("ctrl_c_pty"),
+                );
+                crate::ctrl_c_track::record_handoff(
+                    ok,
+                    Some(if ok {
+                        "ctrl_c_pty"
+                    } else {
+                        "daemon_unreachable"
+                    }),
+                );
+                ok
+            }
+            Err(_) => {
+                crate::ctrl_c_track::record_handoff(false, Some("no_state_dir"));
+                false
+            }
+        },
+        None => {
+            crate::ctrl_c_track::record_handoff(false, Some("no_child_pid"));
             false
         }
-    });
+    };
 
     #[cfg(windows)]
     {
