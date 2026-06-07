@@ -14,7 +14,6 @@ pub mod git_artifact;
 pub mod identity;
 pub mod ids;
 pub mod lexical;
-pub mod mcp_config;
 pub mod paths;
 pub mod schema;
 pub mod search;

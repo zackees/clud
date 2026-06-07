@@ -294,7 +294,7 @@ fn main() {
             }
         }
     };
-    if setup_scope.runs_global_actions() {
+    if matches!(setup_scope, launch_setup::LaunchSetupScope::Global) {
         let mut err = io::stderr().lock();
         if let Err(error) = launch_setup::run_setup(setup_scope, backend, args.verbose, &mut err) {
             eprintln!("[clud] note: global setup failed: {error}");

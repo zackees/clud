@@ -113,11 +113,9 @@ Platform glue:
   sites stay portable.
 - `large_file_guard.rs` - startup-time `ignore`-crate walker that warns about
   source files large enough to choke agents (issue #132); hard 1 s deadline.
-- `launch_setup.rs` - session-only/global/global+memory setup selector plus
-  selected-backend persistent setup actions for skills, Codex hook
-  normalization, and (issue #265) memory MCP+hook registration via
-  `memory::mcp_config`. The third selector row defaults on when memory is
-  not yet registered.
+- `launch_setup.rs` - session-only/global setup selector plus
+  selected-backend persistent setup actions for skills and Codex hook
+  normalization.
 
 Skills and hooks:
 
