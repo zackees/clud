@@ -366,6 +366,7 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - The `bundled` feature ships a vendored SQLite copy with every wheel, sidestepping system-SQLite version drift but inflating the binary by ~1.2 MB.
 - Windows-ARM may not build `sqlite-vec`; the memory module reserves a `whisper-rs`-style target-cfg carve-out (PR1 ships without it; CI on `windows-11-arm` is the decider).
 
+
 ---
 
 ## DD-014: Repo URL as primary memory scope; branch as metadata, not partition
@@ -426,33 +427,3 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 - Windows-ARM CI runs `cargo build --no-default-features` to verify the carve-out continues to compile cleanly. Users on Windows-ARM see the four-path message until they set `CLUD_MEMORY_EMBEDDER_PROVIDER` or switch to WSL2.
 - `ort 2.0.0-rc.x` is pre-release; fastembed v4 is the integration point. Risk: rc churn. Mitigation: if rc.x breaks, pin fastembed v3 + ort 1.16; the `Embedder` trait is stable across either backend.
 - `clud memory reembed --model <new>` (CLI verb lands in #262) will use this PR's `reembed_all` library primitive to swap embedders end-to-end, including across dim changes (Local 384 → Ollama 768).
-
----
-
-## DD-016: Three-tier auto-forget is scoped to Working only
-
-**Context:** The agent-memory subsystem (META #255) models retention with three tiers: Working (per-session scratch), Episodic (session-summarized), and Semantic (durable cross-session knowledge). Auto-forget — the daemon-side TTL sweep — needs a clear contract about which tiers it may delete. The natural temptation is to let TTL apply to every tier with progressively longer thresholds, scoring each row against recency + access + score thresholds and dropping the lowest-ranked rows in any tier.
-
-**Decision:** `memory::tiers::forget_expired` deletes **only** Working-tier rows whose `now_ms - last_access_at_ms > working_ttl_ms`. Episodic and Semantic rows are never auto-forgotten. Users opt into longer-term storage via promotion (Working → Episodic → Semantic), which is itself gated by access-count and dwell-time floors. Removal of Episodic/Semantic is an explicit MCP delete (sibling sub-issue) or — eventually — a user-confirmed forget-candidate flow surfaced from `retention_score`. The score function exists and is used for surface ranking, but the TTL sweep ignores it for Episodic/Semantic.
-
-**Rationale:**
-- Predictable retention is the property users actually want from a long-lived memory store. "I promoted this into Semantic" should mean "this lives until I delete it," not "this lives until the decay model says so."
-- The promotion gate (access-count floor + dwell time) already makes Episodic/Semantic placement intentional. Adding a second gate where the daemon can override that intent silently is poor UX — users would lose memories they thought they had locked in.
-- Working has natural lifecycle bounds (a session ends, scratch is no longer relevant); a TTL sweep matches that mental model.
-- Auto-forgetting Episodic/Semantic is the kind of failure that's hardest to recover from: deleted rows have no audit trail and no user-visible warning before they go. The cost of leaving stale Semantic rows around is bounded; the cost of deleting a real memory is unbounded.
-- `retention_score` still exists, returns a useful number, and can drive a *review*-style flow later. We just don't connect it to the delete path.
-
-**Alternatives Considered:**
-
-| Approach | Why not |
-|---|---|
-| Three-tier TTL (each tier gets its own threshold) | Hides retention behind two policies (promotion + decay); users can't predict what survives. Surveyed in the sibling issue #258 spec under "auto-forget pass" — explicitly rejected for v1. |
-| Score-driven forget across all tiers | Combines decay model + access boost + tier floor into one number; great for ranking, terrible for deletion because the user can't intuit which side of the threshold a row will land on. |
-| Soft-delete with trash-table for all tiers | Adds storage cost and a second surface for "where did my memory go?" diagnostics. Working has no value as a tombstone — it's scratch. |
-| Never auto-forget any tier | Working bloats indefinitely with per-session noise; embedding cost grows without bound. |
-
-**Consequences:**
-- The `TierConfig::working_ttl_ms` knob is load-bearing; the equivalents for Episodic/Semantic don't exist and shouldn't be added without revisiting this DD.
-- Users who outgrow Working scratch must manually delete (via the eventual MCP delete verb) or wait for the TTL. There is no "decay-driven forget" escape hatch in v1.
-- `retention_score` returning a low value is informative, not actionable on the storage path — sibling sub-issues may build surfacing UIs from it (forget-candidate review).
-- This DD is at the policy layer, not the API layer: `SqliteStore::delete` still accepts any id. The tier-gated rule lives inside `tiers::forget_expired` and is the only daemon-driven caller.

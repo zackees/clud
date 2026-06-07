@@ -59,33 +59,6 @@ for the rationale on rusqlite + redb coexistence.
   hits, sorted desc by score with stable insertion-order ties. The
   scope filter is applied upstream on both `knn` and `search`, so
   fusion stays unaware of scoping (pure rank math).
-- `tiers.rs:55` `TierConfig` — retention knobs (working TTL, promote
-  access floor, promote dwell, decay half-life). `tiers.rs:84`
-  `from_env` overrides defaults from `CLUD_MEMORY_WORKING_TTL_MS`,
-  `CLUD_MEMORY_PROMOTE_ACCESS_FLOOR`, `CLUD_MEMORY_PROMOTE_DWELL_MS`,
-  `CLUD_MEMORY_DECAY_HALF_LIFE_MS`.
-- `tiers.rs:117` `promote_candidates` — pure read returning rows whose
-  `access_count >= promote_access_floor` and dwell since
-  `tier_change_at_ms` clears `promote_dwell_ms`. Walks Working →
-  Episodic and Episodic → Semantic.
-- `tiers.rs:150` `apply_promotions` — applies the promotion list,
-  calling `store.promote_tier` then `lexical.upsert` per row so BM25
-  tier stays in lockstep with SQLite. Commits the lexical writer.
-- `tiers.rs:183` `retention_score` — `[0, 1]` blend of recency decay
-  (half-life-based), an access-count boost, and a tier floor (Working
-  0.0, Episodic 0.25, Semantic 0.5). Pure function; not used by
-  auto-forget — surface-ranking only.
-- `tiers.rs:207` `forget_expired` — deletes Working rows whose
-  `now_ms - last_access_at_ms > working_ttl_ms` from both the SQLite
-  store and the lexical index. Episodic and Semantic are never
-  auto-deleted ([DD-016](../../../../docs/DESIGN_DECISIONS.md#dd-016-three-tier-auto-forget-is-scoped-to-working-only)).
-- `tiers.rs:234` `tier_exportable` — git-artifact serialization hook
-  for sibling #264. Working = never, Semantic = always, Episodic =
-  policy-configurable on `TierConfig`.
-
-The consolidation timer / `tick()` driver, Stop-hook callers, daemon
-spawn glue, and the MCP `memory_consolidate` tool live in sibling
-sub-issues; this directory only exposes the primitives above.
 
 ## Identity & scoping
 

@@ -7,11 +7,10 @@ knowledge-graph, and CLI verbs.
 
 ## Status
 
-PR1 shipped the storage + hybrid-search foundation. PR2 (issue #258,
-this commit) adds the tier-lifecycle primitives:
+PR1 (this commit) ships the storage + hybrid-search foundation only:
 
 - `crates/clud-bin/src/memory/` — SqliteStore, LexicalIndex, RRF fusion,
-  embedded `memory_v1.sql` migration runner, tier lifecycle.
+  embedded `memory_v1.sql` migration runner.
 - No daemon-IPC routes, no MCP server, no CLI verbs, no embedder.
 
 See [`crates/clud-bin/src/memory/README.md`](../../crates/clud-bin/src/memory/README.md)
@@ -176,54 +175,6 @@ setx CLUD_MEMORY_EMBEDDER_URL      http://<host>:11434/api/embeddings
 Restart the daemon. Switching the embedder model after rows exist
 will need `clud memory reembed --model nomic-embed-text` (#262) to
 rewrite the vec table at the new 768-dim.
-
-## Tier lifecycle (issue #258)
-
-Three tiers with one-way promotion and tier-gated auto-forget:
-
-- **Working** — per-session scratch. Auto-forgotten when
-  `now_ms - last_access_at_ms > working_ttl_ms` (default 24 h).
-- **Episodic** — session-summarized; manually deleted only.
-- **Semantic** — durable cross-session knowledge; manually deleted only.
-
-Auto-forget is **scoped to Working only**
-([DD-016](../DESIGN_DECISIONS.md#dd-016-three-tier-auto-forget-is-scoped-to-working-only)).
-Episodic and Semantic survive until explicit deletion; the retention
-score still ranks them for surface UIs but does not feed the delete
-path.
-
-Promotion is one-way (Working → Episodic → Semantic). A row is a
-promotion candidate when both gates clear:
-
-- `access_count >= TierConfig.promote_access_floor` (default 3).
-- `now_ms - tier_change_at_ms >= TierConfig.promote_dwell_ms` (default
-  1 h). The dwell gate prevents thrash near the access-count
-  threshold.
-
-[`memory::tiers`](../../crates/clud-bin/src/memory/tiers.rs) exposes
-four primitives, designed for a future consolidation timer (sibling
-sub-issue #261) to call on a periodic tick:
-
-1. `promote_candidates(store, now_ms, cfg) -> Vec<(MemoryId, Tier)>`
-   — pure read.
-2. `apply_promotions(store, lexical, &promotions, now_ms)` — applies
-   the list and keeps the BM25 tier field in lockstep with SQLite.
-3. `retention_score(row, now_ms, cfg) -> f32` in `[0, 1]` blending
-   recency decay (half-life), access boost, and a tier floor (Working
-   0.0, Episodic 0.25, Semantic 0.5).
-4. `forget_expired(store, lexical, now_ms, cfg) -> usize` — deletes
-   expired Working rows, returns the count.
-
-`tier_exportable(tier, cfg) -> bool` is the seam for the git-artifact
-serialization sub-issue (#264): Working = never, Semantic = always,
-Episodic = policy-configurable on `TierConfig`.
-
-Env-var knobs (read by `TierConfig::from_env`):
-
-- `CLUD_MEMORY_WORKING_TTL_MS` (default 86_400_000)
-- `CLUD_MEMORY_PROMOTE_ACCESS_FLOOR` (default 3)
-- `CLUD_MEMORY_PROMOTE_DWELL_MS` (default 3_600_000)
-- `CLUD_MEMORY_DECAY_HALF_LIFE_MS` (default 604_800_000)
 
 ## Sibling sub-issues (META #255)
 

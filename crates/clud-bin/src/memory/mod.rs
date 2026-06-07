@@ -16,7 +16,6 @@ pub mod paths;
 pub mod schema;
 pub mod search;
 pub mod store;
-pub mod tiers;
 
 pub use embedder::{
     embedder_from_env, reembed_all, Embedder, EmbedderTrait, RemoteEmbedder, RemoteProvider,
@@ -31,7 +30,3 @@ pub use ids::MemoryId;
 pub use lexical::{LexicalHit, LexicalIndex};
 pub use search::{rrf_fuse, FusedHit, HybridSearchConfig};
 pub use store::{KnnHit, MemoryRow, SqliteStore, Tier};
-pub use tiers::{
-    apply_promotions, forget_expired, promote_candidates, retention_score, tier_exportable,
-    TierConfig,
-};
