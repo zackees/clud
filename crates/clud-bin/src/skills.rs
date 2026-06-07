@@ -10,8 +10,10 @@
 //! We install only into a backend whose home subdir already exists — that way
 //! users who only run one CLI don't get the other CLIs' skill directories
 //! created in their home. Existing skill files are never overwritten, so user
-//! edits survive. Codex is gated on `.codex` but reads skills from the current
-//! shared agents path, `.agents/skills`.
+//! edits survive. Codex reads skills from `~/.codex/skills/`, mirroring
+//! Claude's `~/.claude/skills/` layout. Clud-managed copies that an older
+//! build wrote to `~/.agents/skills/` are purged best-effort during Codex
+//! global setup.
 //!
 //! The asset files live under `crates/clud-bin/assets/skills/` and are
 //! embedded at compile time via `include_str!`, so the runtime needs no
@@ -86,8 +88,8 @@ pub struct SkillBackend {
     /// (e.g. `.claude`, `.codex`).
     pub home_subdir: &'static str,
     /// Optional override for the home-relative directory that contains
-    /// this backend's skills. Codex stores config in `.codex` but reads user
-    /// skills from `.agents/skills`.
+    /// this backend's skills, when it differs from `home_subdir`. Reserved
+    /// for future backends whose skills live outside their config root.
     pub skills_home_subdir: Option<&'static str>,
     /// Path under the skills home dir where skill packages live (almost
     /// always `skills`, parameterized in case a future tool uses a different
@@ -125,7 +127,7 @@ pub const SKILL_BACKENDS: &[SkillBackend] = &[
         backend: Backend::Codex,
         name: "Codex",
         home_subdir: ".codex",
-        skills_home_subdir: Some(".agents"),
+        skills_home_subdir: None,
         skills_subdir: "skills",
     },
     // To add a new backend (e.g. OpenRouter CLI):
@@ -190,7 +192,7 @@ pub fn ensure_installed() -> Result<Vec<(&'static SkillBackend, InstallReport)>,
 pub fn ensure_installed_at(
     home: &Path,
 ) -> Result<Vec<(&'static SkillBackend, InstallReport)>, InstallError> {
-    let _ = purge_legacy_codex_skills(home, BUNDLED_SKILLS);
+    let _ = purge_stale_agents_skills(home, BUNDLED_SKILLS);
     let mut results = Vec::new();
     for backend in active_backends(home) {
         let report = install_to(&backend.skills_dir(home), BUNDLED_SKILLS)?;
@@ -211,7 +213,7 @@ pub fn ensure_installed_for_backend_at(
     backend: Backend,
 ) -> Result<Option<(&'static SkillBackend, InstallReport)>, InstallError> {
     if matches!(backend, Backend::Codex) {
-        let _ = purge_legacy_codex_skills(home, BUNDLED_SKILLS);
+        let _ = purge_stale_agents_skills(home, BUNDLED_SKILLS);
     }
     let Some(skill_backend) = backend_for(backend) else {
         return Ok(None);
@@ -254,23 +256,24 @@ pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport,
     Ok(report)
 }
 
-/// Remove stale clud-managed skill copies from Codex's old skill directory.
+/// Remove stale clud-managed skill copies from `~/.agents/skills/`.
 ///
-/// Codex now reads user skills from `~/.agents/skills`, but older clud builds
-/// wrote bundled skills into `~/.codex/skills`. The cleanup is deliberately
-/// best effort and conservative: it only touches directories named after
-/// currently bundled clud skills, and only removes a `SKILL.md` that still
-/// carries the clud ownership marker. Any unrelated files in the skill
-/// directory are left in place.
-pub fn purge_legacy_codex_skills(home: &Path, skills: &[BundledSkill]) -> LegacyPurgeReport {
-    let legacy_dir = home.join(".codex").join("skills");
+/// Clud used to install Codex skills under `~/.agents/skills/` based on an
+/// expected cross-vendor skill location. Codex actually loads from
+/// `~/.codex/skills/`, so the agents-dir copies were inert duplicates. The
+/// cleanup is deliberately best effort and conservative: it only touches
+/// directories named after currently bundled clud skills, and only removes
+/// a `SKILL.md` that still carries the clud ownership marker. Any unrelated
+/// files in the skill directory are left in place.
+pub fn purge_stale_agents_skills(home: &Path, skills: &[BundledSkill]) -> LegacyPurgeReport {
+    let stale_dir = home.join(".agents").join("skills");
     let mut report = LegacyPurgeReport::default();
-    if !legacy_dir.is_dir() {
+    if !stale_dir.is_dir() {
         return report;
     }
 
     for skill in skills {
-        let skill_dir = legacy_dir.join(skill.name);
+        let skill_dir = stale_dir.join(skill.name);
         let skill_md = skill_dir.join("SKILL.md");
         if !skill_md.is_file() {
             continue;
@@ -295,7 +298,7 @@ pub fn purge_legacy_codex_skills(home: &Path, skills: &[BundledSkill]) -> Legacy
         }
     }
 
-    let _ = std::fs::remove_dir(&legacy_dir);
+    let _ = std::fs::remove_dir(&stale_dir);
     report
 }
 
@@ -484,7 +487,7 @@ mod tests {
             .map(|b| (b.backend, b.name, b.home_subdir, b.skills_home_subdir))
             .collect();
         assert!(backends.contains(&(Backend::Claude, "Claude Code", ".claude", None)));
-        assert!(backends.contains(&(Backend::Codex, "Codex", ".codex", Some(".agents"))));
+        assert!(backends.contains(&(Backend::Codex, "Codex", ".codex", None)));
     }
 
     #[test]
@@ -543,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_root_installs_only_to_current_agents_skills_dir() {
+    fn codex_root_installs_to_codex_skills_dir() {
         let home = tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
@@ -553,34 +556,53 @@ mod tests {
 
         assert_eq!(
             codex.0.skills_dir(home.path()),
-            home.path().join(".agents/skills")
+            home.path().join(".codex/skills")
         );
-        assert!(home.path().join(".agents/skills/clud-pr/SKILL.md").exists());
-        assert!(!home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
+        assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
+        assert!(!home.path().join(".agents/skills/clud-pr/SKILL.md").exists());
     }
 
     #[test]
-    fn purges_managed_legacy_codex_skill_copies() {
+    fn codex_install_writes_bundled_skill_body_byte_for_byte() {
         let home = tempdir().unwrap();
-        let legacy_skill = home.path().join(".codex/skills/alpha");
-        std::fs::create_dir_all(&legacy_skill).unwrap();
-        std::fs::write(legacy_skill.join("SKILL.md"), "<!-- managed-by: clud -->\n").unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
-        let report = purge_legacy_codex_skills(home.path(), &fake_skills());
+        ensure_installed_for_backend_at(home.path(), Backend::Codex)
+            .unwrap()
+            .expect("codex backend should be active");
+
+        let expected = BUNDLED_SKILLS
+            .iter()
+            .find(|s| s.name == "clud-pr")
+            .expect("clud-pr must be bundled")
+            .skill_md;
+        let written =
+            std::fs::read_to_string(home.path().join(".codex/skills/clud-pr/SKILL.md")).unwrap();
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn purges_managed_stale_agents_skill_copies() {
+        let home = tempdir().unwrap();
+        let stale_skill = home.path().join(".agents/skills/alpha");
+        std::fs::create_dir_all(&stale_skill).unwrap();
+        std::fs::write(stale_skill.join("SKILL.md"), "<!-- managed-by: clud -->\n").unwrap();
+
+        let report = purge_stale_agents_skills(home.path(), &fake_skills());
 
         assert_eq!(report.removed, vec!["alpha"]);
         assert!(report.preserved.is_empty());
         assert!(report.failed.is_empty());
-        assert!(!legacy_skill.exists());
+        assert!(!stale_skill.exists());
     }
 
     #[test]
-    fn legacy_purge_preserves_unrelated_and_user_authored_content() {
+    fn stale_agents_purge_preserves_unrelated_and_user_authored_content() {
         let home = tempdir().unwrap();
-        let legacy_root = home.path().join(".codex/skills");
-        let custom_skill = legacy_root.join("custom");
-        let edited_bundled_skill = legacy_root.join("alpha");
-        let bundled_with_extra = legacy_root.join("beta");
+        let stale_root = home.path().join(".agents/skills");
+        let custom_skill = stale_root.join("custom");
+        let edited_bundled_skill = stale_root.join("alpha");
+        let bundled_with_extra = stale_root.join("beta");
         std::fs::create_dir_all(&custom_skill).unwrap();
         std::fs::create_dir_all(&edited_bundled_skill).unwrap();
         std::fs::create_dir_all(&bundled_with_extra).unwrap();
@@ -597,7 +619,7 @@ mod tests {
         .unwrap();
         std::fs::write(bundled_with_extra.join("notes.txt"), "keep me\n").unwrap();
 
-        let report = purge_legacy_codex_skills(home.path(), &fake_skills());
+        let report = purge_stale_agents_skills(home.path(), &fake_skills());
 
         assert_eq!(report.removed, vec!["beta"]);
         assert_eq!(report.preserved, vec!["alpha"]);
@@ -611,14 +633,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_purge_is_idempotent() {
+    fn stale_agents_purge_is_idempotent() {
         let home = tempdir().unwrap();
-        let legacy_skill = home.path().join(".codex/skills/alpha");
-        std::fs::create_dir_all(&legacy_skill).unwrap();
-        std::fs::write(legacy_skill.join("SKILL.md"), "<!-- managed-by: clud -->\n").unwrap();
+        let stale_skill = home.path().join(".agents/skills/alpha");
+        std::fs::create_dir_all(&stale_skill).unwrap();
+        std::fs::write(stale_skill.join("SKILL.md"), "<!-- managed-by: clud -->\n").unwrap();
 
-        let first = purge_legacy_codex_skills(home.path(), &fake_skills());
-        let second = purge_legacy_codex_skills(home.path(), &fake_skills());
+        let first = purge_stale_agents_skills(home.path(), &fake_skills());
+        let second = purge_stale_agents_skills(home.path(), &fake_skills());
 
         assert_eq!(first.removed, vec!["alpha"]);
         assert!(second.removed.is_empty());
@@ -626,13 +648,55 @@ mod tests {
         assert!(second.failed.is_empty());
     }
 
+    /// Codex install must not touch a pre-existing `~/.codex/skills/<name>/SKILL.md`
+    /// that the user has hand-edited.
     #[test]
-    fn skills_dir_can_target_agents_dir_with_codex_gate() {
+    fn codex_install_preserves_user_edited_skill_at_new_path() {
+        let home = tempdir().unwrap();
+        let clud_pr_dir = home.path().join(".codex/skills/clud-pr");
+        std::fs::create_dir_all(&clud_pr_dir).unwrap();
+        std::fs::write(clud_pr_dir.join("SKILL.md"), "USER EDIT\n").unwrap();
+
+        ensure_installed_for_backend_at(home.path(), Backend::Codex)
+            .unwrap()
+            .expect("codex backend should be active");
+
+        assert_eq!(
+            std::fs::read_to_string(clud_pr_dir.join("SKILL.md")).unwrap(),
+            "USER EDIT\n",
+            "existing user content under ~/.codex/skills/ must not be overwritten"
+        );
+    }
+
+    /// Codex install must clean up stale clud-managed copies from `~/.agents/skills/`.
+    #[test]
+    fn codex_install_purges_stale_agents_skills() {
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        let stale = home.path().join(".agents/skills/clud-pr");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "<!-- managed-by: clud -->\nstale\n").unwrap();
+
+        ensure_installed_for_backend_at(home.path(), Backend::Codex)
+            .unwrap()
+            .expect("codex backend should be active");
+
+        assert!(
+            !stale.exists(),
+            "stale ~/.agents/skills/ copy must be purged"
+        );
+    }
+
+    /// The `skills_home_subdir` field overrides the default skills root.
+    /// Kept as a unit test of `SkillBackend::skills_dir` so the field's
+    /// contract stays exercised even when no shipped backend uses it.
+    #[test]
+    fn skills_dir_honors_skills_home_subdir_override() {
         let home = tempdir().unwrap();
         let backend = SkillBackend {
             backend: Backend::Codex,
-            name: "Codex",
-            home_subdir: ".codex",
+            name: "Test",
+            home_subdir: ".sometool",
             skills_home_subdir: Some(".agents"),
             skills_subdir: "skills",
         };
@@ -641,7 +705,7 @@ mod tests {
             home.path().join(".agents").join("skills")
         );
         assert!(!backend.root_exists(home.path()));
-        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::create_dir_all(home.path().join(".sometool")).unwrap();
         assert!(backend.root_exists(home.path()));
     }
 }

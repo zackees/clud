@@ -2,10 +2,10 @@
 
 Claude Code and Codex skills bundled into the `clud` binary as compile-time
 assets. During global launch setup, the installer copies each skill into the
-selected backend's skill directory (`~/.claude/skills/` for Claude, Codex's
-current `~/.agents/skills/` path when Codex is present). Session-only launches
-do not write persistent skill files. Older clud-managed copies under
-`~/.codex/skills/` are purged only during Codex global setup.
+selected backend's skill directory (`~/.claude/skills/` for Claude,
+`~/.codex/skills/` for Codex when Codex is present). Session-only launches
+do not write persistent skill files. Stale clud-managed copies under
+`~/.agents/skills/` are purged only during Codex global setup.
 
 ## Skills
 
@@ -40,7 +40,7 @@ out during global setup. Two installer implementations are registered behind
 `launch_setup.rs`:
 
 - **`crates/clud-bin/src/skills.rs`** - selected-backend global setup
-  (`~/.claude/skills`, Codex `~/.agents/skills` gated by `~/.codex`), never
+  (`~/.claude/skills`, `~/.codex/skills` gated by `~/.codex`), never
   overwrites user edits, reads from this directory.
 - **`crates/clud-bin/src/skill_install.rs`** - Claude-only global setup,
   overwrites on semantic divergence, reads from a separate top-level `skills/`

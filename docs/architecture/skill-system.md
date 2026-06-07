@@ -5,10 +5,10 @@ embedded inside the `clud` binary as compile-time string assets. Persistent
 skill installation happens only during global launch setup. Session-only
 launches do not write agent setup files.
 
-Claude skills are written under `~/.claude/skills/`. Codex is gated on
-`~/.codex` existing, but the current skill target is `~/.agents/skills/`.
-Older clud-managed Codex copies under `~/.codex/skills/` are purged
-best-effort during Codex global setup.
+Claude skills are written under `~/.claude/skills/`. Codex skills are
+written under `~/.codex/skills/`, mirroring Claude's layout (gated on
+`~/.codex` existing). Clud-managed copies that an older build wrote to
+`~/.agents/skills/` are purged best-effort during Codex global setup.
 
 ## Component Map
 
@@ -34,7 +34,7 @@ multi-backend expander landed.
 | Source tree | `crates/clud-bin/assets/skills/` | Top-level `skills/` |
 | Existing file behavior | Skip, preserving user edits | Compare modulo whitespace; overwrite semantic divergence |
 | Bundled skills | `clud-loop`, `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos` | `clud-pr`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
-| Retired purge list | Legacy Codex managed copies of current bundled skills | `clud-pr-merge` |
+| Retired purge list | Stale clud-managed copies under `~/.agents/skills/` | `clud-pr-merge` |
 
 Both flows are non-fatal. A failure logs a `[clud] note: ...` line and launch
 continues.
@@ -49,8 +49,8 @@ opt into global setup.
 When global setup is selected:
 
 1. `skills::ensure_installed_for_backend()` runs for the selected backend. For
-   Codex, it first purges stale clud-managed `~/.codex/skills/` copies and
-   then writes missing skills to `~/.agents/skills/`.
+   Codex, it first purges stale clud-managed `~/.agents/skills/` copies and
+   then writes missing skills to `~/.codex/skills/`.
 2. `skill_install::ensure_installed()` runs only for Claude global setup. It
    installs or updates the Claude-owned skills and then walks `PURGED_SKILLS`,
    removing retired managed skill directories.
@@ -92,9 +92,9 @@ name remains in `PURGED_SKILLS` so managed installs do not linger.
 - `BundledSkill` (`skills.rs`): public struct with `name` and `skill_md`.
 - `Skill` (`skill_install.rs`): private struct with `name` and `content`.
 - `SKILL_BACKENDS` (`skills.rs`): selected backend install gates and target
-  directories. Codex uses `.codex` as the gate and `.agents/skills` as the
-  target.
-- `InstallReport` and `LegacyPurgeReport` (`skills.rs`): setup and legacy
+  directories. Codex uses `.codex` as both the gate and the skills root
+  (`~/.codex/skills/`), mirroring Claude.
+- `InstallReport` and `LegacyPurgeReport` (`skills.rs`): setup and stale
   cleanup summaries.
 - `PURGED_SKILLS` (`skill_install.rs`): retired Claude-only names. Removal
   only proceeds when `SKILL.md` still contains `managed-by: clud`.

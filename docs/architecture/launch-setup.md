@@ -35,7 +35,7 @@ Global setup runs only the selected backend's registered actions:
 |---|---|---|
 | Claude | bundled skills | `~/.claude/skills/` |
 | Claude | Claude drift skills | `~/.claude/skills/` |
-| Codex | bundled skills | `~/.agents/skills/` gated by `~/.codex`; stale clud-managed `~/.codex/skills/` copies are purged |
+| Codex | bundled skills | `~/.codex/skills/` gated by `~/.codex`; stale clud-managed `~/.agents/skills/` copies are purged |
 | Codex | hook timeout normalization | `~/.codex/hooks.json` and `~/.clud/settings.lock` / `settings.json` |
 
 All setup failures are non-fatal. `main.rs` logs a `[clud] note: ...` line and
