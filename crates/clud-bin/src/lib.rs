@@ -19,7 +19,6 @@ pub mod dnd;
 pub mod gc;
 pub mod graphics;
 pub mod hook_health;
-pub mod hooks;
 pub mod large_file_guard;
 pub mod launch_setup;
 pub mod loop_artifacts;

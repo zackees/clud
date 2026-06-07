@@ -1,6 +1,6 @@
 use clud::{
     args, backend, backend_bootstrap, command, console_setup, console_title, ctrl_c_track, daemon,
-    gc, graphics, hook_health, hooks, large_file_guard, launch_setup, loop_artifacts, loop_spec,
+    gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec,
     mcp_bridge, memory, runner, startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
@@ -11,20 +11,6 @@ fn main() {
 
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();
-
-    // Issue #260: hook subcommands are short-lived subprocesses fired
-    // by Claude Code / Codex mid-session. Dispatch BEFORE
-    // `console_title::set_for_current_cwd()` (a hook call must never
-    // retitle the user's terminal window mid-session) and BEFORE
-    // `ensure_daemon` (a hook never spawns a daemon — hook handlers
-    // exit 0 silently when the daemon is unreachable). We peek the raw
-    // argv here rather than running clap because clap's `--version`
-    // exit path would skip past the console-title stamp downstream;
-    // the cheap peek leaves the normal `clud --version` flow
-    // untouched.
-    if let Some(sub) = hooks::peek_hook_subcommand_from_argv(std::env::args()) {
-        std::process::exit(hooks::dispatch(sub));
-    }
 
     // Stamp the console title with `clud <cwd-name>` so the active
     // window is identifiable at a glance. Windows-only effective; a
