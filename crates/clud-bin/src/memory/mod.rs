@@ -10,7 +10,6 @@
 pub mod cli;
 pub mod embedder;
 pub mod error;
-pub mod git_artifact;
 pub mod identity;
 pub mod ids;
 pub mod lexical;
@@ -25,11 +24,6 @@ pub use embedder::{
     EMBED_DIM_MINILM_L6_V2,
 };
 pub use error::MemoryError;
-pub use git_artifact::{
-    export_to_disk, import_from_disk, memory_dir as git_artifact_memory_dir, DiskArtifactConfig,
-    ExportReport, Frontmatter, ImportReport, PrivacyFilter, RelationRecord, CLUDIGNORE_FILENAME,
-    MEMORY_DIR_REL, RELATIONS_FILENAME,
-};
 pub use identity::{
     branch_isolate, branch_unisolate, cross_repo_glob_filter, normalize_origin_url,
     resolve_repo_scope, scope_key, RepoScope, BRANCH_ISOLATE_MARKER,

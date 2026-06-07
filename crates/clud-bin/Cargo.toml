@@ -90,15 +90,9 @@ tantivy = "0.22"
 uuid = { version = "1", features = ["v7"] }
 # Issue #256: ergonomic error enum for the memory module.
 thiserror = "1"
-# Issue #264: git-artifact serialization. YAML frontmatter on the
-# .clud/memory/*.md files (promoted from [dev-dependencies]), ULID
-# filename prefixes for filesystem-sortable artifact listings, regex
-# matching for the `.cludignore` body-blacklist lines, RFC3339
-# timestamps in frontmatter, and atomic `tempfile`-then-rename writes.
+
+[dev-dependencies]
 serde_yaml = "0.9"
-ulid = { version = "1", features = ["serde"] }
-regex = "1"
-chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
 tempfile = "3"
 
 [lib]

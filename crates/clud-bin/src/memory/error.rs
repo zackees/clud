@@ -29,16 +29,4 @@ pub enum MemoryError {
     EmbedderRemoteFailure { provider: String, message: String },
     #[error("embedder model load: {0}")]
     EmbedderModelLoad(String),
-    /// Issue #264: git-artifact serialization. Raised when the resolved
-    /// directory is not inside a git repository (no `.git`) and the
-    /// caller asked to write to disk anyway.
-    #[error("not in a git repo: {0}")]
-    NotInGitRepo(String),
-    /// Issue #264: a YAML frontmatter block failed to parse, or a body
-    /// was supplied without a frontmatter delimiter at all.
-    #[error("frontmatter parse: {0}")]
-    Frontmatter(String),
-    /// Issue #264: `.cludignore` failed to parse (bad regex, bad glob).
-    #[error("cludignore parse: {0}")]
-    CludIgnore(String),
 }

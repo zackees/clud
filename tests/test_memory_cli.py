@@ -111,46 +111,17 @@ def test_memory_help_lists_verbs() -> None:
         assert verb in out, f"missing {verb} in help output:\n{out}"
 
 
-def test_memory_export_to_disk_outside_git_repo_fails() -> None:
-    # Post-#264: --to-disk writes under <git-root>/.clud/memory/, so a
-    # non-git cwd is a hard user error (exit 1).
-    with tempfile.TemporaryDirectory() as temp_dir:
-        source = Path(CLUD)
-        launch = Path(temp_dir) / source.name
-        shutil.copy2(source, launch)
-        not_a_repo = Path(temp_dir) / "not-a-repo"
-        not_a_repo.mkdir()
-        result = subprocess.run(
-            [str(launch), "memory", "export", "--to-disk"],
-            cwd=not_a_repo,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=os.environ.copy(),
-        )
-    assert result.returncode == 1, (
-        f"expected 1, got {result.returncode}; stdout={result.stdout!r} stderr={result.stderr!r}"
-    )
-    assert "git" in result.stderr.lower() or "not a git" in result.stderr.lower()
+def test_memory_export_to_disk_is_stub() -> None:
+    # --to-disk is the #264 stub; should exit 0 with a pointer to #264.
+    result = _run("memory", "export", "--to-disk")
+    assert result.returncode == 0, result.stderr
+    assert "#264" in result.stdout, result.stdout
 
 
-def test_memory_import_from_disk_outside_git_repo_fails() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        source = Path(CLUD)
-        launch = Path(temp_dir) / source.name
-        shutil.copy2(source, launch)
-        not_a_repo = Path(temp_dir) / "not-a-repo"
-        not_a_repo.mkdir()
-        result = subprocess.run(
-            [str(launch), "memory", "import", "--from-disk"],
-            cwd=not_a_repo,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            env=os.environ.copy(),
-        )
-    assert result.returncode == 1
-    assert "git" in result.stderr.lower()
+def test_memory_import_from_disk_is_stub() -> None:
+    result = _run("memory", "import", "--from-disk")
+    assert result.returncode == 0, result.stderr
+    assert "#264" in result.stdout, result.stdout
 
 
 def test_memory_status_no_daemon_exits_3() -> None:

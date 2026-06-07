@@ -82,9 +82,6 @@ for the rationale on rusqlite + redb coexistence.
 - `tiers.rs:234` `tier_exportable` — git-artifact serialization hook
   for sibling #264. Working = never, Semantic = always, Episodic =
   policy-configurable on `TierConfig`.
-- `git_artifact.rs` — issue #264 git-artifact writer/reader. Owns
-  `export_to_disk` / `import_from_disk` and the `PrivacyFilter` that
-  parses `<root>/.cludignore`. See "Git-artifact serialization" below.
 
 The consolidation timer / `tick()` driver, Stop-hook callers, daemon
 spawn glue, and the MCP `memory_consolidate` tool live in sibling
@@ -223,9 +220,9 @@ text where needed, hit HTTP, and pretty-print the JSON response. See
 | `save <content> [--tier] [--session-id] [--metadata] [--json]` | Embed + insert | `POST /memory/save` |
 | `forget <id> [--json]` | Delete row, cascade to vec + tantivy | `POST /memory/forget/<id>` |
 | `export [--to-stdout]` | Dump recent rows as JSON-lines | `GET /memory/recent?limit=100000` |
-| `export --to-disk [--include-episodic] [--allow-private]` | Write `.clud/memory/*.md` (#264) | none — local fs |
+| `export --to-disk` | Stub — deferred to #264 | (none) |
 | `import --from-stdin` | Read JSON-lines from stdin, re-save each | `POST /memory/save` per line |
-| `import --from-disk [--include-episodic]` | Re-insert rows from `.clud/memory/` (#264) | none — local fs |
+| `import --from-disk` | Stub — deferred to #264 | (none) |
 | `ui [--no-open]` | Open dashboard at `#memory` | reads daemon-info |
 | `reembed [--model] [--dry-run]` | Count rows (dry-run) or note that live reembed needs the daemon stopped | `GET /memory/stats` |
 | `branch-isolate` | Write `<common-dir>/.clud/memory-branch-isolate` | none — local fs |
@@ -283,89 +280,3 @@ ASCII wireframe of the tab:
 |   epis | "lesson: always..."    | hijklmn | 1h  |   x   |
 +---------------------------------------------------------+
 ```
-
-## Git-artifact serialization (#264)
-
-`git_artifact.rs` writes the durable tiers of the store as a tree of
-YAML-frontmatter Markdown files under `<git-root>/.clud/memory/` so
-agent memory can be committed alongside the code it describes.
-
-```
-<git-root>/.clud/memory/
-  .cludignore                    # privacy filter (committed)
-  semantic/<ULID>-<slug>.md      # always exported
-  episodic/<ULID>-<slug>.md      # opt-in via --include-episodic
-  relations.jsonl                # append-only edge log
-```
-
-Each file is `<ULID>-<slug>.md`. The ULID prefix is fresh per export
-(filesystem-sortable listings); the canonical id stays in the
-frontmatter as a uuidv7 `id:` field. Slug = up to 40 chars of the
-first non-blank line, lowercased and collapsed to `[a-z0-9-]`. Empty
-slug falls back to `memory`.
-
-### Frontmatter shape
-
-```yaml
----
-id: 01931d2b-7c0e-7d2c-...        # original MemoryId (uuidv7)
-tier: semantic
-session_id: null
-scope_key: repo://github.com/zackees/clud
-branch_name: null
-is_orphan: false
-created_at_ms: 1700000000000
-updated_at_ms: 1700000000000
-tier_change_at_ms: 1700000000000
-access_count: 3
-last_access_at_ms: 1700000000000
-metadata: {}
-private: false                    # if true, skipped at export
----
-
-<markdown body == row.content>
-```
-
-### `.cludignore`
-
-Lines starting with `#` are comments. Lines starting with `body-regex:`
-compile to a regex matched against the row's body; every other line is
-a shell-style glob matched against the row's `scope_key` or
-`session_id`. A row is skipped at export when **any** rule matches, or
-when `metadata.private == true` (the latter always wins; pass
-`--allow-private` to override).
-
-```
-# .cludignore
-body-regex: AKIA[0-9A-Z]{16}
-body-regex: (?i)password\s*=
-session-xyz-*
-*github.com/secret-repo*
-```
-
-### Tier-gated visibility
-
-- Working — never exported (DD-016 reflexively: working is transient).
-- Episodic — opt-in via `CLUD_MEMORY_EXPORT_EPISODIC=1` or
-  `clud memory export --to-disk --include-episodic`.
-- Semantic — always exported.
-
-### Relations log
-
-`relations.jsonl` is append-only and idempotent. `export_to_disk`
-walks `memory_relations` and appends only rows whose
-`(src_id, dst_id, kind)` are not already in the file.
-`import_from_disk` replays the file with `INSERT OR IGNORE`.
-
-### CLI seams
-
-| Verb | Effect |
-|---|---|
-| `clud memory export --to-disk [--include-episodic] [--allow-private]` | Walk the daemon-owned store and write `.clud/memory/*.md` under the current git repo. |
-| `clud memory import --from-disk [--include-episodic]` | Walk `.clud/memory/*.md` and re-insert rows not already in the store. Re-embeds via the configured embedder. |
-
-Both verbs talk to the on-disk SQLite file directly (not via the
-daemon's HTTP routes) because the export is a read-only walk and WAL
-permits concurrent readers. The import path opens the store with the
-embedder's `dim()` and is best run with the daemon stopped to avoid
-double-loading the embedder.

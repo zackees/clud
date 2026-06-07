@@ -22,14 +22,7 @@ use serde_json::json;
 
 use crate::args::{Args, MemorySubcommand};
 use crate::daemon::{self, MemoryHttpResponse};
-use crate::loop_spec;
-use crate::memory::embedder::embedder_from_env;
-use crate::memory::git_artifact::{self, DiskArtifactConfig};
 use crate::memory::identity;
-use crate::memory::lexical::LexicalIndex;
-use crate::memory::paths::{memory_db_path, tantivy_dir};
-use crate::memory::store::SqliteStore;
-use crate::memory::EmbedderTrait;
 
 /// Dispatch a `clud memory <sub>` invocation. Returns the process exit
 /// code.
@@ -40,25 +33,14 @@ pub fn run(args: &Args, sub: Option<MemorySubcommand>) -> i32 {
     };
 
     // Verbs that touch local working-tree state and never need the
-    // daemon. `--to-disk` / `--from-disk` walk the local `.clud/memory/`
-    // tree directly and exit without contacting the daemon (#264).
+    // daemon. `--to-disk` / `--from-disk` are #264 stubs and exit
+    // cleanly without contacting the daemon.
     match &sub {
         MemorySubcommand::BranchIsolate => return cmd_branch_isolate(),
         MemorySubcommand::BranchUnisolate => return cmd_branch_unisolate(),
-        MemorySubcommand::Export {
-            to_disk,
-            include_episodic,
-            allow_private,
-            ..
-        } if *to_disk => {
-            return cmd_export_to_disk(*include_episodic, *allow_private);
-        }
-        MemorySubcommand::Import {
-            from_disk,
-            include_episodic,
-            ..
-        } if *from_disk => {
-            return cmd_import_from_disk(*include_episodic);
+        MemorySubcommand::Export { to_disk, .. } if *to_disk => return cmd_export_to_disk_stub(),
+        MemorySubcommand::Import { from_disk, .. } if *from_disk => {
+            return cmd_import_from_disk_stub();
         }
         _ => {}
     }
@@ -115,9 +97,9 @@ pub fn run(args: &Args, sub: Option<MemorySubcommand>) -> i32 {
         ),
         MemorySubcommand::Forget { id, json } => cmd_forget(&state_dir, &id, json),
         MemorySubcommand::Export { .. } => cmd_export_to_stdout(&state_dir),
-        MemorySubcommand::Import {
-            from_stdin: true, ..
-        } => cmd_import_from_stdin(&state_dir),
+        MemorySubcommand::Import { from_stdin, .. } if from_stdin => {
+            cmd_import_from_stdin(&state_dir)
+        }
         MemorySubcommand::Import { .. } => cmd_import_default(),
         MemorySubcommand::Ui { no_open } => cmd_ui(&state_dir, no_open),
         MemorySubcommand::Reembed { model, dry_run } => {
@@ -438,176 +420,14 @@ fn cmd_export_to_stdout(state_dir: &Path) -> i32 {
     }
 }
 
-/// Issue #264: write the daemon-owned store to `<git-root>/.clud/memory/`.
-///
-/// We talk to the on-disk SQLite file directly (not the daemon) because
-/// the export is a read-only walk — there is no write contention on
-/// the store. The daemon's writes go through `BEGIN IMMEDIATE` so a
-/// reader can coexist (WAL).
-fn cmd_export_to_disk(include_episodic: bool, allow_private: bool) -> i32 {
-    let Some(root) = resolve_artifact_root() else {
-        return 1;
-    };
-    let cfg = DiskArtifactConfig {
-        root: git_artifact::memory_dir(&root),
-        include_episodic,
-        allow_private,
-    };
-    let db_path = match memory_db_path() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: cannot resolve memory db path: {e}");
-            return 2;
-        }
-    };
-    if !db_path.exists() {
-        println!("memory export --to-disk: no memory.db at {} (nothing to export); run `clud memory init` first", db_path.display());
-        return 0;
-    }
-    // Match the daemon's embed_dim at open time. We probe via the
-    // embedder so a freshly-bumped CLUD_MEMORY_EMBEDDER_MODEL still
-    // opens cleanly.
-    let dim = resolve_embed_dim();
-    let store = match SqliteStore::open(&db_path, dim) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot open memory db ({}): {e}", db_path.display());
-            return 2;
-        }
-    };
-    match git_artifact::export_to_disk(&store, &cfg) {
-        Ok(report) => {
-            println!(
-                "exported {} rows to {} (skipped privacy={}, skipped tier={}, relations appended={})",
-                report.written,
-                cfg.root.display(),
-                report.skipped_privacy,
-                report.skipped_tier,
-                report.relations_appended,
-            );
-            0
-        }
-        Err(e) => {
-            eprintln!("error: export to disk failed: {e}");
-            2
-        }
-    }
-}
-
-/// Issue #264: walk `<git-root>/.clud/memory/` and re-insert any rows
-/// not already in the daemon's store. Re-embedding runs in-process; for
-/// large imports the user can stop the daemon, run this, then restart.
-fn cmd_import_from_disk(include_episodic: bool) -> i32 {
-    let Some(root) = resolve_artifact_root() else {
-        return 1;
-    };
-    let cfg = DiskArtifactConfig {
-        root: git_artifact::memory_dir(&root),
-        include_episodic,
-        allow_private: false,
-    };
-    if !cfg.root.exists() {
-        println!(
-            "memory import --from-disk: no artifact tree at {} (nothing to import)",
-            cfg.root.display()
-        );
-        return 0;
-    }
-    let embedder = match embedder_from_env() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("error: embedder unavailable: {e}");
-            return 2;
-        }
-    };
-    let db_path = match memory_db_path() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: cannot resolve memory db path: {e}");
-            return 2;
-        }
-    };
-    if let Some(parent) = db_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let dim = embedder.dim().max(1);
-    let mut store = match SqliteStore::open(&db_path, dim) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot open memory db ({}): {e}", db_path.display());
-            return 2;
-        }
-    };
-    let tantivy_path = match tantivy_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: cannot resolve tantivy dir: {e}");
-            return 2;
-        }
-    };
-    let mut lexical = match LexicalIndex::open_or_create(&tantivy_path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!(
-                "error: cannot open lexical index ({}): {e}",
-                tantivy_path.display()
-            );
-            return 2;
-        }
-    };
-    match git_artifact::import_from_disk(&mut store, &mut lexical, &embedder, &cfg) {
-        Ok(report) => {
-            println!(
-                "imported {} rows (skipped existing={}, errors={}, relations replayed={})",
-                report.imported, report.skipped_existing, report.errors, report.relations_replayed,
-            );
-            if report.errors > 0 && report.imported == 0 {
-                2
-            } else {
-                0
-            }
-        }
-        Err(e) => {
-            eprintln!("error: import from disk failed: {e}");
-            2
-        }
-    }
+fn cmd_export_to_disk_stub() -> i32 {
+    println!("memory export --to-disk: deferred; see #264 for git-artifact serialization");
+    0
 }
 
 fn cmd_import_default() -> i32 {
-    eprintln!("error: pass --from-stdin to import JSON-lines, or --from-disk to read a .clud/memory/ tree");
+    eprintln!("error: pass --from-stdin to import JSON-lines, or --from-disk (see #264)");
     1
-}
-
-/// Resolve `git_root_from(cwd)`; error if cwd is not inside a git repo.
-fn resolve_artifact_root() -> Option<std::path::PathBuf> {
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: cannot resolve cwd: {e}");
-            return None;
-        }
-    };
-    let root = loop_spec::git_root_from(&cwd);
-    if !root.join(".git").exists() {
-        eprintln!(
-            "error: not a git repo at {}; `clud memory export --to-disk` writes under <git-root>/.clud/memory/",
-            cwd.display()
-        );
-        return None;
-    }
-    Some(root)
-}
-
-/// Pick the embedding dimension for the read-only export path. The
-/// embedder dim must match the dim baked into `memory.db` at first
-/// open. We probe via `embedder_from_env`, falling back to the default
-/// MiniLM dim when the embedder is disabled.
-fn resolve_embed_dim() -> usize {
-    match embedder_from_env() {
-        Ok(e) if e.dim() > 0 => e.dim(),
-        _ => crate::memory::EMBED_DIM_MINILM_L6_V2,
-    }
 }
 
 fn cmd_import_from_stdin(state_dir: &Path) -> i32 {
@@ -666,6 +486,11 @@ fn cmd_import_from_stdin(state_dir: &Path) -> i32 {
     } else {
         0
     }
+}
+
+fn cmd_import_from_disk_stub() -> i32 {
+    println!("memory import --from-disk: deferred; see #264 for git-artifact serialization");
+    0
 }
 
 fn cmd_ui(state_dir: &Path, no_open: bool) -> i32 {
