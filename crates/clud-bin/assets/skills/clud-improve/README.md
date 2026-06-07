@@ -9,4 +9,4 @@ Source of the `/clud-improve` skill shipped inside the `clud` binary. The skill 
 
 ## How it ships
 
-`SKILL.md` is embedded into the `clud` binary at compile time via `include_str!` in `crates/clud-bin/src/skills.rs` (`BUNDLED_SKILLS`). During global setup it is installed into the selected backend's skill directory (`~/.claude/skills/clud-improve/SKILL.md` for Claude, `~/.agents/skills/clud-improve/SKILL.md` for Codex when `.codex` exists). Existing files are preserved so user edits survive. Editing this file and rebuilding the binary is the only supported way to update what users see.
+`SKILL.md` is embedded into the `clud` binary at compile time via `include_str!` in `crates/clud-bin/src/skills.rs` (`BUNDLED_SKILLS`). During global setup it is installed into the selected backend's skill directory (`~/.claude/skills/clud-improve/SKILL.md` for Claude, `~/.codex/skills/clud-improve/SKILL.md` for Codex when `.codex` exists). Existing files are preserved so user edits survive. Editing this file and rebuilding the binary is the only supported way to update what users see.

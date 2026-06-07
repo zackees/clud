@@ -17,7 +17,6 @@ with the worker reading and updating `.clud/loop/LOOP.md`, and otherwise runs
 
 `SKILL.md` is embedded into the `clud` binary at compile time via
 `include_str!` from `crates/clud-bin/src/skills.rs`. On every launch,
-`skills::ensure_installed` writes it to detected backend skill locations,
-including Codex's current `$HOME/.agents/skills/` path and the legacy
-`$HOME/.codex/skills/` path when a Codex home exists. Existing user edits are
-preserved.
+`skills::ensure_installed` writes it to detected backend skill locations
+(`$HOME/.claude/skills/` for Claude, `$HOME/.codex/skills/` for Codex).
+Existing user edits are preserved.

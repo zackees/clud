@@ -482,7 +482,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
-        assert!(home.path().join(".agents/skills/clud-pr/SKILL.md").exists());
+        assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
+        assert!(!home.path().join(".agents").exists());
         assert!(!home.path().join(".claude/skills").exists());
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout": 30"#), "{hooks}");

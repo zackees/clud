@@ -117,9 +117,9 @@ Skills and hooks:
 
 - `skills.rs` - bundles slash-command skills via `include_str!` and installs
   them during global launch setup for the selected backend (`.claude/skills/`,
-  Codex `.agents/skills/` gated on `.codex`) only when the backend home already
-  exists; never overwrites existing files; purges stale clud-managed Codex
-  copies from `.codex/skills/`.
+  Codex `.codex/skills/` gated on `.codex`) only when the backend home already
+  exists; never overwrites existing files; purges stale clud-managed copies
+  from `.agents/skills/`.
 - `skill_install.rs` - Claude global-setup installer for the `clud-*` skill
   set; compares embedded vs installed `SKILL.md` modulo whitespace and
   overwrites divergent copies; purges retired managed skills from
