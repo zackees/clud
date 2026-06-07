@@ -289,47 +289,22 @@ Order matters on a save: take SQLite first, commit, drop, then take
 tantivy. The reconciliation pass on next boot covers the eventual-
 consistency window if a crash happens between the two commits.
 
-### HTTP routes (live as of #262)
+### HTTP route scaffolding
 
 The dashboard's existing `tiny_http` server (issue #183) carries five
 new routes wired to the live `Arc<MemoryService>`:
 
-- `GET /memory/recent?limit=N` — returns newest-first rows as
-  `[{id, tier, content, session_id, scope_key, created_at_ms, access_count}]`.
-- `GET /memory/search?q=…&k=…&session_id=…&tier_floor=…&scope_key=…`
-  — embeds the query (if the embedder is live), runs BM25 + KNN, RRF-
-  fuses, and returns `[{id, tier, content, score, ...}]`. When the
-  embedder is `Disabled`, the route degrades to BM25-only.
+- `GET /memory/recent` — returns `[]` (stub for #263).
+- `GET /memory/search?q=` — returns `[]` (stub for #263).
 - `GET /memory/stats` — returns `{tier_counts, embedder_status,
-  embedder_dim, store_embed_dim, schema_user_version,
-  consolidate_interval_ms}`.
-- `POST /memory/save` — body `{content, tier?, session_id?, scope_key?,
-  metadata_json?}`; embeds + inserts + commits the lexical writer in
-  the documented SQLite-first order; returns `{id, tier, created_at_ms}`.
-- `POST /memory/forget/<id>` — deletes the row from both `memories` +
-  `memory_vec` (one transaction) and the tantivy index; returns
-  `{id, forgotten: bool}`.
+  consolidate_interval_ms}`. The embedder name is real; counts stay at
+  0 until #263.
+- `POST /memory/save` — 501 until #263.
+- `POST /memory/forget/<id>` — 501 until #263.
 
-Validation: missing/empty `q`, empty `content`, unknown tier name, or
-ill-formed id return 400 with a JSON error body. When `MemoryService`
-is `None` (subsystem failed to start) every route returns 503 with a
-JSON error body. The daemon keeps serving sessions and GC traffic.
-
-### CLI surface (#262)
-
-`crates/clud-bin/src/memory/cli.rs::run` dispatches `clud memory <verb>`.
-See [`crates/clud-bin/src/memory/README.md`](../../crates/clud-bin/src/memory/README.md#cli-surface-262)
-for the verb-to-route table. The CLI proxies **all mutating ops through
-the daemon** so there is exactly one SQLite writer per process
-([DD-018](../DESIGN_DECISIONS.md#dd-018-clud-memory-cli-verbs-proxy-mutating-ops-through-the-daemon)).
-`branch-isolate` and `branch-unisolate` are the two verbs that
-**don't** touch the daemon — they write/remove a marker file under
-`<git common-dir>/.clud/memory-branch-isolate`. The `--to-disk` /
-`--from-disk` flags on `export` and `import` are stubs that point
-users at #264.
-
-Exit codes: `0` success, `1` user error, `2` internal error
-(HTTP 5xx / decode), `3` daemon unavailable.
+When `MemoryService` is `None` (subsystem failed to start) every route
+returns 503 with a JSON error body. The daemon keeps serving sessions
+and GC traffic.
 
 The MCP server itself (`#259`) and the hook subcommands (`#260`) plug
 into `MemoryService` from outside; this PR just shares the four handles

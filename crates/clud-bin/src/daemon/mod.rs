@@ -6,7 +6,6 @@ mod gc_service;
 mod http;
 mod io_helpers;
 mod keys;
-mod memory_client;
 pub(crate) mod memory_mcp;
 mod memory_service;
 mod paths;
@@ -25,9 +24,6 @@ pub use entry::{experimental_enabled, handle_special_command, run_centralized_se
 pub use http::{
     dashboard_url_from_info, fetch_state_json, read_dashboard_info, read_dashboard_port,
     DashboardInfo,
-};
-pub use memory_client::{
-    http_forget, http_recent, http_save, http_search, http_stats, MemoryHttpResponse,
 };
 pub use paths::{default_state_dir, default_trash_dir};
 pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};

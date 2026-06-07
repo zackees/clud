@@ -34,7 +34,6 @@ use super::types::{
 };
 use crate::ctrl_c_track::{self, CtrlCEvent};
 use crate::memory::embedder::EmbedderTrait;
-use crate::memory::{rrf_fuse, HybridSearchConfig, MemoryId, MemoryRow, SqliteStore, Tier};
 use crate::session_registry::LiveSession;
 
 /// Supplier of live session-registry rows. Injected at the dashboard
@@ -385,266 +384,40 @@ fn respond_purge_reply(request: Request, reply: GcReply) {
     }
 }
 
-// ---------- memory routes (issue #262) ----------
+// ---------- memory route stubs (issue #261) ----------
 //
-// All five routes are wired to the live `Arc<MemoryService>`. The CLI's
-// `clud memory *` verbs proxy mutating ops (save / forget / reembed)
-// through these routes so there is exactly one SQLite writer per process
-// (DD-018). On `memory.is_none()` (memory subsystem failed to start)
-// every route returns 503 with a JSON error body — the daemon keeps
-// serving session + GC traffic.
-
-/// Wire payload for `POST /memory/save`.
-#[derive(Debug, Default, Deserialize)]
-pub struct MemorySaveRequest {
-    pub content: String,
-    #[serde(default)]
-    pub tier: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub scope_key: Option<String>,
-    #[serde(default)]
-    pub metadata_json: Option<String>,
-}
-
-/// Wire shape for one memory row in HTTP responses.
-#[derive(Debug, Serialize)]
-pub struct MemoryRowView {
-    pub id: String,
-    pub tier: String,
-    pub content: String,
-    pub session_id: Option<String>,
-    pub scope_key: Option<String>,
-    pub created_at_ms: u64,
-    pub access_count: u32,
-}
-
-impl MemoryRowView {
-    fn from_row(row: &MemoryRow) -> Self {
-        Self {
-            id: row.id.as_str().to_string(),
-            tier: tier_name(row.tier).to_string(),
-            content: row.content.clone(),
-            session_id: row.session_id.clone(),
-            scope_key: row.scope_key.clone(),
-            created_at_ms: row.created_at_ms,
-            access_count: row.access_count,
-        }
-    }
-}
-
-fn tier_name(t: Tier) -> &'static str {
-    match t {
-        Tier::Working => "working",
-        Tier::Episodic => "episodic",
-        Tier::Semantic => "semantic",
-    }
-}
-
-fn parse_tier(s: &str) -> Option<Tier> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "working" => Some(Tier::Working),
-        "episodic" => Some(Tier::Episodic),
-        "semantic" => Some(Tier::Semantic),
-        _ => None,
-    }
-}
-
-fn parse_query_string(url: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let Some(qs) = url.split_once('?').map(|(_, q)| q) else {
-        return out;
-    };
-    for piece in qs.split('&') {
-        if piece.is_empty() {
-            continue;
-        }
-        let (k, v) = piece.split_once('=').unwrap_or((piece, ""));
-        out.insert(url_decode(k), url_decode(v));
-    }
-    out
-}
-
-fn url_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hi = (bytes[i + 1] as char).to_digit(16);
-                let lo = (bytes[i + 2] as char).to_digit(16);
-                match (hi, lo) {
-                    (Some(h), Some(l)) => {
-                        out.push((h * 16 + l) as u8 as char);
-                        i += 3;
-                    }
-                    _ => {
-                        out.push(bytes[i] as char);
-                        i += 1;
-                    }
-                }
-            }
-            b => {
-                out.push(b as char);
-                i += 1;
-            }
-        }
-    }
-    out
-}
+// All five routes are wired to the live `Arc<MemoryService>` so #263 can
+// fill in the bodies in a follow-up without touching this file's match
+// arms. On `memory.is_none()` (memory subsystem failed to start) every
+// route returns 503 — the daemon keeps serving session + GC traffic.
 
 fn handle_memory_recent(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
-    let Some(svc) = memory else {
+    if memory.is_none() {
         respond_json(
             request,
             503,
             json_error_bytes("memory subsystem unavailable").as_slice(),
         );
         return;
-    };
-    let qs = parse_query_string(request.url());
-    let limit: usize = qs
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(25);
-
-    let rows: Vec<MemoryRowView> = match svc.store.lock() {
-        Ok(store) => match store.list_recent(limit) {
-            Ok(rows) => rows.iter().map(MemoryRowView::from_row).collect(),
-            Err(err) => {
-                respond_json(
-                    request,
-                    500,
-                    json_error_bytes(&format!("list_recent failed: {err}")).as_slice(),
-                );
-                return;
-            }
-        },
-        Err(_) => {
-            respond_json(
-                request,
-                500,
-                json_error_bytes("memory store mutex poisoned").as_slice(),
-            );
-            return;
-        }
-    };
-    let body = serde_json::to_vec(&rows).unwrap_or_else(|_| b"[]".to_vec());
-    respond_json(request, 200, &body);
+    }
+    // TODO(#263): pull recent rows from `MemoryService::store` and
+    // render them as `[{id, tier, content, created_at_ms}]`. Empty array
+    // until then so the dashboard's JS can already poll the route.
+    respond_json(request, 200, b"[]");
 }
 
 fn handle_memory_search(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
-    let Some(svc) = memory else {
+    if memory.is_none() {
         respond_json(
             request,
             503,
             json_error_bytes("memory subsystem unavailable").as_slice(),
         );
         return;
-    };
-    let qs = parse_query_string(request.url());
-    let Some(query) = qs.get("q").cloned() else {
-        respond_json(
-            request,
-            400,
-            json_error_bytes("missing required query parameter `q`").as_slice(),
-        );
-        return;
-    };
-    if query.is_empty() {
-        respond_json(
-            request,
-            400,
-            json_error_bytes("query parameter `q` must not be empty").as_slice(),
-        );
-        return;
     }
-    let k: usize = qs
-        .get("k")
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(10);
-    let session_id = qs.get("session_id").map(String::as_str);
-    let tier_floor = qs.get("tier_floor").and_then(|s| parse_tier(s));
-    let scope_key = qs.get("scope_key").map(String::as_str);
-
-    let body = match run_hybrid_search(svc, &query, k, session_id, tier_floor, scope_key) {
-        Ok(b) => b,
-        Err(err) => {
-            respond_json(
-                request,
-                500,
-                json_error_bytes(&format!("search failed: {err}")).as_slice(),
-            );
-            return;
-        }
-    };
-    respond_json(request, 200, &body);
-}
-
-/// Shared body for `/memory/search` and the in-process daemon test paths.
-fn run_hybrid_search(
-    svc: &std::sync::Arc<MemoryService>,
-    query: &str,
-    k: usize,
-    session_id: Option<&str>,
-    tier_floor: Option<Tier>,
-    scope_key: Option<&str>,
-) -> Result<Vec<u8>, String> {
-    // BM25 first — does not require the embedder.
-    let lex_hits = {
-        let lex = svc
-            .lexical
-            .lock()
-            .map_err(|_| "memory lexical mutex poisoned".to_string())?;
-        lex.search(query, k, session_id, tier_floor, scope_key)
-            .map_err(|e| e.to_string())?
-    };
-
-    // KNN: only attempt if the embedder is live and dims match.
-    let vec_hits = match svc.embedder.embed(query) {
-        Ok(emb) => {
-            let store = svc
-                .store
-                .lock()
-                .map_err(|_| "memory store mutex poisoned".to_string())?;
-            store
-                .knn(&emb, k, session_id, tier_floor, scope_key)
-                .map_err(|e| e.to_string())?
-        }
-        Err(_) => Vec::new(),
-    };
-
-    let fused = rrf_fuse(&lex_hits, &vec_hits, &HybridSearchConfig::default());
-
-    let mut out: Vec<serde_json::Value> = Vec::with_capacity(fused.len());
-    if !fused.is_empty() {
-        let store = svc
-            .store
-            .lock()
-            .map_err(|_| "memory store mutex poisoned".to_string())?;
-        for hit in fused {
-            if let Ok(Some(row)) = store.fetch(&hit.id) {
-                out.push(serde_json::json!({
-                    "id": row.id.as_str(),
-                    "tier": tier_name(row.tier),
-                    "content": row.content,
-                    "score": hit.score,
-                    "session_id": row.session_id,
-                    "scope_key": row.scope_key,
-                    "created_at_ms": row.created_at_ms,
-                }));
-            }
-        }
-    }
-    serde_json::to_vec(&out).map_err(|e| e.to_string())
+    // TODO(#263): parse `?q=` + `?k=`, run hybrid search via embedder +
+    // store + lexical, return `[{id, tier, content, score}]`.
+    respond_json(request, 200, b"[]");
 }
 
 fn handle_memory_stats(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
@@ -656,230 +429,63 @@ fn handle_memory_stats(request: Request, memory: Option<&std::sync::Arc<MemorySe
         );
         return;
     };
+    // The embedder name is cheap and useful even before #263 ships, so
+    // populate it now. Counts stay at 0 until #263 wires them up.
     let embedder_status =
         <crate::memory::Embedder as EmbedderTrait>::name(svc.embedder.as_ref()).to_string();
-    let embedder_dim = <crate::memory::Embedder as EmbedderTrait>::dim(svc.embedder.as_ref());
-
-    let (working, episodic, semantic, user_version, embed_dim) = match svc.store.lock() {
-        Ok(store) => {
-            let counts = store.count_by_tier().unwrap_or((0, 0, 0));
-            let uv = store.user_version().unwrap_or(0);
-            (counts.0, counts.1, counts.2, uv, store.embed_dim())
-        }
-        Err(_) => (0, 0, 0, 0, 0),
-    };
     let body = serde_json::json!({
         "tier_counts": {
-            "working": working,
-            "episodic": episodic,
-            "semantic": semantic,
+            "working": 0,
+            "episodic": 0,
+            "semantic": 0,
         },
         "embedder_status": embedder_status,
-        "embedder_dim": embedder_dim,
-        "store_embed_dim": embed_dim,
-        "schema_user_version": user_version,
         "consolidate_interval_ms": svc.consolidate_interval_ms,
     });
     let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
     respond_json(request, 200, &bytes);
 }
 
-fn handle_memory_save(mut request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
-    let Some(svc) = memory else {
+fn handle_memory_save(request: Request, memory: Option<&std::sync::Arc<MemoryService>>) {
+    if memory.is_none() {
         respond_json(
             request,
             503,
             json_error_bytes("memory subsystem unavailable").as_slice(),
         );
         return;
-    };
-    let body_bytes = match read_body(&mut request) {
-        Ok(b) => b,
-        Err(err) => {
-            respond_json(
-                request,
-                400,
-                json_error_bytes(&format!("read body failed: {err}")).as_slice(),
-            );
-            return;
-        }
-    };
-    let payload: MemorySaveRequest = match serde_json::from_slice(&body_bytes) {
-        Ok(p) => p,
-        Err(err) => {
-            respond_json(
-                request,
-                400,
-                json_error_bytes(&format!("invalid JSON: {err}")).as_slice(),
-            );
-            return;
-        }
-    };
-    if payload.content.is_empty() {
-        respond_json(
-            request,
-            400,
-            json_error_bytes("`content` must not be empty").as_slice(),
-        );
-        return;
     }
-    let tier = payload
-        .tier
-        .as_deref()
-        .map(parse_tier)
-        .unwrap_or(Some(Tier::Working));
-    let Some(tier) = tier else {
-        respond_json(
-            request,
-            400,
-            json_error_bytes("`tier` must be one of working|episodic|semantic").as_slice(),
-        );
-        return;
-    };
-
-    let embedding = match svc.embedder.embed(&payload.content) {
-        Ok(v) => v,
-        Err(err) => {
-            respond_json(
-                request,
-                500,
-                json_error_bytes(&format!("embedder failed: {err}")).as_slice(),
-            );
-            return;
-        }
-    };
-    let id = MemoryId::new_v7();
-    let now_ms = current_unix_ms();
-    let row = MemoryRow {
-        id: id.clone(),
-        session_id: payload.session_id.clone(),
-        scope_key: payload.scope_key.clone(),
-        branch_name: None,
-        is_orphan: false,
-        tier,
-        content: payload.content.clone(),
-        created_at_ms: now_ms,
-        updated_at_ms: now_ms,
-        tier_change_at_ms: now_ms,
-        access_count: 0,
-        last_access_at_ms: now_ms,
-        metadata_json: payload.metadata_json.clone(),
-    };
-    if let Err(err) = insert_with_lexical(svc, &row, &embedding) {
-        respond_json(
-            request,
-            500,
-            json_error_bytes(&format!("save failed: {err}")).as_slice(),
-        );
-        return;
-    }
-    let body = serde_json::json!({
-        "id": id.as_str(),
-        "tier": tier_name(tier),
-        "created_at_ms": now_ms,
-    });
-    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
-    respond_json(request, 200, &bytes);
-}
-
-fn insert_with_lexical(
-    svc: &std::sync::Arc<MemoryService>,
-    row: &MemoryRow,
-    embedding: &[f32],
-) -> Result<(), String> {
-    {
-        let mut store = svc
-            .store
-            .lock()
-            .map_err(|_| "memory store mutex poisoned".to_string())?;
-        store.insert(row, embedding).map_err(|e| e.to_string())?;
-    }
-    let mut lex = svc
-        .lexical
-        .lock()
-        .map_err(|_| "memory lexical mutex poisoned".to_string())?;
-    lex.upsert(
-        &row.id,
-        row.session_id.as_deref(),
-        row.scope_key.as_deref(),
-        row.tier,
-        &row.content,
-    )
-    .map_err(|e| e.to_string())?;
-    lex.commit().map_err(|e| e.to_string())?;
-    Ok(())
+    // TODO(#263): parse `{content, tier, session_id?, scope_key?}`,
+    // embed, store, lexical-upsert, return `{id}`. Stub returns 501 so
+    // the dashboard's save form gets a deterministic error until then.
+    respond_json(
+        request,
+        501,
+        json_error_bytes("memory save not implemented in this build (see #263)").as_slice(),
+    );
 }
 
 fn handle_memory_forget(
     request: Request,
-    id_str: &str,
+    _id: &str,
     memory: Option<&std::sync::Arc<MemoryService>>,
 ) {
-    let Some(svc) = memory else {
+    if memory.is_none() {
         respond_json(
             request,
             503,
             json_error_bytes("memory subsystem unavailable").as_slice(),
         );
         return;
-    };
-    let id = match MemoryId::parse(id_str) {
-        Ok(id) => id,
-        Err(err) => {
-            respond_json(
-                request,
-                400,
-                json_error_bytes(&format!("invalid id: {err}")).as_slice(),
-            );
-            return;
-        }
-    };
-    let removed = match svc.store.lock() {
-        Ok(mut store) => match store.delete(&id) {
-            Ok(b) => b,
-            Err(err) => {
-                respond_json(
-                    request,
-                    500,
-                    json_error_bytes(&format!("delete failed: {err}")).as_slice(),
-                );
-                return;
-            }
-        },
-        Err(_) => {
-            respond_json(
-                request,
-                500,
-                json_error_bytes("memory store mutex poisoned").as_slice(),
-            );
-            return;
-        }
-    };
-    if removed {
-        if let Ok(mut lex) = svc.lexical.lock() {
-            let _ = lex.delete(&id);
-            let _ = lex.commit();
-        }
     }
-    let body = serde_json::json!({
-        "id": id.as_str(),
-        "forgotten": removed,
-    });
-    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
-    respond_json(request, 200, &bytes);
+    // TODO(#263): validate id, call `SqliteStore::delete` +
+    // `LexicalIndex::delete`, return `{deleted: true}`.
+    respond_json(
+        request,
+        501,
+        json_error_bytes("memory forget not implemented in this build (see #263)").as_slice(),
+    );
 }
-
-fn current_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Drop dead-code lint warning when `SqliteStore` import is used only
-/// via helper paths above on some cfg combinations.
-#[allow(dead_code)]
-fn _force_sqlitestore_use(_s: &SqliteStore) {}
 
 // ---------- state aggregation ----------
 
@@ -1728,13 +1334,12 @@ mod tests {
         assert_eq!(status, 503);
     }
 
-    /// With a live `MemoryService`, the memory routes now serve real
-    /// bodies (#262): stats returns 200 with tier counts, recent/search
-    /// return 200 with an empty array on a fresh store, save validates
-    /// payloads and returns 400 on empty body, forget rejects ill-formed
-    /// ids with 400.
+    /// With a live `MemoryService`, the stub bodies #263 will replace
+    /// are wired through: stats returns 200 with the documented JSON
+    /// shape; recent/search return 200 with an empty array; save/forget
+    /// return 501 until #263 implements them.
     #[test]
-    fn memory_routes_serve_real_bodies_when_subsystem_present() {
+    fn memory_routes_serve_stubs_when_subsystem_present() {
         // Force the embedder to `Disabled` so the test doesn't try to
         // download a fastembed model.
         let saved: Vec<(&str, Option<String>)> = [
@@ -1788,87 +1393,19 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(body.trim(), "[]");
 
-        // Save with empty content is rejected as a 400.
         let (status, _) =
             fetch_path_with_status(port, "POST", "/memory/save", Some("{}".to_string()))
                 .expect("save");
-        assert_eq!(status, 400);
+        assert_eq!(status, 501);
 
-        // Forget with a non-uuid id is rejected as a 400.
         let (status, _) =
             fetch_path_with_status(port, "POST", "/memory/forget/abc", Some("{}".to_string()))
                 .expect("forget");
-        assert_eq!(status, 400);
-
-        // /memory/stats now exposes embedder_dim, store_embed_dim,
-        // and schema_user_version on top of the original three fields.
-        let (status, body) =
-            fetch_path_with_status(port, "GET", "/memory/stats", None).expect("stats v2");
-        assert_eq!(status, 200);
-        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
-        assert!(parsed.get("embedder_dim").is_some(), "body={body}");
-        assert!(parsed.get("store_embed_dim").is_some(), "body={body}");
-        assert!(parsed.get("schema_user_version").is_some(), "body={body}");
+        assert_eq!(status, 501);
 
         svc.shutdown();
 
         // Restore env.
-        for (k, v) in saved {
-            match v {
-                Some(val) => unsafe { std::env::set_var(k, val) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-    }
-
-    /// Issue #262: save without `q` parameter is rejected. Empty `q` is
-    /// also rejected. These are the validation seams the CLI relies on
-    /// for its `clud memory search` exit codes.
-    #[test]
-    fn memory_search_rejects_missing_and_empty_q() {
-        let saved: Vec<(&str, Option<String>)> = [
-            "CLUD_MEMORY_EMBEDDER",
-            "CLUD_MEMORY_EMBEDDER_PROVIDER",
-            "CLUD_MEMORY_EMBEDDER_URL",
-            "CLUD_MEMORY_EMBEDDER_API_KEY",
-            "CLUD_MEMORY_EMBEDDER_MODEL",
-        ]
-        .iter()
-        .map(|k| (*k, std::env::var(*k).ok()))
-        .collect();
-        for (k, _) in &saved {
-            unsafe {
-                std::env::remove_var(k);
-            }
-        }
-        unsafe {
-            std::env::set_var("CLUD_MEMORY_EMBEDDER", "disabled");
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let svc = crate::daemon::memory_service::spawn_memory_service(dir.path())
-            .expect("memory service");
-        let svc = std::sync::Arc::new(svc);
-
-        let port = spawn_dashboard(
-            dir.path().to_path_buf(),
-            None,
-            9999,
-            100,
-            empty_live_provider(),
-            Some(svc.clone()),
-        )
-        .expect("dashboard spawned");
-
-        let (status, _) =
-            fetch_path_with_status(port, "GET", "/memory/search", None).expect("missing q");
-        assert_eq!(status, 400);
-
-        let (status, _) =
-            fetch_path_with_status(port, "GET", "/memory/search?q=", None).expect("empty q");
-        assert_eq!(status, 400);
-
-        svc.shutdown();
         for (k, v) in saved {
             match v {
                 Some(val) => unsafe { std::env::set_var(k, val) },

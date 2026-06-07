@@ -249,14 +249,6 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: DaemonSubcommand,
     },
-    /// Issue #262: agent-memory CLI verbs. The daemon owns the on-disk
-    /// SQLite + tantivy + embedder; the CLI proxies mutating ops through
-    /// the daemon's HTTP routes so there's exactly one SQLite writer per
-    /// process. Bare `clud memory` prints help.
-    Memory {
-        #[command(subcommand)]
-        subcommand: Option<MemorySubcommand>,
-    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -280,86 +272,6 @@ pub enum Command {
 pub enum DaemonSubcommand {
     /// Restart the daemon process so the next CLI call uses the current binary.
     Restart,
-}
-
-/// Subcommands under `clud memory`. See `crates/clud-bin/src/memory/cli.rs`.
-#[derive(Subcommand, Debug, Clone)]
-pub enum MemorySubcommand {
-    /// One-time schema init + best-effort embedder warm. Prints resolved
-    /// paths, embed_dim, and embedder name.
-    Init,
-    /// Print tier row counts, embedder status, schema user_version, db path,
-    /// and the daemon's consolidation cadence.
-    Status {
-        #[arg(long = "json")]
-        json: bool,
-    },
-    /// Hybrid (BM25 + KNN) search via RRF. `--tier-floor` filters out
-    /// rows below the requested tier.
-    Search {
-        query: String,
-        #[arg(short = 'k', long = "k", default_value = "10")]
-        k: u32,
-        #[arg(long = "session-id", value_name = "SID")]
-        session_id: Option<String>,
-        #[arg(long = "tier-floor", value_name = "TIER")]
-        tier_floor: Option<String>,
-        #[arg(long = "scope-key", value_name = "KEY")]
-        scope_key: Option<String>,
-        #[arg(long = "json")]
-        json: bool,
-    },
-    /// Embed and insert a new memory row.
-    Save {
-        content: String,
-        #[arg(long = "tier", default_value = "working")]
-        tier: String,
-        #[arg(long = "session-id", value_name = "SID")]
-        session_id: Option<String>,
-        #[arg(long = "metadata", value_name = "JSON")]
-        metadata: Option<String>,
-        #[arg(long = "json")]
-        json: bool,
-    },
-    /// Delete one memory by id (cascades to memory_vec + tantivy).
-    Forget {
-        id: String,
-        #[arg(long = "json")]
-        json: bool,
-    },
-    /// Export rows as JSON-lines. Default destination is stdout;
-    /// `--to-disk` stubs to #264.
-    Export {
-        #[arg(long = "to-disk", conflicts_with = "to_stdout")]
-        to_disk: bool,
-        #[arg(long = "to-stdout")]
-        to_stdout: bool,
-    },
-    /// Import rows from JSON-lines. `--from-stdin` reads JSON-lines from
-    /// stdin; `--from-disk` stubs to #264.
-    Import {
-        #[arg(long = "from-disk", conflicts_with = "from_stdin")]
-        from_disk: bool,
-        #[arg(long = "from-stdin")]
-        from_stdin: bool,
-    },
-    /// Open the dashboard in a browser at the `#memory` anchor.
-    Ui {
-        #[arg(long = "no-open")]
-        no_open: bool,
-    },
-    /// Re-embed every stored row using the currently-configured embedder.
-    Reembed {
-        #[arg(long = "model", value_name = "NAME")]
-        model: Option<String>,
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-    },
-    /// Write the branch-isolate marker so this branch keeps memories
-    /// private from main.
-    BranchIsolate,
-    /// Remove the branch-isolate marker.
-    BranchUnisolate,
 }
 
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc.rs`.
@@ -431,14 +343,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--stale-after",
         "--daemon",
         "--state-dir",
-        "--session-id",
-        "--tier",
-        "--tier-floor",
-        "--scope-key",
-        "--metadata",
-        "--k",
     ];
-    let short_value_flags: &[&str] = &["-p", "-m", "-r", "-k"];
+    let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
         "--continue",
         "--claude",
@@ -466,17 +372,13 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--json",
         "--no-open",
         "--demo-gfx-sixel",
-        "--to-disk",
-        "--to-stdout",
-        "--from-disk",
-        "--from-stdin",
         "--help",
         "--version",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui", "mcp",
-        "memory", "trash", "daemon", "__daemon", "__worker",
+        "trash", "daemon", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
