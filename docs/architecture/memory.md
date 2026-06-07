@@ -610,80 +610,17 @@ without touching disk; the same flag is exposed to users via
 `clud --setup --dry-run` (no writes; prints the file paths and entries that
 would be added).
 
-## Testing & perf budget (issue #266)
-
-The memory subsystem ships with three layers of test coverage. Per-module
-unit tests sit next to their `.rs` files (issues #256–#265). Cross-cutting
-integration and budget tests live under `tests/` and exercise the wire
-seams that span modules.
-
-### Cross-process persistence
-
-`tests/test_memory_cross_process.py` is the canonical RED test from
-META #255: save a row in one daemon process, kill that daemon, restart,
-search and recall the row. It exercises:
-
-- rusqlite WAL recovery (`SqliteStore::checkpoint_truncate` on boot).
-- Tantivy commit durability across a clean reopen.
-- The reconciliation pass in `spawn_memory_service` that re-upserts
-  every SQLite row into the lexical index — the load-bearing self-heal
-  for the eventual-consistency window between SQLite commit and tantivy
-  commit.
-
-### Perf budgets
-
-`tests/test_memory_perf_budget.py` enforces:
-
-| Budget                                              | Target |
-|-----------------------------------------------------|--------|
-| `memory_save` p50 (100 iterations)                  | ≤ 30 ms  |
-| `memory_smart_search` p50 (100 iterations)          | ≤ 25 ms  |
-| Daemon RSS without local model                      | ≤ 60 MB  |
-| Disk bytes per 1k memories (no vectors)             | ≤ 15 MB  |
-
-Heavy iterations are gated on `pytest -m perf_budget` (or
-`CLUD_PERF_BUDGET=1`). Smoke variants of every budget always run as part
-of `bash test`, exercising the harness setup without spending the
-perf-budget cost. See
-[DD-024](../DESIGN_DECISIONS.md#dd-024-memory-perf-budgets-enforced-as-python-tests-with-explicit-thresholds)
-for the rationale.
-
-Budgets self-skip when the host reports < 4 GB free RAM via `psutil`, so
-a noisy CI worker doesn't false-fail on GC pauses.
-
-### Hook payload fixtures
-
-[`testbins/mock-hooks-payloads/`](../../testbins/mock-hooks-payloads/README.md)
-carries canned JSON for the four hook subcommands × Claude/Codex
-variants. The end-to-end integration test
-`tests/integration/test_memory_e2e.py` walks one full session lifecycle:
-`session-start` → `user-prompt-submit` (with `remember:` directive) →
-`memory search` → `post-tool-use` → `stop`.
-
-### CI matrix gate
-
-`.github/workflows/_unit-test.yml` adds an explicit per-platform gate:
-
-- `windows-11-arm` runs `soldr cargo build -p clud --no-default-features`
-  to prove the `memory_local_embed` cfg carve-out compiles cleanly.
-- The other 5 platforms run `soldr cargo build -p clud --features
-  memory_local_embed` to prove the embedder builds end-to-end.
-
-Both run before `Unit Tests` so a regression in either path fails the
-matrix loudly. The gate is layered on top of `bash test`, not a
-replacement.
-
 ## Sibling sub-issues (META #255)
 
 - ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257.
 - ~~Tier lifecycle (Working / Episodic / Semantic + decay + promotion)~~ — #258.
 - ~~Daemon integration (lifecycle, consolidation timer, HTTP route stubs)~~ — #261.
 - ~~MCP server in daemon + `clud mcp` stdio bridge~~ — #259.
-- ~~Hook subcommands~~ — #260.
-- ~~`clud memory search` / `save` CLI verbs (including
-  `clud memory branch-isolate`)~~ — #262.
+- ~~Hook subcommands~~ — #260 (this PR).
+- `clud memory search` / `save` CLI verbs (including
+  `clud memory branch-isolate`) — #262.
 - ~~Dashboard JS for the `/memory/*` routes~~ — #263.
-- ~~Cross-process persistence test, perf budgets, CI matrix gates~~ — #266.
+- Cross-process persistence test.
 - Knowledge graph (deferred past v1).
 
 Each sub-issue lands on top of the public surface this PR exposes from
