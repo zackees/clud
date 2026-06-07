@@ -26,10 +26,6 @@ the integration tests.
 - [voice/](voice/README.md) - F3 push-to-talk voice mode: mic capture,
   start/stop cues, `whisper-rs` worker thread, transcript injection into the
   backend PTY.
-- [memory/](memory/README.md) - agent-memory storage foundation: `SqliteStore`
-  (rusqlite + sqlite-vec) for content + KNN, `LexicalIndex` (tantivy BM25),
-  RRF fusion. Pure storage; tier lifecycle, embedder, MCP, daemon-IPC, and
-  CLI verbs live in sibling sub-issues under META #255.
 
 ## Top-Level Modules
 
