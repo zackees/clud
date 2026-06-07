@@ -6,7 +6,6 @@ mod gc_service;
 mod http;
 mod io_helpers;
 mod keys;
-pub(crate) mod memory_mcp;
 mod memory_service;
 mod paths;
 mod process_utils;
@@ -27,13 +26,3 @@ pub use http::{
 };
 pub use paths::{default_state_dir, default_trash_dir};
 pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};
-
-/// Issue #259: re-exported for the `clud mcp` stdio bridge. Reads
-/// `daemon.json` and returns the port the in-process MCP server is
-/// listening on (or `None` if the memory subsystem failed to start).
-pub fn read_memory_mcp_port(state_dir: &std::path::Path) -> std::io::Result<Option<u16>> {
-    use io_helpers::read_json_file;
-    use paths::daemon_info_path;
-    let info: types::DaemonInfo = read_json_file(&daemon_info_path(state_dir))?;
-    Ok(info.memory_mcp_port)
-}

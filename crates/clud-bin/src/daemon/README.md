@@ -19,7 +19,6 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `server.rs` — daemon-process entry: binds the loopback listener, spawns the GC registry worker, accepts `Create`/`Session`/`Terminate`/`Gc` requests, spawns worker subprocesses, reaps them.
 - `gc_service.rs` — single-owner registry worker thread (issue #135): opens `~/.clud/data.redb` once, serializes every `gc.*` op through an `mpsc::Receiver<GcRequestMsg>`. Replaces the standalone `gc_daemon` process that shipped in Phase 1.
 - `memory_service.rs` — agent-memory service running in-process (issue #261). Owns `Arc<Mutex<SqliteStore>>`, `Arc<Mutex<LexicalIndex>>`, `Arc<Embedder>`, and `TierConfig`. Runs a consolidation timer thread (`promote_candidates` → `apply_promotions` → `forget_expired` every 5 min, env-tunable) and an hourly `PRAGMA wal_checkpoint(TRUNCATE)`. Reconciliation pass on startup re-upserts every SQLite row into tantivy so a crash between SQLite commit and tantivy commit self-heals on next boot. Loaded by `server::run_daemon` alongside the GC service and the dashboard.
-- `memory_mcp.rs` — in-daemon MCP server (issue #259). Binds an ephemeral loopback TCP port, exposes the 8 ESSENTIAL_TOOLS as line-delimited JSON-RPC 2.0. Pure `std::net` + one accept thread + per-connection thread. The bound port is written into `DaemonInfo.memory_mcp_port` for the `clud mcp` bridge to discover. See [DD-018](../../../../docs/DESIGN_DECISIONS.md#dd-018-mcp-server-embedded-in-clud-daemon-vs-sidecar-binary).
 - `worker.rs` — worker-process entry: starts the backend (subprocess or PTY), serves attach connections, runs the repeat-job loop.
 - `worker_shared.rs` — per-worker shared state: snapshot, in-memory backlog, optional `TerminalCapture` for PTY attach-replay, log file rotation, single-client attach gate.
 - `attach.rs` — interactive client-side attach loop: handshake, raw-terminal keyboard forwarding, Ctrl-C → background-prompt flow, exit-code propagation.
@@ -49,9 +48,6 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `fn run_daemon(&Path) -> i32` — `server.rs:23`
 - `pub fn spawn_memory_service(&Path) -> Result<MemoryService, MemoryError>` — `memory_service.rs:114`
 - `pub struct MemoryService { store, lexical, embedder, tier_config, consolidate_interval_ms }` — `memory_service.rs:52`
-- `pub fn spawn_mcp_server(Arc<MemoryService>) -> Result<McpServer, MemoryError>` — `memory_mcp.rs`
-- `pub struct McpServer { pub port: u16, shutdown }` — `memory_mcp.rs`
-- `pub fn read_memory_mcp_port(&Path) -> io::Result<Option<u16>>` — `mod.rs` (re-export for the `clud mcp` bridge)
 - `fn run_worker(&Path, &str, u32, &Path) -> i32` — `worker.rs:28`
 - `fn ensure_daemon(&Path) -> io::Result<()>` — `client.rs:18`
 - `fn send_daemon_request(&Path, &DaemonRequest)` — `client.rs:51`

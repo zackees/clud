@@ -230,11 +230,6 @@ pub enum Command {
         #[arg(long = "no-open")]
         no_open: bool,
     },
-    /// Issue #259: MCP stdio bridge for Claude Code / Codex. Forwards
-    /// JSON-RPC frames between stdio and the in-daemon memory MCP
-    /// server's loopback TCP port. Transparently brings up the daemon if
-    /// it isn't running.
-    Mcp,
     /// Quarantine paths under ~/.clud/trash and let daemon GC reap them.
     Trash {
         /// Allow copy + best-effort source removal when source and trash
@@ -377,7 +372,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui", "mcp",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
         "trash", "daemon", "__daemon", "__worker",
     ];
 

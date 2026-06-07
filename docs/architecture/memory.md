@@ -310,75 +310,15 @@ The MCP server itself (`#259`) and the hook subcommands (`#260`) plug
 into `MemoryService` from outside; this PR just shares the four handles
 the way #135 shared the GC mpsc channel.
 
-`DaemonInfo.memory_mcp_port` is now populated by #259 — see "MCP server"
-below.
-
-## MCP server
-
-Issue #259 surfaces the agent-memory subsystem as an MCP server,
-in-process with the rest of the daemon (see
-[DD-018](../DESIGN_DECISIONS.md#dd-018-mcp-server-embedded-in-clud-daemon-vs-sidecar-binary)
-for why we embed rather than ship a sidecar). The implementation is in
-[`crates/clud-bin/src/daemon/memory_mcp.rs`](../../crates/clud-bin/src/daemon/memory_mcp.rs);
-the `clud mcp` stdio↔TCP bridge is in
-[`crates/clud-bin/src/mcp_bridge.rs`](../../crates/clud-bin/src/mcp_bridge.rs).
-
-### Port allocation
-
-`spawn_mcp_server` binds `127.0.0.1:0` (ephemeral loopback) and writes
-the resolved port into `DaemonInfo.memory_mcp_port`. The accept loop is
-a single `std::thread`; each accepted TCP connection spawns its own
-per-connection thread. There is no tokio runtime in the daemon — the
-existing `Arc<Mutex<...>>` resources on `MemoryService` are reused
-unchanged.
-
-### The 8 tools (agentmemory `ESSENTIAL_TOOLS`)
-
-Names and argument schemas are 1:1 with the `rohitg00/agentmemory`
-TypeScript reference:
-
-| Tool | v0.1 status |
-|---|---|
-| `memory_save` | functional |
-| `memory_recall` | functional |
-| `memory_smart_search` | functional (BM25 + vec → RRF) |
-| `memory_sessions` | functional |
-| `memory_consolidate` | functional (manual tick) |
-| `memory_diagnose` | basics: embedder, dim, row count, schema user_version |
-| `memory_lesson_save` | functional (writes `lessons` table) |
-| `memory_reflect` | **documented stub** — returns an internal error until v0.5 (depends on knowledge graph + LLM provider) |
-
-### Wire protocol
-
-Line-delimited JSON-RPC 2.0 over TCP. Supported methods: `initialize`,
-`tools/list`, `tools/call`. Tool results return the
-`{ content: [{type: "text", text: "<json-string>"}] }` shape mandated
-by the MCP spec. Errors use the standard JSON-RPC codes plus `-32099`
-("daemon unavailable") emitted by the bridge when
-`DaemonInfo.memory_mcp_port` is `None`.
-
-### `clud mcp` stdio bridge
-
-Calls `daemon::ensure_daemon` first (transparently brings the daemon up
-if it isn't running), reads the port from `daemon.json`, then opens a
-loopback TCP socket and proxies bytes between stdio and the socket
-using two `std::thread`s. Closes when either side closes. On error
-(daemon unavailable, missing port, bad connect) the bridge emits a
-single JSON-RPC error envelope on stdout — never hangs.
-
-### Manual registration (v0.1)
-
-Auto-registration of `~/.claude.json` / `~/.codex/config.toml` is owned
-by sibling #265 and is not in #259. For v0.1 the user adds an entry by
-hand — see
-[`crates/clud-bin/src/memory/README.md`](../../crates/clud-bin/src/memory/README.md#manual-mcp-registration-v01).
+`DaemonInfo.memory_mcp_port` is reserved as `Option<u16>` so #259 can
+populate the field without a wire-format break.
 
 ## Sibling sub-issues (META #255)
 
 - ~~Embeddings (local + remote + Windows-ARM strategy)~~ — #257.
 - ~~Tier lifecycle (Working / Episodic / Semantic + decay + promotion)~~ — #258.
-- ~~Daemon integration (lifecycle, consolidation timer, HTTP route stubs)~~ — #261.
-- ~~MCP server in daemon + `clud mcp` stdio bridge~~ — #259 (this PR).
+- ~~Daemon integration (lifecycle, consolidation timer, HTTP route stubs)~~ — #261 (this PR).
+- MCP server in daemon + `clud mcp` stdio bridge — #259.
 - Hook subcommands — #260.
 - `clud memory search` / `save` CLI verbs (including
   `clud memory branch-isolate`) — #262.
