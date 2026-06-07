@@ -427,6 +427,20 @@ fn main() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
         session.on_loop_end(summary, err);
     }
+    // Issue #285 rec 3: signal cancellation on all three scanner guards
+    // *before* dropping any of them so the three worker threads wake up
+    // concurrently. The subsequent `drop` calls then join in parallel
+    // rather than serializing 3 × scanner-poll-interval of dead time
+    // into the Ctrl-C exit path.
+    if let Some(g) = _sibling_clone_scanner_guard.as_ref() {
+        g.signal_cancel();
+    }
+    if let Some(g) = _extern_repo_scanner_guard.as_ref() {
+        g.signal_cancel();
+    }
+    if let Some(g) = _scanner_guard.as_ref() {
+        g.signal_cancel();
+    }
     drop(_sibling_clone_scanner_guard);
     drop(_extern_repo_scanner_guard);
     drop(_scanner_guard);

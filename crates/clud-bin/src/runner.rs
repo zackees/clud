@@ -346,17 +346,24 @@ enum ProcessOutcome {
 /// `kill_tree` + bounded wait) so `--no-daemon` users still get cleanup.
 fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wrapped: bool) {
     if let Some(pid) = process.pid() {
-        if let Ok(state_dir) = crate::daemon::default_state_dir() {
-            if crate::daemon::try_handoff_kill_to_daemon(
-                &state_dir,
-                &[pid],
-                Some("ctrl_c_subprocess"),
-            ) {
-                // The daemon will kill_tree on a background thread; our
-                // job is just to get out of the way so the user gets
-                // their shell back. The Job Object reaps the direct
-                // child via TerminateProcess as we exit.
-                return;
+        match crate::daemon::default_state_dir() {
+            Ok(state_dir) => {
+                if crate::daemon::try_handoff_kill_to_daemon(
+                    &state_dir,
+                    &[pid],
+                    Some("ctrl_c_subprocess"),
+                ) {
+                    // The daemon will kill_tree on a background thread; our
+                    // job is just to get out of the way so the user gets
+                    // their shell back. The Job Object reaps the direct
+                    // child via TerminateProcess as we exit.
+                    crate::ctrl_c_track::record_handoff(true, Some("ctrl_c_subprocess"));
+                    return;
+                }
+                crate::ctrl_c_track::record_handoff(false, Some("daemon_unreachable"));
+            }
+            Err(_) => {
+                crate::ctrl_c_track::record_handoff(false, Some("no_state_dir"));
             }
         }
         // Daemon-less fallback: keep the legacy synchronous behavior so
@@ -365,6 +372,8 @@ fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wr
             let _ = process_tree::try_break_group(pid);
         }
         process_tree::kill_tree(pid);
+    } else {
+        crate::ctrl_c_track::record_handoff(false, Some("no_child_pid"));
     }
     let _ = process.kill();
     // Daemon-less fallback only: bounded wait so the legacy path doesn't

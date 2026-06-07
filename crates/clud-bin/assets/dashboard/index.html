@@ -95,6 +95,7 @@
     }
     .badge.live { background: color-mix(in srgb, var(--live) 18%, transparent); color: var(--live); }
     .badge.gone { background: color-mix(in srgb, var(--gone) 18%, transparent); color: var(--gone); }
+    .badge.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
     .badge.kind { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); margin-right: 6px; }
     .button {
       background: var(--accent);
@@ -227,6 +228,20 @@
         : fmtMs(profile.daemon_kill_ms);
       return `${esc(cli)} cli / ${esc(daemon)} daemon`;
     }
+    // Issue #285 rec 2: surface whether the daemon adopted the Ctrl-C
+    // kill on the fast path, or whether the legacy synchronous fallback
+    // ran. `null` means the event predates this field.
+    function renderHandoff(event) {
+      if (event.handed_off === true) {
+        const tip = event.handoff_reason ? ` title="${esc(event.handoff_reason)}"` : '';
+        return `<span class="badge live"${tip}>daemon</span>`;
+      }
+      if (event.handed_off === false) {
+        const tip = event.handoff_reason ? ` title="${esc(event.handoff_reason)}"` : '';
+        return `<span class="badge warn"${tip}>fallback</span>`;
+      }
+      return '<span class="badge gone">unknown</span>';
+    }
 
     function renderHeader(state) {
       const d = state.daemon;
@@ -336,6 +351,7 @@
           <td class="metric">${esc(fmtUnixMs(e.exit_at_ms))}</td>
           <td class="metric">${esc(fmtMs(e.elapsed_ms))}</td>
           <td><span class="badge kind">${esc(e.kind)}</span></td>
+          <td>${renderHandoff(e)}</td>
           <td>${esc(e.exit_code)}</td>
           <td>${esc(e.pid)}</td>
           <td class="path">${esc(e.cwd || '-')}</td>
@@ -343,7 +359,7 @@
       document.getElementById('ctrl-c-body').innerHTML = `
         <table>
           <thead><tr>
-            <th>exited at</th><th>elapsed</th><th>kind</th><th>exit</th><th>pid</th><th>cwd</th>
+            <th>exited at</th><th>elapsed</th><th>kind</th><th>handoff</th><th>exit</th><th>pid</th><th>cwd</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
