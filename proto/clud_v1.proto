@@ -1,0 +1,176 @@
+syntax = "proto3";
+
+package clud.v1;
+
+// Foundation schema for the clud daemon wire migration. The current runtime
+// still uses JSON-lines; these messages mirror the existing tagged JSON
+// request and response variants so the prost path can be brought online
+// without renaming the JSON contract.
+
+message ClientToDaemon {
+  oneof request {
+    CreateRequest create = 1;
+    SessionRequest session = 2;
+    ListLiveCwdsRequest list_live_cwds = 3;
+    TerminateRequest terminate = 4;
+    InterruptRequest interrupt = 5;
+    AdoptKillRequest adopt_kill = 6;
+    GcRequest gc = 7;
+    ShutdownRequest shutdown = 8;
+  }
+  string request_id = 100;
+}
+
+message DaemonToClient {
+  oneof response {
+    CreatedResponse created = 1;
+    SessionResponse session = 2;
+    LiveCwdsResponse live_cwds = 3;
+    TerminatedResponse terminated = 4;
+    InterruptedResponse interrupted = 5;
+    AdoptKillAckResponse adopt_kill_ack = 6;
+    GcResponse gc = 7;
+    ShutdownAckResponse shutdown_ack = 8;
+    ErrorResponse error = 9;
+  }
+  string request_id = 100;
+}
+
+message WorkerClientEnvelope {
+  oneof message {
+    WorkerAttachRequest attach = 1;
+    WorkerInputRequest input = 2;
+    WorkerResizeRequest resize = 3;
+    WorkerInterruptRequest interrupt = 4;
+  }
+}
+
+message WorkerServerEnvelope {
+  oneof message {
+    WorkerAttachedResponse attached = 1;
+    WorkerOutputResponse output = 2;
+    WorkerExitedResponse exited = 3;
+    WorkerErrorResponse error = 4;
+  }
+}
+
+message CreateRequest {
+  // JSON mirror of WorkerLaunchSpec. Kept opaque in the foundation PR so
+  // LaunchPlan and graphics structs do not get split before the daemon starts
+  // accepting prost frames.
+  bytes spec_json = 1;
+}
+
+message SessionRequest {
+  string session_id = 1;
+}
+
+message ListLiveCwdsRequest {}
+
+message TerminateRequest {
+  string session_id = 1;
+}
+
+message InterruptRequest {
+  string session_id = 1;
+  CtrlCProfile profile = 2;
+}
+
+message AdoptKillRequest {
+  repeated uint32 pids = 1;
+  optional string reason = 2;
+}
+
+message GcRequest {
+  // JSON mirror of GcOp. This preserves every existing gc.* shape while
+  // reserving one stable prost field number for the daemon envelope.
+  bytes payload_json = 1;
+}
+
+message ShutdownRequest {}
+
+message CreatedResponse {
+  bytes session_json = 1;
+}
+
+message SessionResponse {
+  bytes session_json = 1;
+}
+
+message LiveCwdsResponse {
+  repeated string paths = 1;
+}
+
+message TerminatedResponse {
+  bytes session_json = 1;
+}
+
+message InterruptedResponse {
+  bytes session_json = 1;
+}
+
+message AdoptKillAckResponse {
+  uint32 accepted = 1;
+}
+
+message GcResponse {
+  // JSON mirror of GcReply.
+  bytes reply_json = 1;
+}
+
+message ShutdownAckResponse {
+  uint32 pid = 1;
+}
+
+message ErrorResponse {
+  string message = 1;
+}
+
+message WorkerAttachRequest {
+  optional bytes terminal_json = 1;
+  optional uint32 rows = 2;
+  optional uint32 cols = 3;
+}
+
+message WorkerInputRequest {
+  string data_b64 = 1;
+  bool submit = 2;
+}
+
+message WorkerResizeRequest {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message WorkerInterruptRequest {
+  optional CtrlCProfile profile = 1;
+}
+
+message WorkerAttachedResponse {
+  bytes session_json = 1;
+}
+
+message WorkerOutputResponse {
+  string data_b64 = 1;
+}
+
+message WorkerExitedResponse {
+  int32 exit_code = 1;
+}
+
+message WorkerErrorResponse {
+  string message = 1;
+}
+
+message CtrlCProfile {
+  optional uint32 cli_pid = 1;
+  optional uint64 cli_observed_at_ms = 2;
+  optional uint64 cli_handoff_at_ms = 3;
+  optional uint64 cli_return_ready_at_ms = 4;
+  optional uint64 cli_handoff_ms = 5;
+  optional uint64 daemon_received_at_ms = 6;
+  optional uint64 daemon_kill_started_at_ms = 7;
+  optional uint64 daemon_kill_finished_at_ms = 8;
+  optional uint64 daemon_kill_ms = 9;
+  bool fast_path = 10;
+}
