@@ -11,6 +11,7 @@ mod process_utils;
 mod server;
 mod sessions;
 mod types;
+mod wire_prost;
 mod worker;
 mod worker_shared;
 

@@ -38,7 +38,9 @@ The hidden subcommands are declared in `crates/clud-bin/src/args.rs` and accept 
 
 ## Wire protocol
 
-Loopback TCP (`127.0.0.1:0`, OS-assigned ephemeral port), one request per connection for the daemon side, a persistent connection per attached client for the worker side. Every message is a single line of UTF-8 JSON terminated by `\n`; see `write_json_line` at `io_helpers.rs:25`. All enums are tagged with `"op"` (serde `tag = "op"`, snake_case variants).
+Loopback TCP (`127.0.0.1:0`, OS-assigned ephemeral port), one request per connection for the daemon side, a persistent connection per attached client for the worker side. Every message is currently a single line of UTF-8 JSON terminated by `\n`; see `write_json_line` at `io_helpers.rs:25`. All enums are tagged with `"op"` (serde `tag = "op"`, snake_case variants).
+
+The prost migration foundation lives in `wire_prost.rs` and `proto/clud_v1.proto`. It defines `CLUD` (`0x434c5544`) for prost payloads and `CLJS` (`0x434c4a53`) for legacy JSON payloads so a future dispatcher can route by `Frame.payload_protocol` without changing the existing JSON shapes. This foundation does not switch the live TCP path; JSON remains the runtime default until mixed-client and cross-version tests are in place.
 
 **Client → daemon** (`DaemonRequest`, `types.rs:103`):
 
