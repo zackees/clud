@@ -161,7 +161,7 @@ fn main() {
         }
     }
 
-    let interrupted = startup::install_ctrl_c_flag();
+    let interrupted = startup::install_ctrl_c_flag(args.verbose);
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
         flush_ctrl_c_exit_event(ctrl_c_track::InvocationKind::Attach, exit_code);
         std::process::exit(exit_code);

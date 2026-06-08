@@ -156,20 +156,37 @@ pub fn enforce_session_cap() -> Option<ScopedSessionGuard> {
     }
 }
 
-pub fn install_ctrl_c_flag() -> Arc<AtomicBool> {
-    use std::sync::atomic::Ordering;
+pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&interrupted);
     if let Err(e) = ctrlc::set_handler(move || {
-        // Stamp the first-Ctrl+C wall-clock observation before we flip
-        // the flag the rest of the process polls, so the elapsed-time
-        // measurement covers everything from signal-delivery onward.
-        crate::ctrl_c_track::record_observed();
-        handler_flag.store(true, Ordering::SeqCst);
+        run_ctrl_c_handler(verbose, handler_flag.as_ref(), |msg| {
+            crate::verbose_log::log(msg)
+        });
     }) {
         eprintln!("[clud] warning: failed to install Ctrl+C handler: {}", e);
     }
     interrupted
+}
+
+/// Pure side-effecting body of the Ctrl+C handler closure, extracted so
+/// unit tests can assert the verbose-emit decision without installing a
+/// real signal handler (which would conflict with cargo's test runner).
+///
+/// The handler stamps `ctrl_c_track::OBSERVED_UNIX_MS`, optionally emits
+/// a timestamped marker through `verbose_log::log`, then flips the
+/// process-wide interrupted flag. The verbose marker is what lets the
+/// launch log show *when* the Ctrl+C arrived relative to the eventual
+/// `[clud] subprocess: exited code …` / `[clud] exit: code …` lines —
+/// without it the user only sees the *result* of an interrupt, never
+/// the *moment* it was delivered.
+fn run_ctrl_c_handler(verbose: bool, interrupted: &AtomicBool, emit_verbose: impl FnOnce(&str)) {
+    use std::sync::atomic::Ordering;
+    crate::ctrl_c_track::record_observed();
+    if verbose {
+        emit_verbose("[clud] ctrl-c received");
+    }
+    interrupted.store(true, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -238,5 +255,49 @@ mod tests {
         // it succeeds or fails, the function must return Option<Guard>
         // (never panic, never abort the process).
         let _result = super::try_register_console_drop_target_subprocess();
+    }
+
+    /// Verbose mode: every Ctrl+C press emits the `[clud] ctrl-c received`
+    /// marker so the launch log shows the moment of interrupt, not just
+    /// the eventual exit-code lines.
+    #[test]
+    fn ctrl_c_handler_emits_verbose_marker_when_verbose() {
+        use std::cell::Cell;
+        use std::sync::atomic::Ordering;
+        let interrupted = AtomicBool::new(false);
+        let captured: Cell<Option<String>> = Cell::new(None);
+        super::run_ctrl_c_handler(true, &interrupted, |msg| {
+            captured.set(Some(msg.to_string()));
+        });
+        assert_eq!(
+            captured.into_inner().as_deref(),
+            Some("[clud] ctrl-c received"),
+            "verbose handler must emit the ctrl-c marker"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "handler must flip the interrupted flag"
+        );
+    }
+
+    /// Non-verbose mode: the marker is suppressed so it doesn't clobber
+    /// a live TUI's screen state. The interrupted flag still flips.
+    #[test]
+    fn ctrl_c_handler_skips_verbose_marker_when_not_verbose() {
+        use std::cell::Cell;
+        use std::sync::atomic::Ordering;
+        let interrupted = AtomicBool::new(false);
+        let called = Cell::new(false);
+        super::run_ctrl_c_handler(false, &interrupted, |_| {
+            called.set(true);
+        });
+        assert!(
+            !called.into_inner(),
+            "non-verbose handler must not call the emit closure"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "handler must still flip the interrupted flag without verbose"
+        );
     }
 }
