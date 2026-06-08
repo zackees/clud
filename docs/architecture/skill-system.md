@@ -42,9 +42,12 @@ continues.
 ## Global Setup Flow
 
 `main()` resolves the backend, asks `launch_setup.rs` for a setup scope, and
-then builds the final `LaunchPlan`. Automation, piped stdin, `--dry-run`, and
+then builds the final `LaunchPlan`. If `~/.clud/settings.toml` contains a
+backend-level global preference, future launches for that backend run global
+setup without prompting. Otherwise automation, piped stdin, `--dry-run`, and
 one-shot prompt launches default to session-only. Bare interactive launches can
-opt into global setup.
+opt into global setup; choosing global persists that preference, while choosing
+session-only remains per-launch.
 
 When global setup is selected:
 

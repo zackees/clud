@@ -1,0 +1,242 @@
+//! User-level clud settings persisted under `~/.clud/settings.toml`.
+
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use fs4::fs_std::FileExt;
+use toml_edit::{table, value, DocumentMut, Item};
+
+use crate::backend::Backend;
+use crate::launch_setup::LaunchSetupScope;
+
+pub const CLUD_DIR_NAME: &str = ".clud";
+pub const SETTINGS_FILE_NAME: &str = "settings.toml";
+pub const LOCK_FILE_NAME: &str = "settings.lock";
+
+#[derive(Debug)]
+pub enum SettingsError {
+    NoHomeDir,
+    Io(io::Error),
+    Parse { path: PathBuf, error: String },
+}
+
+impl std::fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettingsError::NoHomeDir => write!(f, "could not resolve user home directory"),
+            SettingsError::Io(error) => write!(f, "{error}"),
+            SettingsError::Parse { path, error } => {
+                write!(f, "malformed TOML in {}: {error}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {}
+
+impl From<io::Error> for SettingsError {
+    fn from(error: io::Error) -> Self {
+        SettingsError::Io(error)
+    }
+}
+
+pub fn settings_path_at(home: &Path) -> PathBuf {
+    home.join(CLUD_DIR_NAME).join(SETTINGS_FILE_NAME)
+}
+
+pub fn load_launch_setup_scope(
+    backend: Backend,
+) -> Result<Option<LaunchSetupScope>, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_launch_setup_scope_at(&home, backend)
+}
+
+pub fn load_launch_setup_scope_at(
+    home: &Path,
+    backend: Backend,
+) -> Result<Option<LaunchSetupScope>, SettingsError> {
+    let path = settings_path_at(home);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let text = fs::read_to_string(&path)?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let document = parse_settings(&path, &text)?;
+    let Some(scope) = document
+        .get("launch_setup")
+        .and_then(|item| item.get(backend_settings_key(backend)))
+        .and_then(|item| item.get("scope"))
+        .and_then(Item::as_str)
+    else {
+        return Ok(None);
+    };
+    Ok(LaunchSetupScope::from_settings_str(scope))
+}
+
+pub fn save_launch_setup_scope(
+    backend: Backend,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_launch_setup_scope_at(&home, backend, scope)
+}
+
+pub fn save_launch_setup_scope_at(
+    home: &Path,
+    backend: Backend,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    fs::create_dir_all(&clud_dir)?;
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+
+    let path = settings_path_at(home);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(SettingsError::Io(error)),
+    };
+    let mut document = if text.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        parse_settings(&path, &text)?
+    };
+
+    if document
+        .get("launch_setup")
+        .and_then(Item::as_table)
+        .is_none()
+    {
+        document["launch_setup"] = table();
+    }
+    let backend_key = backend_settings_key(backend);
+    if document["launch_setup"]
+        .get(backend_key)
+        .and_then(Item::as_table)
+        .is_none()
+    {
+        document["launch_setup"][backend_key] = table();
+    }
+    document["launch_setup"][backend_key]["scope"] = value(scope.as_str());
+
+    let mut body = document.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    Ok(())
+}
+
+fn parse_settings(path: &Path, text: &str) -> Result<DocumentMut, SettingsError> {
+    text.parse::<DocumentMut>()
+        .map_err(|error| SettingsError::Parse {
+            path: path.to_path_buf(),
+            error: error.to_string(),
+        })
+}
+
+fn backend_settings_key(backend: Backend) -> &'static str {
+    backend.executable_name()
+}
+
+fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    FileExt::lock_exclusive(&file)
+        .map_err(|error| io::Error::other(format!("lock {}: {error}", path.display())))?;
+    Ok(LockGuard { _file: file })
+}
+
+struct LockGuard {
+    _file: File,
+}
+
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(path) = std::env::var_os("USERPROFILE") {
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("HOME") {
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn missing_settings_file_has_no_launch_setup_scope() {
+        let home = tempdir().unwrap();
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn saves_launch_setup_scope_per_backend() {
+        let home = tempdir().unwrap();
+
+        save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
+
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
+            Some(LaunchSetupScope::Global)
+        );
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Claude).unwrap(),
+            None
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        assert!(
+            text.contains("[launch_setup.codex]"),
+            "settings TOML should use a backend-scoped table: {text}"
+        );
+        assert!(
+            text.contains("scope = \"global\""),
+            "settings TOML should persist the selected global scope: {text}"
+        );
+    }
+
+    #[test]
+    fn preserves_existing_settings_when_saving_scope() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "[unrelated]\nvalue = \"kept\"\n\n[launch_setup.claude]\nscope = \"session-only\"\n",
+        )
+        .unwrap();
+
+        save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("[unrelated]"), "{text}");
+        assert!(text.contains("value = \"kept\""), "{text}");
+        assert!(text.contains("[launch_setup.claude]"), "{text}");
+        assert!(text.contains("[launch_setup.codex]"), "{text}");
+    }
+}
