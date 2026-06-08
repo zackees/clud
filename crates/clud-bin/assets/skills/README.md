@@ -10,8 +10,8 @@ do not write persistent skill files. Stale clud-managed copies under
 ## Skills
 
 - [clud-loop/](clud-loop/README.md) - Polyfill Claude-style `/loop` behavior
-  for Codex by keeping loop work in `.clud/loop/LOOP.md` and driving
-  `clud --codex loop` / `--repeat`.
+  for Codex with in-chat orchestration, a compact `.clud/loop/LOOP.md`
+  ledger, bounded worker subagents, and explicit legacy external mode.
 - [clud-issue/](clud-issue/README.md) - File a deeply-researched GitHub issue
   via investigate -> interview -> investigate -> post, returning a summary plus
   the issue URL.
