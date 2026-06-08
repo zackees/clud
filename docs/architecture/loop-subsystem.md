@@ -15,11 +15,12 @@ the marker contract entirely and hands the plan to the daemon worker
 
 `/clud-loop` is the Codex-facing skill polyfill for Claude-style `/loop`.
 Codex does not document arbitrary top-level custom slash-command registration,
-so clud ships a `clud-loop` skill. The skill keeps durable work in
-`.clud/loop/LOOP.md`; interval mode starts `clud --codex loop --repeat
-<duration> --loop-count 1 --no-done .clud/loop/LOOP.md`, while no-interval
-mode asks Codex to delegate the foreground `clud --codex loop
-.clud/loop/LOOP.md` work to a worker subagent when available.
+so clud ships a `clud-loop` skill. The skill keeps a compact parent ledger in
+`.clud/loop/LOOP.md`. Foreground mode keeps the current Codex chat as the
+single orchestrator, dispatching subagents only as bounded workers that return
+structured summaries. Cadence mode prefers Codex same-thread automation. The
+old `clud --codex loop` / `--repeat` process-runner path remains documented
+only as explicit legacy external automation.
 
 ## Component map
 

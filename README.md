@@ -288,16 +288,23 @@ skill through `/skills` or `$clud-loop`.
 ```
 
 The skill keeps the durable task and work journal in `.clud/loop/LOOP.md`.
-With an interval, it starts a daemon repeat job equivalent to:
+Without a cadence, it keeps the current Codex chat as the orchestrator: the main
+agent runs one bounded iteration at a time, optionally dispatches bounded worker
+subagents, records structured results, updates the ledger, and stops on explicit
+DONE/NO_WORK/BLOCKED/FAILED/RESOURCE_LIMIT/LOOP_DETECTED/USER_STOP conditions.
+
+With a cadence, the skill prefers a Codex same-thread automation that wakes the
+current thread for one bounded iteration and then stops. The old external
+process runner remains available only when the user explicitly asks for legacy
+or daemon-backed automation.
+
+The legacy interval form is:
 
 ```bash
 clud --codex loop --repeat 30m --loop-count 1 --no-done .clud/loop/LOOP.md
 ```
 
-Without an interval, it asks Codex to delegate the loop work to a worker
-subagent when available, with that worker reading and updating
-`.clud/loop/LOOP.md`, and otherwise runs `clud --codex loop .clud/loop/LOOP.md`
-directly.
+The legacy one-shot external form is `clud --codex loop .clud/loop/LOOP.md`.
 
 ### Task input modes
 

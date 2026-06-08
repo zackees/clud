@@ -1,19 +1,30 @@
 # clud-loop/
 
 Source of the `/clud-loop` skill shipped inside the `clud` binary. The skill
-polyfills Claude-style `/loop` behavior for Codex by keeping the work prompt and
-journal in `.clud/loop/LOOP.md`, then driving the existing `clud --codex loop`
-engine.
+polyfills Claude-style `/loop` behavior for Codex by keeping a compact parent
+ledger in `.clud/loop/LOOP.md` and running bounded in-chat iterations from the
+current Codex thread.
 
-The interval form maps to:
+Foreground mode keeps the main Codex agent as the orchestrator. Subagents, when
+available, are bounded workers only: they receive strict no-recursion packets
+and return structured summaries for the parent to validate and write back to
+the ledger.
+
+Scheduled mode should prefer a Codex same-thread automation that runs one
+bounded iteration per wake-up. The old process-runner path remains available
+only when the user explicitly asks for legacy external automation.
+
+The legacy interval form maps to:
 
 ```bash
 clud --codex loop --repeat <interval> --loop-count 1 --no-done .clud/loop/LOOP.md
 ```
 
-The no-interval form asks Codex to delegate to a worker subagent when available,
-with the worker reading and updating `.clud/loop/LOOP.md`, and otherwise runs
-`clud --codex loop .clud/loop/LOOP.md` directly.
+The legacy one-shot external form maps to:
+
+```bash
+clud --codex loop .clud/loop/LOOP.md
+```
 
 `SKILL.md` is embedded into the `clud` binary at compile time via
 `include_str!` from `crates/clud-bin/src/skills.rs`. On every launch,

@@ -481,6 +481,29 @@ mod tests {
     }
 
     #[test]
+    fn clud_loop_skill_uses_codex_native_orchestration() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-loop")
+            .expect("clud-loop must be bundled")
+            .skill_md;
+
+        for required in [
+            "Foreground In-Chat Orchestration",
+            "main Codex agent is the single orchestrator",
+            "status: DONE | PARTIAL | BLOCKED | FAILED | NOOP",
+            "LOOP_DETECTED",
+            "Legacy External Process Mode",
+            "Do not run `clud --codex loop` for normal foreground in-chat work.",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-loop skill missing required Codex-native loop guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn skill_backends_include_claude_and_codex() {
         let backends: Vec<(Backend, &str, &str, Option<&str>)> = SKILL_BACKENDS
             .iter()
