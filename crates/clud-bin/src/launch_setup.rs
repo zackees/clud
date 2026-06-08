@@ -28,6 +28,14 @@ impl LaunchSetupScope {
             LaunchSetupScope::Global => "global",
         }
     }
+
+    pub fn from_settings_str(value: &str) -> Option<Self> {
+        match value {
+            "session-only" | "session_only" => Some(LaunchSetupScope::SessionOnly),
+            "global" => Some(LaunchSetupScope::Global),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +112,19 @@ pub fn scope_for_non_prompting_launch(
     interactive_terminal: bool,
 ) -> Option<LaunchSetupScope> {
     (!should_prompt_for_scope(args, interactive_terminal)).then_some(LaunchSetupScope::SessionOnly)
+}
+
+pub fn scope_for_configured_launch(
+    args: &Args,
+    interactive_terminal: bool,
+    configured_scope: Option<LaunchSetupScope>,
+) -> Option<LaunchSetupScope> {
+    if !args.dry_run {
+        if let Some(scope) = configured_scope {
+            return Some(scope);
+        }
+    }
+    scope_for_non_prompting_launch(args, interactive_terminal)
 }
 
 pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
@@ -434,6 +455,33 @@ mod tests {
         let args = parse(&["clud", "--codex", "--dry-run"]);
         assert_eq!(
             scope_for_non_prompting_launch(&args, true),
+            Some(LaunchSetupScope::SessionOnly)
+        );
+    }
+
+    #[test]
+    fn configured_global_scope_skips_prompt_for_bare_launches() {
+        let args = parse(&["clud", "--codex"]);
+        assert_eq!(
+            scope_for_configured_launch(&args, true, Some(LaunchSetupScope::Global)),
+            Some(LaunchSetupScope::Global)
+        );
+    }
+
+    #[test]
+    fn configured_global_scope_applies_to_one_shot_launches() {
+        let args = parse(&["clud", "--codex", "-p", "hello"]);
+        assert_eq!(
+            scope_for_configured_launch(&args, true, Some(LaunchSetupScope::Global)),
+            Some(LaunchSetupScope::Global)
+        );
+    }
+
+    #[test]
+    fn dry_run_ignores_configured_global_scope() {
+        let args = parse(&["clud", "--codex", "--dry-run"]);
+        assert_eq!(
+            scope_for_configured_launch(&args, true, Some(LaunchSetupScope::Global)),
             Some(LaunchSetupScope::SessionOnly)
         );
     }

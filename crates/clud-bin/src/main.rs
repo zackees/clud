@@ -1,7 +1,8 @@
 use clud::{
-    args, backend, backend_bootstrap, command, console_setup, console_title, ctrl_c_track, daemon,
-    gc, graphics, hook_health, large_file_guard, launch_setup, loop_artifacts, loop_spec, runner,
-    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
+    ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
+    loop_artifacts, loop_spec, runner, startup, trampoline, trash, ui, verbose_log, wasm,
+    worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -243,20 +244,38 @@ fn main() {
         }
     };
 
-    // Issue #242: mutable harness setup is scoped per launch. Automation,
-    // dry-runs, piped prompts, and one-shot prompt launches default to
-    // session-only and do not write backend home files. Bare interactive TUI
-    // launches can opt into global setup through a reusable selector; global
-    // setup runs only the selected backend's actions.
+    // Issue #242: mutable harness setup is scoped per launch until the user
+    // opts into a backend-level global preference. Dry-runs always remain
+    // session-only; otherwise a stored `~/.clud/settings.toml` scope wins.
+    // Bare interactive TUI launches without a stored scope can opt into global
+    // setup through a reusable selector. Global setup runs only the selected
+    // backend's actions.
     let setup_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    let configured_scope = if args.dry_run {
+        None
+    } else {
+        match clud_settings::load_launch_setup_scope(backend) {
+            Ok(scope) => scope,
+            Err(error) => {
+                if args.verbose {
+                    eprintln!("[clud] note: could not read clud settings: {error}");
+                }
+                None
+            }
+        }
+    };
+    let mut persist_global_scope = false;
     let setup_scope = if let Some(scope) =
-        launch_setup::scope_for_non_prompting_launch(&args, setup_interactive)
+        launch_setup::scope_for_configured_launch(&args, setup_interactive, configured_scope)
     {
         scope
     } else {
         let mut err = io::stderr().lock();
         match launch_setup::prompt_scope(&mut err) {
-            Ok(scope) => scope,
+            Ok(scope) => {
+                persist_global_scope = matches!(scope, launch_setup::LaunchSetupScope::Global);
+                scope
+            }
             Err(error) => {
                 eprintln!(
                     "[clud] note: could not read launch setup scope ({error}); using session-only"
@@ -265,6 +284,11 @@ fn main() {
             }
         }
     };
+    if persist_global_scope {
+        if let Err(error) = clud_settings::save_launch_setup_scope(backend, setup_scope) {
+            eprintln!("[clud] note: could not save global setup preference: {error}");
+        }
+    }
     if matches!(setup_scope, launch_setup::LaunchSetupScope::Global) {
         let mut err = io::stderr().lock();
         if let Err(error) = launch_setup::run_setup(setup_scope, backend, args.verbose, &mut err) {
