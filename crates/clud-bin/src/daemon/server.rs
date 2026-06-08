@@ -536,8 +536,91 @@ fn merge_ctrl_c_profile_for_daemon(session: &mut SessionSnapshot, mut update: Ct
 
 #[cfg(test)]
 mod tests {
+    use super::super::wire_prost::{
+        decode_daemon_response_line, encode_daemon_request_line, DaemonWireFormat,
+    };
     use super::*;
+    use std::io::{BufRead, Write};
+    use std::net::TcpStream;
+    use std::thread;
     use std::time::Instant;
+
+    fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(info) = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
+                if TcpStream::connect(("127.0.0.1", info.port)).is_ok() {
+                    return info;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for daemon startup"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn send_daemon_request_line(
+        state_dir: &Path,
+        request: &DaemonRequest,
+        format: DaemonWireFormat,
+    ) -> (DaemonResponse, String) {
+        let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
+        let bytes = encode_daemon_request_line(request, format).unwrap();
+        stream.write_all(&bytes).unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let response = decode_daemon_response_line(&line).unwrap();
+        (response, line)
+    }
+
+    #[test]
+    fn daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let daemon_state_dir = state_dir.clone();
+        let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+
+        let info = wait_for_daemon_ready(&state_dir);
+        let (json_response, json_line) = send_daemon_request_line(
+            &state_dir,
+            &DaemonRequest::ListLiveCwds,
+            DaemonWireFormat::Json,
+        );
+        assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
+        assert!(
+            json_line.starts_with(r#"{"op":"live_cwds""#),
+            "default legacy request should receive a JSON daemon response: {json_line:?}"
+        );
+
+        let after_json = read_json_file::<DaemonInfo>(&daemon_info_path(&state_dir)).unwrap();
+        assert_eq!(after_json.pid, info.pid);
+        assert_eq!(after_json.port, info.port);
+
+        let (prost_response, prost_line) = send_daemon_request_line(
+            &state_dir,
+            &DaemonRequest::Shutdown,
+            DaemonWireFormat::Prost,
+        );
+        assert!(matches!(
+            prost_response,
+            DaemonResponse::ShutdownAck { pid } if pid == std::process::id()
+        ));
+        assert!(
+            prost_line.starts_with("CLUD-FRAME/1 434c5544 "),
+            "prost request should receive a prost daemon response: {prost_line:?}"
+        );
+        assert_eq!(daemon_thread.join().unwrap(), 0);
+        assert!(
+            !daemon_info_path(&state_dir).exists(),
+            "daemon should remove daemon.json during shutdown"
+        );
+    }
 
     /// `spawn_adopt_kill_worker` must return immediately — the whole
     /// point of the AdoptKill IPC is that the CLI's wait time is bounded
