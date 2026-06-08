@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use prost::Message;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -22,6 +23,11 @@ pub(super) const CLUD_PROST_PAYLOAD_PROTOCOL: u32 = 0x434c_5544;
 /// ASCII "CLJS" in a u32. This names the legacy JSON payload path while the
 /// migration runs with both encoders available.
 pub(super) const CLUD_JSON_PAYLOAD_PROTOCOL: u32 = 0x434c_4a53;
+/// Selects the daemon RPC line format. Unset or `json` keeps the legacy JSON
+/// line protocol; `prost` opts into the v1 prost frame envelope.
+pub(super) const ENV_DAEMON_WIRE: &str = "CLUD_DAEMON_WIRE";
+
+const DAEMON_FRAME_LINE_PREFIX: &str = "CLUD-FRAME/1 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WireFrame {
@@ -29,11 +35,37 @@ pub(super) struct WireFrame {
     pub(super) payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DaemonWireFormat {
+    Json,
+    Prost,
+}
+
+impl DaemonWireFormat {
+    fn from_env_value(value: Option<&str>) -> Result<Self, WireError> {
+        let Some(raw) = value else {
+            return Ok(Self::Json);
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::Json);
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "json" | "legacy" | "legacy-json" => Ok(Self::Json),
+            "prost" => Ok(Self::Prost),
+            _ => Err(WireError::InvalidDaemonWire(raw.to_string())),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum WireError {
     MissingPayload(&'static str),
     UnknownPayloadProtocol(u32),
+    InvalidDaemonWire(String),
+    InvalidFrameLine(String),
     Json(serde_json::Error),
+    Base64(base64::DecodeError),
     Decode(prost::DecodeError),
     U16OutOfRange { field: &'static str, value: u32 },
 }
@@ -45,7 +77,17 @@ impl fmt::Display for WireError {
             Self::UnknownPayloadProtocol(protocol) => {
                 write!(f, "unsupported clud payload_protocol 0x{protocol:08x}")
             }
+            Self::InvalidDaemonWire(value) => {
+                write!(
+                    f,
+                    "unsupported {ENV_DAEMON_WIRE} value {value:?}; expected json or prost"
+                )
+            }
+            Self::InvalidFrameLine(line) => {
+                write!(f, "invalid clud daemon frame line: {line}")
+            }
             Self::Json(err) => write!(f, "json conversion failed: {err}"),
+            Self::Base64(err) => write!(f, "frame payload base64 decode failed: {err}"),
             Self::Decode(err) => write!(f, "prost decode failed: {err}"),
             Self::U16OutOfRange { field, value } => {
                 write!(f, "{field} value {value} exceeds u16::MAX")
@@ -62,10 +104,62 @@ impl From<serde_json::Error> for WireError {
     }
 }
 
+impl From<base64::DecodeError> for WireError {
+    fn from(value: base64::DecodeError) -> Self {
+        Self::Base64(value)
+    }
+}
+
 impl From<prost::DecodeError> for WireError {
     fn from(value: prost::DecodeError) -> Self {
         Self::Decode(value)
     }
+}
+
+pub(super) fn daemon_wire_format_from_env() -> Result<DaemonWireFormat, WireError> {
+    DaemonWireFormat::from_env_value(std::env::var(ENV_DAEMON_WIRE).ok().as_deref())
+}
+
+pub(super) fn encode_daemon_request_line(
+    request: &DaemonRequest,
+    format: DaemonWireFormat,
+) -> Result<Vec<u8>, WireError> {
+    match format {
+        DaemonWireFormat::Json => encode_json_line(request),
+        DaemonWireFormat::Prost => {
+            let frame = encode_daemon_request_prost(request, "daemon-request")?;
+            Ok(encode_wire_frame_line(&frame))
+        }
+    }
+}
+
+pub(super) fn decode_daemon_request_line(
+    line: &str,
+) -> Result<(DaemonRequest, DaemonWireFormat), WireError> {
+    if let Some(frame) = decode_wire_frame_line(line)? {
+        return Ok((decode_daemon_request(&frame)?, DaemonWireFormat::Prost));
+    }
+    Ok((serde_json::from_str(line)?, DaemonWireFormat::Json))
+}
+
+pub(super) fn encode_daemon_response_line(
+    response: &DaemonResponse,
+    format: DaemonWireFormat,
+) -> Result<Vec<u8>, WireError> {
+    match format {
+        DaemonWireFormat::Json => encode_json_line(response),
+        DaemonWireFormat::Prost => {
+            let frame = encode_daemon_response_prost(response, "daemon-response")?;
+            Ok(encode_wire_frame_line(&frame))
+        }
+    }
+}
+
+pub(super) fn decode_daemon_response_line(line: &str) -> Result<DaemonResponse, WireError> {
+    if let Some(frame) = decode_wire_frame_line(line)? {
+        return decode_daemon_response(&frame);
+    }
+    Ok(serde_json::from_str(line)?)
 }
 
 pub(super) fn encode_daemon_request_prost(
@@ -157,6 +251,46 @@ fn prost_frame(payload: Vec<u8>) -> WireFrame {
         payload_protocol: CLUD_PROST_PAYLOAD_PROTOCOL,
         payload,
     }
+}
+
+fn encode_json_line<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn encode_wire_frame_line(frame: &WireFrame) -> Vec<u8> {
+    let payload = BASE64_STANDARD.encode(&frame.payload);
+    format!(
+        "{DAEMON_FRAME_LINE_PREFIX}{:08x} {payload}\n",
+        frame.payload_protocol
+    )
+    .into_bytes()
+}
+
+fn decode_wire_frame_line(line: &str) -> Result<Option<WireFrame>, WireError> {
+    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+    let Some(rest) = trimmed.strip_prefix(DAEMON_FRAME_LINE_PREFIX) else {
+        return Ok(None);
+    };
+    let Some((protocol_hex, payload_b64)) = rest.split_once(' ') else {
+        return Err(WireError::InvalidFrameLine(
+            "missing protocol or payload".to_string(),
+        ));
+    };
+    if protocol_hex.len() != 8 || payload_b64.is_empty() {
+        return Err(WireError::InvalidFrameLine(
+            "expected 8-digit protocol and non-empty payload".to_string(),
+        ));
+    }
+    let payload_protocol = u32::from_str_radix(protocol_hex, 16).map_err(|_| {
+        WireError::InvalidFrameLine(format!("invalid payload protocol {protocol_hex:?}"))
+    })?;
+    let payload = BASE64_STANDARD.decode(payload_b64)?;
+    Ok(Some(WireFrame {
+        payload_protocol,
+        payload,
+    }))
 }
 
 fn daemon_request_to_proto(
@@ -563,6 +697,62 @@ mod tests {
     fn payload_protocol_constants_are_ascii_discriminators() {
         assert_eq!(CLUD_PROST_PAYLOAD_PROTOCOL.to_be_bytes(), *b"CLUD");
         assert_eq!(CLUD_JSON_PAYLOAD_PROTOCOL.to_be_bytes(), *b"CLJS");
+    }
+
+    #[test]
+    fn daemon_wire_format_env_values_default_to_json() {
+        assert_eq!(
+            DaemonWireFormat::from_env_value(None).unwrap(),
+            DaemonWireFormat::Json
+        );
+        assert_eq!(
+            DaemonWireFormat::from_env_value(Some("")).unwrap(),
+            DaemonWireFormat::Json
+        );
+        assert_eq!(
+            DaemonWireFormat::from_env_value(Some("legacy-json")).unwrap(),
+            DaemonWireFormat::Json
+        );
+        assert_eq!(
+            DaemonWireFormat::from_env_value(Some("prost")).unwrap(),
+            DaemonWireFormat::Prost
+        );
+        assert!(matches!(
+            DaemonWireFormat::from_env_value(Some("bincode")),
+            Err(WireError::InvalidDaemonWire(_))
+        ));
+    }
+
+    #[test]
+    fn daemon_request_line_json_preserves_legacy_shape() {
+        let request = DaemonRequest::Shutdown;
+        let line = encode_daemon_request_line(&request, DaemonWireFormat::Json).unwrap();
+        assert!(line.starts_with(br#"{"op":"shutdown"}"#));
+
+        let line = String::from_utf8(line).unwrap();
+        let (decoded, format) = decode_daemon_request_line(&line).unwrap();
+        assert_eq!(format, DaemonWireFormat::Json);
+        assert_json_parity(&request, &decoded);
+    }
+
+    #[test]
+    fn daemon_request_line_prost_carries_frame_envelope() {
+        let request = DaemonRequest::Shutdown;
+        let line = encode_daemon_request_line(&request, DaemonWireFormat::Prost).unwrap();
+        let line = String::from_utf8(line).unwrap();
+        assert!(line.starts_with("CLUD-FRAME/1 434c5544 "));
+
+        let (decoded, format) = decode_daemon_request_line(&line).unwrap();
+        assert_eq!(format, DaemonWireFormat::Prost);
+        assert_json_parity(&request, &decoded);
+    }
+
+    #[test]
+    fn daemon_response_line_prost_roundtrips() {
+        let response = DaemonResponse::ShutdownAck { pid: 1234 };
+        let line = encode_daemon_response_line(&response, DaemonWireFormat::Prost).unwrap();
+        let decoded = decode_daemon_response_line(&String::from_utf8(line).unwrap()).unwrap();
+        assert_json_parity(&response, &decoded);
     }
 
     #[test]
