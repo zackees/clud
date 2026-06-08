@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,10 @@ use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
     CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit,
     SessionSnapshot, WorkerClientMessage,
+};
+use super::wire_prost::{
+    daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
+    DaemonWireFormat, WireError,
 };
 
 /// Idempotent best-effort daemon spawn (issue #135). Always called via
@@ -162,7 +166,11 @@ pub(super) fn send_daemon_request(
 ) -> io::Result<DaemonResponse> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
     let mut stream = TcpStream::connect(("127.0.0.1", info.port))?;
-    write_json_line(&mut stream, request)?;
+    write_daemon_request(
+        &mut stream,
+        request,
+        daemon_wire_format_from_env().map_err(wire_error_to_io)?,
+    )?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let bytes = reader.read_line(&mut line)?;
@@ -172,7 +180,7 @@ pub(super) fn send_daemon_request(
             "daemon closed connection without replying",
         ));
     }
-    serde_json::from_str(&line).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    decode_daemon_response_line(&line).map_err(wire_error_to_io)
 }
 
 pub(super) fn request_session_termination(
@@ -225,7 +233,10 @@ pub fn try_handoff_kill_to_daemon(state_dir: &Path, pids: &[u32], reason: Option
         pids: pids.to_vec(),
         reason: reason.map(|s| s.to_string()),
     };
-    if write_json_line(&mut stream, &request).is_err() {
+    let Ok(format) = daemon_wire_format_from_env() else {
+        return false;
+    };
+    if write_daemon_request(&mut stream, &request, format).is_err() {
         return false;
     }
     // We could parse the ack here, but the wire contract guarantees the
@@ -318,6 +329,20 @@ fn is_old_daemon_signature(err: &io::Error) -> bool {
             | io::ErrorKind::ConnectionReset
             | io::ErrorKind::ConnectionAborted
     )
+}
+
+fn write_daemon_request(
+    stream: &mut TcpStream,
+    request: &DaemonRequest,
+    format: DaemonWireFormat,
+) -> io::Result<()> {
+    let bytes = encode_daemon_request_line(request, format).map_err(wire_error_to_io)?;
+    stream.write_all(&bytes)?;
+    stream.flush()
+}
+
+fn wire_error_to_io(err: WireError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
 pub(super) fn send_worker_message(
@@ -541,6 +566,7 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
 
     /// Issue #192: a daemon whose `daemon.json` reports the same version
     /// as the spawning binary must NOT be restarted. This is the steady-
@@ -616,6 +642,31 @@ mod tests {
         (port, saw_request)
     }
 
+    fn spawn_shutdown_ack_peer() -> (u16, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (line_tx, line_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let _ = line_tx.send(line.clone());
+                let (_, format) =
+                    super::super::wire_prost::decode_daemon_request_line(&line).unwrap();
+                let response = DaemonResponse::ShutdownAck { pid: 4242 };
+                let bytes =
+                    super::super::wire_prost::encode_daemon_response_line(&response, format)
+                        .unwrap();
+                stream.write_all(&bytes).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        (port, line_rx)
+    }
+
     #[test]
     fn send_daemon_request_translates_silent_peer_to_unexpected_eof() {
         let tmp = tempfile::tempdir().unwrap();
@@ -640,6 +691,38 @@ mod tests {
             saw_request.load(Ordering::SeqCst),
             "stub peer should have observed the request before closing"
         );
+    }
+
+    #[test]
+    fn send_daemon_request_defaults_to_legacy_json_wire() {
+        let _guard = EnvGuard::unset(super::super::wire_prost::ENV_DAEMON_WIRE);
+        let tmp = tempfile::tempdir().unwrap();
+        let (port, line_rx) = spawn_shutdown_ack_peer();
+        write_daemon_info(tmp.path(), std::process::id(), port);
+
+        let response = send_daemon_request(tmp.path(), &DaemonRequest::Shutdown).unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::ShutdownAck { pid: 4242 }
+        ));
+        let line = line_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(line.starts_with(r#"{"op":"shutdown"}"#));
+    }
+
+    #[test]
+    fn send_daemon_request_uses_prost_wire_when_requested() {
+        let _guard = EnvGuard::set(super::super::wire_prost::ENV_DAEMON_WIRE, "prost");
+        let tmp = tempfile::tempdir().unwrap();
+        let (port, line_rx) = spawn_shutdown_ack_peer();
+        write_daemon_info(tmp.path(), std::process::id(), port);
+
+        let response = send_daemon_request(tmp.path(), &DaemonRequest::Shutdown).unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::ShutdownAck { pid: 4242 }
+        ));
+        let line = line_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(line.starts_with("CLUD-FRAME/1 434c5544 "));
     }
 
     #[test]
@@ -678,5 +761,51 @@ mod tests {
             !daemon_info_path(tmp.path()).exists(),
             "stale daemon.json should be removed"
         );
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn lock() -> std::sync::MutexGuard<'static, ()> {
+            static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+            LOCK.get_or_init(|| std::sync::Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = Self::lock();
+            let prior = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let lock = Self::lock();
+            let prior = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }

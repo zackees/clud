@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,13 +18,16 @@ use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
 };
 use super::http::{default_live_sessions_provider, spawn_dashboard};
-use super::io_helpers::{new_session_id, read_json_file, write_json_file, write_json_line};
+use super::io_helpers::{new_session_id, read_json_file, write_json_file};
 use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::sessions::list_live_session_cwds;
 use super::types::{
     unix_millis_now, CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcReply,
     SessionSnapshot, WorkerLaunchSpec,
+};
+use super::wire_prost::{
+    decode_daemon_request_line, encode_daemon_response_line, DaemonWireFormat, WireError,
 };
 
 fn current_unix() -> i64 {
@@ -148,8 +151,7 @@ fn handle_daemon_connection(
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
     }
-    let request: DaemonRequest = serde_json::from_str(&line)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
     let response = match request {
         DaemonRequest::Create { spec } => match daemon_create_session(state_dir, workers, *spec) {
             Ok(session) => DaemonResponse::Created { session },
@@ -201,12 +203,26 @@ fn handle_daemon_connection(
         },
     };
     let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
-    let result = write_json_line(&mut stream, &response);
+    let result = write_daemon_response(&mut stream, &response, response_format);
     if is_shutdown {
         let _ = stream.shutdown(std::net::Shutdown::Write);
         shutdown_requested.store(true, Ordering::SeqCst);
     }
     result
+}
+
+fn write_daemon_response(
+    stream: &mut TcpStream,
+    response: &DaemonResponse,
+    format: DaemonWireFormat,
+) -> io::Result<()> {
+    let bytes = encode_daemon_response_line(response, format).map_err(wire_error_to_io)?;
+    stream.write_all(&bytes)?;
+    stream.flush()
+}
+
+fn wire_error_to_io(err: WireError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
 /// Hand a GC op to the registry worker and await the reply. Returns a
