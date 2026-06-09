@@ -11,9 +11,8 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 
 use super::client::{
     ensure_daemon, request_session_interrupt, send_daemon_request, send_worker_message,
-    shutdown_worker_connection,
+    shutdown_worker_connection, write_worker_message,
 };
-use super::io_helpers::write_json_line;
 use super::keys::translate_key_event;
 use super::process_utils::pid_is_alive;
 use super::sessions::resolve_session_id;
@@ -22,6 +21,7 @@ use super::types::{
     KeyAction, LocalAttachResult, LocalInterruptProfile, RawTerminalGuard, SessionKind,
     SessionSnapshot, WorkerClientMessage, WorkerServerMessage, BACKGROUND_PROMPT_TIMEOUT,
 };
+use super::wire_prost::{daemon_wire_format_from_env, decode_worker_server_line, DaemonWireFormat};
 use crate::session::{InteractiveHooks, PtyInputSink};
 use crate::voice::VoiceMode;
 
@@ -35,6 +35,7 @@ const INTERRUPT_EXIT_GRACE: Duration = Duration::from_millis(500);
 /// and is forwarded to the PTY master alongside real keystrokes.
 struct WorkerInputSink {
     writer: Arc<Mutex<TcpStream>>,
+    format: DaemonWireFormat,
 }
 
 impl PtyInputSink for WorkerInputSink {
@@ -43,7 +44,7 @@ impl PtyInputSink for WorkerInputSink {
             data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
             submit,
         };
-        send_worker_message(&self.writer, &msg)
+        send_worker_message(&self.writer, &msg, self.format)
     }
 }
 
@@ -102,6 +103,13 @@ pub(super) fn attach_to_session(
     session: &SessionSnapshot,
     interrupted: &AtomicBool,
 ) -> i32 {
+    let format = match daemon_wire_format_from_env() {
+        Ok(format) => format,
+        Err(err) => {
+            eprintln!("[clud] {err}");
+            return 1;
+        }
+    };
     let started = Instant::now();
     let attach_retry_window = Duration::from_secs(5);
     let (writer, mut reader) = loop {
@@ -125,13 +133,14 @@ pub(super) fn attach_to_session(
         let terminal =
             matches!(session.kind, SessionKind::Pty).then(crate::graphics::detect_current_terminal);
         let (rows, cols) = super::io_helpers::terminal_dimensions();
-        if let Err(err) = write_json_line(
+        if let Err(err) = write_worker_message(
             &mut stream,
             &WorkerClientMessage::Attach {
                 terminal,
                 rows: Some(rows),
                 cols: Some(cols),
             },
+            format,
         ) {
             eprintln!("[clud] failed to attach to session {}: {}", session.id, err);
             return 1;
@@ -175,7 +184,7 @@ pub(super) fn attach_to_session(
             }
         }
 
-        let message = match serde_json::from_str::<WorkerServerMessage>(&line) {
+        let message = match decode_worker_server_line(&line) {
             Ok(message) => message,
             Err(err) => {
                 eprintln!(
@@ -222,7 +231,7 @@ pub(super) fn attach_to_session(
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                let Ok(message) = serde_json::from_str::<WorkerServerMessage>(&line) else {
+                let Ok(message) = decode_worker_server_line(&line) else {
                     continue;
                 };
                 match message {
@@ -254,7 +263,7 @@ pub(super) fn attach_to_session(
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
     {
-        run_remote_interactive(Arc::clone(&writer), interrupted, session.detachable)
+        run_remote_interactive(Arc::clone(&writer), format, interrupted, session.detachable)
     } else {
         wait_for_remote_or_interrupt(&exit_code, interrupted)
     };
@@ -272,12 +281,18 @@ pub(super) fn attach_to_session(
                     }
                     BackgroundPromptDecision::EndSession => {
                         eprintln!("[clud] ending session {}", session.id);
-                        send_interrupt_fast_path(state_dir, &session.id, &writer, interrupt);
+                        send_interrupt_fast_path(
+                            state_dir,
+                            &session.id,
+                            &writer,
+                            format,
+                            interrupt,
+                        );
                         (130, false)
                     }
                 }
             } else {
-                send_interrupt_fast_path(state_dir, &session.id, &writer, interrupt);
+                send_interrupt_fast_path(state_dir, &session.id, &writer, format, interrupt);
                 (130, false)
             }
         }
@@ -301,6 +316,7 @@ fn send_interrupt_fast_path(
     state_dir: &Path,
     session_id: &str,
     writer: &Arc<Mutex<TcpStream>>,
+    format: DaemonWireFormat,
     interrupt: LocalInterruptProfile,
 ) {
     let now = unix_millis_now();
@@ -320,6 +336,7 @@ fn send_interrupt_fast_path(
             &WorkerClientMessage::Interrupt {
                 profile: Some(profile),
             },
+            format,
         ) {
             eprintln!("[clud] warning: failed to hand Ctrl+C to daemon worker: {err}");
         }
@@ -329,6 +346,7 @@ fn send_interrupt_fast_path(
 
 fn run_remote_interactive(
     writer: Arc<Mutex<TcpStream>>,
+    format: DaemonWireFormat,
     interrupted: &AtomicBool,
     _detachable: bool,
 ) -> LocalAttachResult {
@@ -351,6 +369,7 @@ fn run_remote_interactive(
     let mut voice = VoiceMode::from_env();
     let mut sink = WorkerInputSink {
         writer: Arc::clone(&writer),
+        format,
     };
 
     // Issue #79: register the console IDropTarget so dropped paths reach
@@ -377,6 +396,7 @@ fn run_remote_interactive(
                                 data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
                                 submit,
                             },
+                            format,
                         );
                     }
                     KeyAction::Interrupt => {
@@ -406,11 +426,15 @@ fn run_remote_interactive(
                                 .encode(text.as_bytes()),
                             submit: false,
                         },
+                        format,
                     );
                 }
                 Ok(Event::Resize(cols, rows)) => {
-                    let _ =
-                        send_worker_message(&writer, &WorkerClientMessage::Resize { rows, cols });
+                    let _ = send_worker_message(
+                        &writer,
+                        &WorkerClientMessage::Resize { rows, cols },
+                        format,
+                    );
                 }
                 Ok(_) => {}
                 Err(_) => return LocalAttachResult::Completed(1),
@@ -439,6 +463,7 @@ fn run_remote_interactive(
                         data_b64: base64::engine::general_purpose::STANDARD.encode(&chunk),
                         submit: false,
                     },
+                    format,
                 );
             }
         }
