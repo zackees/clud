@@ -749,6 +749,11 @@ fn persist_snapshot(
     shared.persist_current_snapshot()
 }
 
+// Silence import warnings for items consumed only by the `Write` trait or
+// other macros above (none here currently).
+#[allow(unused_imports)]
+use Write as _;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,8 +937,3 @@ mod tests {
         assert!(handle.join().unwrap().is_ok());
     }
 }
-
-// Silence import warnings for items consumed only by the `Write` trait or
-// other macros above (none here currently).
-#[allow(unused_imports)]
-use Write as _;
