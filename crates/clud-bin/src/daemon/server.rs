@@ -543,7 +543,12 @@ mod tests {
     use std::io::{BufRead, Write};
     use std::net::TcpStream;
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    const PROST_PERF_BUDGET_NUMERATOR: u128 = 120;
+    const PROST_PERF_BUDGET_DENOMINATOR: u128 = 100;
+    const DAEMON_WIRE_PERF_WARMUP_SAMPLES: usize = 2;
+    const DAEMON_WIRE_PERF_MEASURED_SAMPLES: usize = 9;
 
     fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -577,6 +582,26 @@ mod tests {
         reader.read_line(&mut line).unwrap();
         let response = decode_daemon_response_line(&line).unwrap();
         (response, line)
+    }
+
+    fn timed_daemon_request_line(
+        state_dir: &Path,
+        request: &DaemonRequest,
+        format: DaemonWireFormat,
+    ) -> (DaemonResponse, String, Duration) {
+        let started = Instant::now();
+        let (response, line) = send_daemon_request_line(state_dir, request, format);
+        (response, line, started.elapsed())
+    }
+
+    fn median_duration(samples: &mut [Duration]) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn scaled_duration(sample: Duration, numerator: u128, denominator: u128) -> Duration {
+        let nanos = sample.as_nanos().saturating_mul(numerator) / denominator;
+        Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
     }
 
     fn send_raw_daemon_request_line(state_dir: &Path, request_line: &str) -> String {
@@ -691,6 +716,95 @@ mod tests {
             !daemon_info_path(&state_dir).exists(),
             "daemon should remove daemon.json during raw JSON shutdown"
         );
+    }
+
+    #[test]
+    fn prost_daemon_wire_list_rpc_stays_within_json_latency_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let daemon_state_dir = state_dir.clone();
+        let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+
+        wait_for_daemon_ready(&state_dir);
+        for _ in 0..DAEMON_WIRE_PERF_WARMUP_SAMPLES {
+            let (json_response, _) = send_daemon_request_line(
+                &state_dir,
+                &DaemonRequest::ListLiveCwds,
+                DaemonWireFormat::Json,
+            );
+            assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
+            let (prost_response, _) = send_daemon_request_line(
+                &state_dir,
+                &DaemonRequest::ListLiveCwds,
+                DaemonWireFormat::Prost,
+            );
+            assert!(matches!(prost_response, DaemonResponse::LiveCwds { .. }));
+        }
+
+        let mut json_samples = Vec::with_capacity(DAEMON_WIRE_PERF_MEASURED_SAMPLES);
+        let mut prost_samples = Vec::with_capacity(DAEMON_WIRE_PERF_MEASURED_SAMPLES);
+        for sample in 0..DAEMON_WIRE_PERF_MEASURED_SAMPLES {
+            if sample % 2 == 0 {
+                let (json_response, _, json_elapsed) = timed_daemon_request_line(
+                    &state_dir,
+                    &DaemonRequest::ListLiveCwds,
+                    DaemonWireFormat::Json,
+                );
+                assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
+                json_samples.push(json_elapsed);
+
+                let (prost_response, _, prost_elapsed) = timed_daemon_request_line(
+                    &state_dir,
+                    &DaemonRequest::ListLiveCwds,
+                    DaemonWireFormat::Prost,
+                );
+                assert!(matches!(prost_response, DaemonResponse::LiveCwds { .. }));
+                prost_samples.push(prost_elapsed);
+            } else {
+                let (prost_response, _, prost_elapsed) = timed_daemon_request_line(
+                    &state_dir,
+                    &DaemonRequest::ListLiveCwds,
+                    DaemonWireFormat::Prost,
+                );
+                assert!(matches!(prost_response, DaemonResponse::LiveCwds { .. }));
+                prost_samples.push(prost_elapsed);
+
+                let (json_response, _, json_elapsed) = timed_daemon_request_line(
+                    &state_dir,
+                    &DaemonRequest::ListLiveCwds,
+                    DaemonWireFormat::Json,
+                );
+                assert!(matches!(json_response, DaemonResponse::LiveCwds { .. }));
+                json_samples.push(json_elapsed);
+            }
+        }
+
+        let json_median = median_duration(&mut json_samples);
+        let prost_median = median_duration(&mut prost_samples);
+        let budget = scaled_duration(
+            json_median,
+            PROST_PERF_BUDGET_NUMERATOR,
+            PROST_PERF_BUDGET_DENOMINATOR,
+        );
+        assert!(
+            prost_median <= budget,
+            "prost ListLiveCwds median latency {prost_median:?} exceeded 20% JSON budget {budget:?}; JSON median {json_median:?}; JSON samples {json_samples:?}; prost samples {prost_samples:?}"
+        );
+
+        let (shutdown_response, shutdown_line) = send_daemon_request_line(
+            &state_dir,
+            &DaemonRequest::Shutdown,
+            DaemonWireFormat::Prost,
+        );
+        assert!(matches!(
+            shutdown_response,
+            DaemonResponse::ShutdownAck { pid } if pid == std::process::id()
+        ));
+        assert!(
+            shutdown_line.starts_with("CLUD-FRAME/1 434c5544 "),
+            "prost shutdown should receive a prost daemon response: {shutdown_line:?}"
+        );
+        assert_eq!(daemon_thread.join().unwrap(), 0);
     }
 
     #[test]
