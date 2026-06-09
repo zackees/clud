@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn send_daemon_request_defaults_to_legacy_json_wire() {
+    fn send_daemon_request_defaults_to_prost_wire() {
         let _guard = EnvGuard::unset(super::super::wire_prost::ENV_DAEMON_WIRE);
         let tmp = tempfile::tempdir().unwrap();
         let (port, line_rx) = spawn_shutdown_ack_peer();
@@ -717,12 +717,12 @@ mod tests {
             DaemonResponse::ShutdownAck { pid: 4242 }
         ));
         let line = line_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(line.starts_with(r#"{"op":"shutdown"}"#));
+        assert!(line.starts_with("CLUD-FRAME/1 434c5544 "));
     }
 
     #[test]
-    fn send_daemon_request_uses_prost_wire_when_requested() {
-        let _guard = EnvGuard::set(super::super::wire_prost::ENV_DAEMON_WIRE, "prost");
+    fn send_daemon_request_uses_legacy_json_wire_when_requested() {
+        let _guard = EnvGuard::set(super::super::wire_prost::ENV_DAEMON_WIRE, "json");
         let tmp = tempfile::tempdir().unwrap();
         let (port, line_rx) = spawn_shutdown_ack_peer();
         write_daemon_info(tmp.path(), std::process::id(), port);
@@ -733,7 +733,7 @@ mod tests {
             DaemonResponse::ShutdownAck { pid: 4242 }
         ));
         let line = line_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(line.starts_with("CLUD-FRAME/1 434c5544 "));
+        assert!(line.starts_with(r#"{"op":"shutdown"}"#));
     }
 
     #[test]

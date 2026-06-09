@@ -23,8 +23,8 @@ pub(super) const CLUD_PROST_PAYLOAD_PROTOCOL: u32 = 0x434c_5544;
 /// ASCII "CLJS" in a u32. This names the legacy JSON payload path while the
 /// migration runs with both encoders available.
 pub(super) const CLUD_JSON_PAYLOAD_PROTOCOL: u32 = 0x434c_4a53;
-/// Selects the daemon RPC line format. Unset or `json` keeps the legacy JSON
-/// line protocol; `prost` opts into the v1 prost frame envelope.
+/// Selects the daemon RPC line format. Unset or empty defaults to the v1
+/// prost frame envelope; `json` keeps the legacy JSON line protocol available.
 pub(super) const ENV_DAEMON_WIRE: &str = "CLUD_DAEMON_WIRE";
 
 const DAEMON_FRAME_LINE_PREFIX: &str = "CLUD-FRAME/1 ";
@@ -44,11 +44,11 @@ pub(super) enum DaemonWireFormat {
 impl DaemonWireFormat {
     fn from_env_value(value: Option<&str>) -> Result<Self, WireError> {
         let Some(raw) = value else {
-            return Ok(Self::Json);
+            return Ok(Self::Prost);
         };
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Ok(Self::Json);
+            return Ok(Self::Prost);
         }
         match trimmed.to_ascii_lowercase().as_str() {
             "json" | "legacy" | "legacy-json" => Ok(Self::Json),
@@ -824,14 +824,14 @@ mod tests {
     }
 
     #[test]
-    fn daemon_wire_format_env_values_default_to_json() {
+    fn daemon_wire_format_env_values_default_to_prost() {
         assert_eq!(
             DaemonWireFormat::from_env_value(None).unwrap(),
-            DaemonWireFormat::Json
+            DaemonWireFormat::Prost
         );
         assert_eq!(
             DaemonWireFormat::from_env_value(Some("")).unwrap(),
-            DaemonWireFormat::Json
+            DaemonWireFormat::Prost
         );
         assert_eq!(
             DaemonWireFormat::from_env_value(Some("legacy-json")).unwrap(),
