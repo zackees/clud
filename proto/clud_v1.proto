@@ -91,10 +91,12 @@ message ShutdownRequest {}
 
 message CreatedResponse {
   bytes session_json = 1;
+  SessionSnapshot session = 2;
 }
 
 message SessionResponse {
   bytes session_json = 1;
+  SessionSnapshot session = 2;
 }
 
 message LiveCwdsResponse {
@@ -103,10 +105,12 @@ message LiveCwdsResponse {
 
 message TerminatedResponse {
   bytes session_json = 1;
+  SessionSnapshot session = 2;
 }
 
 message InterruptedResponse {
   bytes session_json = 1;
+  SessionSnapshot session = 2;
 }
 
 message AdoptKillAckResponse {
@@ -148,6 +152,7 @@ message WorkerInterruptRequest {
 
 message WorkerAttachedResponse {
   bytes session_json = 1;
+  SessionSnapshot session = 2;
 }
 
 message WorkerOutputResponse {
@@ -160,6 +165,32 @@ message WorkerExitedResponse {
 
 message WorkerErrorResponse {
   string message = 1;
+}
+
+message SessionSnapshot {
+  string id = 1;
+  SessionKind kind = 2;
+  optional string cwd = 3;
+  optional string name = 4;
+  optional uint64 created_at = 5;
+  optional bool detachable = 6;
+  optional bool background = 7;
+  optional bool attachable = 8;
+  optional uint64 repeat_interval_secs = 9;
+  optional uint64 repeat_next_run_at = 10;
+  optional bool repeat_running = 11;
+  uint32 daemon_pid = 12;
+  uint32 worker_pid = 13;
+  uint32 worker_port = 14;
+  optional uint32 root_pid = 15;
+  optional int32 exit_code = 16;
+  optional CtrlCProfile ctrl_c = 17;
+}
+
+enum SessionKind {
+  SESSION_KIND_UNSPECIFIED = 0;
+  SESSION_KIND_SUBPROCESS = 1;
+  SESSION_KIND_PTY = 2;
 }
 
 message CtrlCProfile {
