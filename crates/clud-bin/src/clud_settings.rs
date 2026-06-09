@@ -45,6 +45,70 @@ pub fn settings_path_at(home: &Path) -> PathBuf {
     home.join(CLUD_DIR_NAME).join(SETTINGS_FILE_NAME)
 }
 
+pub fn load_auto_fix_hooks_enabled() -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_auto_fix_hooks_enabled_at(&home)
+}
+
+pub fn load_auto_fix_hooks_enabled_at(home: &Path) -> Result<bool, SettingsError> {
+    let path = settings_path_at(home);
+    if !path.exists() {
+        return Ok(true);
+    }
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let text = fs::read_to_string(&path)?;
+    if text.trim().is_empty() {
+        return Ok(true);
+    }
+    let document = parse_settings(&path, &text)?;
+    Ok(document
+        .get("hook_health")
+        .and_then(|item| item.get("auto_fix_hooks"))
+        .and_then(Item::as_bool)
+        .unwrap_or(true))
+}
+
+pub fn save_auto_fix_hooks_enabled(enabled: bool) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_auto_fix_hooks_enabled_at(&home, enabled)
+}
+
+pub fn save_auto_fix_hooks_enabled_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    fs::create_dir_all(&clud_dir)?;
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+
+    let path = settings_path_at(home);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(SettingsError::Io(error)),
+    };
+    let mut document = if text.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        parse_settings(&path, &text)?
+    };
+
+    if document
+        .get("hook_health")
+        .and_then(Item::as_table)
+        .is_none()
+    {
+        document["hook_health"] = table();
+    }
+    document["hook_health"]["auto_fix_hooks"] = value(enabled);
+
+    let mut body = document.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    Ok(())
+}
+
 pub fn load_launch_setup_scope(
     backend: Backend,
 ) -> Result<Option<LaunchSetupScope>, SettingsError> {
@@ -196,6 +260,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_settings_file_defaults_auto_fix_hooks_enabled() {
+        let home = tempdir().unwrap();
+        assert!(load_auto_fix_hooks_enabled_at(home.path()).unwrap());
+    }
+
+    #[test]
+    fn saves_auto_fix_hooks_sticky_opt_out_and_reset() {
+        let home = tempdir().unwrap();
+
+        save_auto_fix_hooks_enabled_at(home.path(), false).unwrap();
+        assert!(!load_auto_fix_hooks_enabled_at(home.path()).unwrap());
+
+        save_auto_fix_hooks_enabled_at(home.path(), true).unwrap();
+        assert!(load_auto_fix_hooks_enabled_at(home.path()).unwrap());
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        assert!(text.contains("[hook_health]"), "{text}");
+        assert!(text.contains("auto_fix_hooks = true"), "{text}");
+    }
+
+    #[test]
     fn saves_launch_setup_scope_per_backend() {
         let home = tempdir().unwrap();
 
@@ -238,5 +323,26 @@ mod tests {
         assert!(text.contains("value = \"kept\""), "{text}");
         assert!(text.contains("[launch_setup.claude]"), "{text}");
         assert!(text.contains("[launch_setup.codex]"), "{text}");
+    }
+
+    #[test]
+    fn auto_fix_hooks_setting_preserves_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "[unrelated]\nvalue = \"kept\"\n\n[launch_setup.codex]\nscope = \"global\"\n",
+        )
+        .unwrap();
+
+        save_auto_fix_hooks_enabled_at(home.path(), false).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("[unrelated]"), "{text}");
+        assert!(text.contains("value = \"kept\""), "{text}");
+        assert!(text.contains("[launch_setup.codex]"), "{text}");
+        assert!(text.contains("[hook_health]"), "{text}");
+        assert!(text.contains("auto_fix_hooks = false"), "{text}");
     }
 }
