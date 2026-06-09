@@ -8,7 +8,7 @@ use prost::Message;
 use serde::{de::DeserializeOwned, Serialize};
 
 use super::types::{
-    CtrlCProfile, DaemonRequest, DaemonResponse, GcOp, GcReply, SessionSnapshot,
+    CtrlCProfile, DaemonRequest, DaemonResponse, GcOp, GcReply, SessionKind, SessionSnapshot,
     WorkerClientMessage, WorkerLaunchSpec, WorkerServerMessage,
 };
 
@@ -67,6 +67,7 @@ pub(super) enum WireError {
     Json(serde_json::Error),
     Base64(base64::DecodeError),
     Decode(prost::DecodeError),
+    InvalidSessionKind(i32),
     U16OutOfRange { field: &'static str, value: u32 },
 }
 
@@ -89,6 +90,9 @@ impl fmt::Display for WireError {
             Self::Json(err) => write!(f, "json conversion failed: {err}"),
             Self::Base64(err) => write!(f, "frame payload base64 decode failed: {err}"),
             Self::Decode(err) => write!(f, "prost decode failed: {err}"),
+            Self::InvalidSessionKind(value) => {
+                write!(f, "invalid session kind enum value {value}")
+            }
             Self::U16OutOfRange { field, value } => {
                 write!(f, "{field} value {value} exceeds u16::MAX")
             }
@@ -416,9 +420,11 @@ fn daemon_response_to_proto(
     let response = match response {
         DaemonResponse::Created { session } => Response::Created(proto::CreatedResponse {
             session_json: to_json_vec(session)?,
+            session: Some(session_to_proto(session)),
         }),
         DaemonResponse::Session { session } => Response::Session(proto::SessionResponse {
             session_json: to_json_vec(session)?,
+            session: Some(session_to_proto(session)),
         }),
         DaemonResponse::LiveCwds { paths } => Response::LiveCwds(proto::LiveCwdsResponse {
             paths: paths
@@ -428,10 +434,12 @@ fn daemon_response_to_proto(
         }),
         DaemonResponse::Terminated { session } => Response::Terminated(proto::TerminatedResponse {
             session_json: to_json_vec(session)?,
+            session: Some(session_to_proto(session)),
         }),
         DaemonResponse::Interrupted { session } => {
             Response::Interrupted(proto::InterruptedResponse {
                 session_json: to_json_vec(session)?,
+                session: Some(session_to_proto(session)),
             })
         }
         DaemonResponse::AdoptKillAck { accepted } => {
@@ -462,19 +470,19 @@ fn daemon_response_from_proto(proto: proto::DaemonToClient) -> Result<DaemonResp
         .ok_or(WireError::MissingPayload("daemon response"))?
     {
         Response::Created(created) => Ok(DaemonResponse::Created {
-            session: from_json_slice::<SessionSnapshot>(&created.session_json)?,
+            session: session_from_proto_or_json(created.session, &created.session_json)?,
         }),
         Response::Session(session) => Ok(DaemonResponse::Session {
-            session: from_json_slice::<SessionSnapshot>(&session.session_json)?,
+            session: session_from_proto_or_json(session.session, &session.session_json)?,
         }),
         Response::LiveCwds(live) => Ok(DaemonResponse::LiveCwds {
             paths: live.paths.into_iter().map(PathBuf::from).collect(),
         }),
         Response::Terminated(terminated) => Ok(DaemonResponse::Terminated {
-            session: from_json_slice::<SessionSnapshot>(&terminated.session_json)?,
+            session: session_from_proto_or_json(terminated.session, &terminated.session_json)?,
         }),
         Response::Interrupted(interrupted) => Ok(DaemonResponse::Interrupted {
-            session: from_json_slice::<SessionSnapshot>(&interrupted.session_json)?,
+            session: session_from_proto_or_json(interrupted.session, &interrupted.session_json)?,
         }),
         Response::AdoptKillAck(ack) => Ok(DaemonResponse::AdoptKillAck {
             accepted: ack.accepted as usize,
@@ -569,6 +577,7 @@ fn worker_server_to_proto(
         WorkerServerMessage::Attached { session } => {
             Message::Attached(proto::WorkerAttachedResponse {
                 session_json: to_json_vec(session.as_ref())?,
+                session: Some(session_to_proto(session.as_ref())),
             })
         }
         WorkerServerMessage::Output { data_b64 } => Message::Output(proto::WorkerOutputResponse {
@@ -595,7 +604,10 @@ fn worker_server_from_proto(
         .ok_or(WireError::MissingPayload("worker server message"))?
     {
         Message::Attached(attached) => Ok(WorkerServerMessage::Attached {
-            session: Box::new(from_json_slice::<SessionSnapshot>(&attached.session_json)?),
+            session: Box::new(session_from_proto_or_json(
+                attached.session,
+                &attached.session_json,
+            )?),
         }),
         Message::Output(output) => Ok(WorkerServerMessage::Output {
             data_b64: output.data_b64,
@@ -606,6 +618,76 @@ fn worker_server_from_proto(
         Message::Error(error) => Ok(WorkerServerMessage::Error {
             message: error.message,
         }),
+    }
+}
+
+fn session_to_proto(session: &SessionSnapshot) -> proto::SessionSnapshot {
+    proto::SessionSnapshot {
+        id: session.id.clone(),
+        kind: session_kind_to_proto(&session.kind),
+        cwd: session.cwd.clone(),
+        name: session.name.clone(),
+        created_at: session.created_at,
+        detachable: Some(session.detachable),
+        background: Some(session.background),
+        attachable: Some(session.attachable),
+        repeat_interval_secs: session.repeat_interval_secs,
+        repeat_next_run_at: session.repeat_next_run_at,
+        repeat_running: Some(session.repeat_running),
+        daemon_pid: session.daemon_pid,
+        worker_pid: session.worker_pid,
+        worker_port: u32::from(session.worker_port),
+        root_pid: session.root_pid,
+        exit_code: session.exit_code,
+        ctrl_c: session.ctrl_c.as_ref().map(profile_to_proto),
+    }
+}
+
+fn session_from_proto(session: proto::SessionSnapshot) -> Result<SessionSnapshot, WireError> {
+    Ok(SessionSnapshot {
+        id: session.id,
+        kind: session_kind_from_proto(session.kind)?,
+        cwd: session.cwd,
+        name: session.name,
+        created_at: session.created_at,
+        detachable: session.detachable.unwrap_or(false),
+        background: session.background.unwrap_or(false),
+        attachable: session.attachable.unwrap_or(true),
+        repeat_interval_secs: session.repeat_interval_secs,
+        repeat_next_run_at: session.repeat_next_run_at,
+        repeat_running: session.repeat_running.unwrap_or(false),
+        daemon_pid: session.daemon_pid,
+        worker_pid: session.worker_pid,
+        worker_port: u16_field("session.worker_port", session.worker_port)?,
+        root_pid: session.root_pid,
+        exit_code: session.exit_code,
+        ctrl_c: session.ctrl_c.map(profile_from_proto),
+    })
+}
+
+fn session_from_proto_or_json(
+    session: Option<proto::SessionSnapshot>,
+    session_json: &[u8],
+) -> Result<SessionSnapshot, WireError> {
+    match session {
+        Some(session) => session_from_proto(session),
+        None => from_json_slice::<SessionSnapshot>(session_json),
+    }
+}
+
+fn session_kind_to_proto(kind: &SessionKind) -> i32 {
+    match kind {
+        SessionKind::Subprocess => 1,
+        SessionKind::Pty => 2,
+    }
+}
+
+fn session_kind_from_proto(kind: i32) -> Result<SessionKind, WireError> {
+    match kind {
+        1 => Ok(SessionKind::Subprocess),
+        2 => Ok(SessionKind::Pty),
+        0 => Err(WireError::MissingPayload("session kind")),
+        other => Err(WireError::InvalidSessionKind(other)),
     }
 }
 
@@ -867,6 +949,129 @@ mod tests {
             let decoded = decode_daemon_response(&frame).unwrap();
             assert_json_parity(&response, &decoded);
         }
+    }
+
+    #[test]
+    fn daemon_session_responses_encode_typed_snapshot_and_json_mirror() {
+        let session = sample_snapshot();
+        let cases = vec![
+            DaemonResponse::Created {
+                session: session.clone(),
+            },
+            DaemonResponse::Session {
+                session: session.clone(),
+            },
+            DaemonResponse::Terminated {
+                session: session.clone(),
+            },
+            DaemonResponse::Interrupted { session },
+        ];
+
+        for response in cases {
+            let frame = encode_daemon_response_prost(&response, "req-typed").unwrap();
+            let envelope = proto::DaemonToClient::decode(frame.payload.as_slice()).unwrap();
+            let response = envelope.response.unwrap();
+            match response {
+                proto::daemon_to_client::Response::Created(created) => {
+                    assert!(!created.session_json.is_empty());
+                    assert_eq!(created.session.unwrap().id, "sess-test");
+                }
+                proto::daemon_to_client::Response::Session(session) => {
+                    assert!(!session.session_json.is_empty());
+                    assert_eq!(session.session.unwrap().id, "sess-test");
+                }
+                proto::daemon_to_client::Response::Terminated(terminated) => {
+                    assert!(!terminated.session_json.is_empty());
+                    assert_eq!(terminated.session.unwrap().id, "sess-test");
+                }
+                proto::daemon_to_client::Response::Interrupted(interrupted) => {
+                    assert!(!interrupted.session_json.is_empty());
+                    assert_eq!(interrupted.session.unwrap().id, "sess-test");
+                }
+                other => panic!("unexpected response payload: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn worker_attached_response_encodes_typed_snapshot_and_json_mirror() {
+        let message = WorkerServerMessage::Attached {
+            session: Box::new(sample_snapshot()),
+        };
+        let frame = encode_worker_server_prost(&message).unwrap();
+        let envelope = proto::WorkerServerEnvelope::decode(frame.payload.as_slice()).unwrap();
+        let proto::worker_server_envelope::Message::Attached(attached) = envelope.message.unwrap()
+        else {
+            panic!("expected attached worker payload");
+        };
+        assert!(!attached.session_json.is_empty());
+        assert_eq!(attached.session.unwrap().id, "sess-test");
+    }
+
+    #[test]
+    fn daemon_session_responses_decode_legacy_json_only_snapshots() {
+        let session = sample_snapshot();
+        let session_json = to_json_vec(&session).unwrap();
+        let cases = vec![
+            proto::daemon_to_client::Response::Created(proto::CreatedResponse {
+                session_json: session_json.clone(),
+                session: None,
+            }),
+            proto::daemon_to_client::Response::Session(proto::SessionResponse {
+                session_json: session_json.clone(),
+                session: None,
+            }),
+            proto::daemon_to_client::Response::Terminated(proto::TerminatedResponse {
+                session_json: session_json.clone(),
+                session: None,
+            }),
+            proto::daemon_to_client::Response::Interrupted(proto::InterruptedResponse {
+                session_json,
+                session: None,
+            }),
+        ];
+
+        for response in cases {
+            let frame = prost_frame(
+                proto::DaemonToClient {
+                    response: Some(response),
+                    request_id: "legacy-json-only".to_string(),
+                }
+                .encode_to_vec(),
+            );
+            let decoded = decode_daemon_response(&frame).unwrap();
+            match decoded {
+                DaemonResponse::Created { session }
+                | DaemonResponse::Session { session }
+                | DaemonResponse::Terminated { session }
+                | DaemonResponse::Interrupted { session } => {
+                    assert_eq!(session.id, "sess-test");
+                    assert_eq!(session.worker_port, 9020);
+                }
+                other => panic!("unexpected decoded response: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn worker_attached_response_decodes_legacy_json_only_snapshot() {
+        let frame = prost_frame(
+            proto::WorkerServerEnvelope {
+                message: Some(proto::worker_server_envelope::Message::Attached(
+                    proto::WorkerAttachedResponse {
+                        session_json: to_json_vec(&sample_snapshot()).unwrap(),
+                        session: None,
+                    },
+                )),
+            }
+            .encode_to_vec(),
+        );
+        let decoded = decode_worker_server(&frame).unwrap();
+        let WorkerServerMessage::Attached { session } = decoded else {
+            panic!("expected attached worker payload");
+        };
+        assert_eq!(session.id, "sess-test");
+        assert_eq!(session.worker_port, 9020);
     }
 
     #[test]
