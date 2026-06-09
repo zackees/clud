@@ -1,6 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
-use std::net::TcpStream;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,14 +19,6 @@ pub(super) fn child_env() -> Vec<(String, String)> {
         format!("CLUD:{}", std::process::id()),
     ));
     env
-}
-
-pub(super) fn write_json_line<T: Serialize>(writer: &mut TcpStream, value: &T) -> io::Result<()> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    writer.write_all(&bytes)?;
-    writer.write_all(b"\n")?;
-    writer.flush()
 }
 
 pub(super) fn write_json_file<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {

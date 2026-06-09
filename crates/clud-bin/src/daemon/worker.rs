@@ -15,12 +15,15 @@ use crate::graphics::GraphicsConfig;
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
-use super::io_helpers::{child_env, read_json_file, write_json_line};
+use super::io_helpers::{child_env, read_json_file};
 use super::paths::spec_path;
 use super::process_utils::pid_is_alive;
 use super::types::{
     CtrlCProfile, SessionKind, SessionRuntime, SessionSnapshot, WorkerClientMessage,
     WorkerLaunchSpec, WorkerServerMessage, DEFAULT_BACKLOG_LIMIT_BYTES,
+};
+use super::wire_prost::{
+    decode_worker_client_line, encode_worker_server_line, DaemonWireFormat, WireError,
 };
 use super::worker_shared::WorkerShared;
 
@@ -488,8 +491,7 @@ fn handle_worker_client(
     if read_worker_line(&mut reader, &mut line, None)? == 0 {
         return Ok(());
     }
-    let message: WorkerClientMessage = serde_json::from_str(&line)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let (message, format) = decode_worker_client_line(&line).map_err(worker_wire_error_to_io)?;
     let (terminal, attach_rows, attach_cols) = match message {
         WorkerClientMessage::Attach {
             terminal,
@@ -503,11 +505,12 @@ fn handle_worker_client(
         WorkerClientMessage::Input { .. }
         | WorkerClientMessage::Resize { .. }
         | WorkerClientMessage::Interrupt { .. } => {
-            return write_json_line(
+            return write_worker_server_line(
                 &mut stream,
                 &WorkerServerMessage::Error {
                     message: "expected attach handshake".to_string(),
                 },
+                format,
             );
         }
     };
@@ -517,15 +520,20 @@ fn handle_worker_client(
     let (client_id, rx, snapshot, backlog) = match shared.attach_client(shutdown_handle) {
         Ok(values) => values,
         Err(message) => {
-            return write_json_line(&mut stream, &WorkerServerMessage::Error { message });
+            return write_worker_server_line(
+                &mut stream,
+                &WorkerServerMessage::Error { message },
+                format,
+            );
         }
     };
     let mut writer = stream.try_clone()?;
-    write_json_line(
+    write_worker_server_line(
         &mut writer,
         &WorkerServerMessage::Attached {
             session: Box::new(snapshot.clone()),
         },
+        format,
     )?;
     let mut header_restore = None;
     if is_pty {
@@ -535,12 +543,13 @@ fn handle_worker_client(
                 Ok(Some(header)) => {
                     runtime.resize(header.text_rows, attach_cols);
                     shared.resize_capture(header.text_rows, attach_cols);
-                    write_json_line(
+                    write_worker_server_line(
                         &mut writer,
                         &WorkerServerMessage::Output {
                             data_b64: base64::engine::general_purpose::STANDARD
                                 .encode(&header.bytes),
                         },
+                        format,
                     )?;
                     header_restore = Some(header.restore_bytes);
                 }
@@ -552,23 +561,29 @@ fn handle_worker_client(
         }
     }
     for chunk in backlog {
-        write_json_line(
+        write_worker_server_line(
             &mut writer,
             &WorkerServerMessage::Output {
                 data_b64: base64::engine::general_purpose::STANDARD.encode(chunk),
             },
+            format,
         )?;
     }
     if let Some(exit_code) = snapshot.exit_code {
         if let Some(bytes) = header_restore.as_deref() {
-            write_json_line(
+            write_worker_server_line(
                 &mut writer,
                 &WorkerServerMessage::Output {
                     data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
                 },
+                format,
             )?;
         }
-        write_json_line(&mut writer, &WorkerServerMessage::Exited { exit_code })?;
+        write_worker_server_line(
+            &mut writer,
+            &WorkerServerMessage::Exited { exit_code },
+            format,
+        )?;
         shared.detach_client(client_id);
         return Ok(());
     }
@@ -579,11 +594,12 @@ fn handle_worker_client(
         while let Ok(message) = rx.recv() {
             if let WorkerServerMessage::Exited { .. } = &message {
                 if let Some(bytes) = header_restore.take() {
-                    if write_json_line(
+                    if write_worker_server_line(
                         &mut writer,
                         &WorkerServerMessage::Output {
                             data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
                         },
+                        format,
                     )
                     .is_err()
                     {
@@ -591,7 +607,7 @@ fn handle_worker_client(
                     }
                 }
             }
-            if write_json_line(&mut writer, &message).is_err() {
+            if write_worker_server_line(&mut writer, &message, format).is_err() {
                 break;
             }
         }
@@ -606,7 +622,7 @@ fn handle_worker_client(
                 if !shared.owns_client(client_id) {
                     break;
                 }
-                let Ok(message) = serde_json::from_str::<WorkerClientMessage>(&line) else {
+                let Ok((message, _message_format)) = decode_worker_client_line(&line) else {
                     continue;
                 };
                 match message {
@@ -670,6 +686,20 @@ fn handle_worker_client(
     Ok(())
 }
 
+fn write_worker_server_line(
+    writer: &mut TcpStream,
+    message: &WorkerServerMessage,
+    format: DaemonWireFormat,
+) -> io::Result<()> {
+    let bytes = encode_worker_server_line(message, format).map_err(worker_wire_error_to_io)?;
+    writer.write_all(&bytes)?;
+    writer.flush()
+}
+
+fn worker_wire_error_to_io(err: WireError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
 fn start_interrupt_fast_path(
     shared: &Arc<WorkerShared>,
     runtime: &SessionRuntime,
@@ -723,3 +753,187 @@ fn persist_snapshot(
 // other macros above (none here currently).
 #[allow(unused_imports)]
 use Write as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::wire_prost::{
+        decode_worker_server_line, encode_worker_client_line, DaemonWireFormat,
+    };
+    use std::io::BufRead;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    fn test_shared(tmp: &TempDir) -> Arc<WorkerShared> {
+        let snapshot = SessionSnapshot {
+            id: "worker-wire-test".to_string(),
+            kind: SessionKind::Subprocess,
+            cwd: None,
+            name: Some("worker wire test".to_string()),
+            created_at: Some(1),
+            detachable: true,
+            background: true,
+            attachable: true,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            daemon_pid: std::process::id(),
+            worker_pid: std::process::id(),
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+            ctrl_c: None,
+        };
+        Arc::new(WorkerShared::new(
+            tmp.path().to_path_buf(),
+            "worker-wire-test".to_string(),
+            snapshot,
+        ))
+    }
+
+    fn test_runtime() -> SessionRuntime {
+        SessionRuntime::Subprocess(Arc::new(NativeProcess::new(ProcessConfig {
+            command: subprocess::command_spec_for_subprocess(vec![
+                "__clud_unstarted_test_process__".to_string(),
+            ]),
+            cwd: None,
+            env: None,
+            capture: false,
+            stderr_mode: StderrMode::Stdout,
+            creationflags: None,
+            create_process_group: false,
+            stdin_mode: StdinMode::Null,
+            nice: None,
+        })))
+    }
+
+    fn attach_message() -> WorkerClientMessage {
+        WorkerClientMessage::Attach {
+            terminal: None,
+            rows: Some(24),
+            cols: Some(80),
+        }
+    }
+
+    fn write_client_message(
+        stream: &mut TcpStream,
+        message: &WorkerClientMessage,
+        format: DaemonWireFormat,
+    ) {
+        let bytes = encode_worker_client_line(message, format).unwrap();
+        stream.write_all(&bytes).unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn spawn_worker_handler(
+        shared: Arc<WorkerShared>,
+    ) -> (TcpStream, thread::JoinHandle<io::Result<()>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_worker_client(
+                stream,
+                &shared,
+                &test_runtime(),
+                &GraphicsConfig::default(),
+                SessionKind::Subprocess,
+                24,
+                80,
+            )
+        });
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        (stream, handle)
+    }
+
+    fn read_server_message(reader: &mut BufReader<TcpStream>) -> (String, WorkerServerMessage) {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let message = decode_worker_server_line(&line).unwrap();
+        (line, message)
+    }
+
+    #[test]
+    fn worker_attach_live_path_preserves_json_wire() {
+        let tmp = TempDir::new().unwrap();
+        let shared = test_shared(&tmp);
+        let (mut stream, handle) = spawn_worker_handler(shared);
+
+        write_client_message(&mut stream, &attach_message(), DaemonWireFormat::Json);
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let (line, message) = read_server_message(&mut reader);
+
+        assert!(line.starts_with(r#"{"op":"attached""#), "{line:?}");
+        assert!(matches!(message, WorkerServerMessage::Attached { .. }));
+        drop(reader);
+        drop(stream);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn worker_attach_live_path_accepts_prost_messages() {
+        let tmp = TempDir::new().unwrap();
+        let shared = test_shared(&tmp);
+        let (mut stream, handle) = spawn_worker_handler(Arc::clone(&shared));
+
+        write_client_message(&mut stream, &attach_message(), DaemonWireFormat::Prost);
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let (line, message) = read_server_message(&mut reader);
+
+        assert!(line.starts_with("CLUD-FRAME/1 434c5544 "), "{line:?}");
+        assert!(matches!(message, WorkerServerMessage::Attached { .. }));
+
+        write_client_message(
+            &mut stream,
+            &WorkerClientMessage::Input {
+                data_b64: base64::engine::general_purpose::STANDARD.encode(b"abc"),
+                submit: false,
+            },
+            DaemonWireFormat::Prost,
+        );
+        write_client_message(
+            &mut stream,
+            &WorkerClientMessage::Resize {
+                rows: 30,
+                cols: 100,
+            },
+            DaemonWireFormat::Prost,
+        );
+        write_client_message(
+            &mut stream,
+            &WorkerClientMessage::Interrupt {
+                profile: Some(CtrlCProfile {
+                    cli_pid: Some(77),
+                    fast_path: true,
+                    ..CtrlCProfile::default()
+                }),
+            },
+            DaemonWireFormat::Prost,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = shared.snapshot();
+            if snapshot
+                .ctrl_c
+                .as_ref()
+                .is_some_and(|profile| profile.cli_pid == Some(77) && profile.fast_path)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "prost interrupt frame was not decoded by the worker attach loop"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        drop(reader);
+        drop(stream);
+        assert!(handle.join().unwrap().is_ok());
+    }
+}

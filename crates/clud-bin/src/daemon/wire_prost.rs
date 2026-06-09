@@ -162,6 +162,48 @@ pub(super) fn decode_daemon_response_line(line: &str) -> Result<DaemonResponse, 
     Ok(serde_json::from_str(line)?)
 }
 
+pub(super) fn encode_worker_client_line(
+    message: &WorkerClientMessage,
+    format: DaemonWireFormat,
+) -> Result<Vec<u8>, WireError> {
+    match format {
+        DaemonWireFormat::Json => encode_json_line(message),
+        DaemonWireFormat::Prost => {
+            let frame = encode_worker_client_prost(message)?;
+            Ok(encode_wire_frame_line(&frame))
+        }
+    }
+}
+
+pub(super) fn decode_worker_client_line(
+    line: &str,
+) -> Result<(WorkerClientMessage, DaemonWireFormat), WireError> {
+    if let Some(frame) = decode_wire_frame_line(line)? {
+        return Ok((decode_worker_client(&frame)?, DaemonWireFormat::Prost));
+    }
+    Ok((serde_json::from_str(line)?, DaemonWireFormat::Json))
+}
+
+pub(super) fn encode_worker_server_line(
+    message: &WorkerServerMessage,
+    format: DaemonWireFormat,
+) -> Result<Vec<u8>, WireError> {
+    match format {
+        DaemonWireFormat::Json => encode_json_line(message),
+        DaemonWireFormat::Prost => {
+            let frame = encode_worker_server_prost(message)?;
+            Ok(encode_wire_frame_line(&frame))
+        }
+    }
+}
+
+pub(super) fn decode_worker_server_line(line: &str) -> Result<WorkerServerMessage, WireError> {
+    if let Some(frame) = decode_wire_frame_line(line)? {
+        return decode_worker_server(&frame);
+    }
+    Ok(serde_json::from_str(line)?)
+}
+
 pub(super) fn encode_daemon_request_prost(
     request: &DaemonRequest,
     request_id: impl Into<String>,
@@ -872,6 +914,30 @@ mod tests {
             let decoded = decode_worker_server(&frame).unwrap();
             assert_json_parity(&message, &decoded);
         }
+    }
+
+    #[test]
+    fn worker_line_dispatch_preserves_json_and_prost_formats() {
+        let attach = WorkerClientMessage::Attach {
+            terminal: None,
+            rows: Some(24),
+            cols: Some(80),
+        };
+        let json_line = encode_worker_client_line(&attach, DaemonWireFormat::Json).unwrap();
+        assert!(json_line.starts_with(br#"{"op":"attach""#));
+        let (decoded_attach, format) =
+            decode_worker_client_line(&String::from_utf8(json_line).unwrap()).unwrap();
+        assert_eq!(format, DaemonWireFormat::Json);
+        assert_json_parity(&attach, &decoded_attach);
+
+        let attached = WorkerServerMessage::Attached {
+            session: Box::new(sample_snapshot()),
+        };
+        let prost_line = encode_worker_server_line(&attached, DaemonWireFormat::Prost).unwrap();
+        assert!(prost_line.starts_with(b"CLUD-FRAME/1 434c5544 "));
+        let decoded_attached =
+            decode_worker_server_line(&String::from_utf8(prost_line).unwrap()).unwrap();
+        assert_json_parity(&attached, &decoded_attached);
     }
 
     #[test]

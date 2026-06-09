@@ -12,7 +12,7 @@ use sysinfo::Signal;
 use crate::gc::InsertInput;
 use crate::trampoline;
 
-use super::io_helpers::{read_json_file, write_json_line};
+use super::io_helpers::read_json_file;
 use super::paths::{
     daemon_info_path, daemon_lock_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
 };
@@ -23,7 +23,7 @@ use super::types::{
 };
 use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
-    DaemonWireFormat, WireError,
+    encode_worker_client_line, DaemonWireFormat, WireError,
 };
 
 /// Idempotent best-effort daemon spawn (issue #135). Always called via
@@ -348,9 +348,20 @@ fn wire_error_to_io(err: WireError) -> io::Error {
 pub(super) fn send_worker_message(
     writer: &Arc<Mutex<TcpStream>>,
     message: &WorkerClientMessage,
+    format: DaemonWireFormat,
 ) -> io::Result<()> {
     let mut guard = writer.lock().expect("writer mutex poisoned");
-    write_json_line(&mut guard, message)
+    write_worker_message(&mut guard, message, format)
+}
+
+pub(super) fn write_worker_message(
+    stream: &mut TcpStream,
+    message: &WorkerClientMessage,
+    format: DaemonWireFormat,
+) -> io::Result<()> {
+    let bytes = encode_worker_client_line(message, format).map_err(wire_error_to_io)?;
+    stream.write_all(&bytes)?;
+    stream.flush()
 }
 
 pub(super) fn shutdown_worker_connection(writer: &Arc<Mutex<TcpStream>>) -> io::Result<()> {
