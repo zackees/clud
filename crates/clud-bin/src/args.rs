@@ -267,6 +267,13 @@ pub enum Command {
 pub enum DaemonSubcommand {
     /// Restart the daemon process so the next CLI call uses the current binary.
     Restart,
+    /// Print the current running-process adoption preview.
+    #[command(name = "running-process", alias = "servicedef")]
+    RunningProcess {
+        /// Emit machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
 }
 
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc.rs`.
