@@ -579,6 +579,19 @@ mod tests {
         (response, line)
     }
 
+    fn send_raw_daemon_request_line(state_dir: &Path, request_line: &str) -> String {
+        let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", info.port)).unwrap();
+        stream.write_all(request_line.as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line
+    }
+
     #[test]
     fn daemon_accepts_legacy_json_and_prost_clients_in_one_process() {
         let tmp = tempfile::tempdir().unwrap();
@@ -635,6 +648,48 @@ mod tests {
             started.elapsed() < Duration::from_millis(100),
             "spawn took too long: {:?}",
             started.elapsed()
+        );
+    }
+
+    /// Previous-release clients defaulted to JSON lines and did not know
+    /// about the current prost encoder. Keep this fixture raw so it cannot
+    /// accidentally track current client helper behavior.
+    #[test]
+    fn daemon_accepts_previous_release_raw_json_client_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let daemon_state_dir = state_dir.clone();
+        let daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+
+        let info = wait_for_daemon_ready(&state_dir);
+        let list_line = send_raw_daemon_request_line(&state_dir, r#"{"op":"list_live_cwds"}"#);
+        assert!(
+            !list_line.starts_with("CLUD-FRAME/1 "),
+            "raw legacy JSON clients must receive legacy JSON replies: {list_line:?}"
+        );
+        let list_json: serde_json::Value = serde_json::from_str(&list_line).unwrap();
+        assert_eq!(list_json["op"], "live_cwds");
+        assert!(
+            list_json["paths"].is_array(),
+            "live_cwds JSON response should keep the previous-release paths array: {list_line:?}"
+        );
+
+        let shutdown_line = send_raw_daemon_request_line(&state_dir, r#"{"op":"shutdown"}"#);
+        assert!(
+            !shutdown_line.starts_with("CLUD-FRAME/1 "),
+            "raw legacy JSON shutdown must receive a legacy JSON reply: {shutdown_line:?}"
+        );
+        let shutdown_json: serde_json::Value = serde_json::from_str(&shutdown_line).unwrap();
+        assert_eq!(shutdown_json["op"], "shutdown_ack");
+        assert_eq!(
+            shutdown_json["pid"].as_u64(),
+            Some(u64::from(info.pid)),
+            "shutdown ack should identify the running daemon pid"
+        );
+        assert_eq!(daemon_thread.join().unwrap(), 0);
+        assert!(
+            !daemon_info_path(&state_dir).exists(),
+            "daemon should remove daemon.json during raw JSON shutdown"
         );
     }
 
