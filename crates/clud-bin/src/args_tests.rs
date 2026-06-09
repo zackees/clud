@@ -885,3 +885,25 @@ fn test_daemon_restart_subcommand_parses() {
         other => panic!("expected Daemon::Restart, got {other:?}"),
     }
 }
+
+#[test]
+fn test_daemon_running_process_json_subcommand_parses() {
+    let args = parse(&["clud", "daemon", "running-process", "--json"]);
+    match args.command {
+        Some(Command::Daemon {
+            subcommand: DaemonSubcommand::RunningProcess { json },
+        }) => assert!(json),
+        other => panic!("expected Daemon::RunningProcess --json, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_daemon_servicedef_alias_subcommand_parses() {
+    let args = parse(&["clud", "daemon", "servicedef"]);
+    match args.command {
+        Some(Command::Daemon {
+            subcommand: DaemonSubcommand::RunningProcess { json },
+        }) => assert!(!json),
+        other => panic!("expected Daemon::RunningProcess alias, got {other:?}"),
+    }
+}

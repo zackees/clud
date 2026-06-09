@@ -98,7 +98,7 @@ fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
     }
 }
 
-fn probe_existing(state_dir: &Path) -> Option<DaemonInfo> {
+pub(super) fn probe_existing(state_dir: &Path) -> Option<DaemonInfo> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)).ok()?;
     if !pid_is_alive(info.pid) {
         return None;

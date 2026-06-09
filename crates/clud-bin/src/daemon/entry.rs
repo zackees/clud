@@ -9,16 +9,21 @@ use crate::command::{has_noninteractive_prompt, LaunchPlan};
 use crate::verbose_log;
 
 use super::attach::{attach_to_session, run_attach};
-use super::client::{ensure_daemon, request_daemon_shutdown, send_daemon_request};
+use super::client::{ensure_daemon, probe_existing, request_daemon_shutdown, send_daemon_request};
 use super::commands::{run_kill, run_list, run_logs};
-use super::io_helpers::{resolve_backlog_bytes, terminal_dimensions};
-use super::paths::state_dir;
+use super::io_helpers::{read_json_file, resolve_backlog_bytes, terminal_dimensions};
+use super::paths::{daemon_info_path, state_dir};
 use super::server::run_daemon;
 use super::sessions::{most_recent_session, most_recent_session_any};
 use super::types::{
-    DaemonRequest, DaemonResponse, SessionKind, WorkerLaunchSpec, ENV_FEATURE_FLAG,
+    DaemonInfo, DaemonRequest, DaemonResponse, SessionKind, WorkerLaunchSpec, ENV_FEATURE_FLAG,
 };
 use super::worker::run_worker;
+
+const RUNNING_PROCESS_SERVICE_NAME: &str = "clud";
+const RUNNING_PROCESS_SERVICE_DEF_DIR_ENV: &str = "RUNNING_PROCESS_SERVICE_DEF_DIR";
+const RUNNING_PROCESS_DISABLE_ENV: &str = "RUNNING_PROCESS_DISABLE";
+const RUNNING_PROCESS_BROKER_ENV: &str = "CLUD_RUNNING_PROCESS_BROKER";
 
 /// True when the launch should be routed through the centralized session
 /// daemon (`daemon::run_centralized_session`) instead of the direct
@@ -95,7 +100,162 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
                 1
             }
         },
+        DaemonSubcommand::RunningProcess { json } => {
+            run_running_process_diagnostics(state_dir, *json)
+        }
     }
+}
+
+fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
+    let service_def_dir = running_process_service_def_dir();
+    let service_def_path =
+        service_def_dir.join(format!("{RUNNING_PROCESS_SERVICE_NAME}.servicedef"));
+    let daemon_info_path = daemon_info_path(state_dir);
+    let recorded_daemon = read_json_file::<DaemonInfo>(&daemon_info_path).ok();
+    let live_daemon = probe_existing(state_dir);
+    let current_exe = std::env::current_exe().ok();
+    let broker_requested = env_flag_eq_one(RUNNING_PROCESS_BROKER_ENV);
+    let broker_disabled = env_flag_eq_one(RUNNING_PROCESS_DISABLE_ENV);
+    let mode = if broker_disabled {
+        "direct-daemon-fallback-disabled"
+    } else if broker_requested {
+        "direct-daemon-fallback-broker-requested"
+    } else {
+        "direct-daemon-fallback"
+    };
+    let summary = if broker_disabled {
+        "RUNNING_PROCESS_DISABLE=1 forces the direct clud daemon path."
+    } else if broker_requested {
+        "Broker mode is requested, but clud still falls back to its direct daemon path in this stub."
+    } else {
+        "Clud is using its direct daemon path; running-process broker wiring is deferred."
+    };
+    let deferred = [
+        "BackendHandle adoption",
+        "binary .servicedef packaging/install",
+        "broker-client connect_to_backend / Hello-skip wiring",
+        "clud JSON/prost wire migration completion",
+        "broker-mode/direct-mode integration tests",
+        "three-OS acceptance, lint, dylint, Phase 7 rollout, and Phase 8 escape-hatch removal",
+    ];
+
+    if json {
+        let payload = serde_json::json!({
+            "service_name": RUNNING_PROCESS_SERVICE_NAME,
+            "service_definition": {
+                "file_name": format!("{RUNNING_PROCESS_SERVICE_NAME}.servicedef"),
+                "directory": path_string(&service_def_dir),
+                "path": path_string(&service_def_path),
+                "directory_env_override": RUNNING_PROCESS_SERVICE_DEF_DIR_ENV,
+                "isolation": "SHARED_BROKER",
+                "installed_by_clud": false,
+                "status": "stubbed_deferred",
+            },
+            "daemon": {
+                "state_dir": path_string(state_dir),
+                "info_path": path_string(&daemon_info_path),
+                "recorded": daemon_info_json(recorded_daemon.as_ref()),
+                "live_reachable": live_daemon.is_some(),
+                "recorded_version_matches_current": recorded_daemon
+                    .as_ref()
+                    .map(|info| info.version.as_deref() == Some(env!("CARGO_PKG_VERSION"))),
+                "current_binary": current_exe.as_ref().map(|path| path_string(path)),
+            },
+            "mode": {
+                "current": mode,
+                "summary": summary,
+                "uses_direct_daemon_fallback": true,
+                "broker_client_wired": false,
+            },
+            "environment": {
+                "RUNNING_PROCESS_DISABLE": broker_disabled,
+                "CLUD_RUNNING_PROCESS_BROKER": broker_requested,
+            },
+            "deferred": deferred,
+        });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(text) => println!("{text}"),
+            Err(err) => {
+                eprintln!("[clud] failed to render running-process diagnostics: {err}");
+                return 1;
+            }
+        }
+    } else {
+        println!("running-process adoption preview for clud");
+        println!("service: {RUNNING_PROCESS_SERVICE_NAME}");
+        println!("isolation: SHARED_BROKER");
+        println!("servicedef: {}", service_def_path.display());
+        println!("daemon state: {}", state_dir.display());
+        println!("daemon info: {}", daemon_info_path.display());
+        println!("live daemon reachable: {}", live_daemon.is_some());
+        println!("mode: {mode}");
+        println!("{summary}");
+        println!("deferred:");
+        for item in deferred {
+            println!("- {item}");
+        }
+    }
+
+    0
+}
+
+fn daemon_info_json(info: Option<&DaemonInfo>) -> serde_json::Value {
+    match info {
+        Some(info) => serde_json::json!({
+            "pid": info.pid,
+            "port": info.port,
+            "dashboard_port": info.dashboard_port,
+            "version": info.version.as_deref(),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn env_flag_eq_one(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn running_process_service_def_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os(RUNNING_PROCESS_SERVICE_DEF_DIR_ENV) {
+        return PathBuf::from(path);
+    }
+
+    #[cfg(windows)]
+    {
+        return dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("running-process")
+            .join("services");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Library")
+            .join("Application Support")
+            .join("running-process")
+            .join("services");
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+            PathBuf::from(config_home)
+                .join("running-process")
+                .join("services")
+        } else {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".config")
+                .join("running-process")
+                .join("services")
+        }
+    }
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i32> {
