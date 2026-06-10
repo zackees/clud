@@ -628,6 +628,7 @@ fn test_default_no_flags() {
     assert!(!args.no_dnd);
     assert!(!args.clean_worktrees);
     assert!(!args.fix_hooks);
+    assert!(!args.no_fix_hooks);
     assert!(!args.yes);
     assert!(!args.force);
     assert_eq!(args.stale_after, "1d");
@@ -691,7 +692,15 @@ fn test_clean_worktrees_with_dry_run() {
 fn test_fix_hooks_flag() {
     let args = parse(&["clud", "--fix-hooks"]);
     assert!(args.fix_hooks);
+    assert!(!args.no_fix_hooks);
     assert!(!args.dry_run);
+}
+
+#[test]
+fn test_no_fix_hooks_flag() {
+    let args = parse(&["clud", "--no-fix-hooks"]);
+    assert!(args.no_fix_hooks);
+    assert!(!args.fix_hooks);
 }
 
 #[test]

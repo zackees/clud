@@ -99,6 +99,10 @@ pub struct Args {
     #[arg(long = "fix-hooks")]
     pub fix_hooks: bool,
 
+    /// Globally disable automatic deterministic hook-health repairs on launch.
+    #[arg(long = "no-fix-hooks", conflicts_with = "fix_hooks")]
+    pub no_fix_hooks: bool,
+
     /// Issue #83: minimum age before a clean worktree is treated as stale.
     /// Accepts `30s`, `5m`, `2h`, `1d`. Defaults to `1d`.
     #[arg(long = "stale-after", default_value = "1d")]
@@ -368,6 +372,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--no-drag-drop",
         "--clean-worktrees",
         "--fix-hooks",
+        "--no-fix-hooks",
         "--yes",
         "--force",
         "--no-daemon",

@@ -187,6 +187,60 @@ fn deterministic_trust_repair_adds_canonical_key() {
 }
 
 #[test]
+fn legacy_codex_hooks_feature_warns_and_plans_deterministic_repair() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let config = repo.join(".codex").join("config.toml");
+    write(&config, "[features]\ncodex_hooks = true\n");
+
+    let report = inspect_paths(&repo, None);
+
+    assert_eq!(
+        report.codex_legacy_hook_feature_configs,
+        vec![config.clone()]
+    );
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("deprecated `[features].codex_hooks`")));
+    assert!(plan_repairs(&report).into_iter().any(|action| matches!(
+        action,
+        RepairAction::MigrateCodexHooksFeatureFlag { config_path } if config_path == config
+    )));
+}
+
+#[test]
+fn legacy_codex_hooks_feature_migration_moves_value_and_preserves_other_config() {
+    let temp = tempdir().unwrap();
+    let config = temp.path().join("home").join(".codex").join("config.toml");
+    write(
+        &config,
+        "[features]\ncodex_hooks = true\nmodel = \"gpt-5\"\n\n[projects.repo]\ntrust_level = \"trusted\"\n",
+    );
+
+    migrate_codex_hooks_feature_flag(&config).unwrap();
+
+    let text = fs::read_to_string(config).unwrap();
+    assert!(text.contains("hooks = true"), "{text}");
+    assert!(!text.contains("codex_hooks"), "{text}");
+    assert!(text.contains("model = \"gpt-5\""), "{text}");
+    assert!(text.contains("[projects.repo]"), "{text}");
+}
+
+#[test]
+fn legacy_codex_hooks_feature_migration_preserves_existing_hooks_value() {
+    let temp = tempdir().unwrap();
+    let config = temp.path().join("home").join(".codex").join("config.toml");
+    write(&config, "[features]\ncodex_hooks = false\nhooks = true\n");
+
+    migrate_codex_hooks_feature_flag(&config).unwrap();
+
+    let text = fs::read_to_string(config).unwrap();
+    assert!(text.contains("hooks = true"), "{text}");
+    assert!(!text.contains("codex_hooks"), "{text}");
+}
+
+#[test]
 fn catch_all_codex_hook_satisfies_specific_claude_matchers() {
     let temp = tempdir().unwrap();
     let repo = temp.path().join("repo");

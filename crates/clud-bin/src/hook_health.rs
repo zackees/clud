@@ -22,6 +22,8 @@ const PRE_TOOL_USE: &str = "PreToolUse";
 const CODEX_PRE_TOOL_USE_STATE: &str = "pre_tool_use";
 const CATCH_ALL_MATCHER: &str = "*";
 const FIX_HINT: &str = "Run `clud --fix-hooks`.";
+const LEGACY_CODEX_HOOKS_FEATURE: &str = "codex_hooks";
+const CURRENT_CODEX_HOOKS_FEATURE: &str = "hooks";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookFrontend {
@@ -142,6 +144,7 @@ pub struct HookHealthReport {
     pub claude: FrontendHookSummary,
     pub codex: FrontendHookSummary,
     pub codex_project_trust: Option<CodexProjectTrust>,
+    pub codex_legacy_hook_feature_configs: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -150,6 +153,9 @@ pub enum RepairAction {
     AddCodexProjectTrust {
         config_path: PathBuf,
         project_key: String,
+    },
+    MigrateCodexHooksFeatureFlag {
+        config_path: PathBuf,
     },
     BackendPrompt {
         source: HookFrontend,
@@ -164,6 +170,20 @@ pub enum RepairAction {
         prompt: String,
     },
 }
+
+#[derive(Debug)]
+pub struct DeterministicRepairError {
+    path: PathBuf,
+    error: io::Error,
+}
+
+impl fmt::Display for DeterministicRepairError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", display_path(&self.path), self.error)
+    }
+}
+
+impl std::error::Error for DeterministicRepairError {}
 
 pub fn should_check_launch(args: &Args) -> bool {
     if args.fix_hooks || args.clean_worktrees {
@@ -188,6 +208,11 @@ pub fn emit_launch_warnings() {
     }
 }
 
+pub fn apply_default_repairs() -> Result<usize, DeterministicRepairError> {
+    let report = inspect_current();
+    apply_deterministic_repairs(deterministic_repair_actions(&report))
+}
+
 pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
     let mut report = inspect_current();
     print_report_warnings(&report);
@@ -197,31 +222,9 @@ pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
         return 0;
     }
 
-    let deterministic = plan_repairs(&report)
-        .into_iter()
-        .filter_map(|action| match action {
-            RepairAction::AddCodexProjectTrust {
-                config_path,
-                project_key,
-            } => Some((config_path, project_key)),
-            RepairAction::BackendPrompt { .. } | RepairAction::ValidationPrompt { .. } => None,
-        })
-        .collect::<Vec<_>>();
-
-    for (config_path, project_key) in deterministic {
-        match add_codex_project_trust(&config_path, &project_key) {
-            Ok(()) => eprintln!(
-                "[clud] added Codex project trust entry `{project_key}` to {}",
-                display_path(&config_path)
-            ),
-            Err(error) => {
-                eprintln!(
-                    "[clud] error: failed to update {}: {error}",
-                    display_path(&config_path)
-                );
-                return 1;
-            }
-        }
+    if let Err(error) = apply_deterministic_repairs(deterministic_repair_actions(&report)) {
+        eprintln!("[clud] error: failed to update {error}");
+        return 1;
     }
 
     report = inspect_current();
@@ -230,7 +233,8 @@ pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
         .filter_map(|action| match action {
             RepairAction::BackendPrompt { prompt, .. } => Some(prompt),
             RepairAction::ValidationPrompt { prompt, .. } => Some(prompt),
-            RepairAction::AddCodexProjectTrust { .. } => None,
+            RepairAction::AddCodexProjectTrust { .. }
+            | RepairAction::MigrateCodexHooksFeatureFlag { .. } => None,
         })
         .collect::<Vec<_>>();
 
@@ -269,6 +273,60 @@ pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
     0
 }
 
+fn deterministic_repair_actions(report: &HookHealthReport) -> Vec<RepairAction> {
+    plan_repairs(report)
+        .into_iter()
+        .filter(|action| {
+            matches!(
+                action,
+                RepairAction::AddCodexProjectTrust { .. }
+                    | RepairAction::MigrateCodexHooksFeatureFlag { .. }
+            )
+        })
+        .collect()
+}
+
+fn apply_deterministic_repairs(
+    actions: Vec<RepairAction>,
+) -> Result<usize, DeterministicRepairError> {
+    let mut applied = 0;
+    for action in actions {
+        match action {
+            RepairAction::AddCodexProjectTrust {
+                config_path,
+                project_key,
+            } => {
+                add_codex_project_trust(&config_path, &project_key).map_err(|error| {
+                    DeterministicRepairError {
+                        path: config_path.clone(),
+                        error,
+                    }
+                })?;
+                applied += 1;
+                eprintln!(
+                    "[clud] added Codex project trust entry `{project_key}` to {}",
+                    display_path(&config_path)
+                );
+            }
+            RepairAction::MigrateCodexHooksFeatureFlag { config_path } => {
+                migrate_codex_hooks_feature_flag(&config_path).map_err(|error| {
+                    DeterministicRepairError {
+                        path: config_path.clone(),
+                        error,
+                    }
+                })?;
+                applied += 1;
+                eprintln!(
+                    "[clud] migrated deprecated Codex `{LEGACY_CODEX_HOOKS_FEATURE}` feature flag to `{CURRENT_CODEX_HOOKS_FEATURE}` in {}",
+                    display_path(&config_path)
+                );
+            }
+            RepairAction::BackendPrompt { .. } | RepairAction::ValidationPrompt { .. } => {}
+        }
+    }
+    Ok(applied)
+}
+
 pub fn inspect_current() -> HookHealthReport {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let repo_root = loop_spec::git_root_from(&cwd);
@@ -285,13 +343,22 @@ fn hook_home_dir() -> Option<PathBuf> {
 pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport {
     let claude = collect_claude(repo_root, home);
     let (codex, codex_project_trust) = collect_codex(repo_root, home);
-    let warnings = build_warnings(&claude, &codex);
+    let codex_legacy_hook_feature_configs =
+        collect_codex_legacy_hook_feature_configs(repo_root, home);
+    let mut warnings = build_warnings(&claude, &codex);
+    for config_path in &codex_legacy_hook_feature_configs {
+        warnings.push(format!(
+            "Codex config {} uses deprecated `[features].{LEGACY_CODEX_HOOKS_FEATURE}`; migrate it to `[features].{CURRENT_CODEX_HOOKS_FEATURE}`. {FIX_HINT}",
+            display_path(config_path)
+        ));
+    }
     HookHealthReport {
         repo_root: repo_root.to_path_buf(),
         home: home.map(Path::to_path_buf),
         claude,
         codex,
         codex_project_trust,
+        codex_legacy_hook_feature_configs,
         warnings,
     }
 }
@@ -299,6 +366,13 @@ pub fn inspect_paths(repo_root: &Path, home: Option<&Path>) -> HookHealthReport 
 pub fn plan_repairs(report: &HookHealthReport) -> Vec<RepairAction> {
     let mut actions = Vec::new();
     actions.extend(validation_prompt_actions(report));
+    actions.extend(
+        report
+            .codex_legacy_hook_feature_configs
+            .iter()
+            .cloned()
+            .map(|config_path| RepairAction::MigrateCodexHooksFeatureFlag { config_path }),
+    );
 
     let project_hooks = report.repo_root.join(".codex").join("hooks.json");
     let has_project_codex_hooks = report
@@ -471,6 +545,41 @@ fn collect_codex(
     apply_codex_activity_state(&mut summary, &project_hooks, project_trust.as_ref(), home);
     warn_on_powershell_exit_code_risk(&mut summary);
     (summary, project_trust)
+}
+
+fn collect_codex_legacy_hook_feature_configs(
+    repo_root: &Path,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = home {
+        paths.push(home.join(".codex").join("config.toml"));
+    }
+    paths.push(repo_root.join(".codex").join("config.toml"));
+
+    let mut configs: Vec<PathBuf> = Vec::new();
+    for path in paths {
+        if path.is_file()
+            && codex_config_has_legacy_hooks_feature(&path)
+            && !configs.iter().any(|existing| same_path(existing, &path))
+        {
+            configs.push(path);
+        }
+    }
+    configs
+}
+
+fn codex_config_has_legacy_hooks_feature(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(document) = text.parse::<DocumentMut>() else {
+        return false;
+    };
+    document
+        .get("features")
+        .and_then(|item| item.get(LEGACY_CODEX_HOOKS_FEATURE))
+        .is_some()
 }
 
 fn apply_codex_activity_state(
@@ -921,6 +1030,7 @@ fn run_backend_prompt(
         no_dnd: true,
         clean_worktrees: false,
         fix_hooks: false,
+        no_fix_hooks: false,
         stale_after: "1d".to_string(),
         yes: false,
         force: false,
@@ -983,6 +1093,10 @@ fn print_dry_run_plan(report: &HookHealthReport) {
                 "- add Codex project trust key `{project_key}` to {}",
                 display_path(&config_path)
             ),
+            RepairAction::MigrateCodexHooksFeatureFlag { config_path } => println!(
+                "- migrate deprecated Codex `[features].{LEGACY_CODEX_HOOKS_FEATURE}` to `[features].{CURRENT_CODEX_HOOKS_FEATURE}` in {}",
+                display_path(&config_path)
+            ),
             RepairAction::BackendPrompt {
                 source,
                 target,
@@ -1024,6 +1138,33 @@ fn add_codex_project_trust(config_path: &Path, project_key: &str) -> io::Result<
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    fs::write(config_path, document.to_string())
+}
+
+fn migrate_codex_hooks_feature_flag(config_path: &Path) -> io::Result<()> {
+    let text = fs::read_to_string(config_path)?;
+    let mut document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+
+    let Some(legacy_value) = document
+        .get("features")
+        .and_then(|item| item.get(LEGACY_CODEX_HOOKS_FEATURE))
+        .cloned()
+    else {
+        return Ok(());
+    };
+
+    if document["features"]
+        .get(CURRENT_CODEX_HOOKS_FEATURE)
+        .is_none()
+    {
+        document["features"][CURRENT_CODEX_HOOKS_FEATURE] = legacy_value;
+    }
+    if let Some(features) = document["features"].as_table_mut() {
+        features.remove(LEGACY_CODEX_HOOKS_FEATURE);
+    }
+
     fs::write(config_path, document.to_string())
 }
 

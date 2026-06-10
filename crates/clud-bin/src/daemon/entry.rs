@@ -224,19 +224,19 @@ fn running_process_service_def_dir() -> PathBuf {
 
     #[cfg(windows)]
     {
-        return dirs::config_dir()
+        dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
             .join("running-process")
-            .join("services");
+            .join("services")
     }
     #[cfg(target_os = "macos")]
     {
-        return dirs::home_dir()
+        dirs::home_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("Library")
             .join("Application Support")
             .join("running-process")
-            .join("services");
+            .join("services")
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -696,6 +696,7 @@ mod tests {
             no_dnd: false,
             clean_worktrees: false,
             fix_hooks: false,
+            no_fix_hooks: false,
             stale_after: "1d".into(),
             yes: false,
             force: false,

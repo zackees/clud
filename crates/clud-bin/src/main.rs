@@ -108,11 +108,30 @@ fn main() {
         std::process::exit(worktrees::run(&opts));
     }
 
-    // Issue #112: explicit hook-parity remediation path. Normal launches only
-    // warn; this flag is the opt-in path that may edit deterministic Codex
-    // trust config and ask the selected backend to migrate hook definitions.
+    if args.no_fix_hooks {
+        if args.dry_run {
+            println!("[clud] dry-run: would disable automatic hook-health repairs globally");
+        } else if let Err(error) = clud_settings::save_auto_fix_hooks_enabled(false) {
+            eprintln!("[clud] error: failed to persist --no-fix-hooks: {error}");
+            std::process::exit(1);
+        } else {
+            eprintln!(
+                "[clud] disabled automatic hook-health repairs globally; run `clud --fix-hooks` to re-enable"
+            );
+        }
+    }
+
+    // Issue #112: explicit hook-parity remediation path. This flag resets the
+    // sticky opt-out, applies deterministic repairs, and asks the selected
+    // backend to migrate hook definitions when semantic translation is needed.
     if args.fix_hooks {
         let selected_backend = backend::resolve_backend(args.claude, args.codex);
+        if !args.dry_run {
+            if let Err(error) = clud_settings::save_auto_fix_hooks_enabled(true) {
+                eprintln!("[clud] error: failed to persist --fix-hooks: {error}");
+                std::process::exit(1);
+            }
+        }
         std::process::exit(hook_health::run_fix_hooks(&args, selected_backend));
     }
 
@@ -169,6 +188,24 @@ fn main() {
     }
 
     if hook_health::should_check_launch(&args) {
+        let auto_fix_hooks = if args.no_fix_hooks {
+            false
+        } else {
+            match clud_settings::load_auto_fix_hooks_enabled() {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    eprintln!(
+                        "[clud] warning: failed to load hook-health settings: {error}; using default"
+                    );
+                    true
+                }
+            }
+        };
+        if auto_fix_hooks && !args.dry_run {
+            if let Err(error) = hook_health::apply_default_repairs() {
+                eprintln!("[clud] warning: failed to auto-repair hook health: {error}");
+            }
+        }
         if args.verbose {
             verbose_log::log("[clud] hooks: checking launch parity");
         }
