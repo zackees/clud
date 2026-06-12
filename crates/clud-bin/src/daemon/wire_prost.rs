@@ -417,13 +417,20 @@ fn daemon_response_to_proto(
     request_id: String,
 ) -> Result<proto::DaemonToClient, WireError> {
     use proto::daemon_to_client::Response;
+    // `session_json` mirror RETIRED (zackees/running-process#385 item 3):
+    // encoders emit only the typed `SessionSnapshot`. No published clud
+    // ever shipped a decoder that required the mirror (the prost wire
+    // itself postdates the last JSON-only release), and `ensure_daemon`
+    // (#192) restarts version-mismatched daemons, so client and daemon
+    // are always the same build. Decoders keep the JSON fallback in
+    // `session_from_proto_or_json` as a defensive measure only.
     let response = match response {
         DaemonResponse::Created { session } => Response::Created(proto::CreatedResponse {
-            session_json: to_json_vec(session)?,
+            session_json: Vec::new(),
             session: Some(session_to_proto(session)),
         }),
         DaemonResponse::Session { session } => Response::Session(proto::SessionResponse {
-            session_json: to_json_vec(session)?,
+            session_json: Vec::new(),
             session: Some(session_to_proto(session)),
         }),
         DaemonResponse::LiveCwds { paths } => Response::LiveCwds(proto::LiveCwdsResponse {
@@ -433,12 +440,12 @@ fn daemon_response_to_proto(
                 .collect(),
         }),
         DaemonResponse::Terminated { session } => Response::Terminated(proto::TerminatedResponse {
-            session_json: to_json_vec(session)?,
+            session_json: Vec::new(),
             session: Some(session_to_proto(session)),
         }),
         DaemonResponse::Interrupted { session } => {
             Response::Interrupted(proto::InterruptedResponse {
-                session_json: to_json_vec(session)?,
+                session_json: Vec::new(),
                 session: Some(session_to_proto(session)),
             })
         }
@@ -575,8 +582,9 @@ fn worker_server_to_proto(
     use proto::worker_server_envelope::Message;
     let message = match message {
         WorkerServerMessage::Attached { session } => {
+            // Mirror retired — see `daemon_response_to_proto`.
             Message::Attached(proto::WorkerAttachedResponse {
-                session_json: to_json_vec(session.as_ref())?,
+                session_json: Vec::new(),
                 session: Some(session_to_proto(session.as_ref())),
             })
         }
@@ -951,8 +959,10 @@ mod tests {
         }
     }
 
+    /// Mirror retired (zackees/running-process#385 item 3): encoders
+    /// emit ONLY the typed snapshot; `session_json` must stay empty.
     #[test]
-    fn daemon_session_responses_encode_typed_snapshot_and_json_mirror() {
+    fn daemon_session_responses_encode_typed_snapshot_without_json_mirror() {
         let session = sample_snapshot();
         let cases = vec![
             DaemonResponse::Created {
@@ -973,19 +983,19 @@ mod tests {
             let response = envelope.response.unwrap();
             match response {
                 proto::daemon_to_client::Response::Created(created) => {
-                    assert!(!created.session_json.is_empty());
+                    assert!(created.session_json.is_empty(), "mirror is retired");
                     assert_eq!(created.session.unwrap().id, "sess-test");
                 }
                 proto::daemon_to_client::Response::Session(session) => {
-                    assert!(!session.session_json.is_empty());
+                    assert!(session.session_json.is_empty(), "mirror is retired");
                     assert_eq!(session.session.unwrap().id, "sess-test");
                 }
                 proto::daemon_to_client::Response::Terminated(terminated) => {
-                    assert!(!terminated.session_json.is_empty());
+                    assert!(terminated.session_json.is_empty(), "mirror is retired");
                     assert_eq!(terminated.session.unwrap().id, "sess-test");
                 }
                 proto::daemon_to_client::Response::Interrupted(interrupted) => {
-                    assert!(!interrupted.session_json.is_empty());
+                    assert!(interrupted.session_json.is_empty(), "mirror is retired");
                     assert_eq!(interrupted.session.unwrap().id, "sess-test");
                 }
                 other => panic!("unexpected response payload: {other:?}"),
@@ -993,8 +1003,10 @@ mod tests {
         }
     }
 
+    /// Mirror retired — see
+    /// [`daemon_session_responses_encode_typed_snapshot_without_json_mirror`].
     #[test]
-    fn worker_attached_response_encodes_typed_snapshot_and_json_mirror() {
+    fn worker_attached_response_encodes_typed_snapshot_without_json_mirror() {
         let message = WorkerServerMessage::Attached {
             session: Box::new(sample_snapshot()),
         };
@@ -1004,7 +1016,7 @@ mod tests {
         else {
             panic!("expected attached worker payload");
         };
-        assert!(!attached.session_json.is_empty());
+        assert!(attached.session_json.is_empty(), "mirror is retired");
         assert_eq!(attached.session.unwrap().id, "sess-test");
     }
 

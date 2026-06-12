@@ -89,13 +89,19 @@ message GcRequest {
 
 message ShutdownRequest {}
 
+// `session_json` (field 1) is a RETIRED JSON mirror of the typed
+// snapshot: encoders stopped emitting it in clud 2.1.0 (running-process
+// adoption, zackees/running-process#385 item 3) because no published
+// release ever depended on it and same-version pairing (#192) makes a
+// mixed wire impossible. Decoders still accept it as a defensive
+// fallback; the field number stays reserved-in-place forever.
 message CreatedResponse {
   bytes session_json = 1;
   SessionSnapshot session = 2;
 }
 
 message SessionResponse {
-  bytes session_json = 1;
+  bytes session_json = 1; // retired mirror; see CreatedResponse
   SessionSnapshot session = 2;
 }
 
@@ -104,12 +110,12 @@ message LiveCwdsResponse {
 }
 
 message TerminatedResponse {
-  bytes session_json = 1;
+  bytes session_json = 1; // retired mirror; see CreatedResponse
   SessionSnapshot session = 2;
 }
 
 message InterruptedResponse {
-  bytes session_json = 1;
+  bytes session_json = 1; // retired mirror; see CreatedResponse
   SessionSnapshot session = 2;
 }
 
@@ -151,7 +157,7 @@ message WorkerInterruptRequest {
 }
 
 message WorkerAttachedResponse {
-  bytes session_json = 1;
+  bytes session_json = 1; // retired mirror; see CreatedResponse
   SessionSnapshot session = 2;
 }
 
