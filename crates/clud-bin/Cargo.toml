@@ -42,7 +42,7 @@ redb = "2"
 # the redb-open window to a few milliseconds at startup/shutdown so
 # concurrent launches serialize cleanly.
 fs4 = "0.13"
-running-process = { version = "4.1.0", default-features = false, features = ["telemetry", "client"] }
+running-process = { version = "4.2.0", default-features = false, features = ["telemetry", "client"] }
 # running-process consumer adoption (upstream #385): the daemon's broker
 # v1 frame lane binds a local-socket endpoint (named pipe on Windows,
 # unix socket elsewhere) alongside the legacy TCP listener. Pinned to
