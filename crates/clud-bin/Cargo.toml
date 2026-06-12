@@ -42,7 +42,7 @@ redb = "2"
 # the redb-open window to a few milliseconds at startup/shutdown so
 # concurrent launches serialize cleanly.
 fs4 = "0.13"
-running-process = { version = "4.0.3", default-features = false, features = ["telemetry"] }
+running-process = { version = "4.1.0", default-features = false, features = ["telemetry", "client"] }
 icy_sixel = "0.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 prost = "0.14"
