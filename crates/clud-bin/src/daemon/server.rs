@@ -102,6 +102,18 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         return 1;
     }
 
+    // running-process consumer adoption (upstream #385): serve the broker
+    // v1 frame lane (BackendHandle identity probes + clud payload frames
+    // under protocol 0x7C4C) on a local-socket endpoint next to the TCP
+    // listener. Best-effort: failure to bind never takes the daemon down,
+    // and RUNNING_PROCESS_DISABLE=1 skips the lane entirely.
+    let rp_lane = super::rp_broker::spawn_frame_lane(
+        state_dir,
+        Arc::clone(&workers),
+        gc_tx.clone(),
+        Arc::clone(&shutdown_requested),
+    );
+
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -135,6 +147,9 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         }
     }
 
+    if let Some(lane) = rp_lane {
+        lane.cleanup();
+    }
     let _ = fs::remove_file(daemon_info_path(state_dir));
     0
 }
@@ -152,7 +167,29 @@ fn handle_daemon_connection(
         return Ok(());
     }
     let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
-    let response = match request {
+    let response = dispatch_daemon_request(state_dir, workers, gc_tx.as_ref(), request);
+    let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
+    let result = write_daemon_response(&mut stream, &response, response_format);
+    if is_shutdown {
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        shutdown_requested.store(true, Ordering::SeqCst);
+    }
+    result
+}
+
+/// Map one decoded [`DaemonRequest`] to its [`DaemonResponse`].
+///
+/// Shared by both transport lanes — the legacy TCP line wire above and
+/// the running-process broker v1 frame lane (`rp_broker`) — so request
+/// semantics cannot drift between them. Transport concerns (encoding,
+/// flagging shutdown after the reply is written) stay with each lane.
+pub(super) fn dispatch_daemon_request(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    request: DaemonRequest,
+) -> DaemonResponse {
+    match request {
         DaemonRequest::Create { spec } => match daemon_create_session(state_dir, workers, *spec) {
             Ok(session) => DaemonResponse::Created { session },
             Err(err) => DaemonResponse::Error {
@@ -195,20 +232,13 @@ fn handle_daemon_connection(
             }
         }
         DaemonRequest::Gc { payload } => {
-            let reply = dispatch_gc_op(gc_tx.as_ref(), payload);
+            let reply = dispatch_gc_op(gc_tx, payload);
             DaemonResponse::Gc { reply }
         }
         DaemonRequest::Shutdown => DaemonResponse::ShutdownAck {
             pid: std::process::id(),
         },
-    };
-    let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
-    let result = write_daemon_response(&mut stream, &response, response_format);
-    if is_shutdown {
-        let _ = stream.shutdown(std::net::Shutdown::Write);
-        shutdown_requested.store(true, Ordering::SeqCst);
     }
-    result
 }
 
 fn write_daemon_response(
