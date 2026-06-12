@@ -37,8 +37,12 @@ use running_process::broker::backend_sdk::{
 };
 use running_process::broker::client::{connect_to_backend, ConnectBackendRequest};
 use running_process::broker::doctor::default_broker_endpoint;
-use running_process::broker::protocol::{encode_framed, Endpoint, Frame};
-use running_process::broker::server::local_socket_name;
+use running_process::broker::protocol::{
+    encode_framed, BrokerIsolation, Endpoint, Frame, ServiceDefinition,
+};
+use running_process::broker::server::{
+    local_socket_name, service_definition_dir, write_service_definition,
+};
 use running_process::NativeProcess;
 use sha2::{Digest, Sha256};
 
@@ -159,6 +163,19 @@ pub(super) fn spawn_frame_lane(
     if running_process_disabled() {
         return None;
     }
+    // Packaged `.servicedef` (soldr#722 pattern, #385 item 4): refresh
+    // clud's service definition on every daemon bringup so the broker's
+    // registry always points at the binary that is actually serving.
+    // Best-effort and independent of the frame lane. Skipped under
+    // `cfg!(test)` — unit tests spawn `run_daemon` in-process and must
+    // not register the throwaway test executable in the user's real
+    // service-definition directory; `install_service_definition` itself
+    // is covered by a dedicated test against a temp dir.
+    if !cfg!(test) {
+        if let Err(err) = install_service_definition() {
+            eprintln!("[clud] note: running-process servicedef install skipped: {err}");
+        }
+    }
     match start_frame_lane(state_dir, workers, gc_tx, shutdown_requested) {
         Ok(lane) => Some(lane),
         Err(err) => {
@@ -166,6 +183,26 @@ pub(super) fn spawn_frame_lane(
             None
         }
     }
+}
+
+/// Install/refresh `clud.servicedef` in the running-process
+/// service-definition directory (`RUNNING_PROCESS_SERVICE_DEF_DIR`
+/// override honored by [`service_definition_dir`]). The definition uses
+/// SHARED_BROKER isolation and points at the current executable.
+pub(super) fn install_service_definition() -> io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let definition = ServiceDefinition {
+        service_name: RUNNING_PROCESS_SERVICE_NAME.into(),
+        binary_path: exe.to_string_lossy().into_owned(),
+        isolation: BrokerIsolation::SharedBroker as i32,
+        explicit_instance: String::new(),
+        per_version_binary_dir: String::new(),
+        min_version: String::new(),
+        version_allow_list: Vec::new(),
+        labels: Default::default(),
+    };
+    write_service_definition(&service_definition_dir(), &definition)
+        .map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn start_frame_lane(
@@ -718,6 +755,39 @@ mod tests {
             assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
         }
         assert_eq!(daemon_thread.join().unwrap(), 0);
+    }
+
+    /// `.servicedef` packaging (#385 item 4): the install helper writes
+    /// a valid SHARED_BROKER definition for service "clud" pointing at
+    /// the current executable, into the (env-overridden) directory.
+    #[test]
+    fn install_service_definition_writes_valid_shared_broker_servicedef() {
+        use prost::Message as _;
+        use running_process::broker::protocol::{BrokerIsolation, ServiceDefinition};
+        use running_process::broker::server::validate_service_definition_for_service;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set(
+            "RUNNING_PROCESS_SERVICE_DEF_DIR",
+            tmp.path().to_str().unwrap(),
+        );
+        let path = install_service_definition().expect("install servicedef");
+        assert_eq!(path, tmp.path().join("clud.servicedef"));
+
+        let bytes = std::fs::read(&path).unwrap();
+        let definition = ServiceDefinition::decode(bytes.as_slice()).unwrap();
+        assert_eq!(definition.service_name, RUNNING_PROCESS_SERVICE_NAME);
+        assert_eq!(definition.isolation, BrokerIsolation::SharedBroker as i32);
+        assert_eq!(
+            std::path::PathBuf::from(&definition.binary_path),
+            std::env::current_exe().unwrap()
+        );
+        validate_service_definition_for_service(&definition, RUNNING_PROCESS_SERVICE_NAME)
+            .expect("definition must validate");
+
+        // Idempotent refresh: a second install overwrites in place.
+        let again = install_service_definition().expect("reinstall servicedef");
+        assert_eq!(again, path);
     }
 
     #[test]

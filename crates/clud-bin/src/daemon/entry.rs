@@ -116,27 +116,20 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
     let current_exe = std::env::current_exe().ok();
     let broker_requested = env_flag_eq_one(RUNNING_PROCESS_BROKER_ENV);
     let broker_disabled = env_flag_eq_one(RUNNING_PROCESS_DISABLE_ENV);
+    let servicedef_installed = service_def_path.exists();
     let mode = if broker_disabled {
-        "direct-daemon-fallback-disabled"
-    } else if broker_requested {
-        "direct-daemon-fallback-broker-requested"
+        "disabled-direct-daemon"
     } else {
-        "direct-daemon-fallback"
+        "frame-lane-with-tcp-fallback"
     };
     let summary = if broker_disabled {
-        "RUNNING_PROCESS_DISABLE=1 forces the direct clud daemon path."
-    } else if broker_requested {
-        "Broker mode is requested, but clud still falls back to its direct daemon path in this stub."
+        "RUNNING_PROCESS_DISABLE=1 bypasses the running-process frame lane; clud uses its direct TCP daemon path only."
     } else {
-        "Clud is using its direct daemon path; running-process broker wiring is deferred."
+        "Clud serves a running-process broker v1 frame lane (payload protocol 0x7C4C) next to its TCP wire; clients try the lane first and fall back to TCP."
     };
     let deferred = [
-        "BackendHandle adoption",
-        "binary .servicedef packaging/install",
-        "broker-client connect_to_backend / Hello-skip wiring",
-        "clud JSON/prost wire migration completion",
-        "broker-mode/direct-mode integration tests",
-        "three-OS acceptance, lint, dylint, Phase 7 rollout, and Phase 8 escape-hatch removal",
+        "broker-spawned backend adoption (the clud daemon remains self-managed)",
+        "Phase 8 escape-hatch removal",
     ];
 
     if json {
@@ -148,8 +141,8 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
                 "path": path_string(&service_def_path),
                 "directory_env_override": RUNNING_PROCESS_SERVICE_DEF_DIR_ENV,
                 "isolation": "SHARED_BROKER",
-                "installed_by_clud": false,
-                "status": "stubbed_deferred",
+                "installed_by_clud": servicedef_installed,
+                "status": if servicedef_installed { "installed" } else { "pending_first_daemon_bringup" },
             },
             "daemon": {
                 "state_dir": path_string(state_dir),
@@ -164,8 +157,8 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
             "mode": {
                 "current": mode,
                 "summary": summary,
-                "uses_direct_daemon_fallback": true,
-                "broker_client_wired": false,
+                "uses_direct_daemon_fallback": broker_disabled,
+                "broker_client_wired": !broker_disabled,
             },
             "environment": {
                 "RUNNING_PROCESS_DISABLE": broker_disabled,
@@ -181,10 +174,11 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
             }
         }
     } else {
-        println!("running-process adoption preview for clud");
+        println!("running-process adoption status for clud");
         println!("service: {RUNNING_PROCESS_SERVICE_NAME}");
         println!("isolation: SHARED_BROKER");
         println!("servicedef: {}", service_def_path.display());
+        println!("servicedef installed: {servicedef_installed}");
         println!("daemon state: {}", state_dir.display());
         println!("daemon info: {}", daemon_info_path.display());
         println!("live daemon reachable: {}", live_daemon.is_some());
@@ -217,41 +211,12 @@ fn env_flag_eq_one(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Single source of truth: running-process's own resolver (honors the
+/// `RUNNING_PROCESS_SERVICE_DEF_DIR` override, then platform defaults).
+/// The daemon writes `clud.servicedef` into the same directory at
+/// bringup (`rp_broker::install_service_definition`).
 fn running_process_service_def_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os(RUNNING_PROCESS_SERVICE_DEF_DIR_ENV) {
-        return PathBuf::from(path);
-    }
-
-    #[cfg(windows)]
-    {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("running-process")
-            .join("services")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Library")
-            .join("Application Support")
-            .join("running-process")
-            .join("services")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            PathBuf::from(config_home)
-                .join("running-process")
-                .join("services")
-        } else {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".config")
-                .join("running-process")
-                .join("services")
-        }
-    }
+    running_process::broker::server::service_definition_dir()
 }
 
 fn path_string(path: &Path) -> String {

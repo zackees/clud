@@ -363,7 +363,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clud"
-version = "2.0.19"
+version = "2.1.0"
 dependencies = [
  "base64",
  "clap",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "mock-agent"
-version = "2.0.19"
+version = "2.1.0"
 dependencies = [
  "libc",
  "serde_json",
