@@ -8,6 +8,7 @@ mod io_helpers;
 mod keys;
 mod paths;
 mod process_utils;
+mod rp_broker;
 mod server;
 mod sessions;
 mod types;

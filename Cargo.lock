@@ -375,6 +375,7 @@ dependencies = [
  "icy_sixel",
  "ignore",
  "image",
+ "interprocess",
  "libc",
  "open",
  "prost",
@@ -2140,9 +2141,9 @@ dependencies = [
 
 [[package]]
 name = "running-process"
-version = "4.1.0"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b463aaf22bc2a27eb0b7bf347c4aa315075796908f859fbd8bcd469041cfc940"
+checksum = "daa54a7b0d3487477cd1a91354883da6fb6bfe3c92b84a8c072c8d3e003cbd2b"
 dependencies = [
  "anyhow",
  "blake3",
