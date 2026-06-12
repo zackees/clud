@@ -164,6 +164,13 @@ pub(super) fn send_daemon_request(
     state_dir: &Path,
     request: &DaemonRequest,
 ) -> io::Result<DaemonResponse> {
+    // Fast path: running-process broker v1 frame lane (Hello-skip via
+    // the daemon identity sidecar). Any miss — `RUNNING_PROCESS_DISABLE=1`,
+    // no sidecar, connect/wire failure — falls through to the legacy TCP
+    // wire below, which remains the authoritative path.
+    if let Some(response) = super::rp_broker::try_send_via_frame_lane(state_dir, request) {
+        return Ok(response);
+    }
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
     let mut stream = TcpStream::connect(("127.0.0.1", info.port))?;
     write_daemon_request(

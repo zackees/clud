@@ -32,9 +32,11 @@ use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::ListenerOptions;
 use running_process::broker::backend_handle::DaemonProcess;
 use running_process::broker::backend_sdk::{
-    remove_daemon_identity_file, write_daemon_identity_file, BackendEndpointMux,
-    LegacyClassification, MuxPoll,
+    read_daemon_identity_file, remove_daemon_identity_file, write_daemon_identity_file,
+    BackendEndpointMux, FrameClient, LegacyClassification, MuxPoll,
 };
+use running_process::broker::client::{connect_to_backend, ConnectBackendRequest};
+use running_process::broker::doctor::default_broker_endpoint;
 use running_process::broker::protocol::{encode_framed, Endpoint, Frame};
 use running_process::broker::server::local_socket_name;
 use running_process::NativeProcess;
@@ -352,7 +354,6 @@ fn answer_payload_frame(
 
 /// Encode a [`DaemonRequest`] as clud frame-lane payload bytes (prost
 /// `ClientToDaemon`). Client-side helper for `FrameClient::request`.
-#[allow(dead_code)] // wired into the client path in the follow-up PR
 pub(super) fn encode_frame_lane_request(
     request: &DaemonRequest,
     envelope_request_id: impl Into<String>,
@@ -364,13 +365,53 @@ pub(super) fn encode_frame_lane_request(
 
 /// Decode clud frame-lane response payload bytes (prost
 /// `DaemonToClient`). Client-side helper for `FrameClient::request`.
-#[allow(dead_code)] // wired into the client path in the follow-up PR
 pub(super) fn decode_frame_lane_response(payload: &[u8]) -> io::Result<DaemonResponse> {
     super::wire_prost::decode_daemon_response(&WireFrame {
         payload_protocol: CLUD_PROST_PAYLOAD_PROTOCOL,
         payload: payload.to_vec(),
     })
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+/// One request/response round trip over the running-process frame lane.
+///
+/// Client-side fast path for `send_daemon_request`: reads the daemon
+/// identity sidecar, dials via [`connect_to_backend`] (Hello-skip —
+/// `cached_backend_endpoint` is the sidecar's endpoint and clud's
+/// `wanted_version == self_version` by construction, so no broker is
+/// required; the `RUNNING_PROCESS_FAKE_BACKEND` test seam and a real
+/// broker Hello both still work through the same call), then exchanges
+/// one [`CLUD_PAYLOAD_PROTOCOL`] frame.
+///
+/// Returns `None` on ANY miss — disabled hatch, missing sidecar,
+/// connect/encode/decode failure — so the caller falls back to the
+/// legacy TCP wire, which stays the authoritative path.
+pub(super) fn try_send_via_frame_lane(
+    state_dir: &Path,
+    request: &DaemonRequest,
+) -> Option<DaemonResponse> {
+    if running_process_disabled() {
+        return None;
+    }
+    let identity = read_daemon_identity_file(&daemon_identity_path(state_dir))?;
+    let version = env!("CARGO_PKG_VERSION");
+    // A broker endpoint is required by the request shape but only ever
+    // dialed when the Hello-skip connect misses; an underivable default
+    // is fine to substitute with a never-listening name.
+    let broker_endpoint =
+        default_broker_endpoint().unwrap_or_else(|_| String::from("clud-rp-no-broker"));
+    let mut connect = ConnectBackendRequest::new(
+        &broker_endpoint,
+        RUNNING_PROCESS_SERVICE_NAME,
+        version,
+        version,
+    );
+    connect.cached_backend_endpoint = Some(&identity.ipc_endpoint.path);
+    let connection = connect_to_backend(connect).ok()?;
+    let mut client = FrameClient::from_stream(connection.stream);
+    let payload = encode_frame_lane_request(request, format!("cli-{}", std::process::id())).ok()?;
+    let reply = client.request(CLUD_PAYLOAD_PROTOCOL, payload).ok()?;
+    decode_frame_lane_response(&reply.payload).ok()
 }
 
 #[cfg(test)]
@@ -388,8 +429,7 @@ mod tests {
     /// Serializes the env mutations in this module AND pins the
     /// RUNNING_PROCESS_DISABLE state each test depends on.
     struct EnvGuard {
-        key: &'static str,
-        prior: Option<String>,
+        priors: Vec<(&'static str, Option<String>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -402,23 +442,30 @@ mod tests {
         }
 
         fn set(key: &'static str, value: &str) -> Self {
-            let lock = Self::lock();
-            let prior = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key,
-                prior,
-                _lock: lock,
-            }
+            Self::apply(vec![(key, Some(value.to_string()))])
         }
 
         fn unset(key: &'static str) -> Self {
+            Self::apply(vec![(key, None)])
+        }
+
+        /// Set/unset several variables under ONE lock acquisition (the
+        /// mutex is not reentrant — nesting two guards would deadlock).
+        fn apply(vars: Vec<(&'static str, Option<String>)>) -> Self {
             let lock = Self::lock();
-            let prior = std::env::var(key).ok();
-            std::env::remove_var(key);
+            let priors = vars
+                .into_iter()
+                .map(|(key, value)| {
+                    let prior = std::env::var(key).ok();
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                    (key, prior)
+                })
+                .collect();
             Self {
-                key,
-                prior,
+                priors,
                 _lock: lock,
             }
         }
@@ -426,9 +473,11 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match self.prior.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
+            for (key, prior) in self.priors.drain(..) {
+                match prior {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -574,6 +623,100 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         assert!(line.contains("shutdown_ack"));
+        assert_eq!(daemon_thread.join().unwrap(), 0);
+    }
+
+    /// Client wiring (#385 item 1): `send_daemon_request` uses the
+    /// frame lane when the sidecar is present; `try_send_via_frame_lane`
+    /// honors the disable hatch and degrades to `None` (TCP fallback)
+    /// when the sidecar is missing.
+    #[test]
+    fn client_round_trips_via_frame_lane_and_falls_back_to_tcp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let daemon_state_dir = state_dir.clone();
+        let daemon_thread;
+        {
+            let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
+            daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+            wait_for_daemon_ready(&state_dir);
+            wait_for_identity_sidecar(&state_dir);
+
+            // Direct frame-lane round trip.
+            let response = try_send_via_frame_lane(&state_dir, &DaemonRequest::ListLiveCwds)
+                .expect("frame lane must answer while the sidecar is live");
+            assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
+
+            // The public client entry point goes through the same lane.
+            let response =
+                super::super::client::send_daemon_request(&state_dir, &DaemonRequest::ListLiveCwds)
+                    .expect("send_daemon_request");
+            assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
+        }
+
+        {
+            // Disable hatch bypasses the lane entirely...
+            let _env = EnvGuard::set(RUNNING_PROCESS_DISABLE_ENV, "1");
+            assert!(
+                try_send_via_frame_lane(&state_dir, &DaemonRequest::ListLiveCwds).is_none(),
+                "disable hatch must bypass the frame lane"
+            );
+            // ...while the legacy TCP wire keeps working underneath.
+            let response =
+                super::super::client::send_daemon_request(&state_dir, &DaemonRequest::ListLiveCwds)
+                    .expect("TCP fallback under the disable hatch");
+            assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
+        }
+
+        let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
+        // A missing sidecar degrades to None (caller falls back to TCP).
+        std::fs::remove_file(daemon_identity_path(&state_dir)).unwrap();
+        assert!(
+            try_send_via_frame_lane(&state_dir, &DaemonRequest::ListLiveCwds).is_none(),
+            "missing sidecar must miss the frame lane"
+        );
+        let response =
+            super::super::client::send_daemon_request(&state_dir, &DaemonRequest::Shutdown)
+                .expect("shutdown via TCP fallback");
+        assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
+        assert_eq!(daemon_thread.join().unwrap(), 0);
+    }
+
+    /// The `RUNNING_PROCESS_FAKE_BACKEND` seam redirects the client to
+    /// the seam endpoint even when the cached sidecar endpoint is bogus.
+    #[test]
+    fn fake_backend_seam_overrides_cached_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let daemon_state_dir = state_dir.clone();
+        let daemon_thread;
+        let real_endpoint_path;
+        {
+            let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
+            daemon_thread = thread::spawn(move || run_daemon(&daemon_state_dir));
+            wait_for_daemon_ready(&state_dir);
+            let identity = wait_for_identity_sidecar(&state_dir);
+            real_endpoint_path = identity.ipc_endpoint.path.clone();
+
+            // Poison the sidecar's endpoint so a Hello-skip dial would miss.
+            let mut poisoned = identity.clone();
+            poisoned.ipc_endpoint.path = format!("{real_endpoint_path}-bogus");
+            write_daemon_identity_file(&daemon_identity_path(&state_dir), &poisoned)
+                .expect("rewrite sidecar");
+        }
+
+        {
+            let _env = EnvGuard::apply(vec![
+                (RUNNING_PROCESS_DISABLE_ENV, None),
+                ("RUNNING_PROCESS_FAKE_BACKEND", Some(real_endpoint_path)),
+            ]);
+            let response = try_send_via_frame_lane(&state_dir, &DaemonRequest::ListLiveCwds)
+                .expect("seam must route around the poisoned cached endpoint");
+            assert!(matches!(response, DaemonResponse::LiveCwds { .. }));
+            let response = try_send_via_frame_lane(&state_dir, &DaemonRequest::Shutdown)
+                .expect("shutdown via seam");
+            assert!(matches!(response, DaemonResponse::ShutdownAck { .. }));
+        }
         assert_eq!(daemon_thread.join().unwrap(), 0);
     }
 
