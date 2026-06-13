@@ -30,19 +30,17 @@ use std::thread;
 
 use interprocess::local_socket::traits::Listener as _;
 use interprocess::local_socket::ListenerOptions;
+use running_process::broker::adopt::{AdoptError, BrokerSession};
 use running_process::broker::backend_handle::DaemonProcess;
 use running_process::broker::backend_sdk::{
     read_daemon_identity_file, remove_daemon_identity_file, write_daemon_identity_file,
-    BackendEndpointMux, FrameClient, LegacyClassification, MuxPoll,
+    BackendEndpointMux, LegacyClassification, MuxPoll,
 };
-use running_process::broker::client::{connect_to_backend, ConnectBackendRequest};
+use running_process::broker::builders::{CacheManifestBuilder, ServiceDefinitionBuilder};
+use running_process::broker::client::{ConnectBackendRequest, RefusalKind};
 use running_process::broker::doctor::default_broker_endpoint;
-use running_process::broker::protocol::{
-    encode_framed, BrokerIsolation, Endpoint, Frame, ServiceDefinition,
-};
-use running_process::broker::server::{
-    local_socket_name, service_definition_dir, write_service_definition,
-};
+use running_process::broker::protocol::{encode_framed, CacheRootKind, Endpoint, Frame};
+use running_process::broker::server::local_socket_name;
 use running_process::NativeProcess;
 use sha2::{Digest, Sha256};
 
@@ -70,6 +68,51 @@ pub(super) const RUNNING_PROCESS_DISABLE_ENV: &str = "RUNNING_PROCESS_DISABLE";
 
 /// Logical service name clud registers and probes under.
 pub(super) const RUNNING_PROCESS_SERVICE_NAME: &str = "clud";
+
+/// Minimum clud daemon version the broker may negotiate for this service
+/// (consumer-adoption guide step 8; zackees/running-process#436). Stamped
+/// onto the `ServiceDefinition` so the broker refuses pre-2.0.0 backends
+/// with `RefusalKind::VersionUnsupported`.
+pub(super) const RUNNING_PROCESS_MIN_VERSION: &str = "2.0.0";
+
+/// Wire mode selector at the clud daemon boundary
+/// (zackees/running-process#436, consumer-adoption-clud.md step 1).
+///
+/// Both arms decode into the SAME internal [`DaemonRequest`] /
+/// [`DaemonResponse`] model via `wire_prost`:
+/// - [`WireMode::JsonLegacy`]: clud's legacy JSON line wire over the
+///   direct daemon endpoint (TCP). Selected by `RUNNING_PROCESS_DISABLE=1`.
+/// - [`WireMode::ProstV1`]: running-process v1 `Frame` lane (payload
+///   protocol `0x7C4C`) reached through [`BrokerSession::adopt`] /
+///   Hello-skip, carrying clud prost payloads. The release default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WireMode {
+    /// Legacy JSON over the direct daemon endpoint (escape hatch).
+    JsonLegacy,
+    /// running-process v1 prost frame lane via the broker session.
+    ProstV1,
+}
+
+impl WireMode {
+    /// Select the active wire mode from the environment. The canonical
+    /// escape hatch `RUNNING_PROCESS_DISABLE=1` forces [`Self::JsonLegacy`]
+    /// + the direct endpoint; everything else uses [`Self::ProstV1`].
+    pub(super) fn select() -> Self {
+        if running_process_disabled() {
+            Self::JsonLegacy
+        } else {
+            Self::ProstV1
+        }
+    }
+
+    /// Stable identifier reported by the daemon diagnostics CLI.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::JsonLegacy => "json-legacy",
+            Self::ProstV1 => "prost-v1",
+        }
+    }
+}
 
 pub(super) fn running_process_disabled() -> bool {
     std::env::var(RUNNING_PROCESS_DISABLE_ENV)
@@ -175,6 +218,14 @@ pub(super) fn spawn_frame_lane(
         if let Err(err) = install_service_definition() {
             eprintln!("[clud] note: running-process servicedef install skipped: {err}");
         }
+        // Publish clud's CacheManifest (runtime/lock/config/log roots) so
+        // peers can discover this daemon through the central registry
+        // (#436, consumer-adoption-clud.md step 9). Best-effort and
+        // independent of the frame lane; skipped under `cfg!(test)` for
+        // the same reason as the servicedef install.
+        if let Err(err) = publish_cache_manifest(state_dir) {
+            eprintln!("[clud] note: running-process cache manifest publish skipped: {err}");
+        }
     }
     match start_frame_lane(state_dir, workers, gc_tx, shutdown_requested) {
         Ok(lane) => Some(lane),
@@ -187,21 +238,55 @@ pub(super) fn spawn_frame_lane(
 
 /// Install/refresh `clud.servicedef` in the running-process
 /// service-definition directory (`RUNNING_PROCESS_SERVICE_DEF_DIR`
-/// override honored by [`service_definition_dir`]). The definition uses
-/// SHARED_BROKER isolation and points at the current executable.
+/// override honored by running-process's `service_definition_dir`). The definition uses
+/// SHARED_BROKER isolation, declares `min_version` 2.0.0, and points at
+/// the current executable.
+///
+/// Built through [`ServiceDefinitionBuilder`] (#436 / #433 frozen
+/// builders) so the broker boilerplate is defaulted and validated on
+/// `install` instead of hand-spelled.
 pub(super) fn install_service_definition() -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
-    let definition = ServiceDefinition {
-        service_name: RUNNING_PROCESS_SERVICE_NAME.into(),
-        binary_path: exe.to_string_lossy().into_owned(),
-        isolation: BrokerIsolation::SharedBroker as i32,
-        explicit_instance: String::new(),
-        per_version_binary_dir: String::new(),
-        min_version: String::new(),
-        version_allow_list: Vec::new(),
-        labels: Default::default(),
-    };
-    write_service_definition(&service_definition_dir(), &definition)
+    ServiceDefinitionBuilder::shared_broker(
+        RUNNING_PROCESS_SERVICE_NAME,
+        exe.to_string_lossy().into_owned(),
+    )
+    .min_version(RUNNING_PROCESS_MIN_VERSION)
+    .allow_version(env!("CARGO_PKG_VERSION"))
+    .label("consumer", "clud")
+    .install()
+    .map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// Seal and publish clud's [`CacheManifest`] into the central registry
+/// (#436 / #433 builders, consumer-adoption-clud.md step 9). Records the
+/// daemon's runtime, lock, config, and log roots so peers can discover
+/// the cache. `RUNNING_PROCESS_MANIFEST_DIR` (honored by the running-
+/// process registry helpers) redirects the registry root for tests.
+///
+/// The roots map clud's on-disk layout (`paths.rs`) onto the broker's
+/// [`CacheRootKind`] taxonomy:
+/// - runtime  → `state_dir` (`CacheRuntime`)
+/// - lock     → `state_dir/daemon.lock` (`CacheLocks`)
+/// - config   → `~/.clud` (`CacheConfig`)
+/// - log      → `state_dir/logs` (`CacheLogs`)
+pub(super) fn publish_cache_manifest(state_dir: &Path) -> io::Result<PathBuf> {
+    let runtime_root = state_dir.to_string_lossy().into_owned();
+    let lock_root = state_dir.join("daemon.lock").to_string_lossy().into_owned();
+    let log_root = state_dir.join("logs").to_string_lossy().into_owned();
+    let config_root = dirs::home_dir()
+        .map(|home| home.join(".clud"))
+        .unwrap_or_else(|| state_dir.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+
+    CacheManifestBuilder::new(RUNNING_PROCESS_SERVICE_NAME, env!("CARGO_PKG_VERSION"))
+        .broker_instance("shared")
+        .root(CacheRootKind::CacheRuntime, runtime_root)
+        .root(CacheRootKind::CacheLocks, lock_root)
+        .root(CacheRootKind::CacheConfig, config_root)
+        .root(CacheRootKind::CacheLogs, log_root)
+        .publish()
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
@@ -410,24 +495,31 @@ pub(super) fn decode_frame_lane_response(payload: &[u8]) -> io::Result<DaemonRes
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
-/// One request/response round trip over the running-process frame lane.
+/// One request/response round trip over the running-process frame lane
+/// (`WireMode::ProstV1`).
 ///
-/// Client-side fast path for `send_daemon_request`: reads the daemon
-/// identity sidecar, dials via [`connect_to_backend`] (Hello-skip —
-/// `cached_backend_endpoint` is the sidecar's endpoint and clud's
-/// `wanted_version == self_version` by construction, so no broker is
-/// required; the `RUNNING_PROCESS_FAKE_BACKEND` test seam and a real
-/// broker Hello both still work through the same call), then exchanges
-/// one [`CLUD_PAYLOAD_PROTOCOL`] frame.
+/// Client-side fast path for `send_daemon_request`: selects the wire mode
+/// ([`WireMode::select`]), reads the daemon identity sidecar, and adopts
+/// the broker session through [`BrokerSession::adopt`] (#436 /
+/// consumer-adoption-clud.md step 6). Adoption performs the Hello
+/// handshake (`service_name = "clud"`, protocol min/max = 1,
+/// `client_lib_name = "running-process"`, `wanted_version` = clud daemon
+/// version) when a real broker is reached, and Hello-skips straight to
+/// the sidecar's backend endpoint otherwise (`cached_backend_endpoint`
+/// is set and `wanted_version == self_version` by construction). It then
+/// exchanges one [`CLUD_PAYLOAD_PROTOCOL`] frame.
 ///
-/// Returns `None` on ANY miss — disabled hatch, missing sidecar,
-/// connect/encode/decode failure — so the caller falls back to the
-/// legacy TCP wire, which stays the authoritative path.
+/// Returns `None` on ANY miss — `WireMode::JsonLegacy` (disable hatch),
+/// missing sidecar, broker refusal, connect/encode/decode failure — so
+/// the caller falls back to the legacy TCP wire, which stays the
+/// authoritative path. Broker refusals are classified through
+/// [`RefusalKind`] before degrading so the cause is logged, not
+/// swallowed silently.
 pub(super) fn try_send_via_frame_lane(
     state_dir: &Path,
     request: &DaemonRequest,
 ) -> Option<DaemonResponse> {
-    if running_process_disabled() {
+    if WireMode::select() == WireMode::JsonLegacy {
         return None;
     }
     let identity = read_daemon_identity_file(&daemon_identity_path(state_dir))?;
@@ -443,12 +535,55 @@ pub(super) fn try_send_via_frame_lane(
         version,
         version,
     );
+    connect.client_lib_name = "running-process";
     connect.cached_backend_endpoint = Some(&identity.ipc_endpoint.path);
-    let connection = connect_to_backend(connect).ok()?;
-    let mut client = FrameClient::from_stream(connection.stream);
+
+    let mut session = match BrokerSession::adopt(connect) {
+        Ok(session) => session,
+        Err(err) => {
+            log_adopt_miss(&err);
+            return None;
+        }
+    };
     let payload = encode_frame_lane_request(request, format!("cli-{}", std::process::id())).ok()?;
-    let reply = client.request(CLUD_PAYLOAD_PROTOCOL, payload).ok()?;
+    let reply = session.request(CLUD_PAYLOAD_PROTOCOL, payload).ok()?;
     decode_frame_lane_response(&reply.payload).ok()
+}
+
+/// Classify a [`BrokerSession::adopt`] failure for one diagnostic line
+/// before falling back to the TCP wire (#436 step 6, typed `Refused`).
+///
+/// `BrokerDisabled` is the escape hatch, not a failure, so it stays
+/// silent. A broker refusal is reported through [`RefusalKind`] rather
+/// than string-matched; everything else (unreachable broker, dial/IO
+/// error) is a plain miss and also stays quiet — the TCP fallback covers
+/// it on every launch.
+fn log_adopt_miss(err: &AdoptError) {
+    if let AdoptError::Connect(connect) = err {
+        match connect.refusal_kind() {
+            Some(RefusalKind::VersionUnsupported) => eprintln!(
+                "[clud] note: broker refused clud (version unsupported); upgrade running-process. Falling back to TCP."
+            ),
+            Some(RefusalKind::VersionBlocked) => eprintln!(
+                "[clud] note: broker refused clud (daemon version blocked). Falling back to TCP."
+            ),
+            Some(RefusalKind::ServiceUnknown) => eprintln!(
+                "[clud] note: broker has no clud.servicedef (service unknown). Falling back to TCP."
+            ),
+            Some(RefusalKind::RateLimited) => eprintln!(
+                "[clud] note: broker rate-limited clud. Falling back to TCP."
+            ),
+            Some(RefusalKind::ShuttingDown) => eprintln!(
+                "[clud] note: broker is shutting down. Falling back to TCP."
+            ),
+            Some(RefusalKind::Other(code)) => {
+                eprintln!("[clud] note: broker refused clud (code {code:?}). Falling back to TCP.")
+            }
+            // None => not a refusal (broker unreachable / dial error);
+            // the TCP fallback handles it on every launch, so stay quiet.
+            None => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -782,12 +917,98 @@ mod tests {
             std::path::PathBuf::from(&definition.binary_path),
             std::env::current_exe().unwrap()
         );
+        // #436 step 8: SHARED_BROKER + min_version "2.0.0" + consumer label.
+        assert_eq!(definition.min_version, RUNNING_PROCESS_MIN_VERSION);
+        assert_eq!(definition.min_version, "2.0.0");
+        assert_eq!(
+            definition.labels.get("consumer").map(String::as_str),
+            Some("clud")
+        );
         validate_service_definition_for_service(&definition, RUNNING_PROCESS_SERVICE_NAME)
             .expect("definition must validate");
 
         // Idempotent refresh: a second install overwrites in place.
         let again = install_service_definition().expect("reinstall servicedef");
         assert_eq!(again, path);
+    }
+
+    /// #436 step 1: the daemon-boundary wire selector maps the canonical
+    /// escape hatch. `RUNNING_PROCESS_DISABLE=1` → json-legacy; anything
+    /// else → prost-v1.
+    #[test]
+    fn wire_mode_select_maps_the_disable_hatch() {
+        let _env = EnvGuard::set(RUNNING_PROCESS_DISABLE_ENV, "1");
+        assert_eq!(WireMode::select(), WireMode::JsonLegacy);
+        assert_eq!(WireMode::JsonLegacy.as_str(), "json-legacy");
+        drop(_env);
+
+        let _env = EnvGuard::unset(RUNNING_PROCESS_DISABLE_ENV);
+        assert_eq!(WireMode::select(), WireMode::ProstV1);
+        assert_eq!(WireMode::ProstV1.as_str(), "prost-v1");
+        drop(_env);
+
+        // A non-`1` value does NOT engage the hatch — prost-v1 stays the
+        // default (matches `running_process_disabled` exact-match rule).
+        let _env = EnvGuard::set(RUNNING_PROCESS_DISABLE_ENV, "true");
+        assert_eq!(WireMode::select(), WireMode::ProstV1);
+    }
+
+    /// #436 step 9: `publish_cache_manifest` seals a manifest recording
+    /// clud's runtime, lock, config, and log roots and writes it to the
+    /// (env-redirected) central registry; it round-trips through
+    /// `read_manifest`.
+    #[test]
+    fn publish_cache_manifest_records_clud_roots_and_round_trips() {
+        use running_process::broker::manifest::read_manifest;
+        use running_process::broker::protocol::{CacheManifest, CacheRootKind};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = tmp.path().join("manifests");
+        let state_dir = tmp.path().join("state");
+        let _env = EnvGuard::set("RUNNING_PROCESS_MANIFEST_DIR", registry.to_str().unwrap());
+
+        let path = publish_cache_manifest(&state_dir).expect("publish manifest");
+        assert!(path.exists(), "manifest must be written to the registry");
+
+        let manifest: CacheManifest = read_manifest(&path).expect("read manifest back");
+        assert_eq!(manifest.service_name, RUNNING_PROCESS_SERVICE_NAME);
+        assert_eq!(manifest.service_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.broker_instance, "shared");
+
+        // Exactly the four declared roots, mapped onto the broker taxonomy.
+        let kinds: Vec<i32> = manifest.roots.iter().map(|root| root.kind).collect();
+        assert!(kinds.contains(&(CacheRootKind::CacheRuntime as i32)));
+        assert!(kinds.contains(&(CacheRootKind::CacheLocks as i32)));
+        assert!(kinds.contains(&(CacheRootKind::CacheConfig as i32)));
+        assert!(kinds.contains(&(CacheRootKind::CacheLogs as i32)));
+        assert_eq!(manifest.roots.len(), 4);
+
+        let runtime = manifest
+            .roots
+            .iter()
+            .find(|root| root.kind == CacheRootKind::CacheRuntime as i32)
+            .expect("runtime root present");
+        assert_eq!(
+            std::path::PathBuf::from(&runtime.path),
+            state_dir,
+            "runtime root must be the daemon state dir"
+        );
+        let log = manifest
+            .roots
+            .iter()
+            .find(|root| root.kind == CacheRootKind::CacheLogs as i32)
+            .expect("log root present");
+        assert_eq!(
+            std::path::PathBuf::from(&log.path),
+            state_dir.join("logs"),
+            "log root must be <state_dir>/logs"
+        );
+
+        // self_sha256 is sealed (non-empty) by the builder.
+        assert!(
+            !manifest.self_sha256.is_empty(),
+            "manifest digest must be sealed"
+        );
     }
 
     #[test]
