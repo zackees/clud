@@ -42,7 +42,7 @@ redb = "2"
 # the redb-open window to a few milliseconds at startup/shutdown so
 # concurrent launches serialize cleanly.
 fs4 = "0.13"
-running-process = { version = "4.2.0", default-features = false, features = ["telemetry", "client"] }
+running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client"] }
 # running-process consumer adoption (upstream #385): the daemon's broker
 # v1 frame lane binds a local-socket endpoint (named pipe on Windows,
 # unix socket elsewhere) alongside the legacy TCP listener. Pinned to
@@ -75,6 +75,14 @@ open = "5"
 [dev-dependencies]
 serde_yaml = "0.9"
 tempfile = "3"
+# #436: the `RUNNING_PROCESS_FAKE_BACKEND` seam that
+# `fake_backend_seam_overrides_cached_endpoint` exercises lives behind
+# running-process's off-by-default `test-seams` feature (upstream #433 R4).
+# Enabling it here compiles the seam into the `cargo test` build only —
+# Cargo unifies this dev-dep feature into the test harness but NOT into
+# `cargo build --bin clud`, so the production binary stays seam-free per
+# the upstream rule ("never compiled into production consumers").
+running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client", "test-seams"] }
 
 [build-dependencies]
 prost-build = "0.14"

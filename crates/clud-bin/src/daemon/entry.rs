@@ -117,15 +117,16 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
     let broker_requested = env_flag_eq_one(RUNNING_PROCESS_BROKER_ENV);
     let broker_disabled = env_flag_eq_one(RUNNING_PROCESS_DISABLE_ENV);
     let servicedef_installed = service_def_path.exists();
+    let wire_mode = super::rp_broker::WireMode::select();
     let mode = if broker_disabled {
         "disabled-direct-daemon"
     } else {
         "frame-lane-with-tcp-fallback"
     };
     let summary = if broker_disabled {
-        "RUNNING_PROCESS_DISABLE=1 bypasses the running-process frame lane; clud uses its direct TCP daemon path only."
+        "RUNNING_PROCESS_DISABLE=1 selects json-legacy + the direct TCP daemon endpoint; the broker frame lane is bypassed."
     } else {
-        "Clud serves a running-process broker v1 frame lane (payload protocol 0x7C4C) next to its TCP wire; clients try the lane first and fall back to TCP."
+        "Clud serves a running-process broker v1 frame lane (payload protocol 0x7C4C) next to its TCP wire; the client adopts the broker session (BrokerSession::adopt) and falls back to legacy JSON over TCP on any miss."
     };
     let deferred = [
         "broker-spawned backend adoption (the clud daemon remains self-managed)",
@@ -141,6 +142,7 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
                 "path": path_string(&service_def_path),
                 "directory_env_override": RUNNING_PROCESS_SERVICE_DEF_DIR_ENV,
                 "isolation": "SHARED_BROKER",
+                "min_version": super::rp_broker::RUNNING_PROCESS_MIN_VERSION,
                 "installed_by_clud": servicedef_installed,
                 "status": if servicedef_installed { "installed" } else { "pending_first_daemon_bringup" },
             },
@@ -156,9 +158,11 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
             },
             "mode": {
                 "current": mode,
+                "wire_mode": wire_mode.as_str(),
                 "summary": summary,
                 "uses_direct_daemon_fallback": broker_disabled,
                 "broker_client_wired": !broker_disabled,
+                "adopts_broker_session": !broker_disabled,
             },
             "environment": {
                 "RUNNING_PROCESS_DISABLE": broker_disabled,
@@ -177,12 +181,17 @@ fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
         println!("running-process adoption status for clud");
         println!("service: {RUNNING_PROCESS_SERVICE_NAME}");
         println!("isolation: SHARED_BROKER");
+        println!(
+            "min_version: {}",
+            super::rp_broker::RUNNING_PROCESS_MIN_VERSION
+        );
         println!("servicedef: {}", service_def_path.display());
         println!("servicedef installed: {servicedef_installed}");
         println!("daemon state: {}", state_dir.display());
         println!("daemon info: {}", daemon_info_path.display());
         println!("live daemon reachable: {}", live_daemon.is_some());
         println!("mode: {mode}");
+        println!("wire_mode: {}", wire_mode.as_str());
         println!("{summary}");
         println!("deferred:");
         for item in deferred {
