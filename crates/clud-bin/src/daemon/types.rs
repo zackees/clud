@@ -198,6 +198,14 @@ pub(super) enum DaemonRequest {
     },
     /// Ask the daemon to exit after replying. Used by `clud daemon restart`.
     Shutdown,
+    /// Fire-and-forget: ask the daemon to sweep every CLUD-tagged process
+    /// whose originator is no longer alive and `kill_tree` each. Sent from
+    /// the foreground clud's exit hook so the daemon catches descendants
+    /// the foreground couldn't reap on its own (e.g., reparented away from
+    /// `self_pid`, or left behind by a SIGKILL'd sibling clud). The daemon
+    /// replies `ReapOrphansAck` immediately and does the sweep on a
+    /// background thread.
+    ReapOrphans,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -229,6 +237,14 @@ pub(super) enum DaemonResponse {
     /// Acknowledgement for `DaemonRequest::Shutdown`.
     ShutdownAck {
         pid: u32,
+    },
+    /// Ack for [`DaemonRequest::ReapOrphans`]. Returned before the daemon
+    /// performs the kill (the sweep runs on a background thread), so the
+    /// CLI's exit path is never blocked. `found` and `reaped` are 0 in the
+    /// fast-path ack; populated only by the synchronous test path.
+    ReapOrphansAck {
+        found: u32,
+        reaped: u32,
     },
     Error {
         message: String,

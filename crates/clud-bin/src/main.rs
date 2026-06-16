@@ -549,6 +549,19 @@ fn main() {
                 outcome.found, outcome.reaped
             ));
         }
+
+        // Have the daemon do a broader sweep on our behalf: any CLUD-tagged
+        // process whose originator is gone (e.g., a sibling clud was
+        // SIGKILL'd and never ran its own exit hook) gets reaped on the
+        // daemon's background thread. Fire-and-forget with a tight
+        // timeout; failure is silently absorbed — the daemon's periodic
+        // heartbeat sweep will catch anything we miss, and the next
+        // `clud slay` does the synchronous version.
+        if !args.keep_orphans {
+            if let Ok(state_dir) = daemon::default_state_dir() {
+                let _ = daemon::try_request_orphan_reap(&state_dir);
+            }
+        }
     }
     if args.verbose {
         verbose_log::log(format_args!("[clud] exit: code {exit_code}"));

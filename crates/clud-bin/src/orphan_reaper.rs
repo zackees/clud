@@ -195,7 +195,38 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
         })
         .collect();
 
-    let found = mine.len();
+    let header = format!("[clud] orphan scan on exit (originator=CLUD:{self_pid}):");
+    report_and_reap(mine, &header, opts)
+}
+
+/// Scan for *abandoned* CLUD-tagged descendants whose originator process is
+/// no longer alive (dead PID, or PID reused by a later-started process —
+/// `running_process` already guards both with a start-time check).
+///
+/// This is the broader sweep called by `clud slay`, by the daemon's
+/// periodic heartbeat, and on `DaemonRequest::ReapOrphans`. Unlike
+/// [`scan_and_report`], it does NOT restrict to descendants of the current
+/// process — anything CLUD-tagged with a dead originator is fair game.
+pub fn reap_orphans(opts: &ReapOpts) -> ReapOutcome {
+    let all = running_process::originator::find_processes_by_originator("CLUD");
+    let orphans: Vec<Descendant> = all
+        .into_iter()
+        .filter(|p| !p.parent_alive)
+        .map(|p| Descendant {
+            pid: p.pid,
+            name: p.name,
+            command: p.command,
+        })
+        .collect();
+
+    let header = "[clud] orphan sweep (dead originator):".to_string();
+    report_and_reap(orphans, &header, opts)
+}
+
+/// Shared classify / report / kill body for both entry points. Returns a
+/// default outcome when `descendants` is empty so callers can skip noise.
+fn report_and_reap(descendants: Vec<Descendant>, header: &str, opts: &ReapOpts) -> ReapOutcome {
+    let found = descendants.len();
     if found == 0 {
         return ReapOutcome::default();
     }
@@ -203,7 +234,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
     // Group by shape label so the report collapses N identical leaks into
     // a single row with a list of PIDs/ports.
     let mut by_label: BTreeMap<String, Vec<&Descendant>> = BTreeMap::new();
-    let classified: Vec<(Shape, &Descendant)> = mine
+    let classified: Vec<(Shape, &Descendant)> = descendants
         .iter()
         .map(|d| (classify(&d.name, &d.command), d))
         .collect();
@@ -217,10 +248,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
         } else {
             "(reaping)"
         };
-        eprintln!(
-            "[clud] orphan scan on exit (originator=CLUD:{self_pid}): \
-             {found} env-tagged descendant(s) {action_word}"
-        );
+        eprintln!("{header} {found} env-tagged descendant(s) {action_word}");
         for (label, ds) in &by_label {
             let pids: Vec<String> = ds.iter().map(|d| d.pid.to_string()).collect();
             eprintln!(
@@ -247,7 +275,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
     }
 
     let mut reaped = 0usize;
-    for d in &mine {
+    for d in &descendants {
         process_tree::kill_tree(d.pid);
         reaped += 1;
     }
@@ -404,5 +432,21 @@ mod tests {
         );
         assert_eq!(outcome.found, 0);
         assert_eq!(outcome.reaped, 0);
+    }
+
+    #[test]
+    fn reap_orphans_in_keep_mode_does_not_kill() {
+        // `keep: true` means: list candidates but never invoke kill_tree. The
+        // test host may or may not have CLUD-tagged descendants with a dead
+        // originator, so we only assert that `reaped == 0` (never kill) and
+        // that `found >= reaped`. This guards against regressions where the
+        // shared report_and_reap path stops honoring `keep`.
+        let outcome = reap_orphans(&ReapOpts {
+            keep: true,
+            quiet: true,
+            explain: false,
+        });
+        assert_eq!(outcome.reaped, 0);
+        assert!(outcome.found >= outcome.reaped);
     }
 }

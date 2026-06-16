@@ -17,6 +17,7 @@ message ClientToDaemon {
     AdoptKillRequest adopt_kill = 6;
     GcRequest gc = 7;
     ShutdownRequest shutdown = 8;
+    ReapOrphansRequest reap_orphans = 9;
   }
   string request_id = 100;
 }
@@ -32,6 +33,7 @@ message DaemonToClient {
     GcResponse gc = 7;
     ShutdownAckResponse shutdown_ack = 8;
     ErrorResponse error = 9;
+    ReapOrphansAckResponse reap_orphans_ack = 10;
   }
   string request_id = 100;
 }
@@ -88,6 +90,21 @@ message GcRequest {
 }
 
 message ShutdownRequest {}
+
+// Issue: have-the-daemon-do-the-orphan-sweep. Fire-and-forget from the
+// foreground CLI's exit hook: the daemon walks every CLUD-tagged process
+// whose originator is no longer alive and reaps its tree. The ack is sent
+// before the kill begins so the CLI does not block on shutdown.
+message ReapOrphansRequest {}
+
+message ReapOrphansAckResponse {
+  // Number of CLUD-tagged processes whose originator was already dead at
+  // scan time. Always 0 in the fast-path ack; populated only by the
+  // synchronous test path.
+  uint32 found = 1;
+  // Number actually reaped. Same caveat as `found`.
+  uint32 reaped = 2;
+}
 
 // `session_json` (field 1) is a RETIRED JSON mirror of the typed
 // snapshot: encoders stopped emitting it in clud 2.1.0 (running-process

@@ -10,6 +10,7 @@ use super::io_helpers::read_json_file;
 use super::paths::{logs_dir, session_log_path, session_snapshot_path};
 use super::sessions::{list_background_sessions, resolve_session_id};
 use super::types::SessionSnapshot;
+use crate::orphan_reaper::{reap_orphans, ReapOpts};
 
 pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) -> i32 {
     if let Err(err) = ensure_daemon(state_dir) {
@@ -19,10 +20,6 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
 
     if all {
         let sessions = list_background_sessions(state_dir);
-        if sessions.is_empty() {
-            println!("No active sessions to kill.");
-            return 0;
-        }
         let mut failed = 0;
         for session in &sessions {
             match request_session_termination(state_dir, &session.id) {
@@ -32,6 +29,17 @@ pub(super) fn run_kill(state_dir: &Path, session_id: Option<&str>, all: bool) ->
                     failed += 1;
                 }
             }
+        }
+
+        // Also reap CLUD-tagged orphans whose originator clud is gone. The
+        // session registry only covers `--detach` / `--detachable` work; a
+        // foreground clud that died via SIGKILL leaves its env-tagged
+        // descendants behind, and they would otherwise live forever.
+        let outcome = reap_orphans(&ReapOpts::default());
+
+        if sessions.is_empty() && outcome.found == 0 {
+            println!("No active sessions or orphans to kill.");
+            return 0;
         }
         if failed > 0 {
             return 1;
