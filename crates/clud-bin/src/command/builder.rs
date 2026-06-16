@@ -133,6 +133,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         }
         Some(Command::Attach { .. })
         | Some(Command::Kill { .. })
+        | Some(Command::Slay)
         | Some(Command::List)
         | Some(Command::Logs { .. })
         | Some(Command::Gc { .. })
