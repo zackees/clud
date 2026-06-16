@@ -371,9 +371,9 @@ the codebase stays portable.
   native executable directly or make the PowerShell command end with
   `exit $LASTEXITCODE` after invoking the batch wrapper.
 
-- **File**: `crates/clud-bin/src/hook_health.rs:641`
+- **File**: `crates/clud-bin/src/hook_health/inspect.rs`
   (`warn_on_powershell_exit_code_risk`); launch gating at
-  `hook_health.rs:167` (`should_check_launch`). The unit coverage for hook
+  `hook_health/mod.rs` (`should_check_launch`). The unit coverage for hook
   parity lives in `crates/clud-bin/src/hook_health_tests.rs`.
 
 - **POSIX behavior**: No-op. The scanner returns immediately unless

@@ -35,6 +35,6 @@ The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) i
 - `main.rs` — calls `build_launch_plan` and `repeat_implies_no_done_warning` to assemble the plan and emit the `--repeat` warning before dispatch.
 - `runner.rs` — consumes `LaunchPlan` to spawn PTY/subprocess and drive iteration loops.
 - `loop_check.rs` — reads `plan.loop_markers` to poll DONE/BLOCKED after each iteration.
-- `hook_health.rs` — builds a plan as part of doctor-style health probes.
+- `hook_health/prompts.rs` — builds a plan as part of doctor-style health probes.
 - `daemon/entry.rs`, `daemon/types.rs` — persist and re-execute `LaunchPlan` records via the daemon worker.
 - `loop_artifacts.rs` — references the `chrono_like_now` algorithm pattern from `loop_task.rs`.

@@ -124,7 +124,7 @@ Skills and hooks:
   set; compares embedded vs installed `SKILL.md` modulo whitespace and
   overwrites divergent copies; purges retired managed skills from
   `PURGED_SKILLS`.
-- `hook_health.rs` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
+- `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation.
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
@@ -149,7 +149,7 @@ Quick lookup, which file owns a given subcommand:
 - `clud gc list` / `purge` / `reconcile` -> `gc.rs` (CLI handlers) talking to
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` -> `worktrees.rs`.
-- `clud --fix-hooks` -> `hook_health.rs`.
+- `clud --fix-hooks` -> `hook_health/`.
 
 ## Cross-Cutting Subsystems
 
