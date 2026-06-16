@@ -29,7 +29,7 @@ Five hard rules:
    - If no, delete any `.claude/worktrees/` created during this run, then either ask to add `.claude/` to `.gitignore` or use a sibling path outside the repo (`../<repo>-wt-<branch>/`). Do not create an unignored worktree inside the repo.
 2. **Stale worktrees.** Before creating a new worktree, run `git worktree prune`, then scan `.claude/worktrees/*` for directories older than 24 hours. If any exist, list them and ask whether to delete them. Do not remove stale worktrees without permission.
 3. **Create the worktree.** `git fetch origin main && git worktree add -b feat/<short-name> .claude/worktrees/<branch> origin/main`. All edits, commits, lint, and tests happen inside that path.
-4. **Tear down.** After `gh pr create` succeeds, run `git worktree remove .claude/worktrees/<branch>`, then `git worktree prune`, and confirm the entry is gone from `git worktree list`.
+4. **Tear down.** After `gh pr create` succeeds, remove the worktree with **a retry loop** because Windows file-lock races against long-lived background daemons (zccache, rust-analyzer) routinely cause the first removal attempt to fail with `Permission denied` / `Device or resource busy` — the handles release within seconds. Pattern: try `git worktree remove .claude/worktrees/<branch> --force`; if it fails, sleep 1s and try `rm -rf .claude/worktrees/<branch>`; retry up to ~5 attempts total (5s wall). After success, run `git worktree prune` and confirm the entry is gone from `git worktree list`. See [`zackees/soldr#710`](https://github.com/zackees/soldr/issues/710) for the proper soldr-side fix (in design); this retry loop is the cheap defensive backstop. On POSIX the first attempt always succeeds (delete-on-close semantics), so the retry loop is a no-op there.
 
 ## Mode Selection
 
@@ -81,7 +81,7 @@ Use this when the user asks to merge, land, or ship an already-open PR.
 9. **Clean tree gate.** Run `git status` inside the worktree. Commit source changes that belong in the PR. Delete tmp, scratch, and build artifacts. The worktree must be clean before push.
 10. **Commit.** Use a conventional commit. Reference the issue when one exists (`Closes #<num>` in the commit body or PR body). For freeform tasks, summarize the task instead.
 11. **Push and open PR.** `git push -u origin <branch>`, then `gh pr create`. The body should include the issue link when present, a concise summary, and tests run.
-12. **Remove the worktree.** Run `git worktree remove .claude/worktrees/<branch>`, then `git worktree prune`, confirm it is gone, then verify the main checkout's `git status` is clean.
+12. **Remove the worktree.** Follow the **Tear down** retry pattern in the Worktree Workspace section — `git worktree remove --force` first, then `rm -rf` with up to 5 retries at 1s spacing for the Windows file-lock race, then `git worktree prune`, confirm it is gone, then verify the main checkout's `git status` is clean.
 13. **Final response.** Give the PR URL and any essential test note. Keep it short.
 
 ## Failure Modes To Avoid

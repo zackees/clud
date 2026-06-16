@@ -95,7 +95,18 @@ PROJECT_VERSION = _project_version()
 
 def copied_clud_env(_source: Path) -> dict[str, str]:
     """Return an environment that can launch a copied clud binary."""
-    return os.environ.copy()
+    env = os.environ.copy()
+    # Suppress unlock_exe()'s in-place rename trampoline when the
+    # launched binary lives in a tmpdir (every _run() invocation).
+    # Without this, the trampoline renames `<tmpdir>/clud.exe` to
+    # `<tmpdir>/clud.exe.old.<rand>` and races against
+    # `TemporaryDirectory.__exit__`'s shutil.rmtree on Windows —
+    # SECTION release on process exit is async, so the tmpdir cleanup
+    # gets WinError 32 on the still-locked `.old.<rand>` file. The
+    # trampoline brings zero benefit here (the tmpdir binary is
+    # never `pip install`'d at this path). See issues #331, #333.
+    env["CLUD_NO_UNLOCK"] = "1"
+    return env
 
 
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
