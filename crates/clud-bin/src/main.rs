@@ -1,8 +1,8 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
-    loop_artifacts, loop_spec, runner, runtime_cache, startup, trampoline, trash, ui, verbose_log,
-    wasm, worktrees,
+    loop_artifacts, loop_spec, orphan_reaper, runner, runtime_cache, startup, trampoline, trash,
+    ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -511,6 +511,24 @@ fn main() {
     drop(_scanner_guard);
     drop(_session_guard);
     drop(_dnd_subprocess_guard);
+    // Issue #340: detect env-tagged orphans we are about to leave behind and
+    // (unless --keep-orphans) reap them. Skip for detached / detachable
+    // sessions — those descendants are intentionally outliving us and are
+    // owned by the daemon now.
+    if !args.detach && !args.detachable {
+        let opts = orphan_reaper::ReapOpts {
+            keep: args.keep_orphans,
+            quiet: args.quiet_orphans,
+            explain: args.explain_orphans,
+        };
+        let outcome = orphan_reaper::scan_and_report(std::process::id(), &opts);
+        if args.verbose && outcome.found > 0 {
+            verbose_log::log(format_args!(
+                "[clud] orphan reaper: found={} reaped={}",
+                outcome.found, outcome.reaped
+            ));
+        }
+    }
     if args.verbose {
         verbose_log::log(format_args!("[clud] exit: code {exit_code}"));
     }

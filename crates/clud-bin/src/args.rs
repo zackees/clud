@@ -138,6 +138,21 @@ pub struct Args {
     #[arg(long = "no-daemon")]
     pub no_daemon: bool,
 
+    /// Issue #340: keep env-tagged orphaned descendants alive on exit
+    /// (skip the auto-reap; still prints the report unless --quiet-orphans).
+    #[arg(long = "keep-orphans")]
+    pub keep_orphans: bool,
+
+    /// Issue #340: suppress the orphan-reaper surprise report on exit.
+    /// Reaping still happens unless --keep-orphans is also set.
+    #[arg(long = "quiet-orphans")]
+    pub quiet_orphans: bool,
+
+    /// Issue #340: dump the relevant env vars for each detected orphan
+    /// alongside the report, to help author allowlist rules.
+    #[arg(long = "explain-orphans")]
+    pub explain_orphans: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -376,6 +391,9 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--yes",
         "--force",
         "--no-daemon",
+        "--keep-orphans",
+        "--quiet-orphans",
+        "--explain-orphans",
         "--json",
         "--no-open",
         "--demo-gfx-sixel",

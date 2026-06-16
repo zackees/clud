@@ -42,7 +42,7 @@ redb = "2"
 # the redb-open window to a few milliseconds at startup/shutdown so
 # concurrent launches serialize cleanly.
 fs4 = "0.13"
-running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client"] }
+running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client", "originator-scan"] }
 # running-process consumer adoption (upstream #385): the daemon's broker
 # v1 frame lane binds a local-socket endpoint (named pipe on Windows,
 # unix socket elsewhere) alongside the legacy TCP listener. Pinned to
@@ -82,7 +82,7 @@ tempfile = "3"
 # Cargo unifies this dev-dep feature into the test harness but NOT into
 # `cargo build --bin clud`, so the production binary stays seam-free per
 # the upstream rule ("never compiled into production consumers").
-running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client", "test-seams"] }
+running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client", "originator-scan", "test-seams"] }
 
 [build-dependencies]
 prost-build = "0.14"
