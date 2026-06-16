@@ -1,0 +1,7 @@
+{
+  "_comment": "clud repo-scoped settings — DD-014. Tracked in version control. Local overrides go in .clud/settings.local.json (gitignored).",
+  "rust": {
+    "use_soldr": true,
+    "install": true
+  }
+}

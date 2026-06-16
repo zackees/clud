@@ -48,8 +48,12 @@ coverage-*.xml
 *.log
 .extern-repos/
 
-# clud loop state (GH issue cache, DONE/BLOCKED markers)
-.clud/
+# clud repo-scoped config dir (DD-014): track `settings.json` (the
+# repo-level soldr-activation marker), ignore runtime state (loop/
+# cache, DONE/BLOCKED markers, local-overrides).
+.clud/*
+!.clud/settings.json
+.clud/settings.local.json
 
 # Claude Code: ignore ephemeral session/cache state, keep project config
 # (settings + hooks + commands + agents + skills are checked in).

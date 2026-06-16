@@ -382,3 +382,73 @@ Three independent lines of evidence confirm Codex CLI loads skills from `~/.code
 `~/.agents/skills/` appears nowhere in the Codex binary's path literals. The pre-#243 layout was the right one all along.
 
 Note: this entry replaces what would have been [#290](https://github.com/zackees/clud/issues/290)'s separate verification spike — the binary-strings evidence is stronger than a black-box repro run, since it shows the source-of-truth path Codex's loader was built against.
+
+---
+
+## DD-014: Repo-scoped clud config lives at `.clud/settings.json` (mirrors `.claude/settings.json`)
+
+**Context:** zackees/clud#343 wires up a repo-scoped opt-in marker so that when a developer checks out a repo, `clud` can transparently route Rust toolchain calls (cargo / rustc / rustfmt / clippy-driver / rustdoc) through [soldr](https://github.com/zackees/soldr) by prepending soldr's shim dir to the session `PATH`. The design needs a single, unambiguous file at the repo root that:
+
+1. Declares the opt-in (presence + explicit field).
+2. Carries forward-compatible structured fields (the `[rust]` section: `use_soldr`, `install`, optional `version` pin — and room for future `[python]`, `[js]`, etc.).
+3. Doesn't collide with existing repo dot-conventions.
+4. Reads symmetrically with the `.claude/` convention developers using Claude Code already know.
+
+Earlier drafts considered `.clud` (bare file), `.clud.toml`, and `.clud/config.toml`. All three either collided with an existing path (the `.clud/` directory was previously gitignored and used for `/clud-loop` runtime state) or broke symmetry with the `.claude/settings.json` pattern.
+
+**Decision:** Put the file at `.clud/settings.json`. The `.clud/` directory is now tracked (not blanket-gitignored). Inside it:
+
+- `.clud/settings.json` — tracked. The repo-scoped opt-in marker + structured config.
+- `.clud/settings.local.json` — gitignored. User-local overrides (mirrors `.claude/settings.local.json`).
+- `.clud/loop/` and any other runtime state — gitignored via `.clud/*` plus `!.clud/settings.json` allowlist.
+
+Parser lives in [`crates/clud-bin/src/repo_clud_config.rs`](../crates/clud-bin/src/repo_clud_config.rs); session activator lives in [`crates/clud-bin/src/soldr_activate.rs`](../crates/clud-bin/src/soldr_activate.rs); main.rs calls `soldr_activate::activate_soldr_shims_if_requested()` right after `trampoline::unlock_exe()`.
+
+Schema (v1):
+
+```json
+{
+  "rust": {
+    "use_soldr": true,
+    "install":   true,
+    "version":   "0.7.55"
+  }
+}
+```
+
+**Rationale:**
+
+- **Symmetry with `.claude/settings.json`.** Developers using Claude Code already understand `.claude/settings.json` as the "tracked, repo-scoped, JSON" config + `.claude/settings.local.json` as "gitignored local overrides". `.clud/settings.json` reuses that mental model verbatim. The `.gitignore` allowlist pattern is identical (`.clud/*` + `!.clud/settings.json` + `.clud/settings.local.json`).
+- **Directory, not bare file.** `.clud/` as a directory lets us grow new files later (`hooks/`, `commands/`, `agents/`, runtime state under `loop/`) without inventing a second top-level marker.
+- **JSON, not TOML.** JSON matches `.claude/settings.json`. Even though `clud_settings.rs` (the user-level settings at `~/.clud/settings.toml`) uses TOML via `toml_edit`, that's a hand-edited dev-config file. `.clud/settings.json` is a repo-checked-in file that may also be generated/edited by tools — JSON's strict syntax (no comments, explicit quoting) is the right trade-off when both humans and machines read/write it.
+- **`[rust]` nesting from day one.** Even though only the rust section exists today, scoping under `"rust"` means future `"python"` / `"js"` sections don't collide with `"use_soldr"` style top-level keys.
+- **Soldr stays passive.** Soldr exposes only `soldr shims --json`. clud is the active consumer: clud reads `.clud/settings.json`, decides whether to call soldr, prepends `PATH`. Soldr knows nothing about `.clud/settings.json`. This dependency direction lets soldr-only consumers (no clud) call `soldr shims --json` themselves from any setup script.
+
+**Alternatives Considered:**
+
+| Approach | Why not |
+|---|---|
+| `.clud` (bare file at repo root) | Collides with the pre-existing `.clud/` directory used by `/clud-loop` for runtime state. Either every consumer has to handle file-vs-dir ambiguity per-checkout, or we ship a migration. Cleaner to use the directory we already have. |
+| `.clud.toml` (file, distinct from `.clud/` dir) | No directory growth path. We'd need a second marker the moment we want `.clud/hooks/` or `.clud/commands/`. Splits the convention across two top-level paths. |
+| `.clud/config.toml` (TOML inside the dir) | Loses symmetry with `.claude/settings.json`. Developers already know the `.claude/` layout; the `.clud/` layout should read the same way without forcing a second mental model. |
+| Reuse `.claude/settings.json` with a new `"clud"` section | Crosses tool ownership. `.claude/settings.json` is Claude Code's file; adding clud-specific keys to it makes both tools' configs fragile to the other's schema evolution. clud should own its own file. |
+| `~/.clud/settings.toml` (user-level only, no repo file) | Misses the per-repo opt-in case — a developer who wants soldr routing for one Rust repo but not another can't express that with a user-level setting alone. The user-level file (`~/.clud/settings.toml`, owned by `clud_settings.rs`) and the repo-level file (`.clud/settings.json`, this DD) coexist; they answer different questions. |
+
+**Consequences:**
+
+- **`.gitignore` change.** The `.clud/` blanket-ignore is replaced by `.clud/*` + `!.clud/settings.json` + `.clud/settings.local.json` (mirroring `.claude/*`). Existing `/clud-loop` runtime state under `.clud/loop/` stays gitignored via the wildcard.
+- **Session startup grows a fixed-cost probe.** `discover_repo_clud_config()` does an O(1) `fs::metadata` per parent dir up to the `.git` boundary. Negligible (~tens of microseconds), but it's a new mandatory step in the startup path. Repos without `.clud/settings.json` pay only the directory-walk; no `soldr` spawn happens.
+- **Soldr's own `.clud/settings.json` is its dogfood.** This PR adds a `.clud/settings.json` to the clud repo itself declaring `rust.use_soldr = true`, so every clud contributor's session automatically routes cargo through soldr per CLAUDE.md.
+- **The repo-level + user-level config files have orthogonal roles.** Repo-level (`.clud/settings.json`, this DD) = "what should clud do in *this* checkout"; user-level (`~/.clud/settings.toml`, DD-006 / `clud_settings.rs`) = "what should clud do for *me* regardless of checkout". They never overlap; agents and reviewers should not conflate them.
+- **Reversal cost is moderate.** Renaming to a different filename later is a one-PR rename. Switching to TOML would mean a parser swap and rewriting `.clud/settings.json` to `.clud/settings.toml` everywhere — also one PR. Schema additions are append-only thanks to `#[serde(default)]` on every field.
+
+**Verification:** `crates/clud-bin/src/repo_clud_config.rs` ships unit tests covering:
+
+- Empty file = defaults (presence-only contract).
+- Missing `[rust]` section = defaults (forward-compat for future `[python]`).
+- Explicit `use_soldr=false` honored.
+- Discovery walks up from a subdirectory.
+- Discovery stops at the `.git/` boundary (no cross-repo bleed).
+- Malformed JSON warns + returns `None`.
+
+`crates/clud-bin/src/soldr_activate.rs` covers the activator failure-mode contract per zackees/clud#343.

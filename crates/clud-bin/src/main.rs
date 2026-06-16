@@ -1,8 +1,8 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
-    loop_artifacts, loop_spec, orphan_reaper, runner, runtime_cache, startup, trampoline, trash,
-    ui, verbose_log, wasm, worktrees,
+    loop_artifacts, loop_spec, orphan_reaper, runner, runtime_cache, soldr_activate, startup,
+    trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -16,6 +16,14 @@ fn main() {
 
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();
+
+    // zackees/clud#343: when the repo ships `.clud/settings.json` with
+    // `rust.use_soldr = true`, route cargo / rustc / rustfmt /
+    // clippy-driver / rustdoc through soldr by prepending soldr's shim
+    // dir to PATH in-process. Must run before any subprocess spawn that
+    // could resolve those binaries (i.e., before `runner::run`,
+    // `daemon::*`, hook spawns, etc.). See DD-014.
+    soldr_activate::activate_soldr_shims_if_requested();
 
     // Stamp the console title with `clud <cwd-name>` so the active
     // window is identifiable at a glance. Windows-only effective; a
