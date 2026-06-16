@@ -27,9 +27,11 @@
 //! engages the same warn-and-continue contract above.
 
 use crate::repo_clud_config::{discover_effective_clud_config, RepoCludConfig};
+use crate::subprocess;
+use crate::win_creation_flags::invisible_helper_creationflags;
+use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const SOLDR_SHIMS_TIMEOUT: Duration = Duration::from_secs(15);
@@ -126,44 +128,45 @@ struct ShimInfo {
 /// caller's `eprintln!` — caller appends "`.clud/settings.json
 /// directive ignored`").
 fn run_soldr_shims_json() -> Result<ShimInfo, String> {
-    let output = match run_with_timeout(
-        Command::new("soldr").args(["shims", "--json"]),
-        SOLDR_SHIMS_TIMEOUT,
-    ) {
-        Ok(out) => out,
-        Err(TimeoutError::Spawn(err)) => {
+    let argv = vec![
+        "soldr".to_string(),
+        "shims".to_string(),
+        "--json".to_string(),
+    ];
+    let (exit_code, combined) = match run_capturing(argv, SOLDR_SHIMS_TIMEOUT) {
+        Ok(t) => t,
+        Err(SubprocError::Spawn(err)) => {
             return Err(format!("failed to spawn `soldr shims --json`: {err}"));
         }
-        Err(TimeoutError::Timeout) => {
+        Err(SubprocError::Timeout) => {
             return Err(format!(
                 "soldr shims --json timed out after {}s",
                 SOLDR_SHIMS_TIMEOUT.as_secs()
             ));
         }
-        Err(TimeoutError::Wait(err)) => {
+        Err(SubprocError::Wait(err)) => {
             return Err(format!("waiting on `soldr shims --json` failed: {err}"));
         }
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let lower = stderr.to_lowercase();
+    if exit_code != 0 {
+        let lower = combined.to_lowercase();
         if lower.contains("unrecognized subcommand") || lower.contains("unknown subcommand") {
             return Err("this soldr is too old (no 'shims' verb); upgrade to v0.7.55+".to_string());
         }
-        let snippet: String = stderr.chars().take(200).collect();
-        let code = output
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "signal".to_string());
+        let snippet: String = combined.chars().take(200).collect();
         return Err(format!(
-            "soldr shims --json exited with code {code}; stderr: {snippet}"
+            "soldr shims --json exited with code {exit_code}; output: {snippet}"
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: SoldrShimsJson = serde_json::from_str(stdout.trim())
+    // soldr emits informational `soldr: ...` lines to stderr that get merged
+    // into the combined stream by `StderrMode::Stdout`. The JSON payload is a
+    // single pretty-printed object that begins with `{` and ends with `}`.
+    // Slice from the first `{` to the LAST `}` to skip the prefix lines.
+    let json_text = extract_json_object(&combined)
+        .ok_or_else(|| "soldr shims --json returned no JSON object in its output".to_string())?;
+    let parsed: SoldrShimsJson = serde_json::from_str(json_text)
         .map_err(|e| format!("soldr shims --json returned invalid JSON; parse error: {e}"))?;
 
     if parsed.schema_version != 1 {
@@ -266,30 +269,26 @@ fn try_install(candidates: &[(&str, &[&str])]) -> Result<String, String> {
             continue;
         }
         let summary = format!("{} {}", installer, args.join(" "));
-        match run_with_timeout(Command::new(installer).args(*args), SOLDR_INSTALL_TIMEOUT) {
-            Ok(output) if output.status.success() => return Ok(summary),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut argv = vec![installer.to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        match run_capturing(argv, SOLDR_INSTALL_TIMEOUT) {
+            Ok((0, _output)) => return Ok(summary),
+            Ok((code, output)) => {
                 last_reason = format!(
-                    "`{summary}` exited with code {}: {}",
-                    output
-                        .status
-                        .code()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "signal".to_string()),
-                    stderr.chars().take(200).collect::<String>()
+                    "`{summary}` exited with code {code}: {}",
+                    output.chars().take(200).collect::<String>()
                 );
             }
-            Err(TimeoutError::Timeout) => {
+            Err(SubprocError::Timeout) => {
                 last_reason = format!(
                     "`{summary}` timed out after {}s",
                     SOLDR_INSTALL_TIMEOUT.as_secs()
                 );
             }
-            Err(TimeoutError::Spawn(err)) => {
+            Err(SubprocError::Spawn(err)) => {
                 last_reason = format!("failed to spawn `{summary}`: {err}");
             }
-            Err(TimeoutError::Wait(err)) => {
+            Err(SubprocError::Wait(err)) => {
                 last_reason = format!("waiting on `{summary}` failed: {err}");
             }
         }
@@ -298,47 +297,75 @@ fn try_install(candidates: &[(&str, &[&str])]) -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------
-// Cross-platform wait-with-timeout for a Command.
-//
-// We avoid `tokio` here — clud's startup must stay sync to keep
-// trampoline / console-title work simple. A spawn-thread + channel
-// timer is the standard pattern.
+// Subprocess wrapper — uses `running_process::NativeProcess` per the
+// clud-wide ban on `std::process::Command` (lint enforced by CI).
+// Mirrors the pattern in `daemon::gc_service::extern_repo::run_gh_capture`.
 // ---------------------------------------------------------------------
 
-enum TimeoutError {
-    Spawn(std::io::Error),
-    Wait(std::io::Error),
+enum SubprocError {
+    Spawn(String),
+    Wait(String),
     Timeout,
 }
 
-fn run_with_timeout(
-    cmd: &mut Command,
-    deadline: Duration,
-) -> Result<std::process::Output, TimeoutError> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(TimeoutError::Spawn)?;
+/// Spawn `argv[0] argv[1..]`, capture combined stdout+stderr (per the
+/// `StderrMode::Stdout` convention used elsewhere in this crate), and
+/// return `(exit_code, combined_output)`. Kills the child on timeout.
+fn run_capturing(argv: Vec<String>, deadline: Duration) -> Result<(i32, String), SubprocError> {
+    let config = ProcessConfig {
+        command: subprocess::command_spec_for_subprocess(argv),
+        cwd: None,
+        env: None,
+        capture: true,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: invisible_helper_creationflags(),
+        create_process_group: false,
+        stdin_mode: StdinMode::Null,
+        nice: None,
+    };
+    let process = NativeProcess::new(config);
+    process
+        .start()
+        .map_err(|e| SubprocError::Spawn(e.to_string()))?;
 
     let start = std::time::Instant::now();
-    let poll_interval = Duration::from_millis(50);
+    let mut buf = Vec::<u8>::new();
     loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => {
-                return child.wait_with_output().map_err(TimeoutError::Wait);
+        match process.read_combined(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(event) => {
+                buf.extend_from_slice(&event.line);
+                buf.push(b'\n');
             }
-            Ok(None) => {
-                if start.elapsed() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(TimeoutError::Timeout);
+            ReadStatus::Timeout => {
+                if process.returncode().is_some() {
+                    break;
                 }
-                std::thread::sleep(poll_interval);
+                if start.elapsed() >= deadline {
+                    let _ = process.kill();
+                    let _ = process.wait(Some(Duration::from_secs(5)));
+                    return Err(SubprocError::Timeout);
+                }
             }
-            Err(err) => return Err(TimeoutError::Wait(err)),
+            ReadStatus::Eof => break,
         }
+    }
+    let exit_code = process
+        .wait(Some(Duration::from_secs(5)))
+        .map_err(|e| SubprocError::Wait(e.to_string()))?;
+    Ok((exit_code, String::from_utf8_lossy(&buf).to_string()))
+}
+
+/// Extract the first valid JSON object from `combined` by slicing from
+/// the first `{` to the last `}`. Returns `None` if there is no
+/// matching pair. Robust enough for soldr's pretty-printed JSON output
+/// mixed with `soldr: ...` informational lines on the same stream.
+fn extract_json_object(combined: &str) -> Option<&str> {
+    let start = combined.find('{')?;
+    let end = combined.rfind('}')?;
+    if end >= start {
+        Some(&combined[start..=end])
+    } else {
+        None
     }
 }
 
