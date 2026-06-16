@@ -744,18 +744,26 @@ where
         if let Ok(chunk) = stdin_rx.try_recv() {
             let requested_interrupt =
                 interrupt_on_ctrl_c_byte && stdin_chunk_requests_interrupt(&chunk);
+            let chunk = if interactive_real_stdin {
+                crate::paste_image::expand_ctrl_v_bytes(&chunk, || {
+                    crate::paste_image::handle_clipboard().ok().flatten()
+                })
+            } else {
+                std::borrow::Cow::Borrowed(chunk.as_slice())
+            };
             // Run the bracketed-paste normalizer over the chunk BEFORE
             // forwarding to the PTY. Non-paste bytes pass through with
             // O(1) state cost (just a 6-byte prefix matcher); paste
             // bodies are buffered and rewritten in place.
-            let outgoing = paste.process(&chunk);
+            let outgoing = paste.process(chunk.as_ref());
             if let Err(err) = process.write_impl(&outgoing, false) {
                 eprintln!("[clud] warning: failed to forward stdin to pty: {}", err);
             } else if hooks.intercept_f3() {
-                // F3 detection still runs over the ORIGINAL chunk: a
-                // press inside a paste body is unusual but we want
-                // detection symmetry with raw byte forwarding.
-                let events = observer.observe(&chunk);
+                // F3 detection runs over the outgoing user input after
+                // Ctrl+V image expansion but before any backend write
+                // side effects. A press inside paste text is unusual but
+                // should keep detection symmetry with raw forwarding.
+                let events = observer.observe(chunk.as_ref());
                 let mut sink = NativePtyProcessSink::new(process);
                 for _ in 0..events.presses {
                     if let Err(err) = hooks.on_f3_press(&mut sink) {
