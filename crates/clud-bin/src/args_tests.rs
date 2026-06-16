@@ -361,6 +361,72 @@ fn test_fix_subcommand() {
 }
 
 #[test]
+fn test_optimize_defaults_to_rust_global_soldr() {
+    let args = parse(&["clud", "optimize"]);
+    match args.command {
+        Some(Command::Optimize {
+            target,
+            global,
+            repo,
+            install_soldr,
+            use_soldr_shims,
+            ref soldr_version,
+        }) => {
+            assert_eq!(target, OptimizeTarget::Rust);
+            assert!(!global);
+            assert!(!repo);
+            assert!(install_soldr);
+            assert!(use_soldr_shims);
+            assert_eq!(soldr_version, "0.7.11");
+        }
+        other => panic!("expected Optimize subcommand, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_optimize_rust_repo_flags() {
+    let args = parse(&[
+        "clud",
+        "optimize",
+        "rust",
+        "--repo",
+        "--install-soldr=false",
+        "--use-soldr-shims=false",
+        "--soldr-version",
+        "1.2.3",
+    ]);
+    match args.command {
+        Some(Command::Optimize {
+            target,
+            global,
+            repo,
+            install_soldr,
+            use_soldr_shims,
+            ref soldr_version,
+        }) => {
+            assert_eq!(target, OptimizeTarget::Rust);
+            assert!(!global);
+            assert!(repo);
+            assert!(!install_soldr);
+            assert!(!use_soldr_shims);
+            assert_eq!(soldr_version, "1.2.3");
+        }
+        other => panic!("expected Optimize subcommand, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_optimize_soldr_alias_selects_rust() {
+    let args = parse(&["clud", "optimize", "soldr"]);
+    match args.command {
+        Some(Command::Optimize { target, .. }) => {
+            assert_eq!(target, OptimizeTarget::Rust);
+        }
+        other => panic!("expected Optimize subcommand, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_fix_with_url() {
     let args = parse(&[
         "clud",

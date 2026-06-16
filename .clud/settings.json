@@ -1,0 +1,9 @@
+{
+  "optimize": {
+    "rust": {
+      "install_soldr": true,
+      "soldr_version": "0.7.11",
+      "use_soldr_shims": true
+    }
+  }
+}

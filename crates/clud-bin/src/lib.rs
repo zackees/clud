@@ -25,6 +25,7 @@ pub mod launch_setup;
 pub mod loop_artifacts;
 pub mod loop_check;
 pub mod loop_spec;
+pub mod optimize;
 pub mod orphan_reaper;
 pub mod paste_image;
 pub mod process_tree;

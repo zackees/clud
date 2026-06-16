@@ -138,6 +138,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         | Some(Command::Gc { .. })
         | Some(Command::Ui { .. })
         | Some(Command::Trash { .. })
+        | Some(Command::Optimize { .. })
         | Some(Command::Daemon { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}
