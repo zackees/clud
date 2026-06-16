@@ -25,7 +25,7 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `sessions.rs` — snapshot discovery + filtering: `resolve_session_id` (exact/name/prefix), `most_recent_session[_any]`, `list_background_sessions`, `list_attachable_sessions`.
 - `keys.rs` — `crossterm` `KeyEvent` → terminal byte sequence translator used by interactive attach.
 - `io_helpers.rs` — JSON read/write over TCP + atomic file writes, session-id generator, terminal-size probe, `--backlog-size` / `CLUD_BACKLOG_BYTES` parsing.
-- `wire_prost.rs` - prost v1 foundation for the daemon wire: generated `clud.v1` types, CLUD/CLJS payload protocol discriminators, encode/decode helpers, JSON-compatibility tests, the default prost daemon RPC path, and the `CLUD_DAEMON_WIRE=json` legacy fallback.
+- `wire_prost/` - prost v1 foundation for the daemon wire: generated `clud.v1` types, CLUD/CLJS payload protocol discriminators, encode/decode helpers, JSON-compatibility tests, the default prost daemon RPC path, and the `CLUD_DAEMON_WIRE=json` legacy fallback.
 - `process_utils.rs` — `pid_is_alive`, `signal_process_tree`, `descendant_pids` via `sysinfo`.
 
 ## Key items
