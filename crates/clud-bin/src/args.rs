@@ -280,7 +280,7 @@ pub enum DaemonSubcommand {
     },
 }
 
-/// Subcommands under `clud gc`. See `crates/clud-bin/src/gc.rs`.
+/// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
     /// Print every tracked entry, newest first.
