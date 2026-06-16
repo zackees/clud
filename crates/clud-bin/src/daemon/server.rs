@@ -114,6 +114,13 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         Arc::clone(&shutdown_requested),
     );
 
+    // Periodic orphan sweep. Catches CLUD-tagged descendants whose
+    // originator clud was SIGKILL'd and never ran its own exit hook (so
+    // the on-exit `ReapOrphans` IPC never fired). Pure background work —
+    // never blocks the accept loop. Sleeps in 1s slices so shutdown is
+    // promptly observed.
+    spawn_orphan_sweeper(Arc::clone(&shutdown_requested));
+
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -229,6 +236,26 @@ pub(super) fn dispatch_daemon_request(
             spawn_adopt_kill_worker(pids.clone(), reason);
             DaemonResponse::AdoptKillAck {
                 accepted: pids.len(),
+            }
+        }
+        DaemonRequest::ReapOrphans => {
+            // Fire-and-forget: spawn the sweep on a background thread so the
+            // CLI's exit path never blocks on `kill_tree`. Ack with zeros —
+            // the foreground caller doesn't wait for the actual count.
+            thread::spawn(|| {
+                let _ = crate::orphan_reaper::reap_orphans(&crate::orphan_reaper::ReapOpts {
+                    keep: false,
+                    // Quiet on the daemon path: the daemon's stderr is a
+                    // log file no one is tailing during normal use, so
+                    // the per-row report would just be noise. The
+                    // synchronous `clud slay` path still prints.
+                    quiet: true,
+                    explain: false,
+                });
+            });
+            DaemonResponse::ReapOrphansAck {
+                found: 0,
+                reaped: 0,
             }
         }
         DaemonRequest::Gc { payload } => {
@@ -409,6 +436,40 @@ fn reap_worker_when_done(
 /// nobody is on the other end to receive a reply. The kill walk uses
 /// `process_tree::kill_tree` for parity with the synchronous path it
 /// replaces (see `runner::teardown_interrupted_child`).
+/// Period between dead-originator orphan sweeps in the daemon. 30s is a
+/// compromise: long enough that the scan (sysinfo + env-var read for every
+/// process on the host) isn't a noticeable background load, short enough
+/// that SIGKILL'd-clud orphans don't linger for minutes.
+const ORPHAN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+fn spawn_orphan_sweeper(shutdown_requested: Arc<AtomicBool>) {
+    let _ = thread::Builder::new()
+        .name("clud-orphan-sweep".to_string())
+        .spawn(move || loop {
+            // Sleep in 1-second slices so shutdown is observed within ~1s.
+            let mut remaining = ORPHAN_SWEEP_INTERVAL;
+            while remaining > Duration::ZERO {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    return;
+                }
+                let slice = remaining.min(Duration::from_secs(1));
+                thread::sleep(slice);
+                remaining = remaining.saturating_sub(slice);
+            }
+            if shutdown_requested.load(Ordering::SeqCst) {
+                return;
+            }
+            let _ = crate::orphan_reaper::reap_orphans(&crate::orphan_reaper::ReapOpts {
+                keep: false,
+                // Quiet: the daemon log shouldn't fill with per-tick
+                // empty-sweep noise; per-process kill failures still
+                // surface via `kill_tree`'s own diagnostics if any.
+                quiet: true,
+                explain: false,
+            });
+        });
+}
+
 fn spawn_adopt_kill_worker(pids: Vec<u32>, reason: Option<String>) {
     let _ = thread::Builder::new()
         .name("clud-adopt-kill".to_string())

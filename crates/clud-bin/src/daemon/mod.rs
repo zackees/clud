@@ -18,7 +18,8 @@ mod worker_shared;
 
 pub use client::{
     ensure_daemon, gc_client_insert, gc_client_list, gc_client_list_repo_visits, gc_client_purge,
-    gc_client_reconcile, gc_client_record_repo_visit, try_handoff_kill_to_daemon, GcPurgeOutcome,
+    gc_client_reconcile, gc_client_record_repo_visit, try_handoff_kill_to_daemon,
+    try_request_orphan_reap, GcPurgeOutcome,
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 pub use http::{

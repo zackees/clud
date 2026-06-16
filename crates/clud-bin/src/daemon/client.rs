@@ -254,6 +254,40 @@ pub fn try_handoff_kill_to_daemon(state_dir: &Path, pids: &[u32], reason: Option
     matches!(reader.read_line(&mut line), Ok(n) if n > 0)
 }
 
+/// Fire-and-forget: ask the daemon to sweep dead-originator CLUD orphans.
+/// Called from the foreground clud's exit hook. Tight 150ms read/write
+/// timeouts (mirrors `try_handoff_kill_to_daemon`) so a wedged daemon
+/// can't drag out CLI shutdown. Returns `true` when the ack arrives.
+///
+/// Failure modes (daemon down, version skew, network hiccup) all degrade
+/// silently — the daemon will still catch any dead-originator orphans on
+/// its next periodic sweep (`gc_service`-adjacent path), and the next
+/// `clud slay` invocation does the synchronous version.
+pub fn try_request_orphan_reap(state_dir: &Path) -> bool {
+    let info = match read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
+        Ok(info) => info,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], info.port)),
+        Duration::from_millis(150),
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+    let Ok(format) = daemon_wire_format_from_env() else {
+        return false;
+    };
+    if write_daemon_request(&mut stream, &DaemonRequest::ReapOrphans, format).is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    matches!(reader.read_line(&mut line), Ok(n) if n > 0)
+}
+
 pub(super) fn request_session_interrupt(
     state_dir: &Path,
     session_id: &str,

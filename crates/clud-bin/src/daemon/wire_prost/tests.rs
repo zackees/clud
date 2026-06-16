@@ -170,6 +170,7 @@ fn daemon_request_prost_roundtrips_json_shapes() {
             },
         },
         DaemonRequest::Shutdown,
+        DaemonRequest::ReapOrphans,
     ];
 
     for request in cases {
@@ -202,6 +203,10 @@ fn daemon_response_prost_roundtrips_json_shapes() {
             reply: GcReply::ListOk { rows: Vec::new() },
         },
         DaemonResponse::ShutdownAck { pid: 1234 },
+        DaemonResponse::ReapOrphansAck {
+            found: 3,
+            reaped: 3,
+        },
         DaemonResponse::Error {
             message: "failed".to_string(),
         },
