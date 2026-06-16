@@ -23,7 +23,6 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use fs4::fs_std::FileExt;
 
@@ -127,15 +126,54 @@ fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
-        let err = Command::new(cached).args(&args).exec();
-        Err(err)
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut argv = Vec::with_capacity(args.len() + 1);
+        argv.push(
+            CString::new(cached.as_os_str().as_bytes())
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
+        );
+        for arg in args {
+            argv.push(
+                CString::new(arg.as_os_str().as_bytes())
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
+            );
+        }
+        let mut argv_ptrs = argv.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
+        argv_ptrs.push(std::ptr::null());
+
+        unsafe {
+            libc::execv(argv[0].as_ptr(), argv_ptrs.as_ptr());
+        }
+        Err(io::Error::last_os_error())
     }
 
     #[cfg(not(unix))]
     {
-        let status = Command::new(cached).args(&args).status()?;
-        std::process::exit(status.code().unwrap_or(1));
+        use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+
+        let mut argv = Vec::with_capacity(args.len() + 1);
+        argv.push(cached.as_os_str().to_string_lossy().into_owned());
+        argv.extend(
+            args.into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
+
+        let process = NativeProcess::new(ProcessConfig {
+            command: CommandSpec::Argv(argv),
+            cwd: None,
+            env: None,
+            capture: false,
+            stderr_mode: StderrMode::Stdout,
+            creationflags: None,
+            create_process_group: false,
+            stdin_mode: StdinMode::Inherit,
+            nice: None,
+        });
+        process.start().map_err(io::Error::other)?;
+        let code = process.wait(None).map_err(io::Error::other)?;
+        std::process::exit(code);
     }
 }
 
@@ -179,8 +217,7 @@ pub fn exe_is_under_runtime_root(exe: &Path, runtime_root: &Path) -> bool {
 /// see "doesn't exist" or "fully written," never a partial file.
 ///
 /// Returns the cached path on success. Pure I/O — does not re-exec
-/// or otherwise modify the current process. The re-exec hop is
-/// Phase 2 and lives in a separate PR.
+/// or otherwise modify the current process.
 pub fn prepare_cached_clud(source: &Path) -> io::Result<PathBuf> {
     let cached = cached_clud_path().ok_or_else(|| {
         io::Error::new(
