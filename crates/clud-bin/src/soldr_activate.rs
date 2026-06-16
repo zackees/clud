@@ -37,6 +37,30 @@ use std::time::Duration;
 const SOLDR_SHIMS_TIMEOUT: Duration = Duration::from_secs(15);
 const SOLDR_INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Env-var that opts into chatty activation logging. Default is silent
+/// so clud's stderr stays empty across normal sessions — `clud` is a
+/// CLI orchestrator whose stderr is asserted clean by several
+/// integration tests (e.g. `test_probe_demo_gfx_sixel_emits_sixel_bytes`).
+/// Users debugging soldr routing set this to `1`.
+const VERBOSE_ENV_VAR: &str = "CLUD_VERBOSE_SOLDR_SHIMS";
+
+fn verbose() -> bool {
+    let Some(value) = std::env::var_os(VERBOSE_ENV_VAR) else {
+        return false;
+    };
+    let s = value.to_string_lossy();
+    !s.is_empty() && s != "0" && !s.eq_ignore_ascii_case("false")
+}
+
+/// Print a stderr line only when `CLUD_VERBOSE_SOLDR_SHIMS` is truthy.
+macro_rules! verbose_eprintln {
+    ($($arg:tt)*) => {{
+        if verbose() {
+            eprintln!($($arg)*);
+        }
+    }};
+}
+
 /// Expected JSON shape from `soldr shims --json`. We tolerate unknown
 /// fields (forward-compat) and only require `schema_version` and
 /// `path_entry`.
@@ -83,14 +107,14 @@ fn activate_with_config(cfg: &RepoCludConfig) {
                     // Install succeeded; fall through to the shims invocation.
                 }
                 Err(reason) => {
-                    eprintln!(
+                    verbose_eprintln!(
                         "clud: failed to install soldr automatically: {reason}; .clud/settings.json directive ignored"
                     );
                     return;
                 }
             }
         } else {
-            eprintln!(
+            verbose_eprintln!(
                 "clud: soldr not found on PATH and install is disabled; .clud/settings.json directive ignored"
             );
             return;
@@ -101,7 +125,7 @@ fn activate_with_config(cfg: &RepoCludConfig) {
     match run_soldr_shims_json() {
         Ok(shim_info) => {
             prepend_path_entry(&shim_info.path_entry);
-            eprintln!(
+            verbose_eprintln!(
                 "clud: .clud/settings.json (or ~/.clud/settings.json) detected; routing cargo / rustc / rustfmt / clippy-driver / rustdoc through soldr{version} (shim dir: {dir})",
                 version = shim_info
                     .soldr_version
@@ -111,7 +135,7 @@ fn activate_with_config(cfg: &RepoCludConfig) {
             );
         }
         Err(reason) => {
-            eprintln!("clud: {reason}; .clud/settings.json directive ignored");
+            verbose_eprintln!("clud: {reason}; .clud/settings.json directive ignored");
         }
     }
 }
@@ -247,7 +271,7 @@ fn install_soldr_on_demand(version: Option<&str>) -> Result<(), String> {
     match attempted {
         Ok(via) => {
             if which::which("soldr").is_ok() {
-                eprintln!("clud: installed soldr via `{via}`");
+                verbose_eprintln!("clud: installed soldr via `{via}`");
                 Ok(())
             } else {
                 Err(format!(
