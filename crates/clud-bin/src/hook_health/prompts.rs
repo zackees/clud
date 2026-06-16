@@ -198,6 +198,9 @@ pub(in crate::hook_health) fn run_backend_prompt(
         daemon_state_dir: None,
         daemon_mode: None,
         no_daemon: true,
+        keep_orphans: false,
+        quiet_orphans: false,
+        explain_orphans: false,
         command: None,
         passthrough: args.passthrough.clone(),
     };

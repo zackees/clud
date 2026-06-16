@@ -678,6 +678,9 @@ mod tests {
             daemon_state_dir: None,
             daemon_mode: None,
             no_daemon: false,
+            keep_orphans: false,
+            quiet_orphans: false,
+            explain_orphans: false,
             command: None,
             passthrough: Vec::new(),
         };
