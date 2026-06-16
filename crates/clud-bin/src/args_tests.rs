@@ -535,6 +535,13 @@ fn test_kill_all() {
 }
 
 #[test]
+fn test_slay_subcommand() {
+    let args = parse(&["clud", "slay"]);
+    assert!(matches!(args.command, Some(Command::Slay)));
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
 fn test_name_flag() {
     let args = parse(&["clud", "--name", "my-session", "--detach", "-p", "hello"]);
     assert_eq!(args.session_name.as_deref(), Some("my-session"));

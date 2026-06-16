@@ -206,6 +206,8 @@ pub enum Command {
         #[arg(long = "all")]
         all: bool,
     },
+    /// Kill all active background sessions.
+    Slay,
     List,
     /// pm2-style log viewer: dump or tail a session's captured output.
     ///
@@ -443,8 +445,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
-        "trash", "optimize", "daemon", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "logs", "gc",
+        "ui", "trash", "optimize", "daemon", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

@@ -289,6 +289,10 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
             let state_dir = state_dir(args);
             Some(run_kill(&state_dir, session_id.as_deref(), *all))
         }
+        Some(Command::Slay) => {
+            let state_dir = state_dir(args);
+            Some(run_kill(&state_dir, None, true))
+        }
         Some(Command::List) => {
             let state_dir = state_dir(args);
             Some(run_list(&state_dir))
