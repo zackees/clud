@@ -18,6 +18,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::runtime_cache;
+
 /// Spawn the current executable as a detached background process.
 ///
 /// On Windows, takes care to prevent the detached child from inheriting our
@@ -156,6 +158,9 @@ pub fn unlock_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
+    if runtime_cache::exe_is_under_clud_runtime(&my_exe) {
+        return;
+    }
 
     // Rename clud.exe → clud.exe.old.<rand>. We keep running from the renamed file.
     let rand_id: u32 = std::process::id()
