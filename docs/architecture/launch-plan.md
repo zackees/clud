@@ -88,7 +88,7 @@ Every code path that runs (or describes) the resolved argv reads from a
   the plan into a `WorkerLaunchSpec` and ships it over IPC.
 - `crates/clud-bin/src/daemon/worker.rs:67` and `:317` — worker process
   re-spawns the backend using `spec.plan.command` and `spec.plan.cwd`.
-- `crates/clud-bin/src/hook_health.rs:800` — `run_backend_prompt` synthesizes
+- `crates/clud-bin/src/hook_health/prompts.rs` — `run_backend_prompt` synthesizes
   a private `Args`, calls `build_launch_plan`, and runs the resulting argv
   as a one-shot subprocess for hook-migration prompting (`--fix-hooks`).
 - `crates/clud-bin/src/loop_artifacts.rs:184` — `LoopSession::start` consumes
