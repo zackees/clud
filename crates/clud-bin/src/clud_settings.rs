@@ -14,6 +14,23 @@ pub const CLUD_DIR_NAME: &str = ".clud";
 pub const SETTINGS_FILE_NAME: &str = "settings.toml";
 pub const LOCK_FILE_NAME: &str = "settings.lock";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustOptimizeSettings {
+    pub use_soldr_shims: bool,
+    pub install_soldr: bool,
+    pub soldr_version: String,
+}
+
+impl Default for RustOptimizeSettings {
+    fn default() -> Self {
+        Self {
+            use_soldr_shims: true,
+            install_soldr: true,
+            soldr_version: "0.7.11".to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SettingsError {
     NoHomeDir,
@@ -197,6 +214,93 @@ pub fn save_launch_setup_scope_at(
     Ok(())
 }
 
+pub fn save_rust_optimize_settings(settings: &RustOptimizeSettings) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_rust_optimize_settings_at(&home, settings)
+}
+
+pub fn save_rust_optimize_settings_at(
+    home: &Path,
+    settings: &RustOptimizeSettings,
+) -> Result<(), SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    fs::create_dir_all(&clud_dir)?;
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+
+    let path = settings_path_at(home);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(SettingsError::Io(error)),
+    };
+    let mut document = if text.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        parse_settings(&path, &text)?
+    };
+
+    if document.get("optimize").and_then(Item::as_table).is_none() {
+        document["optimize"] = table();
+    }
+    if document["optimize"]
+        .get("rust")
+        .and_then(Item::as_table)
+        .is_none()
+    {
+        document["optimize"]["rust"] = table();
+    }
+    document["optimize"]["rust"]["use_soldr_shims"] = value(settings.use_soldr_shims);
+    document["optimize"]["rust"]["install_soldr"] = value(settings.install_soldr);
+    document["optimize"]["rust"]["soldr_version"] = value(settings.soldr_version.clone());
+
+    let mut body = document.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    Ok(())
+}
+
+pub fn load_rust_optimize_settings_at(
+    home: &Path,
+) -> Result<Option<RustOptimizeSettings>, SettingsError> {
+    let path = settings_path_at(home);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let text = fs::read_to_string(&path)?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    let document = parse_settings(&path, &text)?;
+    let Some(table) = document
+        .get("optimize")
+        .and_then(|item| item.get("rust"))
+        .and_then(Item::as_table)
+    else {
+        return Ok(None);
+    };
+    let defaults = RustOptimizeSettings::default();
+    Ok(Some(RustOptimizeSettings {
+        use_soldr_shims: table
+            .get("use_soldr_shims")
+            .and_then(Item::as_bool)
+            .unwrap_or(defaults.use_soldr_shims),
+        install_soldr: table
+            .get("install_soldr")
+            .and_then(Item::as_bool)
+            .unwrap_or(defaults.install_soldr),
+        soldr_version: table
+            .get("soldr_version")
+            .and_then(Item::as_str)
+            .unwrap_or(&defaults.soldr_version)
+            .to_string(),
+    }))
+}
+
 fn parse_settings(path: &Path, text: &str) -> Result<DocumentMut, SettingsError> {
     text.parse::<DocumentMut>()
         .map_err(|error| SettingsError::Parse {
@@ -344,5 +448,42 @@ mod tests {
         assert!(text.contains("[launch_setup.codex]"), "{text}");
         assert!(text.contains("[hook_health]"), "{text}");
         assert!(text.contains("auto_fix_hooks = false"), "{text}");
+    }
+
+    #[test]
+    fn saves_rust_optimize_settings() {
+        let home = tempdir().unwrap();
+        let settings = RustOptimizeSettings {
+            use_soldr_shims: true,
+            install_soldr: false,
+            soldr_version: "1.2.3".to_string(),
+        };
+
+        save_rust_optimize_settings_at(home.path(), &settings).unwrap();
+
+        assert_eq!(
+            load_rust_optimize_settings_at(home.path()).unwrap(),
+            Some(settings)
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        assert!(text.contains("[optimize.rust]"), "{text}");
+        assert!(text.contains("use_soldr_shims = true"), "{text}");
+        assert!(text.contains("install_soldr = false"), "{text}");
+        assert!(text.contains("soldr_version = \"1.2.3\""), "{text}");
+    }
+
+    #[test]
+    fn rust_optimize_settings_preserve_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "[unrelated]\nvalue = \"kept\"\n").unwrap();
+
+        save_rust_optimize_settings_at(home.path(), &RustOptimizeSettings::default()).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("[unrelated]"), "{text}");
+        assert!(text.contains("value = \"kept\""), "{text}");
+        assert!(text.contains("[optimize.rust]"), "{text}");
     }
 }

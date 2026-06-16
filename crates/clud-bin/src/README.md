@@ -99,6 +99,8 @@ Process management and GC:
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
   removes safe ones; `--dry-run` faithful.
+- `optimize.rs` - `clud optimize rust`: installs/persists soldr defaults and
+  writes repo-local `.clud/settings.json` directives.
 
 Platform glue:
 
@@ -149,6 +151,7 @@ Quick lookup, which file owns a given subcommand:
 - `clud gc list` / `purge` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` -> `worktrees.rs`.
+- `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.
 
 ## Cross-Cutting Subsystems

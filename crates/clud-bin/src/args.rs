@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::graphics::GraphicsMode;
@@ -258,6 +258,41 @@ pub enum Command {
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+    /// Install and persist fast local tooling defaults.
+    Optimize {
+        /// Toolchain family to optimize. Defaults to Rust.
+        #[arg(value_enum, default_value_t = OptimizeTarget::Rust)]
+        target: OptimizeTarget,
+        /// Persist the recommendation in ~/.clud/settings.toml.
+        #[arg(long = "global", conflicts_with = "repo")]
+        global: bool,
+        /// Write a repo-local .clud/settings.json directive.
+        #[arg(long = "repo", conflicts_with = "global")]
+        repo: bool,
+        /// Install soldr if it is missing from PATH.
+        #[arg(
+            long = "install-soldr",
+            default_value_t = true,
+            action = ArgAction::Set,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            value_parser = clap::value_parser!(bool),
+        )]
+        install_soldr: bool,
+        /// Enable soldr shims for future clud-managed Rust setup.
+        #[arg(
+            long = "use-soldr-shims",
+            default_value_t = true,
+            action = ArgAction::Set,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            value_parser = clap::value_parser!(bool),
+        )]
+        use_soldr_shims: bool,
+        /// soldr release version to install and persist.
+        #[arg(long = "soldr-version", default_value = "0.7.11")]
+        soldr_version: String,
+    },
     /// Control the always-on clud daemon.
     Daemon {
         #[command(subcommand)]
@@ -279,6 +314,12 @@ pub enum Command {
         #[arg(long = "spec-file")]
         spec_file: PathBuf,
     },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizeTarget {
+    #[value(alias = "soldr")]
+    Rust,
 }
 
 /// Subcommands under `clud daemon`.
@@ -403,7 +444,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
-        "trash", "daemon", "__daemon", "__worker",
+        "trash", "optimize", "daemon", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

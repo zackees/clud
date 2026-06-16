@@ -1,8 +1,8 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
-    loop_artifacts, loop_spec, orphan_reaper, runner, runtime_cache, startup, trampoline, trash,
-    ui, verbose_log, wasm, worktrees,
+    loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache, startup, trampoline,
+    trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -91,6 +91,27 @@ fn main() {
     }) = &args.command
     {
         std::process::exit(trash::run(&args, paths, *cross_volume));
+    }
+
+    // `clud optimize` is machine/repo setup and never launches a backend.
+    if let Some(args::Command::Optimize {
+        target,
+        global,
+        repo,
+        install_soldr,
+        use_soldr_shims,
+        soldr_version,
+    }) = &args.command
+    {
+        std::process::exit(optimize::run(
+            &args,
+            *target,
+            *global,
+            *repo,
+            *install_soldr,
+            *use_soldr_shims,
+            soldr_version,
+        ));
     }
 
     // Issue #83: `--clean-worktrees` is a self-contained maintenance path.
