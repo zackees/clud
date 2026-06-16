@@ -37,7 +37,36 @@ Look at the input first:
 
 - **PR URL / number** -> run **PR triage mode**. Do not branch or code until triage decides what to do.
 - **Merge / land / ship current PR** -> run **PR merge mode**.
+- **Meta tracking issue** (the issue body contains a multi-item checklist of sub-issue references — `- [ ] #NNN` lines, a "Burn-down checklist" section, or a title prefixed `meta:` / `[META]`) -> run **Meta tracking issue mode** before any per-item PR work.
 - **Issue URL / number / freeform task sentence** -> run **task to PR workflow**.
+
+## Meta Tracking Issue Mode
+
+Meta tracking issues do NOT close via a PR merge — they close when every sub-item is closed AND no other open issues exist in the repo. Running the normal Task To PR Workflow against a meta issue deadlocks the `/goal` hook: PRs ship for sub-items, but the meta stays open and the hook keeps firing until the harness hits its `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` (default 100). The fix is to triage what the session can ship, sidecar the rest, and use a goal phrasing whose success criterion is reachable inside one session.
+
+1. **Set the goal with meta phrasing.** Invoke `/goal Triage <meta-issue> burn-down: ship in-scope PRs, open sidecar tracking issue for deferred items, report URLs.` so the Stop hook's success criterion includes the sidecar. Do NOT use the per-issue `Ship PR for <issue>` phrasing — that phrasing's hook can only be satisfied by closing the meta itself, which is structurally out of session scope.
+
+2. **Triage on entry.** Read every unchecked checklist item. Classify each as exactly one of:
+   - `in-scope` — concrete code work, single-PR sized, no external blockers, doable this session.
+   - `blocked-on-merge:#X` — only actionable after another in-flight PR (`#X`) lands first.
+   - `blocked-on-external` — needs cross-repo work, field/observability data, or a third party.
+   - `design` — multi-week implementation phase following a design proposal.
+
+   Post the classification as a comment on the meta issue **before** opening any PRs. The comment commits the triage in writing and creates the audit trail.
+
+3. **Sidecar the deferred items.** Choose one:
+   - **Sidecar issue (preferred).** `gh issue create --repo <owner>/<repo> --title "meta: deferred from #<original> burn-down (<date>) — out-of-session items"` with the deferred items as its body checklist. Cross-link it in the original meta's body.
+   - **In-meta deferred section.** Edit the original meta's body to move deferred items under `## Out of session scope (tracked in <link or note>)`. They keep their visibility but leave the gating checklist.
+
+   Either way, the original meta's gating checklist now contains only `in-scope` items.
+
+4. **Burn down the in-scope set.** For each `in-scope` item, run the Task To PR Workflow per item, opening one PR each. Each PR follows the standard RED -> GREEN, lint, test, push, teardown cycle. The per-item PR's own `/goal` invocation in step 2 of Task To PR Workflow is fine — those goals are reachable.
+
+5. **Resolve the meta-mode session.** When every `in-scope` PR is open and the sidecar exists, comment on the meta summarizing what shipped + linking the sidecar. The session can stop cleanly — the hook's success criterion (in-scope shipped + sidecar opened) is satisfied. The meta itself will close later, by user action, after the PRs land.
+
+6. **Final response.** List the PR URLs shipped, the sidecar issue URL, and a one-line note on what the sidecar tracks.
+
+**Do NOT mid-session move items from `in-scope` to `deferred` to escape the hook.** That corrupts the triage signal and reduces this whole mode to scope fudging. The triage at step 2 commits at entry. If your entry triage was wrong, surface that explicitly in a meta comment and stop — re-triaging is a fresh session's job.
 
 ## PR Merge Mode
 
@@ -95,6 +124,9 @@ Use this when the user asks to merge, land, or ship an already-open PR.
 - Pushing with a dirty worktree or leaving `.claude/worktrees/<branch>/` behind.
 - Skipping lint, tests, or failing hooks.
 - Auto-deleting stale worktrees without asking.
+- Running Task To PR Workflow on a meta tracking issue (multi-item checklist input) without going through **Meta Tracking Issue Mode** first. The `/goal` hook deadlocks because the meta does not close on a single PR merge.
+- Using the per-issue `/goal Ship PR for <issue>` phrasing for a meta input. Meta inputs use the meta phrasing in step 1 of Meta Tracking Issue Mode so the hook's success criterion includes the sidecar.
+- Mid-session re-classifying a meta sub-item from `in-scope` to `deferred` to escape a blocking `/goal` hook. Triage commits at entry; if it was wrong, surface that explicitly and stop.
 
 ## When Not To Use This
 
