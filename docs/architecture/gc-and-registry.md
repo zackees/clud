@@ -118,9 +118,9 @@ file plus a successful TCP connect.
 
 All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
 `CLUD_NO_DAEMON=1`) is **an error**, not a fallback — there is no read-only path in v1
-(`crates/clud-bin/src/gc.rs:594`).
+(`crates/clud-bin/src/gc/cli.rs`).
 
-- **`clud gc list [--json]`** — `cmd_list` (`crates/clud-bin/src/gc.rs`) calls
+- **`clud gc list [--json]`** — `cmd_list` (`crates/clud-bin/src/gc/cli.rs`) calls
   `daemon::gc_client_list`, prints a table (or JSON). Each row reports
   `kind / age / agent_id / branch / path` plus a `live_locked` flag computed by the daemon
   by parsing `git worktree list --porcelain` and extracting `(pid <N>)` from any
@@ -149,21 +149,22 @@ All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
   conservative sibling temp-clone names next to the repo. Returns the count of new rows.
 
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
-(`crates/clud-bin/src/gc.rs:591`).
+(`crates/clud-bin/src/gc/cli.rs`).
 
 ## Worktree scanner
 
-`WorktreeScanner` (`crates/clud-bin/src/gc.rs`) is a polling thread spawned at clud startup
+`WorktreeScanner` (`crates/clud-bin/src/gc/scanner.rs`) is a polling thread spawned at clud startup
 from `main.rs` via `WorktreeScanner::maybe_spawn*()`. It walks `<repo>/.claude/worktrees/`,
 `<repo>/.extern-repos/`, and conservative sibling temp-clone names every ~2 seconds and sends
 `gc.insert` IPC ops for matching immediate subdirs it sees. The scanner is
 **insert-only**: rows that already exist are no-ops (`Registry::insert_if_new` at
-`crates/clud-bin/src/gc.rs:198`), so there is no per-cycle write churn.
+`crates/clud-bin/src/gc/registry.rs`), so there is no per-cycle write churn.
 
-Sleep is **chunked** — 20 × 100ms = ~2s total, but cancellable within 100ms — so Ctrl+C teardown
-does not block for two seconds waiting for the next iteration (`crates/clud-bin/src/gc.rs:568`).
+Sleep is **chunked** — short 25ms sleeps add up to the ~2s polling interval, but remain cancellable
+quickly — so Ctrl+C teardown does not block for two seconds waiting for the next iteration
+(`crates/clud-bin/src/gc/scanner.rs`).
 
-Cancellation is cooperative via `Arc<AtomicBool>`. `Drop` (`crates/clud-bin/src/gc.rs:506`) joins
+Cancellation is cooperative via `Arc<AtomicBool>`. `Drop` (`crates/clud-bin/src/gc/scanner.rs`) joins
 the thread; the startup-side guard `_scanner_guard` in `main.rs` triggers this on normal
 shutdown.
 
@@ -207,11 +208,11 @@ Session cap:
 
 GC store / daemon:
 
-- `Registry` (`crates/clud-bin/src/gc.rs`) — owns the redb handle inside the daemon's
+- `Registry` (`crates/clud-bin/src/gc/registry.rs`) — owns the redb handle inside the daemon's
   registry-worker thread.
-- `TrackedEntry`, `InsertInput` (`crates/clud-bin/src/gc.rs`) — public row + insert-input
+- `TrackedEntry`, `InsertInput` (`crates/clud-bin/src/gc/registry.rs`) — public row + insert-input
   shapes.
-- `WorktreeScanner` (`crates/clud-bin/src/gc.rs`) — polling thread that talks IPC to the
+- `WorktreeScanner` (`crates/clud-bin/src/gc/scanner.rs`) — polling thread that talks IPC to the
   daemon.
 - `DaemonInfo` (`crates/clud-bin/src/daemon/types.rs`) — info-file shape (pid + port) shared
   with the session-management half of the daemon.
@@ -259,7 +260,7 @@ GC store / daemon:
   the worker also won't leak the thread.
 
 - **Worktree dir gone mid-scan.** `read_dir` returns `NotFound` → `scan_once_via_ipc` treats as
-  empty (`crates/clud-bin/src/gc.rs:518`). Individual `agent-*` dirs disappearing between
+  empty (`crates/clud-bin/src/gc/reconcile.rs`). Individual `agent-*` dirs disappearing between
   `read_dir` and the `gc.insert` IPC are benign: the daemon will accept the insert, and a future
   `gc purge` (or a `git worktree remove` from outside clud) cleans the row.
 
