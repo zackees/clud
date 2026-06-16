@@ -27,6 +27,7 @@ pub mod loop_check;
 pub mod loop_spec;
 pub mod process_tree;
 pub mod runner;
+pub mod runtime_cache;
 pub mod session;
 pub mod session_registry;
 pub mod skill_install;
