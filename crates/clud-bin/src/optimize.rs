@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -12,6 +12,15 @@ use crate::loop_spec;
 use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
 };
+
+/// Resolved write scope for `clud optimize rust`. Decoupled from the raw
+/// `--global` / `--repo` booleans so the interactive prompt can produce the
+/// same shape as the flag-driven path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteScope {
+    Repo,
+    Global,
+}
 
 const REPO_DIRECTIVE_DIR: &str = ".clud";
 const REPO_DIRECTIVE_FILE: &str = "settings.json";
@@ -50,18 +59,38 @@ fn run_rust(
         install_soldr,
         soldr_version: soldr_version.to_string(),
     };
-    let write_repo = repo || !global;
+
+    // Resolve scope. Explicit flags win. Otherwise: if we have a TTY and
+    // aren't in --dry-run, prompt — keeps automated callers stable (CI,
+    // tests, scripted pipelines) while giving interactive users a choice.
+    let scope = if global {
+        WriteScope::Global
+    } else if repo {
+        WriteScope::Repo
+    } else if !args.dry_run && io::stdin().is_terminal() && io::stderr().is_terminal() {
+        match prompt_scope_from_stdin() {
+            Ok(scope) => scope,
+            Err(error) => {
+                eprintln!("[clud] error: scope prompt failed: {error}");
+                return 1;
+            }
+        }
+    } else {
+        // Preserves the pre-prompt default for non-TTY / dry-run callers:
+        // bare `clud optimize rust` writes the repo directive.
+        WriteScope::Repo
+    };
 
     if args.dry_run {
         println!("[clud] dry-run: optimize rust");
-        if global {
-            println!(
-                "[clud] dry-run: would write ~/.clud/settings.toml [optimize.rust] use_soldr_shims={} install_soldr={} soldr_version=\"{}\"",
-                settings.use_soldr_shims, settings.install_soldr, settings.soldr_version
-            );
-        }
-        if write_repo {
-            match repo_directive_path() {
+        match scope {
+            WriteScope::Global => {
+                println!(
+                    "[clud] dry-run: would write ~/.clud/settings.toml [optimize.rust] use_soldr_shims={} install_soldr={} soldr_version=\"{}\"",
+                    settings.use_soldr_shims, settings.install_soldr, settings.soldr_version
+                );
+            }
+            WriteScope::Repo => match repo_directive_path() {
                 Ok(path) => println!(
                     "[clud] dry-run: would write repo directive {}",
                     path.display()
@@ -70,24 +99,35 @@ fn run_rust(
                     eprintln!("[clud] error: {error}");
                     return 1;
                 }
-            }
+            },
         }
         if install_soldr {
-            println!("[clud] dry-run: would install soldr if missing from PATH");
+            // Surface the dry-run install destination so the user can audit
+            // it the same way the live path now does.
+            match planned_soldr_install_target() {
+                Ok(target) => println!(
+                    "[clud] dry-run: would install soldr {} to {} (only if missing from PATH)",
+                    soldr_version,
+                    target.display()
+                ),
+                Err(error) => {
+                    eprintln!("[clud] error: {error}");
+                    return 1;
+                }
+            }
         }
         return 0;
     }
 
-    if global {
-        if let Err(error) = clud_settings::save_rust_optimize_settings(&settings) {
-            eprintln!("[clud] error: failed to save optimize settings: {error}");
-            return 1;
+    match scope {
+        WriteScope::Global => {
+            if let Err(error) = clud_settings::save_rust_optimize_settings(&settings) {
+                eprintln!("[clud] error: failed to save optimize settings: {error}");
+                return 1;
+            }
+            println!("[clud] wrote global Rust optimizer defaults to ~/.clud/settings.toml");
         }
-        println!("[clud] wrote global Rust optimizer defaults to ~/.clud/settings.toml");
-    }
-
-    if write_repo {
-        match write_repo_directive(&settings) {
+        WriteScope::Repo => match write_repo_directive(&settings) {
             Ok(path) => {
                 println!(
                     "[clud] wrote repo Rust optimizer directive to {}",
@@ -103,7 +143,7 @@ fn run_rust(
                 eprintln!("[clud] error: failed to write repo directive: {error}");
                 return 1;
             }
-        }
+        },
     }
 
     if install_soldr {
@@ -124,6 +164,56 @@ fn run_rust(
         println!("[clud] disabled soldr shim preference");
     }
     0
+}
+
+/// Interactive scope prompt for `clud optimize rust`. Writes to stderr so
+/// stdout stays clean for piped consumers. Enter (empty line) accepts the
+/// `[L]ocal` default to preserve the pre-prompt behavior. EOF (closed
+/// stdin) likewise falls back to Local.
+pub(crate) fn prompt_scope_from_stdin() -> io::Result<WriteScope> {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    prompt_scope(&mut reader, &mut io::stderr())
+}
+
+pub(crate) fn prompt_scope<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<WriteScope> {
+    write!(
+        writer,
+        "[clud] install scope — [L]ocal repo (.clud/settings.json) or [G]lobal (~/.clud/settings.toml)? [L]: "
+    )?;
+    writer.flush()?;
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        // EOF: treat as default selection rather than erroring.
+        return Ok(WriteScope::Repo);
+    }
+    Ok(parse_scope_answer(&line))
+}
+
+/// Pure mapping from a typed answer to a [`WriteScope`]. Unknown input
+/// falls back to the default (Local/Repo) rather than reprompting — the
+/// prompt is one-shot so automation that pipes "yes\n" still gets a sane
+/// outcome.
+pub(crate) fn parse_scope_answer(answer: &str) -> WriteScope {
+    let trimmed = answer.trim();
+    if trimmed.eq_ignore_ascii_case("g") || trimmed.eq_ignore_ascii_case("global") {
+        WriteScope::Global
+    } else {
+        WriteScope::Repo
+    }
+}
+
+/// Compute where `ensure_soldr_installed` would put the binary if it had
+/// to install today. Used by the pre-install announcement and the dry-run
+/// preview so the user knows the destination before any network I/O.
+fn planned_soldr_install_target() -> Result<PathBuf, String> {
+    let home = home_dir().ok_or_else(|| "could not resolve user home directory".to_string())?;
+    let target_dir = global_bin_dir(&home);
+    let asset = soldr_asset_for_current_platform("0.0.0")?; // version unused for binary_name
+    Ok(target_dir.join(asset.binary_name))
 }
 
 fn write_repo_directive(settings: &RustOptimizeSettings) -> io::Result<PathBuf> {
@@ -304,6 +394,15 @@ fn ensure_soldr_installed(version: &str) -> Result<String, String> {
         .map_err(|error| format!("create {}: {error}", target_dir.display()))?;
 
     let asset = soldr_asset_for_current_platform(version)?;
+    // Pre-announce *before* network I/O. Users running into a slow GitHub
+    // CDN otherwise stare at a silent terminal for tens of seconds; the
+    // single line up front makes both the action and the destination
+    // obvious before the spinner.
+    eprintln!(
+        "[clud] installing soldr {} to {}",
+        version,
+        target_dir.join(asset.binary_name).display()
+    );
     let url = format!(
         "https://github.com/zackees/soldr/releases/download/v{version}/{}",
         asset.file_name
@@ -600,5 +699,78 @@ mod tests {
         fs::write(&binary, "x").unwrap();
 
         assert_eq!(find_file_named(dir.path(), "soldr"), Some(binary));
+    }
+
+    #[test]
+    fn parse_scope_answer_defaults_to_repo_on_empty_or_garbage() {
+        assert_eq!(parse_scope_answer(""), WriteScope::Repo);
+        assert_eq!(parse_scope_answer("\n"), WriteScope::Repo);
+        assert_eq!(parse_scope_answer("   "), WriteScope::Repo);
+        // Unrecognized input keeps the safe default rather than reprompting.
+        assert_eq!(parse_scope_answer("yes"), WriteScope::Repo);
+        assert_eq!(parse_scope_answer("local"), WriteScope::Repo);
+        assert_eq!(parse_scope_answer("l"), WriteScope::Repo);
+        assert_eq!(parse_scope_answer("L"), WriteScope::Repo);
+    }
+
+    #[test]
+    fn parse_scope_answer_picks_global_on_g_variants() {
+        assert_eq!(parse_scope_answer("g"), WriteScope::Global);
+        assert_eq!(parse_scope_answer("G"), WriteScope::Global);
+        assert_eq!(parse_scope_answer("global"), WriteScope::Global);
+        assert_eq!(parse_scope_answer("Global"), WriteScope::Global);
+        assert_eq!(parse_scope_answer("  global  "), WriteScope::Global);
+        assert_eq!(parse_scope_answer("g\n"), WriteScope::Global);
+    }
+
+    #[test]
+    fn prompt_scope_treats_eof_as_default_repo() {
+        // Closed stdin (EOF on first read) must not error out — that would
+        // make the bare `clud optimize rust` invocation flaky for users in
+        // shells that lose their controlling TTY mid-command.
+        let mut reader = io::Cursor::new(Vec::<u8>::new());
+        let mut writer = Vec::<u8>::new();
+        let scope = prompt_scope(&mut reader, &mut writer).unwrap();
+        assert_eq!(scope, WriteScope::Repo);
+        let rendered = String::from_utf8(writer).unwrap();
+        assert!(
+            rendered.contains("install scope"),
+            "prompt was not rendered: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_scope_reads_user_response() {
+        let mut reader = io::Cursor::new(b"g\n".to_vec());
+        let mut writer = Vec::<u8>::new();
+        assert_eq!(
+            prompt_scope(&mut reader, &mut writer).unwrap(),
+            WriteScope::Global
+        );
+
+        let mut reader = io::Cursor::new(b"\n".to_vec());
+        let mut writer = Vec::<u8>::new();
+        assert_eq!(
+            prompt_scope(&mut reader, &mut writer).unwrap(),
+            WriteScope::Repo
+        );
+    }
+
+    #[test]
+    fn planned_soldr_install_target_resolves() {
+        // We only assert structural properties: a real home dir on the
+        // test host exists, and the returned path ends in the platform
+        // binary name. The exact directory varies (CARGO_HOME may or may
+        // not be set), so we don't pin it.
+        let target = planned_soldr_install_target().expect("home dir must resolve in test");
+        let last = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if cfg!(windows) {
+            assert_eq!(last, "soldr.exe");
+        } else {
+            assert_eq!(last, "soldr");
+        }
     }
 }
