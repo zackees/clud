@@ -1,14 +1,18 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
-    loop_artifacts, loop_spec, runner, startup, trampoline, trash, ui, verbose_log, wasm,
-    worktrees,
+    loop_artifacts, loop_spec, runner, runtime_cache, startup, trampoline, trash, ui, verbose_log,
+    wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
     verbose_log::init_launch_clock();
+
+    if let Err(err) = runtime_cache::hop_to_runtime_cache_if_enabled() {
+        eprintln!("[clud] warning: runtime cache hop failed: {err}");
+    }
 
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();

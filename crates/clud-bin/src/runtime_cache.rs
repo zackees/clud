@@ -1,13 +1,11 @@
 //! Canonical per-version runtime cache for `clud.exe` (issue #333).
 //!
-//! Pure-function skeleton — see issue #333 for the full design and
-//! tracking meta #334 for the burn-down context. This module ships
-//! the cache-path computation, the cross-platform "am I running from
-//! the cache?" predicate, and the double-checked file-locked
-//! [`prepare_cached_clud_in`] copy-once helper. The actual re-exec
-//! wiring into `main()` and the `unlock_exe()` short-circuit are
-//! Phase 2 and land in a separate PR; production behavior is
-//! unchanged until then.
+//! Feature-flagged cache hop for #333. This module owns the cache-path
+//! computation, the cross-platform "am I running from the cache?"
+//! predicate, the double-checked file-locked [`prepare_cached_clud_in`]
+//! copy-once helper, and the opt-in re-exec hop. The hop is gated
+//! behind `CLUD_USE_RUNTIME_CACHE=1` so production behavior stays
+//! unchanged until the default-on phase.
 //!
 //! Design summary (full version in issue #333):
 //! - Layout: `~/.clud/runtime/clud-<version>/<binary-name>`.
@@ -21,15 +19,25 @@
 //!   with the cache key changed from per-launch random to per-version
 //!   so subsequent invocations are zero-I/O cache hits.
 
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use fs4::fs_std::FileExt;
 
 /// Subdirectory under `~/.clud/` where per-version cached binaries
 /// live. Mirrors zccache's `runtime-binaries/` convention.
 const RUNTIME_SUBDIR: &str = "runtime";
+
+/// Opt-in gate for the runtime-cache hop. Default off until the
+/// re-exec path has soaked in real PTY / backend workflows.
+const CLUD_USE_RUNTIME_CACHE: &str = "CLUD_USE_RUNTIME_CACHE";
+
+/// Existing escape hatch. During the opt-in phase it disables both the legacy
+/// unlock trampoline and the new runtime-cache hop.
+const CLUD_NO_UNLOCK: &str = "CLUD_NO_UNLOCK";
 
 /// Compile-time version stamp consumed by [`runtime_cache_dir`].
 const CLUD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -61,6 +69,74 @@ pub fn cached_clud_binary_name() -> &'static str {
 /// `<runtime_cache_dir>/<cached_clud_binary_name>`.
 pub fn cached_clud_path() -> Option<PathBuf> {
     Some(runtime_cache_dir()?.join(cached_clud_binary_name()))
+}
+
+/// Returns true when the runtime-cache hop should run.
+pub fn runtime_cache_hop_enabled() -> bool {
+    runtime_cache_hop_enabled_from_vars(
+        std::env::var_os(CLUD_USE_RUNTIME_CACHE).is_some(),
+        std::env::var_os(CLUD_NO_UNLOCK).is_some(),
+        cfg!(debug_assertions),
+    )
+}
+
+fn runtime_cache_hop_enabled_from_vars(
+    use_runtime_cache: bool,
+    no_unlock: bool,
+    debug_assertions: bool,
+) -> bool {
+    use_runtime_cache && !no_unlock && !debug_assertions
+}
+
+/// If `CLUD_USE_RUNTIME_CACHE=1` is set, ensure this clud binary is
+/// cached under `~/.clud/runtime/clud-<version>/` and re-exec from
+/// there before normal startup work begins.
+///
+/// Returns normally only when the hop is disabled, the current process
+/// is already running from the runtime cache, or preparing/spawning the
+/// cached binary fails. On a successful hop this function replaces the
+/// process on Unix, or waits for the child and exits with its status on
+/// Windows.
+pub fn hop_to_runtime_cache_if_enabled() -> io::Result<()> {
+    if !runtime_cache_hop_enabled() {
+        return Ok(());
+    }
+
+    let current_exe = std::env::current_exe()?;
+    if exe_is_under_clud_runtime(&current_exe) {
+        return Ok(());
+    }
+
+    let cached = prepare_cached_clud(&current_exe)?;
+    if paths_equivalent(&current_exe, &cached) {
+        return Ok(());
+    }
+
+    reexec_from_cached_binary(&cached)
+}
+
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(cached).args(&args).exec();
+        Err(err)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = Command::new(cached).args(&args).status()?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 /// True if `exe` resolves into a path under `~/.clud/runtime/`.
@@ -198,6 +274,26 @@ mod tests {
         let path = cached_clud_path().expect("home dir resolvable");
         let dir = runtime_cache_dir().expect("home dir resolvable");
         assert_eq!(path, dir.join(cached_clud_binary_name()));
+    }
+
+    #[test]
+    fn runtime_cache_hop_enabled_requires_opt_in() {
+        assert!(!runtime_cache_hop_enabled_from_vars(false, false, false));
+    }
+
+    #[test]
+    fn runtime_cache_hop_enabled_respects_existing_unlock_escape_hatch() {
+        assert!(!runtime_cache_hop_enabled_from_vars(true, true, false));
+    }
+
+    #[test]
+    fn runtime_cache_hop_enabled_stays_off_for_debug_builds() {
+        assert!(!runtime_cache_hop_enabled_from_vars(true, false, true));
+    }
+
+    #[test]
+    fn runtime_cache_hop_enabled_when_opted_in_without_escape_hatch() {
+        assert!(runtime_cache_hop_enabled_from_vars(true, false, false));
     }
 
     #[test]
