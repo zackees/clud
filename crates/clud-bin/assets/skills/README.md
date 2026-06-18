@@ -21,6 +21,9 @@ do not write persistent skill files. Stale clud-managed copies under
 - [clud-pr/](clud-pr/README.md) - Implement a GitHub issue, PR follow-up, or
   freeform task inside a `.claude/` worktree, or take an open PR through
   CI/review fixes to merge; code changes follow RED -> GREEN.
+- [clud-fix/](clud-fix/README.md) - Drive a GitHub issue through PR merge,
+  issue closure, and validation that the reported reproduction is fixed on
+  main; code changes follow RED -> GREEN.
 - [clud-tag-release/](clud-tag-release/README.md) - Tag a release after
   validating version match, clean `main`, and no duplicate tag, then push and
   surface the auto-release workflow URL.
