@@ -506,6 +506,77 @@ fn build_plan_uses_lock_reason_pid_liveness() {
 }
 
 #[test]
+fn worktree_process_ref_matches_executable_or_command_line() {
+    let worktree = Path::new(r"C:\repo\.claude\worktrees\fix-branch");
+
+    assert!(process_ref_matches_worktree(
+        worktree,
+        Some(Path::new(
+            r"C:\repo\.claude\worktrees\fix-branch\target\debug\tool.exe"
+        )),
+        None,
+        &[r"C:/repo/.claude/worktrees/fix-branch/target/debug/tool.exe".into()]
+    ));
+    assert!(process_ref_matches_worktree(
+        worktree,
+        None,
+        None,
+        &[
+            "python".into(),
+            r"C:/repo/.claude/worktrees/fix-branch/scripts/check.py".into()
+        ]
+    ));
+    assert!(process_ref_matches_worktree(
+        worktree,
+        None,
+        Some(Path::new(r"\\?\C:\repo\.claude\worktrees\fix-branch")),
+        &["python".into()]
+    ));
+    assert!(!process_ref_matches_worktree(
+        worktree,
+        Some(Path::new(
+            r"C:\repo\.claude\worktrees\other-branch\tool.exe"
+        )),
+        None,
+        &[
+            "python".into(),
+            r"C:/repo/.claude/worktrees/other-branch/check.py".into()
+        ]
+    ));
+}
+
+#[test]
+fn remove_worktree_path_refuses_when_live_process_references_worktree() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let wt = tmp.path().join("wt");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    std::fs::create_dir_all(&wt).expect("worktree dir");
+
+    let err = remove_worktree_path_with_git_and_process_refs(
+        &repo,
+        &wt,
+        false,
+        |_, _| panic!("git should not run while process refs exist"),
+        |_| {
+            vec![WorktreeProcessRef {
+                pid: 4242,
+                parent_pid: Some(4000),
+                name: "fbuild-daemon".to_string(),
+                command: format!("fbuild-daemon --root {}", wt.display()),
+                exe: None,
+                cwd: Some(wt.clone()),
+            }]
+        },
+    )
+    .expect_err("live process ref should block worktree removal");
+
+    assert!(err.contains("live process"));
+    assert!(err.contains("4242"));
+    assert!(wt.exists());
+}
+
+#[test]
 fn remove_worktree_path_falls_back_when_git_success_leaves_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");
