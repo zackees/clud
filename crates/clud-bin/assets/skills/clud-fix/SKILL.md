@@ -195,21 +195,45 @@ All conditions are mandatory:
    when labels, title, checklist body, linked issue references, GitHub sub-issue
    metadata, or explicit user wording identify a tracker.
 
-2. **Enumerate child issues.** Collect child references from:
+2. **Enumerate child issues.** Take the **union** of every issue reference
+   appearing **anywhere** in the parent body, regardless of the surrounding
+   markdown structure (checklist, table cell, prose paragraph, bullet list,
+   heading, blockquote). All of the following patterns count, and any single
+   match makes that issue a child candidate:
+
    - markdown checklist lines like `- [ ] #123` or `- [x] #124`
-   - `owner/repo#123`
-   - full GitHub issue URLs
+   - bare `#123` references in tables, prose, or any other markdown structure
+     (e.g. a `| **#3237** | ... |` table cell, or `see #123` inline)
+   - `owner/repo#123` (e.g. `FastLED/fbuild#627`) and bare `<repo>#123` when
+     the parent body or repo context disambiguates the owner
+   - full GitHub issue URLs in any position
    - GitHub sub-issue metadata when available
 
-   Verify each child's GitHub state before deciding it is already done.
+   Do **not** require an issue reference to be inside a `- [ ] #N` checklist to
+   count it. Roadmap metas frequently catalog work in tables; treat each
+   tabled `#N` as an enumerated child. If a reference is cross-repo or
+   ambiguous (e.g. `fbuild#627` with no owner prefix), record it in the ledger
+   with the resolved `owner/repo` you used and surface the resolution choice
+   in the status line so the user can correct it.
 
-   If the enumerated open-children list is empty (the parent is a roadmap whose
-   child items have not been filed as issues yet, or every checklist entry
-   resolves to a closed/missing issue), do NOT proceed to ledger creation. Post
-   the same investigation-report pattern as the single-issue under-specified
-   branch — including the hook-mismatch banner — to the parent issue,
-   explaining which child issues need to be filed to unblock the burn-down.
-   Emit the terminal sentinel as the last line of the user-facing response:
+   For each enumerated candidate, classify before queuing:
+
+   - **Verify state on GitHub** before deciding it is already done — a checked
+     `- [x] #N` is not authoritative; fetch the issue's `state`.
+   - **Open** children are queued in listed order.
+   - **Closed** children are skipped with a one-line ledger entry.
+   - **Missing/inaccessible** children (404, private, wrong repo) are recorded
+     as `blocked` with the resolution attempt noted, then surfaced.
+
+   If after this union enumeration the open-children list is still empty (the
+   parent is a roadmap whose child items have not been filed as issues yet, or
+   every reference resolves to a closed/missing issue), do NOT proceed to
+   ledger creation. Post the same investigation-report pattern as the
+   single-issue under-specified branch — including the hook-mismatch banner —
+   to the parent issue, listing every reference you found and its resolved
+   state, and explaining which child issues need to be filed to unblock the
+   burn-down. Emit the terminal sentinel as the last line of the user-facing
+   response:
 
    ```text
    <clud-fix:terminal kind=empty-children-report-posted reason=parent-roadmap-unfiled url=<parent-url>>
