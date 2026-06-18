@@ -10,6 +10,10 @@ pub(in crate::daemon::wire_prost) fn session_to_proto(
     proto::SessionSnapshot {
         id: session.id.clone(),
         kind: session_kind_to_proto(&session.kind),
+        backend: session.backend.clone(),
+        launch_mode: session.launch_mode.clone(),
+        repo_root: session.repo_root.clone(),
+        command: session.command.clone(),
         cwd: session.cwd.clone(),
         name: session.name.clone(),
         created_at: session.created_at,
@@ -24,6 +28,7 @@ pub(in crate::daemon::wire_prost) fn session_to_proto(
         worker_port: u32::from(session.worker_port),
         root_pid: session.root_pid,
         exit_code: session.exit_code,
+        exited_at: session.exited_at,
         ctrl_c: session.ctrl_c.as_ref().map(profile_to_proto),
     }
 }
@@ -34,6 +39,10 @@ pub(in crate::daemon::wire_prost) fn session_from_proto(
     Ok(SessionSnapshot {
         id: session.id,
         kind: session_kind_from_proto(session.kind)?,
+        backend: session.backend,
+        launch_mode: session.launch_mode,
+        repo_root: session.repo_root,
+        command: session.command,
         cwd: session.cwd,
         name: session.name,
         created_at: session.created_at,
@@ -48,6 +57,7 @@ pub(in crate::daemon::wire_prost) fn session_from_proto(
         worker_port: u16_field("session.worker_port", session.worker_port)?,
         root_pid: session.root_pid,
         exit_code: session.exit_code,
+        exited_at: session.exited_at,
         ctrl_c: session.ctrl_c.map(profile_from_proto),
     })
 }

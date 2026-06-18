@@ -1,6 +1,6 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
-    ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
+    ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log, launch_setup,
     loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache, startup, trampoline,
     trash, ui, verbose_log, wasm, worktrees,
 };
@@ -490,6 +490,18 @@ fn main() {
             "[clud] launch: direct runner"
         });
     }
+    let launch_log = if let Ok(state_dir) = daemon::default_state_dir() {
+        let source = if centralized { "centralized" } else { "direct" };
+        match launch_log::start_launch(&state_dir, &plan, source) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                eprintln!("[clud] warning: failed to record launch start: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
@@ -509,6 +521,9 @@ fn main() {
             ),
         }
     };
+    if let Some(handle) = &launch_log {
+        handle.finish(exit_code);
+    }
     if let Some(session) = loop_session.as_mut() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
         session.on_loop_end(summary, err);

@@ -378,6 +378,10 @@ mod tests {
         let snap = SessionSnapshot {
             id: id.into(),
             kind: SessionKind::Subprocess,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
             cwd: None,
             name: None,
             created_at: Some(created_at),
@@ -392,6 +396,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code,
+            exited_at: exit_code.map(|_| created_at + 1000),
             ctrl_c: None,
         };
         write_json_file(&session_snapshot_path(state_dir, id), &snap).unwrap();

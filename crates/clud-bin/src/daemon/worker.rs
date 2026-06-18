@@ -12,6 +12,7 @@ use running_process::pty::NativePtyProcess;
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
 use crate::graphics::GraphicsConfig;
+use crate::launch_log;
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
@@ -66,6 +67,14 @@ pub(super) fn run_worker(
     let snapshot = SessionSnapshot {
         id: session_id.to_string(),
         kind: spec.kind.clone(),
+        backend: Some(spec.plan.backend.executable_name().to_string()),
+        launch_mode: Some(spec.plan.launch_mode.as_str().to_string()),
+        repo_root: spec
+            .plan
+            .cwd
+            .as_deref()
+            .and_then(launch_log::repo_root_for_cwd),
+        command: spec.plan.command.clone(),
         cwd: spec.plan.cwd.clone(),
         name: spec.name.clone(),
         created_at: Some(created_at),
@@ -80,6 +89,7 @@ pub(super) fn run_worker(
         worker_port,
         root_pid: None,
         exit_code: None,
+        exited_at: None,
         ctrl_c: None,
     };
     let backlog_limit = spec.backlog_bytes.unwrap_or(DEFAULT_BACKLOG_LIMIT_BYTES);
@@ -203,6 +213,14 @@ fn run_repeat_worker(
     let snapshot = SessionSnapshot {
         id: session_id.to_string(),
         kind: SessionKind::Subprocess,
+        backend: Some(spec.plan.backend.executable_name().to_string()),
+        launch_mode: Some(spec.plan.launch_mode.as_str().to_string()),
+        repo_root: spec
+            .plan
+            .cwd
+            .as_deref()
+            .and_then(launch_log::repo_root_for_cwd),
+        command: spec.plan.command.clone(),
         cwd: spec.plan.cwd.clone(),
         name: spec.name.clone(),
         created_at: Some(created_at),
@@ -217,6 +235,7 @@ fn run_repeat_worker(
         worker_port: 0,
         root_pid: None,
         exit_code: None,
+        exited_at: None,
         ctrl_c: None,
     };
     let shared = Arc::new(WorkerShared::new_with_backlog(
@@ -769,6 +788,10 @@ mod tests {
         let snapshot = SessionSnapshot {
             id: "worker-wire-test".to_string(),
             kind: SessionKind::Subprocess,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
             cwd: None,
             name: Some("worker wire test".to_string()),
             created_at: Some(1),
@@ -783,6 +806,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            exited_at: None,
             ctrl_c: None,
         };
         Arc::new(WorkerShared::new(

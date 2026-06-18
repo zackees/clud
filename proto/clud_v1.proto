@@ -208,6 +208,11 @@ message SessionSnapshot {
   optional uint32 root_pid = 15;
   optional int32 exit_code = 16;
   optional CtrlCProfile ctrl_c = 17;
+  optional string backend = 18;
+  optional string launch_mode = 19;
+  optional string repo_root = 20;
+  repeated string command = 21;
+  optional uint64 exited_at = 22;
 }
 
 enum SessionKind {

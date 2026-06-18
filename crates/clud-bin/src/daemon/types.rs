@@ -74,6 +74,14 @@ pub(super) struct SessionSnapshot {
     pub(super) id: String,
     pub(super) kind: SessionKind,
     #[serde(default)]
+    pub(super) backend: Option<String>,
+    #[serde(default)]
+    pub(super) launch_mode: Option<String>,
+    #[serde(default)]
+    pub(super) repo_root: Option<String>,
+    #[serde(default)]
+    pub(super) command: Vec<String>,
+    #[serde(default)]
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) name: Option<String>,
@@ -96,6 +104,8 @@ pub(super) struct SessionSnapshot {
     pub(super) worker_port: u16,
     pub(super) root_pid: Option<u32>,
     pub(super) exit_code: Option<i32>,
+    #[serde(default)]
+    pub(super) exited_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) ctrl_c: Option<CtrlCProfile>,
 }

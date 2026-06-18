@@ -32,6 +32,7 @@ use super::types::{
     CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
 };
 use crate::ctrl_c_track::{self, CtrlCEvent};
+use crate::launch_log::{self, LaunchRecord};
 use crate::session_registry::LiveSession;
 
 /// Supplier of live session-registry rows. Injected at the dashboard
@@ -96,9 +97,18 @@ pub struct DaemonStateView {
 pub struct SessionView {
     pub id: String,
     pub kind: String,
+    pub source: String,
+    pub backend: Option<String>,
+    pub launch_mode: Option<String>,
     pub name: Option<String>,
     pub cwd: Option<String>,
+    pub repo_root: Option<String>,
+    pub command: Vec<String>,
+    pub clud_argv: Vec<String>,
+    pub clud_pid: Option<u32>,
     pub created_at: Option<u64>,
+    pub exited_at: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub detachable: bool,
     pub background: bool,
     pub attachable: bool,
@@ -371,6 +381,7 @@ fn build_dashboard_state(
     let now_unix = current_unix();
 
     let mut sessions = read_session_views(state_dir).unwrap_or_default();
+    merge_launch_records(&mut sessions, launch_log::read_recent(state_dir));
     // Issue #190: surface direct-runner sessions (default `clud` invocation
     // path) by reading the redb session registry. The on-disk snapshot
     // files are only written by the centralized daemon worker, so without
@@ -463,9 +474,21 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
                 SessionKind::Subprocess => "subprocess".to_string(),
                 SessionKind::Pty => "pty".to_string(),
             },
+            source: "daemon".to_string(),
+            backend: snap.backend,
+            launch_mode: snap.launch_mode,
             name: snap.name,
             cwd: snap.cwd,
+            repo_root: snap.repo_root,
+            command: snap.command,
+            clud_argv: Vec::new(),
+            clud_pid: None,
             created_at: snap.created_at,
+            exited_at: snap.exited_at,
+            duration_ms: match (snap.created_at, snap.exited_at) {
+                (Some(start), Some(end)) => Some(end.saturating_sub(start)),
+                _ => None,
+            },
             detachable: snap.detachable,
             background: snap.background,
             attachable: snap.attachable,
@@ -493,19 +516,34 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
 /// `daemon::http::tests` module.
 fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<LiveSession>) {
     for row in live_sessions {
+        if sessions
+            .iter()
+            .any(|session| session.live && session.clud_pid == Some(row.pid))
+        {
+            continue;
+        }
         let id = format!("direct-{}", row.pid);
         sessions.push(SessionView {
             id,
             kind: "direct".to_string(),
+            source: "registry".to_string(),
+            backend: row.backend.clone(),
+            launch_mode: row.launch_mode.clone(),
             // Surface the backend selection (`claude` / `codex`) under the
             // session name column so users can tell which agent each
             // direct-runner row corresponds to.
             name: row.backend.clone(),
             cwd: row.cwd,
+            repo_root: None,
+            command: Vec::new(),
+            clud_argv: Vec::new(),
+            clud_pid: Some(row.pid),
             // `started_unix` is seconds; snapshot rows use milliseconds.
             // Convert so the dashboard's age formatter renders both the
             // same way without a per-kind unit-toggle.
             created_at: Some((row.started_unix.max(0) as u64) * 1000),
+            exited_at: None,
+            duration_ms: None,
             detachable: false,
             background: false,
             attachable: false,
@@ -521,6 +559,40 @@ fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<L
     }
 
     // Newest first across the merged list.
+    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+}
+
+fn merge_launch_records(sessions: &mut Vec<SessionView>, records: Vec<LaunchRecord>) {
+    for record in records {
+        let live = record.exit_code.is_none() && pid_is_alive(record.clud_pid);
+        let duration_ms = record.duration_ms();
+        sessions.push(SessionView {
+            id: format!("launch-{}", record.id),
+            kind: record.source.clone(),
+            source: record.source,
+            backend: Some(record.backend.clone()),
+            launch_mode: Some(record.launch_mode.clone()),
+            name: Some(record.backend),
+            cwd: record.cwd,
+            repo_root: record.repo_root,
+            command: record.command,
+            clud_argv: record.clud_argv,
+            clud_pid: Some(record.clud_pid),
+            created_at: Some(record.launched_at_ms),
+            exited_at: record.exited_at_ms,
+            duration_ms,
+            detachable: false,
+            background: false,
+            attachable: false,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            exit_code: record.exit_code,
+            worker_port: 0,
+            live,
+            ctrl_c: None,
+        });
+    }
     sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
 }
 

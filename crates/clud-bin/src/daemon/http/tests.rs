@@ -2,6 +2,7 @@ use super::*;
 use crate::daemon::gc_service::spawn_registry_worker_with;
 use crate::daemon::types::{CtrlCProfile, SessionKind, SessionSnapshot};
 use crate::gc::Registry;
+use crate::launch_log::LaunchRecord;
 use std::io::Write;
 
 fn write_fake_session(state_dir: &Path, id: &str, snap: SessionSnapshot) {
@@ -15,6 +16,10 @@ fn fake_snapshot(id: &str, name: &str, cwd: &str) -> SessionSnapshot {
     SessionSnapshot {
         id: id.to_string(),
         kind: SessionKind::Pty,
+        backend: Some("codex".to_string()),
+        launch_mode: Some("pty".to_string()),
+        repo_root: Some("/dev".to_string()),
+        command: vec!["codex".to_string(), "exec".to_string()],
         cwd: Some(cwd.to_string()),
         name: Some(name.to_string()),
         created_at: Some(500),
@@ -31,6 +36,7 @@ fn fake_snapshot(id: &str, name: &str, cwd: &str) -> SessionSnapshot {
         worker_port: 12345,
         root_pid: None,
         exit_code: None,
+        exited_at: None,
         ctrl_c: None,
     }
 }
@@ -127,6 +133,49 @@ fn build_state_surfaces_direct_runner_registry_rows() {
     // The live-session count in the stats must include direct sessions
     // — that's what the dashboard header displays.
     assert_eq!(state.stats.live_session_count, 1);
+}
+
+#[test]
+fn build_state_surfaces_completed_foreground_launch_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let launches_dir = dir.path().join("launches");
+    std::fs::create_dir_all(&launches_dir).unwrap();
+    let record = LaunchRecord {
+        id: "1700000000000-4242".to_string(),
+        source: "direct".to_string(),
+        clud_pid: 4242,
+        backend: "codex".to_string(),
+        launch_mode: "subprocess".to_string(),
+        cwd: Some("/dev/fastled5".to_string()),
+        repo_root: Some("/dev/fastled5".to_string()),
+        command: vec!["codex".to_string(), "exec".to_string()],
+        clud_argv: vec!["clud".to_string(), "--codex".to_string()],
+        launched_at_ms: 1_700_000_000_000,
+        exited_at_ms: Some(1_700_000_010_000),
+        exit_code: Some(42),
+    };
+    std::fs::write(
+        launches_dir.join("1700000000000-4242.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
+    assert_eq!(state.sessions.len(), 1);
+    let session = &state.sessions[0];
+    assert_eq!(session.id, "launch-1700000000000-4242");
+    assert_eq!(session.kind, "direct");
+    assert_eq!(session.backend.as_deref(), Some("codex"));
+    assert_eq!(session.launch_mode.as_deref(), Some("subprocess"));
+    assert_eq!(session.cwd.as_deref(), Some("/dev/fastled5"));
+    assert_eq!(session.repo_root.as_deref(), Some("/dev/fastled5"));
+    assert_eq!(session.command, vec!["codex", "exec"]);
+    assert_eq!(session.clud_argv, vec!["clud", "--codex"]);
+    assert_eq!(session.created_at, Some(1_700_000_000_000));
+    assert_eq!(session.exited_at, Some(1_700_000_010_000));
+    assert_eq!(session.duration_ms, Some(10_000));
+    assert_eq!(session.exit_code, Some(42));
+    assert!(!session.live);
 }
 
 #[test]

@@ -39,6 +39,10 @@ fn sample_snapshot() -> SessionSnapshot {
     SessionSnapshot {
         id: "sess-test".to_string(),
         kind: SessionKind::Subprocess,
+        backend: Some("codex".to_string()),
+        launch_mode: Some("subprocess".to_string()),
+        repo_root: Some("C:/work/repo".to_string()),
+        command: vec!["codex".to_string(), "exec".to_string()],
         cwd: Some("C:/work/repo".to_string()),
         name: Some("sample".to_string()),
         created_at: Some(42),
@@ -53,6 +57,7 @@ fn sample_snapshot() -> SessionSnapshot {
         worker_port: 9020,
         root_pid: Some(102),
         exit_code: None,
+        exited_at: None,
         ctrl_c: Some(sample_profile()),
     }
 }

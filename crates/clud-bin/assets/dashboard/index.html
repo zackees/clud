@@ -84,7 +84,7 @@
       vertical-align: top;
     }
     th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
-    td.path, td.id { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; word-break: break-all; }
+    td.path, td.id, td.command { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; word-break: break-all; }
     td.metric { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; white-space: nowrap; }
     .badge {
       display: inline-block;
@@ -186,11 +186,23 @@
 
     function fmtAge(unix) {
       if (!unix) return '-';
-      const secs = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+      const ms = unix > 10_000_000_000 ? unix : unix * 1000;
+      const secs = Math.max(0, Math.floor((Date.now() - ms) / 1000));
       if (secs < 60) return `${secs}s`;
       if (secs < 3600) return `${Math.floor(secs / 60)}m`;
       if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
       return `${Math.floor(secs / 86400)}d`;
+    }
+    function fmtDateTime(ms) {
+      if (!ms) return '-';
+      const d = new Date(ms > 10_000_000_000 ? ms : ms * 1000);
+      const yyyy = d.getFullYear();
+      const mo = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${yyyy}-${mo}-${day} ${hh}:${mm}:${ss}`;
     }
     function fmtUptime(s) {
       const h = Math.floor(s / 3600);
@@ -264,22 +276,30 @@
           '<p class="empty">no sessions recorded.</p>';
         return;
       }
+      const commandText = (s) => {
+        const command = s.command && s.command.length ? s.command : s.clud_argv;
+        return command && command.length ? command.join(' ') : '-';
+      };
       const rows = sessions.map(s => `
         <tr>
           <td class="id">${esc(s.id)}</td>
-          <td>${esc(s.name || '-')}</td>
-          <td><span class="badge kind">${esc(s.kind)}</span></td>
+          <td>${esc(s.backend || s.name || '-')}</td>
+          <td><span class="badge kind">${esc(s.kind)}</span>${s.launch_mode ? `<span class="badge kind">${esc(s.launch_mode)}</span>` : ''}</td>
           <td>${s.live
             ? '<span class="badge live">live</span>'
             : `<span class="badge gone">exit ${esc(s.exit_code ?? '?')}</span>`}</td>
-          <td>${esc(fmtAge(s.created_at))}</td>
+          <td class="metric" title="${esc(fmtDateTime(s.created_at))}">${esc(fmtAge(s.created_at))}</td>
+          <td class="metric">${esc(fmtDateTime(s.exited_at))}</td>
+          <td class="metric">${esc(fmtMs(s.duration_ms))}</td>
           <td class="metric">${renderCtrlC(s.ctrl_c)}</td>
+          <td class="path">${esc(s.repo_root || '-')}</td>
           <td class="path">${esc(s.cwd || '-')}</td>
+          <td class="command">${esc(commandText(s))}</td>
         </tr>`).join('');
       document.getElementById('sessions-body').innerHTML = `
         <table>
           <thead><tr>
-            <th>id</th><th>name</th><th>kind</th><th>state</th><th>age</th><th>ctrl-c</th><th>cwd</th>
+            <th>id</th><th>backend</th><th>kind</th><th>state</th><th>launched</th><th>exited</th><th>duration</th><th>ctrl-c</th><th>repo</th><th>cwd</th><th>launched with</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
