@@ -55,6 +55,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-pr/SKILL.md"),
     },
     BundledSkill {
+        name: "clud-fix",
+        skill_md: include_str!("../assets/skills/clud-fix/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-tag-release",
         skill_md: include_str!("../assets/skills/clud-tag-release/SKILL.md"),
     },
@@ -462,6 +466,7 @@ mod tests {
         assert!(names.contains(&"clud-issue"));
         assert!(names.contains(&"clud-issue-triage"));
         assert!(names.contains(&"clud-pr"));
+        assert!(names.contains(&"clud-fix"));
         assert!(names.contains(&"clud-tag-release"));
         assert!(names.contains(&"clud-docker-rust-app-dev"));
         assert!(names.contains(&"clud-windows-trash"));
@@ -586,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_install_writes_bundled_skill_body_byte_for_byte() {
+    fn codex_install_writes_bundled_skill_bodies_byte_for_byte() {
         let home = tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
@@ -594,14 +599,21 @@ mod tests {
             .unwrap()
             .expect("codex backend should be active");
 
-        let expected = BUNDLED_SKILLS
-            .iter()
-            .find(|s| s.name == "clud-pr")
-            .expect("clud-pr must be bundled")
-            .skill_md;
-        let written =
-            std::fs::read_to_string(home.path().join(".codex/skills/clud-pr/SKILL.md")).unwrap();
-        assert_eq!(written, expected);
+        for skill_name in ["clud-pr", "clud-fix"] {
+            let expected = BUNDLED_SKILLS
+                .iter()
+                .find(|s| s.name == skill_name)
+                .unwrap_or_else(|| panic!("{skill_name} must be bundled"))
+                .skill_md;
+            let written = std::fs::read_to_string(
+                home.path()
+                    .join(".codex/skills")
+                    .join(skill_name)
+                    .join("SKILL.md"),
+            )
+            .unwrap();
+            assert_eq!(written, expected);
+        }
     }
 
     #[test]
