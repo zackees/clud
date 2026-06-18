@@ -13,11 +13,13 @@
 //!
 //! No new external crates — we shell out to `git` and parse text.
 
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::gc::extract_pid_from_lock_reason;
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
@@ -502,9 +504,17 @@ pub(crate) fn remove_worktree_path(
     path: &Path,
     force: bool,
 ) -> Result<&'static str, String> {
-    remove_worktree_path_with_git(main_repo, path, force, run_git).map(RemovalOutcome::note)
+    remove_worktree_path_with_git_and_process_refs(
+        main_repo,
+        path,
+        force,
+        run_git,
+        live_process_refs_for_worktree,
+    )
+    .map(RemovalOutcome::note)
 }
 
+#[cfg(test)]
 fn remove_worktree_path_with_git<F>(
     main_repo: &Path,
     path: &Path,
@@ -514,6 +524,21 @@ fn remove_worktree_path_with_git<F>(
 where
     F: Fn(&Path, &[&str]) -> Result<String, String>,
 {
+    remove_worktree_path_with_git_and_process_refs(main_repo, path, force, git, |_| Vec::new())
+}
+
+fn remove_worktree_path_with_git_and_process_refs<F, P>(
+    main_repo: &Path,
+    path: &Path,
+    force: bool,
+    git: F,
+    process_refs: P,
+) -> Result<RemovalOutcome, String>
+where
+    F: Fn(&Path, &[&str]) -> Result<String, String>,
+    P: Fn(&Path) -> Vec<WorktreeProcessRef>,
+{
+    ensure_no_live_process_refs(path, &process_refs)?;
     let mut args: Vec<&str> = vec!["worktree", "remove"];
     if force {
         args.push("--force");
@@ -526,21 +551,25 @@ where
             if !path_try_exists(path)? {
                 return Ok(RemovalOutcome::GitRemove);
             }
-            fallback_remove_and_prune(main_repo, path, &git).map_err(|fallback_err| {
-                format!(
-                    "git worktree remove reported success but {} still exists; fallback failed: {fallback_err}",
-                    path.display()
-                )
-            })?;
+            fallback_remove_and_prune(main_repo, path, &git, &process_refs).map_err(
+                |fallback_err| {
+                    format!(
+                        "git worktree remove reported success but {} still exists; fallback failed: {fallback_err}",
+                        path.display()
+                    )
+                },
+            )?;
             Ok(RemovalOutcome::FallbackAfterGitSuccess)
         }
         Err(git_err) => {
             if path_try_exists(path)? {
-                fallback_remove_and_prune(main_repo, path, &git).map_err(|fallback_err| {
-                    format!(
-                        "git worktree remove failed: {git_err}; fallback failed: {fallback_err}"
-                    )
-                })?;
+                fallback_remove_and_prune(main_repo, path, &git, &process_refs).map_err(
+                    |fallback_err| {
+                        format!(
+                            "git worktree remove failed: {git_err}; fallback failed: {fallback_err}"
+                        )
+                    },
+                )?;
                 Ok(RemovalOutcome::FallbackAfterGitFailure)
             } else {
                 best_effort_unlock_and_prune_worktree(main_repo, path, &git);
@@ -550,10 +579,17 @@ where
     }
 }
 
-fn fallback_remove_and_prune<F>(main_repo: &Path, path: &Path, git: &F) -> Result<(), String>
+fn fallback_remove_and_prune<F, P>(
+    main_repo: &Path,
+    path: &Path,
+    git: &F,
+    process_refs: &P,
+) -> Result<(), String>
 where
     F: Fn(&Path, &[&str]) -> Result<String, String>,
+    P: Fn(&Path) -> Vec<WorktreeProcessRef>,
 {
+    ensure_no_live_process_refs(path, process_refs)?;
     if path_try_exists(path)? {
         match std::fs::remove_dir_all(path) {
             Ok(()) => {}
@@ -571,6 +607,133 @@ where
     }
     best_effort_unlock_and_prune_worktree(main_repo, path, git);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorktreeProcessRef {
+    pid: u32,
+    parent_pid: Option<u32>,
+    name: String,
+    command: String,
+    exe: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+}
+
+fn ensure_no_live_process_refs<P>(path: &Path, process_refs: &P) -> Result<(), String>
+where
+    P: Fn(&Path) -> Vec<WorktreeProcessRef>,
+{
+    let refs = process_refs(path);
+    if refs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "live process(es) still reference worktree {}: {}. Wait for useful verification to finish, or stop only the exact abandoned/timed-out process tree before cleanup.",
+        path.display(),
+        format_process_refs(&refs)
+    ))
+}
+
+fn format_process_refs(refs: &[WorktreeProcessRef]) -> String {
+    let mut parts: Vec<String> = refs
+        .iter()
+        .take(5)
+        .map(|r| {
+            let parent = r
+                .parent_pid
+                .map(|pid| format!(", parent {pid}"))
+                .unwrap_or_default();
+            let exe = r
+                .exe
+                .as_ref()
+                .map(|p| format!(", exe {}", p.display()))
+                .unwrap_or_default();
+            let cwd = r
+                .cwd
+                .as_ref()
+                .map(|p| format!(", cwd {}", p.display()))
+                .unwrap_or_default();
+            format!(
+                "pid {}{parent}, name {}{exe}{cwd}, cmd {}",
+                r.pid, r.name, r.command
+            )
+        })
+        .collect();
+    if refs.len() > parts.len() {
+        parts.push(format!("and {} more", refs.len() - parts.len()));
+    }
+    parts.join("; ")
+}
+
+fn live_process_refs_for_worktree(path: &Path) -> Vec<WorktreeProcessRef> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+    system
+        .processes()
+        .values()
+        .filter_map(|process| {
+            let cmd: Vec<OsString> = process.cmd().to_vec();
+            let exe = process.exe().map(PathBuf::from);
+            let cwd = process.cwd().map(PathBuf::from);
+            if !process_ref_matches_worktree(&target, exe.as_deref(), cwd.as_deref(), &cmd) {
+                return None;
+            }
+            Some(WorktreeProcessRef {
+                pid: process.pid().as_u32(),
+                parent_pid: process.parent().map(|pid| pid.as_u32()),
+                name: process.name().to_string_lossy().into_owned(),
+                command: cmd
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                exe,
+                cwd,
+            })
+        })
+        .collect()
+}
+
+fn process_ref_matches_worktree(
+    path: &Path,
+    exe: Option<&Path>,
+    cwd: Option<&Path>,
+    cmd: &[OsString],
+) -> bool {
+    let needle = normalize_process_match_text(&path.to_string_lossy());
+    if needle.is_empty() {
+        return false;
+    }
+    if exe
+        .map(|p| normalize_process_match_text(&p.to_string_lossy()).contains(&needle))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if cwd
+        .map(|p| normalize_process_match_text(&p.to_string_lossy()).contains(&needle))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    cmd.iter()
+        .map(|part| normalize_process_match_text(&part.to_string_lossy()))
+        .any(|part| part.contains(&needle))
+}
+
+fn normalize_process_match_text(value: &str) -> String {
+    let value = value.replace('\\', "/");
+    let value = value.strip_prefix("//?/").unwrap_or(&value);
+    if cfg!(windows) {
+        value.to_ascii_lowercase()
+    } else {
+        value.to_string()
+    }
 }
 
 fn best_effort_unlock_and_prune_worktree<F>(main_repo: &Path, path: &Path, git: &F)

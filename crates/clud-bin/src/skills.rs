@@ -486,6 +486,50 @@ mod tests {
     }
 
     #[test]
+    fn clud_improve_files_concrete_reports_without_generic_prompt() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-improve")
+            .expect("clud-improve must be bundled")
+            .skill_md;
+
+        for required in [
+            "Concrete report means file directly",
+            "Bare manual invocation asks once",
+            "If the skill was auto-selected and the current user message already contains a concrete clud report, use that message as the report.",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-improve skill missing argument-aware filing guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn clud_pr_teardown_requires_process_audit() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-pr")
+            .expect("clud-pr must be bundled")
+            .skill_md;
+
+        for required in [
+            "audit live processes before removing the worktree",
+            "stop only that exact process tree before cleanup",
+            "do not use a blind `rm -rf` retry loop",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-pr skill missing process-audit teardown guidance: {required}"
+            );
+        }
+        assert!(
+            !skill.contains("Follow the **Tear down** retry pattern"),
+            "clud-pr skill must not recommend blind retry teardown"
+        );
+    }
+
+    #[test]
     fn clud_loop_skill_uses_codex_native_orchestration() {
         let skill = BUNDLED_SKILLS
             .iter()

@@ -1,6 +1,6 @@
 # clud-improve/
 
-Source of the `/clud-improve` skill shipped inside the `clud` binary. The skill asks the user the literal question "how can clud improve? be as specific as possible", checks `gh auth status`, and on success files the response as a GitHub issue against `zackees/clud`. If the user is not authenticated, the skill tells them to run `gh auth login` and stops. The deliverable is a posted issue URL plus a one-sentence summary - never a draft left in chat.
+Source of the `/clud-improve` skill shipped inside the `clud` binary. The skill files a concrete clud improvement report directly when the invocation includes an argument string or the current user message already contains the report. It asks the literal question "how can clud improve? be as specific as possible" only for a bare manual `/clud-improve` invocation without details. It checks `gh auth status`, and on success files the report as a GitHub issue against `zackees/clud`. If the user is not authenticated, the skill tells them to run `gh auth login` and stops. The deliverable is a posted issue URL plus a one-sentence summary - never a draft left in chat.
 
 ## Files
 
