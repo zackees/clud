@@ -61,6 +61,24 @@ structured evidence for `clud-fix` to evaluate: issue URL, PR URL(s), PR merged
 state, tests run, validation notes, blocker reason if any, and issue closure
 state.
 
+### Terminal sentinels for no-PR outcomes
+
+Three legitimate `/clud-fix` runs reach an honest no-PR terminal: a single-issue
+intake-failed investigation report, a meta empty-children investigation report,
+and an unreachable-scope refusal (see #365 for the upfront refusal gate). In
+each case, emit a structured sentinel as the FINAL line of the user-facing
+response so an outer-`/goal` evaluator can recognize the terminal:
+
+| Terminal | Sentinel |
+|---|---|
+| Single intake-failed | `<clud-fix:terminal kind=investigation-report-posted reason=intake-failed url=<issue-url>>` |
+| Meta empty-children | `<clud-fix:terminal kind=empty-children-report-posted reason=parent-roadmap-unfiled url=<parent-url>>` |
+| Unreachable scope | `<clud-fix:terminal kind=unreachable-scope-refused reason=<closed-source-target\|read-only-repo\|...> url=<issue-url>>` |
+
+The sentinel is plain transcript text — no harness affordance is required to
+emit it. Recognition by `/goal` evaluators is a separate upstream change
+tracked at #367.
+
 ## Done When
 
 ### Single Issue
@@ -107,9 +125,28 @@ All conditions are mandatory:
 
 3. **Under-specified issues get investigation first.** If any readiness item is
    missing, post an investigation report to the issue instead of opening a PR.
-   Include root-cause evidence, reproduction status, planned fix, validation
-   command, and open questions. Then stop with the blocker surfaced; do not
-   manufacture a PR that cannot be validated.
+
+   Lead the report with a hook-mismatch banner (Markdown blockquote, first
+   line) so an outer-`/goal`-following reader sees the no-PR terminal
+   explicitly:
+
+   ```markdown
+   > ⚠ **/clud-fix intake gate failed.** This comment is the deliverable, not
+   > a merged PR. If a session `/goal` hook references this issue URL, run
+   > `/goal clear` after reading — it will not auto-satisfy.
+   ```
+
+   Then include root-cause evidence, reproduction status, planned fix,
+   validation command, and open questions.
+
+   In the final user response, emit the terminal sentinel as the last line:
+
+   ```text
+   <clud-fix:terminal kind=investigation-report-posted reason=intake-failed url=<issue-url>>
+   ```
+
+   Then stop with the blocker surfaced; do not manufacture a PR that cannot be
+   validated.
 
 4. **Survey existing PRs.** Search for PRs that mention or close the issue:
 
@@ -165,6 +202,21 @@ All conditions are mandatory:
    - GitHub sub-issue metadata when available
 
    Verify each child's GitHub state before deciding it is already done.
+
+   If the enumerated open-children list is empty (the parent is a roadmap whose
+   child items have not been filed as issues yet, or every checklist entry
+   resolves to a closed/missing issue), do NOT proceed to ledger creation. Post
+   the same investigation-report pattern as the single-issue under-specified
+   branch — including the hook-mismatch banner — to the parent issue,
+   explaining which child issues need to be filed to unblock the burn-down.
+   Emit the terminal sentinel as the last line of the user-facing response:
+
+   ```text
+   <clud-fix:terminal kind=empty-children-report-posted reason=parent-roadmap-unfiled url=<parent-url>>
+   ```
+
+   Then stop. Do NOT auto-file phase items to extend the loop; see the
+   "Manufacturing new child issues" failure mode.
 
 3. **Create/update the durable ledger.** Store progress in:
 
@@ -235,6 +287,14 @@ This skill must work the same through clud for Claude and Codex:
 - Treating a checked checklist item as proof without verifying the child issue
   state on GitHub.
 - Manufacturing new child issues after the open-child list is empty.
+- Treating a user-installed outer `/goal /clud-fix <url>` wrap as authoritative.
+  This skill owns its `/goal` lifecycle (see Goal Ownership). An outer wrap
+  installs a parallel hook whose literal text the evaluator reads as a strict
+  "PR merged" terminal; the evaluator cannot see this skill's no-PR terminals
+  (intake-failed report, empty-children report, unreachable-scope refusal). On
+  detecting an outer wrap that conflicts with a legitimate no-PR terminal,
+  surface the conflict in the final user response and recommend `/goal clear`.
+  Do not widen scope to satisfy the outer hook.
 
 ## When Not To Use This
 
@@ -243,3 +303,9 @@ This skill must work the same through clud for Claude and Codex:
 - The task is design discussion rather than a bounded issue fix.
 - The requested issue has no falsifiable reproduction and no acceptance
   criteria; post an investigation report first.
+- Wrapping `/clud-fix` in an outer `/goal` (e.g. `/goal /clud-fix <url>`). Just
+  invoke `/clud-fix <url>` directly. The skill owns its own `/goal` lifecycle
+  (Goal Ownership). Wrapping creates a parallel hook the skill cannot see,
+  which loops indefinitely when intake fails, children are empty, or scope is
+  unreachable. The skill's no-PR terminals emit a sentinel intended for the
+  inner goal to recognize; an outer wrap installed by the user cannot see it.
