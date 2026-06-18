@@ -224,6 +224,7 @@ fn build_state_includes_ctrl_c_events_when_present() {
             } else {
                 "daemon_unreachable".to_string()
             }),
+            ctrl_event_kind: None,
         };
         let path = edir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
         std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
