@@ -66,6 +66,10 @@ pub(super) fn logs_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("logs")
 }
 
+pub(super) fn daemon_events_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("daemon-events.jsonl")
+}
+
 pub(super) fn session_log_path(state_dir: &Path, session_id: &str) -> PathBuf {
     logs_dir(state_dir).join(format!("{session_id}.log"))
 }

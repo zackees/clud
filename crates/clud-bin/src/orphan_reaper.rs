@@ -44,6 +44,10 @@ pub struct ReapOutcome {
     pub found: usize,
     /// Number we actually terminated.
     pub reaped: usize,
+    /// Candidate PIDs selected for this scan before `--keep-orphans` is applied.
+    pub candidate_pids: Vec<u32>,
+    /// PIDs passed to `kill_tree`.
+    pub reaped_pids: Vec<u32>,
 }
 
 /// One descendant's view, pre-classification.
@@ -329,6 +333,7 @@ fn report_and_reap(descendants: Vec<Descendant>, header: &str, opts: &ReapOpts) 
     if found == 0 {
         return ReapOutcome::default();
     }
+    let candidate_pids: Vec<u32> = descendants.iter().map(|d| d.pid).collect();
 
     // Group by shape label so the report collapses N identical leaks into
     // a single row with a list of PIDs/ports.
@@ -377,20 +382,32 @@ fn report_and_reap(descendants: Vec<Descendant>, header: &str, opts: &ReapOpts) 
     }
 
     if opts.keep {
-        return ReapOutcome { found, reaped: 0 };
+        return ReapOutcome {
+            found,
+            reaped: 0,
+            candidate_pids,
+            reaped_pids: Vec::new(),
+        };
     }
 
     let mut reaped = 0usize;
+    let mut reaped_pids = Vec::with_capacity(descendants.len());
     for d in &descendants {
         process_tree::kill_tree(d.pid);
         reaped += 1;
+        reaped_pids.push(d.pid);
     }
 
     if !opts.quiet {
         eprintln!("[clud] reaped {reaped} of {found} env-tagged descendant(s)");
     }
 
-    ReapOutcome { found, reaped }
+    ReapOutcome {
+        found,
+        reaped,
+        candidate_pids,
+        reaped_pids,
+    }
 }
 
 #[cfg(test)]
