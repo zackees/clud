@@ -30,7 +30,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +67,78 @@ impl InvocationKind {
     }
 }
 
+/// Specific console-control event that fired clud's interrupt handler.
+///
+/// `ctrlc::set_handler` folds five distinct Windows events
+/// (`CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, `CTRL_CLOSE_EVENT`,
+/// `CTRL_LOGOFF_EVENT`, `CTRL_SHUTDOWN_EVENT`) into one callback, so by
+/// default we can't tell a real keyboard Ctrl+C from a
+/// `GenerateConsoleCtrlEvent` call somewhere in the descendant tree.
+/// The Windows probe in [`crate::startup`] inspects `dwCtrlType` before
+/// the ctrlc handler runs and stores the result here so the dashboard
+/// can show *which* event actually fired.
+///
+/// `None` in [`CtrlCEvent::ctrl_event_kind`] means the probe never ran
+/// (Unix builds, or pre-upgrade event files).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CtrlEventKind {
+    /// `CTRL_C_EVENT` on Windows, `SIGINT` on Unix. The classic
+    /// keyboard Ctrl+C — or a `GenerateConsoleCtrlEvent` broadcast
+    /// from a sibling/descendant.
+    CtrlC,
+    /// `CTRL_BREAK_EVENT` on Windows, `SIGBREAK` on Unix. Almost
+    /// never a keyboard press in modern terminals; usually a
+    /// `GenerateConsoleCtrlEvent` from a process trying to terminate
+    /// a console group.
+    CtrlBreak,
+    /// `CTRL_CLOSE_EVENT`. The console window's close button was
+    /// clicked, the host window is being destroyed, or `EndTask` was
+    /// invoked. The OS gives the handler ~5 seconds before killing
+    /// the process.
+    CtrlClose,
+    /// `CTRL_LOGOFF_EVENT`. Only delivered to service processes —
+    /// extremely unlikely in a foreground CLI but recorded for
+    /// completeness.
+    CtrlLogoff,
+    /// `CTRL_SHUTDOWN_EVENT`. System shutdown. Same service-process
+    /// caveat as `CtrlLogoff`.
+    CtrlShutdown,
+    /// The probe saw a `dwCtrlType` value the Win32 docs don't define.
+    /// Stored so a future Windows revision that adds a new control
+    /// event doesn't get silently dropped on the floor.
+    Unknown,
+}
+
+impl CtrlEventKind {
+    /// Numeric encoding used by the atomic storage. Must round-trip
+    /// through [`Self::from_raw`].
+    pub const fn to_raw(self) -> u32 {
+        match self {
+            CtrlEventKind::CtrlC => 0,
+            CtrlEventKind::CtrlBreak => 1,
+            CtrlEventKind::CtrlClose => 2,
+            CtrlEventKind::CtrlLogoff => 5,
+            CtrlEventKind::CtrlShutdown => 6,
+            CtrlEventKind::Unknown => u32::MAX - 1,
+        }
+    }
+
+    /// Decode a value previously written by [`Self::to_raw`]. Returns
+    /// [`CtrlEventKind::Unknown`] for any unexpected input so callers
+    /// never have to handle "impossible" cases.
+    pub const fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 => CtrlEventKind::CtrlC,
+            1 => CtrlEventKind::CtrlBreak,
+            2 => CtrlEventKind::CtrlClose,
+            5 => CtrlEventKind::CtrlLogoff,
+            6 => CtrlEventKind::CtrlShutdown,
+            _ => CtrlEventKind::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CtrlCEvent {
     pub pid: u32,
@@ -90,6 +162,13 @@ pub struct CtrlCEvent {
     /// so old event files stay parseable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_reason: Option<String>,
+    /// Specific Windows console-control event that fired the handler.
+    /// `None` on Unix and on pre-upgrade event files. Critical for
+    /// telling "user pressed Ctrl+C" from "some descendant called
+    /// `GenerateConsoleCtrlEvent`" — they exit identically through
+    /// the same handler but mean very different things.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctrl_event_kind: Option<CtrlEventKind>,
 }
 
 // Process-wide observation point. Re-stamped on every Ctrl+C the signal
@@ -101,6 +180,18 @@ pub struct CtrlCEvent {
 // A zero value means "never observed" — the unix epoch is the natural
 // sentinel and saves us a separate boolean flag.
 static OBSERVED_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide last-observed control event kind, populated by the
+/// Windows probe installed in [`crate::startup::install_ctrl_c_flag`].
+/// `u32::MAX` is the "never observed" sentinel; real values come from
+/// [`CtrlEventKind::to_raw`].
+///
+/// Lives in its own atomic (separate from `OBSERVED_UNIX_MS`) so the
+/// timestamp updates from the existing `ctrlc` handler don't have to
+/// race with the kind-recording probe — the two writers touch
+/// independent locations.
+const KIND_UNRECORDED: u32 = u32::MAX;
+static OBSERVED_EVENT_KIND: AtomicU32 = AtomicU32::new(KIND_UNRECORDED);
 
 /// Process-wide handoff outcome. Recorded by the teardown sites
 /// (`runner::teardown_interrupted_child`, `session::interrupt_pty_process`)
@@ -131,6 +222,29 @@ pub fn record_observed() {
 
 pub fn was_observed() -> bool {
     OBSERVED_UNIX_MS.load(Ordering::SeqCst) != 0
+}
+
+/// Record which specific console-control event the Windows probe saw.
+/// Called from the `SetConsoleCtrlHandler` callback installed by
+/// [`crate::startup::install_ctrl_c_flag`] before the `ctrlc` handler
+/// fires. Signal-safe: a single atomic store, no allocation, no lock.
+///
+/// The last write wins, matching the [`record_observed`] semantics
+/// above: a burst of events maps to "the kind of the most recent one".
+pub fn record_event_kind(kind: CtrlEventKind) {
+    OBSERVED_EVENT_KIND.store(kind.to_raw(), Ordering::SeqCst);
+}
+
+/// Read the kind recorded by [`record_event_kind`]. Returns `None`
+/// when the probe never fired — Unix builds, or pre-probe code paths
+/// where Ctrl+C was observed but no kind was attributed.
+pub fn observed_event_kind() -> Option<CtrlEventKind> {
+    let raw = OBSERVED_EVENT_KIND.load(Ordering::SeqCst);
+    if raw == KIND_UNRECORDED {
+        None
+    } else {
+        Some(CtrlEventKind::from_raw(raw))
+    }
 }
 
 /// Record the daemon-handoff outcome (issue #285 rec 2). Called from
@@ -174,6 +288,7 @@ fn build_event(kind: InvocationKind, exit_code: i32) -> Option<CtrlCEvent> {
         .and_then(|g| g.clone())
         .map(|o| (Some(o.handed_off), o.reason))
         .unwrap_or((None, None));
+    let ctrl_event_kind = observed_event_kind();
     Some(CtrlCEvent {
         pid: std::process::id(),
         observed_at_ms,
@@ -184,6 +299,7 @@ fn build_event(kind: InvocationKind, exit_code: i32) -> Option<CtrlCEvent> {
         cwd,
         handed_off,
         handoff_reason,
+        ctrl_event_kind,
     })
 }
 
@@ -268,6 +384,7 @@ fn unix_millis_now() -> u64 {
 #[cfg(test)]
 pub(crate) fn reset_for_test() {
     OBSERVED_UNIX_MS.store(0, Ordering::SeqCst);
+    OBSERVED_EVENT_KIND.store(KIND_UNRECORDED, Ordering::SeqCst);
     if let Ok(mut g) = HANDOFF_OUTCOME.lock() {
         *g = None;
     }
@@ -306,12 +423,14 @@ mod tests {
             cwd: Some("/tmp/x".to_string()),
             handed_off: Some(true),
             handoff_reason: Some("ctrl_c_subprocess".to_string()),
+            ctrl_event_kind: Some(CtrlEventKind::CtrlBreak),
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""kind":"direct""#));
         assert!(json.contains(r#""elapsed_ms":250"#));
         assert!(json.contains(r#""handed_off":true"#));
         assert!(json.contains(r#""handoff_reason":"ctrl_c_subprocess""#));
+        assert!(json.contains(r#""ctrl_event_kind":"ctrl_break""#));
         let back: CtrlCEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pid, 1234);
         assert_eq!(back.elapsed_ms, 250);
@@ -319,6 +438,7 @@ mod tests {
         assert_eq!(back.cwd.as_deref(), Some("/tmp/x"));
         assert_eq!(back.handed_off, Some(true));
         assert_eq!(back.handoff_reason.as_deref(), Some("ctrl_c_subprocess"));
+        assert_eq!(back.ctrl_event_kind, Some(CtrlEventKind::CtrlBreak));
     }
 
     #[test]
@@ -339,6 +459,98 @@ mod tests {
         assert_eq!(event.pid, 1234);
         assert_eq!(event.handed_off, None);
         assert_eq!(event.handoff_reason, None);
+        assert_eq!(event.ctrl_event_kind, None);
+    }
+
+    #[test]
+    fn ctrl_event_kind_round_trips_through_raw() {
+        for kind in [
+            CtrlEventKind::CtrlC,
+            CtrlEventKind::CtrlBreak,
+            CtrlEventKind::CtrlClose,
+            CtrlEventKind::CtrlLogoff,
+            CtrlEventKind::CtrlShutdown,
+            CtrlEventKind::Unknown,
+        ] {
+            let raw = kind.to_raw();
+            assert_eq!(
+                CtrlEventKind::from_raw(raw),
+                kind,
+                "round-trip failed for {kind:?} -> {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_event_kind_from_raw_maps_undefined_to_unknown() {
+        // Windows reserves 3, 4, and 7+ as undocumented / future-use values.
+        // Anything outside the known set must funnel into Unknown so a
+        // future Windows revision can't crash forensics.
+        for raw in [3u32, 4, 7, 99, u32::MAX, u32::MAX - 1] {
+            assert_eq!(CtrlEventKind::from_raw(raw), CtrlEventKind::Unknown);
+        }
+    }
+
+    #[test]
+    fn ctrl_event_kind_serializes_as_snake_case() {
+        // Lock in the on-disk JSON spelling. Dashboard consumers and
+        // downstream telemetry depend on these literal strings.
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::CtrlC).unwrap(),
+            "\"ctrl_c\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::CtrlBreak).unwrap(),
+            "\"ctrl_break\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::CtrlClose).unwrap(),
+            "\"ctrl_close\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::CtrlLogoff).unwrap(),
+            "\"ctrl_logoff\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::CtrlShutdown).unwrap(),
+            "\"ctrl_shutdown\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn record_event_kind_round_trips_through_observed_event_kind() {
+        let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        assert_eq!(observed_event_kind(), None);
+        record_event_kind(CtrlEventKind::CtrlClose);
+        assert_eq!(observed_event_kind(), Some(CtrlEventKind::CtrlClose));
+        // Last writer wins, matching the timestamp semantics.
+        record_event_kind(CtrlEventKind::CtrlBreak);
+        assert_eq!(observed_event_kind(), Some(CtrlEventKind::CtrlBreak));
+    }
+
+    #[test]
+    fn build_event_carries_recorded_event_kind() {
+        let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        record_observed();
+        record_event_kind(CtrlEventKind::CtrlBreak);
+        let event = build_event(InvocationKind::Direct, 130).expect("event built");
+        assert_eq!(event.ctrl_event_kind, Some(CtrlEventKind::CtrlBreak));
+    }
+
+    #[test]
+    fn build_event_leaves_event_kind_none_when_probe_never_fired() {
+        let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        record_observed();
+        // No `record_event_kind` call — emulates Unix or pre-probe Windows.
+        let event = build_event(InvocationKind::Direct, 130).expect("event built");
+        assert_eq!(event.ctrl_event_kind, None);
     }
 
     #[test]
@@ -364,6 +576,7 @@ mod tests {
                 cwd: None,
                 handed_off: None,
                 handoff_reason: None,
+                ctrl_event_kind: None,
             };
             let path = dir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
             fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
@@ -392,6 +605,7 @@ mod tests {
             cwd: None,
             handed_off: Some(true),
             handoff_reason: None,
+            ctrl_event_kind: None,
         };
         fs::write(dir.join("good.json"), serde_json::to_vec(&good).unwrap()).unwrap();
         let events = read_recent_events(tmp.path(), 10);

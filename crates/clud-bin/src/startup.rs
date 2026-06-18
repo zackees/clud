@@ -166,7 +166,68 @@ pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
     }) {
         eprintln!("[clud] warning: failed to install Ctrl+C handler: {}", e);
     }
+    install_windows_ctrl_event_probe();
     interrupted
+}
+
+/// Install a `SetConsoleCtrlHandler` probe whose only job is to record
+/// **which** console-control event the OS delivered — `CTRL_C_EVENT`
+/// vs `CTRL_BREAK_EVENT` vs `CTRL_CLOSE_EVENT` etc. — so the dashboard
+/// can tell a real Ctrl+C keypress apart from a
+/// `GenerateConsoleCtrlEvent` broadcast made by some descendant in the
+/// process tree.
+///
+/// The probe is installed **after** the `ctrlc` crate's handler. Windows
+/// dispatches console-control handlers in **reverse order of
+/// registration** (most recently installed first), so our probe fires
+/// first, stamps the kind into [`crate::ctrl_c_track::record_event_kind`],
+/// and returns `FALSE` to fall through to the `ctrlc` handler, which
+/// preserves existing behavior (stamp the observation timestamp + flip
+/// the interrupted flag).
+///
+/// No-op on non-Windows builds — the kind isn't ambiguous there, and
+/// the `signal-hook` integration in the `ctrlc` crate already knows
+/// which signal it caught.
+#[cfg(windows)]
+fn install_windows_ctrl_event_probe() {
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    use windows_core::BOOL;
+
+    // The probe MUST be `unsafe extern "system" fn` and MUST be stateless
+    // (no closure captures), because the Win32 ABI calls it on an OS-
+    // managed thread with no Rust context. All communication with the
+    // rest of the process goes through the atomics in `ctrl_c_track`.
+    //
+    // We always return `FALSE` so the next handler in the chain (the
+    // `ctrlc` crate's handler, registered earlier) gets a chance to
+    // run. Returning `TRUE` here would short-circuit the chain and
+    // prevent `ctrlc`'s `record_observed` + interrupted-flag work.
+    unsafe extern "system" fn probe(ctrl_type: u32) -> BOOL {
+        crate::ctrl_c_track::record_event_kind(crate::ctrl_c_track::CtrlEventKind::from_raw(
+            ctrl_type,
+        ));
+        // `BOOL(0)` == FALSE — keep walking the handler chain.
+        BOOL(0)
+    }
+
+    // SAFETY: `SetConsoleCtrlHandler` is documented as safe to call from
+    // any thread at any time. `probe` is a `'static` function pointer
+    // with the correct ABI, and we pass `TRUE` to add (not remove).
+    let res = unsafe { SetConsoleCtrlHandler(Some(probe), true) };
+    if let Err(e) = res {
+        eprintln!(
+            "[clud] warning: failed to install Windows ctrl-event probe: {}",
+            e
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn install_windows_ctrl_event_probe() {
+    // The probe needs `SetConsoleCtrlHandler`, which only exists on
+    // Windows. On Unix the `ctrlc` crate's `signal-hook` backend
+    // already disambiguates SIGINT from SIGTERM, so leaving the
+    // event-kind field as `None` is the correct, honest answer.
 }
 
 /// Pure side-effecting body of the Ctrl+C handler closure, extracted so
