@@ -71,10 +71,32 @@ enum Shape {
     NpmRunPreview,
     NpmRunDev,
     NodejsWheelShim,
+    /// Long-lived `powershell.exe` / `pwsh.exe` helper. Issue #360: Codex
+    /// ships its command-safety layer as a `powershell.exe -NoProfile ...
+    /// -EncodedCommand <multi-kilobyte-base64>` child, and without this
+    /// case it falls into `Shape::Generic`, which surfaces the base64
+    /// payload as the row label and sprays kilobytes into the terminal.
+    PowerShell {
+        mode: PowerShellMode,
+    },
     /// Catch-all: `name + first-arg-basename`.
     Generic {
         label: String,
     },
+}
+
+/// Which `-…` flag PowerShell was started with. The label format
+/// distinguishes "Codex's AST parser" (`-EncodedCommand`) from "someone
+/// running `powershell.exe -File foo.ps1`" so a triager can tell at a
+/// glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerShellMode {
+    EncodedCommand,
+    Command,
+    File,
+    /// Plain `powershell.exe`, `-NoExit` interactive, or anything we
+    /// didn't classify.
+    Other,
 }
 
 impl Shape {
@@ -95,6 +117,12 @@ impl Shape {
             Shape::NpmRunPreview => "npm run preview".to_string(),
             Shape::NpmRunDev => "npm run dev".to_string(),
             Shape::NodejsWheelShim => "node (nodejs_wheel shim)".to_string(),
+            Shape::PowerShell { mode } => match mode {
+                PowerShellMode::EncodedCommand => "powershell (EncodedCommand)".to_string(),
+                PowerShellMode::Command => "powershell (-Command)".to_string(),
+                PowerShellMode::File => "powershell (-File)".to_string(),
+                PowerShellMode::Other => "powershell".to_string(),
+            },
             Shape::Generic { label } => label.clone(),
         }
     }
@@ -136,21 +164,92 @@ fn classify(name: &str, command: &str) -> Shape {
     if cmd_lc.contains("nodejs_wheel") {
         return Shape::NodejsWheelShim;
     }
+    if name_lc == "powershell.exe"
+        || name_lc == "powershell"
+        || name_lc == "pwsh.exe"
+        || name_lc == "pwsh"
+    {
+        return Shape::PowerShell {
+            mode: detect_powershell_mode(command),
+        };
+    }
 
     // Fallback: name + first non-flag arg basename, so users still get a
-    // readable row instead of a raw path dump.
+    // readable row instead of a raw path dump. Issue #360: bound the
+    // basename length so a long argv token (e.g. a base64 blob that
+    // didn't trigger any specific classifier above) can't spew kilobytes
+    // through the print site below.
     let first_arg = command
         .split_whitespace()
         .skip(1)
         .find(|a| !a.starts_with('-'))
         .unwrap_or("");
     let basename = first_arg.rsplit(['/', '\\']).next().unwrap_or("");
+    let basename = truncate_with_ellipsis(basename, GENERIC_BASENAME_MAX);
     let label = if basename.is_empty() {
         name.to_string()
     } else {
         format!("{name}  {basename}")
     };
     Shape::Generic { label }
+}
+
+/// Walk the PowerShell command line for the first recognized mode flag.
+/// Matched case-insensitively because PowerShell accepts mixed-case (and
+/// abbreviated) switches. The first hit wins; we don't second-guess the
+/// shell's own ordering.
+fn detect_powershell_mode(command: &str) -> PowerShellMode {
+    for tok in command.split_whitespace() {
+        let tok = tok.trim_start_matches(['-', '/']);
+        let tok_lc = tok.to_ascii_lowercase();
+        // `-EncodedCommand` and the common `-enc` abbreviation. We
+        // recognize anything that's a unique prefix of "encodedcommand"
+        // because PowerShell itself does too.
+        if tok_lc == "encodedcommand" || tok_lc == "enc" || tok_lc == "encoded" {
+            return PowerShellMode::EncodedCommand;
+        }
+        // `-Command` and the single-letter `-c`. Reject `-Co…` (Configuration etc.)
+        // by requiring an exact match — PowerShell needs `-Command` spelled out
+        // far enough to disambiguate, and Codex's helper would never use a
+        // prefix shorter than `-c`.
+        if tok_lc == "command" || tok_lc == "c" {
+            return PowerShellMode::Command;
+        }
+        // `-File` / `-f`.
+        if tok_lc == "file" || tok_lc == "f" {
+            return PowerShellMode::File;
+        }
+    }
+    PowerShellMode::Other
+}
+
+/// Max length for the basename portion of a `Shape::Generic` label.
+/// Anything longer is almost certainly a base64 or path that shouldn't
+/// be in the reaper's one-line summary anyway. Issue #360.
+const GENERIC_BASENAME_MAX: usize = 40;
+
+/// Hard cap on the label printed by `report_and_reap`'s row format.
+/// Belt-and-suspenders against any future label longer than this — the
+/// classifier-side cap above bounds Generic labels, but a future
+/// `Shape` variant or a poorly-bounded label() implementation would
+/// otherwise still be able to spew kilobytes through this single line.
+const PRINTED_LABEL_MAX: usize = 60;
+
+/// Truncate `s` to at most `max` bytes, appending `…` when truncated.
+/// Walks back to the nearest char boundary so we never split a UTF-8
+/// sequence in the middle.
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 3);
+    out.push_str(&s[..end]);
+    out.push('…');
+    out
 }
 
 /// Extract a `--port N` (or `--port=N`) value from a command line. Returns
@@ -251,10 +350,17 @@ fn report_and_reap(descendants: Vec<Descendant>, header: &str, opts: &ReapOpts) 
         eprintln!("{header} {found} env-tagged descendant(s) {action_word}");
         for (label, ds) in &by_label {
             let pids: Vec<String> = ds.iter().map(|d| d.pid.to_string()).collect();
+            // Issue #360: `{label:<30}` is a min-width pad, not a max-width
+            // truncate. A misclassified powershell `-EncodedCommand <base64>`
+            // (or any future row whose label slipped past the classifier
+            // bound) would otherwise spew kilobytes through this single
+            // line. Cap defensively so the reaper's output stays one line
+            // per row no matter what shape the cmdline took.
+            let safe_label = truncate_with_ellipsis(label, PRINTED_LABEL_MAX);
             eprintln!(
-                "         {count}x  {label:<30}  pids=[{joined}]",
+                "         {count}x  {safe_label:<30}  pids=[{joined}]",
                 count = ds.len(),
-                label = label,
+                safe_label = safe_label,
                 joined = pids.join(", "),
             );
             if opts.explain {
@@ -379,6 +485,234 @@ mod tests {
             ),
             other => panic!("expected Generic, got {other:?}"),
         }
+    }
+
+    /// Issue #360: Codex's command-safety AST parser runs as
+    /// `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy
+    /// Bypass -EncodedCommand <multi-KB-base64>`. The classifier must
+    /// recognize it as PowerShell-EncodedCommand so the printed label
+    /// stays short instead of falling into `Shape::Generic` and
+    /// surfacing the base64 payload as the row label.
+    #[test]
+    fn classify_powershell_encoded_command_codex_shape() {
+        let cmd = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+                   -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQA=";
+        assert_eq!(
+            classify("powershell.exe", cmd),
+            Shape::PowerShell {
+                mode: PowerShellMode::EncodedCommand
+            }
+        );
+    }
+
+    #[test]
+    fn classify_powershell_command_flag() {
+        let cmd = "powershell.exe -NoProfile -Command Get-Process";
+        assert_eq!(
+            classify("powershell.exe", cmd),
+            Shape::PowerShell {
+                mode: PowerShellMode::Command
+            }
+        );
+    }
+
+    #[test]
+    fn classify_powershell_file_flag() {
+        let cmd = "powershell.exe -NoProfile -File C:\\scripts\\foo.ps1";
+        assert_eq!(
+            classify("powershell.exe", cmd),
+            Shape::PowerShell {
+                mode: PowerShellMode::File
+            }
+        );
+    }
+
+    #[test]
+    fn classify_powershell_bare_other() {
+        // Plain `powershell.exe` with no recognized mode flag still
+        // gets classified as PowerShell — not Generic — so the label
+        // stays short.
+        let cmd = "powershell.exe -NoExit";
+        assert_eq!(
+            classify("powershell.exe", cmd),
+            Shape::PowerShell {
+                mode: PowerShellMode::Other
+            }
+        );
+    }
+
+    #[test]
+    fn classify_pwsh_core_recognized() {
+        // PowerShell 7+ ships as `pwsh.exe`; same classifier path.
+        let cmd = "pwsh.exe -NoProfile -EncodedCommand JABF";
+        assert_eq!(
+            classify("pwsh.exe", cmd),
+            Shape::PowerShell {
+                mode: PowerShellMode::EncodedCommand
+            }
+        );
+    }
+
+    #[test]
+    fn classify_powershell_case_insensitive_flag() {
+        // PowerShell accepts mixed case on switches; the classifier
+        // must too. Codex emits `-EncodedCommand`, ad-hoc scripts often
+        // use `-encodedcommand` or `-EnC`.
+        let cmd = "powershell.exe -noprofile -encodedcommand AAAA";
+        assert_eq!(
+            classify("powershell.exe", cmd),
+            Shape::PowerShell {
+                mode: PowerShellMode::EncodedCommand
+            }
+        );
+    }
+
+    #[test]
+    fn powershell_label_is_short_and_distinguishes_modes() {
+        // Each mode produces a distinct, single-line label. The
+        // critical guarantee for #360 is that no mode can produce a
+        // multi-kilobyte label — the format is hard-coded.
+        assert_eq!(
+            Shape::PowerShell {
+                mode: PowerShellMode::EncodedCommand
+            }
+            .label(),
+            "powershell (EncodedCommand)"
+        );
+        assert_eq!(
+            Shape::PowerShell {
+                mode: PowerShellMode::Command
+            }
+            .label(),
+            "powershell (-Command)"
+        );
+        assert_eq!(
+            Shape::PowerShell {
+                mode: PowerShellMode::File
+            }
+            .label(),
+            "powershell (-File)"
+        );
+        assert_eq!(
+            Shape::PowerShell {
+                mode: PowerShellMode::Other
+            }
+            .label(),
+            "powershell"
+        );
+        // Sanity: every mode's label stays well under the print-site
+        // cap, so PowerShell rows never get ellipsized.
+        for mode in [
+            PowerShellMode::EncodedCommand,
+            PowerShellMode::Command,
+            PowerShellMode::File,
+            PowerShellMode::Other,
+        ] {
+            let label = Shape::PowerShell { mode }.label();
+            assert!(
+                label.len() < PRINTED_LABEL_MAX,
+                "label {label:?} ({} bytes) must stay under PRINTED_LABEL_MAX = {PRINTED_LABEL_MAX}",
+                label.len()
+            );
+        }
+    }
+
+    /// Issue #360 defense-in-depth: even if a future classifier path
+    /// produces a Generic label longer than the basename cap (e.g.
+    /// from a renamed argv format), the truncation helper guarantees
+    /// the printed row stays one line.
+    #[test]
+    fn truncate_with_ellipsis_caps_long_input_and_adds_ellipsis() {
+        let blob = "a".repeat(500);
+        let out = truncate_with_ellipsis(&blob, 40);
+        // Truncated bytes + the 3-byte ellipsis (UTF-8) = 43 bytes max.
+        assert!(out.len() <= 40 + "…".len());
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_short_input_unchanged() {
+        // No truncation, no ellipsis appended.
+        let out = truncate_with_ellipsis("hello", 40);
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_at_exact_boundary_unchanged() {
+        // Boundary case: input length == max. No truncation expected.
+        let s = "a".repeat(40);
+        let out = truncate_with_ellipsis(&s, 40);
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_respects_utf8_boundaries() {
+        // Truncating mid-multibyte-char would panic on the slice
+        // operation. Walk-back-to-boundary must save us — and the
+        // resulting string must still be valid UTF-8.
+        let s = "中文测试字符串";
+        let out = truncate_with_ellipsis(s, 5);
+        // Round-trip through UTF-8 must succeed; the only way this
+        // fails is if we sliced through a multibyte sequence.
+        assert!(out.is_char_boundary(out.len()));
+        assert!(out.ends_with('…'));
+    }
+
+    /// Issue #360 root case: a Generic basename longer than
+    /// `GENERIC_BASENAME_MAX` (e.g. a base64 token with no path
+    /// separators) must be truncated by the classifier so the printed
+    /// label stays short even before the print-site cap kicks in.
+    #[test]
+    fn classify_generic_truncates_long_basename() {
+        let blob = "A".repeat(500);
+        let cmd = format!("/usr/bin/some-tool {blob}");
+        match classify("some-tool", &cmd) {
+            Shape::Generic { label } => {
+                assert!(
+                    label.len() < 100,
+                    "label should be truncated, got {} bytes: {label:?}",
+                    label.len()
+                );
+                assert!(
+                    label.ends_with('…'),
+                    "expected trailing ellipsis, got {label:?}"
+                );
+            }
+            other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_powershell_mode_recognizes_short_aliases() {
+        // PowerShell accepts `-enc` and `-c` abbreviations; the
+        // detector should too.
+        assert_eq!(
+            detect_powershell_mode("powershell.exe -enc AAAA"),
+            PowerShellMode::EncodedCommand
+        );
+        assert_eq!(
+            detect_powershell_mode("powershell.exe -c Get-Process"),
+            PowerShellMode::Command
+        );
+        assert_eq!(
+            detect_powershell_mode("powershell.exe -f foo.ps1"),
+            PowerShellMode::File
+        );
+    }
+
+    #[test]
+    fn detect_powershell_mode_other_when_no_recognized_flag() {
+        // Plain `powershell.exe` and unrecognized flags both fall
+        // through to Other rather than being misclassified as a
+        // specific mode.
+        assert_eq!(
+            detect_powershell_mode("powershell.exe"),
+            PowerShellMode::Other
+        );
+        assert_eq!(
+            detect_powershell_mode("powershell.exe -NoProfile -NoExit"),
+            PowerShellMode::Other
+        );
     }
 
     #[test]
