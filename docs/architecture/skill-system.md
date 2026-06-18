@@ -33,7 +33,7 @@ multi-backend expander landed.
 | Backends targeted | Selected backend during global setup; Claude plus Codex today | Claude global setup only |
 | Source tree | `crates/clud-bin/assets/skills/` | Top-level `skills/` |
 | Existing file behavior | Skip, preserving user edits | Compare modulo whitespace; overwrite semantic divergence |
-| Bundled skills | `clud-loop`, `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-fix`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos`, `clud-improve` | `clud-pr`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
+| Bundled skills | `clud-loop`, `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-fix`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos`, `clud-improve` | `clud-pr`, `clud-fix`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
 | Retired purge list | Stale clud-managed copies under `~/.agents/skills/` | `clud-pr-merge` |
 
 Both flows are non-fatal. A failure logs a `[clud] note: ...` line and launch
@@ -65,7 +65,7 @@ When global setup is selected:
 | `clud-loop` | yes | no |
 | `clud-issue` | yes | yes |
 | `clud-pr` | yes | yes |
-| `clud-fix` | yes | no |
+| `clud-fix` | yes | yes |
 | `clud-issue-triage` | yes | no |
 | `clud-tag-release` | yes | no |
 | `clud-docker-rust-app-dev` | yes | no |

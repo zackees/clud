@@ -51,6 +51,11 @@ def test_bundled_clud_fix_skill_carries_codex_install_metadata() -> None:
     assert "<!-- managed-by: clud -->" in body
     assert "RED -> GREEN" in body
     assert "clud-pr-merge" not in body
+    assert "/goal $clud-fix <issue-or-issue-url>" in body
+    assert "Complete meta issue #N" in body
+    assert "every child issue closed/validated" in body
+    assert "parent issue closed" in body
+    assert ".clud/fix/<owner>__<repo>__issue-<num>.json" in body
 
 
 def test_clud_codex_dry_run_does_not_crash(

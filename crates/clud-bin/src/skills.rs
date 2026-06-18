@@ -509,6 +509,57 @@ mod tests {
     }
 
     #[test]
+    fn clud_fix_skill_owns_issue_goal_and_meta_burndown() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-fix")
+            .expect("clud-fix must be bundled")
+            .skill_md;
+
+        for required in [
+            "/goal $clud-fix <issue-or-issue-url>",
+            "Complete meta issue #N",
+            "every child issue closed/validated",
+            "parent checklist updated",
+            "parent issue closed",
+            ".clud/fix/<owner>__<repo>__issue-<num>.json",
+            "Delegated `clud-pr` work must not invoke a nested `/goal`",
+            "Claude And Codex Parity",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-fix skill missing required orchestration guidance: {required}"
+            );
+        }
+
+        assert!(
+            !skill.contains("clud-pr-merge"),
+            "clud-fix must not depend on the retired merge skill"
+        );
+    }
+
+    #[test]
+    fn clud_pr_skill_supports_delegated_mode_without_nested_goal() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-pr")
+            .expect("clud-pr must be bundled")
+            .skill_md;
+
+        for required in [
+            "Delegated Mode",
+            "Do not invoke `/goal`",
+            "When called by [[clud-fix]], do not set or replace `/goal`",
+            "Return structured evidence",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-pr skill missing delegated-mode guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn skill_backends_include_claude_and_codex() {
         let backends: Vec<(Backend, &str, &str, Option<&str>)> = SKILL_BACKENDS
             .iter()

@@ -37,6 +37,10 @@ const BUNDLED_SKILLS: &[Skill] = &[
         content: include_str!("../../../skills/clud-pr/SKILL.md"),
     },
     Skill {
+        name: "clud-fix",
+        content: include_str!("../assets/skills/clud-fix/SKILL.md"),
+    },
+    Skill {
         name: "clud-issue",
         content: include_str!("../../../skills/clud-issue/SKILL.md"),
     },
@@ -416,6 +420,10 @@ mod tests {
         // just guards against accidental removal of any of them.
         let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
         assert!(names.contains(&"clud-pr"), "clud-pr missing from bundle");
+        assert!(
+            names.contains(&"clud-fix"),
+            "clud-fix missing from Claude drift bundle"
+        );
         assert!(
             !names.contains(&"clud-pr-merge"),
             "clud-pr-merge should be retired into PURGED_SKILLS"

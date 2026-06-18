@@ -14,13 +14,14 @@ triggers:
 
 Read the user's task, express the bug fix or feature requirement as a failing test first, implement the fix until that test turns green, push it as one PR with no files left behind, then give the user the PR URL. The task may be an issue URL, issue number, PR URL, PR number, or a plain sentence.
 
-Five hard rules:
+Six hard rules:
 
-1. **Lock the goal in.** Before any code or merge work, invoke the `/goal <one-line deliverable>` slash command so the harness Stop hook blocks until you ship. Use the deliverable phrasings under each mode below. Skip only for PR Triage Mode until triage decides to act.
+1. **Lock the goal in, unless delegated.** Before any code or merge work, invoke the `/goal <one-line deliverable>` slash command so the harness Stop hook blocks until you ship. Use the deliverable phrasings under each mode below. Skip only for PR Triage Mode until triage decides to act, or when the caller explicitly says this is delegated from [[clud-fix]] and an outer issue-level goal is already active.
 2. **Use a disposable worktree.** Do all PR work inside `.claude/worktrees/<branch>/`, never on the main checkout.
 3. **Push the PR.** Finish with `gh pr create`; a local branch or commit is not the deliverable.
 4. **Leave nothing behind.** After the PR exists, remove the worktree and verify the main checkout's `git status` is clean.
 5. **RED -> GREEN for code changes.** Before implementing a bug fix or feature, add or identify an automated test that fails because the requirement is unmet. Run the focused test and capture the RED failure. Then implement until that test is GREEN. If no automated test is practical, document the reason and use the closest executable repro/check before coding.
+6. **Delegated mode returns evidence.** When called by [[clud-fix]], do not set or replace `/goal`; return structured evidence for the outer orchestrator instead.
 
 ## Worktree Workspace
 
@@ -35,15 +36,34 @@ Five hard rules:
 
 Look at the input first:
 
+- **Explicitly delegated from [[clud-fix]]** -> run the matching task or merge mode in **Delegated Mode**. Do not set a nested `/goal`.
 - **PR URL / number** -> run **PR triage mode**. Do not branch or code until triage decides what to do.
 - **Merge / land / ship current PR** -> run **PR merge mode**.
 - **Issue URL / number / freeform task sentence** -> run **task to PR workflow**.
+
+## Delegated Mode
+
+Use this mode when [[clud-fix]] hands off one issue or one PR while it owns an
+outer issue-level `/goal`.
+
+1. **Do not invoke `/goal`.** The active goal belongs to [[clud-fix]] and covers
+   issue closure, validation, parent checklist updates, and parent closure.
+2. **Run the normal task or merge workflow.** All worktree, RED -> GREEN, CI,
+   CodeRabbit, lint/test, commit, push, merge, and teardown rules still apply.
+3. **Return structured evidence instead of a goal result.** Include:
+   - issue URL or PR URL received
+   - PR URL opened or merged
+   - PR state and merge commit when applicable
+   - focused RED/GREEN command and broad checks run
+   - remaining blockers, if any
+   - issue closure state if known
+4. **Do not close parent/meta issues.** Parent issue state is owned by [[clud-fix]].
 
 ## PR Merge Mode
 
 Use this when the user asks to merge, land, or ship an already-open PR.
 
-1. **Set the goal.** Invoke `/goal Merge PR #<num> to main and report the merged URL.` so the Stop hook blocks until the PR is merged or you explicitly clear the goal.
+1. **Set the goal unless delegated.** Invoke `/goal Merge PR #<num> to main and report the merged URL.` so the Stop hook blocks until the PR is merged or you explicitly clear the goal. If delegated from [[clud-fix]], skip this nested goal and return structured merge evidence to the caller.
 2. **Resolve the PR.** `gh pr view --json number,headRefName,baseRefName,state,mergeable,statusCheckRollup,url`. Refuse if state is not `OPEN` or mergeability is a clear blocker.
 3. **Poll with a cap and visible status.** Estimate recent CI duration from `gh run list --branch <default> --limit 10 --json conclusion,startedAt,updatedAt`; announce the cap before waiting. Poll every 30 seconds, and check `gh pr view <num> --json state` first every time so a manually merged/closed PR exits immediately.
 4. **Classify CI failures.** A check passing on default but failing on the PR is a regression. A check already failing on default is pre-existing and not merge-blocking. A PR-only check missing on default must be compared against recent PRs before calling it pre-existing.
@@ -67,7 +87,7 @@ Use this when the user asks to merge, land, or ship an already-open PR.
 ## Task To PR Workflow
 
 1. **Read the task.** If the input includes an issue URL/number, fetch it with `gh issue view <num>` or the URL and extract acceptance criteria. If it is a plain sentence, treat that sentence as the acceptance criteria and infer the repo from the current checkout.
-2. **Set the goal.** After reading the task and before any worktree or code work, invoke `/goal Ship PR for <issue-or-task-summary>: report URL and confirm main checkout is clean.` so the Stop hook blocks until the PR URL is reported and the worktree is torn down. If issue-only checks resolve the work without a new PR, clear the goal before stopping.
+2. **Set the goal unless delegated.** After reading the task and before any worktree or code work, invoke `/goal Ship PR for <issue-or-task-summary>: report URL and confirm main checkout is clean.` so the Stop hook blocks until the PR URL is reported and the worktree is torn down. If delegated from [[clud-fix]], skip this nested goal and return structured PR evidence to the caller. If issue-only checks resolve the work without a new PR, clear the goal before stopping.
 3. **Issue-only checks.** For issue inputs only:
    - Verify the issue is open.
    - Search for PRs that already resolve it.
@@ -92,6 +112,7 @@ Use this when the user asks to merge, land, or ship an already-open PR.
 - Calling an issue resolved when its PR merged only into a stack branch.
 - Creating multiple PRs for one requested task.
 - Implementing before proving RED, or claiming coverage from a test that never failed for the bug/requirement.
+- Replacing an outer [[clud-fix]] `/goal` with a narrower PR-level goal while in delegated mode.
 - Pushing with a dirty worktree or leaving `.claude/worktrees/<branch>/` behind.
 - Skipping lint, tests, or failing hooks.
 - Auto-deleting stale worktrees without asking.
