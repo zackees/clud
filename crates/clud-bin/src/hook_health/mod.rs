@@ -93,7 +93,8 @@ pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
             RepairAction::BackendPrompt { prompt, .. } => Some(prompt),
             RepairAction::ValidationPrompt { prompt, .. } => Some(prompt),
             RepairAction::AddCodexProjectTrust { .. }
-            | RepairAction::MigrateCodexHooksFeatureFlag { .. } => None,
+            | RepairAction::MigrateCodexHooksFeatureFlag { .. }
+            | RepairAction::NormalizeCodexBatchHookExitCode { .. } => None,
         })
         .collect::<Vec<_>>();
 

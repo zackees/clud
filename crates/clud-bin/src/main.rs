@@ -308,7 +308,7 @@ fn main() {
 
     // Issue #242: mutable harness setup is scoped per launch until the user
     // opts into a backend-level global preference. Dry-runs always remain
-    // session-only; otherwise a stored `~/.clud/settings.toml` scope wins.
+    // session-only; otherwise a stored `~/.clud/settings.json` scope wins.
     // Bare interactive TUI launches without a stored scope can opt into global
     // setup through a reusable selector. Global setup runs only the selected
     // backend's actions.
@@ -359,6 +359,20 @@ fn main() {
     }
     if args.verbose {
         verbose_log::log(format_args!("[clud] setup scope: {}", setup_scope.as_str()));
+    }
+
+    if matches!(backend, backend::Backend::Codex) {
+        match clud_settings::load_or_init_codex_config_overrides(!args.dry_run) {
+            Ok(overrides) => {
+                args.codex_config_overrides = overrides;
+            }
+            Err(error) => {
+                eprintln!(
+                    "[clud] warning: failed to load Codex settings: {error}; using default Codex config overrides"
+                );
+                args.codex_config_overrides = clud_settings::default_codex_config_overrides();
+            }
+        }
     }
 
     let plan = command::build_launch_plan(&args, backend, &backend_path);

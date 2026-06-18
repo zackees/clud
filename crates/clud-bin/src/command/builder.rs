@@ -33,6 +33,13 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         && !codex_uses_exec
         && (args.continue_session || args.resume.is_some());
 
+    if matches!(backend, Backend::Codex) {
+        for override_value in &args.codex_config_overrides {
+            cmd.push("-c".to_string());
+            cmd.push(override_value.clone());
+        }
+    }
+
     if codex_uses_exec {
         cmd.push("exec".to_string());
     } else if codex_uses_resume {

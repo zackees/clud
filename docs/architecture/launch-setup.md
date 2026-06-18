@@ -14,19 +14,24 @@ Launch setup scope (Up/Down, Enter):
 [ ] Globally
 ```
 
-The default is session-only unless `~/.clud/settings.toml` already stores a
+The default is session-only unless `~/.clud/settings.json` already stores a
 backend-level global preference, for example:
 
-```toml
-[launch_setup.codex]
-scope = "global"
+```json
+{
+  "launch_setup": {
+    "codex": {
+      "scope": "global"
+    }
+  }
+}
 ```
 
 The selector drains any key events that were already pending when it appeared,
 so the Enter key used to submit the `clud` command is not reused as the
 selector confirmation. Enter accepts the highlighted option, Up selects
 session-only, and Down selects global. Selecting global writes the backend's
-scope to `~/.clud/settings.toml`, so later launches for that backend run global
+scope to `~/.clud/settings.json`, so later launches for that backend run global
 setup without prompting. Selecting session-only stays scoped to that one launch.
 
 A bare `clud` invocation (no `--claude` or `--codex`), non-interactive backend
@@ -50,7 +55,7 @@ Global setup runs only the selected backend's registered actions:
 | Claude | Claude drift skills | `~/.claude/skills/` |
 | Codex | bundled skills | `~/.codex/skills/` gated by `~/.codex`; stale clud-managed `~/.agents/skills/` copies are purged |
 | Codex | hook timeout normalization | `~/.codex/hooks.json` and `~/.clud/settings.lock` / `settings.json` |
-| All | persisted global setup preference | `~/.clud/settings.lock` / `settings.toml` |
+| All | persisted global setup preference | `~/.clud/settings.lock` / `settings.json` |
 
 All setup failures are non-fatal. `main.rs` logs a `[clud] note: ...` line and
 continues to build and run the backend `LaunchPlan`.

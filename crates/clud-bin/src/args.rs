@@ -158,6 +158,10 @@ pub struct Args {
 
     #[arg(last = true, id = "BACKEND_ARGS")]
     pub passthrough: Vec<String>,
+
+    /// Runtime Codex `-c` config overrides loaded from ~/.clud/settings.json.
+    #[arg(skip)]
+    pub codex_config_overrides: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -265,7 +269,7 @@ pub enum Command {
         /// Toolchain family to optimize. Defaults to Rust.
         #[arg(value_enum, default_value_t = OptimizeTarget::Rust)]
         target: OptimizeTarget,
-        /// Persist the recommendation in ~/.clud/settings.toml.
+        /// Persist the recommendation in ~/.clud/settings.json.
         #[arg(long = "global", conflicts_with = "repo")]
         global: bool,
         /// Write a repo-local .clud/settings.json directive.

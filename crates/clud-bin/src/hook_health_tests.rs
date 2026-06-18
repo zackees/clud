@@ -240,6 +240,69 @@ fn legacy_codex_hooks_feature_migration_preserves_existing_hooks_value() {
     assert!(!text.contains("codex_hooks"), "{text}");
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn codex_batch_hook_exit_code_risk_warns_and_plans_repair() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let codex = repo.join(".codex").join("hooks.json");
+    write(
+        &codex,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\tools\\guard.cmd --check"}]}]}}"#,
+    );
+    write(
+        &home.join(".codex").join("config.toml"),
+        &format!(
+            "[projects.'{}']\ntrust_level = \"trusted\"\n{}",
+            codex_project_key(&repo),
+            trusted_state_for(&codex, 0, 0)
+        ),
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("may fail open")));
+    assert!(plan_repairs(&report).into_iter().any(|action| matches!(
+        action,
+        RepairAction::NormalizeCodexBatchHookExitCode { hooks_path } if hooks_path == codex
+    )));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn codex_batch_hook_exit_code_repair_appends_lastexitcode() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let codex = repo.join(".codex").join("hooks.json");
+    write(
+        &codex,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\tools\\guard.cmd --check"},{"type":"command","command":"C:\\tools\\safe.cmd; exit $LASTEXITCODE"}]}]}}"#,
+    );
+    write(
+        &home.join(".codex").join("config.toml"),
+        &format!(
+            "[projects.'{}']\ntrust_level = \"trusted\"\n{}",
+            codex_project_key(&repo),
+            trusted_state_for(&codex, 0, 0)
+        ),
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+    apply_deterministic_repairs(deterministic_repair_actions(&report)).unwrap();
+
+    let text = fs::read_to_string(codex).unwrap();
+    assert!(
+        text.contains(r#"C:\\tools\\guard.cmd --check; exit $LASTEXITCODE"#),
+        "{text}"
+    );
+    assert_eq!(text.matches("safe.cmd; exit $LASTEXITCODE").count(), 1);
+}
+
 #[test]
 fn catch_all_codex_hook_satisfies_specific_claude_matchers() {
     let temp = tempdir().unwrap();
