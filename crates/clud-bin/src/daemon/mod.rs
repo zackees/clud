@@ -1,6 +1,7 @@
 mod attach;
 mod client;
 mod commands;
+mod daemon_events;
 mod entry;
 mod gc_service;
 mod http;

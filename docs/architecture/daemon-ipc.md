@@ -126,6 +126,7 @@ Under `state_dir` (resolved by `paths.rs:7` — CLI flag > `CLUD_DAEMON_STATE_DI
 
 ```
 daemon.json                    DaemonInfo { pid, port }       written once at daemon startup
+daemon-events.jsonl            structured daemon event log     append-only, best-effort, rotated once at 1 MiB
 sessions/<id>.json             SessionSnapshot                overwritten on every state change
 specs/<id>.json                WorkerLaunchSpec               written by daemon, removed by worker on exit
 logs/<id>.log                  append-only stdout/stderr      soft cap 10 MiB (LOG_ROTATE_BYTES)
@@ -134,6 +135,8 @@ logs/<id>.log.1                single rotation backup         overwritten on eac
 ```
 
 All JSON files use `write_json_file` (`io_helpers.rs:33`): write to `.tmp`, `remove_file` existing, `rename` into place — atomic on POSIX and Windows. Snapshot writes happen on root-pid set, exit, repeat-state change, and `background` flip (`worker_shared.rs:155`-`193`). The log file is opened once in `init_log_file` and rotated when `metadata().len() >= LOG_ROTATE_BYTES` (`worker_shared.rs:93`-`127`); only one backup is kept because clud sessions are ephemeral and the on-disk footprint shouldn't grow unboundedly for a stale session nobody reattaches to.
+
+`daemon-events.jsonl` is separate from backend output logs. Each line is one JSON object with `ts_ms`, `event_id`, `daemon_pid`, `thread`, `op`, and operation-specific fields. It records daemon lifecycle events, request/reply envelopes, GC dispatch, worker reap, `AdoptKill`, and orphan sweep start/finish records. The log is best-effort and non-fatal: write failures do not affect daemon behavior.
 
 Every `push_output` chunk goes to three sinks (`worker_shared.rs:299`-`331`): the in-memory backlog (with eviction at the byte cap), the `TerminalCapture` parser if active, and the log file. The Output mpsc to the attached client is fed last, after all persistence side-effects, so a crash mid-`push_output` cannot leave the client ahead of the on-disk state.
 

@@ -9,17 +9,21 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use serde_json::json;
 use sysinfo::Signal;
 
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
+use super::daemon_events;
 use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
 };
 use super::http::{default_live_sessions_provider, spawn_dashboard};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file};
-use super::paths::{daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir};
+use super::paths::{
+    daemon_events_path, daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
+};
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::sessions::list_live_session_cwds;
 use super::types::{
@@ -42,6 +46,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
     }
+    daemon_events::log_event(state_dir, "daemon_starting", []);
 
     cleanup_stale_state(state_dir);
 
@@ -94,6 +99,16 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         eprintln!("[clud] failed to persist daemon info: {}", err);
         return 1;
     }
+    daemon_events::log_event(
+        state_dir,
+        "daemon_started",
+        [
+            ("port", json!(port)),
+            ("dashboard_port", json!(dashboard_port)),
+            ("version", json!(env!("CARGO_PKG_VERSION"))),
+            ("event_log", json!(daemon_events_path(state_dir))),
+        ],
+    );
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let shutdown_requested = Arc::new(AtomicBool::new(false));
@@ -119,7 +134,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // the on-exit `ReapOrphans` IPC never fired). Pure background work —
     // never blocks the accept loop. Sleeps in 1s slices so shutdown is
     // promptly observed.
-    spawn_orphan_sweeper(Arc::clone(&shutdown_requested));
+    spawn_orphan_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
 
     loop {
         match listener.accept() {
@@ -157,7 +172,9 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     if let Some(lane) = rp_lane {
         lane.cleanup();
     }
+    daemon_events::log_event(state_dir, "daemon_stopping", []);
     let _ = fs::remove_file(daemon_info_path(state_dir));
+    daemon_events::log_event(state_dir, "daemon_stopped", []);
     0
 }
 
@@ -174,9 +191,34 @@ fn handle_daemon_connection(
         return Ok(());
     }
     let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
-    let response = dispatch_daemon_request(state_dir, workers, gc_tx.as_ref(), request);
+    let request_id = daemon_events::request_id();
+    daemon_events::log_event(
+        state_dir,
+        "request_received",
+        [
+            ("request_id", json!(request_id)),
+            ("request_op", json!(request_op(&request))),
+            ("wire_format", json!(response_format_name(response_format))),
+        ],
+    );
+    let started = Instant::now();
+    let response =
+        dispatch_daemon_request_with_id(state_dir, workers, gc_tx.as_ref(), request_id, request);
     let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
     let result = write_daemon_response(&mut stream, &response, response_format);
+    daemon_events::log_event(
+        state_dir,
+        "request_replied",
+        [
+            ("request_id", json!(request_id)),
+            ("response_op", json!(response_op(&response))),
+            ("duration_ms", json!(started.elapsed().as_millis())),
+            (
+                "write_error",
+                json!(result.as_ref().err().map(|err| err.to_string())),
+            ),
+        ],
+    );
     if is_shutdown {
         let _ = stream.shutdown(std::net::Shutdown::Write);
         shutdown_requested.store(true, Ordering::SeqCst);
@@ -194,6 +236,17 @@ pub(super) fn dispatch_daemon_request(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    request: DaemonRequest,
+) -> DaemonResponse {
+    let request_id = daemon_events::request_id();
+    dispatch_daemon_request_with_id(state_dir, workers, gc_tx, request_id, request)
+}
+
+fn dispatch_daemon_request_with_id(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    request_id: u64,
     request: DaemonRequest,
 ) -> DaemonResponse {
     match request {
@@ -233,7 +286,16 @@ pub(super) fn dispatch_daemon_request(
             },
         },
         DaemonRequest::AdoptKill { pids, reason } => {
-            spawn_adopt_kill_worker(pids.clone(), reason);
+            daemon_events::log_event(
+                state_dir,
+                "adopt_kill_accepted",
+                [
+                    ("request_id", json!(request_id)),
+                    ("pids", json!(pids)),
+                    ("reason", json!(reason)),
+                ],
+            );
+            spawn_adopt_kill_worker(state_dir.to_path_buf(), pids.clone(), reason);
             DaemonResponse::AdoptKillAck {
                 accepted: pids.len(),
             }
@@ -242,24 +304,19 @@ pub(super) fn dispatch_daemon_request(
             // Fire-and-forget: spawn the sweep on a background thread so the
             // CLI's exit path never blocks on `kill_tree`. Ack with zeros —
             // the foreground caller doesn't wait for the actual count.
-            thread::spawn(|| {
-                let _ = crate::orphan_reaper::reap_orphans(&crate::orphan_reaper::ReapOpts {
-                    keep: false,
-                    // Quiet on the daemon path: the daemon's stderr is a
-                    // log file no one is tailing during normal use, so
-                    // the per-row report would just be noise. The
-                    // synchronous `clud slay` path still prints.
-                    quiet: true,
-                    explain: false,
-                });
-            });
+            daemon_events::log_event(
+                state_dir,
+                "reap_orphans_accepted",
+                [("request_id", json!(request_id))],
+            );
+            spawn_orphan_reap_once(state_dir.to_path_buf(), "request", Some(request_id));
             DaemonResponse::ReapOrphansAck {
                 found: 0,
                 reaped: 0,
             }
         }
         DaemonRequest::Gc { payload } => {
-            let reply = dispatch_gc_op(gc_tx, payload);
+            let reply = dispatch_gc_op(state_dir, gc_tx, request_id, payload);
             DaemonResponse::Gc { reply }
         }
         DaemonRequest::Shutdown => DaemonResponse::ShutdownAck {
@@ -282,29 +339,103 @@ fn wire_error_to_io(err: WireError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
+fn response_format_name(format: DaemonWireFormat) -> &'static str {
+    match format {
+        DaemonWireFormat::Json => "json",
+        DaemonWireFormat::Prost => "prost",
+    }
+}
+
+fn request_op(request: &DaemonRequest) -> &'static str {
+    match request {
+        DaemonRequest::Create { .. } => "create",
+        DaemonRequest::Session { .. } => "session",
+        DaemonRequest::ListLiveCwds => "list_live_cwds",
+        DaemonRequest::Terminate { .. } => "terminate",
+        DaemonRequest::Interrupt { .. } => "interrupt",
+        DaemonRequest::AdoptKill { .. } => "adopt_kill",
+        DaemonRequest::Gc { .. } => "gc",
+        DaemonRequest::Shutdown => "shutdown",
+        DaemonRequest::ReapOrphans => "reap_orphans",
+    }
+}
+
+fn response_op(response: &DaemonResponse) -> &'static str {
+    match response {
+        DaemonResponse::Created { .. } => "created",
+        DaemonResponse::Session { .. } => "session",
+        DaemonResponse::LiveCwds { .. } => "live_cwds",
+        DaemonResponse::Terminated { .. } => "terminated",
+        DaemonResponse::Interrupted { .. } => "interrupted",
+        DaemonResponse::AdoptKillAck { .. } => "adopt_kill_ack",
+        DaemonResponse::Gc { .. } => "gc",
+        DaemonResponse::ShutdownAck { .. } => "shutdown_ack",
+        DaemonResponse::ReapOrphansAck { .. } => "reap_orphans_ack",
+        DaemonResponse::Error { .. } => "error",
+    }
+}
+
+fn gc_reply_op(reply: &GcReply) -> &'static str {
+    match reply {
+        GcReply::ListOk { .. } => "list_ok",
+        GcReply::PurgeOk { .. } => "purge_ok",
+        GcReply::PurgeStarted { .. } => "purge_started",
+        GcReply::ReconcileOk { .. } => "reconcile_ok",
+        GcReply::InsertOk => "insert_ok",
+        GcReply::RepoVisitOk => "repo_visit_ok",
+        GcReply::RepoVisitsOk { .. } => "repo_visits_ok",
+        GcReply::Error { .. } => "error",
+    }
+}
+
 /// Hand a GC op to the registry worker and await the reply. Returns a
 /// `GcReply::Error` if the worker is missing (failed to spawn at daemon
 /// startup), hung up, or didn't reply within [`WORKER_REPLY_TIMEOUT`].
-fn dispatch_gc_op(gc_tx: Option<&mpsc::Sender<RegistryMsg>>, op: super::types::GcOp) -> GcReply {
+fn dispatch_gc_op(
+    state_dir: &Path,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    request_id: u64,
+    op: super::types::GcOp,
+) -> GcReply {
+    daemon_events::log_event(state_dir, "gc_started", [("request_id", json!(request_id))]);
+    let started = Instant::now();
     let Some(tx) = gc_tx else {
-        return GcReply::Error {
+        let reply = GcReply::Error {
             message: "gc registry unavailable in this daemon".to_string(),
         };
+        log_gc_finished(state_dir, request_id, started, &reply);
+        return reply;
     };
     let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
     if tx
         .send(RegistryMsg::Op(GcRequestMsg { op, reply_tx }))
         .is_err()
     {
-        return GcReply::Error {
+        let reply = GcReply::Error {
             message: "gc registry worker stopped".to_string(),
         };
+        log_gc_finished(state_dir, request_id, started, &reply);
+        return reply;
     }
-    reply_rx
+    let reply = reply_rx
         .recv_timeout(WORKER_REPLY_TIMEOUT)
         .unwrap_or_else(|_| GcReply::Error {
             message: "gc registry worker timed out".to_string(),
-        })
+        });
+    log_gc_finished(state_dir, request_id, started, &reply);
+    reply
+}
+
+fn log_gc_finished(state_dir: &Path, request_id: u64, started: Instant, reply: &GcReply) {
+    daemon_events::log_event(
+        state_dir,
+        "gc_finished",
+        [
+            ("request_id", json!(request_id)),
+            ("response_op", json!(gc_reply_op(reply))),
+            ("duration_ms", json!(started.elapsed().as_millis())),
+        ],
+    );
 }
 
 fn daemon_create_session(
@@ -406,24 +537,52 @@ fn daemon_create_session(
         .lock()
         .expect("workers mutex poisoned")
         .insert(session_id.clone(), Arc::clone(&worker));
-    reap_worker_when_done(Arc::clone(workers), session_id.clone(), worker);
+    reap_worker_when_done(
+        state_dir.to_path_buf(),
+        Arc::clone(workers),
+        session_id.clone(),
+        worker,
+    );
     Ok(snapshot)
 }
 
 fn reap_worker_when_done(
+    state_dir: std::path::PathBuf,
     workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     session_id: String,
     worker: Arc<NativeProcess>,
 ) {
     thread::spawn(move || {
-        let _ = worker.wait(None);
+        let started = Instant::now();
+        daemon_events::log_event(
+            &state_dir,
+            "worker_reap_wait_started",
+            [("session_id", json!(session_id))],
+        );
+        let wait_result = worker.wait(None);
         let mut guard = workers.lock().expect("workers mutex poisoned");
-        if guard
+        let removed = if guard
             .get(&session_id)
             .is_some_and(|current| Arc::ptr_eq(current, &worker))
         {
             guard.remove(&session_id);
-        }
+            true
+        } else {
+            false
+        };
+        daemon_events::log_event(
+            &state_dir,
+            "worker_reaped",
+            [
+                ("session_id", json!(session_id)),
+                ("removed", json!(removed)),
+                ("duration_ms", json!(started.elapsed().as_millis())),
+                (
+                    "wait_error",
+                    json!(wait_result.err().map(|err| err.to_string())),
+                ),
+            ],
+        );
     });
 }
 
@@ -442,7 +601,7 @@ fn reap_worker_when_done(
 /// that SIGKILL'd-clud orphans don't linger for minutes.
 const ORPHAN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
-fn spawn_orphan_sweeper(shutdown_requested: Arc<AtomicBool>) {
+fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<AtomicBool>) {
     let _ = thread::Builder::new()
         .name("clud-orphan-sweep".to_string())
         .spawn(move || loop {
@@ -459,29 +618,78 @@ fn spawn_orphan_sweeper(shutdown_requested: Arc<AtomicBool>) {
             if shutdown_requested.load(Ordering::SeqCst) {
                 return;
             }
-            let _ = crate::orphan_reaper::reap_orphans(&crate::orphan_reaper::ReapOpts {
-                keep: false,
-                // Quiet: the daemon log shouldn't fill with per-tick
-                // empty-sweep noise; per-process kill failures still
-                // surface via `kill_tree`'s own diagnostics if any.
-                quiet: true,
-                explain: false,
-            });
+            run_orphan_sweep(&state_dir, "periodic", None);
         });
 }
 
-fn spawn_adopt_kill_worker(pids: Vec<u32>, reason: Option<String>) {
+fn spawn_orphan_reap_once(
+    state_dir: std::path::PathBuf,
+    trigger: &'static str,
+    request_id: Option<u64>,
+) {
+    thread::spawn(move || run_orphan_sweep(&state_dir, trigger, request_id));
+}
+
+fn run_orphan_sweep(state_dir: &Path, trigger: &'static str, request_id: Option<u64>) {
+    daemon_events::log_event(
+        state_dir,
+        "orphan_sweep_started",
+        [
+            ("trigger", json!(trigger)),
+            ("request_id", json!(request_id)),
+        ],
+    );
+    let started = Instant::now();
+    let outcome = crate::orphan_reaper::reap_orphans(&crate::orphan_reaper::ReapOpts {
+        keep: false,
+        // Quiet: the daemon log shouldn't fill stderr with per-tick
+        // scan reports; the JSONL stream is the durable diagnostic surface.
+        quiet: true,
+        explain: false,
+    });
+    daemon_events::log_event(
+        state_dir,
+        "orphan_sweep_finished",
+        [
+            ("trigger", json!(trigger)),
+            ("request_id", json!(request_id)),
+            ("found", json!(outcome.found)),
+            ("reaped", json!(outcome.reaped)),
+            ("candidate_pids", json!(outcome.candidate_pids)),
+            ("reaped_pids", json!(outcome.reaped_pids)),
+            ("skipped_pids", json!(Vec::<u32>::new())),
+            ("reason", json!("dead_originator")),
+            ("duration_ms", json!(started.elapsed().as_millis())),
+        ],
+    );
+}
+
+fn spawn_adopt_kill_worker(state_dir: std::path::PathBuf, pids: Vec<u32>, reason: Option<String>) {
     let _ = thread::Builder::new()
         .name("clud-adopt-kill".to_string())
         .spawn(move || {
-            for pid in pids {
+            daemon_events::log_event(
+                &state_dir,
+                "adopt_kill_started",
+                [("pids", json!(pids)), ("reason", json!(reason))],
+            );
+            let started = Instant::now();
+            let mut killed = Vec::new();
+            for pid in &pids {
+                let pid = *pid;
                 crate::process_tree::kill_tree(pid);
+                killed.push(pid);
             }
-            // `reason` is for telemetry / future event-logging — hold a
-            // reference so the field doesn't get optimized out and so a
-            // future change can route it into `ctrl_c_events` without
-            // touching the wire format again.
-            let _ = reason;
+            daemon_events::log_event(
+                &state_dir,
+                "adopt_kill_finished",
+                [
+                    ("pids", json!(pids)),
+                    ("killed", json!(killed)),
+                    ("reason", json!(reason)),
+                    ("duration_ms", json!(started.elapsed().as_millis())),
+                ],
+            );
         });
 }
 
@@ -641,6 +849,35 @@ mod tests {
     const DAEMON_WIRE_PERF_WARMUP_SAMPLES: usize = 2;
     const DAEMON_WIRE_PERF_MEASURED_SAMPLES: usize = 9;
 
+    fn read_daemon_events(state_dir: &Path) -> Vec<serde_json::Value> {
+        let path = daemon_events_path(state_dir);
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn wait_for_daemon_event_ops(state_dir: &Path, expected: &[&str]) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = read_daemon_events(state_dir);
+            let ops: Vec<&str> = events
+                .iter()
+                .filter_map(|event| event["op"].as_str())
+                .collect();
+            if expected.iter().all(|expected| ops.contains(expected)) {
+                return events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for daemon events {expected:?}; saw {ops:?}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -758,8 +995,13 @@ mod tests {
     /// fast, and pin the spawn-side latency below 100ms even on slow CI.
     #[test]
     fn spawn_adopt_kill_worker_returns_promptly() {
+        let tmp = tempfile::tempdir().unwrap();
         let started = Instant::now();
-        spawn_adopt_kill_worker(vec![u32::MAX], Some("test".to_string()));
+        spawn_adopt_kill_worker(
+            tmp.path().to_path_buf(),
+            vec![u32::MAX],
+            Some("test".to_string()),
+        );
         assert!(
             started.elapsed() < Duration::from_millis(100),
             "spawn took too long: {:?}",
@@ -902,8 +1144,85 @@ mod tests {
     fn spawn_adopt_kill_worker_accepts_empty_pids() {
         // Zero-PID payload is valid wire data (the CLI may have lost the
         // root PID); the worker must still spawn without panicking.
+        let tmp = tempfile::tempdir().unwrap();
         let started = Instant::now();
-        spawn_adopt_kill_worker(Vec::new(), None);
+        spawn_adopt_kill_worker(tmp.path().to_path_buf(), Vec::new(), None);
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn adopt_kill_request_writes_jsonl_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+
+        let response = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            None,
+            DaemonRequest::AdoptKill {
+                pids: vec![u32::MAX],
+                reason: Some("ctrl_c_subprocess".to_string()),
+            },
+        );
+        assert!(matches!(
+            response,
+            DaemonResponse::AdoptKillAck { accepted: 1 }
+        ));
+
+        let events = wait_for_daemon_event_ops(
+            tmp.path(),
+            &[
+                "adopt_kill_accepted",
+                "adopt_kill_started",
+                "adopt_kill_finished",
+            ],
+        );
+        let accepted = events
+            .iter()
+            .find(|event| event["op"] == "adopt_kill_accepted")
+            .unwrap();
+        assert_eq!(accepted["pids"], json!([u32::MAX]));
+        assert_eq!(accepted["reason"], "ctrl_c_subprocess");
+        let finished = events
+            .iter()
+            .find(|event| event["op"] == "adopt_kill_finished")
+            .unwrap();
+        assert_eq!(finished["killed"], json!([u32::MAX]));
+        assert!(finished["duration_ms"].is_u64());
+    }
+
+    #[test]
+    fn reap_orphans_request_writes_jsonl_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+
+        let response =
+            dispatch_daemon_request(tmp.path(), &workers, None, DaemonRequest::ReapOrphans);
+        assert!(matches!(
+            response,
+            DaemonResponse::ReapOrphansAck {
+                found: 0,
+                reaped: 0
+            }
+        ));
+
+        let events = wait_for_daemon_event_ops(
+            tmp.path(),
+            &[
+                "reap_orphans_accepted",
+                "orphan_sweep_started",
+                "orphan_sweep_finished",
+            ],
+        );
+        let finished = events
+            .iter()
+            .find(|event| event["op"] == "orphan_sweep_finished")
+            .unwrap();
+        assert_eq!(finished["trigger"], "request");
+        assert!(finished["found"].is_u64());
+        assert!(finished["reaped"].is_u64());
+        assert!(finished["candidate_pids"].is_array());
+        assert!(finished["reaped_pids"].is_array());
+        assert_eq!(finished["reason"], "dead_originator");
     }
 }
