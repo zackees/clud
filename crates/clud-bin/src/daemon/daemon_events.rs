@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
@@ -10,6 +11,7 @@ use super::paths::daemon_events_path;
 
 const MAX_EVENT_LOG_BYTES: u64 = 1024 * 1024;
 const EVENT_LOG_BACKUP_SUFFIX: &str = "1";
+static APPEND_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn log_event(
     state_dir: &Path,
@@ -39,6 +41,9 @@ fn base_event(op: &str) -> Map<String, Value> {
 }
 
 fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
+    let _guard = APPEND_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("daemon event log append lock poisoned"))?;
     rotate_if_needed(path)?;
     let parent = path
         .parent()
@@ -131,5 +136,43 @@ mod tests {
         let lines = read_lines(&path);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["op"], "after_rotate");
+    }
+
+    #[test]
+    fn concurrent_append_keeps_one_valid_json_object_per_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let threads = 12;
+        let per_thread = 75;
+
+        std::thread::scope(|scope| {
+            for worker in 0..threads {
+                let state_dir = state_dir.clone();
+                scope.spawn(move || {
+                    for seq in 0..per_thread {
+                        log_event(
+                            &state_dir,
+                            "stress",
+                            [
+                                ("worker", json!(worker)),
+                                ("seq", json!(seq)),
+                                ("payload", json!("x".repeat(1024))),
+                            ],
+                        );
+                    }
+                });
+            }
+        });
+
+        let text = fs::read_to_string(daemon_events_path(tmp.path())).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), threads * per_thread);
+        for (idx, line) in lines.iter().enumerate() {
+            let value: Value = serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("invalid jsonl line {idx}: {err}: {line:?}"));
+            assert_eq!(value["op"], "stress");
+            assert!(value["worker"].is_u64());
+            assert!(value["seq"].is_u64());
+        }
     }
 }
