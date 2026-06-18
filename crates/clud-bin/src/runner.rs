@@ -346,6 +346,7 @@ enum ProcessOutcome {
 /// `kill_tree` + bounded wait) so `--no-daemon` users still get cleanup.
 fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wrapped: bool) {
     if let Some(pid) = process.pid() {
+        crate::ctrl_c_track::record_forensics(Some(pid));
         match crate::daemon::default_state_dir() {
             Ok(state_dir) => {
                 if crate::daemon::try_handoff_kill_to_daemon(
@@ -374,6 +375,7 @@ fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wr
         process_tree::kill_tree(pid);
     } else {
         crate::ctrl_c_track::record_handoff(false, Some("no_child_pid"));
+        crate::ctrl_c_track::record_forensics(None);
     }
     let _ = process.kill();
     // Daemon-less fallback only: bounded wait so the legacy path doesn't

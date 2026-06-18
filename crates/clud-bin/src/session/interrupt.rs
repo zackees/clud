@@ -19,6 +19,7 @@ pub(super) fn reap_pty_exit(process: &NativePtyProcess) -> i32 {
 /// real kill_tree from out of the user's hot path.
 pub(super) fn interrupt_pty_process(process: &NativePtyProcess, verbose: bool) -> i32 {
     let pid = process.pid().ok().flatten();
+    crate::ctrl_c_track::record_forensics(pid);
     let handed_off = match pid {
         Some(pid) => match crate::daemon::default_state_dir() {
             Ok(state_dir) => {
