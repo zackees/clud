@@ -475,7 +475,10 @@ class TestLoopMode:
         assert report["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
         assert report["iterations"] == 50
         cmd = report["command"]
-        assert cmd[1] == "exec"
+        assert cmd[0] == "codex"
+        assert "-c" in cmd
+        assert 'plugins."github@openai-curated".enabled=false' in cmd
+        assert cmd.index("exec") > 0
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
         assert "-p" not in cmd
 

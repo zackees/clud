@@ -688,6 +688,7 @@ mod tests {
             explain_orphans: false,
             command: None,
             passthrough: Vec::new(),
+            codex_config_overrides: Vec::new(),
         };
         assert!(experimental_enabled(&args));
     }

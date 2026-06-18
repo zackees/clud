@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 
 use super::codex_trust::{add_codex_project_trust, migrate_codex_hooks_feature_flag};
 use super::prompts::{catch_all_migration_prompt, migration_prompt, validation_prompt_actions};
@@ -33,6 +34,18 @@ pub fn plan_repairs(report: &HookHealthReport) -> Vec<RepairAction> {
             });
         }
     }
+
+    let mut risky_codex_hook_paths = BTreeSet::new();
+    for hook in &report.codex.hooks {
+        if hook_command_needs_last_exit_code(hook.command.as_deref()) {
+            risky_codex_hook_paths.insert(hook.source_path.clone());
+        }
+    }
+    actions.extend(
+        risky_codex_hook_paths
+            .into_iter()
+            .map(|hooks_path| RepairAction::NormalizeCodexBatchHookExitCode { hooks_path }),
+    );
 
     let claude_by_matcher = report.claude.hook_by_matcher();
     let codex_by_matcher = report.codex.hook_by_matcher();
@@ -155,6 +168,7 @@ pub(in crate::hook_health) fn deterministic_repair_actions(
                 action,
                 RepairAction::AddCodexProjectTrust { .. }
                     | RepairAction::MigrateCodexHooksFeatureFlag { .. }
+                    | RepairAction::NormalizeCodexBatchHookExitCode { .. }
             )
         })
         .collect()
@@ -195,8 +209,79 @@ pub(in crate::hook_health) fn apply_deterministic_repairs(
                     display_path(&config_path)
                 );
             }
+            RepairAction::NormalizeCodexBatchHookExitCode { hooks_path } => {
+                normalize_codex_batch_hook_exit_codes(&hooks_path).map_err(|error| {
+                    DeterministicRepairError {
+                        path: hooks_path.clone(),
+                        error,
+                    }
+                })?;
+                applied += 1;
+                eprintln!(
+                    "[clud] updated Codex hook batch wrapper exit-code propagation in {}",
+                    display_path(&hooks_path)
+                );
+            }
             RepairAction::BackendPrompt { .. } | RepairAction::ValidationPrompt { .. } => {}
         }
     }
     Ok(applied)
+}
+
+pub(in crate::hook_health) fn hook_command_needs_last_exit_code(command: Option<&str>) -> bool {
+    if !cfg!(target_os = "windows") {
+        return false;
+    }
+    let Some(command) = command else {
+        return false;
+    };
+    let lower = command.to_ascii_lowercase();
+    (lower.contains(".cmd") || lower.contains(".bat")) && !lower.contains("$lastexitcode")
+}
+
+fn normalize_codex_batch_hook_exit_codes(path: &std::path::Path) -> std::io::Result<()> {
+    let text = fs::read_to_string(path)?;
+    let mut json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut changed = 0usize;
+    normalize_value(&mut json, &mut changed);
+    if changed == 0 {
+        return Ok(());
+    }
+    let mut body = serde_json::to_string_pretty(&json).map_err(std::io::Error::other)?;
+    body.push('\n');
+    fs::write(path, body)
+}
+
+fn normalize_value(value: &mut serde_json::Value, changed: &mut usize) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(command) = map
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            {
+                if hook_command_needs_last_exit_code(Some(command.as_str())) {
+                    map.insert(
+                        "command".to_string(),
+                        serde_json::Value::String(format!(
+                            "{}; exit $LASTEXITCODE",
+                            command.trim_end()
+                        )),
+                    );
+                    *changed += 1;
+                    return;
+                }
+            }
+            for value in map.values_mut() {
+                normalize_value(value, changed);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_value(value, changed);
+            }
+        }
+        _ => {}
+    }
 }

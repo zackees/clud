@@ -86,7 +86,7 @@ fn run_rust(
         match scope {
             WriteScope::Global => {
                 println!(
-                    "[clud] dry-run: would write ~/.clud/settings.toml [optimize.rust] use_soldr_shims={} install_soldr={} soldr_version=\"{}\"",
+                    "[clud] dry-run: would write ~/.clud/settings.json optimize.rust use_soldr_shims={} install_soldr={} soldr_version=\"{}\"",
                     settings.use_soldr_shims, settings.install_soldr, settings.soldr_version
                 );
             }
@@ -125,7 +125,7 @@ fn run_rust(
                 eprintln!("[clud] error: failed to save optimize settings: {error}");
                 return 1;
             }
-            println!("[clud] wrote global Rust optimizer defaults to ~/.clud/settings.toml");
+            println!("[clud] wrote global Rust optimizer defaults to ~/.clud/settings.json");
         }
         WriteScope::Repo => match write_repo_directive(&settings) {
             Ok(path) => {
@@ -182,7 +182,7 @@ pub(crate) fn prompt_scope<R: BufRead, W: Write>(
 ) -> io::Result<WriteScope> {
     write!(
         writer,
-        "[clud] install scope — [L]ocal repo (.clud/settings.json) or [G]lobal (~/.clud/settings.toml)? [L]: "
+        "[clud] install scope — [L]ocal repo (.clud/settings.json) or [G]lobal (~/.clud/settings.json)? [L]: "
     )?;
     writer.flush()?;
     let mut line = String::new();

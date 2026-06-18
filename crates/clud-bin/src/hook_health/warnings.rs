@@ -83,6 +83,10 @@ pub(in crate::hook_health) fn print_dry_run_plan(report: &HookHealthReport) {
                 "- migrate deprecated Codex `[features].{LEGACY_CODEX_HOOKS_FEATURE}` to `[features].{CURRENT_CODEX_HOOKS_FEATURE}` in {}",
                 display_path(&config_path)
             ),
+            RepairAction::NormalizeCodexBatchHookExitCode { hooks_path } => println!(
+                "- add explicit `$LASTEXITCODE` propagation to Codex batch hook commands in {}",
+                display_path(&hooks_path)
+            ),
             RepairAction::BackendPrompt {
                 source,
                 target,

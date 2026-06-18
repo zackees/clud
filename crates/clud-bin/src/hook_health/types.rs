@@ -137,6 +137,9 @@ pub enum RepairAction {
     MigrateCodexHooksFeatureFlag {
         config_path: PathBuf,
     },
+    NormalizeCodexBatchHookExitCode {
+        hooks_path: PathBuf,
+    },
     BackendPrompt {
         source: HookFrontend,
         target: HookFrontend,
