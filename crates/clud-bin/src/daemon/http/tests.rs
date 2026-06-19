@@ -226,6 +226,8 @@ fn build_state_includes_ctrl_c_events_when_present() {
             }),
             ctrl_event_kind: None,
             forensics: None,
+            press_kind: None,
+            elapsed_since_prior_ms: None,
         };
         let path = edir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
         std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();

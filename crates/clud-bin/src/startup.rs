@@ -160,9 +160,17 @@ pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&interrupted);
     if let Err(e) = ctrlc::set_handler(move || {
-        run_ctrl_c_handler(verbose, handler_flag.as_ref(), |msg| {
-            crate::verbose_log::log(msg)
-        });
+        run_ctrl_c_handler(
+            verbose,
+            handler_flag.as_ref(),
+            |msg| crate::verbose_log::log(msg),
+            |msg| {
+                // Stderr so the "press again to exit" notice shows up
+                // even when verbose-mode logging is off — the user
+                // needs to see it regardless of logging configuration.
+                eprintln!("{msg}");
+            },
+        );
     }) {
         eprintln!("[clud] warning: failed to install Ctrl+C handler: {}", e);
     }
@@ -230,24 +238,104 @@ fn install_windows_ctrl_event_probe() {
     // event-kind field as `None` is the correct, honest answer.
 }
 
+/// Outcome of a single press through [`run_ctrl_c_handler`]. The Windows
+/// double-Ctrl+C guard (issue #377) swallows the first press in a
+/// rapid-succession window so users don't tear down clud (and any
+/// long-running backend session it owns) by accidental keystroke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CtrlCDecision {
+    /// First press inside a fresh rapid-succession window. clud did
+    /// not flip the interrupted flag; a follow-up press is required to
+    /// exit. The child still received its own copy of the
+    /// console-control event from the OS so it can cancel cooperatively.
+    FirstSoft { window_ms: u64 },
+    /// Press flipped the interrupted flag. Either the second press
+    /// landed inside the window, the guard was disabled by env var,
+    /// or the platform doesn't engage the guard (non-Windows).
+    Exit,
+}
+
 /// Pure side-effecting body of the Ctrl+C handler closure, extracted so
-/// unit tests can assert the verbose-emit decision without installing a
-/// real signal handler (which would conflict with cargo's test runner).
+/// unit tests can assert the verbose-emit and double-tap decisions
+/// without installing a real signal handler (which would conflict with
+/// cargo's test runner).
 ///
-/// The handler stamps `ctrl_c_track::OBSERVED_UNIX_MS`, optionally emits
-/// a timestamped marker through `verbose_log::log`, then flips the
-/// process-wide interrupted flag. The verbose marker is what lets the
-/// launch log show *when* the Ctrl+C arrived relative to the eventual
-/// `[clud] subprocess: exited code …` / `[clud] exit: code …` lines —
-/// without it the user only sees the *result* of an interrupt, never
-/// the *moment* it was delivered.
-fn run_ctrl_c_handler(verbose: bool, interrupted: &AtomicBool, emit_verbose: impl FnOnce(&str)) {
+/// The handler:
+/// 1. Atomically swaps in the current timestamp and reads the prior one
+///    (signal-safe — see [`crate::ctrl_c_track::record_observed_returning_prior`]).
+/// 2. On Windows (and only when the double-tap guard is engaged), checks
+///    whether the prior press lands inside the rapid-succession window.
+///    If not, classifies this as `FirstSoft` and skips flipping the
+///    interrupted flag — clud stays alive so the user can decide whether
+///    to interrupt again.
+/// 3. Otherwise (second press in window / non-Windows / opt-out), flips
+///    the interrupted flag.
+/// 4. Stamps the press classification + elapsed-since-prior into the
+///    forensic event so the dashboard can distinguish swallowed presses
+///    from teardown presses.
+///
+/// `emit_warning` carries the "press again to exit" notice. Tests pass
+/// a `Cell`-backed closure to capture it; the production caller passes
+/// a real `eprintln!` so the user sees it in their shell even when
+/// `--verbose` is off.
+pub(crate) fn run_ctrl_c_handler(
+    verbose: bool,
+    interrupted: &AtomicBool,
+    emit_verbose: impl FnOnce(&str),
+    emit_warning: impl FnOnce(&str),
+) -> CtrlCDecision {
+    use crate::ctrl_c_track::{
+        double_tap_enabled, double_tap_window_ms, record_elapsed_since_prior_ms,
+        record_observed_returning_prior, record_press_kind, CtrlPressKind,
+    };
     use std::sync::atomic::Ordering;
-    crate::ctrl_c_track::record_observed();
-    if verbose {
-        emit_verbose("[clud] ctrl-c received");
+
+    let prior_ms = record_observed_returning_prior();
+    let elapsed_ms = if prior_ms == 0 {
+        None
+    } else {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(prior_ms);
+        Some(now_ms.saturating_sub(prior_ms))
+    };
+    if let Some(gap) = elapsed_ms {
+        // record_elapsed_since_prior_ms uses 0 as "no prior" sentinel,
+        // so coerce a genuine zero gap to 1ms to keep the forensic
+        // field meaningful.
+        record_elapsed_since_prior_ms(gap.max(1));
     }
-    interrupted.store(true, Ordering::SeqCst);
+
+    let window_ms = double_tap_window_ms();
+    let guard_engaged = double_tap_enabled();
+    let inside_window = matches!(elapsed_ms, Some(gap) if gap <= window_ms);
+
+    let decision = if guard_engaged && !inside_window {
+        CtrlCDecision::FirstSoft { window_ms }
+    } else {
+        CtrlCDecision::Exit
+    };
+
+    match decision {
+        CtrlCDecision::FirstSoft { window_ms } => {
+            record_press_kind(CtrlPressKind::FirstSoft);
+            if verbose {
+                emit_verbose("[clud] ctrl-c received (first press, soft interrupt)");
+            }
+            emit_warning(&format!(
+                "[clud] Ctrl+C — press again within {window_ms}ms to exit"
+            ));
+        }
+        CtrlCDecision::Exit => {
+            record_press_kind(CtrlPressKind::SecondExit);
+            if verbose {
+                emit_verbose("[clud] ctrl-c received");
+            }
+            interrupted.store(true, Ordering::SeqCst);
+        }
+    }
+    decision
 }
 
 #[cfg(test)]
@@ -318,47 +406,264 @@ mod tests {
         let _result = super::try_register_console_drop_target_subprocess();
     }
 
-    /// Verbose mode: every Ctrl+C press emits the `[clud] ctrl-c received`
-    /// marker so the launch log shows the moment of interrupt, not just
-    /// the eventual exit-code lines.
+    /// Reset the `ctrl_c_track` statics + relevant env vars so each
+    /// double-tap test starts from a known state. Callers must already
+    /// hold `crate::ctrl_c_track::test_state_lock()` to serialize.
+    fn reset_handler_state() {
+        crate::ctrl_c_track::reset_for_test();
+        std::env::remove_var(crate::ctrl_c_track::ENV_DISABLE_DOUBLE_TAP);
+        std::env::remove_var(crate::ctrl_c_track::ENV_DOUBLE_TAP_WINDOW_MS);
+    }
+
+    /// Verbose mode: every press that actually exits emits the
+    /// `[clud] ctrl-c received` marker so the launch log shows the
+    /// moment of interrupt, not just the eventual exit-code lines.
+    /// Non-Windows: a single press exits, so the marker fires on the
+    /// first press. Windows: the first press is a soft interrupt;
+    /// we drive the second press inside the window to land on Exit.
     #[test]
     fn ctrl_c_handler_emits_verbose_marker_when_verbose() {
         use std::cell::Cell;
         use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
         let interrupted = AtomicBool::new(false);
         let captured: Cell<Option<String>> = Cell::new(None);
-        super::run_ctrl_c_handler(true, &interrupted, |msg| {
-            captured.set(Some(msg.to_string()));
-        });
+
+        // First press: on Windows this is a soft interrupt and the
+        // emit closure receives a different marker. To exercise the
+        // Exit branch on every platform, prime the timestamp first
+        // and then drive the press that lands inside the window.
+        if cfg!(windows) {
+            // Prime: this swallows the first press on Windows.
+            let _ = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        }
+
+        let decision = super::run_ctrl_c_handler(
+            true,
+            &interrupted,
+            |msg| captured.set(Some(msg.to_string())),
+            |_| {},
+        );
+
+        assert!(
+            matches!(decision, super::CtrlCDecision::Exit),
+            "handler must Exit when the guard is not engaged or inside the window"
+        );
         assert_eq!(
             captured.into_inner().as_deref(),
             Some("[clud] ctrl-c received"),
-            "verbose handler must emit the ctrl-c marker"
+            "verbose handler must emit the ctrl-c marker on Exit"
         );
         assert!(
             interrupted.load(Ordering::SeqCst),
-            "handler must flip the interrupted flag"
+            "handler must flip the interrupted flag on Exit"
         );
     }
 
-    /// Non-verbose mode: the marker is suppressed so it doesn't clobber
-    /// a live TUI's screen state. The interrupted flag still flips.
+    /// Non-verbose mode: the verbose marker is suppressed. The
+    /// interrupted flag still flips on Exit. Mirrors the test above
+    /// but checks the suppressed-emit path.
     #[test]
     fn ctrl_c_handler_skips_verbose_marker_when_not_verbose() {
         use std::cell::Cell;
         use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
         let interrupted = AtomicBool::new(false);
+
+        if cfg!(windows) {
+            // Prime: swallow the first soft press on Windows.
+            let _ = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        }
+
         let called = Cell::new(false);
-        super::run_ctrl_c_handler(false, &interrupted, |_| {
-            called.set(true);
-        });
+        let decision = super::run_ctrl_c_handler(
+            false,
+            &interrupted,
+            |_| {
+                called.set(true);
+            },
+            |_| {},
+        );
+        assert!(
+            matches!(decision, super::CtrlCDecision::Exit),
+            "handler must Exit when the guard is not engaged or inside the window"
+        );
         assert!(
             !called.into_inner(),
-            "non-verbose handler must not call the emit closure"
+            "non-verbose handler must not call the emit closure on Exit"
         );
         assert!(
             interrupted.load(Ordering::SeqCst),
             "handler must still flip the interrupted flag without verbose"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #377: double-Ctrl+C guard handler behavior.
+    // ---------------------------------------------------------------
+
+    /// Windows: the first press in a fresh window is a soft interrupt.
+    /// The interrupted flag does NOT flip, the press classification is
+    /// recorded as `FirstSoft`, and the user-facing warning fires.
+    #[cfg(windows)]
+    #[test]
+    fn first_press_on_windows_is_soft_interrupt() {
+        use std::cell::Cell;
+        use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        let interrupted = AtomicBool::new(false);
+        let warning: Cell<Option<String>> = Cell::new(None);
+
+        let decision = super::run_ctrl_c_handler(
+            false,
+            &interrupted,
+            |_| {},
+            |msg| warning.set(Some(msg.to_string())),
+        );
+
+        assert!(
+            matches!(decision, super::CtrlCDecision::FirstSoft { .. }),
+            "first press on Windows must be classified FirstSoft"
+        );
+        assert!(
+            !interrupted.load(Ordering::SeqCst),
+            "first press on Windows MUST NOT flip interrupted"
+        );
+        let msg = warning.into_inner().expect("warning emitted");
+        assert!(
+            msg.contains("press again"),
+            "warning must tell the user to press again, got: {msg}"
+        );
+        assert_eq!(
+            crate::ctrl_c_track::observed_press_kind(),
+            Some(crate::ctrl_c_track::CtrlPressKind::FirstSoft)
+        );
+    }
+
+    /// Windows: a second press inside the rapid-succession window
+    /// flips the interrupted flag and stamps `SecondExit`.
+    #[cfg(windows)]
+    #[test]
+    fn second_press_within_window_exits_on_windows() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        let interrupted = AtomicBool::new(false);
+
+        // First press — soft.
+        let first = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        assert!(matches!(first, super::CtrlCDecision::FirstSoft { .. }));
+        assert!(!interrupted.load(Ordering::SeqCst));
+
+        // Second press immediately after — well inside the default
+        // 1500ms window.
+        let second = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        assert!(
+            matches!(second, super::CtrlCDecision::Exit),
+            "second press inside window must Exit"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "second press inside window MUST flip interrupted"
+        );
+        assert_eq!(
+            crate::ctrl_c_track::observed_press_kind(),
+            Some(crate::ctrl_c_track::CtrlPressKind::SecondExit)
+        );
+    }
+
+    /// Windows: two presses spaced beyond the window — the second
+    /// press is treated as a fresh first press, NOT as Exit. Drives
+    /// the env-var override down to a 50ms window so the test can
+    /// sleep past it without slowing the suite.
+    #[cfg(windows)]
+    #[test]
+    fn two_presses_outside_window_both_soft_on_windows() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        // Smallest accepted window. Sleeping 120ms reliably passes it
+        // even on coarse-grained Windows timers.
+        std::env::set_var(crate::ctrl_c_track::ENV_DOUBLE_TAP_WINDOW_MS, "50");
+        let interrupted = AtomicBool::new(false);
+
+        let first = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        assert!(matches!(first, super::CtrlCDecision::FirstSoft { .. }));
+
+        std::thread::sleep(std::time::Duration::from_millis(120));
+
+        let second = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        assert!(
+            matches!(second, super::CtrlCDecision::FirstSoft { .. }),
+            "press past the window must reset to FirstSoft, got {second:?}"
+        );
+        assert!(
+            !interrupted.load(Ordering::SeqCst),
+            "no Exit means interrupted MUST remain false"
+        );
+        std::env::remove_var(crate::ctrl_c_track::ENV_DOUBLE_TAP_WINDOW_MS);
+    }
+
+    /// Windows: the opt-out env var (`CLUD_NO_DOUBLE_CTRL_C=1`)
+    /// disables the guard entirely, so the very first press exits
+    /// like the pre-#377 behavior.
+    #[cfg(windows)]
+    #[test]
+    fn opt_out_env_var_makes_first_press_exit_on_windows() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        std::env::set_var(crate::ctrl_c_track::ENV_DISABLE_DOUBLE_TAP, "1");
+
+        let interrupted = AtomicBool::new(false);
+        let decision = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        assert!(
+            matches!(decision, super::CtrlCDecision::Exit),
+            "with the guard disabled, the first press must Exit"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "with the guard disabled, the first press MUST flip interrupted"
+        );
+        std::env::remove_var(crate::ctrl_c_track::ENV_DISABLE_DOUBLE_TAP);
+    }
+
+    /// Non-Windows: the guard is not engaged. A single press exits,
+    /// matching the documented "non-Windows behavior is intentionally
+    /// unchanged" line in the acceptance criteria.
+    #[cfg(not(windows))]
+    #[test]
+    fn first_press_on_non_windows_exits() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        let interrupted = AtomicBool::new(false);
+
+        let decision = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        assert!(
+            matches!(decision, super::CtrlCDecision::Exit),
+            "non-Windows: a single press must Exit"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "non-Windows: a single press MUST flip interrupted"
         );
     }
 }
