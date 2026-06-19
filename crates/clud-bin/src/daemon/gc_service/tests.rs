@@ -555,10 +555,15 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
     // Outside the worker loop the test plays the role of the
     // registry-writer thread: drain the pool's completion
     // callbacks and apply them to redb directly.
+    // #383: the 250ms quiet window was too tight on Windows, where two
+    // parallel directory-purges can finish more than 250ms apart due to
+    // AV-scanner / TempDir contention. Use 1500ms quiet so the second
+    // completion has room to land; the 5s overall deadline still caps
+    // the worst case.
     let drained = drain_purge_completions(
         &registry,
         &completion_rx,
-        Duration::from_millis(250),
+        Duration::from_millis(1500),
         Duration::from_secs(5),
     );
     assert!(
@@ -715,10 +720,12 @@ fn periodic_tick_removes_merged_stale_extern_repo_entry() {
     let pool_tx = spawn_purge_pool(1);
     let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
     run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+    // #383: matches the bump in the periodic-purge test above —
+    // 250ms was too tight on Windows for sequential purge completions.
     let _drained = drain_purge_completions(
         &registry,
         &completion_rx,
-        Duration::from_millis(250),
+        Duration::from_millis(1500),
         Duration::from_secs(5),
     );
 
