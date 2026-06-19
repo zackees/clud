@@ -65,9 +65,10 @@ state.
 
 Three legitimate `/clud-fix` runs reach an honest no-PR terminal: a single-issue
 intake-failed investigation report, a meta empty-children investigation report,
-and an unreachable-scope refusal (see #365 for the upfront refusal gate). In
-each case, emit a structured sentinel as the FINAL line of the user-facing
-response so an outer-`/goal` evaluator can recognize the terminal:
+and an unreachable-scope refusal (the upfront gate added in step 2 of the
+single-issue workflow). In each case, emit a structured sentinel as the FINAL
+line of the user-facing response so an outer-`/goal` evaluator can recognize
+the terminal:
 
 | Terminal | Sentinel |
 |---|---|
@@ -116,14 +117,64 @@ All conditions are mandatory:
    If the issue is not open, stop and report the current state. Do not silently
    reopen or push.
 
-2. **Readiness check.** A fixable single issue needs:
+2. **Reachable-scope gate.** This skill's terminal requires a merged PR. If the
+   work needed to satisfy the issue cannot reach a merged PR in this repo, the
+   run cannot terminate cleanly — refuse upfront rather than entering the
+   intake-failure path mid-run (the original failure documented in #365).
+
+   Check both:
+
+   - **Repo push permission.** If the issue lives in a third-party repo:
+
+     ```bash
+     gh repo view <owner>/<repo> --json viewerPermission,isFork,parent
+     ```
+
+     If `viewerPermission` is `READ` or `TRIAGE` AND no fork is configured for
+     this user (or the user has not opted into a fork-and-PR flow for this
+     repo), the run cannot reach "PR merged on `<owner>/<repo>:main`". Refuse
+     with: "Issue lives at `<owner>/<repo>` where viewerPermission is
+     `<level>`. `/clud-fix` cannot satisfy its 'PR merged' terminal here.
+     Open an issue or fork-and-PR via [[clud-pr]] instead."
+
+   - **Non-source-artifact heuristic.** Scan the issue body and title for
+     phrases that imply the fix lives outside the user's source tree:
+
+     - `@anthropic-ai/claude-code`, `claude-code harness`, `harness binary`,
+       `compiled into the harness`
+     - `closed-source`, `closed source`, `proprietary binary`,
+       `vendor binary`, `vendored library`
+     - explicit references to third-party install paths
+       (`/usr/lib/<vendor>/`, `node_modules/@<vendor>/`, etc.) being the
+       sole source of the bug
+
+     Hitting the heuristic is not proof — it is a stop-and-confirm prompt:
+     "Issue body suggests the fix targets `<artifact>`, which `/clud-fix`
+     cannot reach (no source tree to modify, no PR target). Refuse the run
+     unless the user confirms a reachable substitute scope (e.g. a clud-side
+     workaround, a runtime guard, or filing an upstream issue)."
+
+   When either branch trips and the user does not provide a reachable
+   substitute, emit the unreachable-scope terminal sentinel as the FINAL
+   line of the user-facing response:
+
+   ```text
+   <clud-fix:terminal kind=unreachable-scope-refused reason=<read-only-repo|closed-source-target|...> url=<issue-url>>
+   ```
+
+   Then stop. Do NOT widen scope to manufacture a PR-able task that
+   satisfies the literal goal text but misses what the user actually asked
+   for; that pattern is exactly what made the `/goal` Stop-hook loop in
+   #365 wedge.
+
+3. **Readiness check.** A fixable single issue needs:
    - concrete reproduction: command, code snippet, or observable behavior
    - falsifiable symptom: wrong output, error, stack trace, screenshot, or
      specific misbehavior
    - fixed criterion: expected behavior or acceptance checklist
    - bounded scope: a bug fix or small feature, not open-ended design
 
-3. **Under-specified issues get investigation first.** If any readiness item is
+4. **Under-specified issues get investigation first.** If any readiness item is
    missing, post an investigation report to the issue instead of opening a PR.
 
    Lead the report with a hook-mismatch banner (Markdown blockquote, first
@@ -148,7 +199,7 @@ All conditions are mandatory:
    Then stop with the blocker surfaced; do not manufacture a PR that cannot be
    validated.
 
-4. **Survey existing PRs.** Search for PRs that mention or close the issue:
+5. **Survey existing PRs.** Search for PRs that mention or close the issue:
 
    ```bash
    gh pr list --repo <owner>/<repo> --search "<num> in:body" --state all --json number,state,headRefName,mergedAt,url
@@ -159,16 +210,16 @@ All conditions are mandatory:
    [[clud-pr]] PR merge mode, in delegated mode, to drive it through CI/review
    fixes and merge.
 
-5. **Plan validation before implementation.** Identify files to touch, focused
+6. **Plan validation before implementation.** Identify files to touch, focused
    RED test/repro, and the post-merge validation command. For non-trivial design
    scope, check in with the user before opening a PR.
 
-6. **Delegate PR work to [[clud-pr]].** Hand off the issue URL and state:
+7. **Delegate PR work to [[clud-pr]].** Hand off the issue URL and state:
    "delegated from `clud-fix`; do not set a nested `/goal`; return structured
    evidence." [[clud-pr]] owns the disposable worktree, RED -> GREEN cycle,
    lint/test gates, PR creation, CI/review fix loop, and merge mode.
 
-7. **Validate on main.** After merge, run:
+8. **Validate on main.** After merge, run:
 
    ```bash
    git fetch origin && git checkout main && git pull
@@ -177,7 +228,7 @@ All conditions are mandatory:
    Then run the issue's original reproduction or acceptance command. CI green is
    not enough; validation must exercise the reported behavior.
 
-8. **Close or confirm closed.** Verify with:
+9. **Close or confirm closed.** Verify with:
 
    ```bash
    gh issue view <num> --repo <owner>/<repo> --json state,closedAt
@@ -186,7 +237,7 @@ All conditions are mandatory:
    If the issue is still open after a validated merge, close it with a comment
    naming the merged PR and validation evidence.
 
-9. **Report.** Return the merged PR URL(s), the closed issue URL, and validation
+10. **Report.** Return the merged PR URL(s), the closed issue URL, and validation
    evidence.
 
 ## Meta / Parent / Burn-Down Workflow
