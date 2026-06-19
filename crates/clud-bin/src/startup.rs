@@ -159,9 +159,18 @@ pub fn enforce_session_cap() -> Option<ScopedSessionGuard> {
 pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
     let interrupted = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&interrupted);
+    // Snapshot interactivity once at install time so the handler
+    // doesn't have to call `isatty()` from the ctrlc thread on every
+    // press. Issue #377's double-Ctrl+C guard is meant to protect
+    // interactive users from accidental teardown; scripts and CI
+    // (which redirect stdin/stderr) should keep the historical
+    // single-press exit so existing automation isn't broken.
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr());
     if let Err(e) = ctrlc::set_handler(move || {
         run_ctrl_c_handler(
             verbose,
+            interactive,
             handler_flag.as_ref(),
             |msg| crate::verbose_log::log(msg),
             |msg| {
@@ -278,8 +287,17 @@ pub(crate) enum CtrlCDecision {
 /// a `Cell`-backed closure to capture it; the production caller passes
 /// a real `eprintln!` so the user sees it in their shell even when
 /// `--verbose` is off.
+///
+/// `interactive` is the install-time snapshot of whether stdin **and**
+/// stderr are TTYs. The double-tap guard is gated on this so scripts
+/// and CI (which redirect at least one of those handles) keep the
+/// historical single-press exit. Without this gate the guard breaks
+/// every Python integration test that drives clud via subprocess and
+/// sends a single Ctrl+C — the test would sit waiting for a second
+/// press that no automation knows to send.
 pub(crate) fn run_ctrl_c_handler(
     verbose: bool,
+    interactive: bool,
     interrupted: &AtomicBool,
     emit_verbose: impl FnOnce(&str),
     emit_warning: impl FnOnce(&str),
@@ -308,7 +326,7 @@ pub(crate) fn run_ctrl_c_handler(
     }
 
     let window_ms = double_tap_window_ms();
-    let guard_engaged = double_tap_enabled();
+    let guard_engaged = interactive && double_tap_enabled();
     let inside_window = matches!(elapsed_ms, Some(gap) if gap <= window_ms);
 
     let decision = if guard_engaged && !inside_window {
@@ -438,10 +456,11 @@ mod tests {
         // and then drive the press that lands inside the window.
         if cfg!(windows) {
             // Prime: this swallows the first press on Windows.
-            let _ = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+            let _ = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         }
 
         let decision = super::run_ctrl_c_handler(
+            true,
             true,
             &interrupted,
             |msg| captured.set(Some(msg.to_string())),
@@ -478,12 +497,13 @@ mod tests {
 
         if cfg!(windows) {
             // Prime: swallow the first soft press on Windows.
-            let _ = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+            let _ = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         }
 
         let called = Cell::new(false);
         let decision = super::run_ctrl_c_handler(
             false,
+            true,
             &interrupted,
             |_| {
                 called.set(true);
@@ -525,6 +545,7 @@ mod tests {
 
         let decision = super::run_ctrl_c_handler(
             false,
+            true,
             &interrupted,
             |_| {},
             |msg| warning.set(Some(msg.to_string())),
@@ -562,13 +583,13 @@ mod tests {
         let interrupted = AtomicBool::new(false);
 
         // First press — soft.
-        let first = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        let first = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         assert!(matches!(first, super::CtrlCDecision::FirstSoft { .. }));
         assert!(!interrupted.load(Ordering::SeqCst));
 
         // Second press immediately after — well inside the default
         // 1500ms window.
-        let second = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        let second = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         assert!(
             matches!(second, super::CtrlCDecision::Exit),
             "second press inside window must Exit"
@@ -600,12 +621,12 @@ mod tests {
         std::env::set_var(crate::ctrl_c_track::ENV_DOUBLE_TAP_WINDOW_MS, "50");
         let interrupted = AtomicBool::new(false);
 
-        let first = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        let first = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         assert!(matches!(first, super::CtrlCDecision::FirstSoft { .. }));
 
         std::thread::sleep(std::time::Duration::from_millis(120));
 
-        let second = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        let second = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         assert!(
             matches!(second, super::CtrlCDecision::FirstSoft { .. }),
             "press past the window must reset to FirstSoft, got {second:?}"
@@ -631,7 +652,7 @@ mod tests {
         std::env::set_var(crate::ctrl_c_track::ENV_DISABLE_DOUBLE_TAP, "1");
 
         let interrupted = AtomicBool::new(false);
-        let decision = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        let decision = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         assert!(
             matches!(decision, super::CtrlCDecision::Exit),
             "with the guard disabled, the first press must Exit"
@@ -656,7 +677,7 @@ mod tests {
         reset_handler_state();
         let interrupted = AtomicBool::new(false);
 
-        let decision = super::run_ctrl_c_handler(false, &interrupted, |_| {}, |_| {});
+        let decision = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
         assert!(
             matches!(decision, super::CtrlCDecision::Exit),
             "non-Windows: a single press must Exit"
@@ -664,6 +685,34 @@ mod tests {
         assert!(
             interrupted.load(Ordering::SeqCst),
             "non-Windows: a single press MUST flip interrupted"
+        );
+    }
+
+    /// Non-interactive (scripts, CI, piped stdin) MUST keep the
+    /// single-press exit semantics on every platform — Python
+    /// integration tests in this repo drive clud via subprocess and
+    /// send a single Ctrl+C; they would deadlock under the double-tap
+    /// guard. Issue #377 is about protecting **interactive users**, not
+    /// about changing the behavior contract automation depends on.
+    #[test]
+    fn non_interactive_keeps_single_press_exit_on_every_platform() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        let interrupted = AtomicBool::new(false);
+
+        // interactive=false simulates piped stdin / non-TTY stderr
+        // (the install-time snapshot would have come back false).
+        let decision = super::run_ctrl_c_handler(false, false, &interrupted, |_| {}, |_| {});
+        assert!(
+            matches!(decision, super::CtrlCDecision::Exit),
+            "non-interactive: the first press MUST Exit on every platform"
+        );
+        assert!(
+            interrupted.load(Ordering::SeqCst),
+            "non-interactive: the first press MUST flip interrupted"
         );
     }
 }
