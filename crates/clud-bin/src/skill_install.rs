@@ -41,6 +41,10 @@ const BUNDLED_SKILLS: &[Skill] = &[
         content: include_str!("../assets/skills/clud-fix/SKILL.md"),
     },
     Skill {
+        name: "clud-do",
+        content: include_str!("../assets/skills/clud-do/SKILL.md"),
+    },
+    Skill {
         name: "clud-issue",
         content: include_str!("../../../skills/clud-issue/SKILL.md"),
     },
