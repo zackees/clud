@@ -59,6 +59,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-fix/SKILL.md"),
     },
     BundledSkill {
+        name: "clud-do",
+        skill_md: include_str!("../assets/skills/clud-do/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-review",
         skill_md: include_str!("../assets/skills/clud-review/SKILL.md"),
     },
