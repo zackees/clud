@@ -137,13 +137,19 @@ Diagnostics and misc:
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.
-- `crash_report.rs` - process panic hook installed from `main.rs`
-  (role=`foreground`), `daemon/server.rs::run_daemon` (role=`daemon`), and
-  `daemon/worker.rs::run_worker` (role=`worker`); writes a JSON record with
-  backtrace under `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`, prunes
-  to the 50 most recent, and surfaces a one-line stderr notice on the next
-  launch when a new report appears. `install()` is idempotent — the hook
-  itself is installed once per process; re-calling only updates the role tag.
+- `crash_report.rs` - process panic hook + native crash handler installed
+  from `main.rs` (role=`foreground`), `daemon/server.rs::run_daemon`
+  (role=`daemon`), and `daemon/worker.rs::run_worker` (role=`worker`).
+  Both panic-driven and native-crash-driven (`crash-handler` crate;
+  SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT on Unix; structured exceptions on
+  Windows) reports share one writer producing JSON records with backtrace
+  under `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`, prunes to
+  the 50 most recent, and surfaces a one-line stderr notice on the next
+  launch when a new report appears. `install_native()` is idempotent —
+  the hook is installed once per process; re-calling only updates the
+  role tag. Native install **does not attach a SIGINT/CTRL_C_EVENT
+  handler**, leaving the existing `startup::install_ctrl_c_flag` /
+  `ctrl_c_track` (#372) path authoritative for Ctrl-C.
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.

@@ -34,9 +34,10 @@ pub(super) fn run_worker(
     daemon_pid: u32,
     spec_file: &Path,
 ) -> i32 {
-    // Retag the panic hook for the worker process so crashes here get
+    // Retag the crash reporter for the worker process so crashes here get
     // written under role="worker" instead of inheriting the foreground tag.
-    crate::crash_report::install("worker");
+    // Native-crash handling is installed at the same time.
+    crate::crash_report::install_native("worker");
     let spec = match read_json_file::<WorkerLaunchSpec>(spec_file) {
         Ok(spec) => spec,
         Err(err) => {

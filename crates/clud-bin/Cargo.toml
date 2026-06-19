@@ -13,6 +13,12 @@ arboard = "3"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+# Native crash handler for SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT
+# on Unix and structured exceptions on Windows. By default it does NOT
+# attach a SIGINT / CTRL_C_EVENT handler, so the existing `ctrlc`-based
+# Ctrl-C path (#372 / `ctrl_c_track`) remains the authoritative handler
+# for Ctrl-C / Ctrl-Break.
+crash-handler = "0.7"
 ctrlc = "3"
 # Issue #13: voice-mode stack. Linux capture shells out to `arecord` on
 # F3 press so libasound is loaded only by that on-demand helper process,
