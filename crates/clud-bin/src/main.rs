@@ -11,9 +11,15 @@ fn main() {
     // Install the crash reporter first so a panic during the rest of startup
     // (arg parsing, runtime-cache hop, drop-target registration, ...) still
     // writes a JSON report under ~/.clud/state/crashes/. Idempotent; the
-    // daemon and worker process entries re-call install() with their own
-    // role to retag any future panic without reinstalling the hook.
-    crash_report::install("foreground");
+    // daemon and worker process entries re-call install_native() with their
+    // own role to retag any future crash without reinstalling the hook.
+    //
+    // `install_native` covers SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT on
+    // Unix and structured exceptions on Windows in addition to Rust panics.
+    // It explicitly does NOT attach a SIGINT / CTRL_C_EVENT handler — the
+    // existing `ctrlc`-based path (`startup::install_ctrl_c_flag` below /
+    // #372 forensic capture) remains the authoritative Ctrl-C handler.
+    crash_report::install_native("foreground");
 
     verbose_log::init_launch_clock();
 

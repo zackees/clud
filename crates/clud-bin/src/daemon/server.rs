@@ -42,9 +42,12 @@ fn current_unix() -> i64 {
 }
 
 pub(super) fn run_daemon(state_dir: &Path) -> i32 {
-    // Retag the panic hook installed by main.rs so any crash inside the
-    // daemon process gets written under role="daemon".
-    crate::crash_report::install("daemon");
+    // Retag the crash reporter installed by main.rs so any crash inside the
+    // daemon process gets written under role="daemon". `install_native`
+    // also ensures the SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT /
+    // Windows-SEH handler is in place — both panic and native crashes go
+    // to `~/.clud/state/crashes/`.
+    crate::crash_report::install_native("daemon");
     if let Err(err) = fs::create_dir_all(state_dir) {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
