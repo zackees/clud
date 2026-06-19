@@ -849,8 +849,14 @@ mod tests {
 
     const PROST_PERF_BUDGET_NUMERATOR: u128 = 120;
     const PROST_PERF_BUDGET_DENOMINATOR: u128 = 100;
-    const DAEMON_WIRE_PERF_WARMUP_SAMPLES: usize = 2;
-    const DAEMON_WIRE_PERF_MEASURED_SAMPLES: usize = 9;
+    // #380: macOS ARM runners exhibit bimodal latency (fast cluster ~50ms,
+    // slow cluster ~200ms). At N=9 the JSON and prost medians can land on
+    // opposite sides of the cluster gap purely by sample-count luck,
+    // flagging a false-positive budget violation. Bump warmup to settle the
+    // daemon process JIT / OS scheduler, and bump measured samples so the
+    // median's σ/√N variance drops below the 1.2× budget margin.
+    const DAEMON_WIRE_PERF_WARMUP_SAMPLES: usize = 8;
+    const DAEMON_WIRE_PERF_MEASURED_SAMPLES: usize = 25;
 
     fn read_daemon_events(state_dir: &Path) -> Vec<serde_json::Value> {
         let path = daemon_events_path(state_dir);

@@ -49,10 +49,17 @@ fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("missing daemon event log parent"))?;
     fs::create_dir_all(parent)?;
+    // Buffer the entire JSON object + trailing newline into one allocation
+    // so we issue a single `write_all` (#378). Without this,
+    // `serde_json::to_writer` emits many small `write_all` calls and a
+    // concurrent reader doing `read_to_string` can hit EOF mid-object,
+    // producing the `EOF while parsing an object` failure the rp_broker /
+    // reap-orphans tests saw on Linux ARM and macOS ARM.
+    let mut buf =
+        serde_json::to_vec(event).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    buf.push(b'\n');
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, event)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    file.write_all(b"\n")?;
+    file.write_all(&buf)?;
     file.flush()
 }
 
@@ -137,6 +144,19 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["op"], "after_rotate");
     }
+
+    // NB: the reader-vs-writer atomicity intent originally captured by a
+    // `concurrent_reader_never_sees_partial_jsonl_object` test was removed
+    // post-#379 once it became clear that Linux's `O_APPEND` guarantees
+    // writer-vs-writer atomicity (covered by the test below) but not
+    // reader-vs-writer atomicity. The single-`write_all` fix in #378 is
+    // best-effort for readers: it shrinks the partial-read window to a
+    // single syscall, which is enough for the production-pattern tests
+    // (`daemon::server::tests::reap_orphans_request_writes_jsonl_events`,
+    // `adopt_kill_request_writes_jsonl_events`) that exercise the actual
+    // daemon access pattern, but a stress test reading in a tight loop on
+    // Linux ARM can still observe the race. Those production-pattern tests
+    // continue to serve as the regression check.
 
     #[test]
     fn concurrent_append_keeps_one_valid_json_object_per_line() {
