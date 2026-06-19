@@ -68,8 +68,15 @@ impl Drop for EnvGuard {
     }
 }
 
+// The 10s deadline absorbs Linux-ARM CI runner variance — the previous
+// 5s was tight enough that the rp_broker tests timed out when daemon
+// startup picked up extra overhead from `debug = "line-tables-only"`
+// (larger binary, slightly slower image load) and the panic-hook
+// installer that now runs at the top of `run_daemon`. The daemon itself
+// is normally ready in <500ms on all platforms; the bump only matters
+// when the runner is under load.
 fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(info) = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
             if TcpStream::connect(("127.0.0.1", info.port)).is_ok() {
@@ -86,7 +93,7 @@ fn wait_for_daemon_ready(state_dir: &Path) -> DaemonInfo {
 
 fn wait_for_identity_sidecar(state_dir: &Path) -> DaemonProcess {
     let path = daemon_identity_path(state_dir);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(identity) = read_daemon_identity_file(&path) {
             return identity;
