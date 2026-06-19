@@ -49,10 +49,17 @@ fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("missing daemon event log parent"))?;
     fs::create_dir_all(parent)?;
+    // Buffer the entire JSON object + trailing newline into one allocation
+    // so we issue a single `write_all` (#378). Without this,
+    // `serde_json::to_writer` emits many small `write_all` calls and a
+    // concurrent reader doing `read_to_string` can hit EOF mid-object,
+    // producing the `EOF while parsing an object` failure the rp_broker /
+    // reap-orphans tests saw on Linux ARM and macOS ARM.
+    let mut buf =
+        serde_json::to_vec(event).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    buf.push(b'\n');
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, event)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    file.write_all(b"\n")?;
+    file.write_all(&buf)?;
     file.flush()
 }
 
@@ -94,6 +101,8 @@ fn thread_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn read_lines(path: &Path) -> Vec<Value> {
         fs::read_to_string(path)
@@ -136,6 +145,70 @@ mod tests {
         let lines = read_lines(&path);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["op"], "after_rotate");
+    }
+
+    #[test]
+    fn concurrent_reader_never_sees_partial_jsonl_object() {
+        // Regression test for #378: a reader doing `read_to_string`
+        // concurrently with appenders must never observe a truncated
+        // trailing object. Pre-fix, `serde_json::to_writer` would emit many
+        // small `write_all` calls and a reader catching the file between
+        // them would parse a partial line and error with
+        // `EOF while parsing an object`.
+        use std::sync::atomic::AtomicBool;
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().to_path_buf();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let writer = {
+            let state_dir = state_dir.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut seq = 0u64;
+                while !stop.load(Ordering::Acquire) {
+                    log_event(
+                        &state_dir,
+                        "race",
+                        [("seq", json!(seq)), ("payload", json!("x".repeat(2048)))],
+                    );
+                    seq += 1;
+                }
+                seq
+            })
+        };
+
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let state_dir = state_dir.clone();
+            let reader_done = reader_done.clone();
+            std::thread::spawn(move || {
+                let path = daemon_events_path(&state_dir);
+                let mut iterations = 0;
+                let deadline = std::time::Instant::now() + Duration::from_millis(750);
+                while std::time::Instant::now() < deadline {
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        for (idx, line) in text.lines().enumerate() {
+                            // Each line must parse cleanly — no `EOF while
+                            // parsing an object`.
+                            serde_json::from_str::<Value>(line).unwrap_or_else(|err| {
+                                panic!(
+                                    "race: invalid jsonl line {idx} at iteration \
+                                     {iterations}: {err}: {line:?}"
+                                )
+                            });
+                        }
+                    }
+                    iterations += 1;
+                }
+                reader_done.store(true, Ordering::Release);
+                iterations
+            })
+        };
+
+        let _ = reader.join().unwrap();
+        stop.store(true, Ordering::Release);
+        let _ = writer.join().unwrap();
+        assert!(reader_done.load(Ordering::Acquire));
     }
 
     #[test]
