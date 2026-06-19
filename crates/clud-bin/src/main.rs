@@ -2,7 +2,7 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
     launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
-    startup, symbols, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    startup, symbols, tool_run, tools, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -20,6 +20,21 @@ fn main() {
     // existing `ctrlc`-based path (`startup::install_ctrl_c_flag` below /
     // #372 forensic capture) remains the authoritative Ctrl-C handler.
     crash_report::install_native("foreground");
+
+    // Issue #408 (Layer 3 of three-layer UV_CACHE_DIR enforcement): pin
+    // every `uv` invocation spawned inside clud's process tree to
+    // `~/.clud/cache/uv/`, so per-script venvs for bundled tools never
+    // leak into the user's global `~/.cache/uv/`. The `clud tool run`
+    // subcommand (Layer 1) re-affirms the same value; both layers read
+    // from `tools::clud_uv_cache_dir()` so there is one source of truth.
+    //
+    // SAFETY: at this point we are still single-threaded (crash reporter
+    // installs handlers but does not spawn threads). Setting env vars
+    // before any other code runs is the standard cross-platform pattern
+    // for this case.
+    unsafe {
+        std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
+    }
 
     verbose_log::init_launch_clock();
 
@@ -104,6 +119,26 @@ fn main() {
     }) = &args.command
     {
         std::process::exit(trash::run(&args, paths, *cross_volume));
+    }
+
+    // Issue #408: `clud tool run <rel_path> [args]` invokes a bundled
+    // Python tool with `UV_CACHE_DIR` pinned. Self-contained; never
+    // launches an agent backend.
+    if let Some(args::Command::Tool {
+        subcommand:
+            args::ToolSubcommand::Run {
+                rel_path,
+                args: tool_args,
+            },
+    }) = &args.command
+    {
+        match tool_run::run(rel_path, tool_args) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool run failed: {err}");
+                std::process::exit(2);
+            }
+        }
     }
 
     // #374 (PR 3): `clud symbols` inspects / verifies crash-report
