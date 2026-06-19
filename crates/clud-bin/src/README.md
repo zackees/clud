@@ -145,11 +145,22 @@ Diagnostics and misc:
   Windows) reports share one writer producing JSON records with backtrace
   under `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`, prunes to
   the 50 most recent, and surfaces a one-line stderr notice on the next
-  launch when a new report appears. `install_native()` is idempotent —
-  the hook is installed once per process; re-calling only updates the
-  role tag. Native install **does not attach a SIGINT/CTRL_C_EVENT
-  handler**, leaving the existing `startup::install_ctrl_c_flag` /
-  `ctrl_c_track` (#372) path authoritative for Ctrl-C.
+  launch when a new report appears (plus a follow-up "backtrace appears
+  unsymbolicated; run `clud symbols verify`" line when the new report
+  has zero `at FILE:LINE` frames — #374 PR 3). `install_native()` is
+  idempotent — the hook is installed once per process; re-calling only
+  updates the role tag. Native install **does not attach a
+  SIGINT/CTRL_C_EVENT handler**, leaving the existing
+  `startup::install_ctrl_c_flag` / `ctrl_c_track` (#372) path
+  authoritative for Ctrl-C.
+- `symbols.rs` - `clud symbols` / `clud symbols install` / `clud symbols
+  verify [--all]` subcommand handler. With `debug = "line-tables-only"`
+  embedded in every build (#374 PR 1), no sidecar files need to be
+  fetched; the verifier confirms the running binary can resolve recent
+  crash reports' `at FILE:LINE` frames and exits 0/1 accordingly. The
+  bare `clud symbols` form prints a five-line summary. Self-contained
+  maintenance command; dispatched from `main.rs` before any backend
+  resolution. See `docs/architecture/crash-reports.md`.
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.

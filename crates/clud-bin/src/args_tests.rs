@@ -989,3 +989,48 @@ fn test_daemon_servicedef_alias_subcommand_parses() {
         other => panic!("expected Daemon::RunningProcess alias, got {other:?}"),
     }
 }
+
+#[test]
+fn test_symbols_bare_subcommand_yields_none() {
+    let args = parse(&["clud", "symbols"]);
+    match args.command {
+        Some(Command::Symbols { ref subcommand }) => assert!(subcommand.is_none()),
+        other => panic!("expected Symbols, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_symbols_install_subcommand_parses() {
+    let args = parse(&["clud", "symbols", "install"]);
+    match args.command {
+        Some(Command::Symbols {
+            subcommand: Some(SymbolsSubcommand::Install),
+        }) => {}
+        other => panic!("expected Symbols::Install, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_symbols_verify_all_subcommand_parses() {
+    let args = parse(&["clud", "symbols", "verify", "--all"]);
+    match args.command {
+        Some(Command::Symbols {
+            subcommand: Some(SymbolsSubcommand::Verify { all }),
+        }) => assert!(all),
+        other => panic!("expected Symbols::Verify --all, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_symbols_verify_default_all_false() {
+    let args = parse(&["clud", "symbols", "verify"]);
+    match args.command {
+        Some(Command::Symbols {
+            subcommand: Some(SymbolsSubcommand::Verify { all }),
+        }) => assert!(!all),
+        other => panic!("expected Symbols::Verify (no --all), got {other:?}"),
+    }
+}

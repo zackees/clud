@@ -40,6 +40,7 @@ pub mod skills;
 pub mod startup;
 pub mod stream_json;
 pub mod subprocess;
+pub mod symbols;
 pub mod trampoline;
 pub mod trash;
 pub mod ui;
