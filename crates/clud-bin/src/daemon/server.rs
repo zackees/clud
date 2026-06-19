@@ -42,6 +42,9 @@ fn current_unix() -> i64 {
 }
 
 pub(super) fn run_daemon(state_dir: &Path) -> i32 {
+    // Retag the panic hook installed by main.rs so any crash inside the
+    // daemon process gets written under role="daemon".
+    crate::crash_report::install("daemon");
     if let Err(err) = fs::create_dir_all(state_dir) {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;

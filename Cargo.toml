@@ -14,10 +14,10 @@ repository = "https://github.com/zackees/clud"
 homepage = "https://github.com/zackees/clud"
 
 [profile.dev]
-debug = 0
+debug = "line-tables-only"
 
 [profile.release]
-debug = 0
+debug = "line-tables-only"
 
 [patch.crates-io]
 whisper-rs = { path = "vendor/whisper-rs" }
