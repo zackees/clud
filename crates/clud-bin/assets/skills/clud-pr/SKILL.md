@@ -47,7 +47,79 @@ Before mode selection, classify the input to distinguish PR URLs, issue URLs, an
 
 If the input is a bare number and both `gh pr view` and `gh issue view` succeed, that's a contradiction of GitHub's namespace rule — refuse with `unknown-reference` and stop. If neither succeeds, refuse with `unknown-reference` and stop.
 
-Multi-forge support (GitLab MRs, Bitbucket PRs, Gitea/Forgejo pulls, self-hosted variants) is tracked separately and not in scope for this section; all examples and probes here assume GitHub.
+All `gh` examples below are GitHub-specific. The skill supports other forges via the `## Forge support` section below — substitute the matching native CLI per forge.
+
+## Forge support
+
+This skill defaults to GitHub and the `gh` CLI for backwards compatibility. URL inputs from other forges are classified by URL prefix and routed to the matching native CLI. Bare numbers (`#<N>`) without an explicit prefix resolve their forge from the current worktree's `git remote get-url origin`.
+
+### Multi-forge URL recognition
+
+| Forge | URL prefix(es) | Native CLI | Vocabulary |
+|---|---|---|---|
+| GitHub | `github.com/<o>/<r>/(issues\|pull)/<N>` | `gh` | issue / PR (`#N`) |
+| GitLab | `gitlab.com/<g>/<p>/-/(issues\|merge_requests)/<N>` and self-hosted variants | `glab` | issue / **merge request (MR)** (`!N`) |
+| Bitbucket | `bitbucket.org/<o>/<r>/(issues\|pull-requests)/<N>` | none official; REST API | issue / PR (`#N`) |
+| Gitea | `<host>/<o>/<r>/(issues\|pulls)/<N>` | `tea` | issue / PR (`#N`) |
+| Forgejo | `<host>/<o>/<r>/(issues\|pulls)/<N>` (same patterns as Gitea) | `forgejo-cli` (early) or `tea` | issue / PR (`#N`) |
+| Self-hosted GitLab / Gitea / Forgejo | same patterns under custom domains | same CLI | same vocabulary |
+
+The classifier returns `{forge, kind, owner, repo, number, host}` for any URL input.
+
+### Bare-number resolution
+
+When the input is a bare `#<N>` or `<N>`:
+
+1. Run `git remote get-url origin` in the current worktree.
+2. Match the remote URL against the forge patterns above.
+3. Use the resolved forge for the bare-number probe (`gh pr view` for GitHub, `glab mr view` for GitLab, etc.).
+
+### Explicit prefix override
+
+Prefixes in the invocation force a specific forge and skip remote inference: `github:<N>` / `gitlab:<N>` / `bitbucket:<N>` / `gitea:<N>` / `forgejo:<N>`.
+
+### CLI abstraction
+
+All `gh` examples elsewhere in this skill are GitHub-specific. Substitute the matching native CLI per forge:
+
+- `gh issue view <N>` ↔ `glab issue view <N>` ↔ `tea issues show <N>` ↔ Bitbucket REST: `curl ... /repositories/<o>/<r>/issues/<N>`
+- `gh pr view <N>` ↔ `glab mr view <N>` ↔ `tea pulls show <N>` ↔ Bitbucket REST: `curl ... /pullrequests/<N>`
+- `gh pr merge <N> --squash` ↔ `glab mr merge <N> --squash` ↔ `tea pulls merge <N>` ↔ Bitbucket REST: `PUT /pullrequests/<N>/merge`
+
+### Vocabulary translation
+
+Internal skill logic can keep saying "PR" generically. User-facing output uses the forge's native vocabulary:
+
+- GitHub user sees `PR #123 merged` — unchanged.
+- GitLab user sees `MR !123 merged` (note the `!` sigil GitLab uses instead of `#` for MR references).
+- Bitbucket / Gitea / Forgejo users see `PR #123 merged`.
+
+Never silently translate vocabulary in error messages — if a GitLab MR is mentioned, the message says `MR !123`, not `PR #123`.
+
+### Auth-token discovery
+
+Each forge has its own auth model:
+
+- **GitHub**: `gh auth status` or `GITHUB_TOKEN` env var (default).
+- **GitLab**: `glab auth status` or `GITLAB_TOKEN` / `GL_TOKEN`.
+- **Bitbucket**: App password or workspace token (e.g. `BITBUCKET_TOKEN`).
+- **Gitea / Forgejo**: per-host token (`GITEA_TOKEN`, `FORGEJO_TOKEN`).
+
+If the required CLI or token is missing, emit a clear refusal and stop:
+
+```
+forge-cli-missing: install <cli> to use clud against <forge>
+forge-auth-missing: authenticate to <forge> via <cli> auth login
+```
+
+Don't log or persist tokens; rely on the user's existing auth.
+
+### Hard rules
+
+1. **No bundled CLIs.** Discover whether `gh` / `glab` / `tea` / etc. is on PATH; refuse if not. Don't bundle tooling.
+2. **GitHub stays the path of least resistance.** Users on GitHub see no behavior change. The forge classifier only kicks in when the URL matches a non-GitHub pattern (or the user passes an explicit non-GitHub prefix).
+3. **No silent vocabulary translation in error messages.** If a GitLab MR is mentioned, the message says `MR !123`, not `PR #123`.
+4. **No cross-forge operations.** Never move an issue between forges, link a PR to an MR, etc. Single forge per invocation.
 
 ## Mode Selection
 
