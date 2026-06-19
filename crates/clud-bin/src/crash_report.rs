@@ -91,6 +91,21 @@ pub fn install(role: &str) {
         if let Ok(dir) = crashes_dir() {
             if let Some((_, path)) = surface_previous_report(&dir) {
                 eprintln!("clud: previous crash report at {}", path.display());
+                // Opportunistic symbol-status hint: if the report's
+                // backtrace has no `at FILE:LINE` frames, point the user
+                // at `clud symbols verify` (#374 PR 3). Best-effort; if
+                // we can't read or parse the report we stay quiet.
+                if let Ok(raw) = fs::read_to_string(&path) {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(bt) = value.get("backtrace").and_then(|v| v.as_str()) {
+                            if crate::symbols::is_unsymbolicated(bt) {
+                                eprintln!(
+                                    "clud: backtrace appears unsymbolicated; run `clud symbols verify` for diagnostic details"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         let prev_hook = std::panic::take_hook();
@@ -109,7 +124,11 @@ fn current_role() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn crashes_dir() -> std::io::Result<PathBuf> {
+/// Returns `~/.clud/state/crashes/`, creating the directory if missing.
+///
+/// Exposed `pub(crate)` so the `symbols` subcommand reuses the same
+/// resolution logic (`CLUD_DAEMON_STATE_DIR` env override → home dir).
+pub(crate) fn crashes_dir() -> std::io::Result<PathBuf> {
     let state_dir = crate::daemon::default_state_dir()?;
     let dir = state_dir.join("crashes");
     fs::create_dir_all(&dir)?;

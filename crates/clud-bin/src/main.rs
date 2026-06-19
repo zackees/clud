@@ -2,7 +2,7 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
     launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
-    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    startup, symbols, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -104,6 +104,13 @@ fn main() {
     }) = &args.command
     {
         std::process::exit(trash::run(&args, paths, *cross_volume));
+    }
+
+    // #374 (PR 3): `clud symbols` inspects / verifies crash-report
+    // symbolication against the running binary. Self-contained; never
+    // launches a backend.
+    if let Some(args::Command::Symbols { subcommand }) = &args.command {
+        std::process::exit(symbols::run(&args, subcommand.clone()));
     }
 
     // `clud optimize` is machine/repo setup and never launches a backend.

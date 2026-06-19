@@ -304,6 +304,19 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: DaemonSubcommand,
     },
+    /// Inspect or verify crash-report symbolication (#374 PR 3/3).
+    ///
+    /// clud builds with `debug = "line-tables-only"` embed every line
+    /// table in the binary itself, so there are no sidecar files to
+    /// install. This subcommand is an opportunistic verifier that
+    /// confirms the running binary can symbolicate recent crash reports
+    /// in `~/.clud/state/crashes/`. `clud symbols` (bare) prints a
+    /// summary; `clud symbols install` and `clud symbols verify` exit 1
+    /// when any inspected report is unsymbolicated.
+    Symbols {
+        #[command(subcommand)]
+        subcommand: Option<SymbolsSubcommand>,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -328,7 +341,25 @@ pub enum OptimizeTarget {
     Rust,
 }
 
-/// Subcommands under `clud daemon`.
+/// Subcommands under `clud symbols`. See `crates/clud-bin/src/symbols.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum SymbolsSubcommand {
+    /// Verify that the running binary's embedded line tables resolve
+    /// recent crash report backtraces. With the embed-everywhere
+    /// strategy, this is a no-op when symbols are already present and
+    /// a diagnostic when they're not. Exits 1 if any inspected report
+    /// is unsymbolicated.
+    Install,
+    /// Same as `install` but with an explicit `--all` toggle.
+    Verify {
+        /// Verify every report under `~/.clud/state/crashes/` rather
+        /// than just the most-recent one.
+        #[arg(long = "all")]
+        all: bool,
+    },
+}
+
+/// Subcommands under `clud daemon`. See `crates/clud-bin/src/daemon/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum DaemonSubcommand {
     /// Restart the daemon process so the next CLI call uses the current binary.
@@ -450,7 +481,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "logs", "gc",
-        "ui", "trash", "optimize", "daemon", "__daemon", "__worker",
+        "ui", "trash", "optimize", "daemon", "symbols", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;
