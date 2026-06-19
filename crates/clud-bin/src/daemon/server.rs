@@ -850,14 +850,22 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    const PROST_PERF_BUDGET_NUMERATOR: u128 = 120;
+    // #380 + #387: even after the N=2->8 / N=9->25 sample bump, 1.2× was
+    // still below the median's noise floor on macOS x86 (σ ≈ 40-50ms over
+    // a ~50-195ms range → SE of median ~10ms, so the 95% CIs of JSON and
+    // prost medians overlapped at the old 1.2× threshold). 1.5× still
+    // catches a real >50% prost regression while staying above the noise.
+    // Tightening below this would require either >=100 samples or a
+    // trimmed-mean statistic — both deferred to a future perf-test
+    // redesign.
+    const PROST_PERF_BUDGET_NUMERATOR: u128 = 150;
     const PROST_PERF_BUDGET_DENOMINATOR: u128 = 100;
     // #380: macOS ARM runners exhibit bimodal latency (fast cluster ~50ms,
     // slow cluster ~200ms). At N=9 the JSON and prost medians can land on
     // opposite sides of the cluster gap purely by sample-count luck,
     // flagging a false-positive budget violation. Bump warmup to settle the
     // daemon process JIT / OS scheduler, and bump measured samples so the
-    // median's σ/√N variance drops below the 1.2× budget margin.
+    // median's σ/√N variance drops below the 1.5× budget margin.
     const DAEMON_WIRE_PERF_WARMUP_SAMPLES: usize = 8;
     const DAEMON_WIRE_PERF_MEASURED_SAMPLES: usize = 25;
 
@@ -1133,7 +1141,7 @@ mod tests {
         );
         assert!(
             prost_median <= budget,
-            "prost ListLiveCwds median latency {prost_median:?} exceeded 20% JSON budget {budget:?}; JSON median {json_median:?}; JSON samples {json_samples:?}; prost samples {prost_samples:?}"
+            "prost ListLiveCwds median latency {prost_median:?} exceeded 50% JSON budget {budget:?}; JSON median {json_median:?}; JSON samples {json_samples:?}; prost samples {prost_samples:?}"
         );
 
         let (shutdown_response, shutdown_line) = send_daemon_request_line(
