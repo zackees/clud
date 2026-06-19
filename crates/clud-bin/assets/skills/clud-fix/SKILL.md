@@ -31,11 +31,29 @@ focused signal until it passes before broad gates.
 ## Input
 
 - A GitHub issue URL such as `https://github.com/<owner>/<repo>/issues/<num>`.
-- A bare `#<num>` only when the current checkout is the right repository. Resolve
-  `<owner>/<repo>` with `gh repo view` before acting.
+- A GitHub PR URL such as `https://github.com/<owner>/<repo>/pull/<num>`.
+- A bare `#<num>` (issue) or `!<num>` (PR) only when the current checkout is the
+  right repository. Resolve `<owner>/<repo>` with `gh repo view` before acting.
 
-The argument can be a single issue or a meta/parent/burn-down issue that lists
-sub-issues. Classify the mode before planning any implementation.
+The argument can be a single issue, a meta/parent/burn-down issue that lists
+sub-issues, or a PR. Classify the mode before planning any implementation.
+
+### PR URL input
+
+A PR URL input bypasses the single-issue / meta classifier entirely and
+delegates to [[clud-pr]] PR Drive Mode: actively check CI builders + code-review
+comments (CodeRabbit, GitHub Copilot review, human reviewers) + files needing
+resolve, apply scoped fixes, push the new commits without force-push, and merge
+when the PR is clean. Once [[clud-pr]] returns with the PR merged, this skill
+validates against the underlying issue (if linked via `Closes #<N>`) and closes
+it if validation passes.
+
+Recognition rules for distinguishing PR URLs vs issue URLs vs bare numbers are
+documented under "Input Recognition" in [[clud-pr]] — same disambiguation logic
+applies here. See #395 for the spec.
+
+This makes `/clud-fix` symmetric: issue URL → "fix this issue end-to-end";
+PR URL → "drive this PR end-to-end through merge + validation."
 
 ## Goal Ownership
 
