@@ -137,6 +137,13 @@ Diagnostics and misc:
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.
+- `crash_report.rs` - process panic hook installed from `main.rs`
+  (role=`foreground`), `daemon/server.rs::run_daemon` (role=`daemon`), and
+  `daemon/worker.rs::run_worker` (role=`worker`); writes a JSON record with
+  backtrace under `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`, prunes
+  to the 50 most recent, and surfaces a one-line stderr notice on the next
+  launch when a new report appears. `install()` is idempotent — the hook
+  itself is installed once per process; re-calling only updates the role tag.
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.

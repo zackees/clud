@@ -1,13 +1,20 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
-    ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log, launch_setup,
-    loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache, startup, trampoline,
-    trash, ui, verbose_log, wasm, worktrees,
+    crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
+    launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
+    startup, trampoline, trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
+    // Install the crash reporter first so a panic during the rest of startup
+    // (arg parsing, runtime-cache hop, drop-target registration, ...) still
+    // writes a JSON report under ~/.clud/state/crashes/. Idempotent; the
+    // daemon and worker process entries re-call install() with their own
+    // role to retag any future panic without reinstalling the hook.
+    crash_report::install("foreground");
+
     verbose_log::init_launch_clock();
 
     if let Err(err) = runtime_cache::hop_to_runtime_cache_if_enabled() {
