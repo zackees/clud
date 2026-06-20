@@ -58,12 +58,24 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
     let tools_root = tools_root()
         .ok_or_else(|| io::Error::other("could not resolve home directory for ~/.clud/tools/"))?;
     let tool_path = resolve_tool_path(&tools_root, rel_path);
+
+    // Bootstrap the daemon if it isn't already running. The daemon owns
+    // the bundled-tools install (`daemon/server.rs::run_daemon`), so
+    // ensuring it is up guarantees the tool file exists on disk by the
+    // time we resolve `tool_path`. Idempotent + fast in steady state
+    // (one file-stat + TCP probe). `CLUD_NO_DAEMON` short-circuits this
+    // path; in that mode the user has accepted that bundled tools may
+    // not be present and we fall through to the NotFound below.
+    if let Ok(state_dir) = crate::daemon::default_state_dir() {
+        let _ = crate::daemon::ensure_daemon(&state_dir);
+    }
+
     if !tool_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "bundled tool not found at {}; the BUNDLED_TOOLS install \
-                 may have been skipped or failed",
+                "bundled tool not found at {}; the daemon-owned install \
+                 may have been skipped (CLUD_NO_DAEMON?) or failed",
                 tool_path.display(),
             ),
         ));

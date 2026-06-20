@@ -122,6 +122,19 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: None,
         quiet_ok: false,
     },
+    BundledTool {
+        rel_path: "hooks/block-bad-cmd.py",
+        body: include_str!("../assets/tools/hooks/block-bad-cmd.py"),
+        // PreToolUse hook: reads a small JSON blob from stdin, decides
+        // allow/deny, exits. The decision IS the work; killing mid-run
+        // loses the verdict — `Killable`. Hook runners cap themselves
+        // at a few seconds, so the 30s ceiling here is a backstop, not
+        // an expected wall-clock.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(30),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
     // docker-build tool family — implementation of zackees/clud#421.
     // Trampoline filename uses a hyphen to match the public CLI shape
     // (`clud tool run docker/docker-build.py soldr <path>`); sibling

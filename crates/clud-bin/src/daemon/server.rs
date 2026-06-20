@@ -95,6 +95,17 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         default_live_sessions_provider(),
     );
 
+    // Install bundled Python tools (`~/.clud/tools/*`) before announcing
+    // readiness. PreToolUse hooks like `clud tool run hooks/block-bad-cmd.py`
+    // would otherwise NotFound on the first invocation after a fresh
+    // install — they call `ensure_daemon` and then immediately exec uv
+    // against the resolved path. The install is idempotent and cheap
+    // (one stat per tool on the steady state); a few extra ms before
+    // info-file write is the right tradeoff against silent hook
+    // failures. Errors are logged inside `ensure_installed` and never
+    // abort daemon startup.
+    crate::tool_install::ensure_installed();
+
     let info = DaemonInfo {
         pid: std::process::id(),
         port,
