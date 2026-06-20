@@ -44,6 +44,7 @@ pub mod subprocess;
 pub mod symbols;
 pub mod tool_install;
 pub mod tool_run;
+pub mod tool_tee;
 pub mod tools;
 pub mod trampoline;
 pub mod trash;
