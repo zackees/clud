@@ -264,7 +264,35 @@ def _nested_shell_command(words: list[str]) -> str | None:
     return None
 
 
-def _forbidden_reason(command_text: str) -> str | None:
+def _python_rust_hybrid_root(cwd: Path | None) -> Path | None:
+    """Walk up from `cwd` looking for the nearest ancestor directory that
+    contains BOTH `pyproject.toml` and `Cargo.toml`. That coexistence is
+    the signal that `uv run`'s project auto-sync may rebuild a native
+    Rust extension (maturin, setuptools-rust, or a custom build script
+    that calls cargo) — the case the gate is trying to prevent.
+
+    Returns the directory path when found, else `None`. A repo with
+    only one of the two files (pure Python, pure Rust) is not a hybrid
+    and never triggers the block.
+    """
+    if cwd is None:
+        return None
+    try:
+        anchor = cwd.resolve()
+    except OSError:
+        return None
+    for candidate in (anchor, *anchor.parents):
+        try:
+            has_py = (candidate / "pyproject.toml").is_file()
+            has_rs = (candidate / "Cargo.toml").is_file()
+        except OSError:
+            continue
+        if has_py and has_rs:
+            return candidate
+    return None
+
+
+def _forbidden_reason(command_text: str, cwd: Path | None = None) -> str | None:
     if "bad cmd" in command_text.lower():
         return f'command contains "bad cmd". Full command: {command_text!r}'
 
@@ -280,7 +308,7 @@ def _forbidden_reason(command_text: str) -> str | None:
         first = _program_name(words[0])
         nested = _nested_shell_command(words)
         if nested is not None:
-            nested_reason = _forbidden_reason(nested)
+            nested_reason = _forbidden_reason(nested, cwd=cwd)
             if nested_reason is not None:
                 return nested_reason
             continue
@@ -311,29 +339,62 @@ def _forbidden_reason(command_text: str) -> str | None:
 
             # Require an opt-out for the project auto-sync. Without one of
             # --no-project / --no-sync / --frozen, `uv run` reinstalls the
-            # project into the venv on every invocation. On maturin-backed
-            # repos that is a full Rust+PyO3 rebuild (~10s+ per call) for
-            # operations that don't need the native extension at all
-            # (lint, version-check, doc generation, etc.). The escape hatch
-            # for the legitimate full-rebuild case is `./test` — see
-            # zackees/soldr#805.
+            # project into the venv on every invocation. In a Python+Rust
+            # hybrid (a pyproject.toml + Cargo.toml in the same project
+            # root) that auto-sync can trigger a full native rebuild
+            # (maturin, setuptools-rust, or a build script that shells
+            # out to cargo) — minutes of compile for operations that
+            # don't need the native extension at all (lint, version-check,
+            # doc generation, etc.). The escape hatch for the legitimate
+            # full-rebuild case is `./test` — see zackees/soldr#805.
+            #
+            # Scoping: file-based heuristic instead of parsing pyproject
+            # build-backend. Pure-Python repos (FastLED uses hatchling)
+            # have no Cargo.toml at all, so they fall through.
             uv_safe_flags = {"--no-project", "--no-sync", "--frozen"}
             has_uv_safe_flag = any(
                 w in uv_safe_flags or any(w.startswith(f + "=") for f in uv_safe_flags)
                 for w in words[2:]
             )
             if not has_uv_safe_flag:
-                return (
-                    "`uv run` without --no-project / --no-sync / --frozen "
-                    "triggers the project auto-sync, which rebuilds the "
-                    "native extension (full maturin compile on "
-                    "maturin-backed projects). Pass `--no-project` for "
-                    "pure-Python scripts, `--no-sync` to use the existing "
-                    "venv, or `--frozen` to lock to the existing lockfile. "
-                    "Escape hatch for a legitimate full-rebuild: run "
-                    "`./test` (or `bash ./test`) — the canonical "
-                    "full-build entrypoint. See zackees/soldr#805."
-                )
+                hybrid_root = _python_rust_hybrid_root(cwd)
+                if hybrid_root is not None:
+                    # Env-var escape hatch: lets a caller intentionally
+                    # eat the auto-sync cost (e.g. they DO want the
+                    # rebuild, or they're running a one-off where the
+                    # latency is fine). Allow the command but emit a
+                    # yellow warning so the rebuild isn't silent and the
+                    # calling agent knows what just happened. Logged too
+                    # so the bypass is visible in the audit trail.
+                    if os.environ.get("CLUD_UV_RUST_ALLOW_ALL") == "1":
+                        _log(f"CLUD_UV_RUST_ALLOW_ALL=1 bypassed hybrid block at {hybrid_root}")
+                        print(
+                            "\x1b[33mWARNING: AUTO COMPILING RUST because of uv run\n"
+                            f"CLUD_UV_RUST_ALLOW_ALL=1 is set, so the auto-sync gate at {hybrid_root} was bypassed.\n"
+                            "DIRECTIVE TO AGENT: the next `uv run` in this project root will "
+                            "trigger a full native rebuild (can take minutes). If you don't need "
+                            "a fresh build, pass `--no-sync` (use existing venv), `--no-project` "
+                            "(pure-Python script), or `--frozen` (lock to existing lockfile) to "
+                            "skip the auto-sync. If you DO need a clean rebuild, prefer `./test` "
+                            "(or `bash ./test`) — the canonical full-build entrypoint.\x1b[0m",
+                            file=sys.stderr,
+                        )
+                    else:
+                        return (
+                            f"this hook fired because {hybrid_root} contains "
+                            "both pyproject.toml and Cargo.toml (a Python+Rust "
+                            "hybrid project). `uv run` without --no-project / "
+                            "--no-sync / --frozen triggers the project "
+                            "auto-sync, which on a Rust-backed wheel is a full "
+                            "native rebuild. Pass `--no-project` for pure-Python "
+                            "scripts, `--no-sync` to use the existing venv, or "
+                            "`--frozen` to lock to the existing lockfile. "
+                            "Escape hatch for a legitimate full-rebuild: run "
+                            "`./test` (or `bash ./test`) — the canonical "
+                            "full-build entrypoint. Set "
+                            "CLUD_UV_RUST_ALLOW_ALL=1 to bypass this gate "
+                            "with a warning. See zackees/soldr#805."
+                        )
             continue
 
         if first in RUST_TOOLS:
@@ -356,9 +417,16 @@ def main() -> int:
 
     tool_name = payload.get("tool_name") or payload.get("toolName") or "?"
     command_text = _extract_command(payload)
-    _log(f"tool_name={tool_name!r} command={command_text!r}")
+    cwd_raw = payload.get("cwd") or payload.get("cwdPath")
+    if not isinstance(cwd_raw, str) or not cwd_raw:
+        cwd_raw = os.getcwd()
+    try:
+        cwd = Path(cwd_raw)
+    except (TypeError, ValueError):
+        cwd = None
+    _log(f"tool_name={tool_name!r} cwd={cwd_raw!r} command={command_text!r}")
 
-    reason = _forbidden_reason(command_text)
+    reason = _forbidden_reason(command_text, cwd=cwd)
     if reason is not None:
         msg = f"[block-bad-cmd hook] refusing to run {tool_name!r}: {reason}"
         _log(f"BLOCKED: {msg}")
