@@ -38,6 +38,7 @@ pub mod session_index;
 pub mod session_registry;
 pub mod shim_install;
 pub mod shim_resolve;
+pub mod shim_session;
 pub mod shim_uv;
 pub mod skill_install;
 pub mod skills;
