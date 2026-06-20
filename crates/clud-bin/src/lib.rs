@@ -50,6 +50,7 @@ pub mod tool_log;
 pub mod tool_query;
 pub mod tool_run;
 pub mod tool_tee;
+pub mod tool_termination;
 pub mod tool_watchdog;
 pub mod tools;
 pub mod trampoline;
