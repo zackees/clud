@@ -535,10 +535,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            report.ran,
-            vec!["bundled-skills", "codex-hook-normalize"]
-        );
+        assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
         assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
         assert!(!home.path().join(".claude/skills").exists());
@@ -568,10 +565,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            report.ran,
-            vec!["bundled-skills", "claude-drift-skills"]
-        );
+        assert_eq!(report.ran, vec!["bundled-skills", "claude-drift-skills"]);
         assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
         // Launch setup no longer installs bundled tools — the daemon owns
