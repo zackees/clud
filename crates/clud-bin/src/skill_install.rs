@@ -64,11 +64,19 @@ const BUNDLED_SKILLS: &[Skill] = &[
         name: "clud-extern-repos",
         content: include_str!("../../../skills/clud-extern-repos/SKILL.md"),
     },
+    Skill {
+        name: "clud-pr-merge",
+        content: include_str!("../../../skills/clud-pr-merge/SKILL.md"),
+    },
 ];
 
 /// Retired skill names to remove from managed installs. Keep entries here
 /// after deleting the source file so upgrades can clean old user homes.
-const PURGED_SKILLS: &[&str] = &["clud-pr-merge"];
+///
+/// Empty list — `clud-pr-merge` was brought back from the grave; the
+/// purge mechanism + tests stay intact for any future retirement, but
+/// nothing is currently retired.
+const PURGED_SKILLS: &[&str] = &[];
 
 /// Compatibility helper that runs the install/check using the current home
 /// directory. Production launch setup calls [`ensure_installed_at`] only for
@@ -437,8 +445,8 @@ mod tests {
             "clud-fix missing from Claude drift bundle"
         );
         assert!(
-            !names.contains(&"clud-pr-merge"),
-            "clud-pr-merge should be retired into PURGED_SKILLS"
+            names.contains(&"clud-pr-merge"),
+            "clud-pr-merge missing from bundle (was restored after the purge)"
         );
         assert!(
             names.contains(&"clud-issue"),
@@ -470,26 +478,35 @@ mod tests {
     }
 
     #[test]
-    fn purge_list_contains_retired_pr_merge_skill() {
+    fn purge_list_is_currently_empty() {
+        // `clud-pr-merge` was the sole entry; it was brought back from
+        // the grave. The PURGED_SKILLS mechanism stays in the code for
+        // any future retirement (see the two tests below that exercise
+        // the purge machinery with a fake retired name), but no skill
+        // is currently retired.
         assert!(
-            PURGED_SKILLS.contains(&"clud-pr-merge"),
-            "retired merge skill must stay in the purge list"
+            PURGED_SKILLS.is_empty(),
+            "PURGED_SKILLS is expected to be empty; got {:?}",
+            PURGED_SKILLS
         );
     }
 
     #[test]
     fn retired_managed_skill_is_removed() {
+        // Uses a fake skill name (not in BUNDLED_SKILLS / PURGED_SKILLS)
+        // so the test exercises the purge mechanism without depending
+        // on the live retirement state.
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("clud-pr-merge");
+        let dir = tmp.path().join("fake-retired-skill");
         let target = dir.join("SKILL.md");
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             &target,
-            "---\nname: clud-pr-merge\n---\n<!-- managed-by: clud -->\n",
+            "---\nname: fake-retired-skill\n---\n<!-- managed-by: clud -->\n",
         )
         .unwrap();
 
-        purge_retired_skill_at(&target, "clud-pr-merge");
+        purge_retired_skill_at(&target, "fake-retired-skill");
 
         assert!(
             !dir.exists(),
@@ -500,12 +517,12 @@ mod tests {
     #[test]
     fn retired_unmanaged_skill_is_preserved() {
         let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join("clud-pr-merge");
+        let dir = tmp.path().join("fake-retired-skill");
         let target = dir.join("SKILL.md");
         fs::create_dir_all(&dir).unwrap();
         fs::write(&target, "user custom skill\n").unwrap();
 
-        purge_retired_skill_at(&target, "clud-pr-merge");
+        purge_retired_skill_at(&target, "fake-retired-skill");
 
         assert!(
             target.exists(),
