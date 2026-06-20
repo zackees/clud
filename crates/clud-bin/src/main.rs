@@ -2,7 +2,8 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
     launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
-    startup, symbols, tool_run, tools, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    startup, symbols, tool_info, tool_list, tool_run, tools, trampoline, trash, ui, verbose_log,
+    wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -136,6 +137,40 @@ fn main() {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("[clud] tool run failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Slice 3 of #427: `clud tool list` — list invocations in this session.
+    if let Some(args::Command::Tool {
+        subcommand: args::ToolSubcommand::List { json, long },
+    }) = &args.command
+    {
+        match tool_list::run(*json, *long) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool list failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Slice 3 of #427: `clud tool info [<ref>]` — show state + last N lines.
+    if let Some(args::Command::Tool {
+        subcommand:
+            args::ToolSubcommand::Info {
+                reference,
+                pid,
+                lines,
+                json,
+            },
+    }) = &args.command
+    {
+        match tool_info::run(reference.as_deref(), *pid, *lines, *json) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool info failed: {err}");
                 std::process::exit(2);
             }
         }
