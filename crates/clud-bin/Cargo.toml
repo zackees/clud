@@ -63,7 +63,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 terminal_size = "0.4"
+# Plain serde-friendly TOML deserializer. Used by the shell::git_bash_resolver
+# manifest reader (issue #447); the existing toml_edit dep keeps round-trip
+# editing of settings.toml, but a one-shot `toml::from_str` is the cleanest
+# fit for an embedded vendor manifest.
+toml = "0.8"
 toml_edit = "0.25.11"
+# Issue #447: pure-Rust zip extraction for the vendored Git Bash bundle.
+# `deflate` is the only compression method present in git-bash-bin.zip;
+# disabling default features avoids pulling bzip2/zstd C deps.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 vt100 = "0.16"
 vte = "0.15"
 wasmi = "0.40.0"

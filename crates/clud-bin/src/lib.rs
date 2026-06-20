@@ -36,6 +36,7 @@ pub mod runtime_cache;
 pub mod session;
 pub mod session_index;
 pub mod session_registry;
+pub mod shell;
 pub mod shim_install;
 pub mod shim_resolve;
 pub mod shim_session;
