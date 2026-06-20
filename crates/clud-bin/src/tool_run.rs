@@ -32,6 +32,7 @@ use crate::session_index::{
 };
 use crate::tool_install::tools_root;
 use crate::tool_tee::TeeWriter;
+use crate::tool_termination::{emit_termination, ExitKind};
 use crate::tool_watchdog::{Watchdog, WatchdogDecision};
 use crate::tools::clud_uv_cache_dir;
 
@@ -146,6 +147,7 @@ fn run_with_session(
     });
     process.start().map_err(io::Error::other)?;
 
+    let started_at_ms = unix_millis_now();
     let _ = append_event(
         ctx,
         &IndexEvent::Started {
@@ -157,7 +159,7 @@ fn run_with_session(
             // would need a dedicated API. For now record what we know.
             pid: 0,
             pid_start_time: 0,
-            started_at_ms: unix_millis_now(),
+            started_at_ms,
         },
     );
 
@@ -192,31 +194,54 @@ fn run_with_session(
                         let _ = process.kill();
                         let _ = drain_into_tee(&process, &mut tee, emitted);
                         let _ = tee.flush();
-                        eprintln!("{}", watchdog.render_aborted(reason));
+                        let ended_at_ms = unix_millis_now();
                         let _ = append_event(
                             ctx,
                             &IndexEvent::Aborted {
                                 tool_id,
                                 reason: reason.label().to_string(),
-                                ended_at_ms: unix_millis_now(),
+                                ended_at_ms,
                             },
+                        );
+                        // Slice 6: structured JSON payload + pointer block.
+                        let _ = emit_termination(
+                            ctx.session_pid,
+                            tool_id,
+                            rel_path,
+                            args,
+                            started_at_ms,
+                            ended_at_ms,
+                            watchdog.started_at.elapsed(),
+                            ExitKind::Aborted(reason),
+                            None,
                         );
                         return Ok(124); // standard "command timed out" exit.
                     }
                     WatchdogDecision::ResumeLater(reason) => {
                         // Resumable: the world owns the state; the
                         // observer succeeded. Detach and exit 0 with the
-                        // in-progress JSON so the caller can re-invoke.
+                        // in-progress payload so the caller can re-invoke.
                         let _ = drain_into_tee(&process, &mut tee, emitted);
                         let _ = tee.flush();
-                        eprintln!("{}", watchdog.render_in_progress(reason));
+                        let ended_at_ms = unix_millis_now();
                         let _ = append_event(
                             ctx,
                             &IndexEvent::Aborted {
                                 tool_id,
                                 reason: format!("resumable:{}", reason.label()),
-                                ended_at_ms: unix_millis_now(),
+                                ended_at_ms,
                             },
+                        );
+                        let _ = emit_termination(
+                            ctx.session_pid,
+                            tool_id,
+                            rel_path,
+                            args,
+                            started_at_ms,
+                            ended_at_ms,
+                            watchdog.started_at.elapsed(),
+                            ExitKind::InProgress(reason),
+                            None,
                         );
                         return Ok(0);
                     }
@@ -228,14 +253,33 @@ fn run_with_session(
     let _ = drain_into_tee(&process, &mut tee, emitted);
     let _ = tee.flush();
 
+    let ended_at_ms = unix_millis_now();
     let _ = append_event(
         ctx,
         &IndexEvent::Finished {
             tool_id,
             exit_code,
-            ended_at_ms: unix_millis_now(),
+            ended_at_ms,
         },
     );
+
+    // Slice 6: emit the structured payload + pointer block on every
+    // non-zero exit so the agent always sees how to find the log.
+    // We deliberately skip emission for the zero-exit happy path —
+    // pointers there would be noise after a successful run.
+    if exit_code != 0 {
+        let _ = emit_termination(
+            ctx.session_pid,
+            tool_id,
+            rel_path,
+            args,
+            started_at_ms,
+            ended_at_ms,
+            watchdog.started_at.elapsed(),
+            ExitKind::Failed,
+            Some(exit_code),
+        );
+    }
 
     Ok(exit_code)
 }
