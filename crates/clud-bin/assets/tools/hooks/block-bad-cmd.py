@@ -359,19 +359,42 @@ def _forbidden_reason(command_text: str, cwd: Path | None = None) -> str | None:
             if not has_uv_safe_flag:
                 hybrid_root = _python_rust_hybrid_root(cwd)
                 if hybrid_root is not None:
-                    return (
-                        f"this hook fired because {hybrid_root} contains "
-                        "both pyproject.toml and Cargo.toml (a Python+Rust "
-                        "hybrid project). `uv run` without --no-project / "
-                        "--no-sync / --frozen triggers the project "
-                        "auto-sync, which on a Rust-backed wheel is a full "
-                        "native rebuild. Pass `--no-project` for pure-Python "
-                        "scripts, `--no-sync` to use the existing venv, or "
-                        "`--frozen` to lock to the existing lockfile. "
-                        "Escape hatch for a legitimate full-rebuild: run "
-                        "`./test` (or `bash ./test`) — the canonical "
-                        "full-build entrypoint. See zackees/soldr#805."
-                    )
+                    # Env-var escape hatch: lets a caller intentionally
+                    # eat the auto-sync cost (e.g. they DO want the
+                    # rebuild, or they're running a one-off where the
+                    # latency is fine). Allow the command but emit a
+                    # yellow warning so the rebuild isn't silent and the
+                    # calling agent knows what just happened. Logged too
+                    # so the bypass is visible in the audit trail.
+                    if os.environ.get("CLUD_UV_RUST_ALLOW_ALL") == "1":
+                        _log(f"CLUD_UV_RUST_ALLOW_ALL=1 bypassed hybrid block at {hybrid_root}")
+                        print(
+                            "\x1b[33mWARNING: AUTO COMPILING RUST because of uv run\n"
+                            f"CLUD_UV_RUST_ALLOW_ALL=1 is set, so the auto-sync gate at {hybrid_root} was bypassed.\n"
+                            "DIRECTIVE TO AGENT: the next `uv run` in this project root will "
+                            "trigger a full native rebuild (can take minutes). If you don't need "
+                            "a fresh build, pass `--no-sync` (use existing venv), `--no-project` "
+                            "(pure-Python script), or `--frozen` (lock to existing lockfile) to "
+                            "skip the auto-sync. If you DO need a clean rebuild, prefer `./test` "
+                            "(or `bash ./test`) — the canonical full-build entrypoint.\x1b[0m",
+                            file=sys.stderr,
+                        )
+                    else:
+                        return (
+                            f"this hook fired because {hybrid_root} contains "
+                            "both pyproject.toml and Cargo.toml (a Python+Rust "
+                            "hybrid project). `uv run` without --no-project / "
+                            "--no-sync / --frozen triggers the project "
+                            "auto-sync, which on a Rust-backed wheel is a full "
+                            "native rebuild. Pass `--no-project` for pure-Python "
+                            "scripts, `--no-sync` to use the existing venv, or "
+                            "`--frozen` to lock to the existing lockfile. "
+                            "Escape hatch for a legitimate full-rebuild: run "
+                            "`./test` (or `bash ./test`) — the canonical "
+                            "full-build entrypoint. Set "
+                            "CLUD_UV_RUST_ALLOW_ALL=1 to bypass this gate "
+                            "with a warning. See zackees/soldr#805."
+                        )
             continue
 
         if first in RUST_TOOLS:
