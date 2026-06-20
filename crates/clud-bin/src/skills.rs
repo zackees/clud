@@ -593,10 +593,9 @@ mod tests {
             );
         }
 
-        assert!(
-            !skill.contains("clud-pr-merge"),
-            "clud-fix must not depend on the retired merge skill"
-        );
+        // clud-pr-merge was retired then brought back; clud-fix may now
+        // reference it again as a delegation target. No assertion either
+        // way — both shapes are valid.
     }
 
     #[test]
