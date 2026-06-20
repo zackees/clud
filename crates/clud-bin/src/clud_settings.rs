@@ -19,6 +19,8 @@ pub const DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE: &str =
     "plugins.\"github@openai-curated\".enabled=false";
 const CODEX_CONFIG_OVERRIDES_NOTE: &str =
     "clud passes these strings as repeated `codex -c` config overrides before the Codex subcommand. Edit config_overrides to change plugin/connector behavior.";
+const SHELL_DISABLE_POWERSHELL_NOTE: &str =
+    "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustOptimizeSettings {
@@ -185,6 +187,87 @@ pub fn save_launch_setup_scope_at(
     })
 }
 
+pub fn load_shell_disable_powershell_for_backend(backend: Backend) -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_shell_disable_powershell_for_backend_at(&home, backend)
+}
+
+pub fn load_shell_disable_powershell_for_backend_at(
+    home: &Path,
+    backend: Backend,
+) -> Result<bool, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(resolve_shell_disable_powershell(&document, backend))
+}
+
+pub fn save_shell_disable_powershell(enabled: bool) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_shell_disable_powershell_at(&home, enabled)
+}
+
+pub fn save_shell_disable_powershell_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let shell = object_entry(document, "shell");
+        shell
+            .entry("disable_powershell_note".to_string())
+            .or_insert_with(|| Value::String(SHELL_DISABLE_POWERSHELL_NOTE.to_string()));
+        shell.insert("disable_powershell".to_string(), Value::Bool(enabled));
+    })
+}
+
+pub fn save_shell_disable_powershell_for_backend(
+    backend: Backend,
+    enabled: Option<bool>,
+) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_shell_disable_powershell_for_backend_at(&home, backend, enabled)
+}
+
+pub fn save_shell_disable_powershell_for_backend_at(
+    home: &Path,
+    backend: Backend,
+    enabled: Option<bool>,
+) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let shell = object_entry(document, "shell");
+        shell
+            .entry("disable_powershell_note".to_string())
+            .or_insert_with(|| Value::String(SHELL_DISABLE_POWERSHELL_NOTE.to_string()));
+        let backend_entry = shell
+            .entry(backend_settings_key(backend).to_string())
+            .or_insert_with(|| json!({}));
+        if !backend_entry.is_object() {
+            *backend_entry = json!({});
+        }
+        let backend_obj = backend_entry.as_object_mut().unwrap();
+        match enabled {
+            Some(value) => {
+                backend_obj.insert("disable_powershell".to_string(), Value::Bool(value));
+            }
+            None => {
+                backend_obj.insert("disable_powershell".to_string(), Value::Null);
+            }
+        }
+    })
+}
+
+fn resolve_shell_disable_powershell(document: &Value, backend: Backend) -> bool {
+    let shell = document.get("shell");
+    if let Some(per_backend) = shell
+        .and_then(|item| item.get(backend_settings_key(backend)))
+        .and_then(|item| item.get("disable_powershell"))
+        .and_then(Value::as_bool)
+    {
+        return per_backend;
+    }
+    shell
+        .and_then(|item| item.get("disable_powershell"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn save_rust_optimize_settings(settings: &RustOptimizeSettings) -> Result<(), SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
     save_rust_optimize_settings_at(&home, settings)
@@ -319,6 +402,28 @@ fn parse_legacy_toml_settings(path: &Path, text: &str) -> Result<Value, Settings
                     .unwrap_or(&defaults.soldr_version),
             }),
         );
+    }
+
+    if let Some(shell) = document.get("shell").and_then(Item::as_table) {
+        if let Some(enabled) = shell.get("disable_powershell").and_then(Item::as_bool) {
+            object_entry(&mut root, "shell")
+                .insert("disable_powershell".to_string(), Value::Bool(enabled));
+        }
+        for backend_key in ["claude", "codex"] {
+            let Some(per_backend) = shell.get(backend_key).and_then(Item::as_table) else {
+                continue;
+            };
+            let Some(value) = per_backend
+                .get("disable_powershell")
+                .and_then(Item::as_bool)
+            else {
+                continue;
+            };
+            object_entry(&mut root, "shell").insert(
+                backend_key.to_string(),
+                json!({ "disable_powershell": value }),
+            );
+        }
     }
 
     Ok(root)
@@ -678,5 +783,117 @@ mod tests {
         assert_eq!(json["hook_health"]["auto_fix_hooks"], true);
         assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
         assert_eq!(json["optimize"]["rust"]["soldr_version"], "9.9.9");
+    }
+
+    #[test]
+    fn missing_shell_section_defaults_to_false_for_both_backends() {
+        let home = tempdir().unwrap();
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap()
+        );
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap()
+        );
+        assert!(!settings_path_at(home.path()).exists());
+    }
+
+    #[test]
+    fn top_level_disable_propagates_to_both_backends_when_overrides_null() {
+        let home = tempdir().unwrap();
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap()
+        );
+        assert!(load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap());
+    }
+
+    #[test]
+    fn backend_override_wins_over_top_level() {
+        let home = tempdir().unwrap();
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+        save_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude, Some(false))
+            .unwrap();
+
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap(),
+            "claude override should resolve false even when top-level is true"
+        );
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap(),
+            "codex with null override should inherit top-level true"
+        );
+    }
+
+    #[test]
+    fn saves_shell_disable_powershell_preserves_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"codex":{"scope":"global"}}}"#,
+        )
+        .unwrap();
+
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["shell"]["disable_powershell"], true);
+        assert!(
+            json["shell"]["disable_powershell_note"]
+                .as_str()
+                .unwrap()
+                .contains("PreToolUse hook"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn clearing_backend_override_falls_back_to_top_level() {
+        let home = tempdir().unwrap();
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+        save_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude, Some(false))
+            .unwrap();
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap()
+        );
+
+        save_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude, None).unwrap();
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap(),
+            "after clearing override claude should inherit top-level true"
+        );
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            json["shell"]["claude"]["disable_powershell"].is_null(),
+            "cleared override should serialize as JSON null, got: {text}"
+        );
+    }
+
+    #[test]
+    fn legacy_toml_shell_section_is_migrated() {
+        let home = tempdir().unwrap();
+        let legacy = legacy_settings_path_at(home.path());
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy,
+            "[shell]\ndisable_powershell = true\n\n[shell.codex]\ndisable_powershell = false\n",
+        )
+        .unwrap();
+
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap(),
+            "claude should inherit top-level true from legacy TOML"
+        );
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap(),
+            "codex override should override top-level"
+        );
     }
 }
