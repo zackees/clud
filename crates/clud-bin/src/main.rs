@@ -2,7 +2,8 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
     launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
-    startup, symbols, tool_run, tools, trampoline, trash, ui, verbose_log, wasm, worktrees,
+    startup, symbols, tool_info, tool_ledger, tool_list, tool_log, tool_run, tools, trampoline,
+    trash, ui, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -136,6 +137,111 @@ fn main() {
             Ok(code) => std::process::exit(code),
             Err(err) => {
                 eprintln!("[clud] tool run failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Slice 3 of #427: `clud tool list` — list invocations in this session.
+    if let Some(args::Command::Tool {
+        subcommand: args::ToolSubcommand::List { json, long },
+    }) = &args.command
+    {
+        match tool_list::run(*json, *long) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool list failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Slice 3 of #427: `clud tool info [<ref>]` — show state + last N lines.
+    if let Some(args::Command::Tool {
+        subcommand:
+            args::ToolSubcommand::Info {
+                reference,
+                pid,
+                lines,
+                json,
+            },
+    }) = &args.command
+    {
+        match tool_info::run(reference.as_deref(), *pid, *lines, *json) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool info failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Slice 4 of #427: `clud tool log <ref> [filters]`.
+    if let Some(args::Command::Tool {
+        subcommand:
+            args::ToolSubcommand::Log {
+                reference,
+                pid,
+                stream,
+                since,
+                until,
+                between,
+                grep,
+                head,
+                tail,
+                json,
+            },
+    }) = &args.command
+    {
+        let Some(stream_sel) = tool_log::StreamSelector::parse(stream) else {
+            eprintln!("[clud] tool log: --stream must be stdout|stderr|combined");
+            std::process::exit(2);
+        };
+        let between_pair = between.as_ref().and_then(|v| {
+            if v.len() == 2 {
+                Some((v[0].as_str(), v[1].as_str()))
+            } else {
+                None
+            }
+        });
+        match tool_log::run(
+            reference.as_deref(),
+            *pid,
+            stream_sel,
+            since.as_deref(),
+            until.as_deref(),
+            between_pair,
+            grep.as_deref(),
+            *head,
+            *tail,
+            *json,
+        ) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool log failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Slice 4 of #427: `clud tool ledger [--tool X] [--session ...]`.
+    if let Some(args::Command::Tool {
+        subcommand:
+            args::ToolSubcommand::Ledger {
+                tool,
+                session,
+                json,
+            },
+    }) = &args.command
+    {
+        let Some(scope) = tool_ledger::SessionScope::parse(session) else {
+            eprintln!("[clud] tool ledger: --session must be current|previous|all");
+            std::process::exit(2);
+        };
+        match tool_ledger::run(tool.as_deref(), scope, *json) {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("[clud] tool ledger failed: {err}");
                 std::process::exit(2);
             }
         }

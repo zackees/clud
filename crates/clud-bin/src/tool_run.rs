@@ -21,14 +21,25 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
+use running_process::{
+    CommandSpec, NativeProcess, ProcessConfig, ProcessError, StderrMode, StdinMode,
+};
 
 use crate::session_index::{
     allocate_next_id, append_event, unix_millis_now, IndexEvent, SessionContext,
 };
 use crate::tool_install::tools_root;
+use crate::tool_tee::TeeWriter;
+use crate::tool_termination::{emit_termination, ExitKind};
+use crate::tool_watchdog::{Watchdog, WatchdogDecision};
 use crate::tools::clud_uv_cache_dir;
+
+/// Poll interval for draining captured stdout/stderr into the tee writer.
+/// 100ms keeps the visual feel of live output without burning CPU on
+/// idle tools; the captured-output API is lock-cheap so this is fine.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Resolve and execute a bundled tool by relative path. Returns the
 /// inner `uv` process's exit code so the CLI can surface it verbatim.
@@ -79,30 +90,29 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
 
     let env: Vec<(String, String)> = build_child_env(&cache_dir);
 
-    // Slice 1 of #427: record a Started event in the session index when
-    // a clud session is active. When `SessionContext::from_env()` returns
-    // None (CI / minimal / no-daemon case) we silently skip — the tool
-    // still runs, just without lifecycle tracking. Slice 2 will replace
-    // the placeholder PID/start_time with values captured from the
-    // running subprocess.
+    // Resolve session context up front. None means no daemon / CI fallback;
+    // we run the tool in plain passthrough mode (no capture, no tee, no
+    // index — same behavior as before #427 slice 1).
     let session_ctx = SessionContext::from_env();
     let tool_id = session_ctx
         .as_ref()
         .and_then(|ctx| allocate_next_id(ctx).ok());
-    if let (Some(ctx), Some(tool_id)) = (session_ctx.as_ref(), tool_id) {
-        let _ = append_event(
-            ctx,
-            &IndexEvent::Started {
-                tool_id,
-                tool: rel_path.to_string(),
-                args: args.to_vec(),
-                pid: 0,            // slice 2 fills this with the spawned subprocess PID
-                pid_start_time: 0, // slice 2 fills this with the OS start time
-                started_at_ms: unix_millis_now(),
-            },
-        );
-    }
 
+    // Two execution modes:
+    //   - With session: capture + tee + index lifecycle events.
+    //   - Without session: original passthrough (no capture, no tee).
+    // The session-less path keeps `clud tool run` runnable in CI / minimal
+    // containers where the daemon isn't present.
+    match (session_ctx.as_ref(), tool_id) {
+        (Some(ctx), Some(tool_id)) => run_with_session(ctx, tool_id, rel_path, args, argv, env),
+        _ => run_passthrough(argv, env),
+    }
+}
+
+/// Plain passthrough: child stdout/stderr go straight to the caller's
+/// terminal, no capture, no JSONL log. Pre-slice-2 behavior, retained for
+/// the no-daemon / CI fallback case.
+fn run_passthrough(argv: Vec<String>, env: Vec<(String, String)>) -> io::Result<i32> {
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),
         cwd: None,
@@ -115,20 +125,187 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
         nice: None,
     });
     process.start().map_err(io::Error::other)?;
-    let exit_code = process.wait(None).map_err(io::Error::other)?;
+    process.wait(None).map_err(io::Error::other)
+}
 
-    if let (Some(ctx), Some(tool_id)) = (session_ctx.as_ref(), tool_id) {
-        let _ = append_event(
-            ctx,
-            &IndexEvent::Finished {
-                tool_id,
-                exit_code,
-                ended_at_ms: unix_millis_now(),
-            },
+/// Session-attached run: capture stdout/stderr through `running_process`,
+/// poll-drain into the [`TeeWriter`] every 100ms (so the user still sees
+/// live output, modulo the poll interval), and append Started/Finished
+/// events to the session index.
+fn run_with_session(
+    ctx: &SessionContext,
+    tool_id: u32,
+    rel_path: &str,
+    args: &[String],
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+) -> io::Result<i32> {
+    // Open the per-invocation log dir + JSONL writers BEFORE starting the
+    // subprocess so any open-time failure surfaces immediately (no
+    // half-spawned child with no log destination).
+    let log_dir = ctx.tool_log_dir(tool_id);
+    let mut tee = TeeWriter::open(&log_dir)?;
+
+    let process = NativeProcess::new(ProcessConfig {
+        command: CommandSpec::Argv(argv),
+        cwd: None,
+        env: Some(env),
+        capture: true,
+        stderr_mode: StderrMode::Pipe,
+        creationflags: None,
+        create_process_group: false,
+        stdin_mode: StdinMode::Inherit,
+        nice: None,
+    });
+    process.start().map_err(io::Error::other)?;
+
+    let started_at_ms = unix_millis_now();
+    let _ = append_event(
+        ctx,
+        &IndexEvent::Started {
+            tool_id,
+            tool: rel_path.to_string(),
+            args: args.to_vec(),
+            // The actual subprocess PID/start_time come from the daemon's
+            // process-tree view; capturing them through running_process
+            // would need a dedicated API. For now record what we know.
+            pid: 0,
+            pid_start_time: 0,
+            started_at_ms,
+        },
+    );
+
+    // Slice 5 of #427: build the watchdog from the tool's BundledTool
+    // entry (kill_semantics, command_timeout, progress_timeout, quiet_ok).
+    // Unknown tools default to Killable + 60m + no progress watchdog.
+    let mut watchdog = Watchdog::for_rel_path(rel_path);
+
+    // Poll-drain loop. `wait(Some(100ms))` returns `Err(ProcessError::Timeout)`
+    // while the child is still running; we drain captured output each
+    // iteration and emit it via the tee. On `Ok` (child exited), we do a
+    // final drain so any output written during the last 100ms still lands
+    // in the log.
+    //
+    // Each iteration also asks the watchdog whether either timer has
+    // fired. If so we either kill (killable) or emit an in-progress
+    // terminal (resumable) and break out.
+    let mut emitted = 0usize;
+    let mut last_drain_count = 0usize;
+    let exit_code = loop {
+        match process.wait(Some(DRAIN_POLL_INTERVAL)) {
+            Ok(code) => break code,
+            Err(ProcessError::Timeout) => {
+                emitted = drain_into_tee(&process, &mut tee, emitted);
+                if emitted > last_drain_count {
+                    watchdog.note_output();
+                    last_drain_count = emitted;
+                }
+                match watchdog.check() {
+                    WatchdogDecision::Continue => continue,
+                    WatchdogDecision::KillAndAbort(reason) => {
+                        let _ = process.kill();
+                        let _ = drain_into_tee(&process, &mut tee, emitted);
+                        let _ = tee.flush();
+                        let ended_at_ms = unix_millis_now();
+                        let _ = append_event(
+                            ctx,
+                            &IndexEvent::Aborted {
+                                tool_id,
+                                reason: reason.label().to_string(),
+                                ended_at_ms,
+                            },
+                        );
+                        // Slice 6: structured JSON payload + pointer block.
+                        let _ = emit_termination(
+                            ctx.session_pid,
+                            tool_id,
+                            rel_path,
+                            args,
+                            started_at_ms,
+                            ended_at_ms,
+                            watchdog.started_at.elapsed(),
+                            ExitKind::Aborted(reason),
+                            None,
+                        );
+                        return Ok(124); // standard "command timed out" exit.
+                    }
+                    WatchdogDecision::ResumeLater(reason) => {
+                        // Resumable: the world owns the state; the
+                        // observer succeeded. Detach and exit 0 with the
+                        // in-progress payload so the caller can re-invoke.
+                        let _ = drain_into_tee(&process, &mut tee, emitted);
+                        let _ = tee.flush();
+                        let ended_at_ms = unix_millis_now();
+                        let _ = append_event(
+                            ctx,
+                            &IndexEvent::Aborted {
+                                tool_id,
+                                reason: format!("resumable:{}", reason.label()),
+                                ended_at_ms,
+                            },
+                        );
+                        let _ = emit_termination(
+                            ctx.session_pid,
+                            tool_id,
+                            rel_path,
+                            args,
+                            started_at_ms,
+                            ended_at_ms,
+                            watchdog.started_at.elapsed(),
+                            ExitKind::InProgress(reason),
+                            None,
+                        );
+                        return Ok(0);
+                    }
+                }
+            }
+            Err(other) => return Err(io::Error::other(other)),
+        }
+    };
+    let _ = drain_into_tee(&process, &mut tee, emitted);
+    let _ = tee.flush();
+
+    let ended_at_ms = unix_millis_now();
+    let _ = append_event(
+        ctx,
+        &IndexEvent::Finished {
+            tool_id,
+            exit_code,
+            ended_at_ms,
+        },
+    );
+
+    // Slice 6: emit the structured payload + pointer block on every
+    // non-zero exit so the agent always sees how to find the log.
+    // We deliberately skip emission for the zero-exit happy path —
+    // pointers there would be noise after a successful run.
+    if exit_code != 0 {
+        let _ = emit_termination(
+            ctx.session_pid,
+            tool_id,
+            rel_path,
+            args,
+            started_at_ms,
+            ended_at_ms,
+            watchdog.started_at.elapsed(),
+            ExitKind::Failed,
+            Some(exit_code),
         );
     }
 
     Ok(exit_code)
+}
+
+/// Drain captured combined output from `emitted..` and route it through
+/// the tee writer. Returns the new emitted index. Best-effort: emit
+/// errors are swallowed so a failing tee write never prevents the tool
+/// from completing.
+fn drain_into_tee(process: &NativeProcess, tee: &mut TeeWriter, emitted: usize) -> usize {
+    let combined = process.captured_combined();
+    if combined.len() > emitted {
+        let _ = tee.emit_batch(&combined[emitted..]);
+    }
+    combined.len()
 }
 
 /// Resolve a bundled-tool path under the supplied tools-root. Trivially

@@ -396,6 +396,83 @@ pub enum ToolSubcommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tool invocations in the current clud session — slice 3 of #427.
+    List {
+        /// Emit a JSON array instead of the human-readable table.
+        #[arg(long = "json")]
+        json: bool,
+        /// Show the long-form `<session-pid>-<tool-id>` ID in the table.
+        #[arg(long = "long")]
+        long: bool,
+    },
+    /// Query the full JSONL log of one invocation with optional filters
+    /// — slice 4 of #427.
+    Log {
+        /// Reference to the invocation. Same forms as `tool info`.
+        reference: Option<String>,
+        /// Look up by the tool's own OS PID instead of session-local id.
+        #[arg(long = "pid")]
+        pid: Option<u32>,
+        /// Which stream to read: `stdout`, `stderr`, or `combined` (default).
+        #[arg(long = "stream", default_value = "combined")]
+        stream: String,
+        /// Only entries newer than `now - <duration>` (e.g. `5m`, `1h`).
+        #[arg(long = "since")]
+        since: Option<String>,
+        /// Only entries older than `now - <duration>`.
+        #[arg(long = "until")]
+        until: Option<String>,
+        /// Absolute time range as two integer epoch-ms values.
+        #[arg(long = "between", number_of_values = 2)]
+        between: Option<Vec<String>>,
+        /// Substring match on the decoded line text.
+        #[arg(long = "grep")]
+        grep: Option<String>,
+        /// Show only the first N matching entries.
+        #[arg(long = "head")]
+        head: Option<usize>,
+        /// Show only the last N matching entries.
+        #[arg(long = "tail")]
+        tail: Option<usize>,
+        /// Emit the raw JSONL stream instead of decoded text.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// History of tool invocations matching optional filters — slice 4
+    /// of #427.
+    Ledger {
+        /// Restrict to one tool name.
+        #[arg(long = "tool")]
+        tool: Option<String>,
+        /// Session scope: `current` (default), `previous`, or `all`.
+        #[arg(long = "session", default_value = "current")]
+        session: String,
+        /// Emit a JSON array instead of the human-readable table.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Show current state + last N lines of stdout/stderr for one
+    /// invocation — slice 3 of #427.
+    Info {
+        /// Reference to the invocation. Accepts:
+        /// * a bare session-local integer (`3`)
+        /// * a long-form `<session-pid>-<tool-id>` (`47180-3`)
+        /// * `@<tool-name>` or `@<tool-name>:N` for N-th-most-recent
+        ///
+        /// Omit to default to the most recently started invocation.
+        reference: Option<String>,
+        /// Look up by the tool's own OS PID instead of the session-local
+        /// integer. Bare integers always mean tool-id, not PID — use this
+        /// flag to disambiguate.
+        #[arg(long = "pid")]
+        pid: Option<u32>,
+        /// Number of trailing stdout/stderr lines to show per stream.
+        #[arg(long = "lines", default_value_t = 20)]
+        lines: usize,
+        /// Emit a JSON object instead of the human-readable view.
+        #[arg(long = "json")]
+        json: bool,
+    },
 }
 
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.

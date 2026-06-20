@@ -376,6 +376,170 @@ def _exit_after_cancel(code: int, on_label: str, pr: int, repo: str | None,
     sys.exit(code)
 
 
+QUEUE_WARN_SEC = 600  # 10 min queued = surface a warning (#440)
+STEP_WARN_SEC = 300  # 5 min on the same step = possible stuck (#440)
+
+
+def _now_epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _parse_iso(ts: str | None) -> float | None:
+    """Parse an RFC3339 / ISO-8601 timestamp into epoch seconds. Returns
+    None on any malformed input."""
+    if not ts:
+        return None
+    try:
+        # Strip trailing Z; datetime.fromisoformat handles offsets but
+        # not the 'Z' suffix until Python 3.11.
+        ts = ts.replace("Z", "+00:00")
+        from datetime import datetime
+        return datetime.fromisoformat(ts).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def fetch_run_jobs(run_id: str, repo: str | None) -> dict | None:
+    """Call gh run view --json jobs,status,conclusion,createdAt,updatedAt
+    for the given run; return the parsed dict or None on error."""
+    args = ["run", "view", str(run_id), "--json",
+            "jobs,status,conclusion,createdAt,updatedAt,workflowName"]
+    if repo:
+        args.extend(["--repo", repo])
+    res = gh(*args)
+    if not res.ok:
+        return None
+    try:
+        return json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def aggregate_jobs(run_info: dict) -> dict:
+    """Compute per-poll aggregate stats + per-job rows from a
+    `gh run view --json jobs` payload."""
+    jobs = run_info.get("jobs", []) or []
+    counts = {"total": len(jobs), "queued": 0, "in_progress": 0,
+              "completed": 0, "failed": 0}
+    current: list[dict] = []
+    warnings: list[str] = []
+    now = time.time()
+    for j in jobs:
+        status = j.get("status") or ""
+        conclusion = j.get("conclusion") or ""
+        if status == "queued":
+            counts["queued"] += 1
+            started = _parse_iso(j.get("startedAt") or j.get("createdAt"))
+            if started and (now - started) > QUEUE_WARN_SEC:
+                warnings.append(
+                    f"{j.get('name', '?')} has been queued for "
+                    f"{int(now - started)}s (> {QUEUE_WARN_SEC}s threshold)"
+                )
+        elif status == "in_progress":
+            counts["in_progress"] += 1
+            current.append(_summarize_job(j, now, warnings))
+        elif status == "completed":
+            counts["completed"] += 1
+            if conclusion in {"failure", "cancelled", "timed_out"}:
+                counts["failed"] += 1
+    total = counts["total"] or 1  # avoid div-by-zero
+    percent = int(round((counts["completed"] / total) * 100))
+    return {
+        "counts": counts,
+        "percent_complete": percent,
+        "current_jobs": current,
+        "warnings": warnings,
+    }
+
+
+def _summarize_job(j: dict, now: float, warnings: list[str]) -> dict:
+    name = j.get("name", "?")
+    started = _parse_iso(j.get("startedAt"))
+    elapsed_sec = int(now - started) if started else None
+    current_step = None
+    for step in j.get("steps", []) or []:
+        if step.get("status") == "in_progress":
+            step_started = _parse_iso(step.get("startedAt"))
+            step_elapsed = int(now - step_started) if step_started else None
+            current_step = {
+                "name": step.get("name", "?"),
+                "number": step.get("number"),
+                "started_at": step.get("startedAt"),
+                "elapsed_sec": step_elapsed,
+            }
+            if step_elapsed and step_elapsed > STEP_WARN_SEC:
+                warnings.append(
+                    f"{name}: step '{step.get('name', '?')}' has held "
+                    f"for {step_elapsed}s (> {STEP_WARN_SEC}s threshold)"
+                )
+            break
+    return {
+        "name": name,
+        "started_at": j.get("startedAt"),
+        "elapsed_sec": elapsed_sec,
+        "current_step": current_step,
+    }
+
+
+def emit_progress_report(pr: int, repo: str | None,
+                          snapshot: "PRSnapshot",
+                          checks: list["CheckRow"]) -> None:
+    """Emit a per-poll progress report covering active workflow runs
+    associated with the PR's head SHA.
+
+    JSONL line on stdout (schema-versioned), human-readable per-job
+    rows on stderr."""
+    seen_runs: set[str] = set()
+    for c in checks:
+        if c.bucket != "pending":
+            continue
+        run_id = _extract_run_id_from_link(c.link)
+        if not run_id or run_id in seen_runs:
+            continue
+        seen_runs.add(run_id)
+        info = fetch_run_jobs(run_id, repo)
+        if not info:
+            continue
+        agg = aggregate_jobs(info)
+        report = {
+            "v": 1,
+            "ts_ms": _now_epoch_ms(),
+            "pr": pr,
+            "run_id": run_id,
+            "sha": snapshot.head_sha[:7] if snapshot.head_sha else None,
+            "workflow": info.get("workflowName"),
+            "status": info.get("status"),
+            "conclusion": info.get("conclusion") or None,
+            "jobs": agg["counts"],
+            "percent_complete": agg["percent_complete"],
+            "current_jobs": agg["current_jobs"],
+            "warnings": agg["warnings"],
+        }
+        print(json.dumps(report))
+        # Human-readable rows on stderr so stdout stays machine-parseable.
+        c1 = agg["counts"]
+        print(
+            f"  {info.get('workflowName', '?')} run {run_id} "
+            f"sha={(snapshot.head_sha or '?')[:7]} "
+            f"status={info.get('status')} "
+            f"{c1['completed']}/{c1['total']} jobs done "
+            f"({agg['percent_complete']}%)",
+            file=sys.stderr,
+        )
+        for j in agg["current_jobs"]:
+            step = j.get("current_step") or {}
+            step_str = step.get("name", "—") if step else "—"
+            print(
+                f"    {j['name']:<24} in_progress  "
+                f"{step_str:<22} "
+                f"{j.get('elapsed_sec', '—')}s "
+                f"step elapsed {step.get('elapsed_sec', '—')}s",
+                file=sys.stderr,
+            )
+        for w in agg["warnings"]:
+            print(f"    WARN: {w}", file=sys.stderr)
+
+
 def watch(pr: int, repo: str | None, interval: int, timeout: int,
          require_pattern: str | None, opts: CancelOptions) -> int:
     deadline = time.monotonic() + timeout
@@ -425,6 +589,17 @@ def watch(pr: int, repo: str | None, interval: int, timeout: int,
         checks = fetch_checks(pr, repo)
         pending = [c for c in checks if c.bucket == "pending"]
         failing = [c for c in checks if c.bucket == "fail"]
+
+        # Per-job progress reporting (#440). Emits structured JSONL on
+        # stdout + a human-readable per-job line block on stderr so the
+        # observer can answer "what's actually happening?" without
+        # dropping out to `gh run view` manually.
+        try:
+            emit_progress_report(pr, repo, snapshot, checks)
+        except Exception as exc:  # noqa: BLE001
+            # Progress reporting is advisory; never let it break the
+            # primary watch loop.
+            print(f"NOTE  progress report failed: {exc}", file=sys.stderr)
 
         # Classify each failing check as required or advisory.
         for c in failing:

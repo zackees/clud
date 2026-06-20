@@ -71,6 +71,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-review/SKILL.md"),
     },
     BundledSkill {
+        name: "clud-python-lint-deadcode",
+        skill_md: include_str!("../assets/skills/clud-python-lint-deadcode/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-tag-release",
         skill_md: include_str!("../assets/skills/clud-tag-release/SKILL.md"),
     },
@@ -93,6 +97,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "clud-docker-mac-x86",
         skill_md: include_str!("../assets/skills/clud-docker-mac-x86/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-docker-linux-build",
+        skill_md: include_str!("../assets/skills/clud-docker-linux-build/SKILL.md"),
     },
 ];
 

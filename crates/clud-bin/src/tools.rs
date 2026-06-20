@@ -135,6 +135,61 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: None,
         quiet_ok: true,
     },
+    // docker-build tool family — implementation of zackees/clud#421.
+    // Trampoline filename uses a hyphen to match the public CLI shape
+    // (`clud tool run docker/docker-build.py soldr <path>`); sibling
+    // per-stack files use underscores so Python `importlib` can load
+    // them as modules without a hyphen-in-identifier syntax error.
+    //
+    // All four are `Killable`: the underlying work IS the running docker
+    // subprocess (init writes files; up/run/shell/verify/clean drive a
+    // container). Killing the python process kills the docker exec —
+    // and re-invocation re-runs from scratch (idempotent for `up`,
+    // re-issues the command for `run`).
+    BundledTool {
+        rel_path: "docker/docker-build.py",
+        body: include_str!("../assets/tools/docker/docker-build.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
+        rel_path: "docker/docker_build_soldr.py",
+        body: include_str!("../assets/tools/docker/docker_build_soldr.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
+        rel_path: "docker/docker_build_python.py",
+        body: include_str!("../assets/tools/docker/docker_build_python.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
+        rel_path: "docker/docker_build_cpp.py",
+        body: include_str!("../assets/tools/docker/docker_build_cpp.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
+        rel_path: "python/lint_deadcode.py",
+        body: include_str!("../assets/tools/python/lint_deadcode.py"),
+        // Vulture scans the source tree and exits with the report.
+        // The process IS the work — `Killable`. 2-minute progress
+        // watchdog because vulture should be emitting status during
+        // its walk.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: Some(std::time::Duration::from_secs(120)),
+        quiet_ok: false,
+    },
 ];
 
 /// The single source of truth for the `UV_CACHE_DIR` value used by every
@@ -274,6 +329,86 @@ mod tests {
             assert!(
                 tool.body.contains(code_line),
                 "pr_merge_watch.py docstring must document `{code_line}`",
+            );
+        }
+    }
+
+    /// Issue #421: the docker-build tool family ships in the bundle.
+    /// All four entries (trampoline + three per-stack tools) must be
+    /// present or the SKILL.md / consumer skills break.
+    #[test]
+    fn bundled_includes_docker_build_family() {
+        let names: Vec<&str> = BUNDLED_TOOLS.iter().map(|t| t.rel_path).collect();
+        for required in [
+            "docker/docker-build.py",
+            "docker/docker_build_soldr.py",
+            "docker/docker_build_python.py",
+            "docker/docker_build_cpp.py",
+        ] {
+            assert!(
+                names.contains(&required),
+                "BUNDLED_TOOLS must include {required}; got {names:?}",
+            );
+        }
+    }
+
+    /// The docker-build trampoline must document its dispatch contract
+    /// in the docstring so callers (the SKILL.md, other skills) can
+    /// rely on its argv shape. Locks the public CLI shape in via the
+    /// embedded body so a docstring rewrite that breaks the contract
+    /// trips this test before the bad tool ships.
+    #[test]
+    fn docker_build_trampoline_documents_dispatch_shape() {
+        let trampoline = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker-build.py")
+            .expect("docker-build trampoline must be in BUNDLED_TOOLS");
+        for required_line in [
+            "clud tool run docker/docker-build.py <stack> <path> [subcommand]",
+            "clud tool run docker/docker-build.py doctor",
+            "Stacks: soldr",
+            "doctor",
+        ] {
+            assert!(
+                trampoline.body.contains(required_line),
+                "docker-build.py must document `{required_line}` in its body",
+            );
+        }
+    }
+
+    /// Each per-stack tool must declare its v0 scope honestly: the
+    /// soldr stack ships init+up+run+shell+clean+doctor; python+cpp
+    /// ship init only (other subcommands exit 64). Lock that in.
+    #[test]
+    fn docker_build_stack_v0_scopes_match_issue_421() {
+        let soldr = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_build_soldr.py")
+            .expect("soldr stack tool must exist");
+        for required_marker in [
+            "def cmd_init",
+            "def cmd_up",
+            "def cmd_run",
+            "def cmd_doctor",
+        ] {
+            assert!(
+                soldr.body.contains(required_marker),
+                "soldr stack tool must implement `{required_marker}` in v0",
+            );
+        }
+        for stub_stack in ["python", "cpp"] {
+            let path = format!("docker/docker_build_{stub_stack}.py");
+            let tool = BUNDLED_TOOLS
+                .iter()
+                .find(|t| t.rel_path == path)
+                .unwrap_or_else(|| panic!("{stub_stack} stack tool must exist"));
+            assert!(
+                tool.body.contains("def cmd_init"),
+                "{stub_stack} stack must at least implement init in v0",
+            );
+            assert!(
+                tool.body.contains("not implemented in v0"),
+                "{stub_stack} stack must clearly mark not-yet-implemented subcommands",
             );
         }
     }
