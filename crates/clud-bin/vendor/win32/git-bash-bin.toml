@@ -1,0 +1,26 @@
+# Lazy-fetched portable Git Bash bundle. Resolved at runtime when
+# shell.disable_powershell=true and Claude is the active backend so
+# CLAUDE_CODE_GIT_BASH_PATH can point at a known-good bash.exe without
+# requiring a system-wide Git for Windows install.
+#
+# Refs https://github.com/zackees/clud/issues/447.
+
+[git_bash_bin]
+url = "https://github.com/zackees/zcmds_win32/raw/main/assets/git-bash-bin.zip"
+size_bytes = 9384477
+
+# sha256 of the .zip body. Compute with `sha256sum git-bash-bin.zip` or
+# `curl -sL <url> | sha256sum`. Bumping this requires bumping
+# upstream_commit_sha in lockstep.
+sha256 = "24321f20a5e02c16d09b42facfaf10cf38a1167bcf4c5116d0c3a31bb6191ba6"
+
+# Upstream pin so a force-push to zcmds_win32 main can't change the bytes
+# we resolve. The runtime fetch URL stays the raw.githubusercontent.com
+# `main` path (302 from github.com/.../raw/...), since raw.githubusercontent
+# blob fetches are content-addressable enough for the sha256 to catch any
+# drift — the pin here is documentation for whoever bumps the manifest.
+upstream_repo = "zackees/zcmds_win32"
+upstream_commit_sha = "f5eab1dc23b807bdc202d08fe19b2ff1b89308b9"
+
+# Path of the entry-point binary inside the extracted zip tree.
+relative_bash_path = "git-bash-bin/bash.exe"
