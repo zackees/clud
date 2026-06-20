@@ -264,6 +264,15 @@ pub enum Command {
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+    /// Issue #408: invoke a bundled clud-managed Python tool under
+    /// `~/.clud/tools/<rel_path>` via `uv run`, with `UV_CACHE_DIR` pinned
+    /// to `~/.clud/cache/uv/` so per-tool venvs stay under clud's own state
+    /// root. Layer 1 of the three-layer `UV_CACHE_DIR` enforcement; the
+    /// only documented invocation path for bundled tools.
+    Tool {
+        #[command(subcommand)]
+        subcommand: ToolSubcommand,
+    },
     /// Install and persist fast local tooling defaults.
     Optimize {
         /// Toolchain family to optimize. Defaults to Rust.
@@ -370,6 +379,22 @@ pub enum DaemonSubcommand {
         /// Emit machine-readable JSON.
         #[arg(long = "json")]
         json: bool,
+    },
+}
+
+/// Subcommands under `clud tool`. See `crates/clud-bin/src/tool_run.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ToolSubcommand {
+    /// Invoke a bundled tool by its `~/.clud/tools/`-relative path,
+    /// forwarding any trailing args to the tool. Example:
+    /// `clud tool run github/pr_merge_watch.py 404 --interval 30`.
+    Run {
+        /// Path under `~/.clud/tools/` (e.g. `github/pr_merge_watch.py`).
+        rel_path: String,
+        /// Arguments forwarded verbatim to the tool. Use `--` to pass flags
+        /// the clud parser would otherwise consume.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -481,7 +506,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "logs", "gc",
-        "ui", "trash", "optimize", "daemon", "symbols", "__daemon", "__worker",
+        "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

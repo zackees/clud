@@ -13,7 +13,7 @@ use crossterm::terminal;
 
 use crate::args::Args;
 use crate::backend::Backend;
-use crate::{codex_hook_normalize, skill_install, skills};
+use crate::{codex_hook_normalize, skill_install, skills, tool_install};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchSetupScope {
@@ -278,6 +278,34 @@ impl HarnessSetupAction for ClaudeDriftSkillsAction {
     }
 }
 
+/// Issue #408: install bundled Python tools to `~/.clud/tools/` on launch,
+/// mirroring the bundled-skills pattern. Backend-agnostic — registered
+/// once per backend so the install runs regardless of which agent is
+/// being launched. Each install is idempotent so the second call is a
+/// silent no-op on the steady state.
+struct BundledToolsAction {
+    backend: Backend,
+}
+
+impl HarnessSetupAction for BundledToolsAction {
+    fn name(&self) -> &'static str {
+        "bundled-tools"
+    }
+
+    fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    fn supports(&self, scope: LaunchSetupScope) -> bool {
+        matches!(scope, LaunchSetupScope::Global)
+    }
+
+    fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
+        tool_install::ensure_installed_at(ctx.home);
+        Ok(())
+    }
+}
+
 struct CodexHookNormalizeAction;
 
 impl HarnessSetupAction for CodexHookNormalizeAction {
@@ -313,6 +341,12 @@ pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
             backend: Backend::Claude,
         }),
         Box::new(BundledSkillsAction {
+            backend: Backend::Codex,
+        }),
+        Box::new(BundledToolsAction {
+            backend: Backend::Claude,
+        }),
+        Box::new(BundledToolsAction {
             backend: Backend::Codex,
         }),
         Box::new(ClaudeDriftSkillsAction),
@@ -529,7 +563,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
+        assert_eq!(
+            report.ran,
+            vec!["bundled-skills", "bundled-tools", "codex-hook-normalize"]
+        );
         assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
         assert!(!home.path().join(".claude/skills").exists());
@@ -559,9 +596,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.ran, vec!["bundled-skills", "claude-drift-skills"]);
+        assert_eq!(
+            report.ran,
+            vec!["bundled-skills", "bundled-tools", "claude-drift-skills"]
+        );
         assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
+        // BundledToolsAction creates `.clud/tools/` even on an empty
+        // registry's run by virtue of `ensure_installed_at` being called.
+        // The empty registry means no children are written, so the
+        // `.clud/` dir itself stays absent — confirm.
         assert!(!home.path().join(".clud").exists());
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout":5"#), "{hooks}");
