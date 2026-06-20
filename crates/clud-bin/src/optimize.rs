@@ -474,7 +474,50 @@ fn extract_archive(archive: &Path, temp_dir: &Path, asset: &SoldrAsset) -> Resul
     }
 }
 
+/// PEP 723 helper that extracts a `.zip` via the stdlib `zipfile` module.
+/// Embedded at compile time so the binary is self-contained; written to a
+/// temp path on demand and invoked via `uv run --script`.
+const EXTRACT_ZIP_PY: &str = include_str!("../assets/scripts/extract_zip.py");
+
 fn expand_zip(archive: &Path, temp_dir: &Path) -> Result<i32, String> {
+    // Primary path: invoke the bundled Python extractor via `uv run --script`.
+    // `--no-project` keeps the resolver from walking ancestors of CWD and
+    // accidentally syncing whatever pyproject.toml happens to be there.
+    let script_path = temp_dir.join("__clud_extract_zip.py");
+    std::fs::write(&script_path, EXTRACT_ZIP_PY)
+        .map_err(|error| format!("write extract_zip helper to temp: {error}"))?;
+    let argv = vec![
+        "uv".to_string(),
+        "run".to_string(),
+        "--no-project".to_string(),
+        "--script".to_string(),
+        script_path.to_string_lossy().to_string(),
+        archive.to_string_lossy().to_string(),
+        temp_dir.to_string_lossy().to_string(),
+    ];
+    match run_status_string(argv, None) {
+        Ok(status) => {
+            // Best-effort cleanup; if the rm fails the temp dir gets wiped
+            // by the outer caller anyway.
+            let _ = std::fs::remove_file(&script_path);
+            Ok(status)
+        }
+        Err(uv_error) => {
+            let _ = std::fs::remove_file(&script_path);
+            expand_zip_via_powershell(archive, temp_dir, &uv_error)
+        }
+    }
+}
+
+/// PowerShell fallback used only when `uv run --script` could not be
+/// spawned (uv missing from PATH). Honors the original two-step probe
+/// of `powershell.exe` then `pwsh.exe`. Will be skipped entirely when
+/// the upcoming `shell.disable_powershell` setting is true (forthcoming).
+fn expand_zip_via_powershell(
+    archive: &Path,
+    temp_dir: &Path,
+    uv_error: &str,
+) -> Result<i32, String> {
     let args = vec![
         "-NoProfile".to_string(),
         "-ExecutionPolicy".to_string(),
@@ -490,13 +533,16 @@ fn expand_zip(archive: &Path, temp_dir: &Path) -> Result<i32, String> {
             .collect(),
         None,
     )
-    .or_else(|first_error| {
+    .or_else(|powershell_error| {
         run_status_string(
             std::iter::once("pwsh".to_string()).chain(args).collect(),
             None,
         )
-        .map_err(|second_error| {
-            format!("failed to start powershell ({first_error}) or pwsh ({second_error})")
+        .map_err(|pwsh_error| {
+            format!(
+                "uv run --script unavailable ({uv_error}); PowerShell fallback also failed \
+                 (powershell: {powershell_error}; pwsh: {pwsh_error})"
+            )
         })
     })
 }
