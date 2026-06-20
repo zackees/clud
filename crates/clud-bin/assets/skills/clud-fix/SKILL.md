@@ -136,8 +136,10 @@ the outer goal until the issue-level completion condition is proven.
 For a single issue, use a goal equivalent to:
 
 ```text
-/goal Fix issue #N: PR(s) merged to main, issue closed, and reported reproduction validated fixed on current main.
+/goal Fix issue #N: all relevant PRs merged to main, any dependent issues closed (including their PRs), this issue closed, and the reported reproduction validated fixed on current main.
 ```
+
+The "all relevant PRs" / "dependent issues" phrasing is deliberate. When a fix legitimately needs more than one PR — a foundation PR plus follow-up slice PRs — the inner `/goal` text must already authorize that scope so the Stop hook does not wedge on a single-PR literal reading. See the "Scope Expansion" section below for the mid-flight pivot mechanics that satisfy this broader goal.
 
 For a meta/parent/burn-down issue, use a goal equivalent to:
 
@@ -310,6 +312,16 @@ All conditions are mandatory:
    evidence." [[clud-pr]] owns the disposable worktree, RED -> GREEN cycle,
    lint/test gates, PR creation, CI/review fix loop, and merge mode.
 
+7a. **Scope-expansion check.** Before validating on main, inspect [[clud-pr]]'s
+   returned evidence. If the merged PR's body references the issue with
+   `Refs #<num>` instead of `Closes #<num>` — i.e. the work is foundation-only
+   and additional PRs are needed to ship the user-visible feature this issue
+   tracks — the single-issue goal is not satisfiable by this PR alone. Pivot
+   to meta mode per the **Scope Expansion** section below before continuing
+   to step 8. Do not silently declare the goal done; do not also try to close
+   the issue. Validation (step 8) still runs after the meta-mode burn-down
+   completes, against the final state of main.
+
 8. **Validate on main.** After merge, run:
 
    ```bash
@@ -330,6 +342,57 @@ All conditions are mandatory:
 
 10. **Report.** Return the merged PR URL(s), the closed issue URL, and validation
    evidence.
+
+## Scope Expansion (Single-Issue → Meta Pivot)
+
+A single-issue run can discover mid-implementation that the user's stated goal
+cannot be satisfied by one PR. The trigger is observable: [[clud-pr]] returns
+evidence of a merged PR whose body has `Refs #<num>` instead of `Closes #<num>`
+because the work is foundation-only and additional PRs are needed to ship the
+user-visible feature the issue tracks.
+
+When that happens, do not declare the goal done. Pivot to meta mode:
+
+1. **Surface the expansion explicitly.** One-line user-visible report:
+
+   ```text
+   scope-expansion detected: <one-sentence reason>. Filing sub-issues and continuing in meta mode.
+   ```
+
+2. **File sub-issues** that decompose the remaining work. Each sub-issue gets:
+
+   - a focused acceptance checklist
+   - file-level scope notes (which modules, files, or RPCs each slice touches)
+   - `Parent: tracked by #<N>` pointer to the original issue
+   - `Out of scope (handled in later slices)` pointer to its successors
+   - the canonical `Closes #<sub-N>` keyword in its eventual PR body
+
+3. **Convert the parent into a meta.** Update the parent issue's title prefix
+   to `meta(...)` and prepend a `## Slice burn-down` checklist section pointing
+   at the new sub-issues. The parent now matches the meta-issue classifier so
+   subsequent runs route to the Meta workflow automatically.
+
+4. **Re-enter the Meta workflow** against the parent. The outer `/goal` stays
+   installed and is now reachable because the meta workflow closes each
+   sub-issue in sequence, ticks the parent checklist, and closes the parent.
+
+5. **Per-sub-issue caps still apply.** Runaway scope expansion is bounded by
+   the existing per-sub-issue PR cap (10) and validation retry cap (2). The
+   outer meta loop has no cap, same as today's meta workflow.
+
+This pivot is the **mid-flight equivalent** of the meta workflow's enumeration
+step — scope discovered during implementation is no different from scope
+enumerated at intake. The distinction from manufactured meta-level work
+(forbidden — see Failure Modes) is that scope-expansion sub-issues correspond
+to observable, deferred work the parent issue's intent demands; manufactured
+sub-issues are fabricated to extend an idle loop.
+
+This branch was added because of an incident where the foundation PR for a
+multi-slice feature was opened with `Refs #N` (not `Closes #N`), merged, and
+then the run stopped — leaving the outer user `/goal` ("issue closed +
+feature verified fixed") wedged. The skill correctly recognized the literal
+goal was unsatisfiable but did not take the obvious next step of filing the
+follow-up sub-issues and continuing. The pivot above is that next step.
 
 ## Meta / Parent / Burn-Down Workflow
 
@@ -452,7 +515,12 @@ This skill must work the same through clud for Claude and Codex:
 - Depending on a standalone merge skill; use [[clud-pr]] PR merge mode.
 - Treating a checked checklist item as proof without verifying the child issue
   state on GitHub.
-- Manufacturing new child issues after the open-child list is empty.
+- Manufacturing new child issues to keep an idle meta loop fed when the
+  open-child list is empty. Filing sub-issues to capture
+  legitimately-deferred scope discovered mid-implementation IS allowed (see
+  Scope Expansion); fabricating arbitrary work to extend an idle loop is
+  NOT. The distinction: are the sub-issues backed by scope the parent
+  issue's intent demands, or invented to satisfy a literal goal text?
 - Treating a user-installed outer `/goal /clud-fix <url>` wrap as authoritative.
   This skill owns its `/goal` lifecycle (see Goal Ownership). An outer wrap
   installs a parallel hook whose literal text the evaluator reads as a strict

@@ -231,6 +231,25 @@ Invoked when Mode Selection resolves to **PR URL / number, OPEN**. The intent is
 9. **Clean tree gate.** Run `git status` inside the worktree. Commit source changes that belong in the PR. Delete tmp, scratch, and build artifacts. The worktree must be clean before push.
 10. **Commit.** Use a conventional commit. Reference the issue when one exists (`Closes #<num>` in the commit body or PR body). For freeform tasks, summarize the task instead.
 11. **Push and open PR.** `git push -u origin <branch>`, then `gh pr create`. The body should include the issue link when present, a concise summary, and tests run.
+11a. **Scope-Expansion Checkpoint.** After the PR is opened, audit honestly: does this PR alone close the user's stated issue? Concrete tells that one PR is **not** enough:
+
+   - The PR body uses `Refs #<num>` instead of `Closes #<num>` because the work is foundation/scaffolding-only and follow-up PRs are required for the user-visible feature.
+   - The "Out of scope" / "Deferred follow-ups" section of the PR body names additional discrete work items.
+   - The implementation revealed dependent issues (in this repo or a sibling repo) that must also close before the user's stated goal is satisfied.
+
+   If any of those hold, surface the expansion explicitly:
+
+   ```text
+   scope-expansion detected: <one-sentence reason>. Filing sub-issues and handing off to /clud-fix meta mode.
+   ```
+
+   Then:
+   - File sub-issues for each remaining slice (focused acceptance checklist, file-level scope notes, `Parent: tracked by #<N>` pointer).
+   - Convert the parent issue into a meta — update title prefix to `meta(...)`, prepend a `## Slice burn-down` checklist section pointing at the new sub-issues.
+   - In your final response, recommend the user run `/clud-fix #<parent-num>` (or, if the parent run was already inside [[clud-fix]] meta mode, hand back to the outer orchestrator). The outer `/goal` (if any) stays installed and is now reachable because /clud-fix will drive the meta burn-down to closure.
+
+   When this checkpoint does NOT trip — the PR genuinely closes the issue — proceed to step 12.
+
 12. **Remove the worktree.** Follow the **Tear down** process-audit pattern in the Worktree Workspace section: wait for useful matching subprocesses, stop only exact abandoned/timed-out matching process trees, then run `git worktree remove`, `git worktree prune`, confirm the entry is gone, and verify the main checkout's `git status` is clean.
 13. **Final response.** Give the PR URL and any essential test note. Keep it short.
 
@@ -240,7 +259,7 @@ Invoked when Mode Selection resolves to **PR URL / number, OPEN**. The intent is
 - Treating a freeform sentence as if it must have an issue number.
 - Implementing a closed issue or an issue already resolved on the default branch.
 - Calling an issue resolved when its PR merged only into a stack branch.
-- Creating multiple PRs for one requested task.
+- Creating multiple PRs without surfacing scope-expansion to the user. One PR is the default outcome; when implementation reveals the task legitimately needs multiple PRs to satisfy the user's stated goal, the right pivot is to hand off to [[clud-fix]] meta mode (file sub-issues, convert parent to meta — see the **Scope-Expansion Checkpoint** step below). Silently chaining multiple PRs without that surfacing IS still the failure mode.
 - Implementing before proving RED, or claiming coverage from a test that never failed for the bug/requirement.
 - Replacing an outer [[clud-fix]] `/goal` with a narrower PR-level goal while in delegated mode.
 - Pushing with a dirty worktree or leaving `.claude/worktrees/<branch>/` behind.
