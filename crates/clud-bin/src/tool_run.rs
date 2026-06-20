@@ -24,6 +24,9 @@ use std::path::PathBuf;
 
 use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
+use crate::session_index::{
+    allocate_next_id, append_event, unix_millis_now, IndexEvent, SessionContext,
+};
 use crate::tool_install::tools_root;
 use crate::tools::clud_uv_cache_dir;
 
@@ -64,6 +67,30 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
 
     let env: Vec<(String, String)> = build_child_env(&cache_dir);
 
+    // Slice 1 of #427: record a Started event in the session index when
+    // a clud session is active. When `SessionContext::from_env()` returns
+    // None (CI / minimal / no-daemon case) we silently skip — the tool
+    // still runs, just without lifecycle tracking. Slice 2 will replace
+    // the placeholder PID/start_time with values captured from the
+    // running subprocess.
+    let session_ctx = SessionContext::from_env();
+    let tool_id = session_ctx
+        .as_ref()
+        .and_then(|ctx| allocate_next_id(ctx).ok());
+    if let (Some(ctx), Some(tool_id)) = (session_ctx.as_ref(), tool_id) {
+        let _ = append_event(
+            ctx,
+            &IndexEvent::Started {
+                tool_id,
+                tool: rel_path.to_string(),
+                args: args.to_vec(),
+                pid: 0,            // slice 2 fills this with the spawned subprocess PID
+                pid_start_time: 0, // slice 2 fills this with the OS start time
+                started_at_ms: unix_millis_now(),
+            },
+        );
+    }
+
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),
         cwd: None,
@@ -76,7 +103,20 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
         nice: None,
     });
     process.start().map_err(io::Error::other)?;
-    process.wait(None).map_err(io::Error::other)
+    let exit_code = process.wait(None).map_err(io::Error::other)?;
+
+    if let (Some(ctx), Some(tool_id)) = (session_ctx.as_ref(), tool_id) {
+        let _ = append_event(
+            ctx,
+            &IndexEvent::Finished {
+                tool_id,
+                exit_code,
+                ended_at_ms: unix_millis_now(),
+            },
+        );
+    }
+
+    Ok(exit_code)
 }
 
 /// Resolve a bundled-tool path under the supplied tools-root. Trivially
