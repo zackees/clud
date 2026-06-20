@@ -181,7 +181,7 @@ pub fn write_to_console_input(records_bytes: &[u8]) -> std::io::Result<()> {
     if records_bytes.is_empty() {
         return Ok(());
     }
-    if records_bytes.len() % INPUT_RECORD_SIZE != 0 {
+    if !records_bytes.len().is_multiple_of(INPUT_RECORD_SIZE) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
