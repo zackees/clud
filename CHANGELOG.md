@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- New `shell.disable_powershell` toggle in `~/.clud/settings.json` (default
+  `false`, per-backend overrides under `shell.claude` / `shell.codex`). When
+  enabled for the active backend, clud now injects `CLUD_DISABLE_POWERSHELL=1`
+  into the child env so skills can branch on it. For Claude specifically,
+  clud also injects `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` and points
+  `CLAUDE_CODE_GIT_BASH_PATH` at a lazily-fetched portable Git Bash bundle
+  vendored from `zackees/zcmds_win32` (~9 MB, sha256-pinned, cached at
+  `~/.clud/vendor/win32/git-bash-bin-<sha[..12]>/`). Driven by FastLED #3336:
+  Claude on Windows defaults to PowerShell, which silently breaks
+  bash-native tooling (DTR/RTS-less serial, `&&` parser error, `.py`
+  file-association semantics). See zackees/clud#447.
+
 ## 2.0.19 - 2026-06-07
 
 - `/clud-pr` and other bundled skills now install under `~/.codex/skills/`
