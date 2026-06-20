@@ -75,6 +75,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-git/SKILL.md"),
     },
     BundledSkill {
+        name: "clud-git-diff",
+        skill_md: include_str!("../assets/skills/clud-git-diff/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-python-lint-deadcode",
         skill_md: include_str!("../assets/skills/clud-python-lint-deadcode/SKILL.md"),
     },
