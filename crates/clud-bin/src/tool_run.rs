@@ -30,7 +30,7 @@ use running_process::{
 use crate::session_index::{
     allocate_next_id, append_event, unix_millis_now, IndexEvent, SessionContext,
 };
-use crate::tool_install::tools_root;
+use crate::tool_install::{ensure_installed as ensure_tools_installed, tools_root};
 use crate::tool_tee::TeeWriter;
 use crate::tool_termination::{emit_termination, ExitKind};
 use crate::tool_watchdog::{Watchdog, WatchdogDecision};
@@ -47,8 +47,10 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Errors:
 /// - The home directory cannot be resolved (returns `Other`).
 /// - The tool file doesn't exist under `~/.clud/tools/` (returns
-///   `NotFound`). This usually means `tool_install::ensure_installed` was
-///   never called or the install failed silently.
+///   `NotFound`). This usually means `rel_path` is not a registered
+///   `BUNDLED_TOOLS` entry; `ensure_installed` is called inline before the
+///   existence check, so a missing-but-registered tool implies the install
+///   itself failed (a `[clud] note: …` line was printed to stderr).
 /// - `uv` isn't on `PATH` or could not start (returns the underlying
 ///   running-process error wrapped in `Other`).
 /// - `uv` ran but reported a non-zero exit — that's surfaced as the `Ok`
@@ -59,24 +61,34 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
         .ok_or_else(|| io::Error::other("could not resolve home directory for ~/.clud/tools/"))?;
     let tool_path = resolve_tool_path(&tools_root, rel_path);
 
-    // Bootstrap the daemon if it isn't already running. The daemon owns
-    // the bundled-tools install (`daemon/server.rs::run_daemon`), so
-    // ensuring it is up guarantees the tool file exists on disk by the
-    // time we resolve `tool_path`. Idempotent + fast in steady state
-    // (one file-stat + TCP probe). `CLUD_NO_DAEMON` short-circuits this
-    // path; in that mode the user has accepted that bundled tools may
-    // not be present and we fall through to the NotFound below.
+    // Bootstrap the daemon if it isn't already running. Best-effort —
+    // the daemon hosts session-index writers and other background services,
+    // not the tool-file guarantee. `CLUD_NO_DAEMON` short-circuits this.
     if let Ok(state_dir) = crate::daemon::default_state_dir() {
         let _ = crate::daemon::ensure_daemon(&state_dir);
     }
+
+    // Self-heal the bundled-tools install in this process.
+    //
+    // The daemon also calls `ensure_installed` at startup, but `ensure_daemon`
+    // above only restarts the daemon when `CARGO_PKG_VERSION` differs (see
+    // `daemon::client::daemon_version_matches`). When a dev rebuild adds a
+    // new `BUNDLED_TOOLS` entry without bumping the version, the running
+    // daemon is treated as fresh and never re-runs the install — so the new
+    // tool file is missing and the NotFound below fires. A local
+    // `ensure_installed` covers that gap. Cheap on the steady state: one
+    // stat + read per tool, no writes when content matches.
+    ensure_tools_installed();
 
     if !tool_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "bundled tool not found at {}; the daemon-owned install \
-                 may have been skipped (CLUD_NO_DAEMON?) or failed",
+                "bundled tool not found at {}; either `{}` is not a \
+                 registered BUNDLED_TOOLS entry, or the inline \
+                 `ensure_installed` failed (see prior `[clud] note: …` line)",
                 tool_path.display(),
+                rel_path,
             ),
         ));
     }
