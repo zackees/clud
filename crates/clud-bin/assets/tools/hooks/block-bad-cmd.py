@@ -264,7 +264,55 @@ def _nested_shell_command(words: list[str]) -> str | None:
     return None
 
 
-def _forbidden_reason(command_text: str) -> str | None:
+def _find_pyproject(start: Path) -> Path | None:
+    """Walk up from `start` looking for the nearest `pyproject.toml`."""
+    try:
+        anchor = start.resolve()
+    except OSError:
+        return None
+    for candidate in (anchor, *anchor.parents):
+        pp = candidate / "pyproject.toml"
+        try:
+            if pp.is_file():
+                return pp
+        except OSError:
+            continue
+    return None
+
+
+def _maturin_build_backend(cwd: Path | None) -> tuple[Path, str] | None:
+    """Return `(pyproject_path, backend_value)` when the nearest
+    `pyproject.toml` above `cwd` declares a maturin build backend. The
+    `uv run` auto-sync block is scoped to this case — other repos (hatchling,
+    setuptools, no pyproject at all) don't pay the maturin rebuild cost and
+    must not be blocked. Returns `None` when no cwd is available, no
+    pyproject is found, the file can't be parsed, or the backend isn't
+    maturin.
+    """
+    if cwd is None:
+        return None
+    try:
+        import tomllib
+    except ImportError:
+        return None
+    pp = _find_pyproject(cwd)
+    if pp is None:
+        return None
+    try:
+        with pp.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    build_system = data.get("build-system")
+    if not isinstance(build_system, dict):
+        return None
+    backend = build_system.get("build-backend")
+    if isinstance(backend, str) and "maturin" in backend.lower():
+        return pp, backend
+    return None
+
+
+def _forbidden_reason(command_text: str, cwd: Path | None = None) -> str | None:
     if "bad cmd" in command_text.lower():
         return f'command contains "bad cmd". Full command: {command_text!r}'
 
@@ -280,7 +328,7 @@ def _forbidden_reason(command_text: str) -> str | None:
         first = _program_name(words[0])
         nested = _nested_shell_command(words)
         if nested is not None:
-            nested_reason = _forbidden_reason(nested)
+            nested_reason = _forbidden_reason(nested, cwd=cwd)
             if nested_reason is not None:
                 return nested_reason
             continue
@@ -317,23 +365,34 @@ def _forbidden_reason(command_text: str) -> str | None:
             # (lint, version-check, doc generation, etc.). The escape hatch
             # for the legitimate full-rebuild case is `./test` — see
             # zackees/soldr#805.
+            #
+            # Scoping: only enforce this in projects whose `pyproject.toml`
+            # actually declares a maturin build backend. Other repos pay no
+            # rebuild cost on `uv run` and the block was a false positive
+            # there (e.g. FastLED uses hatchling — `uv run` is fast and
+            # blocking it was just noise).
             uv_safe_flags = {"--no-project", "--no-sync", "--frozen"}
             has_uv_safe_flag = any(
                 w in uv_safe_flags or any(w.startswith(f + "=") for f in uv_safe_flags)
                 for w in words[2:]
             )
             if not has_uv_safe_flag:
-                return (
-                    "`uv run` without --no-project / --no-sync / --frozen "
-                    "triggers the project auto-sync, which rebuilds the "
-                    "native extension (full maturin compile on "
-                    "maturin-backed projects). Pass `--no-project` for "
-                    "pure-Python scripts, `--no-sync` to use the existing "
-                    "venv, or `--frozen` to lock to the existing lockfile. "
-                    "Escape hatch for a legitimate full-rebuild: run "
-                    "`./test` (or `bash ./test`) — the canonical "
-                    "full-build entrypoint. See zackees/soldr#805."
-                )
+                maturin = _maturin_build_backend(cwd)
+                if maturin is not None:
+                    pp_path, backend = maturin
+                    return (
+                        f"this hook fired because {pp_path} declares "
+                        f"build-backend = {backend!r}. `uv run` without "
+                        "--no-project / --no-sync / --frozen triggers the "
+                        "project auto-sync, which on a maturin-backed repo "
+                        "is a full Rust+PyO3 rebuild. Pass `--no-project` "
+                        "for pure-Python scripts, `--no-sync` to use the "
+                        "existing venv, or `--frozen` to lock to the "
+                        "existing lockfile. Escape hatch for a legitimate "
+                        "full-rebuild: run `./test` (or `bash ./test`) — "
+                        "the canonical full-build entrypoint. See "
+                        "zackees/soldr#805."
+                    )
             continue
 
         if first in RUST_TOOLS:
@@ -356,9 +415,16 @@ def main() -> int:
 
     tool_name = payload.get("tool_name") or payload.get("toolName") or "?"
     command_text = _extract_command(payload)
-    _log(f"tool_name={tool_name!r} command={command_text!r}")
+    cwd_raw = payload.get("cwd") or payload.get("cwdPath")
+    if not isinstance(cwd_raw, str) or not cwd_raw:
+        cwd_raw = os.getcwd()
+    try:
+        cwd = Path(cwd_raw)
+    except (TypeError, ValueError):
+        cwd = None
+    _log(f"tool_name={tool_name!r} cwd={cwd_raw!r} command={command_text!r}")
 
-    reason = _forbidden_reason(command_text)
+    reason = _forbidden_reason(command_text, cwd=cwd)
     if reason is not None:
         msg = f"[block-bad-cmd hook] refusing to run {tool_name!r}: {reason}"
         _log(f"BLOCKED: {msg}")
