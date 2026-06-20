@@ -41,12 +41,10 @@ pub struct BundledTool {
 
 /// Every tool `clud` ships and auto-installs. Adding a tool is a one-line
 /// entry here plus a new file under `crates/clud-bin/assets/tools/`.
-///
-/// Foundation PR — initially empty. First entry (the
-/// `github/pr_merge_watch.py` script for issue #408) lands in a follow-up
-/// PR once its body is designed; the empty array still exercises the
-/// install loop, the registry-presence test, and the guardrail scan.
-pub const BUNDLED_TOOLS: &[BundledTool] = &[];
+pub const BUNDLED_TOOLS: &[BundledTool] = &[BundledTool {
+    rel_path: "github/pr_merge_watch.py",
+    body: include_str!("../assets/tools/github/pr_merge_watch.py"),
+}];
 
 /// The single source of truth for the `UV_CACHE_DIR` value used by every
 /// bundled-tool invocation in clud's process tree.
@@ -148,6 +146,44 @@ mod tests {
                     tool.rel_path,
                 );
             }
+        }
+    }
+
+    /// Issue #418 sub-task 1: the pr_merge_watch.py tool ships in the
+    /// bundle. If this test fires, the BUNDLED_TOOLS entry was renamed,
+    /// removed, or the asset file went missing — any of which breaks the
+    /// downstream `clud-pr` / `clud-pr-merge` skill calls.
+    #[test]
+    fn bundled_includes_pr_merge_watch() {
+        let names: Vec<&str> = BUNDLED_TOOLS.iter().map(|t| t.rel_path).collect();
+        assert!(
+            names.contains(&"github/pr_merge_watch.py"),
+            "BUNDLED_TOOLS must include github/pr_merge_watch.py; \
+             got {names:?}",
+        );
+    }
+
+    /// The bundled pr_merge_watch.py must declare its expected exit
+    /// codes in its docstring — those codes are the public contract that
+    /// any caller (`clud-pr-merge` skill, future tooling) depends on.
+    #[test]
+    fn pr_merge_watch_documents_exit_codes() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "github/pr_merge_watch.py")
+            .expect("pr_merge_watch.py must be in BUNDLED_TOOLS");
+        for code_line in [
+            "Exit codes:",
+            "0  all required checks green",
+            "1  at least one required check failed",
+            "2  new review activity",
+            "3  PR closed or merged",
+            "4  timeout",
+        ] {
+            assert!(
+                tool.body.contains(code_line),
+                "pr_merge_watch.py docstring must document `{code_line}`",
+            );
         }
     }
 
