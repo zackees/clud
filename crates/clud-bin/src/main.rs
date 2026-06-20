@@ -3,7 +3,7 @@ use clud::{
     crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
     launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
     startup, symbols, tool_info, tool_ledger, tool_list, tool_log, tool_run, tools, trampoline,
-    trash, ui, verbose_log, wasm, worktrees,
+    trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -450,6 +450,25 @@ fn main() {
         }
     } else if args.verbose {
         verbose_log::log("[clud] daemon: skipped");
+    }
+
+    // After the daemon has had its chance to install bundled tools
+    // (`daemon::server::run_daemon` → `tool_install::ensure_installed`),
+    // fire the hook-config scanner against the cwd. Warns on bare
+    // `uv run` in Pre/PostToolUse hooks of Python+Rust polyglot
+    // repos — the failure mode that turns every hook fire into a
+    // multi-minute Rust rebuild on maturin-backed projects (see the
+    // tool's docstring for the setuptools-co-existing-with-Cargo
+    // variant). Same gate as the large-file guard so the warning
+    // only fires for backend launches, not subcommand utility calls
+    // (`clud tool run`, `clud loop`, etc.).
+    if args.command.is_none() && !args.clean_worktrees && !args.fix_hooks {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let root = loop_spec::git_root_from(&cwd);
+        if args.verbose {
+            verbose_log::log("[clud] uv-run hook guard: scanning agent hooks");
+        }
+        uv_run_hook_guard::run(&root);
     }
 
     let backend = backend::resolve_backend(args.claude, args.codex);

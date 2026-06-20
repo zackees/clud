@@ -135,6 +135,20 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: None,
         quiet_ok: true,
     },
+    BundledTool {
+        rel_path: "hooks/uv_run_hook_guard.py",
+        body: include_str!("../assets/tools/hooks/uv_run_hook_guard.py"),
+        // Startup-time scanner: walks .claude/.codex hook configs in
+        // a Python+Rust polyglot repo and warns on bare `uv run` in
+        // Pre/PostToolUse hooks. Killable because the process IS the
+        // work; the 3-second sleep at the end of `main()` accounts
+        // for the only deliberate wall-clock spent (the warning's
+        // visibility delay). 30s backstop is comfortable headroom.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(30),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
     // docker-build tool family — implementation of zackees/clud#421.
     // Trampoline filename uses a hyphen to match the public CLI shape
     // (`clud tool run docker/docker-build.py soldr <path>`); sibling
@@ -299,6 +313,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The `uv_run_hook_guard` tool ships and is invoked from clud
+    /// startup (`main.rs` → `uv_run_hook_guard::run`). If the entry is
+    /// removed or renamed the wrapper silently does nothing and the
+    /// startup warning never fires — invariant test catches the drift.
+    #[test]
+    fn bundled_includes_uv_run_hook_guard() {
+        let names: Vec<&str> = BUNDLED_TOOLS.iter().map(|t| t.rel_path).collect();
+        assert!(
+            names.contains(&"hooks/uv_run_hook_guard.py"),
+            "BUNDLED_TOOLS must include hooks/uv_run_hook_guard.py; \
+             got {names:?}",
+        );
     }
 
     /// Issue #418 sub-task 1: the pr_merge_watch.py tool ships in the
