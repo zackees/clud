@@ -123,6 +123,19 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "git/clud-git-diff.py",
+        body: include_str!("../assets/tools/git/clud-git-diff.py"),
+        // Native OS webview diff viewer (pywebview). The world (git
+        // history) owns the state; killing the process just closes the
+        // window — `Resumable`. The viewer is silent while the user
+        // reads, so `quiet_ok` suppresses the progress watchdog.
+        // 60-minute ceiling because a deep code review can take a while.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+    BundledTool {
         rel_path: "hooks/block-bad-cmd.py",
         body: include_str!("../assets/tools/hooks/block-bad-cmd.py"),
         // PreToolUse hook: reads a small JSON blob from stdin, decides
