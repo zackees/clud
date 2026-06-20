@@ -61,6 +61,7 @@ pub mod tools;
 pub mod trampoline;
 pub mod trash;
 pub mod ui;
+pub mod uv_run_hook_guard;
 pub mod verbose_log;
 pub mod voice;
 pub mod wasm;
