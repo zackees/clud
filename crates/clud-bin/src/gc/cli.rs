@@ -1,11 +1,16 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use clap::CommandFactory;
 
 use super::registry::now_unix;
+use super::uv_cache;
 use crate::args::{Args, GcSubcommand};
 use crate::worktrees;
+
+/// Literal value of `--kind` that routes to the filesystem-managed
+/// uv-cache handlers instead of the redb-tracked daemon path.
+const UV_CACHE_KIND: &str = "uv-cache";
 
 // ---------- CLI handlers ----------
 //
@@ -21,6 +26,25 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
     // Bare `clud gc` keeps printing help and does NOT contact the daemon.
     if sub.is_none() {
         return print_help_and_exit_zero();
+    }
+    // Issue #422: `--kind uv-cache` is filesystem-managed (not redb-tracked),
+    // so it short-circuits the daemon roundtrip entirely. Handle it before
+    // the daemon-required check so users without the daemon running can
+    // still manage their uv cache.
+    match sub.as_ref().unwrap() {
+        GcSubcommand::List {
+            json,
+            kind: Some(k),
+        } if k == UV_CACHE_KIND => return cmd_list_uv_cache(*json),
+        GcSubcommand::Purge {
+            duration,
+            dry_run,
+            yes,
+            kind: Some(k),
+        } if k == UV_CACHE_KIND => {
+            return cmd_purge_uv_cache(duration.as_deref(), *dry_run, *yes);
+        }
+        _ => {}
     }
     if args.no_daemon || daemon_disabled_via_env() {
         eprintln!("error: gc operations require the clud daemon; remove --no-daemon");
@@ -48,6 +72,132 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
             kind.as_deref(),
         ),
         GcSubcommand::Reconcile => cmd_reconcile(&state_dir),
+    }
+}
+
+/// Issue #422: `clud gc list --kind uv-cache` — print env count, total
+/// bytes, oldest mtime. Filesystem-only; no daemon needed.
+fn cmd_list_uv_cache(json: bool) -> i32 {
+    let summary = match uv_cache::list() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: uv-cache list failed: {e}");
+            return 1;
+        }
+    };
+    if json {
+        let oldest_unix = summary
+            .oldest_mtime
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+        println!(
+            "{{\"kind\":\"uv-cache\",\"root\":{:?},\"exists\":{},\"env_count\":{},\"total_bytes\":{},\"oldest_mtime_unix\":{}}}",
+            summary.root.to_string_lossy(),
+            summary.exists,
+            summary.env_count,
+            summary.total_bytes,
+            oldest_unix
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "null".into()),
+        );
+        return 0;
+    }
+    println!("uv-cache root: {}", summary.root.display());
+    if !summary.exists {
+        println!("(cache directory does not exist; no envs materialized yet)");
+        return 0;
+    }
+    println!("envs:        {}", summary.env_count);
+    println!(
+        "total bytes: {} ({})",
+        summary.total_bytes,
+        format_bytes(summary.total_bytes)
+    );
+    if let Some(mtime) = summary.oldest_mtime {
+        let age = SystemTime::now().duration_since(mtime).unwrap_or_default();
+        println!("oldest env:  {} old", worktrees::fmt_age(age));
+    }
+    0
+}
+
+/// Issue #422: `clud gc purge --kind uv-cache` semantics:
+/// - With `--duration 7d` → mtime-based sweep (same threshold as the
+///   daemon's daily sweep). Requires `--yes` unless `--dry-run`.
+/// - Without `--duration` → full nuke `rm -rf ~/.clud/cache/uv/`.
+///   Requires `--yes` (no interactive prompt — the cache is rebuildable,
+///   but the user should explicitly opt in).
+fn cmd_purge_uv_cache(duration: Option<&str>, dry_run: bool, yes: bool) -> i32 {
+    if let Some(d) = duration {
+        if d != "7d" {
+            eprintln!(
+                "error: --duration on --kind uv-cache supports only `7d` \
+                 (the daemon sweep threshold); got {d}"
+            );
+            return 2;
+        }
+        if !dry_run && !yes {
+            eprintln!("error: --yes required to delete uv-cache entries (or pass --dry-run)");
+            return 2;
+        }
+        match uv_cache::sweep_stale(SystemTime::now(), dry_run) {
+            Ok(report) => {
+                let stale_word = if report.stale_envs_removed == 1 {
+                    ""
+                } else {
+                    "s"
+                };
+                if report.dry_run {
+                    println!(
+                        "--dry-run: would remove {} stale env{stale_word}, skip {} locked.",
+                        report.stale_envs_removed, report.locked_envs_skipped,
+                    );
+                } else {
+                    println!(
+                        "uv-cache sweep: removed {} stale env{stale_word}, {} locked-skipped.",
+                        report.stale_envs_removed, report.locked_envs_skipped,
+                    );
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("error: uv-cache sweep failed: {e}");
+                1
+            }
+        }
+    } else {
+        if !yes {
+            eprintln!("error: --yes required for `clud gc purge --kind uv-cache` (destructive)");
+            return 2;
+        }
+        if dry_run {
+            println!("--dry-run: would remove all of ~/.clud/cache/uv/");
+            return 0;
+        }
+        match uv_cache::purge_all() {
+            Ok(()) => {
+                println!("uv-cache purged.");
+                0
+            }
+            Err(e) => {
+                eprintln!("error: uv-cache purge failed: {e}");
+                1
+            }
+        }
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 

@@ -469,6 +469,11 @@ fn run_periodic_purge_tick_with_free_space<F>(
             eprintln!("[clud] gc tick: trash error: {message}");
         }
     }
+
+    // Issue #423: daily 7-day sweep of stale uv-cache envs. The
+    // helper handles its own 24h sentinel under ~/.clud/state/ so
+    // this call is cheap on every tick (one stat + age compare).
+    crate::daemon::uv_cache_sweep::maybe_sweep_uv_cache();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

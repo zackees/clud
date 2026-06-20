@@ -24,6 +24,7 @@ mod cli;
 mod reconcile;
 mod registry;
 mod scanner;
+pub mod uv_cache;
 
 pub use cli::run;
 pub(crate) use reconcile::best_effort_branch;
