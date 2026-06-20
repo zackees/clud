@@ -146,12 +146,18 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
     // container). Killing the python process kills the docker exec —
     // and re-invocation re-runs from scratch (idempotent for `up`,
     // re-issues the command for `run`).
+    //
+    // `progress_timeout: Some(10 min)` — a healthy `docker build` /
+    // `docker run` emits layer-step output continuously; ten minutes of
+    // silence is the daemon hung, not legitimate work. The 60-min
+    // `command_timeout` ceiling still applies when the build is making
+    // visible progress.
     BundledTool {
         rel_path: "docker/docker-build.py",
         body: include_str!("../assets/tools/docker/docker-build.py"),
         kill_semantics: KillSemantics::Killable,
         command_timeout: DEFAULT_KILLABLE_TIMEOUT,
-        progress_timeout: None,
+        progress_timeout: Some(Duration::from_secs(60 * 10)),
         quiet_ok: false,
     },
     BundledTool {
@@ -159,7 +165,7 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         body: include_str!("../assets/tools/docker/docker_build_soldr.py"),
         kill_semantics: KillSemantics::Killable,
         command_timeout: DEFAULT_KILLABLE_TIMEOUT,
-        progress_timeout: None,
+        progress_timeout: Some(Duration::from_secs(60 * 10)),
         quiet_ok: false,
     },
     BundledTool {
@@ -167,7 +173,7 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         body: include_str!("../assets/tools/docker/docker_build_python.py"),
         kill_semantics: KillSemantics::Killable,
         command_timeout: DEFAULT_KILLABLE_TIMEOUT,
-        progress_timeout: None,
+        progress_timeout: Some(Duration::from_secs(60 * 10)),
         quiet_ok: false,
     },
     BundledTool {
@@ -175,7 +181,7 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         body: include_str!("../assets/tools/docker/docker_build_cpp.py"),
         kill_semantics: KillSemantics::Killable,
         command_timeout: DEFAULT_KILLABLE_TIMEOUT,
-        progress_timeout: None,
+        progress_timeout: Some(Duration::from_secs(60 * 10)),
         quiet_ok: false,
     },
     BundledTool {
@@ -409,6 +415,74 @@ mod tests {
             assert!(
                 tool.body.contains("not implemented in v0"),
                 "{stub_stack} stack must clearly mark not-yet-implemented subcommands",
+            );
+        }
+    }
+
+    /// Every bundled tool body must start with the canonical PEP 723
+    /// uv-run shebang. Two reasons:
+    ///   1. `clud tool run` execs `uv run <path>` explicitly, but users
+    ///      who copy the installed file out of `~/.clud/tools/` and try
+    ///      `./tool.py` expect the shebang to take it from there.
+    ///   2. It's a one-line drift check — a tool author who skips the
+    ///      shebang has likely also skipped the PEP 723 block (lint_deadcode
+    ///      did exactly this; see the fix in this commit's sibling edit).
+    #[test]
+    fn bundled_tools_have_uv_run_shebang() {
+        const SHEBANG: &str = "#!/usr/bin/env -S uv run --script";
+        for tool in BUNDLED_TOOLS {
+            assert!(
+                tool.body.starts_with(SHEBANG),
+                "tool {} must start with `{SHEBANG}` — the convention every \
+                 other bundled tool follows, so a hand-run via `./tool.py` \
+                 dispatches to uv the same way `clud tool run` does",
+                tool.rel_path,
+            );
+        }
+    }
+
+    /// Every bundled tool body must declare `requires-python = ">=3.11"`
+    /// in its PEP 723 inline metadata. The fleet baseline; older targets
+    /// would let a tool slip in that uses 3.11-only syntax without anyone
+    /// noticing on the dev box (which is typically 3.13+). 3.11 is the
+    /// oldest CPython that still receives security fixes at the time of
+    /// writing.
+    #[test]
+    fn bundled_tools_declare_requires_python_3_11() {
+        const REQUIRED: &str = "requires-python = \">=3.11\"";
+        for tool in BUNDLED_TOOLS {
+            assert!(
+                tool.body.contains(REQUIRED),
+                "tool {} must declare `{REQUIRED}` in its PEP 723 metadata block",
+                tool.rel_path,
+            );
+        }
+    }
+
+    /// Every `Killable` tool with a `command_timeout` over 5 minutes must
+    /// either set a `progress_timeout` or carry an explicit
+    /// `quiet_ok: true` (indicating that long stretches of silence are
+    /// expected). The default `progress_timeout: None` + multi-hour cap
+    /// is the silent-hang failure mode docker tools were hitting (full
+    /// 60-min wait on a hung daemon) before the sweep commit.
+    #[test]
+    fn long_running_killables_declare_progress_intent() {
+        const FIVE_MIN: Duration = Duration::from_secs(60 * 5);
+        for tool in BUNDLED_TOOLS {
+            if !matches!(tool.kill_semantics, KillSemantics::Killable) {
+                continue;
+            }
+            if tool.command_timeout <= FIVE_MIN {
+                continue;
+            }
+            assert!(
+                tool.progress_timeout.is_some() || tool.quiet_ok,
+                "tool {} is Killable with command_timeout={:?} > 5 min but \
+                 sets progress_timeout=None and quiet_ok=false. Pick one: \
+                 set progress_timeout to catch silent hangs, or set \
+                 quiet_ok=true if long silences are expected for this tool.",
+                tool.rel_path,
+                tool.command_timeout,
             );
         }
     }

@@ -25,44 +25,30 @@ When the fix-loop modifies code to clear a regression or address a CodeRabbit co
 
 1. **Resolve the PR.** `gh pr view --json number,headRefName,baseRefName,state,mergeable,statusCheckRollup,url` against the current branch. Refuse if state ≠ OPEN or mergeable ≠ MERGEABLE/UNKNOWN.
 
-2. **Estimate the wait, probe CodeRabbit presence, announce both, then poll.** Before sleeping:
-   - **Probe whether CodeRabbit is installed on this repo (issue #194).** Sample the 5 most-recent *merged* PRs for any `coderabbitai[bot]` review:
-     ```
-     CR_REVIEW_COUNT=$(gh pr list --repo <owner/repo> --state merged --limit 5 --json number \
-       | jq -r '.[].number' \
-       | while read n; do
-           gh api repos/<owner/repo>/pulls/$n/reviews \
-             --jq '[.[] | select(.user.login=="coderabbitai[bot]")] | length'
-         done | awk '{s+=$1} END {print s+0}')
-     if [ "$CR_REVIEW_COUNT" -eq 0 ]; then CR_REQUIRED=false; else CR_REQUIRED=true; fi
-     ```
-     - Sample "merged" not "any state" — open PRs may legitimately predate CR's review window and would yield a false negative.
-     - Sample size 5 — robust against one slipped PR, cheap (one cluster of API calls), no caching across runs (CR may be installed mid-session and caching would shadow that).
-     - "Drop" not "warn and continue" — when CR is provably absent, requiring a CR review is a *category* error, not a relaxed gate.
-   - Probe the repo's *recent* CI duration: `gh run list --repo <owner/repo> --branch main --limit 10 --json conclusion,startedAt,updatedAt`. Take the p90 wall-clock; round up to the nearest 5 min. This is your expected wait.
+2. **Estimate the wait, announce it, then delegate the poll to `pr_merge_watch`.** The whole inline poll loop — PR-state probe, checks probe, CodeRabbit-review probe, cap, cancel-on-fail bookkeeping, all the early-exit edge cases — is encapsulated in the bundled `pr_merge_watch.py` tool. Don't reimplement it inline; call the tool.
+
+   - Probe the repo's *recent* CI duration: `gh run list --repo <owner/repo> --branch main --limit 10 --json conclusion,startedAt,updatedAt`. Take the p90 wall-clock; round up to the nearest 5 min. This is your `--timeout` budget for the tool.
    - **Default cap: 45 minutes** (the FastLED repo and similar embedded projects routinely hit 25–30 min platform builds). Tighten the cap to `max(15, p90 + 5min)` for repos with faster CI; never go below 15 minutes.
-   - **Announce upfront** with one user-facing line that names both the cap and the CodeRabbit decision. Silent polling reads as a hung shell — never skip this announcement.
-     - CR detected: `[clud-pr-merge] polling CI for up to <N> min; slowest recent build was <P90> min; CodeRabbit detected — gating on CI + CR review.`
-     - CR not detected: `[clud-pr-merge] polling CI for up to <N> min; slowest recent build was <P90> min; CodeRabbit not detected on this repo (sampled 5 recent merged PRs) — gating on CI only.`
-   - Then loop with **30-second sleeps**. Each iteration fetches:
-     - `gh pr view <num> --json state --jq .state` — **first** check every iteration. If the PR became MERGED or CLOSED, **break the loop immediately** (success for MERGED, abort for CLOSED). See "Early-exit on PR state change" below.
-     - `gh pr checks <num> --json name,state,bucket` — every required check has a non-PENDING state.
-     - **Only if `CR_REQUIRED=true`:** `gh api repos/{owner}/{repo}/pulls/{num}/reviews --jq '.[] | select(.user.login=="coderabbitai[bot]")'` — at least one CodeRabbit review has been posted (or CodeRabbit explicitly "skipped" the review, which counts as reported). When `CR_REQUIRED=false`, skip this check entirely — the exit condition collapses to `pending == 0`.
+   - **Announce upfront** so the user knows what to expect; silent polling reads as a hung shell.
+     - `[clud-pr-merge] polling CI for up to <N> min via pr_merge_watch; slowest recent build was <P90> min.`
+   - Then run the tool. Pass `--timeout` as `<N>*60` seconds; everything else defaults are fine for the standard case:
+     ```
+     clud tool run github/pr_merge_watch.py <PR#> --timeout <N*60>
+     ```
+     The tool internally polls `gh pr view`, `gh pr checks`, and (when CodeRabbit has reviewed prior merged PRs in this repo) the `coderabbitai[bot]` review stream — handling all the gotchas listed below for you. Inspect the exit code:
+     - **`0`** — all required checks green AND PR mergeable. Proceed to step 6 (clean tree gate) then step 7 (merge).
+     - **`1`** — at least one required check failed. Tool prints the failing check name + first error + a classifier label (e.g. "rustfmt drift", "clippy warning", "test failure") on stdout. Proceed to step 3 (regression diff) then step 5 (fix loop).
+     - **`2`** — new CodeRabbit / human review activity. Proceed to step 4 (collect comments) then step 5 (fix loop).
+     - **`3`** — PR was merged or closed out from under us. If MERGED, success (skip to step 7's post-merge confirmation). If CLOSED, abort with a user-facing message.
+     - **`4`** — timeout. Give up: `[clud-pr-merge] timed out waiting for CI/CodeRabbit after <N> minutes. Re-run when checks have reported.` Do NOT merge.
 
-   Exit condition:
-   - `CR_REQUIRED=true` → `pending == 0 AND coderabbit_reviews != 0` (current behavior; if CR was sampled-present but never reviews this specific PR within the cap, the skill times out — that's correct, an installed-but-slow CR is still a real gate).
-   - `CR_REQUIRED=false` → `pending == 0` alone.
-   - In either case, a PR state change to MERGED/CLOSED also breaks the loop.
+   **Why delegate.** The tool encapsulates several edge cases that every inline poll re-discovers the hard way:
+   - **PR-state early-exit.** The tool checks `pr view --json state` first each iteration and exits 3 the moment state ≠ OPEN. Without that, GitHub Actions jobs that don't cancel on merge keep "PENDING" forever and the poll hangs (issue: `zackees/zccache` ~20-min stalls on merged PRs).
+   - **CodeRabbit-not-installed graceful degradation.** The tool never blocks on CR reviews if the repo doesn't have CR configured — it just exits when checks settle. No need for the 5-merged-PR CR-presence probe.
+   - **`gh pr checks` exit-code gotcha.** `gh pr checks` returns non-zero whenever any check failed even with `--json`. The tool reads stdout regardless of `$?`; an inline poll has to remember this.
+   - **Cancel-on-exit.** On a non-success exit the tool cancels still-running workflow runs on the PR's head SHA so we stop burning matrix minutes on results we've already decided to ignore.
 
-   If the cap elapses with no signal, **give up and warn the user**: `[clud-pr-merge] timed out waiting for CI/CodeRabbit after <N> minutes. Re-run when checks have reported.` Do NOT merge.
-
-   **Early-exit on PR state change (CRITICAL — prevents the "stuck shell" bug).** GitHub Actions jobs do NOT cancel when a PR is merged out from under them. If a maintainer merges (or auto-merge fires) while the poll is waiting, the slow platform-build jobs on the original SHA keep running for another ~20 min. The poll's "no PENDING checks" condition stays false the whole time, so the loop keeps spawning sleeps and never exits — from the user's perspective the shell is hung. Two preventions, both mandatory:
-   1. Check `gh pr view <num> --json state` FIRST in every poll iteration and break the loop the moment state ≠ OPEN. The poll's exit reason is "PR merged/closed," not "all checks finished."
-   2. For polls started via `run_in_background: true`, the bash loop runs OUT of band from the conversation. The moment merge is confirmed externally (manual `gh pr view`, the `<task-notification>` payload of the bg task, or any other signal), kill the background task via the runtime's stop mechanism. Do NOT rely on "it'll self-terminate" — the loop's purpose is moot but the loop body doesn't know that.
-
-   **Polling pattern.** Use Bash with `until <condition>; do sleep 30; done` (sleep *inside* the body). Do not chain `sleep N; <cmd>` — the Claude Code harness blocks leading sleeps. For waits longer than ~5 minutes consider `ScheduleWakeup` instead so the conversation isn't held open by an active poll.
-
-   **`gh pr checks` exit-code gotcha.** `gh pr checks` exits non-zero whenever ANY check has failed, even with `--json`. A backgrounded poll that finishes with exit 1 may still have produced complete output — always read the output, never gate on `$?`.
+   **If you need to background the wait** (so the agent does other work in parallel), pass it through `run_in_background: true` and treat the task-notification's exit code the same way as a foreground invocation. The tool handles its own polling cadence (default 60 s) so no `until`/`sleep` wrapping is needed.
 
 3. **Diff CI failures vs main (with PR-only-workflow handling).** For every failing check on the PR:
    - Fetch the same check name on `main`'s latest commit: `gh api repos/{owner}/{repo}/commits/main/check-runs`.
@@ -76,7 +62,7 @@ When the fix-loop modifies code to clear a regression or address a CodeRabbit co
    - If fix queue (regressions + CodeRabbit comments) is empty → break, proceed to merge.
    - Dispatch a sub-agent with: the regression list, the CodeRabbit comments, the relevant file paths, and the constraint to keep changes minimal (only fix what's flagged, don't refactor unrelated code).
    - After the agent finishes: `bash lint` + `bash test`, commit, push.
-   - Wait for CI to re-run (poll with the same announce-and-cap procedure from step 2, this round only).
+   - Wait for CI to re-run using the same `clud tool run github/pr_merge_watch.py <PR#> --timeout <N*60>` call as step 2. Interpret the exit code the same way.
    - Re-evaluate gates. If both clear → break. Otherwise → next round.
    - After round 3 with gates still failing → **give up**. Print remaining blockers and exit without merging.
 
@@ -96,16 +82,13 @@ When the fix-loop modifies code to clear a regression or address a CodeRabbit co
 
 ## Failure modes to avoid
 
-- **Poll loop without a cap** — always stop at the announced cap (default 45 min, adjusted per repo); better to warn-and-stop than burn forever.
-- **Silent polling** — without an upfront "polling for up to N min" announcement, the user reads the silent wait as a hung shell. Always announce.
-- **CodeRabbit-not-installed deadlock — probe before polling.** On a repo without CodeRabbit, the `coderabbit_reviews != 0` clause never satisfies, so the loop spins until the cap fires (issue #194; observed: ~20 min silent stall on `zackees/zccache#523`). Always run the 5-merged-PR `coderabbitai[bot]` review-presence probe in step 2 and drop the CR clause when the sample is zero. Do not "warn and continue" — a category-error gate is not a relaxed gate.
-- **Treating timeout as merge-eligible** — no signal ≠ green signal. Refuse to merge in the timeout case.
+The tool (`pr_merge_watch.py`) handles the polling-specific failure modes — PR-state early-exit, CodeRabbit-absent deadlock, `gh pr checks` exit-code quirk, cancel-on-exit, cap enforcement. They're listed in the tool's docstring + repo issues #194/#195. The failure modes that remain the *skill's* responsibility:
+
+- **Silent polling** — even with the tool delegating the wait, the skill must emit the upfront `[clud-pr-merge] polling CI for up to <N> min ...` announcement so a foreground invocation doesn't look hung.
+- **Treating timeout as merge-eligible** — exit code 4 from the tool means "no signal arrived in time," not "green." Refuse to merge in the timeout case.
+- **Reimplementing the poll inline** — don't write your own `until ... sleep` loop with `gh pr view`/`gh pr checks`/`gh api` calls. The tool exists exactly because every inline attempt rediscovers the same edge cases. If the tool's behavior is wrong for your case, fix the tool, don't fork it.
 - **Conflating "passing on main" with "not a regression"** — only the *same check name* on main counts. Renamed/added checks are new regressions until proven otherwise.
 - **Treating "check missing from main" as "passing on main"** — PR-only workflows (e.g. `pull_request_target`) never run on `push` events, so they're invisible in main's check-runs. Cross-reference recent PRs before classifying.
-- **Trusting `gh pr checks` exit code** — it returns 1 whenever any check failed, even with `--json`. Always read the output and ignore `$?`.
-- **Leading `sleep N; <cmd>` chains** — the Claude Code harness blocks these. Use `until <check>; do sleep N; done` (sleep inside the body), or `run_in_background: true` for fire-and-forget waits, or `ScheduleWakeup` for >5min waits.
-- **CI poll that doesn't watch PR state** — if `gh pr view <num> --json state` is not checked every iteration, the loop will keep spinning for 20+ minutes after a merge (GitHub Actions jobs do not cancel on merge, so PENDING checks remain PENDING). Always poll PR state first; break on MERGED/CLOSED.
-- **Background poll left running after merge confirmation** — once you see `state: MERGED` from any source, kill the background poll task explicitly. Do NOT rely on "it'll self-terminate" — the loop's exit condition is moot but the loop body doesn't know that, and respawned `sleep 30` processes will continue to spam the host until the cap is hit.
 - **Letting the fix-agent expand scope** — pass a tight scope; if the agent finds an unrelated bug, it gets noted, not fixed in this PR.
 
 ## When NOT to use this
