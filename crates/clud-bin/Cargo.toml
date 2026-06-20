@@ -150,3 +150,13 @@ windows-core = "0.61"
 [[bin]]
 name = "clud"
 path = "src/main.rs"
+
+# Slice 1 of #406 / #409: tiny PATH-resolved relay that lives at
+# `~/.clud/state/shims/python` etc. so any `python` invocation inside a
+# clud session goes through the daemon's ResolveInterpreter RPC.
+# Currently shares clud-bin's dep tree; the size-budget enforcement +
+# release-shim profile lands in slice 4 (#412) when the binary is
+# bundled into wheels.
+[[bin]]
+name = "clud-shim"
+path = "src/bin/clud_shim.rs"
