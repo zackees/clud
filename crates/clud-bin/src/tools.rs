@@ -165,6 +165,18 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: None,
         quiet_ok: false,
     },
+    BundledTool {
+        rel_path: "python/lint_deadcode.py",
+        body: include_str!("../assets/tools/python/lint_deadcode.py"),
+        // Vulture scans the source tree and exits with the report.
+        // The process IS the work — `Killable`. 2-minute progress
+        // watchdog because vulture should be emitting status during
+        // its walk.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: DEFAULT_KILLABLE_TIMEOUT,
+        progress_timeout: Some(std::time::Duration::from_secs(120)),
+        quiet_ok: false,
+    },
 ];
 
 /// The single source of truth for the `UV_CACHE_DIR` value used by every
