@@ -40,7 +40,18 @@ Entry and orchestration:
   `mod ...`.
 - `runner.rs` - per-iteration subprocess- and PTY-mode runner for a single
   `LaunchPlan`; owns child-env construction, stream-json fallback,
-  Ctrl-C-aware teardown, and OLE drag-drop registration wiring.
+  Ctrl-C-aware teardown, and OLE drag-drop registration wiring. The
+  backend-aware `child_env_for_backend` reads
+  `~/.clud/settings.json::shell.disable_powershell` and, for Claude, injects
+  the two undocumented kill-switch env vars `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`
+  + `CLAUDE_CODE_GIT_BASH_PATH` (resolved via
+  [`shell/`](shell/README.md)) — see issue #447.
+- `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
+  Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
+  `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a
+  system-wide Git for Windows install. Manifest at
+  `vendor/win32/git-bash-bin.toml`; cache at
+  `~/.clud/vendor/win32/git-bash-bin-<sha[..12]>/`.
 - `startup.rs` - launch-time helpers factored out of `main.rs`: drag-target
   gating (`--no-dnd`, `--dry-run`), session-cap enforcement, Ctrl+C flag
   installer.
