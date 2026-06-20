@@ -20,6 +20,7 @@
 //! never leak into the user's global `~/.cache/uv/`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Literal marker that distinguishes clud-managed tool files from
 /// user-authored ones. Mirrors the same string used by
@@ -27,8 +28,62 @@ use std::path::PathBuf;
 /// literal across both registries.
 pub const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 
-/// One bundled tool: where it lands under `~/.clud/tools/` and the embedded
-/// body baked into the binary at compile time.
+/// Default `command_timeout` for a tool declared `KillSemantics::Resumable`.
+/// Resumable tools observe external state (PR merge polls, CI watchers);
+/// a 20-minute cap matches PM2's polling-friendly cadence and stays within
+/// 4× Anthropic's 5-minute prompt-cache window. Entries may override.
+pub const DEFAULT_RESUMABLE_TIMEOUT: Duration = Duration::from_secs(60 * 20);
+
+/// Default `command_timeout` for a tool declared `KillSemantics::Killable`
+/// (or `ResumableWithKillableSubsteps`). One hour matches typical
+/// long-build wall-clock (cargo build with cold cache, docker multi-stage
+/// build). Entries may override.
+pub const DEFAULT_KILLABLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// Kill-vs-resume semantics for a tool invocation. Drives how the
+/// `tool_run` wrapper handles `command_timeout` and what abort terminal
+/// it returns. See #427 for the full taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillSemantics {
+    /// Killing the tool process loses no underlying state — the world
+    /// holds the state, the tool just observes. On `command_timeout` the
+    /// wrapper returns `status: in-progress` and exit 0; re-invocation
+    /// with the same args resumes. Examples: `gh-pr-merge-wait`,
+    /// `gh-watch-issue`.
+    Resumable,
+    /// The tool process IS the state — killing it aborts the work.
+    /// On `command_timeout` or `progress_timeout` the wrapper kills the
+    /// process tree and returns a structured abort terminal with last 50
+    /// lines + diagnostic block. Examples: `lint`, `docker-build`,
+    /// `cargo build`.
+    Killable,
+    /// Outer loop is resumable, but individual substeps are killable
+    /// (e.g. `docker-run-watch` polling logs while a per-step docker
+    /// exec can be aborted). Slice 5 may need a richer wrapper for
+    /// this variant; at the outer-cap layer it behaves like `Resumable`.
+    ResumableWithKillableSubsteps,
+}
+
+impl KillSemantics {
+    /// Default `command_timeout` for this kill-semantics class.
+    pub const fn default_command_timeout(self) -> Duration {
+        match self {
+            KillSemantics::Resumable => DEFAULT_RESUMABLE_TIMEOUT,
+            KillSemantics::Killable => DEFAULT_KILLABLE_TIMEOUT,
+            KillSemantics::ResumableWithKillableSubsteps => DEFAULT_RESUMABLE_TIMEOUT,
+        }
+    }
+}
+
+/// One bundled tool: where it lands under `~/.clud/tools/`, the embedded
+/// body baked into the binary at compile time, plus the execution
+/// semantics that drive the `tool_run` wrapper's watchdog and abort
+/// terminals.
+///
+/// Slice 1 of #427 added `kill_semantics`, `command_timeout`,
+/// `progress_timeout`, and `quiet_ok`. The wrapper enforcement that
+/// honors these fields lands in slice 5 (#432); slices 2–4 use them only
+/// for the session index's metadata.
 pub struct BundledTool {
     /// Relative path under `~/.clud/tools/`, forward-slash-separated. May
     /// include subdirectories (e.g. `"github/pr_merge_watch.py"`).
@@ -37,6 +92,21 @@ pub struct BundledTool {
     /// [`MANAGED_BY_CLUD_MARKER`] string so the installer can distinguish
     /// the managed copy from a user-edited override.
     pub body: &'static str,
+    /// Whether this tool's process is `Resumable` (observation) or
+    /// `Killable` (state-bearing). Drives the wrapper's abort terminal.
+    pub kill_semantics: KillSemantics,
+    /// Wall-clock cap on a single invocation. Defaults are 20 min for
+    /// resumable and 60 min for killable; entries may override.
+    pub command_timeout: Duration,
+    /// If `Some`, the wrapper aborts when no output (stdout or stderr)
+    /// has been observed for this duration — even before `command_timeout`
+    /// fires. `None` = no progress watchdog. Use for long-running builds
+    /// or downloads where silence indicates a hang.
+    pub progress_timeout: Option<Duration>,
+    /// If `true`, the wrapper does NOT arm the progress watchdog even
+    /// when `progress_timeout` is `Some`. Use for tools whose normal
+    /// operation is silent (e.g. `git diff` with no changes is not hung).
+    pub quiet_ok: bool,
 }
 
 /// Every tool `clud` ships and auto-installs. Adding a tool is a one-line
@@ -44,6 +114,12 @@ pub struct BundledTool {
 pub const BUNDLED_TOOLS: &[BundledTool] = &[BundledTool {
     rel_path: "github/pr_merge_watch.py",
     body: include_str!("../assets/tools/github/pr_merge_watch.py"),
+    // PR-merge watcher polls GitHub state; the world owns the merge
+    // status, so killing this process loses no work — `Resumable`.
+    kill_semantics: KillSemantics::Resumable,
+    command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+    progress_timeout: None,
+    quiet_ok: false,
 }];
 
 /// The single source of truth for the `UV_CACHE_DIR` value used by every

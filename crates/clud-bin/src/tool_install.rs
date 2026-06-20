@@ -176,6 +176,10 @@ mod tests {
         BundledTool {
             rel_path: "fake/probe.py",
             body: "# managed-by: clud\nprint('probe')\n",
+            kill_semantics: crate::tools::KillSemantics::Killable,
+            command_timeout: crate::tools::DEFAULT_KILLABLE_TIMEOUT,
+            progress_timeout: None,
+            quiet_ok: false,
         }
     }
 
@@ -183,6 +187,10 @@ mod tests {
         BundledTool {
             rel_path: "fake/probe.py",
             body: "# managed-by: clud\nprint('probe v2')\n",
+            kill_semantics: crate::tools::KillSemantics::Killable,
+            command_timeout: crate::tools::DEFAULT_KILLABLE_TIMEOUT,
+            progress_timeout: None,
+            quiet_ok: false,
         }
     }
 
@@ -280,6 +288,10 @@ mod tests {
         let tool = BundledTool {
             rel_path: "a/b/c/deep.py",
             body: "# managed-by: clud\n",
+            kill_semantics: crate::tools::KillSemantics::Killable,
+            command_timeout: crate::tools::DEFAULT_KILLABLE_TIMEOUT,
+            progress_timeout: None,
+            quiet_ok: false,
         };
         ensure_tool_installed_at(tmp.path(), &tool);
         let target = target_path_at(tmp.path(), tool.rel_path);
