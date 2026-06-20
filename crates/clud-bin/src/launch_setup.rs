@@ -602,11 +602,16 @@ mod tests {
         );
         assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
-        // BundledToolsAction creates `.clud/tools/` even on an empty
-        // registry's run by virtue of `ensure_installed_at` being called.
-        // The empty registry means no children are written, so the
-        // `.clud/` dir itself stays absent — confirm.
-        assert!(!home.path().join(".clud").exists());
+        // BundledToolsAction installs every entry in `BUNDLED_TOOLS` to
+        // `.clud/tools/<rel_path>` — proves the install lifecycle fired
+        // for the Claude backend just like its codex sibling at line ~575.
+        // Spot-check the first entry (github/pr_merge_watch.py) since the
+        // exact set evolves as new tools land (#420 added pr_merge_watch;
+        // #421 added the docker-build family).
+        assert!(home
+            .path()
+            .join(".clud/tools/github/pr_merge_watch.py")
+            .exists());
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout":5"#), "{hooks}");
     }
