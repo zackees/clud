@@ -396,6 +396,37 @@ pub enum ToolSubcommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tool invocations in the current clud session — slice 3 of #427.
+    List {
+        /// Emit a JSON array instead of the human-readable table.
+        #[arg(long = "json")]
+        json: bool,
+        /// Show the long-form `<session-pid>-<tool-id>` ID in the table.
+        #[arg(long = "long")]
+        long: bool,
+    },
+    /// Show current state + last N lines of stdout/stderr for one
+    /// invocation — slice 3 of #427.
+    Info {
+        /// Reference to the invocation. Accepts:
+        /// * a bare session-local integer (`3`)
+        /// * a long-form `<session-pid>-<tool-id>` (`47180-3`)
+        /// * `@<tool-name>` or `@<tool-name>:N` for N-th-most-recent
+        ///
+        /// Omit to default to the most recently started invocation.
+        reference: Option<String>,
+        /// Look up by the tool's own OS PID instead of the session-local
+        /// integer. Bare integers always mean tool-id, not PID — use this
+        /// flag to disambiguate.
+        #[arg(long = "pid")]
+        pid: Option<u32>,
+        /// Number of trailing stdout/stderr lines to show per stream.
+        #[arg(long = "lines", default_value_t = 20)]
+        lines: usize,
+        /// Emit a JSON object instead of the human-readable view.
+        #[arg(long = "json")]
+        json: bool,
+    },
 }
 
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.
