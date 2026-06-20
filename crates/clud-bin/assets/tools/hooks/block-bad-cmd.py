@@ -264,51 +264,31 @@ def _nested_shell_command(words: list[str]) -> str | None:
     return None
 
 
-def _find_pyproject(start: Path) -> Path | None:
-    """Walk up from `start` looking for the nearest `pyproject.toml`."""
-    try:
-        anchor = start.resolve()
-    except OSError:
-        return None
-    for candidate in (anchor, *anchor.parents):
-        pp = candidate / "pyproject.toml"
-        try:
-            if pp.is_file():
-                return pp
-        except OSError:
-            continue
-    return None
+def _python_rust_hybrid_root(cwd: Path | None) -> Path | None:
+    """Walk up from `cwd` looking for the nearest ancestor directory that
+    contains BOTH `pyproject.toml` and `Cargo.toml`. That coexistence is
+    the signal that `uv run`'s project auto-sync may rebuild a native
+    Rust extension (maturin, setuptools-rust, or a custom build script
+    that calls cargo) — the case the gate is trying to prevent.
 
-
-def _maturin_build_backend(cwd: Path | None) -> tuple[Path, str] | None:
-    """Return `(pyproject_path, backend_value)` when the nearest
-    `pyproject.toml` above `cwd` declares a maturin build backend. The
-    `uv run` auto-sync block is scoped to this case — other repos (hatchling,
-    setuptools, no pyproject at all) don't pay the maturin rebuild cost and
-    must not be blocked. Returns `None` when no cwd is available, no
-    pyproject is found, the file can't be parsed, or the backend isn't
-    maturin.
+    Returns the directory path when found, else `None`. A repo with
+    only one of the two files (pure Python, pure Rust) is not a hybrid
+    and never triggers the block.
     """
     if cwd is None:
         return None
     try:
-        import tomllib
-    except ImportError:
+        anchor = cwd.resolve()
+    except OSError:
         return None
-    pp = _find_pyproject(cwd)
-    if pp is None:
-        return None
-    try:
-        with pp.open("rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    build_system = data.get("build-system")
-    if not isinstance(build_system, dict):
-        return None
-    backend = build_system.get("build-backend")
-    if isinstance(backend, str) and "maturin" in backend.lower():
-        return pp, backend
+    for candidate in (anchor, *anchor.parents):
+        try:
+            has_py = (candidate / "pyproject.toml").is_file()
+            has_rs = (candidate / "Cargo.toml").is_file()
+        except OSError:
+            continue
+        if has_py and has_rs:
+            return candidate
     return None
 
 
@@ -359,39 +339,38 @@ def _forbidden_reason(command_text: str, cwd: Path | None = None) -> str | None:
 
             # Require an opt-out for the project auto-sync. Without one of
             # --no-project / --no-sync / --frozen, `uv run` reinstalls the
-            # project into the venv on every invocation. On maturin-backed
-            # repos that is a full Rust+PyO3 rebuild (~10s+ per call) for
-            # operations that don't need the native extension at all
-            # (lint, version-check, doc generation, etc.). The escape hatch
-            # for the legitimate full-rebuild case is `./test` — see
-            # zackees/soldr#805.
+            # project into the venv on every invocation. In a Python+Rust
+            # hybrid (a pyproject.toml + Cargo.toml in the same project
+            # root) that auto-sync can trigger a full native rebuild
+            # (maturin, setuptools-rust, or a build script that shells
+            # out to cargo) — minutes of compile for operations that
+            # don't need the native extension at all (lint, version-check,
+            # doc generation, etc.). The escape hatch for the legitimate
+            # full-rebuild case is `./test` — see zackees/soldr#805.
             #
-            # Scoping: only enforce this in projects whose `pyproject.toml`
-            # actually declares a maturin build backend. Other repos pay no
-            # rebuild cost on `uv run` and the block was a false positive
-            # there (e.g. FastLED uses hatchling — `uv run` is fast and
-            # blocking it was just noise).
+            # Scoping: file-based heuristic instead of parsing pyproject
+            # build-backend. Pure-Python repos (FastLED uses hatchling)
+            # have no Cargo.toml at all, so they fall through.
             uv_safe_flags = {"--no-project", "--no-sync", "--frozen"}
             has_uv_safe_flag = any(
                 w in uv_safe_flags or any(w.startswith(f + "=") for f in uv_safe_flags)
                 for w in words[2:]
             )
             if not has_uv_safe_flag:
-                maturin = _maturin_build_backend(cwd)
-                if maturin is not None:
-                    pp_path, backend = maturin
+                hybrid_root = _python_rust_hybrid_root(cwd)
+                if hybrid_root is not None:
                     return (
-                        f"this hook fired because {pp_path} declares "
-                        f"build-backend = {backend!r}. `uv run` without "
-                        "--no-project / --no-sync / --frozen triggers the "
-                        "project auto-sync, which on a maturin-backed repo "
-                        "is a full Rust+PyO3 rebuild. Pass `--no-project` "
-                        "for pure-Python scripts, `--no-sync` to use the "
-                        "existing venv, or `--frozen` to lock to the "
-                        "existing lockfile. Escape hatch for a legitimate "
-                        "full-rebuild: run `./test` (or `bash ./test`) — "
-                        "the canonical full-build entrypoint. See "
-                        "zackees/soldr#805."
+                        f"this hook fired because {hybrid_root} contains "
+                        "both pyproject.toml and Cargo.toml (a Python+Rust "
+                        "hybrid project). `uv run` without --no-project / "
+                        "--no-sync / --frozen triggers the project "
+                        "auto-sync, which on a Rust-backed wheel is a full "
+                        "native rebuild. Pass `--no-project` for pure-Python "
+                        "scripts, `--no-sync` to use the existing venv, or "
+                        "`--frozen` to lock to the existing lockfile. "
+                        "Escape hatch for a legitimate full-rebuild: run "
+                        "`./test` (or `bash ./test`) — the canonical "
+                        "full-build entrypoint. See zackees/soldr#805."
                     )
             continue
 
