@@ -32,6 +32,7 @@ use crate::session_index::{
 };
 use crate::tool_install::tools_root;
 use crate::tool_tee::TeeWriter;
+use crate::tool_watchdog::{Watchdog, WatchdogDecision};
 use crate::tools::clud_uv_cache_dir;
 
 /// Poll interval for draining captured stdout/stderr into the tee writer.
@@ -160,17 +161,66 @@ fn run_with_session(
         },
     );
 
+    // Slice 5 of #427: build the watchdog from the tool's BundledTool
+    // entry (kill_semantics, command_timeout, progress_timeout, quiet_ok).
+    // Unknown tools default to Killable + 60m + no progress watchdog.
+    let mut watchdog = Watchdog::for_rel_path(rel_path);
+
     // Poll-drain loop. `wait(Some(100ms))` returns `Err(ProcessError::Timeout)`
     // while the child is still running; we drain captured output each
     // iteration and emit it via the tee. On `Ok` (child exited), we do a
     // final drain so any output written during the last 100ms still lands
     // in the log.
+    //
+    // Each iteration also asks the watchdog whether either timer has
+    // fired. If so we either kill (killable) or emit an in-progress
+    // terminal (resumable) and break out.
     let mut emitted = 0usize;
+    let mut last_drain_count = 0usize;
     let exit_code = loop {
         match process.wait(Some(DRAIN_POLL_INTERVAL)) {
             Ok(code) => break code,
             Err(ProcessError::Timeout) => {
                 emitted = drain_into_tee(&process, &mut tee, emitted);
+                if emitted > last_drain_count {
+                    watchdog.note_output();
+                    last_drain_count = emitted;
+                }
+                match watchdog.check() {
+                    WatchdogDecision::Continue => continue,
+                    WatchdogDecision::KillAndAbort(reason) => {
+                        let _ = process.kill();
+                        let _ = drain_into_tee(&process, &mut tee, emitted);
+                        let _ = tee.flush();
+                        eprintln!("{}", watchdog.render_aborted(reason));
+                        let _ = append_event(
+                            ctx,
+                            &IndexEvent::Aborted {
+                                tool_id,
+                                reason: reason.label().to_string(),
+                                ended_at_ms: unix_millis_now(),
+                            },
+                        );
+                        return Ok(124); // standard "command timed out" exit.
+                    }
+                    WatchdogDecision::ResumeLater(reason) => {
+                        // Resumable: the world owns the state; the
+                        // observer succeeded. Detach and exit 0 with the
+                        // in-progress JSON so the caller can re-invoke.
+                        let _ = drain_into_tee(&process, &mut tee, emitted);
+                        let _ = tee.flush();
+                        eprintln!("{}", watchdog.render_in_progress(reason));
+                        let _ = append_event(
+                            ctx,
+                            &IndexEvent::Aborted {
+                                tool_id,
+                                reason: format!("resumable:{}", reason.label()),
+                                ended_at_ms: unix_millis_now(),
+                            },
+                        );
+                        return Ok(0);
+                    }
+                }
             }
             Err(other) => return Err(io::Error::other(other)),
         }
