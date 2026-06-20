@@ -111,16 +111,31 @@ pub struct BundledTool {
 
 /// Every tool `clud` ships and auto-installs. Adding a tool is a one-line
 /// entry here plus a new file under `crates/clud-bin/assets/tools/`.
-pub const BUNDLED_TOOLS: &[BundledTool] = &[BundledTool {
-    rel_path: "github/pr_merge_watch.py",
-    body: include_str!("../assets/tools/github/pr_merge_watch.py"),
-    // PR-merge watcher polls GitHub state; the world owns the merge
-    // status, so killing this process loses no work — `Resumable`.
-    kill_semantics: KillSemantics::Resumable,
-    command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
-    progress_timeout: None,
-    quiet_ok: false,
-}];
+pub const BUNDLED_TOOLS: &[BundledTool] = &[
+    BundledTool {
+        rel_path: "github/pr_merge_watch.py",
+        body: include_str!("../assets/tools/github/pr_merge_watch.py"),
+        // PR-merge watcher polls GitHub state; the world owns the merge
+        // status, so killing this process loses no work — `Resumable`.
+        kill_semantics: KillSemantics::Resumable,
+        command_timeout: DEFAULT_RESUMABLE_TIMEOUT,
+        progress_timeout: None,
+        quiet_ok: false,
+    },
+    BundledTool {
+        rel_path: "hooks/block-bad-cmd.py",
+        body: include_str!("../assets/tools/hooks/block-bad-cmd.py"),
+        // PreToolUse hook: reads a small JSON blob from stdin, decides
+        // allow/deny, exits. The decision IS the work; killing mid-run
+        // loses the verdict — `Killable`. Hook runners cap themselves
+        // at a few seconds, so the 30s ceiling here is a backstop, not
+        // an expected wall-clock.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(30),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
+];
 
 /// The single source of truth for the `UV_CACHE_DIR` value used by every
 /// bundled-tool invocation in clud's process tree.

@@ -292,7 +292,16 @@ fn main() {
         hook_health::emit_launch_warnings();
     }
 
-    if !args.clean_worktrees && !args.fix_hooks {
+    // Large-file guard runs only on actual backend launches (bare `clud`,
+    // `clud --claude`, `clud --codex`, or piped/prompted variants). Skip
+    // for every subcommand path: `clud tool run`, `clud loop`, `clud gc`,
+    // `clud attach/kill/list/logs`, etc. — those are utility invocations
+    // (including PreToolUse hooks like `clud tool run hooks/block-bad-cmd.py`)
+    // where the warning would be noise, not signal. The subcommands that
+    // already short-circuit above via `std::process::exit` never reached
+    // this code anyway; this gate also covers `clud loop` and any future
+    // subcommand that falls through.
+    if args.command.is_none() && !args.clean_worktrees && !args.fix_hooks {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let root = loop_spec::git_root_from(&cwd);
         if args.verbose {
