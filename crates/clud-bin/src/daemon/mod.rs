@@ -13,6 +13,7 @@ mod rp_broker;
 mod server;
 mod sessions;
 mod types;
+pub mod uv_cache_sweep;
 mod wire_prost;
 mod worker;
 mod worker_shared;
