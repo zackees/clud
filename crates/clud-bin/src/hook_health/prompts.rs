@@ -201,6 +201,7 @@ pub(in crate::hook_health) fn run_backend_prompt(
         keep_orphans: false,
         quiet_orphans: false,
         explain_orphans: false,
+        no_cpu_banner: false,
         command: None,
         passthrough: args.passthrough.clone(),
         codex_config_overrides: args.codex_config_overrides.clone(),

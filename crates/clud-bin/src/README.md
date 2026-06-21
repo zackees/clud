@@ -145,6 +145,17 @@ Skills and hooks:
 
 Diagnostics and misc:
 
+- `cpu_banner.rs` - issue #466: foreground CPU-burn banner. Spawns one
+  background `sysinfo` sampler that ticks every 2 s, sums `cpu_usage()` +
+  `memory()` over the parent-PID subtree rooted at our originator, and emits
+  `[clud] cpu N % · X.Y / Z cores · …` to stderr when subtree CPU crosses
+  `max(50 %, 0.20 × num_cpus × 100 %)` for 3 sustained ticks. Hysteretic
+  drop-out at 0.7×; 30 s heartbeat while sustained; clear-banner only after
+  ≥ 60 s episodes. Wired into `runner::run_plan_subprocess` and
+  `runner::run_plan_pty` via a `BannerWatcher` whose `Drop` joins the
+  thread. Suppressed by `--no-cpu-banner`, `--dry-run`, `--detach`,
+  `--detachable`, `--repeat`, and `[foreground.cpu_banner] enabled = false`
+  in `~/.clud/settings.json`. Slice of #463 (`clud top`).
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.
