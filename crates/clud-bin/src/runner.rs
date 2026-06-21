@@ -13,6 +13,7 @@ use crate::backend::Backend;
 use crate::clud_settings;
 use crate::command;
 use crate::console_setup::enable_console_vt_input;
+use crate::cpu_banner;
 use crate::loop_artifacts;
 use crate::loop_check::{
     check_loop_markers, check_loop_markers_with_output, loop_unconverged_exit,
@@ -259,10 +260,15 @@ pub fn run_plan_subprocess(
     verbose: bool,
     interrupted: &AtomicBool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
+    cpu_banner_cfg: cpu_banner::CpuBannerCfg,
 ) -> i32 {
     use std::path::PathBuf;
 
     use running_process::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
+
+    // Issue #466: CPU-burn banner. Watcher thread joins on drop at function
+    // exit. Inert when cfg.enabled = false (no thread spawned).
+    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
     let env = child_env_for_backend(plan.backend);
     let mut last_exit = 0i32;
@@ -591,8 +597,14 @@ pub fn run_plan_pty(
     interrupted: &AtomicBool,
     dnd_enabled: bool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
+    cpu_banner_cfg: cpu_banner::CpuBannerCfg,
 ) -> i32 {
     use running_process::pty::NativePtyProcess;
+
+    // Issue #466: CPU-burn banner. Same shape as the subprocess runner —
+    // background thread joins on drop at function exit. Inert when
+    // cfg.enabled = false.
+    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
     // Enable VT input on the Windows console for the whole PTY session.
     // The raw byte pump reads from clud's stdin, so PTY mode needs the

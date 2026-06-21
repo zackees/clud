@@ -1,9 +1,9 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
-    crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_log,
-    launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache,
-    startup, symbols, tool_info, tool_ledger, tool_list, tool_log, tool_run, tools, trampoline,
-    trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
+    launch_log, launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner,
+    runtime_cache, startup, symbols, tool_info, tool_ledger, tool_list, tool_log, tool_run, tools,
+    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -705,6 +705,13 @@ fn main() {
     } else {
         None
     };
+    // Issue #466: build the CPU-burn banner cfg from CLI flags + settings.
+    // Suppressed in non-interactive modes (`--dry-run`, `--detach`,
+    // `--detachable`, `--repeat`), by `--no-cpu-banner`, and by the
+    // `[foreground.cpu_banner] enabled = false` settings toggle. Builds an
+    // inert cfg in any of those cases so `BannerWatcher::spawn` is a no-op.
+    let cpu_banner_cfg = build_cpu_banner_cfg(&args, &plan);
+
     let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
@@ -714,6 +721,7 @@ fn main() {
                 args.verbose,
                 interrupted.as_ref(),
                 loop_session.as_mut(),
+                cpu_banner_cfg,
             ),
             backend::LaunchMode::Pty => runner::run_plan_pty(
                 &plan,
@@ -721,6 +729,7 @@ fn main() {
                 interrupted.as_ref(),
                 startup::should_register_drop_target(&args),
                 loop_session.as_mut(),
+                cpu_banner_cfg,
             ),
         }
     };
@@ -791,6 +800,35 @@ fn main() {
     };
     flush_ctrl_c_exit_event(kind, exit_code);
     std::process::exit(exit_code);
+}
+
+/// Issue #466: assemble the [`cpu_banner::CpuBannerCfg`] from CLI flags
+/// and `~/.clud/settings.json`. Returns the disabled variant whenever the
+/// banner would be wrong to print: `--no-cpu-banner`, `--dry-run`,
+/// `--detach`, `--detachable`, `--repeat`, or the
+/// `[foreground.cpu_banner] enabled = false` settings toggle. Otherwise
+/// reads `heartbeat_secs` from settings (default 30) and resolves
+/// `num_cpus` via `std::thread::available_parallelism` (no syscall on the
+/// hot path; falls back to 1 if probing fails).
+fn build_cpu_banner_cfg(args: &args::Args, plan: &command::LaunchPlan) -> cpu_banner::CpuBannerCfg {
+    if args.no_cpu_banner
+        || args.dry_run
+        || args.detach
+        || args.detachable
+        || plan.repeat_schedule.is_some()
+    {
+        return cpu_banner::CpuBannerCfg::disabled();
+    }
+    let settings = clud_settings::load_cpu_banner_settings().unwrap_or_default();
+    if !settings.enabled {
+        return cpu_banner::CpuBannerCfg::disabled();
+    }
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mut cfg = cpu_banner::CpuBannerCfg::new(std::process::id(), num_cpus);
+    cfg.heartbeat_secs = settings.heartbeat_secs;
+    cfg
 }
 
 /// Write the cross-path Ctrl+C exit-timing event (issue: `clud ui` ctrl-c

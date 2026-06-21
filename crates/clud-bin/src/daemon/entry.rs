@@ -686,6 +686,7 @@ mod tests {
             keep_orphans: false,
             quiet_orphans: false,
             explain_orphans: false,
+            no_cpu_banner: false,
             command: None,
             passthrough: Vec::new(),
             codex_config_overrides: Vec::new(),

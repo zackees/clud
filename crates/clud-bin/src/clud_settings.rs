@@ -299,6 +299,52 @@ pub fn load_rust_optimize_settings_at(
     rust_optimize_from_json(&document)
 }
 
+/// Settings for the foreground CPU-burn banner (#466). Defaults: enabled,
+/// 30 s heartbeat. JSON shape:
+///
+/// ```json
+/// { "foreground": { "cpu_banner": { "enabled": false, "heartbeat_secs": 60 } } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuBannerSettings {
+    pub enabled: bool,
+    pub heartbeat_secs: u64,
+}
+
+impl Default for CpuBannerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            heartbeat_secs: 30,
+        }
+    }
+}
+
+pub fn load_cpu_banner_settings() -> Result<CpuBannerSettings, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_cpu_banner_settings_at(&home)
+}
+
+pub fn load_cpu_banner_settings_at(home: &Path) -> Result<CpuBannerSettings, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    let mut out = CpuBannerSettings::default();
+    let Some(section) = document
+        .get("foreground")
+        .and_then(|item| item.get("cpu_banner"))
+    else {
+        return Ok(out);
+    };
+    if let Some(enabled) = section.get("enabled").and_then(Value::as_bool) {
+        out.enabled = enabled;
+    }
+    if let Some(secs) = section.get("heartbeat_secs").and_then(Value::as_u64) {
+        out.heartbeat_secs = secs;
+    }
+    Ok(out)
+}
+
 fn with_settings_document<F>(home: &Path, mutate: F) -> Result<(), SettingsError>
 where
     F: FnOnce(&mut Value),
@@ -895,5 +941,38 @@ mod tests {
             !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap(),
             "codex override should override top-level"
         );
+    }
+
+    #[test]
+    fn cpu_banner_defaults_when_settings_missing() {
+        let home = tempdir().unwrap();
+        let got = load_cpu_banner_settings_at(home.path()).unwrap();
+        assert_eq!(got, CpuBannerSettings::default());
+    }
+
+    #[test]
+    fn cpu_banner_reads_enabled_override() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"foreground":{"cpu_banner":{"enabled":false}}}"#).unwrap();
+        let got = load_cpu_banner_settings_at(home.path()).unwrap();
+        assert!(!got.enabled);
+        assert_eq!(got.heartbeat_secs, 30, "default heartbeat preserved");
+    }
+
+    #[test]
+    fn cpu_banner_reads_heartbeat_override() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"foreground":{"cpu_banner":{"heartbeat_secs":120}}}"#,
+        )
+        .unwrap();
+        let got = load_cpu_banner_settings_at(home.path()).unwrap();
+        assert!(got.enabled, "default enabled preserved");
+        assert_eq!(got.heartbeat_secs, 120);
     }
 }

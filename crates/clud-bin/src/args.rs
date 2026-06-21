@@ -153,6 +153,15 @@ pub struct Args {
     #[arg(long = "explain-orphans")]
     pub explain_orphans: bool,
 
+    /// Issue #466: suppress the foreground CPU-burn banner for this
+    /// invocation. Banner is otherwise on by default; it polls the subtree
+    /// CPU every 2 s and emits `[clud] cpu N % …` to stderr when subtree
+    /// CPU crosses `max(50 %, 0.20 × num_cpus × 100 %)` for 3 sustained
+    /// ticks. Permanent opt-out via `[foreground.cpu_banner] enabled =
+    /// false` in `~/.clud/settings.json`.
+    #[arg(long = "no-cpu-banner")]
+    pub no_cpu_banner: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
