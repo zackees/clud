@@ -127,12 +127,13 @@ mod tests {
 
     #[test]
     fn prepend_to_path_is_idempotent() {
-        let mut e = env(&[("PATH", "/home/u/.clud/state/shims:/usr/bin")]);
+        let initial_path = format!("/home/u/.clud/state/shims{}/usr/bin", path_sep());
+        let mut e = env(&[("PATH", initial_path.as_str())]);
         let added = prepend_to_path(&mut e, Path::new("/home/u/.clud/state/shims"));
         assert!(!added, "second prepend should be a no-op");
         // Path unchanged.
         let path = &e.iter().find(|(k, _)| k == "PATH").unwrap().1;
-        assert_eq!(path, "/home/u/.clud/state/shims:/usr/bin");
+        assert_eq!(path, &initial_path);
     }
 
     #[test]
