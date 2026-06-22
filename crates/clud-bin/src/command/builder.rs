@@ -143,6 +143,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         | Some(Command::Slay)
         | Some(Command::List)
         | Some(Command::Logs { .. })
+        | Some(Command::Log { .. })
         | Some(Command::Gc { .. })
         | Some(Command::Ui { .. })
         | Some(Command::Trash { .. })

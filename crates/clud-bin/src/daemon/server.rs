@@ -19,7 +19,7 @@ use super::daemon_events;
 use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
 };
-use super::http::{default_live_sessions_provider, spawn_dashboard};
+use super::http::{default_live_sessions_provider, spawn_dashboard, TelemetryStore};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file};
 use super::paths::{
     daemon_events_path, daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
@@ -87,12 +87,17 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // discover it. Bind failures are non-fatal — IPC keeps working;
     // `dashboard_port` is just `None` on this daemon instance.
     let started_at_unix = current_unix();
+    // Issue #469: in-memory telemetry sink for `clud log` POSTs. Lives
+    // only for the daemon's lifetime — restart wipes it. Persistence
+    // is a follow-up once the prototype contract stabilizes.
+    let telemetry = TelemetryStore::new();
     let dashboard_port = spawn_dashboard(
         state_dir.to_path_buf(),
         gc_tx.clone(),
         port,
         started_at_unix,
         default_live_sessions_provider(),
+        telemetry,
     );
 
     // Install bundled Python tools (`~/.clud/tools/*`) before announcing

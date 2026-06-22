@@ -1,9 +1,9 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
-    launch_log, launch_setup, loop_artifacts, loop_spec, optimize, orphan_reaper, runner,
-    runtime_cache, startup, symbols, tool_info, tool_ledger, tool_list, tool_log, tool_run, tools,
-    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
+    runner, runtime_cache, startup, symbols, tool_info, tool_ledger, tool_list, tool_log, tool_run,
+    tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -120,6 +120,18 @@ fn main() {
     }) = &args.command
     {
         std::process::exit(trash::run(&args, paths, *cross_volume));
+    }
+
+    // Issue #469: `clud log --cmd "..."` posts one telemetry event to
+    // the always-on daemon's HTTP server. Discovers the daemon via
+    // `$CLUD_DAEMON_HTTP_SERVER`. Self-contained; never launches an
+    // agent backend.
+    if let Some(args::Command::Log {
+        cmd,
+        fail_on_no_server,
+    }) = &args.command
+    {
+        std::process::exit(log_event::run(cmd, *fail_on_no_server));
     }
 
     // Issue #408: `clud tool run <rel_path> [args]` invokes a bundled
