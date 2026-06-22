@@ -176,6 +176,7 @@ fn daemon_request_prost_roundtrips_json_shapes() {
         },
         DaemonRequest::Shutdown,
         DaemonRequest::ReapOrphans,
+        DaemonRequest::Metrics,
     ];
 
     for request in cases {
@@ -211,6 +212,10 @@ fn daemon_response_prost_roundtrips_json_shapes() {
         DaemonResponse::ReapOrphansAck {
             found: 3,
             reaped: 3,
+        },
+        DaemonResponse::Metrics {
+            pid: 1234,
+            cpu_pct: 72.5,
         },
         DaemonResponse::Error {
             message: "failed".to_string(),

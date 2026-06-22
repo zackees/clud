@@ -190,6 +190,17 @@ pub(super) fn send_daemon_request(
     decode_daemon_response_line(&line).map_err(wire_error_to_io)
 }
 
+pub fn daemon_client_metrics(state_dir: &Path) -> io::Result<(u32, f32)> {
+    match send_daemon_request(state_dir, &DaemonRequest::Metrics)? {
+        DaemonResponse::Metrics { pid, cpu_pct } => Ok((pid, cpu_pct)),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
 pub(super) fn request_session_termination(
     state_dir: &Path,
     session_id: &str,

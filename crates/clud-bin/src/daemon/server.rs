@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
 use serde_json::json;
-use sysinfo::Signal;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
 use crate::win_creation_flags::invisible_helper_creationflags;
 
@@ -337,6 +337,10 @@ fn dispatch_daemon_request_with_id(
                 reaped: 0,
             }
         }
+        DaemonRequest::Metrics => DaemonResponse::Metrics {
+            pid: std::process::id(),
+            cpu_pct: sample_daemon_cpu_pct(),
+        },
         DaemonRequest::Gc { payload } => {
             let reply = dispatch_gc_op(state_dir, gc_tx, request_id, payload);
             DaemonResponse::Gc { reply }
@@ -379,6 +383,7 @@ fn request_op(request: &DaemonRequest) -> &'static str {
         DaemonRequest::Gc { .. } => "gc",
         DaemonRequest::Shutdown => "shutdown",
         DaemonRequest::ReapOrphans => "reap_orphans",
+        DaemonRequest::Metrics => "metrics",
     }
 }
 
@@ -393,8 +398,24 @@ fn response_op(response: &DaemonResponse) -> &'static str {
         DaemonResponse::Gc { .. } => "gc",
         DaemonResponse::ShutdownAck { .. } => "shutdown_ack",
         DaemonResponse::ReapOrphansAck { .. } => "reap_orphans_ack",
+        DaemonResponse::Metrics { .. } => "metrics",
         DaemonResponse::Error { .. } => "error",
     }
+}
+
+fn sample_daemon_cpu_pct() -> f32 {
+    static SAMPLER: std::sync::OnceLock<Mutex<System>> = std::sync::OnceLock::new();
+    let mut sys = SAMPLER
+        .get_or_init(|| Mutex::new(System::new()))
+        .lock()
+        .expect("daemon metrics sampler poisoned");
+    let pid = Pid::from_u32(std::process::id());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_cpu(),
+    );
+    sys.process(pid).map(|proc| proc.cpu_usage()).unwrap_or(0.0)
 }
 
 fn gc_reply_op(reply: &GcReply) -> &'static str {
@@ -1260,5 +1281,20 @@ mod tests {
         assert!(finished["candidate_pids"].is_array());
         assert!(finished["reaped_pids"].is_array());
         assert_eq!(finished["reason"], "dead_originator");
+    }
+
+    #[test]
+    fn metrics_request_returns_daemon_pid_and_cpu_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+
+        let response = dispatch_daemon_request(tmp.path(), &workers, None, DaemonRequest::Metrics);
+        match response {
+            DaemonResponse::Metrics { pid, cpu_pct } => {
+                assert_eq!(pid, std::process::id());
+                assert!(cpu_pct >= 0.0, "cpu_pct should be non-negative: {cpu_pct}");
+            }
+            other => panic!("expected Metrics, got {other:?}"),
+        }
     }
 }

@@ -85,6 +85,7 @@ fn daemon_request_to_proto(
         }),
         DaemonRequest::Shutdown => Request::Shutdown(proto::ShutdownRequest {}),
         DaemonRequest::ReapOrphans => Request::ReapOrphans(proto::ReapOrphansRequest {}),
+        DaemonRequest::Metrics => Request::Metrics(proto::MetricsRequest {}),
     };
     Ok(proto::ClientToDaemon {
         request: Some(request),
@@ -125,6 +126,7 @@ fn daemon_request_from_proto(proto: proto::ClientToDaemon) -> Result<DaemonReque
         }),
         Request::Shutdown(_) => Ok(DaemonRequest::Shutdown),
         Request::ReapOrphans(_) => Ok(DaemonRequest::ReapOrphans),
+        Request::Metrics(_) => Ok(DaemonRequest::Metrics),
     }
 }
 
@@ -182,6 +184,10 @@ fn daemon_response_to_proto(
                 reaped: *reaped,
             })
         }
+        DaemonResponse::Metrics { pid, cpu_pct } => Response::Metrics(proto::MetricsResponse {
+            pid: *pid,
+            cpu_pct: *cpu_pct,
+        }),
         DaemonResponse::Error { message } => Response::Error(proto::ErrorResponse {
             message: message.clone(),
         }),
@@ -223,6 +229,10 @@ fn daemon_response_from_proto(proto: proto::DaemonToClient) -> Result<DaemonResp
         Response::ReapOrphansAck(ack) => Ok(DaemonResponse::ReapOrphansAck {
             found: ack.found,
             reaped: ack.reaped,
+        }),
+        Response::Metrics(metrics) => Ok(DaemonResponse::Metrics {
+            pid: metrics.pid,
+            cpu_pct: metrics.cpu_pct,
         }),
         Response::Error(error) => Ok(DaemonResponse::Error {
             message: error.message,

@@ -216,6 +216,9 @@ pub(super) enum DaemonRequest {
     /// replies `ReapOrphansAck` immediately and does the sweep on a
     /// background thread.
     ReapOrphans,
+    /// Return lightweight daemon process metrics for foreground clients
+    /// that want ambient status without scraping dashboard JSON.
+    Metrics,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -255,6 +258,10 @@ pub(super) enum DaemonResponse {
     ReapOrphansAck {
         found: u32,
         reaped: u32,
+    },
+    Metrics {
+        pid: u32,
+        cpu_pct: f32,
     },
     Error {
         message: String,
@@ -559,6 +566,32 @@ mod tests {
     fn list_live_cwds_request_serializes_as_tagged_op() {
         let wire = serde_json::to_string(&DaemonRequest::ListLiveCwds).unwrap();
         assert_eq!(wire, r#"{"op":"list_live_cwds"}"#);
+    }
+
+    #[test]
+    fn metrics_request_serializes_as_tagged_op() {
+        let wire = serde_json::to_string(&DaemonRequest::Metrics).unwrap();
+        assert_eq!(wire, r#"{"op":"metrics"}"#);
+    }
+
+    #[test]
+    fn metrics_response_roundtrips() {
+        let response = DaemonResponse::Metrics {
+            pid: 142500,
+            cpu_pct: 72.5,
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(wire.contains(r#""op":"metrics""#));
+        assert!(wire.contains(r#""pid":142500"#));
+
+        let parsed: DaemonResponse = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonResponse::Metrics { pid, cpu_pct } => {
+                assert_eq!(pid, 142500);
+                assert!((cpu_pct - 72.5).abs() < f32::EPSILON);
+            }
+            other => panic!("expected Metrics, got {other:?}"),
+        }
     }
 
     #[test]
