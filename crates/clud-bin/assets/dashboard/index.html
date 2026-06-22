@@ -480,8 +480,8 @@
         </table>`;
     }
 
-    function renderTelemetry(state) {
-      const rows = state.telemetry || [];
+    function renderTelemetry(rows) {
+      rows = rows || [];
       document.getElementById('telemetry-count').textContent = rows.length ? `(${rows.length})` : '';
       if (!rows.length) {
         document.getElementById('telemetry-body').innerHTML =
@@ -585,20 +585,28 @@
     }
 
     async function refresh() {
+      // Issue #471: /state.json and /telemetry are independent endpoints.
+      // Fire them in parallel; either response can render on its own and
+      // partial failure of one does not blank the other.
+      const stateP = fetch('/state.json').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
+      const telemetryP = fetch('/telemetry').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
       try {
-        const resp = await fetch('/state.json');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const state = await resp.json();
+        const state = await stateP;
         lastState = state;
         renderHeader(state);
         renderSessions(state);
         renderGc(state);
         renderRepos(state);
         renderCtrlCEvents(state);
-        renderTelemetry(state);
       } catch (err) {
         document.getElementById('daemon-meta').textContent =
           `connection lost: ${err}`;
+      }
+      try {
+        renderTelemetry(await telemetryP);
+      } catch (err) {
+        document.getElementById('telemetry-body').innerHTML =
+          `<p class="empty">failed to load telemetry: ${esc(err)}</p>`;
       }
     }
 

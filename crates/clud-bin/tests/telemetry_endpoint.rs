@@ -5,10 +5,10 @@
 //! `CLUD_TEST_MARKER` env var, and asserts:
 //!
 //! 1. `clud log` exited 0 (proves the POST round-tripped).
-//! 2. `/state.json` shows the new entry under `telemetry` keyed by the
-//!    test process's PID.
-//! 3. `/telemetry/by-pid/<pid>` returns the full entry including the
-//!    captured `CLUD_*` env vars.
+//! 2. `GET /telemetry` returns one summary entry keyed by the test
+//!    process's PID (issue #471 — moved off `/state.json#telemetry`).
+//! 3. `GET /telemetry/by-pid/<pid>` returns the full entry including
+//!    the captured `CLUD_*` env vars.
 //!
 //! Validates the entire chain: CLI → HTTP POST → in-memory sink →
 //! dashboard read.
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clud::daemon::{
-    spawn_dashboard_telemetry_only, DashboardState, TelemetryPidDetail, TelemetryStore,
+    spawn_dashboard_telemetry_only, TelemetryPidDetail, TelemetryPidSummary, TelemetryStore,
 };
 use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
@@ -104,21 +104,19 @@ fn telemetry_round_trip_via_clud_log_subprocess() {
         "clud log --fail-on-no-server should round-trip the POST; got exit={exit_code}\nstdout:\n{stdout}",
     );
 
-    // Assert /state.json shows the entry under the child's parent PID.
-    // The child's parent is THIS test process — process.pid() returns
-    // the child PID. We don't know the exact PPID the child sees on
-    // Windows (which uses sysinfo) vs. POSIX (getppid), so just assert
-    // there is exactly one PID with one entry, and it's our PID.
-    let state_body = fetch_path(port, "GET", "/state.json", None).expect("GET /state.json");
-    let state: DashboardState = serde_json::from_str(&state_body).expect("parse state");
+    // Issue #471: telemetry summary now lives at its own URL — fetch
+    // from `/telemetry` directly instead of pulling it out of the
+    // consolidated state document.
+    let summary_body = fetch_path(port, "GET", "/telemetry", None).expect("GET /telemetry");
+    let summaries: Vec<TelemetryPidSummary> =
+        serde_json::from_str(&summary_body).expect("parse summary");
     assert_eq!(
-        state.telemetry.len(),
+        summaries.len(),
         1,
-        "expected exactly one PID summary, got {}: {:?}",
-        state.telemetry.len(),
-        state.telemetry
+        "expected exactly one PID summary, got {}: {summaries:?}",
+        summaries.len(),
     );
-    let summary = &state.telemetry[0];
+    let summary = &summaries[0];
     assert_eq!(
         summary.entry_count, 1,
         "expected 1 entry, got {}",
@@ -245,6 +243,52 @@ fn clud_log_unreachable_server_with_fail_flag_exits_nonzero() {
         }
     };
     assert_ne!(exit_code, 0, "expected non-zero exit on unreachable server");
+}
+
+/// Issue #471: `GET /telemetry` returns the per-PID summary list
+/// independently of `/state.json`. Asserts the empty case + that two
+/// distinct PIDs from two POSTs both appear, sorted last-seen-desc.
+#[test]
+fn telemetry_summary_endpoint_returns_independent_list() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let telemetry = TelemetryStore::new();
+    let port =
+        spawn_dashboard_telemetry_only(dir.path().to_path_buf(), 9999, 100, telemetry.clone())
+            .expect("dashboard spawned");
+
+    // Empty case: no POSTs yet → empty array.
+    let empty_body = fetch_path(port, "GET", "/telemetry", None).expect("GET /telemetry empty");
+    let empty: Vec<TelemetryPidSummary> = serde_json::from_str(&empty_body).expect("parse empty");
+    assert!(empty.is_empty(), "expected empty array, got {empty:?}");
+
+    // POST two entries from two distinct PIDs.
+    for (pid, ts) in [(111u32, 1_700_000_001_000u64), (222, 1_700_000_002_000)] {
+        let body =
+            format!(r#"{{"parent_pid":{pid},"time_ms":{ts},"cmd":"e","cwd":"/tmp","env":{{}}}}"#);
+        let resp =
+            fetch_path(port, "POST", "/telemetry/log", Some(body)).expect("POST /telemetry/log");
+        assert!(resp.contains("{}"), "expected ack {{}}, got: {resp}");
+    }
+
+    let body = fetch_path(port, "GET", "/telemetry", None).expect("GET /telemetry populated");
+    let summaries: Vec<TelemetryPidSummary> = serde_json::from_str(&body).expect("parse populated");
+    assert_eq!(summaries.len(), 2);
+    // Sort order is last_at_ms desc — newer (received later) comes first.
+    // Both POSTs happened in the same test second, so use parent_pid as a
+    // tie-breaker assertion: the SET equals {111, 222}.
+    let pids: std::collections::BTreeSet<u32> = summaries.iter().map(|s| s.parent_pid).collect();
+    assert_eq!(pids, [111, 222].into_iter().collect());
+    assert!(
+        summaries.iter().all(|s| s.entry_count == 1),
+        "each PID should have exactly one entry: {summaries:?}"
+    );
+    // Sanity: /state.json must NOT contain a `telemetry` field anymore.
+    let state_body = fetch_path(port, "GET", "/state.json", None).expect("GET /state.json");
+    let state: serde_json::Value = serde_json::from_str(&state_body).expect("parse state");
+    assert!(
+        state.get("telemetry").is_none(),
+        "/state.json should no longer carry telemetry; got {state}"
+    );
 }
 
 /// Tiny HTTP/1.0 client for the test. Mirrors the helper in

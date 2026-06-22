@@ -203,11 +203,6 @@ pub struct DashboardState {
     #[serde(default)]
     pub ctrl_c_events: Vec<CtrlCEvent>,
     pub stats: Stats,
-    /// Issue #469: per-PID telemetry summary (entry counts + last-seen).
-    /// Full per-entry payload (with envs) lives at `/telemetry/by-pid/<pid>`
-    /// so this list stays bounded for the 5s poller.
-    #[serde(default)]
-    pub telemetry: Vec<TelemetryPidSummary>,
 }
 
 /// Meta about the daemon serving this dashboard.
@@ -377,8 +372,12 @@ fn run_dashboard_loop(
                     ipc_port,
                     started_at_unix,
                     live_sessions_provider.as_ref(),
-                    &telemetry,
                 );
+            }
+            // Issue #471: telemetry summary lives at its own URL now
+            // (was previously bundled into `/state.json#telemetry`).
+            (Method::Get, "/telemetry") => {
+                handle_telemetry_summary(request, &telemetry);
             }
             (Method::Post, "/gc/purge") => {
                 handle_purge(request, gc_tx.as_ref());
@@ -407,18 +406,9 @@ fn handle_state(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: &(dyn Fn() -> Vec<LiveSession> + Send + Sync),
-    telemetry: &TelemetryStore,
 ) {
     let live_sessions = live_sessions_provider();
-    let telemetry_summary = telemetry.summary();
-    match build_dashboard_state(
-        state_dir,
-        gc_tx,
-        ipc_port,
-        started_at_unix,
-        live_sessions,
-        telemetry_summary,
-    ) {
+    match build_dashboard_state(state_dir, gc_tx, ipc_port, started_at_unix, live_sessions) {
         Ok(state) => match serde_json::to_vec(&state) {
             Ok(bytes) => respond_json(request, 200, &bytes),
             Err(err) => respond_json(
@@ -486,6 +476,22 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>)
     match send_gc_op(tx, op) {
         Ok(reply) => respond_purge_reply(request, reply),
         Err(err) => respond_json(request, 500, json_error_bytes(&err).as_slice()),
+    }
+}
+
+/// Issue #471: per-PID summary list at its own URL. Returns the same
+/// `Vec<TelemetryPidSummary>` shape that the bundled
+/// `/state.json#telemetry` field used to carry — no behavior change
+/// for the SPA's existing render code beyond the fetch destination.
+fn handle_telemetry_summary(request: Request, telemetry: &TelemetryStore) {
+    let summary = telemetry.summary();
+    match serde_json::to_vec(&summary) {
+        Ok(bytes) => respond_json(request, 200, &bytes),
+        Err(err) => respond_json(
+            request,
+            500,
+            json_error_bytes(&format!("serialize failed: {err}")).as_slice(),
+        ),
     }
 }
 
@@ -597,7 +603,6 @@ fn build_dashboard_state(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions: Vec<LiveSession>,
-    telemetry: Vec<TelemetryPidSummary>,
 ) -> Result<DashboardState, String> {
     let now_unix = current_unix();
 
@@ -669,7 +674,6 @@ fn build_dashboard_state(
         repos,
         ctrl_c_events,
         stats,
-        telemetry,
     })
 }
 
