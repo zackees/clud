@@ -31,13 +31,45 @@
 //! the PTY pump runs on every platform.
 
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(any(windows, test))]
+use std::time::Duration;
+use std::time::Instant;
+
+#[cfg(any(windows, test))]
+const CPU_FLASH_THRESHOLD_PCT: f32 = 70.0;
+#[cfg(windows)]
+const CPU_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(any(windows, test))]
+const CPU_ALERT_TTL: Duration = Duration::from_millis(2500);
+#[cfg(any(windows, test))]
+const CPU_FLASH_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug)]
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+struct TitleState {
+    base_title: String,
+    cpu_alert: Option<CpuAlert>,
+}
+
+#[derive(Debug)]
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+struct CpuAlert {
+    title: String,
+    observed_at: Instant,
+    expires_at: Instant,
+}
 
 /// The title we want the console to display, shared between the
 /// foreground thread and the keeper thread. Empty string means
 /// `set_for_current_cwd` was never called and the keeper should idle.
-fn desired_title_cell() -> &'static Arc<Mutex<String>> {
-    static CELL: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
-    CELL.get_or_init(|| Arc::new(Mutex::new(String::new())))
+fn title_state_cell() -> &'static Arc<Mutex<TitleState>> {
+    static CELL: OnceLock<Arc<Mutex<TitleState>>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        Arc::new(Mutex::new(TitleState {
+            base_title: String::new(),
+            cpu_alert: None,
+        }))
+    })
 }
 
 /// Set the console title to `clud <cwd-basename>` for the current
@@ -48,9 +80,12 @@ fn desired_title_cell() -> &'static Arc<Mutex<String>> {
 pub fn set_for_current_cwd() {
     let basename = current_cwd_basename().unwrap_or_else(|| "?".to_string());
     let title = title_for_cwd_name(&basename);
-    *desired_title_cell()
+    let mut state = title_state_cell()
         .lock()
-        .expect("desired title mutex poisoned") = title.clone();
+        .expect("title state mutex poisoned");
+    state.base_title = title.clone();
+    state.cpu_alert = None;
+    drop(state);
     set_title(&title);
 }
 
@@ -76,18 +111,26 @@ pub fn keep_setting_in_background() {
 fn spawn_keeper_thread() {
     let _ = std::thread::Builder::new()
         .name("clud-title-keeper".into())
-        .spawn(|| loop {
-            let want = desired_title_cell()
-                .lock()
-                .expect("desired title mutex poisoned")
-                .clone();
-            if !want.is_empty() {
-                let now = read_console_title();
-                if now.as_deref() != Some(want.as_str()) {
-                    set_title(&want);
+        .spawn(|| {
+            let mut last_metrics_poll = None::<Instant>;
+            loop {
+                let now = Instant::now();
+                if last_metrics_poll
+                    .map(|last| last.elapsed() >= CPU_METRICS_POLL_INTERVAL)
+                    .unwrap_or(true)
+                {
+                    last_metrics_poll = Some(now);
+                    refresh_cpu_alert_from_daemon(now);
                 }
+                let want = current_desired_title(Instant::now());
+                if !want.is_empty() {
+                    let now = read_console_title();
+                    if now.as_deref() != Some(want.as_str()) {
+                        set_title(&want);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(750));
             }
-            std::thread::sleep(std::time::Duration::from_millis(750));
         });
 }
 
@@ -118,6 +161,78 @@ fn read_console_title() -> Option<String> {
 /// unit-tested on every platform.
 pub fn title_for_cwd_name(cwd_name: &str) -> String {
     format!("clud {}", cwd_name)
+}
+
+#[cfg(any(windows, test))]
+fn title_for_cpu_alert(base_title: &str, cpu_pct: f32) -> String {
+    format!("{base_title} CPU {:.0}%", cpu_pct)
+}
+
+#[cfg(windows)]
+fn current_desired_title(now: Instant) -> String {
+    let mut state = title_state_cell()
+        .lock()
+        .expect("title state mutex poisoned");
+    current_desired_title_locked(&mut state, now)
+}
+
+#[cfg(any(windows, test))]
+fn current_desired_title_locked(state: &mut TitleState, now: Instant) -> String {
+    let Some(alert) = &state.cpu_alert else {
+        return state.base_title.clone();
+    };
+    if now >= alert.expires_at {
+        state.cpu_alert = None;
+        return state.base_title.clone();
+    }
+    let flash_tick = now.saturating_duration_since(alert.observed_at).as_millis()
+        / CPU_FLASH_INTERVAL.as_millis();
+    if flash_tick % 2 == 0 {
+        alert.title.clone()
+    } else {
+        state.base_title.clone()
+    }
+}
+
+#[cfg(windows)]
+fn refresh_cpu_alert_from_daemon(now: Instant) {
+    let Ok(state_dir) = crate::daemon::default_state_dir() else {
+        clear_cpu_alert();
+        return;
+    };
+    match crate::daemon::daemon_client_metrics(&state_dir) {
+        Ok((_pid, cpu_pct)) => update_cpu_alert(cpu_pct, now),
+        Err(_) => clear_cpu_alert(),
+    }
+}
+
+#[cfg(windows)]
+fn update_cpu_alert(cpu_pct: f32, now: Instant) {
+    let mut state = title_state_cell()
+        .lock()
+        .expect("title state mutex poisoned");
+    update_cpu_alert_locked(&mut state, cpu_pct, now);
+}
+
+#[cfg(any(windows, test))]
+fn update_cpu_alert_locked(state: &mut TitleState, cpu_pct: f32, now: Instant) {
+    if cpu_pct > CPU_FLASH_THRESHOLD_PCT && !state.base_title.is_empty() {
+        state.cpu_alert = Some(CpuAlert {
+            title: title_for_cpu_alert(&state.base_title, cpu_pct),
+            observed_at: now,
+            expires_at: now + CPU_ALERT_TTL,
+        });
+    } else {
+        state.cpu_alert = None;
+    }
+}
+
+#[cfg(windows)]
+fn clear_cpu_alert() {
+    title_state_cell()
+        .lock()
+        .expect("title state mutex poisoned")
+        .cpu_alert = None;
 }
 
 /// Best-effort lookup of the current working directory's leaf name.
@@ -367,9 +482,10 @@ mod tests {
         // re-stamp; if the cell stays empty after `set_for_current_cwd`,
         // the keeper would idle forever. Verify the value is captured.
         set_for_current_cwd();
-        let stored = desired_title_cell()
+        let stored = title_state_cell()
             .lock()
-            .expect("desired title mutex")
+            .expect("title state mutex")
+            .base_title
             .clone();
         assert!(
             stored.starts_with("clud "),
@@ -379,6 +495,61 @@ mod tests {
             !stored.trim_end().eq("clud"),
             "desired title should include a basename component, got {stored:?}"
         );
+    }
+
+    #[test]
+    fn cpu_alert_title_formats_percentage() {
+        assert_eq!(title_for_cpu_alert("clud repo", 72.4), "clud repo CPU 72%");
+        assert_eq!(title_for_cpu_alert("clud repo", 72.5), "clud repo CPU 72%");
+        assert_eq!(title_for_cpu_alert("clud repo", 72.6), "clud repo CPU 73%");
+    }
+
+    #[test]
+    fn cpu_alert_flashes_between_alert_and_base_title() {
+        let now = Instant::now();
+        let mut state = TitleState {
+            base_title: "clud repo".to_string(),
+            cpu_alert: None,
+        };
+        update_cpu_alert_locked(&mut state, 71.0, now);
+
+        assert_eq!(
+            current_desired_title_locked(&mut state, now),
+            "clud repo CPU 71%"
+        );
+        assert_eq!(
+            current_desired_title_locked(&mut state, now + CPU_FLASH_INTERVAL),
+            "clud repo"
+        );
+        assert_eq!(
+            current_desired_title_locked(&mut state, now + CPU_FLASH_INTERVAL * 2),
+            "clud repo CPU 71%"
+        );
+    }
+
+    #[test]
+    fn cpu_alert_clears_below_threshold_and_after_ttl() {
+        let now = Instant::now();
+        let mut state = TitleState {
+            base_title: "clud repo".to_string(),
+            cpu_alert: None,
+        };
+
+        update_cpu_alert_locked(&mut state, 70.0, now);
+        assert!(state.cpu_alert.is_none(), "70% is not above threshold");
+
+        update_cpu_alert_locked(&mut state, 70.1, now);
+        assert!(state.cpu_alert.is_some());
+
+        update_cpu_alert_locked(&mut state, 10.0, now + Duration::from_secs(1));
+        assert!(state.cpu_alert.is_none());
+
+        update_cpu_alert_locked(&mut state, 80.0, now);
+        assert_eq!(
+            current_desired_title_locked(&mut state, now + CPU_ALERT_TTL),
+            "clud repo"
+        );
+        assert!(state.cpu_alert.is_none());
     }
 
     #[test]

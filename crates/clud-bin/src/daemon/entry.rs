@@ -503,7 +503,8 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         | DaemonResponse::Gc { .. }
         | DaemonResponse::LiveCwds { .. }
         | DaemonResponse::ShutdownAck { .. }
-        | DaemonResponse::ReapOrphansAck { .. } => 1,
+        | DaemonResponse::ReapOrphansAck { .. }
+        | DaemonResponse::Metrics { .. } => 1,
     }
 }
 

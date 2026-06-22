@@ -95,7 +95,8 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
         | DaemonResponse::Gc { .. }
         | DaemonResponse::LiveCwds { .. }
         | DaemonResponse::ShutdownAck { .. }
-        | DaemonResponse::ReapOrphansAck { .. } => 1,
+        | DaemonResponse::ReapOrphansAck { .. }
+        | DaemonResponse::Metrics { .. } => 1,
     }
 }
 

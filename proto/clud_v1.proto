@@ -18,6 +18,7 @@ message ClientToDaemon {
     GcRequest gc = 7;
     ShutdownRequest shutdown = 8;
     ReapOrphansRequest reap_orphans = 9;
+    MetricsRequest metrics = 10;
   }
   string request_id = 100;
 }
@@ -34,6 +35,7 @@ message DaemonToClient {
     ShutdownAckResponse shutdown_ack = 8;
     ErrorResponse error = 9;
     ReapOrphansAckResponse reap_orphans_ack = 10;
+    MetricsResponse metrics = 11;
   }
   string request_id = 100;
 }
@@ -96,6 +98,13 @@ message ShutdownRequest {}
 // whose originator is no longer alive and reaps its tree. The ack is sent
 // before the kill begins so the CLI does not block on shutdown.
 message ReapOrphansRequest {}
+
+message MetricsRequest {}
+
+message MetricsResponse {
+  uint32 pid = 1;
+  float cpu_pct = 2;
+}
 
 message ReapOrphansAckResponse {
   // Number of CLUD-tagged processes whose originator was already dead at
