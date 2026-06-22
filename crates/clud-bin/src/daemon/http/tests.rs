@@ -84,8 +84,7 @@ fn empty_live_provider() -> super::LiveSessionsProvider {
 #[test]
 fn build_state_with_empty_state_dir_returns_zeros() {
     let dir = tempfile::tempdir().unwrap();
-    let state =
-        build_dashboard_state(dir.path(), None, 9999, 100, Vec::new(), Vec::new()).expect("build");
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
     assert_eq!(state.stats.session_count, 0);
     assert_eq!(state.stats.live_session_count, 0);
     assert_eq!(state.stats.gc_count, 0);
@@ -114,8 +113,7 @@ fn build_state_surfaces_direct_runner_registry_rows() {
         cwd: Some("/dev/repo".to_string()),
     }];
 
-    let state =
-        build_dashboard_state(dir.path(), None, 9999, 100, live, Vec::new()).expect("build");
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, live).expect("build");
     let direct: Vec<_> = state
         .sessions
         .iter()
@@ -162,8 +160,7 @@ fn build_state_surfaces_completed_foreground_launch_records() {
     )
     .unwrap();
 
-    let state =
-        build_dashboard_state(dir.path(), None, 9999, 100, Vec::new(), Vec::new()).expect("build");
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
     assert_eq!(state.sessions.len(), 1);
     let session = &state.sessions[0];
     assert_eq!(session.id, "launch-1700000000000-4242");
@@ -190,8 +187,7 @@ fn build_state_includes_session_snapshots() {
         fake_snapshot("sess-a", "test", "/dev/foo"),
     );
 
-    let state =
-        build_dashboard_state(dir.path(), None, 9999, 100, Vec::new(), Vec::new()).expect("build");
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
     assert_eq!(state.sessions.len(), 1);
     assert_eq!(state.sessions[0].id, "sess-a");
     assert_eq!(state.sessions[0].name.as_deref(), Some("test"));
@@ -236,8 +232,7 @@ fn build_state_includes_ctrl_c_events_when_present() {
         let path = edir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
         std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
     }
-    let state =
-        build_dashboard_state(dir.path(), None, 9999, 100, Vec::new(), Vec::new()).expect("build");
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
     assert_eq!(state.ctrl_c_events.len(), 3);
     // Newest first
     assert_eq!(state.ctrl_c_events[0].exit_at_ms, 1_700_000_000_500 + 2_000);
@@ -262,8 +257,7 @@ fn build_state_includes_ctrl_c_profile() {
     });
     write_fake_session(dir.path(), "sess-ctrl-c", snap);
 
-    let state =
-        build_dashboard_state(dir.path(), None, 9999, 100, Vec::new(), Vec::new()).expect("build");
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
     let profile = state.sessions[0].ctrl_c.as_ref().expect("profile");
     assert_eq!(profile.cli_handoff_ms, Some(25));
     assert_eq!(profile.daemon_kill_ms, Some(64));
