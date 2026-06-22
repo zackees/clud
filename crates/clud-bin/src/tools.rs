@@ -162,6 +162,21 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: None,
         quiet_ok: true,
     },
+    BundledTool {
+        rel_path: "hooks/telemetry.py",
+        body: include_str!("../assets/tools/hooks/telemetry.py"),
+        // PostToolUse hook (#473): ships the hook payload to the clud
+        // daemon's /telemetry/log endpoint. ALWAYS exits 0 by contract —
+        // a stuck or broken telemetry path must never block a tool call.
+        // Killable because the work IS the POST; killing mid-flight loses
+        // that one record but the tool call is unaffected (recommended
+        // wiring uses `async: true`). 30s backstop matches the other
+        // hooks; the script itself enforces a 2s HTTP timeout internally.
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(30),
+        progress_timeout: None,
+        quiet_ok: true,
+    },
     // docker-build tool family — implementation of zackees/clud#421.
     // Trampoline filename uses a hyphen to match the public CLI shape
     // (`clud tool run docker/docker-build.py soldr <path>`); sibling
@@ -339,6 +354,33 @@ mod tests {
             names.contains(&"hooks/uv_run_hook_guard.py"),
             "BUNDLED_TOOLS must include hooks/uv_run_hook_guard.py; \
              got {names:?}",
+        );
+    }
+
+    /// Issue #473: the `hooks/telemetry.py` PostToolUse bridge ships in
+    /// the bundle and is the documented producer for the daemon's
+    /// `/telemetry/log` endpoint (#469). If the entry is renamed or
+    /// removed, the recommended `~/.claude/settings.json` wiring
+    /// (`clud tool run hooks/telemetry.py`) silently breaks.
+    #[test]
+    fn bundled_includes_telemetry_hook() {
+        let names: Vec<&str> = BUNDLED_TOOLS.iter().map(|t| t.rel_path).collect();
+        assert!(
+            names.contains(&"hooks/telemetry.py"),
+            "BUNDLED_TOOLS must include hooks/telemetry.py; got {names:?}",
+        );
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "hooks/telemetry.py")
+            .expect("just-asserted entry");
+        // Contract assertions: never blocks, env-var-driven discovery.
+        assert!(
+            tool.body.contains("ALWAYS exits 0"),
+            "telemetry.py must document the always-exit-0 contract",
+        );
+        assert!(
+            tool.body.contains("CLUD_DAEMON_HTTP_SERVER"),
+            "telemetry.py must reference the env-var discovery contract",
         );
     }
 
