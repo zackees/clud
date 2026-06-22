@@ -282,6 +282,24 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: ToolSubcommand,
     },
+    /// Issue #469 (beta prototype): POST one telemetry event to the
+    /// always-on clud daemon's HTTP server. Captures parent PID, time,
+    /// the `cmd` string passed in, the current working directory, and
+    /// every env var beginning with `CLUD_`. The daemon URL is read
+    /// from `$CLUD_DAEMON_HTTP_SERVER`. By default missing env / unreachable
+    /// daemon are silent (exit 0) so a hook caller is never broken; with
+    /// `--fail-on-no-server` either failure causes a non-zero exit so
+    /// tests can prove a real round-trip.
+    Log {
+        /// Free-form command string describing what the caller was doing.
+        /// Stored verbatim in the telemetry record.
+        #[arg(long = "cmd", short = 'c')]
+        cmd: String,
+        /// Exit non-zero if `CLUD_DAEMON_HTTP_SERVER` is unset OR the
+        /// POST fails. Without this flag, failures are swallowed.
+        #[arg(long = "fail-on-no-server")]
+        fail_on_no_server: bool,
+    },
     /// Install and persist fast local tooling defaults.
     Optimize {
         /// Toolchain family to optimize. Defaults to Rust.
@@ -553,6 +571,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--stale-after",
         "--daemon",
         "--state-dir",
+        // Issue #469: `clud log --cmd "..."` arg.
+        "--cmd",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
@@ -588,11 +608,13 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--demo-gfx-sixel",
         "--help",
         "--version",
+        // Issue #469: `clud log --fail-on-no-server` bool flag.
+        "--fail-on-no-server",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "logs", "gc",
-        "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "logs", "log",
+        "gc", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

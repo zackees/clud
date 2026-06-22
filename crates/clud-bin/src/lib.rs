@@ -25,6 +25,7 @@ pub mod hook_health;
 pub mod large_file_guard;
 pub mod launch_log;
 pub mod launch_setup;
+pub mod log_event;
 pub mod loop_artifacts;
 pub mod loop_check;
 pub mod loop_spec;

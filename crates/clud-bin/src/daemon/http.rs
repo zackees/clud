@@ -12,12 +12,12 @@
 //! Loopback-only, no authentication — matches the trust model of the
 //! existing JSON IPC listener.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,28 @@ use crate::session_registry::LiveSession;
 pub(super) type LiveSessionsProvider =
     std::sync::Arc<dyn Fn() -> Vec<LiveSession> + Send + Sync + 'static>;
 
+/// Test-only public entry point: spawn the dashboard HTTP listener for
+/// telemetry-only scenarios (no GC backend). Integration tests under
+/// `tests/telemetry_endpoint.rs` use this to wire up the server without
+/// taking on the `gc_service::RegistryMsg` type that the full
+/// `spawn_dashboard` signature otherwise leaks.
+pub fn spawn_dashboard_telemetry_only(
+    state_dir: PathBuf,
+    ipc_port: u16,
+    started_at_unix: i64,
+    telemetry: TelemetryStore,
+) -> Option<u16> {
+    let live_provider: LiveSessionsProvider = std::sync::Arc::new(Vec::new);
+    spawn_dashboard(
+        state_dir,
+        None,
+        ipc_port,
+        started_at_unix,
+        live_provider,
+        telemetry,
+    )
+}
+
 /// Production provider: reads the redb session registry under the
 /// cross-process advisory lock. Errors are swallowed so a registry
 /// hiccup never blanks the dashboard for sessions that *do* have
@@ -64,6 +86,109 @@ const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard/index.html");
 /// daemon. The purge payload is two short JSON fields; 16 KiB is generous.
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024;
 
+/// Issue #469 (beta): per-PID cap on telemetry entries. A runaway logger
+/// can't grow this past N — oldest entries get dropped first.
+const TELEMETRY_PER_PID_CAP: usize = 500;
+
+/// Issue #469 — one telemetry record submitted by `clud log`. Mirrors
+/// `log_event::TelemetryPayload` plus the daemon-added receive timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryEntry {
+    pub parent_pid: u32,
+    pub time_ms: u64,
+    pub received_at_ms: u64,
+    pub cmd: String,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+}
+
+/// `POST /telemetry/log` body — same shape as the entry minus the
+/// server-side `received_at_ms` timestamp (daemon assigns it).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryIngest {
+    pub parent_pid: u32,
+    pub time_ms: u64,
+    pub cmd: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Compact per-PID view returned inside `/state.json` — totals only, so
+/// the polled summary stays bounded regardless of entry count. The
+/// per-entry detail (with envs) lives behind `/telemetry/by-pid/<pid>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryPidSummary {
+    pub parent_pid: u32,
+    pub entry_count: usize,
+    pub last_at_ms: u64,
+}
+
+/// Full per-PID payload returned by `GET /telemetry/by-pid/<pid>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryPidDetail {
+    pub parent_pid: u32,
+    pub entries: Vec<TelemetryEntry>,
+}
+
+/// In-memory telemetry sink shared between the HTTP listener and any
+/// other daemon component that wants to read it. Lifetime = daemon
+/// lifetime; restart wipes it (persistence is a follow-up).
+#[derive(Debug, Default, Clone)]
+pub struct TelemetryStore {
+    inner: Arc<Mutex<TelemetryStoreInner>>,
+}
+
+#[derive(Debug, Default)]
+struct TelemetryStoreInner {
+    by_pid: HashMap<u32, VecDeque<TelemetryEntry>>,
+}
+
+impl TelemetryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one entry. Trims the per-PID ring buffer to `TELEMETRY_PER_PID_CAP`
+    /// (drop-oldest).
+    pub fn push(&self, entry: TelemetryEntry) {
+        let mut guard = self.inner.lock().expect("telemetry store poisoned");
+        let dq = guard.by_pid.entry(entry.parent_pid).or_default();
+        dq.push_back(entry);
+        while dq.len() > TELEMETRY_PER_PID_CAP {
+            dq.pop_front();
+        }
+    }
+
+    /// Per-PID summary keyed by parent_pid, sorted by last activity desc.
+    pub fn summary(&self) -> Vec<TelemetryPidSummary> {
+        let guard = self.inner.lock().expect("telemetry store poisoned");
+        let mut rows: Vec<_> = guard
+            .by_pid
+            .iter()
+            .map(|(pid, dq)| {
+                let last_at_ms = dq.back().map(|e| e.received_at_ms).unwrap_or(0);
+                TelemetryPidSummary {
+                    parent_pid: *pid,
+                    entry_count: dq.len(),
+                    last_at_ms,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.last_at_ms.cmp(&a.last_at_ms));
+        rows
+    }
+
+    /// Full per-PID detail or `None` if the PID has no entries.
+    pub fn detail(&self, pid: u32) -> Option<TelemetryPidDetail> {
+        let guard = self.inner.lock().expect("telemetry store poisoned");
+        guard.by_pid.get(&pid).map(|dq| TelemetryPidDetail {
+            parent_pid: pid,
+            entries: dq.iter().cloned().collect(),
+        })
+    }
+}
+
 /// Aggregate document returned by `GET /state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardState {
@@ -78,6 +203,11 @@ pub struct DashboardState {
     #[serde(default)]
     pub ctrl_c_events: Vec<CtrlCEvent>,
     pub stats: Stats,
+    /// Issue #469: per-PID telemetry summary (entry counts + last-seen).
+    /// Full per-entry payload (with envs) lives at `/telemetry/by-pid/<pid>`
+    /// so this list stays bounded for the 5s poller.
+    #[serde(default)]
+    pub telemetry: Vec<TelemetryPidSummary>,
 }
 
 /// Meta about the daemon serving this dashboard.
@@ -179,6 +309,7 @@ pub(super) fn spawn_dashboard(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
+    telemetry: TelemetryStore,
 ) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -204,6 +335,7 @@ pub(super) fn spawn_dashboard(
                 ipc_port,
                 started_at_unix,
                 live_sessions_provider,
+                telemetry,
             )
         });
     match res {
@@ -222,15 +354,21 @@ fn run_dashboard_loop(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
+    telemetry: TelemetryStore,
 ) {
     for request in server.incoming_requests() {
         let method = request.method().clone();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or(&url).to_string();
-        match (method, path.as_str()) {
-            (Method::Get, "/") | (Method::Get, "/index.html") => {
-                respond_html(request, 200, DASHBOARD_HTML.as_bytes());
+        // Telemetry detail route — `/telemetry/by-pid/<u32>`. Matched
+        // first so the catch-all SPA fallback below never claims it.
+        if method == Method::Get {
+            if let Some(rest) = path.strip_prefix("/telemetry/by-pid/") {
+                handle_telemetry_detail(request, rest, &telemetry);
+                continue;
             }
+        }
+        match (method, path.as_str()) {
             (Method::Get, "/state.json") => {
                 handle_state(
                     request,
@@ -239,10 +377,19 @@ fn run_dashboard_loop(
                     ipc_port,
                     started_at_unix,
                     live_sessions_provider.as_ref(),
+                    &telemetry,
                 );
             }
             (Method::Post, "/gc/purge") => {
                 handle_purge(request, gc_tx.as_ref());
+            }
+            (Method::Post, "/telemetry/log") => {
+                handle_telemetry_log(request, &telemetry);
+            }
+            // Any other GET is an SPA route — serve the dashboard so the
+            // History-API router takes over (refresh + deep-links).
+            (Method::Get, _) => {
+                respond_html(request, 200, DASHBOARD_HTML.as_bytes());
             }
             _ => {
                 respond_text(request, 404, b"not found");
@@ -260,9 +407,18 @@ fn handle_state(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: &(dyn Fn() -> Vec<LiveSession> + Send + Sync),
+    telemetry: &TelemetryStore,
 ) {
     let live_sessions = live_sessions_provider();
-    match build_dashboard_state(state_dir, gc_tx, ipc_port, started_at_unix, live_sessions) {
+    let telemetry_summary = telemetry.summary();
+    match build_dashboard_state(
+        state_dir,
+        gc_tx,
+        ipc_port,
+        started_at_unix,
+        live_sessions,
+        telemetry_summary,
+    ) {
         Ok(state) => match serde_json::to_vec(&state) {
             Ok(bytes) => respond_json(request, 200, &bytes),
             Err(err) => respond_json(
@@ -333,6 +489,70 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>)
     }
 }
 
+fn handle_telemetry_log(mut request: Request, telemetry: &TelemetryStore) {
+    let body = match read_body(&mut request) {
+        Ok(b) => b,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("read body failed: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let payload: TelemetryIngest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("invalid JSON: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let received_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    telemetry.push(TelemetryEntry {
+        parent_pid: payload.parent_pid,
+        time_ms: payload.time_ms,
+        received_at_ms,
+        cmd: payload.cmd,
+        cwd: payload.cwd,
+        env: payload.env,
+    });
+    respond_json(request, 200, b"{}");
+}
+
+fn handle_telemetry_detail(request: Request, pid_str: &str, telemetry: &TelemetryStore) {
+    let pid: u32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("invalid pid: {pid_str}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let detail = telemetry.detail(pid).unwrap_or(TelemetryPidDetail {
+        parent_pid: pid,
+        entries: Vec::new(),
+    });
+    match serde_json::to_vec(&detail) {
+        Ok(bytes) => respond_json(request, 200, &bytes),
+        Err(err) => respond_json(
+            request,
+            500,
+            json_error_bytes(&format!("serialize failed: {err}")).as_slice(),
+        ),
+    }
+}
+
 fn respond_purge_reply(request: Request, reply: GcReply) {
     match reply {
         GcReply::PurgeOk { removed, skipped } => {
@@ -377,6 +597,7 @@ fn build_dashboard_state(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions: Vec<LiveSession>,
+    telemetry: Vec<TelemetryPidSummary>,
 ) -> Result<DashboardState, String> {
     let now_unix = current_unix();
 
@@ -448,6 +669,7 @@ fn build_dashboard_state(
         repos,
         ctrl_c_events,
         stats,
+        telemetry,
     })
 }
 
