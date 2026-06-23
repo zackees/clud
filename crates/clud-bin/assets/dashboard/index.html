@@ -136,6 +136,7 @@
     <button class="tab" data-tab="gc">Garbage</button>
     <button class="tab" data-tab="repos">Repos</button>
     <button class="tab" data-tab="ctrl-c">Ctrl-C</button>
+    <button class="tab" data-tab="tools">Tools</button>
     <button class="tab" data-tab="telemetry">Telemetry</button>
   </div>
 
@@ -172,6 +173,14 @@
     </div>
   </section>
 
+  <section id="tools">
+    <div class="card">
+      <h2>Tool calls <span id="tools-count" class="meta"></span></h2>
+      <div id="tools-aggregate"><p class="empty">loading...</p></div>
+      <div id="tools-body"><p class="empty">no tool calls recorded yet.</p></div>
+    </div>
+  </section>
+
   <section id="telemetry-detail">
     <div style="margin-bottom: 12px;">
       <a id="telemetry-back" style="color: var(--accent); cursor: pointer; text-decoration: none;">← Back to Telemetry</a>
@@ -197,7 +206,7 @@
 
   <script>
     const POLL_MS = 5000;
-    const TABS = ['sessions', 'gc', 'repos', 'ctrl-c', 'telemetry'];
+    const TABS = ['sessions', 'gc', 'repos', 'ctrl-c', 'tools', 'telemetry'];
     const DEFAULT_TAB = 'sessions';
     let lastState = null;
     let currentRoute = { tab: DEFAULT_TAB, telemetryPid: null };
@@ -480,6 +489,65 @@
         </table>`;
     }
 
+    function renderTools(data) {
+      data = data || {};
+      const entries = data.entries || [];
+      const aggregate = data.aggregate || [];
+      document.getElementById('tools-count').textContent = entries.length ? `(${entries.length})` : '';
+
+      if (aggregate.length) {
+        const aggregateRows = aggregate.map(b => `
+          <tr>
+            <td class="metric">${esc(b.label)}</td>
+            <td class="metric">${esc(b.total)}</td>
+            <td class="metric">${esc(b.success)}</td>
+            <td class="metric">${esc(b.failed)}</td>
+            <td class="metric">${esc(b.running)}</td>
+          </tr>`).join('');
+        document.getElementById('tools-aggregate').innerHTML = `
+          <table style="margin-bottom: 12px;">
+            <thead><tr>
+              <th>bucket</th><th>calls</th><th>ok</th><th>failed</th><th>running</th>
+            </tr></thead>
+            <tbody>${aggregateRows}</tbody>
+          </table>`;
+      } else {
+        document.getElementById('tools-aggregate').innerHTML = '';
+      }
+
+      if (!entries.length) {
+        document.getElementById('tools-body').innerHTML =
+          '<p class="empty">no tool calls recorded yet.</p>';
+        return;
+      }
+
+      const rows = entries.slice(0, 100).map(e => {
+        const state = e.exit_code === null || e.exit_code === undefined
+          ? '<span class="badge live">running</span>'
+          : e.exit_code === 0
+            ? '<span class="badge live">ok</span>'
+            : `<span class="badge warn">exit ${esc(e.exit_code)}</span>`;
+        const stderr = e.stderr_tail
+          ? `<details><summary>stderr</summary><pre style="white-space: pre-wrap; margin: 6px 0 0;">${esc(e.stderr_tail)}</pre></details>`
+          : '-';
+        return `
+          <tr>
+            <td class="path">${esc(e.name)}</td>
+            <td>${state}</td>
+            <td class="metric" title="${esc(fmtDateTime(e.start_time_ms))}">${esc(fmtAge(e.start_time_ms))}</td>
+            <td class="metric">${esc(fmtDateTime(e.end_time_ms))}</td>
+            <td class="path">${stderr}</td>
+          </tr>`;
+      }).join('');
+      document.getElementById('tools-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>tool</th><th>state</th><th>started</th><th>ended</th><th>failure stderr</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
     function renderTelemetry(rows) {
       rows = rows || [];
       document.getElementById('telemetry-count').textContent = rows.length ? `(${rows.length})` : '';
@@ -590,6 +658,7 @@
       // partial failure of one does not blank the other.
       const stateP = fetch('/state.json').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
       const telemetryP = fetch('/telemetry').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
+      const toolsP = fetch('/tools').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
       try {
         const state = await stateP;
         lastState = state;
@@ -607,6 +676,12 @@
       } catch (err) {
         document.getElementById('telemetry-body').innerHTML =
           `<p class="empty">failed to load telemetry: ${esc(err)}</p>`;
+      }
+      try {
+        renderTools(await toolsP);
+      } catch (err) {
+        document.getElementById('tools-body').innerHTML =
+          `<p class="empty">failed to load tool calls: ${esc(err)}</p>`;
       }
     }
 

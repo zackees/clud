@@ -222,6 +222,12 @@ pub enum Command {
     /// Kill all active background sessions.
     Slay,
     List,
+    /// Print current clud daemon CPU metrics.
+    Top {
+        /// Emit machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
     /// pm2-style log viewer: dump or tail a session's captured output.
     ///
     /// With no session id, lists all sessions that have log files and prints
@@ -273,11 +279,7 @@ pub enum Command {
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
-    /// Issue #408: invoke a bundled clud-managed Python tool under
-    /// `~/.clud/tools/<rel_path>` via `uv run`, with `UV_CACHE_DIR` pinned
-    /// to `~/.clud/cache/uv/` so per-tool venvs stay under clud's own state
-    /// root. Layer 1 of the three-layer `UV_CACHE_DIR` enforcement; the
-    /// only documented invocation path for bundled tools.
+    /// Run and inspect bundled clud tools without starting the daemon.
     Tool {
         #[command(subcommand)]
         subcommand: ToolSubcommand,
@@ -613,8 +615,9 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "logs", "log",
-        "gc", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
+        "log", "gc", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon",
+        "__worker",
     ];
 
     let mut in_subcommand = false;

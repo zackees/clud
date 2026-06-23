@@ -7,9 +7,6 @@ use std::sync::Mutex;
 #[path = "tests/parallel.rs"]
 mod parallel;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 // ENV_DATA_DB is process-global; serialize so two test threads
 // never race to open the same redb file concurrently.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -149,31 +146,6 @@ fn drain_purge_completions(
     }
 }
 
-fn write_mock_gh(dir: &Path, json: &str) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let path = dir.join("gh.cmd");
-        fs::write(&path, format!("@echo off\r\necho {json}\r\nexit /b 0\r\n")).unwrap();
-        path
-    }
-    #[cfg(not(windows))]
-    {
-        let path = dir.join("gh");
-        fs::write(
-            &path,
-            format!("#!/bin/sh\ncat <<'JSON'\n{json}\nJSON\nexit 0\n"),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&path, perms).unwrap();
-        }
-        path
-    }
-}
-
 #[test]
 fn gc_tick_cadence_config_handles_default_disable_and_positive() {
     assert_eq!(
@@ -255,37 +227,6 @@ fn disk_watchdog_decision_warns_and_purges_only_below_thresholds() {
             auto_purge: false
         }
     );
-}
-
-#[test]
-fn github_remote_slug_parser_accepts_common_origin_urls() {
-    assert_eq!(
-        parse_github_slug_from_remote_url("git@github.com:zackees/dep.git"),
-        Some("zackees/dep".to_string())
-    );
-    assert_eq!(
-        parse_github_slug_from_remote_url("https://github.com/zackees/dep.git\n"),
-        Some("zackees/dep".to_string())
-    );
-    assert_eq!(
-        parse_github_slug_from_remote_url("ssh://git@github.com/zackees/dep"),
-        Some("zackees/dep".to_string())
-    );
-    assert_eq!(
-        parse_github_slug_from_remote_url("https://example.com/x/y"),
-        None
-    );
-}
-
-#[test]
-fn gh_pr_list_json_requires_non_empty_merged_at() {
-    assert!(gh_pr_list_json_has_merged(
-        r#"[{"mergedAt":"2026-01-01T00:00:00Z","url":"https://github.com/a/b/pull/1"}]"#
-    ));
-    assert!(!gh_pr_list_json_has_merged(
-        r#"[{"mergedAt":null,"url":"https://github.com/a/b/pull/1"}]"#
-    ));
-    assert!(!gh_pr_list_json_has_merged("not json"));
 }
 
 #[test]
@@ -678,31 +619,14 @@ fn trash_reaper_keeps_row_when_delete_fails() {
 }
 
 #[test]
-fn periodic_tick_removes_merged_stale_extern_repo_entry() {
+fn periodic_tick_removes_stale_extern_repo_entry() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("extern-purge.redb");
     let repo = dir.path().join("extern");
     fs::create_dir_all(&repo).unwrap();
-    worktrees::run_git(&repo, &["init"]).expect("git init");
-    worktrees::run_git(&repo, &["checkout", "-b", "feat/test"]).expect("git branch");
-    worktrees::run_git(
-        &repo,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/zackees/dependency.git",
-        ],
-    )
-    .expect("git remote");
 
-    let mock_gh = write_mock_gh(
-        dir.path(),
-        r#"[{"mergedAt":"2026-01-01T00:00:00Z","url":"https://github.com/zackees/dependency/pull/1"}]"#,
-    );
     let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
-    let _gh = ScopedEnv::set(ENV_TEST_GH_BIN, mock_gh.as_os_str());
 
     let registry = Registry::open_at(&db_path).expect("open registry");
     registry
@@ -710,7 +634,7 @@ fn periodic_tick_removes_merged_stale_extern_repo_entry() {
             kind: EXTERN_REPO_KIND.to_string(),
             path: repo.to_string_lossy().to_string(),
             repo_root: Some(dir.path().to_string_lossy().to_string()),
-            branch: Some("feat/test".to_string()),
+            branch: None,
             agent_id: None,
             now_unix: now_unix(),
         })
@@ -730,8 +654,48 @@ fn periodic_tick_removes_merged_stale_extern_repo_entry() {
     );
 
     let rows = registry.list(Some(EXTERN_REPO_KIND)).expect("list");
-    assert!(rows.is_empty(), "merged extern-repo row should be deleted");
-    assert!(!repo.exists(), "merged extern-repo dir should be deleted");
+    assert!(rows.is_empty(), "stale extern-repo row should be deleted");
+    assert!(!repo.exists(), "stale extern-repo dir should be deleted");
+}
+
+#[test]
+fn periodic_tick_keeps_fresh_extern_repo_entry() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("extern-keep.redb");
+    let repo = dir.path().join("extern");
+    fs::create_dir_all(&repo).unwrap();
+
+    // 1h stale-after, but the dir was just created (mtime ~ now) → keep.
+    let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "3600");
+
+    let registry = Registry::open_at(&db_path).expect("open registry");
+    registry
+        .insert_if_new(&InsertInput {
+            kind: EXTERN_REPO_KIND.to_string(),
+            path: repo.to_string_lossy().to_string(),
+            repo_root: Some(dir.path().to_string_lossy().to_string()),
+            branch: None,
+            agent_id: None,
+            now_unix: now_unix(),
+        })
+        .expect("insert extern repo");
+
+    let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
+    let pool_tx = spawn_purge_pool(1);
+    let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
+    run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+    let drained = drain_purge_completions(
+        &registry,
+        &completion_rx,
+        Duration::from_millis(150),
+        Duration::from_millis(500),
+    );
+    assert_eq!(drained, 0, "fresh extern-repo must not be dispatched");
+
+    let rows = registry.list(Some(EXTERN_REPO_KIND)).expect("list");
+    assert_eq!(rows.len(), 1, "fresh extern-repo row should survive");
+    assert!(repo.exists(), "fresh extern-repo dir should survive");
 }
 
 #[test]

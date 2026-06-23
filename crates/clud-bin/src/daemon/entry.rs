@@ -9,7 +9,10 @@ use crate::command::{has_noninteractive_prompt, LaunchPlan};
 use crate::verbose_log;
 
 use super::attach::{attach_to_session, run_attach};
-use super::client::{ensure_daemon, probe_existing, request_daemon_shutdown, send_daemon_request};
+use super::client::{
+    daemon_client_metrics, ensure_daemon, probe_existing, request_daemon_shutdown,
+    send_daemon_request,
+};
 use super::commands::{run_kill, run_list, run_logs};
 use super::io_helpers::{read_json_file, resolve_backlog_bytes, terminal_dimensions};
 use super::paths::{daemon_info_path, state_dir};
@@ -102,6 +105,32 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
         },
         DaemonSubcommand::RunningProcess { json } => {
             run_running_process_diagnostics(state_dir, *json)
+        }
+    }
+}
+
+fn run_top(state_dir: &Path, json: bool) -> i32 {
+    if let Err(err) = ensure_daemon(state_dir) {
+        eprintln!("error: daemon unavailable: {err}");
+        return 1;
+    }
+
+    match daemon_client_metrics(state_dir) {
+        Ok((pid, cpu_pct)) => {
+            if json {
+                let payload = serde_json::json!({
+                    "pid": pid,
+                    "cpu_pct": cpu_pct,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            } else {
+                println!("clud daemon pid {pid} - cpu {cpu_pct:.1}%");
+            }
+            0
+        }
+        Err(err) => {
+            eprintln!("error: daemon metrics unavailable: {err}");
+            1
         }
     }
 }
@@ -296,6 +325,10 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
         Some(Command::List) => {
             let state_dir = state_dir(args);
             Some(run_list(&state_dir))
+        }
+        Some(Command::Top { json }) => {
+            let state_dir = state_dir(args);
+            Some(run_top(&state_dir, *json))
         }
         Some(Command::Logs {
             session_id,

@@ -36,6 +36,6 @@ If the dependent PR must land first, make that ordering explicit in the parent P
 
 ## Cleanup
 
-The daemon may auto-remove `.extern-repos/<name>/` only after the tracked branch has a merged PR, the directory has been inactive for at least 24 hours, and no live clud session is rooted inside it.
+The daemon auto-removes `.extern-repos/<name>/` once the directory has been inactive (no descendant `mtime` change) for at least 24 hours and no live clud session is rooted inside it. Anything tracked under `.extern-repos/` is clud-managed by convention, so don't park work there that you want kept indefinitely — copy it elsewhere or commit + push it first.
 
-If `gh` is missing, rate-limited, or cannot confirm a merged PR, keep the checkout.
+Override the inactivity window via `CLUD_GC_EXTERN_REPO_MAX_AGE_SECS` (default `86400`).

@@ -27,7 +27,6 @@ mod scanner;
 pub mod uv_cache;
 
 pub use cli::run;
-pub(crate) use reconcile::best_effort_branch;
 pub use reconcile::{
     extract_pid_from_lock_reason, reconcile_dir, reconcile_extern_repos_dir, reconcile_repo_root,
     reconcile_sibling_clones_dir, run_reconcile, ScanResult,

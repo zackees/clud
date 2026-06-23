@@ -57,6 +57,7 @@ pub fn spawn_dashboard_telemetry_only(
     telemetry: TelemetryStore,
 ) -> Option<u16> {
     let live_provider: LiveSessionsProvider = std::sync::Arc::new(Vec::new);
+    let tool_telemetry = ToolTelemetryStore::new();
     spawn_dashboard(
         state_dir,
         None,
@@ -64,6 +65,7 @@ pub fn spawn_dashboard_telemetry_only(
         started_at_unix,
         live_provider,
         telemetry,
+        tool_telemetry,
     )
 }
 
@@ -89,6 +91,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024;
 /// Issue #469 (beta): per-PID cap on telemetry entries. A runaway logger
 /// can't grow this past N — oldest entries get dropped first.
 const TELEMETRY_PER_PID_CAP: usize = 500;
+const TOOL_TELEMETRY_CAP: usize = 1000;
 
 /// Issue #469 — one telemetry record submitted by `clud log`. Mirrors
 /// `log_event::TelemetryPayload` plus the daemon-added receive timestamp.
@@ -187,6 +190,197 @@ impl TelemetryStore {
             entries: dq.iter().cloned().collect(),
         })
     }
+}
+
+/// One `clud tool` invocation reported by the lightweight launcher.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallEntry {
+    pub id: String,
+    pub name: String,
+    pub start_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolEventIngest {
+    pub event: String,
+    pub id: String,
+    pub name: String,
+    pub start_time_ms: u64,
+    #[serde(default)]
+    pub end_time_ms: Option<u64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAggregateBucket {
+    pub label: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub total: usize,
+    pub success: usize,
+    pub failed: usize,
+    pub running: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolTelemetryView {
+    pub entries: Vec<ToolCallEntry>,
+    pub aggregate: Vec<ToolAggregateBucket>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ToolTelemetryStore {
+    inner: Arc<Mutex<ToolTelemetryStoreInner>>,
+}
+
+#[derive(Debug, Default)]
+struct ToolTelemetryStoreInner {
+    entries: VecDeque<ToolCallEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardTelemetryStores {
+    telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
+}
+
+impl ToolTelemetryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_event(&self, event: ToolEventIngest) {
+        let mut guard = self.inner.lock().expect("tool telemetry store poisoned");
+        match event.event.as_str() {
+            "start" => {
+                if let Some(existing) = guard.entries.iter_mut().find(|entry| entry.id == event.id)
+                {
+                    existing.name = event.name;
+                    existing.start_time_ms = event.start_time_ms;
+                    return;
+                }
+                guard.entries.push_back(ToolCallEntry {
+                    id: event.id,
+                    name: event.name,
+                    start_time_ms: event.start_time_ms,
+                    end_time_ms: None,
+                    exit_code: None,
+                    stderr_tail: None,
+                });
+                while guard.entries.len() > TOOL_TELEMETRY_CAP {
+                    guard.entries.pop_front();
+                }
+            }
+            "finish" => {
+                if let Some(existing) = guard.entries.iter_mut().find(|entry| entry.id == event.id)
+                {
+                    existing.name = event.name;
+                    existing.start_time_ms = event.start_time_ms;
+                    existing.end_time_ms = event.end_time_ms;
+                    existing.exit_code = event.exit_code;
+                    existing.stderr_tail = event.stderr_tail;
+                } else {
+                    guard.entries.push_back(ToolCallEntry {
+                        id: event.id,
+                        name: event.name,
+                        start_time_ms: event.start_time_ms,
+                        end_time_ms: event.end_time_ms,
+                        exit_code: event.exit_code,
+                        stderr_tail: event.stderr_tail,
+                    });
+                }
+                while guard.entries.len() > TOOL_TELEMETRY_CAP {
+                    guard.entries.pop_front();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn view(&self) -> ToolTelemetryView {
+        self.view_at(current_unix_millis())
+    }
+
+    fn view_at(&self, now_ms: u64) -> ToolTelemetryView {
+        let guard = self.inner.lock().expect("tool telemetry store poisoned");
+        let mut entries: Vec<_> = guard.entries.iter().cloned().collect();
+        entries.sort_by(|a, b| b.start_time_ms.cmp(&a.start_time_ms));
+        ToolTelemetryView {
+            aggregate: tool_aggregate_at(&entries, now_ms),
+            entries,
+        }
+    }
+}
+
+fn tool_aggregate_at(entries: &[ToolCallEntry], now_ms: u64) -> Vec<ToolAggregateBucket> {
+    let mut buckets = Vec::new();
+    push_tool_bucket(
+        &mut buckets,
+        "last 10s",
+        now_ms.saturating_sub(10_000),
+        now_ms,
+    );
+    push_tool_bucket(
+        &mut buckets,
+        "10-20s",
+        now_ms.saturating_sub(20_000),
+        now_ms.saturating_sub(10_000),
+    );
+    push_tool_bucket(
+        &mut buckets,
+        "20-30s",
+        now_ms.saturating_sub(30_000),
+        now_ms.saturating_sub(20_000),
+    );
+    for minute in 1..=10 {
+        let end_ms = now_ms.saturating_sub(30_000 + ((minute - 1) * 60_000));
+        let start_ms = end_ms.saturating_sub(60_000);
+        push_tool_bucket(&mut buckets, &format!("{minute}m"), start_ms, end_ms);
+    }
+
+    for entry in entries {
+        if entry.start_time_ms < now_ms.saturating_sub(10 * 60_000) || entry.start_time_ms > now_ms
+        {
+            continue;
+        }
+        if let Some(bucket) = buckets.iter_mut().find(|bucket| {
+            entry.start_time_ms >= bucket.start_ms && entry.start_time_ms < bucket.end_ms
+        }) {
+            bucket.total += 1;
+            match entry.exit_code {
+                Some(0) => bucket.success += 1,
+                Some(_) => bucket.failed += 1,
+                None => bucket.running += 1,
+            }
+        }
+    }
+    buckets
+}
+
+fn push_tool_bucket(
+    buckets: &mut Vec<ToolAggregateBucket>,
+    label: &str,
+    start_ms: u64,
+    end_ms: u64,
+) {
+    buckets.push(ToolAggregateBucket {
+        label: label.to_string(),
+        start_ms,
+        end_ms,
+        total: 0,
+        success: 0,
+        failed: 0,
+        running: 0,
+    });
 }
 
 /// Aggregate document returned by `GET /state.json`.
@@ -305,6 +499,7 @@ pub(super) fn spawn_dashboard(
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
     telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
 ) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -330,7 +525,10 @@ pub(super) fn spawn_dashboard(
                 ipc_port,
                 started_at_unix,
                 live_sessions_provider,
-                telemetry,
+                DashboardTelemetryStores {
+                    telemetry,
+                    tool_telemetry,
+                },
             )
         });
     match res {
@@ -349,7 +547,7 @@ fn run_dashboard_loop(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
-    telemetry: TelemetryStore,
+    stores: DashboardTelemetryStores,
 ) {
     for request in server.incoming_requests() {
         let method = request.method().clone();
@@ -359,7 +557,7 @@ fn run_dashboard_loop(
         // first so the catch-all SPA fallback below never claims it.
         if method == Method::Get {
             if let Some(rest) = path.strip_prefix("/telemetry/by-pid/") {
-                handle_telemetry_detail(request, rest, &telemetry);
+                handle_telemetry_detail(request, rest, &stores.telemetry);
                 continue;
             }
         }
@@ -377,13 +575,19 @@ fn run_dashboard_loop(
             // Issue #471: telemetry summary lives at its own URL now
             // (was previously bundled into `/state.json#telemetry`).
             (Method::Get, "/telemetry") => {
-                handle_telemetry_summary(request, &telemetry);
+                handle_telemetry_summary(request, &stores.telemetry);
+            }
+            (Method::Get, "/tools") => {
+                handle_tools_summary(request, &stores.tool_telemetry);
             }
             (Method::Post, "/gc/purge") => {
                 handle_purge(request, gc_tx.as_ref());
             }
             (Method::Post, "/telemetry/log") => {
-                handle_telemetry_log(request, &telemetry);
+                handle_telemetry_log(request, &stores.telemetry);
+            }
+            (Method::Post, "/tools/event") => {
+                handle_tool_event(request, &stores.tool_telemetry);
             }
             // Any other GET is an SPA route — serve the dashboard so the
             // History-API router takes over (refresh + deep-links).
@@ -530,6 +734,45 @@ fn handle_telemetry_log(mut request: Request, telemetry: &TelemetryStore) {
         cwd: payload.cwd,
         env: payload.env,
     });
+    respond_json(request, 200, b"{}");
+}
+
+fn handle_tools_summary(request: Request, tool_telemetry: &ToolTelemetryStore) {
+    let view = tool_telemetry.view();
+    match serde_json::to_vec(&view) {
+        Ok(bytes) => respond_json(request, 200, &bytes),
+        Err(err) => respond_json(
+            request,
+            500,
+            json_error_bytes(&format!("serialize failed: {err}")).as_slice(),
+        ),
+    }
+}
+
+fn handle_tool_event(mut request: Request, tool_telemetry: &ToolTelemetryStore) {
+    let body = match read_body(&mut request) {
+        Ok(b) => b,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("read body failed: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let payload: ToolEventIngest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("invalid JSON: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    tool_telemetry.push_event(payload);
     respond_json(request, 200, b"{}");
 }
 
@@ -974,6 +1217,13 @@ fn current_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

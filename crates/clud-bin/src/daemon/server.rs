@@ -19,7 +19,9 @@ use super::daemon_events;
 use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
 };
-use super::http::{default_live_sessions_provider, spawn_dashboard, TelemetryStore};
+use super::http::{
+    default_live_sessions_provider, spawn_dashboard, TelemetryStore, ToolTelemetryStore,
+};
 use super::io_helpers::{new_session_id, read_json_file, write_json_file};
 use super::paths::{
     daemon_events_path, daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
@@ -39,6 +41,12 @@ fn current_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn spawn_tool_installer() {
+    let _ = thread::Builder::new()
+        .name("clud-tool-install".to_string())
+        .spawn(crate::tool_install::ensure_installed);
 }
 
 pub(super) fn run_daemon(state_dir: &Path) -> i32 {
@@ -91,6 +99,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // only for the daemon's lifetime — restart wipes it. Persistence
     // is a follow-up once the prototype contract stabilizes.
     let telemetry = TelemetryStore::new();
+    let tool_telemetry = ToolTelemetryStore::new();
     let dashboard_port = spawn_dashboard(
         state_dir.to_path_buf(),
         gc_tx.clone(),
@@ -98,18 +107,12 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         started_at_unix,
         default_live_sessions_provider(),
         telemetry,
+        tool_telemetry,
     );
 
-    // Install bundled Python tools (`~/.clud/tools/*`) before announcing
-    // readiness. PreToolUse hooks like `clud tool run hooks/block-bad-cmd.py`
-    // would otherwise NotFound on the first invocation after a fresh
-    // install — they call `ensure_daemon` and then immediately exec uv
-    // against the resolved path. The install is idempotent and cheap
-    // (one stat per tool on the steady state); a few extra ms before
-    // info-file write is the right tradeoff against silent hook
-    // failures. Errors are logged inside `ensure_installed` and never
-    // abort daemon startup.
-    crate::tool_install::ensure_installed();
+    // Tool installation is deferred until after readiness. `clud tool` self-heals
+    // its requested file inline, so daemon bringup no longer blocks callers
+    // on a full bundled-tool scan.
 
     let info = DaemonInfo {
         pid: std::process::id(),
@@ -131,6 +134,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
             ("event_log", json!(daemon_events_path(state_dir))),
         ],
     );
+    spawn_tool_installer();
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let shutdown_requested = Arc::new(AtomicBool::new(false));

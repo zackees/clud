@@ -31,17 +31,16 @@ use super::wire_prost::{
 ///
 /// 1. Fast path: read the info file, probe its PID + port; return if up.
 /// 2. Slow path: acquire `<state_dir>/daemon.lock` (issue #138 bringup
-///    serialization), re-probe under the lock, and only spawn `clud
-///    __daemon --state-dir <state_dir>` detached if a sibling didn't
-///    bring the daemon up while we waited. Lock releases when this
-///    function returns.
+///    serialization), clean stale state, re-probe under the lock, and
+///    only spawn `clud __daemon --state-dir <state_dir>` detached if a
+///    sibling didn't bring the daemon up while we waited. Lock releases
+///    when this function returns.
 ///
 /// Visible to `main.rs` (the `clud` binary) so it can call this during
 /// early startup. `pub` rather than `pub(crate)` because the binary is
 /// a separate crate within the package.
 pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(state_dir)?;
-    cleanup_stale_state(state_dir);
     if let Some(info) = probe_existing(state_dir) {
         if daemon_version_matches(&info) {
             return Ok(());
@@ -61,6 +60,7 @@ pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     }
 
     let _bringup_lock = acquire_bringup_lock(state_dir)?;
+    cleanup_stale_state(state_dir);
     // Re-probe under the lock: a sibling may have spawned while we waited.
     if let Some(info) = probe_existing(state_dir) {
         if daemon_version_matches(&info) {
@@ -685,6 +685,36 @@ mod tests {
         super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();
     }
 
+    fn write_unfinished_session(state_dir: &Path, id: &str) {
+        fs::create_dir_all(sessions_dir(state_dir)).unwrap();
+        let session = SessionSnapshot {
+            id: id.to_string(),
+            kind: super::super::types::SessionKind::Subprocess,
+            backend: Some("codex".to_string()),
+            launch_mode: Some("subprocess".to_string()),
+            repo_root: None,
+            command: vec!["codex".to_string()],
+            cwd: None,
+            name: None,
+            created_at: Some(1),
+            detachable: false,
+            background: false,
+            attachable: false,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            daemon_pid: 1,
+            worker_pid: u32::MAX,
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+            exited_at: None,
+            ctrl_c: None,
+        };
+        super::super::io_helpers::write_json_file(&session_snapshot_path(state_dir, id), &session)
+            .unwrap();
+    }
+
     fn spawn_silent_peer() -> (u16, Arc<AtomicBool>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -753,6 +783,23 @@ mod tests {
         assert!(
             saw_request.load(Ordering::SeqCst),
             "stub peer should have observed the request before closing"
+        );
+    }
+
+    #[test]
+    fn ensure_daemon_fast_path_skips_stale_state_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (port, _saw_request) = spawn_silent_peer();
+        write_daemon_info(tmp.path(), std::process::id(), port);
+        write_unfinished_session(tmp.path(), "stale-session");
+
+        ensure_daemon(tmp.path()).expect("reachable daemon should satisfy fast path");
+
+        let session: SessionSnapshot =
+            read_json_file(&session_snapshot_path(tmp.path(), "stale-session")).unwrap();
+        assert_eq!(
+            session.exit_code, None,
+            "steady-state ensure_daemon must not scan and mutate session files"
         );
     }
 

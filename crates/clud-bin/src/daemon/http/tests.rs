@@ -94,6 +94,61 @@ fn build_state_with_empty_state_dir_returns_zeros() {
     assert_eq!(state.daemon.version, env!("CARGO_PKG_VERSION"));
 }
 
+#[test]
+fn tool_telemetry_merges_start_finish_and_aggregates_recent_calls() {
+    let store = ToolTelemetryStore::new();
+    let now = 1_700_000_000_000;
+    store.push_event(ToolEventIngest {
+        event: "start".to_string(),
+        id: "call-1".to_string(),
+        name: "hooks/check.py".to_string(),
+        start_time_ms: now - 5_000,
+        end_time_ms: None,
+        exit_code: None,
+        stderr_tail: None,
+    });
+    store.push_event(ToolEventIngest {
+        event: "finish".to_string(),
+        id: "call-1".to_string(),
+        name: "hooks/check.py".to_string(),
+        start_time_ms: now - 5_000,
+        end_time_ms: Some(now - 4_000),
+        exit_code: Some(2),
+        stderr_tail: Some("bad command".to_string()),
+    });
+    store.push_event(ToolEventIngest {
+        event: "finish".to_string(),
+        id: "call-2".to_string(),
+        name: "tools/ok.py".to_string(),
+        start_time_ms: now - 65_000,
+        end_time_ms: Some(now - 64_000),
+        exit_code: Some(0),
+        stderr_tail: None,
+    });
+
+    let view = store.view_at(now);
+    assert_eq!(view.entries.len(), 2);
+    assert_eq!(view.entries[0].id, "call-1");
+    assert_eq!(view.entries[0].exit_code, Some(2));
+    assert_eq!(view.entries[0].stderr_tail.as_deref(), Some("bad command"));
+
+    let last_10s = view
+        .aggregate
+        .iter()
+        .find(|bucket| bucket.label == "last 10s")
+        .unwrap();
+    assert_eq!(last_10s.total, 1);
+    assert_eq!(last_10s.failed, 1);
+
+    let one_min = view
+        .aggregate
+        .iter()
+        .find(|bucket| bucket.label == "1m")
+        .unwrap();
+    assert_eq!(one_min.total, 1);
+    assert_eq!(one_min.success, 1);
+}
+
 /// Issue #190: direct-runner `clud` invocations only show up in the
 /// redb session registry, not as JSON snapshots on disk. The dashboard
 /// must merge those rows in so the Sessions tab isn't perpetually
@@ -316,6 +371,7 @@ fn end_to_end_state_endpoint_returns_all_three_kinds() {
         100,
         empty_live_provider(),
         TelemetryStore::new(),
+        ToolTelemetryStore::new(),
     )
     .expect("dashboard spawned");
 
@@ -333,6 +389,35 @@ fn end_to_end_state_endpoint_returns_all_three_kinds() {
     // Hit GET / and confirm the HTML asset is served.
     let html_body = fetch_path(port, "GET", "/", None).expect("fetch root");
     assert!(html_body.contains("clud dashboard"));
+}
+
+#[test]
+fn end_to_end_tool_event_endpoint_round_trips_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = spawn_dashboard(
+        dir.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+    )
+    .expect("dashboard spawned");
+
+    let start = r#"{"event":"start","id":"call-http","name":"hooks/test.py","start_time_ms":1700000000000}"#;
+    let body = fetch_path(port, "POST", "/tools/event", Some(start.to_string())).expect("post");
+    assert_eq!(body, "{}");
+    let finish = r#"{"event":"finish","id":"call-http","name":"hooks/test.py","start_time_ms":1700000000000,"end_time_ms":1700000000100,"exit_code":1,"stderr_tail":"failed"}"#;
+    let body = fetch_path(port, "POST", "/tools/event", Some(finish.to_string())).expect("post");
+    assert_eq!(body, "{}");
+
+    let tools_body = fetch_path(port, "GET", "/tools", None).expect("tools");
+    let view: ToolTelemetryView = serde_json::from_str(&tools_body).expect("parse tools");
+    assert_eq!(view.entries.len(), 1);
+    assert_eq!(view.entries[0].name, "hooks/test.py");
+    assert_eq!(view.entries[0].exit_code, Some(1));
+    assert_eq!(view.entries[0].stderr_tail.as_deref(), Some("failed"));
 }
 
 #[test]
@@ -367,6 +452,7 @@ fn end_to_end_purge_kind_round_trip_mutates_registry() {
         100,
         empty_live_provider(),
         TelemetryStore::new(),
+        ToolTelemetryStore::new(),
     )
     .expect("dashboard spawned");
 
@@ -452,6 +538,7 @@ fn end_to_end_per_row_delete_only_targets_requested_id() {
         100,
         empty_live_provider(),
         TelemetryStore::new(),
+        ToolTelemetryStore::new(),
     )
     .expect("dashboard spawned");
 

@@ -991,6 +991,26 @@ fn test_daemon_servicedef_alias_subcommand_parses() {
 }
 
 #[test]
+fn test_top_subcommand_parses() {
+    let args = parse(&["clud", "top"]);
+    match args.command {
+        Some(Command::Top { json }) => assert!(!json),
+        other => panic!("expected Top, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_top_json_subcommand_parses() {
+    let args = parse(&["clud", "top", "--json"]);
+    match args.command {
+        Some(Command::Top { json }) => assert!(json),
+        other => panic!("expected Top --json, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
 fn test_symbols_bare_subcommand_yields_none() {
     let args = parse(&["clud", "symbols"]);
     match args.command {
