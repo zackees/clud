@@ -308,12 +308,12 @@ impl HarnessSetupAction for CodexHookNormalizeAction {
 }
 
 pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
-    // Note: bundled Python tools (~/.clud/tools/*) are installed by the
-    // daemon at startup (see `daemon/server.rs::run_daemon`), not as part
-    // of this launch-setup pipeline. `clud tool run` bootstraps the
-    // daemon when needed so first-run hooks bypass NotFound. The launch
-    // setup actions here are limited to backend-specific skills, drift
-    // tracking, and codex hook normalization.
+    // Note: bundled Python tools (~/.clud/tools/*) are refreshed by
+    // foreground startup and daemon startup, not as part of this
+    // launch-setup pipeline. `clud tool run` also self-heals inline so
+    // first-run hooks bypass NotFound. The launch setup actions here are
+    // limited to backend-specific skills, drift tracking, and codex hook
+    // normalization.
     vec![
         Box::new(BundledSkillsAction {
             backend: Backend::Claude,
@@ -568,10 +568,11 @@ mod tests {
         assert_eq!(report.ran, vec!["bundled-skills", "claude-drift-skills"]);
         assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
-        // Launch setup no longer installs bundled tools — the daemon owns
-        // that. `.clud/` is created by the bundled-skills action for
-        // settings.json under codex setup, but the claude path does not
-        // touch it, so it stays absent here.
+        // Launch setup does not install bundled tools. Foreground startup,
+        // daemon startup, and `clud tool run` own that path. `.clud/` is
+        // created by the bundled-skills action for settings.json under codex
+        // setup, but the claude path does not touch it, so it stays absent
+        // here.
         assert!(!home.path().join(".clud").exists());
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout":5"#), "{hooks}");

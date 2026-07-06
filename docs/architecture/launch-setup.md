@@ -43,7 +43,11 @@ launch setup.
 
 Session-only launches skip persistent setup. They must not create or modify
 agent home setup files under `~/.claude`, `~/.codex`, `~/.agents`, or
-`~/.clud` as part of harness setup.
+`~/.clud` as part of harness setup. Bundled Python tools under
+`~/.clud/tools/` are outside this launch-setup selector: normal foreground
+startup, daemon startup, and `clud tool run` refresh clud-managed copies by
+comparing the installed file with the embedded `BUNDLED_TOOLS` body and
+replacing divergent managed copies.
 
 ## Global Actions
 
@@ -59,6 +63,11 @@ Global setup runs only the selected backend's registered actions:
 
 All setup failures are non-fatal. `main.rs` logs a `[clud] note: ...` line and
 continues to build and run the backend `LaunchPlan`.
+
+Bundled Python tools are deliberately not registered as launch-setup actions.
+They are backend-agnostic clud commands, so their stale-copy replacement runs
+on non-dry-run foreground startup even when the selected launch setup scope is
+session-only.
 
 ## Adding an Action
 
