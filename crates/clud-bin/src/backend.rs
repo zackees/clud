@@ -17,6 +17,16 @@ impl Backend {
             Backend::Codex => "codex",
         }
     }
+
+    pub fn from_settings_str(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("claude") {
+            Some(Backend::Claude)
+        } else if value.eq_ignore_ascii_case("codex") {
+            Some(Backend::Codex)
+        } else {
+            None
+        }
+    }
 }
 
 impl std::fmt::Display for Backend {
@@ -55,11 +65,25 @@ pub fn find_backend(backend: Backend) -> Option<PathBuf> {
 
 /// Resolve which backend to use based on CLI flags.
 /// Default is Claude.
-pub fn resolve_backend(_claude: bool, codex: bool) -> Backend {
+pub fn resolve_backend(claude: bool, codex: bool) -> Backend {
+    resolve_backend_with_default(claude, codex, None)
+}
+
+/// Resolve which backend to use based on CLI flags and a persisted default.
+///
+/// Explicit CLI backend flags always win. The persisted default only applies
+/// to bare `clud` launches.
+pub fn resolve_backend_with_default(
+    claude: bool,
+    codex: bool,
+    default_backend: Option<Backend>,
+) -> Backend {
     if codex {
         Backend::Codex
-    } else {
+    } else if claude {
         Backend::Claude
+    } else {
+        default_backend.unwrap_or(Backend::Claude)
     }
 }
 
@@ -142,6 +166,26 @@ mod tests {
     #[test]
     fn test_default_is_claude() {
         assert_eq!(resolve_backend(false, false), Backend::Claude);
+    }
+
+    #[test]
+    fn test_persisted_default_backend_wins_for_bare_launch() {
+        assert_eq!(
+            resolve_backend_with_default(false, false, Some(Backend::Codex)),
+            Backend::Codex
+        );
+    }
+
+    #[test]
+    fn test_explicit_backend_flags_override_persisted_default() {
+        assert_eq!(
+            resolve_backend_with_default(true, false, Some(Backend::Codex)),
+            Backend::Claude
+        );
+        assert_eq!(
+            resolve_backend_with_default(false, true, Some(Backend::Claude)),
+            Backend::Codex
+        );
     }
 
     #[test]

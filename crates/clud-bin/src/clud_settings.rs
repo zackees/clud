@@ -106,6 +106,55 @@ pub fn load_or_init_codex_config_overrides_at(
     }
 }
 
+pub fn load_default_backend() -> Result<Option<Backend>, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_default_backend_at(&home)
+}
+
+pub fn load_default_backend_at(home: &Path) -> Result<Option<Backend>, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    let Some(value) = document
+        .get("backend")
+        .and_then(|item| item.get("default"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(infer_default_backend_from_launch_setup(&document));
+    };
+    Ok(Backend::from_settings_str(value))
+}
+
+pub fn save_default_backend(backend: Backend) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_default_backend_at(&home, backend)
+}
+
+pub fn save_default_backend_at(home: &Path, backend: Backend) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        set_default_backend(document, backend);
+    })
+}
+
+pub fn save_global_launch_setup_selection(
+    backend: Backend,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_global_launch_setup_selection_at(&home, backend, scope)
+}
+
+pub fn save_global_launch_setup_selection_at(
+    home: &Path,
+    backend: Backend,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        set_default_backend(document, backend);
+        set_launch_setup_scope(document, backend, scope);
+    })
+}
+
 pub fn load_auto_fix_hooks_enabled() -> Result<bool, SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
     load_auto_fix_hooks_enabled_at(&home)
@@ -173,17 +222,7 @@ pub fn save_launch_setup_scope_at(
     scope: LaunchSetupScope,
 ) -> Result<(), SettingsError> {
     with_settings_document(home, |document| {
-        let launch_setup = object_entry(document, "launch_setup");
-        let entry = launch_setup
-            .entry(backend_settings_key(backend).to_string())
-            .or_insert_with(|| json!({}));
-        if !entry.is_object() {
-            *entry = json!({});
-        }
-        entry.as_object_mut().unwrap().insert(
-            "scope".to_string(),
-            Value::String(scope.as_str().to_string()),
-        );
+        set_launch_setup_scope(document, backend, scope);
     })
 }
 
@@ -410,6 +449,18 @@ fn parse_legacy_toml_settings(path: &Path, text: &str) -> Result<Value, Settings
             .insert("auto_fix_hooks".to_string(), Value::Bool(enabled));
     }
 
+    if let Some(default_backend) = document
+        .get("backend")
+        .and_then(|item| item.get("default"))
+        .and_then(Item::as_str)
+        .and_then(Backend::from_settings_str)
+    {
+        object_entry(&mut root, "backend").insert(
+            "default".to_string(),
+            Value::String(default_backend.executable_name().to_string()),
+        );
+    }
+
     if let Some(launch_setup) = document.get("launch_setup").and_then(Item::as_table) {
         for (backend, item) in launch_setup.iter() {
             if let Some(scope) = item
@@ -565,6 +616,47 @@ fn seed_codex_config_override_defaults(document: &mut Value) {
         });
 }
 
+fn set_default_backend(document: &mut Value, backend: Backend) {
+    object_entry(document, "backend").insert(
+        "default".to_string(),
+        Value::String(backend.executable_name().to_string()),
+    );
+}
+
+fn set_launch_setup_scope(document: &mut Value, backend: Backend, scope: LaunchSetupScope) {
+    let launch_setup = object_entry(document, "launch_setup");
+    let entry = launch_setup
+        .entry(backend_settings_key(backend).to_string())
+        .or_insert_with(|| json!({}));
+    if !entry.is_object() {
+        *entry = json!({});
+    }
+    entry.as_object_mut().unwrap().insert(
+        "scope".to_string(),
+        Value::String(scope.as_str().to_string()),
+    );
+}
+
+fn infer_default_backend_from_launch_setup(document: &Value) -> Option<Backend> {
+    let mut inferred = None;
+    for backend in [Backend::Claude, Backend::Codex] {
+        let is_global = document
+            .get("launch_setup")
+            .and_then(|item| item.get(backend_settings_key(backend)))
+            .and_then(|item| item.get("scope"))
+            .and_then(Value::as_str)
+            .and_then(LaunchSetupScope::from_settings_str)
+            == Some(LaunchSetupScope::Global);
+        if is_global {
+            if inferred.is_some() {
+                return None;
+            }
+            inferred = Some(backend);
+        }
+    }
+    inferred
+}
+
 fn object_entry<'a>(document: &'a mut Value, key: &str) -> &'a mut Map<String, Value> {
     if !document.is_object() {
         *document = json!({});
@@ -646,6 +738,94 @@ mod tests {
             default_codex_config_overrides()
         );
         assert!(!settings_path_at(home.path()).exists());
+    }
+
+    #[test]
+    fn missing_settings_file_has_no_default_backend() {
+        let home = tempdir().unwrap();
+        assert_eq!(load_default_backend_at(home.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn saves_default_backend() {
+        let home = tempdir().unwrap();
+
+        save_default_backend_at(home.path(), Backend::Codex).unwrap();
+
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
+    }
+
+    #[test]
+    fn infers_default_backend_from_sole_global_launch_setup_scope() {
+        let home = tempdir().unwrap();
+
+        save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
+
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+    }
+
+    #[test]
+    fn does_not_infer_default_backend_when_multiple_scopes_are_global() {
+        let home = tempdir().unwrap();
+
+        save_launch_setup_scope_at(home.path(), Backend::Claude, LaunchSetupScope::Global).unwrap();
+        save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
+
+        assert_eq!(load_default_backend_at(home.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn default_backend_preserves_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"codex":{"scope":"global"}}}"#,
+        )
+        .unwrap();
+
+        save_default_backend_at(home.path(), Backend::Claude).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["backend"]["default"], "claude");
+    }
+
+    #[test]
+    fn saves_global_launch_setup_selection_in_one_document() {
+        let home = tempdir().unwrap();
+
+        save_global_launch_setup_selection_at(
+            home.path(),
+            Backend::Codex,
+            LaunchSetupScope::Global,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
+            Some(LaunchSetupScope::Global)
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
     }
 
     #[test]
@@ -805,11 +985,15 @@ mod tests {
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         fs::write(
             &legacy,
-            "[hook_health]\nauto_fix_hooks = false\n\n[launch_setup.codex]\nscope = \"global\"\n\n[optimize.rust]\nuse_soldr_shims = true\ninstall_soldr = false\nsoldr_version = \"9.9.9\"\n",
+            "[backend]\ndefault = \"codex\"\n\n[hook_health]\nauto_fix_hooks = false\n\n[launch_setup.codex]\nscope = \"global\"\n\n[optimize.rust]\nuse_soldr_shims = true\ninstall_soldr = false\nsoldr_version = \"9.9.9\"\n",
         )
         .unwrap();
 
         assert!(!load_auto_fix_hooks_enabled_at(home.path()).unwrap());
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
         assert_eq!(
             load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
             Some(LaunchSetupScope::Global)
@@ -826,6 +1010,7 @@ mod tests {
         save_auto_fix_hooks_enabled_at(home.path(), true).unwrap();
         let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
         let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
         assert_eq!(json["hook_health"]["auto_fix_hooks"], true);
         assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
         assert_eq!(json["optimize"]["rust"]["soldr_version"], "9.9.9");
