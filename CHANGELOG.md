@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `clud --codex` / `clud --claude` global launch setup now uses an inline
+  terminal selector with a visible selection cursor, hides the hardware cursor
+  while active, supports Esc/Ctrl-C cancellation paths, and persists the
+  selected backend as the bare `clud` default until the opposite backend is
+  selected globally.
 - New `shell.disable_powershell` toggle in `~/.clud/settings.json` (default
   `false`, per-backend overrides under `shell.claude` / `shell.codex`). When
   enabled for the active backend, clud now injects `CLUD_DISABLE_POWERSHELL=1`

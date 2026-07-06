@@ -379,7 +379,19 @@ fn main() {
         uv_run_hook_guard::run(&root);
     }
 
-    let backend = backend::resolve_backend(args.claude, args.codex);
+    let configured_default_backend = if args.dry_run {
+        None
+    } else {
+        match clud_settings::load_default_backend() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("[clud] warning: failed to load default backend: {error}; using claude");
+                None
+            }
+        }
+    };
+    let backend =
+        backend::resolve_backend_with_default(args.claude, args.codex, configured_default_backend);
     let backend_path = {
         let mut bootstrap_host = backend_bootstrap::ProductionBackendBootstrapHost;
         let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
@@ -404,11 +416,12 @@ fn main() {
     };
 
     // Issue #242: mutable harness setup is scoped per launch until the user
-    // opts into a backend-level global preference. Dry-runs always remain
-    // session-only; otherwise a stored `~/.clud/settings.json` scope wins.
-    // Bare interactive TUI launches without a stored scope can opt into global
-    // setup through a reusable selector. Global setup runs only the selected
-    // backend's actions.
+    // opts into a global selection. Dry-runs ignore stored preferences;
+    // otherwise `backend.default` controls bare launches and the selected
+    // backend's stored setup scope controls whether global setup runs.
+    // Interactive launches with an explicit backend can opt into global setup
+    // through the inline selector, and are prompted again when the explicit
+    // backend differs from `backend.default`.
     let setup_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
     let configured_scope = if args.dry_run {
         None
@@ -423,17 +436,26 @@ fn main() {
             }
         }
     };
-    let mut persist_global_scope = false;
-    let setup_scope = if let Some(scope) =
-        launch_setup::scope_for_configured_launch(&args, setup_interactive, configured_scope)
-    {
+    let mut persist_prompted_global_selection = false;
+    let setup_scope = if let Some(scope) = launch_setup::scope_for_launch_selection(
+        &args,
+        setup_interactive,
+        configured_scope,
+        configured_default_backend,
+        backend,
+    ) {
         scope
     } else {
         let mut err = io::stderr().lock();
         match launch_setup::prompt_scope(&mut err) {
             Ok(scope) => {
-                persist_global_scope = matches!(scope, launch_setup::LaunchSetupScope::Global);
+                persist_prompted_global_selection =
+                    launch_setup::should_persist_prompted_default_backend(&args, scope);
                 scope
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                eprintln!("[clud] launch setup cancelled");
+                std::process::exit(130);
             }
             Err(error) => {
                 eprintln!(
@@ -443,8 +465,9 @@ fn main() {
             }
         }
     };
-    if persist_global_scope {
-        if let Err(error) = clud_settings::save_launch_setup_scope(backend, setup_scope) {
+    if persist_prompted_global_selection {
+        if let Err(error) = clud_settings::save_global_launch_setup_selection(backend, setup_scope)
+        {
             eprintln!("[clud] note: could not save global setup preference: {error}");
         }
     }
