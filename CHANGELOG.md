@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `clud --codex` now configures Codex to use `CODEX.md`, then `CLAUDE.md`, as
+  project instruction fallbacks when `AGENTS.md` is absent at the repository
+  root. The injected `project_doc_fallback_filenames` override is visible in
+  `--dry-run` output. See zackees/clud#485.
 - `clud --codex` / `clud --claude` global launch setup now uses an inline
   terminal selector with a visible selection cursor, hides the hardware cursor
   while active, supports Esc/Ctrl-C cancellation paths, and persists the
