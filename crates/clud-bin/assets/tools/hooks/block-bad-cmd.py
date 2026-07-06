@@ -29,11 +29,17 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import queue
 import re
 import sys
+import threading
+import time
+import traceback
 from pathlib import Path
 
 LOG_PATH = Path.home() / ".clud" / "tools" / "hooks" / "block-bad-cmd.log"
+STDIN_READ_CHUNK_BYTES = 64 * 1024
+STDIN_READ_MAX_BYTES = 1024 * 1024
 RUST_TOOLS = {
     "cargo",
     "rustc",
@@ -103,6 +109,164 @@ def _log(msg: str) -> None:
             fh.write(f"[{ts}] pid={os.getpid()} {msg}\n")
     except OSError:
         pass
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return max(0.01, value)
+
+
+STDIN_READ_IDLE_TIMEOUT_SEC = _float_env("CLUD_HOOK_STDIN_IDLE_TIMEOUT_SEC", 0.25)
+STDIN_READ_DEADLINE_SEC = _float_env("CLUD_HOOK_STDIN_DEADLINE_SEC", 2.0)
+
+
+def _decode_stdin(chunks: list[bytes]) -> str:
+    return b"".join(chunks).decode("utf-8", errors="replace").lstrip("\ufeff")
+
+
+def _stack_summary(thread_id: int | None = None) -> str:
+    frame = None if thread_id is None else sys._current_frames().get(thread_id)
+    if frame is None:
+        stack = traceback.format_stack(limit=8)
+    else:
+        stack = traceback.format_stack(frame, limit=8)
+    return " | ".join(line.strip().replace("\n", " ") for line in stack)
+
+
+def _log_stdin_incomplete(
+    mode: str,
+    reason: str,
+    byte_count: int,
+    thread_id: int | None = None,
+) -> None:
+    _log(
+        "stdin_read_incomplete "
+        f"mode={mode} reason={reason} bytes={byte_count} "
+        f"stack={_stack_summary(thread_id)}"
+    )
+
+
+def _read_stdin_nonblocking() -> str | None:
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    try:
+        fd = stream.fileno()
+        was_blocking = os.get_blocking(fd)
+        os.set_blocking(fd, False)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    chunks: list[bytes] = []
+    byte_count = 0
+    deadline = time.monotonic() + STDIN_READ_DEADLINE_SEC
+    idle_until: float | None = None
+    incomplete_reason: str | None = None
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, STDIN_READ_CHUNK_BYTES)
+            except BlockingIOError:
+                now = time.monotonic()
+                wait_until = deadline if idle_until is None else min(deadline, idle_until)
+                if now >= wait_until:
+                    incomplete_reason = (
+                        "idle"
+                        if idle_until is not None and idle_until <= deadline
+                        else "deadline"
+                    )
+                    break
+                time.sleep(min(0.01, max(0.001, wait_until - now)))
+                continue
+            except OSError as exc:
+                _log(f"stdin_read_error mode=nonblocking error={exc}")
+                return _decode_stdin(chunks)
+
+            if not chunk:
+                break
+            chunks.append(chunk)
+            byte_count += len(chunk)
+            idle_until = time.monotonic() + STDIN_READ_IDLE_TIMEOUT_SEC
+            if byte_count >= STDIN_READ_MAX_BYTES:
+                incomplete_reason = "max_bytes"
+                break
+    finally:
+        try:
+            os.set_blocking(fd, was_blocking)
+        except OSError:
+            pass
+
+    if incomplete_reason is not None:
+        _log_stdin_incomplete("nonblocking", incomplete_reason, byte_count)
+    return _decode_stdin(chunks)
+
+
+def _read_stdin_threaded() -> str:
+    out: queue.Queue[bytes | BaseException | None] = queue.Queue()
+
+    def worker() -> None:
+        try:
+            fd = sys.stdin.fileno()
+            while True:
+                chunk = os.read(fd, STDIN_READ_CHUNK_BYTES)
+                if not chunk:
+                    out.put(None)
+                    return
+                out.put(chunk)
+        except BaseException as exc:  # pragma: no cover - defensive fallback path
+            out.put(exc)
+
+    thread = threading.Thread(target=worker, name="clud-hook-stdin-reader", daemon=True)
+    thread.start()
+
+    chunks: list[bytes] = []
+    byte_count = 0
+    deadline = time.monotonic() + STDIN_READ_DEADLINE_SEC
+    idle_until: float | None = None
+    incomplete_reason: str | None = None
+    while True:
+        now = time.monotonic()
+        wait_until = deadline if idle_until is None else min(deadline, idle_until)
+        if now >= wait_until:
+            incomplete_reason = (
+                "idle" if idle_until is not None and idle_until <= deadline else "deadline"
+            )
+            break
+        try:
+            item = out.get(timeout=max(0.001, wait_until - now))
+        except queue.Empty:
+            incomplete_reason = (
+                "idle" if idle_until is not None and idle_until <= deadline else "deadline"
+            )
+            break
+        if item is None:
+            break
+        if isinstance(item, BaseException):
+            _log(f"stdin_read_error mode=threaded error={item}")
+            break
+        chunks.append(item)
+        byte_count += len(item)
+        idle_until = time.monotonic() + STDIN_READ_IDLE_TIMEOUT_SEC
+        if byte_count >= STDIN_READ_MAX_BYTES:
+            incomplete_reason = "max_bytes"
+            break
+
+    if incomplete_reason is not None:
+        _log_stdin_incomplete("threaded", incomplete_reason, byte_count, thread.ident)
+    return _decode_stdin(chunks)
+
+
+def _read_stdin_bounded() -> str:
+    if os.name == "nt":
+        return _read_stdin_threaded()
+    raw = _read_stdin_nonblocking()
+    if raw is not None:
+        return raw
+    return _read_stdin_threaded()
 
 
 def _extract_command(payload: dict) -> str:
@@ -370,7 +534,8 @@ def _forbidden_reason(command_text: str, cwd: Path | None = None) -> str | None:
                         _log(f"CLUD_UV_RUST_ALLOW_ALL=1 bypassed hybrid block at {hybrid_root}")
                         print(
                             "\x1b[33mWARNING: AUTO COMPILING RUST because of uv run\n"
-                            f"CLUD_UV_RUST_ALLOW_ALL=1 is set, so the auto-sync gate at {hybrid_root} was bypassed.\n"
+                            "CLUD_UV_RUST_ALLOW_ALL=1 is set, so the auto-sync gate at "
+                            f"{hybrid_root} was bypassed.\n"
                             "DIRECTIVE TO AGENT: the next `uv run` in this project root will "
                             "trigger a full native rebuild (can take minutes). If you don't need "
                             "a fresh build, pass `--no-sync` (use existing venv), `--no-project` "
@@ -400,14 +565,15 @@ def _forbidden_reason(command_text: str, cwd: Path | None = None) -> str | None:
         if first in RUST_TOOLS:
             return (
                 f"Use `soldr {first} ...` instead of bare `{first}`. "
-                "soldr resolves the pinned rustup-managed toolchain and avoids GNU/Chocolatey shims."
+                "soldr resolves the pinned rustup-managed toolchain and avoids "
+                "GNU/Chocolatey shims."
             )
 
     return None
 
 
 def main() -> int:
-    raw = sys.stdin.read()
+    raw = _read_stdin_bounded()
     _log(f"raw_stdin_bytes={len(raw)}")
     try:
         payload = json.loads(raw) if raw.strip() else {}

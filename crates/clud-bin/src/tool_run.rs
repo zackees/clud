@@ -40,8 +40,8 @@ use crate::session_index::{
 use crate::shim_uv;
 use crate::tool_install::{ensure_installed as ensure_tools_installed, tools_root};
 use crate::tool_tee::TeeWriter;
-use crate::tool_termination::{emit_termination, ExitKind};
-use crate::tool_watchdog::{Watchdog, WatchdogDecision};
+use crate::tool_termination::{emit_termination, format_elapsed, ExitKind};
+use crate::tool_watchdog::{AbortReason, Watchdog, WatchdogDecision};
 use crate::tools::clud_uv_cache_dir;
 
 /// Poll interval for draining captured stdout/stderr into the tee writer.
@@ -118,7 +118,7 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
         (Some(ctx), Some(tool_id)) => {
             run_with_session(ctx, tool_id, rel_path, args, argv, env, telemetry)
         }
-        _ => run_passthrough(argv, env, telemetry),
+        _ => run_passthrough(rel_path, args, argv, env, telemetry),
     }
 }
 
@@ -126,10 +126,13 @@ pub fn run(rel_path: &str, args: &[String]) -> io::Result<i32> {
 /// immediately re-emit them and retain a stderr tail for tool telemetry.
 /// There is still no session index or per-tool log in this fallback path.
 fn run_passthrough(
+    rel_path: &str,
+    args: &[String],
     argv: Vec<String>,
     env: Vec<(String, String)>,
     telemetry: ToolTelemetry,
 ) -> io::Result<i32> {
+    let argv_for_diagnostic = argv.clone();
     let process = NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(argv),
         cwd: None,
@@ -142,14 +145,46 @@ fn run_passthrough(
         nice: None,
     });
     process.start().map_err(io::Error::other)?;
+    let mut watchdog = Watchdog::for_rel_path(rel_path);
     let mut emitted_stdout = 0usize;
     let mut emitted_stderr = 0usize;
+    let mut last_drain_count = 0usize;
     let exit_code = loop {
         match process.wait(Some(DRAIN_POLL_INTERVAL)) {
             Ok(code) => break code,
             Err(ProcessError::Timeout) => {
                 (emitted_stdout, emitted_stderr) =
                     drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
+                let drain_count = emitted_stdout + emitted_stderr;
+                if drain_count > last_drain_count {
+                    watchdog.note_output();
+                    last_drain_count = drain_count;
+                }
+                match watchdog.check() {
+                    WatchdogDecision::Continue => continue,
+                    WatchdogDecision::KillAndAbort(reason) => {
+                        let _ = process.kill();
+                        let _ = drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
+                        let stderr_tail = stderr_tail_200(&process.captured_stderr().concat());
+                        let _ = emit_passthrough_abort_diagnostic(
+                            rel_path,
+                            args,
+                            &argv_for_diagnostic,
+                            watchdog.started_at.elapsed(),
+                            reason,
+                            stderr_tail.as_deref(),
+                        );
+                        telemetry.finish(124, stderr_tail);
+                        return Ok(124);
+                    }
+                    WatchdogDecision::ResumeLater(reason) => {
+                        let _ = drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
+                        let mut err = io::stderr().lock();
+                        let _ = writeln!(err, "{}", watchdog.render_in_progress(reason));
+                        let _ = err.flush();
+                        return Ok(0);
+                    }
+                }
             }
             Err(other) => return Err(io::Error::other(other)),
         }
@@ -160,6 +195,53 @@ fn run_passthrough(
         stderr_tail_200(&process.captured_stderr().concat()),
     );
     Ok(exit_code)
+}
+
+fn render_passthrough_abort_payload(
+    rel_path: &str,
+    args: &[String],
+    argv: &[String],
+    elapsed: Duration,
+    reason: AbortReason,
+    stderr_tail: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "v": 1,
+        "tool": rel_path,
+        "args": args,
+        "argv": argv,
+        "status": "aborted",
+        "reason": reason.label(),
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "stderr_tail": stderr_tail,
+    })
+    .to_string()
+}
+
+fn emit_passthrough_abort_diagnostic(
+    rel_path: &str,
+    args: &[String],
+    argv: &[String],
+    elapsed: Duration,
+    reason: AbortReason,
+    stderr_tail: Option<&str>,
+) -> io::Result<()> {
+    let payload =
+        render_passthrough_abort_payload(rel_path, args, argv, elapsed, reason, stderr_tail);
+    let argv_json = serde_json::to_string(argv).unwrap_or_else(|_| format!("{argv:?}"));
+    let mut err = io::stderr().lock();
+    writeln!(err, "{payload}")?;
+    writeln!(
+        err,
+        "TIMEOUT after {} on {} in session-less tool runner.",
+        format_elapsed(elapsed),
+        rel_path
+    )?;
+    writeln!(err, "  command argv: {argv_json}")?;
+    if let Some(tail) = stderr_tail {
+        writeln!(err, "  stderr tail: {tail}")?;
+    }
+    err.flush()
 }
 
 /// Session-attached run: capture stdout/stderr through `running_process`,
@@ -1205,5 +1287,31 @@ mod tests {
         assert_eq!(tail.len(), 200);
         assert_eq!(tail, "x".repeat(200));
         assert!(stderr_tail_200(b"").is_none());
+    }
+
+    #[test]
+    fn passthrough_abort_payload_names_exact_argv() {
+        let args = vec!["--flag".to_string()];
+        let argv = vec![
+            "uv".to_string(),
+            "run".to_string(),
+            "--script".to_string(),
+            "hooks/block-bad-cmd.py".to_string(),
+        ];
+        let payload = render_passthrough_abort_payload(
+            "hooks/block-bad-cmd.py",
+            &args,
+            &argv,
+            Duration::from_millis(1234),
+            AbortReason::CommandTimeout,
+            Some("blocked at sys.stdin.read()"),
+        );
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["status"], "aborted");
+        assert_eq!(value["reason"], "command_timeout");
+        assert_eq!(value["tool"], "hooks/block-bad-cmd.py");
+        assert_eq!(value["args"][0], "--flag");
+        assert_eq!(value["argv"][0], "uv");
+        assert_eq!(value["stderr_tail"], "blocked at sys.stdin.read()");
     }
 }
