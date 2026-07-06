@@ -2,7 +2,7 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
     cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
     launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
-    runner, runtime_cache, startup, symbols, tool_cli, tools, trampoline, trash, ui,
+    runner, runtime_cache, startup, symbols, tool_cli, tool_install, tools, trampoline, trash, ui,
     uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
@@ -273,6 +273,15 @@ fn main() {
         std::process::exit(exit_code);
     }
 
+    // Bundled Python tools are embedded in this binary via BUNDLED_TOOLS.
+    // Refresh managed copies during normal foreground startup so an
+    // upgraded clud binary replaces stale `~/.clud/tools/...` commands even
+    // when an older daemon is already running. `clud tool run` keeps its own
+    // inline self-heal path for hook invocations; dry-run remains no-write.
+    if !args.dry_run {
+        tool_install::ensure_installed();
+    }
+
     if hook_health::should_check_launch(&args) {
         let auto_fix_hooks = if args.no_fix_hooks {
             false
@@ -352,9 +361,8 @@ fn main() {
         verbose_log::log("[clud] daemon: skipped");
     }
 
-    // After the daemon has had its chance to install bundled tools
-    // (`daemon::server::run_daemon` → `tool_install::ensure_installed`),
-    // fire the hook-config scanner against the cwd. Warns on bare
+    // After foreground startup has refreshed bundled tools, fire the
+    // hook-config scanner against the cwd. Warns on bare
     // `uv run` in Pre/PostToolUse hooks of Python+Rust polyglot
     // repos — the failure mode that turns every hook fire into a
     // multi-minute Rust rebuild on maturin-backed projects (see the

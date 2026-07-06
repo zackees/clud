@@ -109,11 +109,28 @@ def copied_clud_env(_source: Path) -> dict[str, str]:
     return env
 
 
+def _copy_clud_for_test(temp_dir: str) -> Path:
+    source = Path(CLUD)
+    launch = Path(temp_dir) / source.name
+    shutil.copy2(source, launch)
+    return launch
+
+
+def _fake_claude_on_path(bin_dir: Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        fake = bin_dir / "claude.cmd"
+        fake.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    else:
+        fake = bin_dir / "claude"
+        fake.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+
+
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as temp_dir:
         source = Path(CLUD)
-        launch = Path(temp_dir) / source.name
-        shutil.copy2(source, launch)
+        launch = _copy_clud_for_test(temp_dir)
         return subprocess.run(
             [str(launch), *args],
             capture_output=True,
@@ -374,6 +391,81 @@ def test_pipe_mode() -> None:
     data = json.loads(result.stdout)
     assert "-p" in data["command"]
     assert "piped prompt" in data["command"]
+
+
+def test_startup_refreshes_stale_managed_bundled_tool(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    home.mkdir()
+    _fake_claude_on_path(fake_bin)
+
+    hook = home / ".clud" / "tools" / "hooks" / "block-bad-cmd.py"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("# managed-by: clud\nprint('stale hook')\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = copied_clud_env(source)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            [
+                str(launch),
+                "--no-daemon",
+                "--no-fix-hooks",
+                "--no-cpu-banner",
+                "--no-dnd",
+                "--subprocess",
+                "-p",
+                "hello",
+            ],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    assert result.returncode == 0, (
+        f"startup launch failed (rc={result.returncode}): "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    updated = hook.read_text(encoding="utf-8")
+    assert "def _read_stdin_bounded() -> str" in updated
+    assert "stdin_read_incomplete " in updated
+    assert "stale hook" not in updated
+
+
+def test_dry_run_does_not_refresh_stale_managed_bundled_tool(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = home / ".clud" / "tools" / "hooks" / "block-bad-cmd.py"
+    hook.parent.mkdir(parents=True)
+    stale = "# managed-by: clud\nprint('stale hook')\n"
+    hook.write_text(stale, encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = copied_clud_env(source)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        result = subprocess.run(
+            [str(launch), "--dry-run", "-p", "hello"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert hook.read_text(encoding="utf-8") == stale
 
 
 def test_clean_worktrees_dry_run_smoke() -> None:
