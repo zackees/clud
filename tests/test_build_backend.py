@@ -17,8 +17,10 @@ SPEC.loader.exec_module(build_backend)
 def test_build_wheel_routes_through_soldr_and_repairs(monkeypatch, tmp_path) -> None:
     calls = []
     repairs = []
+    soldr = tmp_path / build_backend._script_name("soldr")
 
     monkeypatch.setattr(build_backend, "build_env", lambda: {"PATH": "test-bin"})
+    monkeypatch.setattr(build_backend, "_soldr_executable", lambda: str(soldr))
 
     def fake_check_call(cmd, *, env, timeout):
         calls.append((cmd, env, timeout))
@@ -34,7 +36,7 @@ def test_build_wheel_routes_through_soldr_and_repairs(monkeypatch, tmp_path) -> 
     assert calls == [
         (
             [
-                "soldr",
+                str(soldr),
                 "maturin",
                 "pep517",
                 "build-wheel",
@@ -46,8 +48,8 @@ def test_build_wheel_routes_through_soldr_and_repairs(monkeypatch, tmp_path) -> 
                 sys.executable,
             ],
             {
-                "PATH": "test-bin",
-                "RUSTC_WRAPPER": "soldr",
+                "PATH": str(tmp_path) + build_backend.os.pathsep + "test-bin",
+                "RUSTC_WRAPPER": str(soldr),
                 "ZCCACHE_PATH_REMAP": "auto",
                 "CARGO_TARGET_DIR": str(Path.home() / ".soldr" / "cargo-target" / "wheel-build"),
             },
@@ -76,10 +78,23 @@ def test_soldr_env_preserves_explicit_cache_settings(monkeypatch, tmp_path) -> N
     assert env["ZCCACHE_PATH_REMAP"] == "manual"
 
 
+def test_soldr_executable_prefers_build_env_script(monkeypatch, tmp_path) -> None:
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    soldr = scripts / build_backend._script_name("soldr")
+    soldr.write_text("", encoding="utf-8")
+    python = scripts / build_backend._script_name("python")
+
+    monkeypatch.setattr(build_backend.sys, "executable", str(python))
+
+    assert build_backend._soldr_executable() == str(soldr)
+
+
 def test_build_wheel_forwards_maturin_pep517_args(monkeypatch, tmp_path) -> None:
     calls = []
 
     monkeypatch.setattr(build_backend, "build_env", lambda: {})
+    monkeypatch.setattr(build_backend, "_soldr_executable", lambda: "soldr")
     monkeypatch.setenv("MATURIN_PEP517_ARGS", "--profile dev --compatibility pypi")
 
     def fake_check_call(cmd, *, env, timeout):

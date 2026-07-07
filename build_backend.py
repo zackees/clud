@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -17,9 +18,24 @@ _SOLDR_PEP517_TIMEOUT_SECONDS = 600
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 
+def _script_name(name: str) -> str:
+    return f"{name}.exe" if platform.system() == "Windows" else name
+
+
+def _soldr_executable() -> str:
+    build_env_soldr = Path(sys.executable).parent / _script_name("soldr")
+    if build_env_soldr.is_file():
+        return str(build_env_soldr)
+    return shutil.which("soldr") or "soldr"
+
+
 def _soldr_build_env() -> dict[str, str]:
     env = build_env()
-    env.setdefault("RUSTC_WRAPPER", "soldr")
+    soldr = _soldr_executable()
+    soldr_dir = Path(soldr).parent
+    if soldr_dir != Path("."):
+        env["PATH"] = str(soldr_dir) + os.pathsep + env.get("PATH", "")
+    env.setdefault("RUSTC_WRAPPER", soldr)
     env.setdefault("ZCCACHE_PATH_REMAP", "auto")
 
     knob = env.get("SOLDR_PEP517_STABLE_TARGET_DIR", "").strip().lower()
@@ -36,7 +52,7 @@ def _maturin_pep517(
     *args: str,
     env_overrides: Mapping[str, str] | None = None,
 ) -> None:
-    cmd = ["soldr", "maturin", "pep517", subcommand, *args]
+    cmd = [_soldr_executable(), "maturin", "pep517", subcommand, *args]
     env = _soldr_build_env()
     if env_overrides:
         env.update(env_overrides)
