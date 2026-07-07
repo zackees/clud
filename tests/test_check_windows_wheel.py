@@ -11,7 +11,12 @@ import struct
 import zipfile
 from pathlib import Path
 
-from ci.check_windows_wheel import check_wheel, forbidden_imports, iter_imported_dll_names
+from ci.check_windows_wheel import (
+    _is_clud_script_exe,
+    check_wheel,
+    forbidden_imports,
+    iter_imported_dll_names,
+)
 
 # A minimal PE32+ executable synthesized in-memory. The layout is chosen
 # so the import table is parseable but still tiny; the test doesn't care
@@ -120,11 +125,21 @@ def _make_pe_with_imports(dll_names: list[str]) -> bytes:
     return bytes(pe)
 
 
-def _make_wheel(tmp_path: Path, wheel_name: str, imports: list[str]) -> Path:
-    exe_bytes = _make_pe_with_imports(imports)
+def _make_wheel(
+    tmp_path: Path,
+    wheel_name: str,
+    imports: list[str],
+    *,
+    scripts: list[str] | None = None,
+) -> Path:
+    scripts = scripts or ["clud.exe"]
     wheel_path = tmp_path / wheel_name
     with zipfile.ZipFile(wheel_path, "w") as archive:
-        archive.writestr("clud-2.0.0.data/scripts/clud.exe", exe_bytes)
+        for script in scripts:
+            archive.writestr(
+                f"clud-2.0.0.data/scripts/{script}",
+                _make_pe_with_imports(imports),
+            )
         archive.writestr("clud-2.0.0.dist-info/RECORD", "")
     return wheel_path
 
@@ -155,6 +170,30 @@ def test_mingw_wheel_flags_every_forbidden_dll(tmp_path: Path):
     assert "libwinpthread-1.dll" in msg
     # Non-MinGW imports aren't flagged by themselves.
     assert "KERNEL32.dll" not in forbidden_imports(["KERNEL32.dll"])
+
+
+def test_windows_wheel_checks_every_clud_script_exe(tmp_path: Path):
+    wheel = _make_wheel(
+        tmp_path,
+        "clud-2.0.0-py3-none-win_amd64.whl",
+        ["libgcc_s_seh-1.dll"],
+        scripts=["clud.exe", "clud-shim.exe", "clud-block-bad-cmd.exe"],
+    )
+
+    errors = check_wheel(wheel)
+
+    assert len(errors) == 3
+    assert any("clud.exe" in error for error in errors)
+    assert any("clud-shim.exe" in error for error in errors)
+    assert any("clud-block-bad-cmd.exe" in error for error in errors)
+
+
+def test_clud_script_member_filter():
+    assert _is_clud_script_exe("clud-2.0.0.data/scripts/clud.exe")
+    assert _is_clud_script_exe("clud-2.0.0.data/scripts/clud-shim.exe")
+    assert _is_clud_script_exe("clud-2.0.0.data/scripts/clud-block-bad-cmd.exe")
+    assert not _is_clud_script_exe("clud-2.0.0.data/scripts/python.exe")
+    assert not _is_clud_script_exe("clud-2.0.0.data/purelib/clud.exe")
 
 
 def test_non_windows_wheel_is_skipped(tmp_path: Path):

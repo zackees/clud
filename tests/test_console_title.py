@@ -23,6 +23,7 @@ idempotent spawn) and the OSC stripper's byte-level behavior.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -80,6 +81,12 @@ def test_clud_stamps_console_title_on_windows() -> None:
     deterministic basename by spawning clud from a fresh tempdir whose
     directory we name ourselves, then assert the exact string.
     """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.skip(
+            "child process console-title writes are not observable from "
+            "the Windows GitHub Actions console host"
+        )
+
     import ctypes
     from ctypes import wintypes
 

@@ -1,9 +1,10 @@
 # clud-bin
 
 Main Rust binary crate for the `clud` project. Builds the `clud` executable
-(a fast CLI for running Claude Code and Codex in YOLO mode) and is distributed
-as a Python wheel via maturin with `bindings = "bin"` — installing the wheel
-drops the native binary onto `PATH`.
+(a fast CLI for running Claude Code and Codex in YOLO mode) plus small helper
+binaries, and is distributed as a Python wheel via maturin with
+`bindings = "bin"` — installing the wheel drops those native commands onto
+`PATH`.
 
 The crate also exposes a `clud` library target (`src/lib.rs`) so integration
 tests can exercise internals directly.
@@ -58,8 +59,9 @@ soldr cargo test -p clud-bin     # crate-level Rust tests only
 
 Packaged as a Python wheel via maturin (`[tool.maturin] bindings = "bin"`,
 `manifest-path = "crates/clud-bin/Cargo.toml"` in the root `pyproject.toml`).
-The wheel installs the `clud` binary onto the user's `PATH` — no Python
-runtime code ships beyond a thin version shim.
+The wheel installs the native `clud`, `clud-shim`, and `clud-block-bad-cmd`
+commands onto the user's `PATH` — no Python runtime code ships beyond a thin
+version shim and compatibility hook shims.
 
 CI builds across 6 platforms: Linux x86 + ARM, Windows x86 + ARM, macOS
 ARM + x86. The Windows ARM target stubs out `whisper-rs` because the

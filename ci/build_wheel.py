@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import platform
 import subprocess
 import sys
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 BuildMode = Literal["dev", "release"]
+REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd")
 
 
 def build_environment(mode: BuildMode, env: dict[str, str]) -> dict[str, str]:
@@ -86,6 +88,76 @@ def install_wheel(wheel: Path, *, env: dict[str, str]) -> int:
     for pth in (ROOT / ".venv").glob("**/site-packages/clud.pth"):
         with contextlib.suppress(OSError):
             pth.unlink()
+    return verify_installed_scripts(env=env)
+
+
+def _script_name(name: str) -> str:
+    return f"{name}.exe" if platform.system() == "Windows" else name
+
+
+def _installed_script(name: str) -> Path:
+    return Path(sys.executable).parent / _script_name(name)
+
+
+def verify_installed_scripts(*, env: dict[str, str]) -> int:
+    missing = [name for name in REQUIRED_SCRIPTS if not _installed_script(name).is_file()]
+    if missing:
+        print(
+            "installed wheel is missing scripts: " + ", ".join(missing),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+    guard = _installed_script("clud-block-bad-cmd")
+    deny_payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "bad" + " cmd"},
+        }
+    )
+    deny = subprocess.run(
+        [str(guard)],
+        input=deny_payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+        env=env,
+    )
+    if deny.returncode != 2 or "permissionDecision" not in deny.stdout or "deny" not in deny.stdout:
+        print(
+            "installed clud-block-bad-cmd deny smoke failed: "
+            f"rc={deny.returncode} stdout={deny.stdout!r} stderr={deny.stderr!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+    allow_payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo ok"},
+        }
+    )
+    allow = subprocess.run(
+        [str(guard)],
+        input=allow_payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+        env=env,
+    )
+    if allow.returncode != 0:
+        print(
+            "installed clud-block-bad-cmd allow smoke failed: "
+            f"rc={allow.returncode} stdout={allow.stdout!r} stderr={allow.stderr!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
     return 0
 
 

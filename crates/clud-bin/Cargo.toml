@@ -169,3 +169,7 @@ path = "src/main.rs"
 [[bin]]
 name = "clud-shim"
 path = "src/bin/clud_shim.rs"
+
+[[bin]]
+name = "clud-block-bad-cmd"
+path = "src/bin/clud_block_bad_cmd.rs"

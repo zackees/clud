@@ -28,9 +28,14 @@ def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) ->
     mock_agent.write_text("", encoding="utf-8")
     installed_clud = tmp_path / ci_test._binary_name("clud")
     installed_clud.write_text("", encoding="utf-8")
+    installed_block_guard = tmp_path / ci_test._binary_name("clud-block-bad-cmd")
+    installed_block_guard.write_text("", encoding="utf-8")
     captured: list[list[str]] = []
 
-    monkeypatch.setattr(ci_test, "_installed_clud_script", lambda: installed_clud)
+    def fake_installed_script(name: str):
+        return {"clud": installed_clud, "clud-block-bad-cmd": installed_block_guard}.get(name)
+
+    monkeypatch.setattr(ci_test, "_installed_script", fake_installed_script)
     monkeypatch.setattr(ci_test, "ROOT", tmp_path)
 
     def fake_run(cmd: list[str], *, env=None) -> int:
@@ -43,6 +48,7 @@ def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) ->
 
     assert env is not None
     assert env["CLUD_TEST_BINARY"] == str(installed_clud)
+    assert env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] == str(installed_block_guard)
     assert env["CLUD_TEST_MOCK_AGENT_BINARY"] == str(mock_agent)
     assert captured == [["cargo", "build", "-p", "mock-agent"]]
 
@@ -54,12 +60,14 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
     target_dir = tmp_path / "target" / "debug"
     target_dir.mkdir(parents=True)
     clud = target_dir / ci_test._binary_name("clud")
+    block_guard = target_dir / ci_test._binary_name("clud-block-bad-cmd")
     mock_agent = target_dir / ci_test._binary_name("mock-agent")
     clud.write_text("", encoding="utf-8")
+    block_guard.write_text("", encoding="utf-8")
     mock_agent.write_text("", encoding="utf-8")
     captured: list[list[str]] = []
 
-    monkeypatch.setattr(ci_test, "_installed_clud_script", lambda: None)
+    monkeypatch.setattr(ci_test, "_installed_script", lambda name: None)
     monkeypatch.setattr(ci_test, "ROOT", tmp_path)
 
     def fake_run(cmd: list[str], *, env=None) -> int:
@@ -72,5 +80,6 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
 
     assert env is not None
     assert env["CLUD_TEST_BINARY"] == str(clud)
+    assert env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] == str(block_guard)
     assert env["CLUD_TEST_MOCK_AGENT_BINARY"] == str(mock_agent)
     assert captured == [["cargo", "build", "-p", "clud", "-p", "mock-agent"]]

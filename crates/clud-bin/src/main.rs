@@ -311,7 +311,7 @@ fn main() {
     // `clud --claude`, `clud --codex`, or piped/prompted variants). Skip
     // for every subcommand path: `clud tool run`, `clud loop`, `clud gc`,
     // `clud attach/kill/list/logs`, etc. — those are utility invocations
-    // (including PreToolUse hooks like `clud tool run hooks/block-bad-cmd.py`)
+    // (including compatibility hook shims such as `clud tool run ...`)
     // where the warning would be noise, not signal. The subcommands that
     // already short-circuit above via `std::process::exit` never reached
     // this code anyway; this gate also covers `clud loop` and any future
