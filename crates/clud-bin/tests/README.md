@@ -5,6 +5,7 @@ Rust integration tests for the `clud-bin` crate. Unlike the `#[test]` units insi
 ## Files
 
 - `pty_behavior.rs` — End-to-end PTY checks: `respond_to_queries_impl` DSR stub (T1), `resize_impl` propagate-on-POSIX / no-op-on-Windows (T2), extreme `cols=32767` spawn safety (T3), verbatim stdin forwarding through `run_raw_pty_pump`, F3 press/release detection (xterm + kitty CSI-u), idle `on_tick` cadence, Ctrl-C flag honoring, resize channel application, prompt exit on child death, and raw-mode recovery on hook panic.
+- `win32_hooking_probe.rs` — Ignored Windows-only #468 research probe for raw Job Object lifecycle events, PEB command-line reads, handle snapshots, breakaway denial, and LoadLibrary DLL injection against `testbins/probe-*`.
 
 ## How to run
 
@@ -16,6 +17,7 @@ bash test --integration                     # adds mock-agent integration tests
 soldr cargo test -p clud-bin                # all clud-bin tests (unit + integration)
 soldr cargo test -p clud-bin --test pty_behavior   # this file only
 soldr cargo test -p clud-bin --test pty_behavior -- --nocapture   # see canary-skip diagnostics
+soldr cargo test -p clud --test win32_hooking_probe -- --ignored --nocapture --test-threads=1
 ```
 
 All `cargo`/`rustc`/`rustfmt` invocations must go through `soldr` (see root `CLAUDE.md`). The mock-agent is auto-built on first run via `cargo build -p mock-agent --message-format json`.
