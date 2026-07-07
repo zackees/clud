@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::args::Args;
@@ -17,7 +18,7 @@ pub fn default_state_dir() -> std::io::Result<PathBuf> {
     if let Ok(path) = std::env::var(ENV_STATE_DIR) {
         return Ok(PathBuf::from(path));
     }
-    let home = dirs::home_dir()
+    let home = clud_home_dir()
         .ok_or_else(|| std::io::Error::other("no home directory; cannot resolve clud state dir"))?;
     Ok(home.join(".clud").join("state"))
 }
@@ -27,9 +28,37 @@ pub fn default_state_dir() -> std::io::Result<PathBuf> {
 /// Lives next to `data.redb` at `~/.clud/trash/` so the always-on daemon
 /// can reap entries across all repos and shells.
 pub fn default_trash_dir() -> std::io::Result<PathBuf> {
-    let home = dirs::home_dir()
+    let home = clud_home_dir()
         .ok_or_else(|| std::io::Error::other("no home directory; cannot resolve clud trash dir"))?;
     Ok(home.join(".clud").join("trash"))
+}
+
+fn clud_home_dir() -> Option<PathBuf> {
+    home_dir_from_parts(
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOME"),
+        dirs::home_dir(),
+    )
+}
+
+fn home_dir_from_parts(
+    userprofile: Option<OsString>,
+    home: Option<OsString>,
+    fallback: Option<PathBuf>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(path) = non_empty_path(userprofile) {
+        return Some(path);
+    }
+
+    #[cfg(not(windows))]
+    let _ = userprofile;
+
+    non_empty_path(home).or(fallback)
+}
+
+fn non_empty_path(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|path| !path.is_empty()).map(PathBuf::from)
 }
 
 pub(super) fn state_dir(args: &Args) -> PathBuf {
@@ -76,4 +105,35 @@ pub(super) fn session_log_path(state_dir: &Path, session_id: &str) -> PathBuf {
 
 pub(super) fn spec_path(state_dir: &Path, session_id: &str) -> PathBuf {
     specs_dir(state_dir).join(format!("{session_id}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_dir_resolution_prefers_testable_env_home() {
+        let userprofile = Some(OsString::from(r"C:\isolated-home"));
+        let home = Some(OsString::from("/tmp/isolated-home"));
+        let fallback = Some(PathBuf::from("/real-home"));
+        let resolved = home_dir_from_parts(userprofile, home, fallback).unwrap();
+
+        #[cfg(windows)]
+        assert_eq!(resolved, PathBuf::from(r"C:\isolated-home"));
+
+        #[cfg(not(windows))]
+        assert_eq!(resolved, PathBuf::from("/tmp/isolated-home"));
+    }
+
+    #[test]
+    fn home_dir_resolution_falls_back_when_env_empty() {
+        let resolved = home_dir_from_parts(
+            Some(OsString::new()),
+            Some(OsString::new()),
+            Some(PathBuf::from("/fallback-home")),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, PathBuf::from("/fallback-home"));
+    }
 }
