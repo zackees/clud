@@ -130,6 +130,41 @@ def test_macos_x86_without_build_env_soldr_uses_python_maturin(
     ]
 
 
+def test_macos_x86_without_build_env_soldr_uses_longer_timeout(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+    python = tmp_path / "bin" / "python"
+
+    monkeypatch.setattr(build_backend.sys, "executable", str(python))
+    monkeypatch.setattr(build_backend.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(build_backend.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(build_backend, "build_env", lambda: {})
+
+    def fake_check_call(cmd, *, env, timeout):
+        del env
+        calls.append((cmd, timeout))
+
+    monkeypatch.setattr(build_backend.subprocess, "check_call", fake_check_call)
+
+    build_backend._maturin_pep517("build-wheel", "--out", "dist")
+
+    assert calls == [
+        (
+            [
+                str(python),
+                "-m",
+                "maturin",
+                "pep517",
+                "build-wheel",
+                "--out",
+                "dist",
+            ],
+            build_backend._MATURIN_MODULE_PEP517_TIMEOUT_SECONDS,
+        )
+    ]
+
+
 def test_build_wheel_forwards_maturin_pep517_args(monkeypatch, tmp_path) -> None:
     calls = []
 

@@ -15,6 +15,7 @@ from ci.env import build_env
 from ci.wheel_repair import repair_windows_gnu_wheel
 
 _SOLDR_PEP517_TIMEOUT_SECONDS = 600
+_MATURIN_MODULE_PEP517_TIMEOUT_SECONDS = 1800
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 
@@ -64,6 +65,22 @@ def _maturin_pep517_command(subcommand: str, *args: str) -> list[str]:
     return [_soldr_executable(), "maturin", "pep517", subcommand, *args]
 
 
+def _uses_maturin_module(cmd: list[str]) -> bool:
+    return len(cmd) >= 3 and cmd[:3] == [sys.executable, "-m", "maturin"]
+
+
+def _pep517_timeout_seconds(cmd: list[str]) -> int:
+    if _uses_maturin_module(cmd):
+        return _MATURIN_MODULE_PEP517_TIMEOUT_SECONDS
+    return _SOLDR_PEP517_TIMEOUT_SECONDS
+
+
+def _pep517_command_label(cmd: list[str]) -> str:
+    if _uses_maturin_module(cmd):
+        return "python -m maturin pep517"
+    return "soldr maturin pep517"
+
+
 def _maturin_pep517(
     subcommand: str,
     *args: str,
@@ -73,11 +90,12 @@ def _maturin_pep517(
     env = _soldr_build_env()
     if env_overrides:
         env.update(env_overrides)
+    timeout = _pep517_timeout_seconds(cmd)
     try:
-        subprocess.check_call(cmd, env=env, timeout=_SOLDR_PEP517_TIMEOUT_SECONDS)
+        subprocess.check_call(cmd, env=env, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            "soldr maturin pep517 exceeded 600s; suspect zccache daemon wedge - "
+            f"{_pep517_command_label(cmd)} exceeded {timeout}s; suspect zccache daemon wedge - "
             "try `soldr status` to inspect."
         ) from exc
 
