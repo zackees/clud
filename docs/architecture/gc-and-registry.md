@@ -116,7 +116,7 @@ file plus a successful TCP connect.
 
 ## GC subcommands
 
-All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
+The tracked-entry subcommands are thin IPC clients against the daemon. `--no-daemon` (or
 `CLUD_NO_DAEMON=1`) is **an error**, not a fallback — there is no read-only path in v1
 (`crates/clud-bin/src/gc/cli.rs`).
 
@@ -125,10 +125,16 @@ All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
   `kind / age / agent_id / branch / path` plus a `live_locked` flag computed by the daemon
   by parsing `git worktree list --porcelain` and extracting `(pid <N>)` from any
   `locked <reason>` line.
-- **`clud gc purge [--duration 7d] [--kind worktree] [--dry-run] [--yes]`** — `cmd_purge`
-  pre-validates the duration string locally, then calls `daemon::gc_client_purge`. The daemon
-  selects candidates (all rows, or rows older than `now - duration`), partitions out
-  live-locked worktrees or live session CWD ancestors, and:
+- **`clud gc prune --kind <name> [--dry-run]`** and
+  **`clud gc all [--dry-run]`** call `daemon::gc_client_purge` with the kind-specific safe
+  prune policy. Worktree-like rows use the built-in stale duration, extern-repo rows rely on
+  their filesystem-mtime purgeability gate, trash rows are reaped, and `uv-cache` uses its
+  filesystem-only stale-env sweep.
+- **`clud gc purge --kind <name> [--dry-run] --yes`** and
+  **`clud gc all --purge --yes [--dry-run]`** are the destructive forms. The CLI requires
+  `--kind` for single-kind purge and `--yes` for destructive all-kind purge before contacting
+  the daemon. The daemon selects candidates, partitions out live-locked worktrees or live
+  session CWD ancestors, and:
   - `--dry-run` reports `removed` (the number that *would* be deleted) plus `skipped`. Replies
     `GcReply::PurgeOk { removed, skipped }` synchronously.
   - Non-dry-run **bulk** purge fans every purgeable entry out to the daemon's parallel purge pool
@@ -140,10 +146,9 @@ All three subcommands are thin IPC clients against the daemon. `--no-daemon` (or
   - Per-row delete (`GcOp::DeleteById`, dashboard "delete" button) stays on the synchronous path
     and replies `GcReply::PurgeOk { removed, skipped }` — exactly one entry, fast.
   Worktree rows use `git worktree remove --force`; if git fails or reports success while the
-  directory survives, clud falls back to direct removal plus `git worktree prune`. Bare
-  `clud gc purge` (no `--duration`) is interactive and asks for `y/N` confirmation unless
-  `--yes`. Stale rows during/after a partial purge are tolerated — eventual consistency, not
-  transactional; the next purge or list reconciles.
+  directory survives, clud falls back to direct removal plus `git worktree prune`. Stale rows
+  during/after a partial purge are tolerated — eventual consistency, not transactional; the
+  next purge or list reconciles.
 - **`clud gc reconcile`** — `cmd_reconcile` calls `daemon::gc_client_reconcile` with the
   current repo root. The daemon walks `<repo>/.claude/worktrees/`, `<repo>/.extern-repos/`, and
   conservative sibling temp-clone names next to the repo. Returns the count of new rows.
@@ -262,7 +267,8 @@ GC store / daemon:
 - **Worktree dir gone mid-scan.** `read_dir` returns `NotFound` → `scan_once_via_ipc` treats as
   empty (`crates/clud-bin/src/gc/reconcile.rs`). Individual `agent-*` dirs disappearing between
   `read_dir` and the `gc.insert` IPC are benign: the daemon will accept the insert, and a future
-  `gc purge` (or a `git worktree remove` from outside clud) cleans the row.
+  `gc prune`, explicit `gc purge --kind`, or a `git worktree remove` from outside clud cleans
+  the row.
 
 - **PID reuse.** The session-cap registry's `Drop` only deletes its row if `register_self` was
   called successfully (`crates/clud-bin/src/session_registry.rs:565`), so an early-aborted `clud`

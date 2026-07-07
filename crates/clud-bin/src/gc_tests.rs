@@ -157,9 +157,10 @@ fn delete_removes_one_row() {
 #[test]
 fn delete_on_missing_id_is_noop() {
     // The redb-backed delete scans for a matching id and silently
-    // succeeds if nothing matches. This is intentional — `gc purge`
-    // can fire the delete after the row has already been removed by
-    // a concurrent operation, and we don't want to error out.
+    // succeeds if nothing matches. This is intentional: daemon-side
+    // purge completion can fire the delete after the row has already
+    // been removed by a concurrent operation, and we don't want to
+    // error out.
     let reg = fresh_registry("delete-missing");
     insert(&reg, "worktree", "/tmp/a", 100);
     // Try to delete a never-issued id.
@@ -170,8 +171,8 @@ fn delete_on_missing_id_is_noop() {
 #[test]
 fn ids_are_monotonic_across_inserts() {
     // The id counter is stored in the META table. Insert several rows
-    // and confirm the ids strictly increase. (`gc purge` references
-    // rows by id, so this needs to be stable.)
+    // and confirm the ids strictly increase. Daemon delete paths
+    // reference rows by id, so this needs to be stable.
     let reg = fresh_registry("ids-mono");
     insert(&reg, "worktree", "/tmp/a", 100);
     insert(&reg, "worktree", "/tmp/b", 100);

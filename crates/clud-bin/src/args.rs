@@ -252,7 +252,7 @@ pub enum Command {
     /// Issue #110: tracked-entry garbage collection (redb-backed
     /// registry at `~/.clud/data.redb`).
     ///
-    /// Subcommands: `list`, `purge <duration>`, `reconcile`. Running
+    /// Subcommands: `list`, `prune`, `purge`, `all`, `reconcile`. Running
     /// `clud gc` with no subcommand prints this help summary.
     Gc {
         #[command(subcommand)]
@@ -507,30 +507,47 @@ pub enum ToolSubcommand {
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
-    /// Print every tracked entry, newest first.
+    /// Print tracked entries, newest first.
     List {
         /// Issue #135: emit a JSON array instead of the human-readable table.
         #[arg(long = "json")]
         json: bool,
-        /// Restrict to a single entry kind (e.g. `worktree`, `trash`).
+        /// Restrict to a single managed kind (e.g. `worktree`, `trash`).
         #[arg(long = "kind")]
         kind: Option<String>,
     },
-    /// Remove tracked entries older than `<duration>`. When `<duration>`
-    /// is omitted, purge ALL tracked entries that are not live-locked.
+    /// Drop stale/unreferenced entries for one managed kind.
+    Prune {
+        /// Preview the removal plan without touching anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Managed kind to prune (e.g. `worktree`, `uv-cache`, `trash`).
+        #[arg(long = "kind")]
+        kind: Option<String>,
+    },
+    /// Remove all entries for one managed kind. Destructive; requires `--yes`.
     Purge {
-        /// Duration (e.g. `30s`, `5m`, `2h`, `1d`). When omitted, purge
-        /// every non-live-locked entry regardless of age.
-        duration: Option<String>,
         /// Preview the removal plan without touching anything.
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Skip the interactive confirmation prompt.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
-        /// Restrict to a single entry kind (e.g. `worktree`).
+        /// Managed kind to purge (e.g. `worktree`, `uv-cache`, `trash`).
         #[arg(long = "kind")]
         kind: Option<String>,
+    },
+    /// Operate across every managed kind. Defaults to safe prune.
+    All {
+        /// Purge every managed kind instead of pruning stale entries.
+        #[arg(long = "purge")]
+        purge: bool,
+        /// Preview the removal plan without touching anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Required with `--purge`.
+        #[arg(long = "yes", short = 'y')]
+        yes: bool,
     },
     /// Walk `.claude/worktrees/` in the current repo and insert any
     /// previously-untracked worktree directories.

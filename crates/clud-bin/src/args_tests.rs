@@ -849,36 +849,30 @@ fn test_gc_list_kind_filter() {
 }
 
 #[test]
-fn test_gc_purge_with_duration() {
-    let args = parse(&["clud", "gc", "purge", "1d"]);
+fn test_gc_prune_kind_filter() {
+    let args = parse(&["clud", "gc", "prune", "--kind", "worktree"]);
     match args.command {
         Some(Command::Gc {
-            subcommand:
-                Some(GcSubcommand::Purge {
-                    ref duration,
-                    dry_run,
-                    yes,
-                    ref kind,
-                }),
+            subcommand: Some(GcSubcommand::Prune { dry_run, ref kind }),
         }) => {
-            assert_eq!(duration.as_deref(), Some("1d"));
             assert!(!dry_run);
-            assert!(!yes);
-            assert!(kind.is_none());
+            assert_eq!(kind.as_deref(), Some("worktree"));
         }
-        _ => panic!("expected Gc::Purge"),
+        _ => panic!("expected Gc::Prune"),
     }
 }
 
 #[test]
-fn test_gc_purge_without_duration_means_purge_all() {
-    // Issue #135 Phase 1: bare `clud gc purge` -> purge ALL non-live-locked.
+fn test_gc_purge_without_kind_parses_for_runtime_error() {
     let args = parse(&["clud", "gc", "purge"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::Purge { ref duration, .. }),
+            subcommand: Some(GcSubcommand::Purge { ref kind, .. }),
         }) => {
-            assert!(duration.is_none(), "purge with no arg -> None duration");
+            assert!(
+                kind.is_none(),
+                "runtime prints the custom missing-kind error"
+            );
         }
         _ => panic!("expected bare Gc::Purge"),
     }
@@ -890,7 +884,6 @@ fn test_gc_purge_dry_run_yes_kind() {
         "clud",
         "gc",
         "purge",
-        "7d",
         "--dry-run",
         "--yes",
         "--kind",
@@ -900,18 +893,69 @@ fn test_gc_purge_dry_run_yes_kind() {
         Some(Command::Gc {
             subcommand:
                 Some(GcSubcommand::Purge {
-                    ref duration,
                     dry_run,
                     yes,
                     ref kind,
                 }),
         }) => {
-            assert_eq!(duration.as_deref(), Some("7d"));
             assert!(dry_run);
             assert!(yes);
             assert_eq!(kind.as_deref(), Some("worktree"));
         }
         _ => panic!("expected Gc::Purge with flags"),
+    }
+}
+
+#[test]
+fn test_gc_purge_rejects_legacy_duration_positional() {
+    let argv: Vec<String> = ["clud", "gc", "purge", "7d"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let result = Args::try_parse_from(argv);
+    assert!(
+        result.is_err(),
+        "legacy purge duration positional should be rejected"
+    );
+}
+
+#[test]
+fn test_gc_all_defaults_to_prune() {
+    let args = parse(&["clud", "gc", "all"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand:
+                Some(GcSubcommand::All {
+                    purge,
+                    dry_run,
+                    yes,
+                }),
+        }) => {
+            assert!(!purge);
+            assert!(!dry_run);
+            assert!(!yes);
+        }
+        _ => panic!("expected Gc::All"),
+    }
+}
+
+#[test]
+fn test_gc_all_purge_yes() {
+    let args = parse(&["clud", "gc", "all", "--purge", "--yes"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand:
+                Some(GcSubcommand::All {
+                    purge,
+                    dry_run,
+                    yes,
+                }),
+        }) => {
+            assert!(purge);
+            assert!(!dry_run);
+            assert!(yes);
+        }
+        _ => panic!("expected Gc::All --purge --yes"),
     }
 }
 
