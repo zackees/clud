@@ -212,6 +212,19 @@ fn main() {
             );
         }
     }
+    let auto_fix_hooks = if args.no_fix_hooks {
+        false
+    } else {
+        match clud_settings::load_auto_fix_hooks_enabled() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                eprintln!(
+                    "[clud] warning: failed to load hook-health settings: {error}; using default"
+                );
+                true
+            }
+        }
+    };
 
     // Issue #112: explicit hook-parity remediation path. This flag resets the
     // sticky opt-out, applies deterministic repairs, and asks the selected
@@ -286,22 +299,10 @@ fn main() {
     // inline self-heal path for hook invocations; dry-run remains no-write.
     if !args.dry_run {
         tool_install::ensure_installed();
+        clud::block_bad_cmd_rollout::run_startup_checks(auto_fix_hooks);
     }
 
     if hook_health::should_check_launch(&args) {
-        let auto_fix_hooks = if args.no_fix_hooks {
-            false
-        } else {
-            match clud_settings::load_auto_fix_hooks_enabled() {
-                Ok(enabled) => enabled,
-                Err(error) => {
-                    eprintln!(
-                        "[clud] warning: failed to load hook-health settings: {error}; using default"
-                    );
-                    true
-                }
-            }
-        };
         if auto_fix_hooks && !args.dry_run {
             if let Err(error) = hook_health::apply_default_repairs() {
                 eprintln!("[clud] warning: failed to auto-repair hook health: {error}");

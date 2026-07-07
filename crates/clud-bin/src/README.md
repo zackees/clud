@@ -142,6 +142,9 @@ Skills and hooks:
   `PURGED_SKILLS`.
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation.
+- `block_bad_cmd_rollout.rs` - startup health/migration for the native
+  `clud-block-bad-cmd` helper: stale install warning plus exact old hook
+  command rewrites when the helper is available.
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).

@@ -90,6 +90,14 @@ They are backend-agnostic clud commands, so their stale-copy replacement runs
 on non-dry-run foreground startup even when the selected launch setup scope is
 session-only.
 
+The native `clud-block-bad-cmd` rollout has a similarly narrow foreground
+startup repair outside the launch-setup selector: clud warns when an installed
+layout has `clud`/`clud-shim` but lacks the native helper, and, when hook
+auto-repair is enabled, rewrites only exact old
+`clud tool run hooks/block-bad-cmd.py` hook commands to `clud-block-bad-cmd`
+after the helper is resolvable on PATH. Non-exact user hook commands are left
+alone.
+
 ## Adding an Action
 
 Add a `HarnessSetupAction` implementation in `launch_setup.rs`, give it a

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.3.0 - 2026-07-07
+
+- Native `clud-block-bad-cmd` rollout is now end-to-end: install scripts verify
+  the helper after `uv tool install --force`, startup warns on stale installs
+  missing the helper, exact old `clud tool run hooks/block-bad-cmd.py` hook
+  commands migrate to the native helper when safe, and bundled tools now have a
+  retired-tool purge lifecycle for future shim removal. See zackees/clud#499.
 - `clud --codex` now configures Codex to use `CODEX.md`, then `CLAUDE.md`, as
   project instruction fallbacks when `AGENTS.md` is absent at the repository
   root. The injected `project_doc_fallback_filenames` override is visible in

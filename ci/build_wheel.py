@@ -8,6 +8,7 @@ import json
 import platform
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Literal
 
@@ -57,6 +58,18 @@ def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[st
 
 def built_wheels() -> list[Path]:
     return sorted(DIST.glob("clud-*.whl"), key=lambda path: path.stat().st_mtime)
+
+
+def wheel_snapshot() -> dict[str, int]:
+    return {path.name: path.stat().st_mtime_ns for path in built_wheels()}
+
+
+def wheels_changed_since(snapshot: dict[str, int]) -> list[Path]:
+    return [
+        path
+        for path in built_wheels()
+        if snapshot.get(path.name) != path.stat().st_mtime_ns
+    ]
 
 
 def latest_wheel() -> Path:
@@ -161,19 +174,44 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
     return 0
 
 
+def verify_wheel_scripts(wheel: Path) -> int:
+    with zipfile.ZipFile(wheel) as archive:
+        members = {name.replace("\\", "/") for name in archive.namelist()}
+    missing = []
+    for name in REQUIRED_SCRIPTS:
+        script = _script_name(name)
+        if not any(member.endswith(f".data/scripts/{script}") for member in members):
+            missing.append(script)
+    if missing:
+        print(
+            f"built wheel {wheel.name} is missing scripts: " + ", ".join(missing),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    return 0
+
+
 def run_build(mode: BuildMode) -> int:
     from ci.env import build_env
 
     env = build_environment(mode, build_env())
     DIST.mkdir(parents=True, exist_ok=True)
-    before = {path.name for path in built_wheels()}
+    before = wheel_snapshot()
     cmd = build_command(mode, env=env)
     print(f"build mode: {mode}", file=sys.stderr, flush=True)
     result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
     if result.returncode != 0:
         return result.returncode
-    for wheel in built_wheels():
+    changed_wheels = wheels_changed_since(before)
+    if not changed_wheels:
+        print("build completed but produced no wheel", file=sys.stderr, flush=True)
+        return 1
+    for wheel in changed_wheels:
         repair_windows_gnu_wheel(wheel)
+        verify = verify_wheel_scripts(wheel)
+        if verify != 0:
+            return verify
     if mode != "dev":
         return 0
 

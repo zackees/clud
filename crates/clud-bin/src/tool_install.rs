@@ -16,6 +16,10 @@
 //! never touched. This lets a developer hand-customize an installed script
 //! and have it survive `clud` upgrades.
 //!
+//! Retired tools follow the same safety rule through [`PURGED_TOOLS`]: only a
+//! stale file that still carries the managed marker is removed. User-authored
+//! files at the old path are preserved.
+//!
 //! All errors are non-fatal: a tool-install hiccup never breaks the launch
 //! path — at worst the user sees a `[clud] note: …` line and continues.
 //!
@@ -31,6 +35,18 @@ use crate::tools::{BundledTool, BUNDLED_TOOLS, MANAGED_BY_CLUD_MARKER};
 /// they're invoked by the `clud tool run` subcommand which sets
 /// `UV_CACHE_DIR` itself.
 const TOOLS_ROOT: &str = ".clud/tools";
+
+/// A previously bundled tool that should be removed from managed installs.
+///
+/// Keep this list empty until a compatibility window has closed. For example,
+/// `hooks/block-bad-cmd.py` remains bundled as a one-release shim while hook
+/// configs migrate to the native `clud-block-bad-cmd` helper.
+pub struct PurgedTool {
+    pub rel_path: &'static str,
+    pub reason: &'static str,
+}
+
+pub const PURGED_TOOLS: &[PurgedTool] = &[];
 
 /// Resolve `~/.clud/tools/`. Returns `None` if the home directory cannot be
 /// determined; callers degrade silently in that case.
@@ -60,6 +76,7 @@ pub fn ensure_installed_at(home: &Path) {
     for tool in BUNDLED_TOOLS {
         ensure_tool_installed_at(home, tool);
     }
+    purge_retired_tools_at(home, PURGED_TOOLS);
 }
 
 fn ensure_tool_installed_at(home: &Path, tool: &BundledTool) {
@@ -150,6 +167,57 @@ fn update_diverges(path: &Path, tool: &BundledTool) {
         return;
     }
     eprintln!("\x1b[32m[clud] updated tool/{}\x1b[0m", tool.rel_path);
+}
+
+pub fn purge_retired_tools_at(home: &Path, purged_tools: &[PurgedTool]) -> PurgeReport {
+    let mut report = PurgeReport::default();
+    for tool in purged_tools {
+        let path = target_path_at(home, tool.rel_path);
+        match std::fs::read_to_string(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                report.missing += 1;
+            }
+            Err(e) => {
+                report.errors += 1;
+                eprintln!(
+                    "[clud] note: could not read retired tool {}: {e}",
+                    path.display()
+                );
+            }
+            Ok(content) => {
+                if !content.contains(MANAGED_BY_CLUD_MARKER) {
+                    report.preserved_user += 1;
+                    continue;
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        report.removed += 1;
+                        eprintln!(
+                            "\x1b[32m[clud] removed retired tool/{} ({})\x1b[0m",
+                            tool.rel_path, tool.reason
+                        );
+                    }
+                    Err(e) => {
+                        report.errors += 1;
+                        eprintln!(
+                            "[clud] note: could not remove retired tool/{} at {}: {e}",
+                            tool.rel_path,
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    report
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeReport {
+    pub removed: usize,
+    pub preserved_user: usize,
+    pub missing: usize,
+    pub errors: usize,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -308,5 +376,54 @@ mod tests {
             target_path_at(tmp.path(), "x.py").parent(),
             Some(resolved.as_path())
         );
+    }
+
+    #[test]
+    fn retired_managed_tool_is_removed() {
+        let tmp = TempDir::new().unwrap();
+        let retired = PurgedTool {
+            rel_path: "hooks/block-bad-cmd.py",
+            reason: "native helper rollout complete",
+        };
+        let target = target_path_at(tmp.path(), retired.rel_path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "# managed-by: clud\nprint('old')\n").unwrap();
+
+        let report = purge_retired_tools_at(tmp.path(), &[retired]);
+
+        assert_eq!(report.removed, 1);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn retired_user_authored_tool_is_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let retired = PurgedTool {
+            rel_path: "hooks/block-bad-cmd.py",
+            reason: "native helper rollout complete",
+        };
+        let target = target_path_at(tmp.path(), retired.rel_path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let body = "#!/usr/bin/env python3\nprint('mine')\n";
+        fs::write(&target, body).unwrap();
+
+        let report = purge_retired_tools_at(tmp.path(), &[retired]);
+
+        assert_eq!(report.preserved_user, 1);
+        assert_eq!(fs::read_to_string(target).unwrap(), body);
+    }
+
+    #[test]
+    fn retired_missing_tool_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let retired = PurgedTool {
+            rel_path: "hooks/block-bad-cmd.py",
+            reason: "native helper rollout complete",
+        };
+
+        let report = purge_retired_tools_at(tmp.path(), &[retired]);
+
+        assert_eq!(report.missing, 1);
+        assert_eq!(report.errors, 0);
     }
 }
