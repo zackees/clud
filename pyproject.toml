@@ -1,5 +1,5 @@
 [build-system]
-requires = ["cmake>=3.26", "maturin>=1.7,<2"]
+requires = ["soldr>=0.7.98"]
 build-backend = "build_backend"
 backend-path = ["."]
 

@@ -2,28 +2,24 @@
 
 from __future__ import annotations
 
-import ast
-import re
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _build_system_requires() -> list[str]:
-    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    section_match = re.search(r"(?ms)^\[build-system\]\s*(.*?)(?=^\[|\Z)", text)
-    if section_match is None:
-        raise AssertionError("missing [build-system] section")
-
-    requires_match = re.search(r"(?ms)^requires\s*=\s*(\[.*?\])", section_match.group(1))
-    if requires_match is None:
-        raise AssertionError("missing build-system.requires")
-
-    return ast.literal_eval(requires_match.group(1))
+def _pyproject() -> dict:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        return tomllib.load(handle)
 
 
-def test_pip_build_requires_native_build_tools() -> None:
-    requirements = [requirement.lower() for requirement in _build_system_requires()]
+def test_pip_build_uses_clud_soldr_backend_wrapper() -> None:
+    build_system = _pyproject()["build-system"]
+    requirements = [requirement.lower() for requirement in build_system["requires"]]
 
-    assert any(requirement.startswith("maturin") for requirement in requirements)
-    assert any(requirement.startswith("cmake") for requirement in requirements)
+    assert build_system["build-backend"] == "build_backend"
+    assert build_system["backend-path"] == ["."]
+    assert any(requirement.startswith("soldr") for requirement in requirements)
+    assert not any(requirement.startswith("maturin") for requirement in requirements)
+    assert not any(requirement.startswith("cmake") for requirement in requirements)
