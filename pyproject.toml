@@ -1,5 +1,8 @@
 [build-system]
-requires = ["soldr>=0.7.98; platform_system != 'Darwin' or platform_machine != 'x86_64'"]
+requires = [
+    "soldr>=0.7.98; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+    "maturin[zig]>=1.7,<2; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+]
 build-backend = "build_backend"
 backend-path = ["."]
 

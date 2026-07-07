@@ -106,6 +106,30 @@ def test_soldr_executable_prefers_setup_soldr_binary(monkeypatch, tmp_path) -> N
     assert build_backend._soldr_executable() == str(setup_soldr)
 
 
+def test_macos_x86_without_build_env_soldr_uses_python_maturin(
+    monkeypatch, tmp_path
+) -> None:
+    setup_soldr = tmp_path / "setup-soldr" / "bin" / build_backend._script_name("soldr")
+    setup_soldr.parent.mkdir(parents=True)
+    setup_soldr.write_text("", encoding="utf-8")
+    python = tmp_path / "bin" / "python"
+
+    monkeypatch.setenv("SOLDR_BINARY", str(setup_soldr))
+    monkeypatch.setattr(build_backend.sys, "executable", str(python))
+    monkeypatch.setattr(build_backend.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(build_backend.platform, "machine", lambda: "x86_64")
+
+    assert build_backend._maturin_pep517_command("build-wheel", "--out", "dist") == [
+        str(python),
+        "-m",
+        "maturin",
+        "pep517",
+        "build-wheel",
+        "--out",
+        "dist",
+    ]
+
+
 def test_build_wheel_forwards_maturin_pep517_args(monkeypatch, tmp_path) -> None:
     calls = []
 

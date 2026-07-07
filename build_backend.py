@@ -22,12 +22,20 @@ def _script_name(name: str) -> str:
     return f"{name}.exe" if platform.system() == "Windows" else name
 
 
+def _build_env_soldr_executable() -> Path:
+    return Path(sys.executable).parent / _script_name("soldr")
+
+
+def _macos_x86() -> bool:
+    return platform.system() == "Darwin" and platform.machine().lower() in {"x86_64", "amd64"}
+
+
 def _soldr_executable() -> str:
     setup_soldr = os.getenv("SOLDR_BINARY")
     if setup_soldr and Path(setup_soldr).is_file():
         return setup_soldr
 
-    build_env_soldr = Path(sys.executable).parent / _script_name("soldr")
+    build_env_soldr = _build_env_soldr_executable()
     if build_env_soldr.is_file():
         return str(build_env_soldr)
     return shutil.which("soldr") or "soldr"
@@ -50,12 +58,18 @@ def _soldr_build_env() -> dict[str, str]:
     return env
 
 
+def _maturin_pep517_command(subcommand: str, *args: str) -> list[str]:
+    if _macos_x86() and not _build_env_soldr_executable().is_file():
+        return [sys.executable, "-m", "maturin", "pep517", subcommand, *args]
+    return [_soldr_executable(), "maturin", "pep517", subcommand, *args]
+
+
 def _maturin_pep517(
     subcommand: str,
     *args: str,
     env_overrides: Mapping[str, str] | None = None,
 ) -> None:
-    cmd = [_soldr_executable(), "maturin", "pep517", subcommand, *args]
+    cmd = _maturin_pep517_command(subcommand, *args)
     env = _soldr_build_env()
     if env_overrides:
         env.update(env_overrides)
