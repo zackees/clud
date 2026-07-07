@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "clud"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "arboard",
  "base64",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "mock-agent"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "libc",
  "serde_json",
