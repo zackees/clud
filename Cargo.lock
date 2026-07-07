@@ -444,6 +444,7 @@ dependencies = [
  "whisper-rs",
  "windows 0.61.3",
  "windows-core 0.61.2",
+ "windows-sys 0.59.0",
  "zip",
 ]
 
@@ -1975,6 +1976,14 @@ dependencies = [
  "proc-macro2",
  "syn",
 ]
+
+[[package]]
+name = "probe-dll"
+version = "2.3.0"
+
+[[package]]
+name = "probe-target"
+version = "2.3.0"
 
 [[package]]
 name = "proc-macro-crate"
