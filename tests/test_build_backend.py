@@ -20,6 +20,7 @@ def test_build_wheel_routes_through_soldr_and_repairs(monkeypatch, tmp_path) -> 
     soldr = tmp_path / build_backend._script_name("soldr")
 
     monkeypatch.setattr(build_backend, "build_env", lambda: {"PATH": "test-bin"})
+    monkeypatch.setattr(build_backend, "_macos_x86", lambda: False)
     monkeypatch.setattr(build_backend, "_soldr_executable", lambda: str(soldr))
 
     def fake_check_call(cmd, *, env, timeout):
