@@ -20,9 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v3
-      - uses: zackees/setup-soldr@v0.9.62
+      - uses: zackees/setup-soldr@v0.9.66
         with:
-          version: 0.7.104
+          version: 0.8.0
           cache: true
           toolchain: 1.94.1
           cache-key-suffix: dylint

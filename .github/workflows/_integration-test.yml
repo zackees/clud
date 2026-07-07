@@ -51,6 +51,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mapfile -t microsoft_sources < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d 2>/dev/null || true)
+          if [ "${#microsoft_sources[@]}" -gt 0 ]; then
+            sudo rm -f "${microsoft_sources[@]}"
+          fi
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends mold
 
@@ -59,10 +63,13 @@ jobs:
       # routed through soldr/zccache. Install mold before setup so dependency
       # cooking and the dev wheel build share the same linker fingerprint.
       - name: Setup soldr
-        uses: zackees/setup-soldr@v0.9.62
+        uses: zackees/setup-soldr@v0.9.66
         with:
           toolchain: "1.94.1"
-          version: ${{ contains(inputs.runs-on, 'intel') && '0.7.45' || '0.7.104' }}
+          # soldr 0.8.0 does not ship x86_64-apple-darwin; keep the
+          # last known macOS Intel binary there while every other runner
+          # uses the latest release.
+          version: ${{ contains(inputs.runs-on, 'intel') && '0.7.45' || '0.8.0' }}
           cache: true
           build-cache-mode: thin
           shims: true
