@@ -79,7 +79,7 @@ jobs:
           linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
           preserve-source-mtimes: true
           solo-toolchain-cache: true
-          prebuild-deps: soldr-cook
+          prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
           prebuild-deps-flags: ${{ inputs.build-mode == 'release' && '--release --workspace' || '--workspace' }}
 
       - name: Restore source checkout

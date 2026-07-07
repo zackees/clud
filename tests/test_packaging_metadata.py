@@ -47,3 +47,19 @@ def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
     assert version_lines
     assert all("0.7.104" in line for line in version_lines)
     assert all("0.7.45" not in line or "inputs.runs-on" in line for line in version_lines)
+
+
+def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
+    setup_workflows = [
+        path
+        for path in (ROOT / ".github" / "workflows").glob("_*.yml")
+        if "zackees/setup-soldr" in path.read_text(encoding="utf-8")
+    ]
+
+    assert setup_workflows
+    for path in setup_workflows:
+        text = path.read_text(encoding="utf-8")
+        assert (
+            "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
+            in text
+        )
