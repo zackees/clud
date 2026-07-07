@@ -23,6 +23,10 @@ def _script_name(name: str) -> str:
 
 
 def _soldr_executable() -> str:
+    setup_soldr = os.getenv("SOLDR_BINARY")
+    if setup_soldr and Path(setup_soldr).is_file():
+        return setup_soldr
+
     build_env_soldr = Path(sys.executable).parent / _script_name("soldr")
     if build_env_soldr.is_file():
         return str(build_env_soldr)
@@ -35,7 +39,6 @@ def _soldr_build_env() -> dict[str, str]:
     soldr_dir = Path(soldr).parent
     if soldr_dir != Path("."):
         env["PATH"] = str(soldr_dir) + os.pathsep + env.get("PATH", "")
-    env.setdefault("RUSTC_WRAPPER", soldr)
     env.setdefault("ZCCACHE_PATH_REMAP", "auto")
 
     knob = env.get("SOLDR_PEP517_STABLE_TARGET_DIR", "").strip().lower()

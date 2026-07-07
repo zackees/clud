@@ -21,5 +21,6 @@ def test_pip_build_uses_clud_soldr_backend_wrapper() -> None:
     assert build_system["build-backend"] == "build_backend"
     assert build_system["backend-path"] == ["."]
     assert any(requirement.startswith("soldr") for requirement in requirements)
+    assert any("platform_system" in requirement for requirement in requirements)
     assert not any(requirement.startswith("maturin") for requirement in requirements)
     assert not any(requirement.startswith("cmake") for requirement in requirements)

@@ -49,7 +49,6 @@ def test_build_wheel_routes_through_soldr_and_repairs(monkeypatch, tmp_path) -> 
             ],
             {
                 "PATH": str(tmp_path) + build_backend.os.pathsep + "test-bin",
-                "RUSTC_WRAPPER": str(soldr),
                 "ZCCACHE_PATH_REMAP": "auto",
                 "CARGO_TARGET_DIR": str(Path.home() / ".soldr" / "cargo-target" / "wheel-build"),
             },
@@ -79,6 +78,7 @@ def test_soldr_env_preserves_explicit_cache_settings(monkeypatch, tmp_path) -> N
 
 
 def test_soldr_executable_prefers_build_env_script(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("SOLDR_BINARY", raising=False)
     scripts = tmp_path / "Scripts"
     scripts.mkdir()
     soldr = scripts / build_backend._script_name("soldr")
@@ -88,6 +88,22 @@ def test_soldr_executable_prefers_build_env_script(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(build_backend.sys, "executable", str(python))
 
     assert build_backend._soldr_executable() == str(soldr)
+
+
+def test_soldr_executable_prefers_setup_soldr_binary(monkeypatch, tmp_path) -> None:
+    setup_soldr = tmp_path / "setup-soldr" / "bin" / build_backend._script_name("soldr")
+    setup_soldr.parent.mkdir(parents=True)
+    setup_soldr.write_text("", encoding="utf-8")
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    build_env_soldr = scripts / build_backend._script_name("soldr")
+    build_env_soldr.write_text("", encoding="utf-8")
+    python = scripts / build_backend._script_name("python")
+
+    monkeypatch.setenv("SOLDR_BINARY", str(setup_soldr))
+    monkeypatch.setattr(build_backend.sys, "executable", str(python))
+
+    assert build_backend._soldr_executable() == str(setup_soldr)
 
 
 def test_build_wheel_forwards_maturin_pep517_args(monkeypatch, tmp_path) -> None:
