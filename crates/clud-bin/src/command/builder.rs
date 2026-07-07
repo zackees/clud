@@ -166,6 +166,7 @@ pub(crate) fn build_launch_plan_at(
         | Some(Command::Logs { .. })
         | Some(Command::Log { .. })
         | Some(Command::Gc { .. })
+        | Some(Command::Config { .. })
         | Some(Command::Ui { .. })
         | Some(Command::Trash { .. })
         | Some(Command::Tool { .. })

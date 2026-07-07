@@ -78,6 +78,72 @@ pub fn default_codex_config_overrides() -> Vec<String> {
     vec![DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string()]
 }
 
+pub fn home_dir_path() -> Result<PathBuf, SettingsError> {
+    home_dir().ok_or(SettingsError::NoHomeDir)
+}
+
+pub fn seeded_global_settings_document() -> Value {
+    let mut document = json!({});
+    seed_global_settings_defaults(&mut document);
+    document
+}
+
+pub fn seed_global_settings_defaults(document: &mut Value) {
+    if let Some(shell) = seed_object_entry(document, "shell") {
+        shell
+            .entry("disable_powershell".to_string())
+            .or_insert(Value::Bool(false));
+    }
+
+    if let Some(hook_health) = seed_object_entry(document, "hook_health") {
+        hook_health
+            .entry("auto_fix_hooks".to_string())
+            .or_insert(Value::Bool(true));
+    }
+
+    seed_codex_config_override_defaults(document);
+}
+
+pub fn load_or_init_global_settings() -> Result<Value, SettingsError> {
+    let home = home_dir_path()?;
+    load_or_init_global_settings_at(&home)
+}
+
+pub fn load_or_init_global_settings_at(home: &Path) -> Result<Value, SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let path = settings_path_at(home);
+    let mut document = read_settings_or_legacy(home)?;
+    let original = document.clone();
+    seed_global_settings_defaults(&mut document);
+    if document != original || !path.is_file() {
+        write_settings(&path, &document)?;
+    }
+    Ok(document)
+}
+
+pub fn read_settings_json_file(path: &Path) -> Result<Value, SettingsError> {
+    let text = fs::read_to_string(path)?;
+    if text.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    parse_json_settings(path, &text)
+}
+
+pub fn write_settings_json_file(path: &Path, document: &Value) -> Result<(), SettingsError> {
+    write_settings(path, document)
+}
+
+pub fn merged_settings_document(global: &Value, local: Option<&Value>) -> Value {
+    let mut merged = seeded_global_settings_document();
+    merge_settings_into(&mut merged, global);
+    if let Some(local) = local {
+        merge_settings_into(&mut merged, local);
+    }
+    merged
+}
+
 pub fn load_or_init_codex_config_overrides(
     write_default: bool,
 ) -> Result<Vec<String>, SettingsError> {
@@ -98,7 +164,7 @@ pub fn load_or_init_codex_config_overrides_at(
     match read_codex_config_overrides(&document, &path)? {
         Some(overrides) => Ok(overrides),
         None if write_default => {
-            seed_codex_config_override_defaults(&mut document);
+            seed_global_settings_defaults(&mut document);
             write_settings(&path, &document)?;
             Ok(default_codex_config_overrides())
         }
@@ -394,6 +460,7 @@ where
     let _lock = acquire_lock(&lock_path)?;
     let path = settings_path_at(home);
     let mut document = read_settings_or_legacy(home)?;
+    seed_global_settings_defaults(&mut document);
     mutate(&mut document);
     write_settings(&path, &document)
 }
@@ -578,6 +645,9 @@ fn read_codex_config_overrides(
     else {
         return Ok(None);
     };
+    if value.is_null() {
+        return Ok(None);
+    }
     let Some(items) = value.as_array() else {
         return Err(SettingsError::Parse {
             path: path.to_path_buf(),
@@ -600,7 +670,9 @@ fn read_codex_config_overrides(
 }
 
 fn seed_codex_config_override_defaults(document: &mut Value) {
-    let codex = object_entry(document, "codex");
+    let Some(codex) = seed_object_entry(document, "codex") else {
+        return;
+    };
     codex
         .entry("config_overrides_note".to_string())
         .or_insert_with(|| Value::String(CODEX_CONFIG_OVERRIDES_NOTE.to_string()));
@@ -614,6 +686,37 @@ fn seed_codex_config_override_defaults(document: &mut Value) {
                     .collect(),
             )
         });
+}
+
+fn merge_settings_into(target: &mut Value, source: &Value) {
+    let Some(source_obj) = source.as_object() else {
+        return;
+    };
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let target_obj = target.as_object_mut().unwrap();
+    for (key, source_value) in source_obj {
+        if source_value.is_null() {
+            continue;
+        }
+        match target_obj.get_mut(key) {
+            Some(target_value) if target_value.is_object() && source_value.is_object() => {
+                merge_settings_into(target_value, source_value);
+            }
+            Some(target_value) => {
+                *target_value = source_value.clone();
+            }
+            None if source_value.is_object() => {
+                let mut nested = json!({});
+                merge_settings_into(&mut nested, source_value);
+                target_obj.insert(key.clone(), nested);
+            }
+            None => {
+                target_obj.insert(key.clone(), source_value.clone());
+            }
+        }
+    }
 }
 
 fn set_default_backend(document: &mut Value, backend: Backend) {
@@ -667,6 +770,17 @@ fn object_entry<'a>(document: &'a mut Value, key: &str) -> &'a mut Map<String, V
         *entry = json!({});
     }
     entry.as_object_mut().unwrap()
+}
+
+fn seed_object_entry<'a>(document: &'a mut Value, key: &str) -> Option<&'a mut Map<String, Value>> {
+    if !document.is_object() {
+        *document = json!({});
+    }
+    let root = document.as_object_mut().unwrap();
+    if !root.contains_key(key) {
+        root.insert(key.to_string(), json!({}));
+    }
+    root.get_mut(key).and_then(Value::as_object_mut)
 }
 
 fn backend_settings_key(backend: Backend) -> &'static str {
@@ -850,6 +964,82 @@ mod tests {
                 .contains("codex -c"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn first_run_global_settings_seed_discoverable_defaults_only() {
+        let home = tempdir().unwrap();
+
+        let document = load_or_init_global_settings_at(home.path()).unwrap();
+
+        assert_eq!(document["shell"]["disable_powershell"], false);
+        assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
+        assert_eq!(
+            document["codex"]["config_overrides"][0],
+            DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE
+        );
+        assert!(document.get("launch_setup").is_none());
+        assert!(document.get("optimize").is_none());
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        assert!(text.contains("\"shell\""));
+        assert!(text.contains("\"hook_health\""));
+        assert!(text.contains("\"codex\""));
+    }
+
+    #[test]
+    fn global_settings_seed_preserves_null_opinions() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"shell":{"disable_powershell":null},"hook_health":null,"codex":{"config_overrides":null}}"#,
+        )
+        .unwrap();
+
+        let document = load_or_init_global_settings_at(home.path()).unwrap();
+
+        assert!(document["shell"]["disable_powershell"].is_null());
+        assert!(document["hook_health"].is_null());
+        assert!(document["codex"]["config_overrides"].is_null());
+    }
+
+    #[test]
+    fn merged_settings_deep_merges_and_treats_null_as_defer() {
+        let global = json!({
+            "shell": {
+                "disable_powershell": true,
+                "claude": { "disable_powershell": false }
+            },
+            "codex": {
+                "config_overrides": ["global"],
+                "extra": { "a": 1, "b": 2 }
+            },
+            "unknown": { "global": true }
+        });
+        let local = json!({
+            "shell": {
+                "disable_powershell": null,
+                "claude": { "disable_powershell": true }
+            },
+            "codex": {
+                "config_overrides": ["local"],
+                "extra": { "b": null, "c": 3 }
+            },
+            "unknown": { "local": true }
+        });
+
+        let merged = merged_settings_document(&global, Some(&local));
+
+        assert_eq!(merged["shell"]["disable_powershell"], true);
+        assert_eq!(merged["shell"]["claude"]["disable_powershell"], true);
+        assert_eq!(merged["codex"]["config_overrides"], json!(["local"]));
+        assert_eq!(merged["codex"]["extra"]["a"], 1);
+        assert_eq!(merged["codex"]["extra"]["b"], 2);
+        assert_eq!(merged["codex"]["extra"]["c"], 3);
+        assert_eq!(merged["unknown"]["global"], true);
+        assert_eq!(merged["unknown"]["local"], true);
     }
 
     #[test]
