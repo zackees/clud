@@ -161,15 +161,39 @@ def _shutdown_daemon(state_dir: Path) -> None:
     if not info_path.exists():
         return
     info = json.loads(info_path.read_text(encoding="utf-8"))
+    pid = int(info.get("pid") or 0)
     try:
         with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=2) as sock:
             sock.sendall(b'{"op":"shutdown"}\n')
             sock.recv(4096)
     except OSError:
         return
-    deadline = time.monotonic() + 5
-    while info_path.exists() and time.monotonic() < deadline:
+    deadline = time.monotonic() + 10
+    while (
+        (info_path.exists() or _pid_is_alive(pid))
+        and time.monotonic() < deadline
+    ):
         time.sleep(0.05)
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0 and f'"{pid}"' in result.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _snapshot_tree(root: Path) -> dict[str, tuple[bool, int, int | None, bytes | None]]:
