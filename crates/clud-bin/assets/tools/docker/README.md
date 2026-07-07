@@ -9,7 +9,7 @@ Bundled Python tools that drive Docker-based Linux build harnesses. Installed un
 | File | Role |
 |---|---|
 | [`docker-build.py`](docker-build.py) | Trampoline. Dispatches to a per-stack tool based on the first arg. Implementation note: filename uses a hyphen to match the public CLI shape (`clud tool run docker/docker-build.py soldr <path>`); sibling per-stack files use underscores because Python module imports cannot tolerate hyphens. |
-| [`docker_build_soldr.py`](docker_build_soldr.py) | Rust + soldr + zccache stack. The reference implementation. Persistent anonymous volumes for `target/`, `CARGO_HOME`, `RUSTUP_HOME`, and the cargo-chef recipe cache; source bind-mounted read-only at `/src`. |
+| [`docker_build_soldr.py`](docker_build_soldr.py) | Rust + soldr + zccache stack. The reference implementation. The image bakes in soldr, and persistent anonymous volumes hold `target/`, `CARGO_HOME`, `RUSTUP_HOME`, the cargo-chef recipe cache, and `/root/.soldr`; source bind-mounted read-only at `/src`. |
 | [`docker_build_python.py`](docker_build_python.py) | uv-managed Python stack. **v0 scope: `init` only.** Other subcommands return EX_USAGE (64) with a clear "needs author work" notice. |
 | [`docker_build_cpp.py`](docker_build_cpp.py) | CMake + ccache stack. **v0 scope: `init` only.** Same status as python. |
 

@@ -36,7 +36,7 @@ The trampoline dispatches in-process to the right per-stack tool — invoking di
 | What | Mount type |
 |---|---|
 | Source code | **read-only bind mount** (`-v $repo:/src:ro`) |
-| `target/`, `CARGO_HOME`, `RUSTUP_HOME`, `cargo-chef` | **anonymous (named) Docker volumes** |
+| `target/`, `CARGO_HOME`, `RUSTUP_HOME`, `cargo-chef`, `/root/.soldr` | **anonymous (named) Docker volumes** |
 | Build output (binaries you want out) | anon volume → `docker cp` at the end (NEVER host bind) |
 
 Host bind mounts on Docker-for-Windows / Docker-for-Mac pay a 5-10× FS-translation tax through the FUSE / 9p / virtiofs layer between the Linux VM and the host filesystem. Named volumes live inside Docker's own native ext4 — no translation. Observed datapoint from the zackees/zccache prototype: cold-build 20m22s with host bind → ~3 min with anon volume. Same machine, same image, single config change.
@@ -70,7 +70,7 @@ Incremental builders (cargo, ccache, make, ninja) compare **source mtime vs buil
 
 ## v0 scope (this PR — zackees/clud#421)
 
-- **soldr stack:** init + up + run + shell + clean + doctor — full implementation
+- **soldr stack:** init + up + run + shell + clean + doctor — full implementation. The helper image bakes in soldr and mounts `/root/.soldr` as a named volume so soldr daemon/cache state stays warm without touching the host singleton.
 - **python stack:** init only (Dockerfile + entry.sh + stack.toml writeout). Other subcommands return exit 64 with a clear notice.
 - **cpp stack:** same as python.
 - **verify:** stub on every stack (exit 64). The cold + warm-no-op + single-edit benchmark is the next slice.

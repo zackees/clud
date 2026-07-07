@@ -8,9 +8,10 @@
 
 The reference implementation of the volume contract from
 zackees/clud#416. Source bind-mounted read-only at `/src`; build state
-in anonymous Docker volumes named after `<project>-soldr-<role>` so the
-mount lives inside Docker's native VM filesystem and avoids the 5-10x
-host-bind FS-translation tax on Docker-for-Windows / Docker-for-Mac.
+and soldr's daemon home live in anonymous Docker volumes named after
+`<project>-soldr-<role>` so the mount lives inside Docker's native VM
+filesystem and avoids the 5-10x host-bind FS-translation tax on
+Docker-for-Windows / Docker-for-Mac.
 
 Origin: derived from `.perf-local/docker-repro/build_in_docker.sh` in
 the zackees/zccache repo, which proved a 20m22s cold-build against a
@@ -52,25 +53,48 @@ from pathlib import Path
 STACK = "soldr"
 
 DOCKERFILE = r"""# managed-by: clud (docker_build_soldr.py)
-# zccache/soldr reference stack. Build cache lives in anon volumes;
-# this image is a thin host for rustup + a baseline rust toolchain.
-FROM rust:1.94-slim
+ARG RUST_VERSION=1.94.1
+FROM rust:${RUST_VERSION}-trixie
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         bash ca-certificates curl git pkg-config build-essential \
-        libssl-dev clang lld \
+        libssl-dev clang lld zstd \
  && rm -rf /var/lib/apt/lists/*
 
 # Toolchain caches live in named volumes so cold rebuilds amortize
 # across `clud tool run docker-build` invocations.
-ENV CARGO_HOME=/cargo-home \
+ENV HOME=/root \
+    CARGO_HOME=/cargo-home \
     CARGO_TARGET_DIR=/target \
     RUSTUP_HOME=/rustup-home \
     CARGO_CHEF_LOCAL_DIR=/cargo-chef \
-    CARGO_TERM_COLOR=always
+    SOLDR_TRUST_MODE=permissive \
+    CARGO_TERM_COLOR=always \
+    PATH=/cargo-home/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
-RUN mkdir -p /target /cargo-home /rustup-home /cargo-chef /src
+# Seed the toolchain into the same paths that later become named
+# volumes. Docker copies this image content into a fresh named volume
+# on first mount, so the first `docker exec` does not re-download Rust.
+ARG RUST_VERSION=1.94.1
+RUN mkdir -p /target /cargo-home /rustup-home /cargo-chef /root/.soldr /src \
+ && rustup default "${RUST_VERSION}" \
+ && rustup component add rustfmt clippy
+
+# Bake soldr into the helper image instead of installing it during the
+# first command. Keep its persistent daemon/cache state in /root/.soldr,
+# which cmd_up mounts as a named volume.
+ARG SOLDR_VERSION=0.8.0
+RUN mkdir -p /opt/soldr-bin \
+ && curl -fsSL \
+        "https://github.com/zackees/soldr/releases/download/v${SOLDR_VERSION}/soldr-v${SOLDR_VERSION}-x86_64-unknown-linux-gnu.tar.zst" \
+    | zstd -d --stdout \
+    | tar -xf - -C /opt/soldr-bin \
+ && for bin in soldr soldr-clang-shim cargo-chef crgx; do \
+        [ -f "/opt/soldr-bin/$bin" ] && cp "/opt/soldr-bin/$bin" "/usr/local/bin/$bin" && chmod +x "/usr/local/bin/$bin"; \
+    done \
+ && soldr --version
+
 WORKDIR /src
 CMD ["bash", "-l"]
 """
@@ -94,12 +118,15 @@ target = "/target"
 cargo_home = "/cargo-home"
 rustup_home = "/rustup-home"
 cargo_chef = "/cargo-chef"
+soldr_home = "/root/.soldr"
 
 [env]
+HOME = "/root"
 CARGO_HOME = "/cargo-home"
 CARGO_TARGET_DIR = "/target"
 RUSTUP_HOME = "/rustup-home"
 CARGO_CHEF_LOCAL_DIR = "/cargo-chef"
+SOLDR_TRUST_MODE = "permissive"
 """
 
 USAGE = """\
@@ -180,11 +207,12 @@ def cmd_up(path: Path) -> int:
     vol_args = []
     for role, mount in (("target", "/target"), ("cargo-home", "/cargo-home"),
                         ("rustup-home", "/rustup-home"),
-                        ("cargo-chef", "/cargo-chef")):
+                        ("cargo-chef", "/cargo-chef"),
+                        ("soldr-home", "/root/.soldr")):
         vol_args += ["-v", f"{_volume_name(path, role)}:{mount}"]
 
     sys.stdout.write(f"starting container {name}...\n")
-    _docker("run", "-d", "--name", name,
+    _docker("run", "-d", "--init", "--name", name,
             "-v", f"{path.resolve()}:/src:ro",
             *vol_args,
             image, "tail", "-f", "/dev/null")
@@ -223,7 +251,8 @@ def cmd_verify(path: Path) -> int:
 def cmd_clean(path: Path) -> int:
     name = _container_name(path)
     _docker("rm", "-f", name, check=False)
-    for role in ("target", "cargo-home", "rustup-home", "cargo-chef"):
+    for role in ("target", "cargo-home", "rustup-home", "cargo-chef",
+                 "soldr-home"):
         _docker("volume", "rm", _volume_name(path, role), check=False)
     sys.stdout.write(f"removed container + {STACK} volumes for {path}\n")
     return 0
