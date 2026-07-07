@@ -4,6 +4,12 @@ members = [
     "crates/clud-bin",
     "testbins/mock-agent",
 ]
+exclude = [
+    "dylints/ban_manual_slash_normalize",
+]
+
+[workspace.metadata.dylint]
+libraries = [{ path = "dylints/*" }]
 
 [workspace.package]
 version = "2.2.0"

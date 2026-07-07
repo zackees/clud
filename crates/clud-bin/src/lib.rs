@@ -32,6 +32,7 @@ pub mod loop_spec;
 pub mod optimize;
 pub mod orphan_reaper;
 pub mod paste_image;
+pub mod path_norm;
 pub mod process_tree;
 pub mod runner;
 pub mod runtime_cache;

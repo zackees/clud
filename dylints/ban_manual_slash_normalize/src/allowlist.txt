@@ -1,0 +1,5 @@
+# Each non-empty, non-comment line is matched against the tail of each
+# source file path after normalizing path separators to `/`.
+
+# The primitive itself owns path separator normalization.
+crates/clud-bin/src/path_norm.rs

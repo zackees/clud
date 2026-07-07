@@ -1,0 +1,17 @@
+[package]
+name = "ban_manual_slash_normalize"
+version = "0.1.0"
+description = "Ban manual backslash-to-slash path rewrites"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = { git = "https://github.com/trailofbits/dylint", rev = "4bd91ce7729b74c7ee5664bbb588f7baf30b4a09" }
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[workspace]

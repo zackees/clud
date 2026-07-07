@@ -1,0 +1,85 @@
+name: Dylint
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ZCCACHE_DISABLE: "1"
+
+jobs:
+  dylint:
+    name: Dylint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v3
+      - uses: zackees/setup-soldr@v0.9.62
+        with:
+          cache: true
+          toolchain: 1.94.1
+          cache-key-suffix: dylint
+          prebuild-deps: none
+          linker: platform-default
+          cache-payload-warn-bytes: 2GiB
+      - name: Install Dylint nightly toolchain
+        timeout-minutes: 10
+        run: rustup toolchain install nightly-2026-03-26 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
+      - name: Install Dylint
+        timeout-minutes: 10
+        run: soldr --no-cache cargo install cargo-dylint dylint-link --version 5.0.0 --locked
+      - name: Build compatible Dylint driver
+        timeout-minutes: 15
+        run: uv run --no-project python ci/build_dylint_driver.py
+      - name: Check dylint formatting
+        run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
+      - name: Test dylint crate
+        run: soldr --no-cache cargo +nightly-2026-03-26 test --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml
+      - name: Run dylint over workspace
+        run: |
+          export PATH="${CARGO_HOME}/bin:${PATH}"
+          set +e
+          for attempt in 1 2 3; do
+            soldr --no-cache cargo +nightly-2026-03-26 dylint --all -- --workspace --all-targets
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              exit 0
+            fi
+            created_any=0
+            for toolchain_dir in target/dylint/libraries/*; do
+              [ -d "$toolchain_dir" ] || continue
+              toolchain="$(basename "$toolchain_dir")"
+              alias_dir="$toolchain_dir/release"
+              mkdir -p "$alias_dir"
+              for lib_dir in "$toolchain_dir"/release "$toolchain_dir"/*/release; do
+                [ -d "$lib_dir" ] || continue
+                for ext in so dylib dll; do
+                  for lib in "$lib_dir"/*."$ext"; do
+                    [ -f "$lib" ] || continue
+                    stem="$(basename "$lib" ".$ext")"
+                    case "$stem" in
+                      *"@"*) continue ;;
+                    esac
+                    alias_path="$alias_dir/${stem}@${toolchain}.${ext}"
+                    if [ ! -e "$alias_path" ]; then
+                      cp "$lib" "$alias_path"
+                      created_any=1
+                    fi
+                  done
+                done
+              done
+            done
+            if [ "$created_any" -eq 0 ]; then
+              echo "::error::cargo dylint failed and no new aliases to create on attempt $attempt"
+              exit $rc
+            fi
+            echo "Created @<toolchain> aliases; retrying cargo dylint..."
+          done
+          echo "::error::cargo dylint did not succeed after retries"
+          exit 1
