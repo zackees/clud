@@ -193,6 +193,37 @@ def test_dry_run_codex() -> None:
     assert data["launch_mode"] == "subprocess"
 
 
+def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    (repo / "CODEX.md").write_text("codex fallback", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = copied_clud_env(source)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        result = subprocess.run(
+            [str(launch), "--dry-run", "--codex", "-p", "hello"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert (
+        'project_doc_fallback_filenames=["CODEX.md"]'
+        in data["command"]
+    )
+
+
 def test_dry_run_pty_override() -> None:
     result = _run("--dry-run", "--pty", "-p", "hello")
     assert result.returncode == 0

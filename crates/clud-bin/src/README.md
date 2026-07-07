@@ -122,6 +122,9 @@ Platform glue:
   sites stay portable.
 - `large_file_guard.rs` - startup-time `ignore`-crate walker that warns about
   source files large enough to choke agents (issue #132); hard 1 s deadline.
+- `path_norm.rs` - fbuild/zccache-style `NormalizedPath` and separator-safe
+  path-string helpers for cross-platform path keys, serialization, and
+  executable names received from another OS.
 - `launch_setup.rs` - session-only/global setup selector plus
   selected-backend persistent setup actions for skills and Codex hook
   normalization.

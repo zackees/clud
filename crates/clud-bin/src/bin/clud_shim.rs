@@ -182,11 +182,7 @@ pub fn shim_run(env: &impl ShimEnv, connect: ConnectFn, exec: ExecFn, err: &mut 
 /// the stem can't be computed.
 fn current_exe_basename(argv: &[String]) -> String {
     argv.first()
-        .and_then(|s| {
-            std::path::Path::new(s)
-                .file_stem()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
+        .and_then(|s| clud::path_norm::file_stem_any_separator(s))
         .unwrap_or_else(|| "python".to_string())
 }
 

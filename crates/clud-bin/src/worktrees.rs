@@ -22,6 +22,7 @@ use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, Stdi
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::gc::extract_pid_from_lock_reason;
+use crate::path_norm::slash_separators;
 use crate::session_registry::{LivenessProbe, OsLivenessProbe};
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
@@ -727,12 +728,12 @@ fn process_ref_matches_worktree(
 }
 
 fn normalize_process_match_text(value: &str) -> String {
-    let value = value.replace('\\', "/");
+    let value = slash_separators(value);
     let value = value.strip_prefix("//?/").unwrap_or(&value);
     if cfg!(windows) {
         value.to_ascii_lowercase()
     } else {
-        value.to_string()
+        value.to_owned()
     }
 }
 
