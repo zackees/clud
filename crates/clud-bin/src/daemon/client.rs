@@ -18,8 +18,8 @@ use super::paths::{
 };
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
-    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit,
-    SessionSnapshot, WorkerClientMessage,
+    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow,
+    ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
 };
 use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
@@ -193,6 +193,25 @@ pub(super) fn send_daemon_request(
 pub fn daemon_client_metrics(state_dir: &Path) -> io::Result<(u32, f32)> {
     match send_daemon_request(state_dir, &DaemonRequest::Metrics)? {
         DaemonResponse::Metrics { pid, cpu_pct } => Ok((pid, cpu_pct)),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
+pub(super) fn daemon_client_proc_snapshot(
+    state_dir: &Path,
+    include_dead_since_ms: u64,
+) -> io::Result<ProcTreeSnapshot> {
+    match send_daemon_request(
+        state_dir,
+        &DaemonRequest::ProcSnapshot {
+            include_dead_since_ms,
+        },
+    )? {
+        DaemonResponse::ProcSnapshot { snapshot } => Ok(snapshot),
         DaemonResponse::Error { message } => Err(io::Error::other(message)),
         response => Err(io::Error::new(
             io::ErrorKind::InvalidData,

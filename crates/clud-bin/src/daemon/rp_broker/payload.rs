@@ -6,7 +6,8 @@ use running_process::broker::protocol::Frame;
 use running_process::NativeProcess;
 
 use super::super::gc_service::RegistryMsg;
-use super::super::server::dispatch_daemon_request;
+use super::super::proc_sampler::ProcSamplerHandle;
+use super::super::server::dispatch_daemon_request_with_sampler;
 use super::super::types::DaemonResponse;
 use super::super::wire_prost::{
     decode_daemon_request, encode_daemon_response_prost, WireFrame, CLUD_PROST_PAYLOAD_PROTOCOL,
@@ -26,6 +27,7 @@ pub(super) fn answer_payload_frame(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    proc_sampler: Option<&ProcSamplerHandle>,
 ) -> PayloadAnswer {
     let envelope_request_id = format!("rp-{}", frame.request_id);
     let request = decode_daemon_request(&WireFrame {
@@ -33,7 +35,9 @@ pub(super) fn answer_payload_frame(
         payload: frame.payload.clone(),
     });
     let response = match request {
-        Ok(request) => dispatch_daemon_request(state_dir, workers, gc_tx, request),
+        Ok(request) => {
+            dispatch_daemon_request_with_sampler(state_dir, workers, gc_tx, proc_sampler, request)
+        }
         Err(err) => DaemonResponse::Error {
             message: format!("malformed clud frame payload: {err}"),
         },

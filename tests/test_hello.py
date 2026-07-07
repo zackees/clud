@@ -302,6 +302,46 @@ def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
             _shutdown_daemon(state_dir)
 
 
+def test_top_once_json_arg_surface() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "daemon-state"
+        env = _isolated_clud_env(source, home, state_dir)
+        try:
+            result = subprocess.run(
+                [
+                    str(launch),
+                    "top",
+                    "--once",
+                    "--json",
+                    "--flat",
+                    "--sort",
+                    "rss",
+                    "--limit",
+                    "5",
+                    "--since",
+                    "5s",
+                    "--originator",
+                    "CLUD:0",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+            )
+
+            assert result.returncode == 0, result.stderr
+            data = json.loads(result.stdout)
+            assert data["schema_version"] == 1
+            assert data["interval_ms"] >= 250
+            assert isinstance(data["rows"], list)
+            assert "summary" in data
+        finally:
+            _shutdown_daemon(state_dir)
+
+
 def test_linux_binary_does_not_require_libasound_at_startup() -> None:
     if not sys.platform.startswith("linux"):
         return

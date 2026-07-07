@@ -26,6 +26,7 @@ use super::io_helpers::{new_session_id, read_json_file, write_json_file};
 use super::paths::{
     daemon_events_path, daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
 };
+use super::proc_sampler::{spawn_proc_sampler, ProcSamplerHandle, DEFAULT_SAMPLE_INTERVAL_MS};
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::sessions::list_live_session_cwds;
 use super::types::{
@@ -138,6 +139,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let proc_sampler = spawn_proc_sampler(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
     if let Err(err) = listener.set_nonblocking(true) {
         eprintln!("[clud] failed to configure daemon listener: {}", err);
         return 1;
@@ -153,6 +155,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         Arc::clone(&workers),
         gc_tx.clone(),
         Arc::clone(&shutdown_requested),
+        proc_sampler.clone(),
     );
 
     // Periodic orphan sweep. Catches CLUD-tagged descendants whose
@@ -169,6 +172,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let state_dir = state_dir.to_path_buf();
                 let gc_tx = gc_tx.clone();
                 let shutdown_requested = Arc::clone(&shutdown_requested);
+                let proc_sampler = proc_sampler.clone();
                 thread::spawn(move || {
                     let _ = handle_daemon_connection(
                         stream,
@@ -176,6 +180,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                         &workers,
                         gc_tx,
                         &shutdown_requested,
+                        &proc_sampler,
                     );
                 });
             }
@@ -210,6 +215,7 @@ fn handle_daemon_connection(
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: &Arc<AtomicBool>,
+    proc_sampler: &ProcSamplerHandle,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -228,8 +234,14 @@ fn handle_daemon_connection(
         ],
     );
     let started = Instant::now();
-    let response =
-        dispatch_daemon_request_with_id(state_dir, workers, gc_tx.as_ref(), request_id, request);
+    let response = dispatch_daemon_request_with_id(
+        state_dir,
+        workers,
+        gc_tx.as_ref(),
+        Some(proc_sampler),
+        request_id,
+        request,
+    );
     let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
     let result = write_daemon_response(&mut stream, &response, response_format);
     daemon_events::log_event(
@@ -258,20 +270,32 @@ fn handle_daemon_connection(
 /// the running-process broker v1 frame lane (`rp_broker`) — so request
 /// semantics cannot drift between them. Transport concerns (encoding,
 /// flagging shutdown after the reply is written) stay with each lane.
+#[cfg(test)]
 pub(super) fn dispatch_daemon_request(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     request: DaemonRequest,
 ) -> DaemonResponse {
+    dispatch_daemon_request_with_sampler(state_dir, workers, gc_tx, None, request)
+}
+
+pub(super) fn dispatch_daemon_request_with_sampler(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    proc_sampler: Option<&ProcSamplerHandle>,
+    request: DaemonRequest,
+) -> DaemonResponse {
     let request_id = daemon_events::request_id();
-    dispatch_daemon_request_with_id(state_dir, workers, gc_tx, request_id, request)
+    dispatch_daemon_request_with_id(state_dir, workers, gc_tx, proc_sampler, request_id, request)
 }
 
 fn dispatch_daemon_request_with_id(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    proc_sampler: Option<&ProcSamplerHandle>,
     request_id: u64,
     request: DaemonRequest,
 ) -> DaemonResponse {
@@ -345,6 +369,15 @@ fn dispatch_daemon_request_with_id(
             pid: std::process::id(),
             cpu_pct: sample_daemon_cpu_pct(),
         },
+        DaemonRequest::ProcSnapshot {
+            include_dead_since_ms,
+        } => {
+            let snapshot = proc_sampler
+                .cloned()
+                .unwrap_or_else(|| ProcSamplerHandle::empty(DEFAULT_SAMPLE_INTERVAL_MS))
+                .snapshot(include_dead_since_ms);
+            DaemonResponse::ProcSnapshot { snapshot }
+        }
         DaemonRequest::Gc { payload } => {
             let reply = dispatch_gc_op(state_dir, gc_tx, request_id, payload);
             DaemonResponse::Gc { reply }
@@ -388,6 +421,7 @@ fn request_op(request: &DaemonRequest) -> &'static str {
         DaemonRequest::Shutdown => "shutdown",
         DaemonRequest::ReapOrphans => "reap_orphans",
         DaemonRequest::Metrics => "metrics",
+        DaemonRequest::ProcSnapshot { .. } => "proc_snapshot",
     }
 }
 
@@ -403,6 +437,7 @@ fn response_op(response: &DaemonResponse) -> &'static str {
         DaemonResponse::ShutdownAck { .. } => "shutdown_ack",
         DaemonResponse::ReapOrphansAck { .. } => "reap_orphans_ack",
         DaemonResponse::Metrics { .. } => "metrics",
+        DaemonResponse::ProcSnapshot { .. } => "proc_snapshot",
         DaemonResponse::Error { .. } => "error",
     }
 }
@@ -1299,6 +1334,28 @@ mod tests {
                 assert!(cpu_pct >= 0.0, "cpu_pct should be non-negative: {cpu_pct}");
             }
             other => panic!("expected Metrics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proc_snapshot_request_returns_cached_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+
+        let response = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            None,
+            DaemonRequest::ProcSnapshot {
+                include_dead_since_ms: 0,
+            },
+        );
+        match response {
+            DaemonResponse::ProcSnapshot { snapshot } => {
+                assert_eq!(snapshot.schema_version, 1);
+                assert_eq!(snapshot.sampler_pid, std::process::id());
+            }
+            other => panic!("expected ProcSnapshot, got {other:?}"),
         }
     }
 }

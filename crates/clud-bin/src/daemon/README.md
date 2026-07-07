@@ -28,6 +28,49 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `wire_prost/` - prost v1 foundation for the daemon wire: generated `clud.v1` types, CLUD/CLJS payload protocol discriminators, encode/decode helpers, JSON-compatibility tests, the default prost daemon RPC path, and the `CLUD_DAEMON_WIRE=json` legacy fallback.
 - `process_utils.rs` — `pid_is_alive`, `signal_process_tree`, `descendant_pids` via `sysinfo`.
 
+- `proc_sampler.rs` - daemon-owned process sampler for `clud top`: keeps one persistent `sysinfo::System`, refreshes CPU/RSS/parent data on the hot tick, refreshes `RUNNING_PROCESS_ORIGINATOR` tags on a slower cadence, and serves cached `ProcTreeSnapshot` replies over daemon IPC.
+- `top.rs` - `clud top` snapshot filtering, sorting, JSON preparation, and text tree/flat rendering.
+
+## `clud top --json` schema
+
+`DaemonRequest::ProcSnapshot { include_dead_since_ms }` returns the cached sampler payload below. The CLI applies `--originator`, `--sort`, `--flat`/`--tree`, and `--limit` to the same shape before printing JSON.
+
+```json
+{
+  "schema_version": 1,
+  "sampled_at_ms": 1234567890,
+  "sample_age_ms": 42,
+  "sampler_pid": 71584,
+  "interval_ms": 2000,
+  "rows": [
+    {
+      "pid": 73000,
+      "ppid": 71584,
+      "originator": "CLUD:71584",
+      "originator_pid": 71584,
+      "session_id": "sess-example",
+      "session_name": "build",
+      "cpu_pct": 12.5,
+      "cpu_ewma_pct": 8.1,
+      "rss_bytes": 104857600,
+      "age_secs": 30,
+      "command": "codex exec",
+      "depth": 1,
+      "tier": "hot",
+      "live": true
+    }
+  ],
+  "summary": {
+    "process_count": 1,
+    "originator_count": 1,
+    "total_cpu_pct": 12.5,
+    "total_rss_bytes": 104857600
+  }
+}
+```
+
+Dead rows are omitted by default. Passing `--since <duration>` sets `include_dead_since_ms`; matching dead rows have `"live": false`, `"tier": "frozen"`, and an `exited_at_ms` field.
+
 ## Key items
 
 - `pub fn experimental_enabled(&Args) -> bool` — `entry.rs:21`

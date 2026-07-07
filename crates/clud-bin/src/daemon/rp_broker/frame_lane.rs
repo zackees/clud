@@ -19,6 +19,7 @@ use running_process::broker::server::local_socket_name;
 use running_process::NativeProcess;
 
 use super::super::gc_service::RegistryMsg;
+use super::super::proc_sampler::ProcSamplerHandle;
 use super::endpoint::{daemon_identity_path, endpoint_for_state_dir};
 use super::payload::answer_payload_frame;
 use super::{
@@ -60,6 +61,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
     workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: Arc<AtomicBool>,
+    proc_sampler: ProcSamplerHandle,
 ) -> Option<FrameLane> {
     if running_process_disabled() {
         return None;
@@ -85,7 +87,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
             eprintln!("[clud] note: running-process cache manifest publish skipped: {err}");
         }
     }
-    match start_frame_lane(state_dir, workers, gc_tx, shutdown_requested) {
+    match start_frame_lane(state_dir, workers, gc_tx, shutdown_requested, proc_sampler) {
         Ok(lane) => Some(lane),
         Err(err) => {
             eprintln!("[clud] note: running-process frame lane unavailable: {err}");
@@ -153,6 +155,7 @@ pub(super) fn start_frame_lane(
     workers: Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: Arc<AtomicBool>,
+    proc_sampler: ProcSamplerHandle,
 ) -> io::Result<FrameLane> {
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
@@ -194,6 +197,7 @@ pub(super) fn start_frame_lane(
                     let workers = Arc::clone(&workers);
                     let gc_tx = gc_tx.clone();
                     let shutdown_requested = Arc::clone(&shutdown_requested);
+                    let proc_sampler = proc_sampler.clone();
                     thread::spawn(move || {
                         let mut stream = stream;
                         let _ = serve_connection(
@@ -202,6 +206,7 @@ pub(super) fn start_frame_lane(
                             &state_dir,
                             &workers,
                             gc_tx.as_ref(),
+                            Some(&proc_sampler),
                             &shutdown_requested,
                         );
                     });
@@ -234,6 +239,7 @@ fn serve_connection<S, F>(
     state_dir: &Path,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
+    proc_sampler: Option<&ProcSamplerHandle>,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> io::Result<()>
 where
@@ -264,7 +270,8 @@ where
             }
             MuxPoll::Payload { frame, consumed } => {
                 buf.drain(..consumed);
-                let response = answer_payload_frame(&frame, state_dir, workers, gc_tx);
+                let response =
+                    answer_payload_frame(&frame, state_dir, workers, gc_tx, proc_sampler);
                 let is_shutdown = response.is_shutdown;
                 let wire = encode_framed(&Frame::response_to(&frame, response.payload))
                     .map_err(io::Error::other)?;

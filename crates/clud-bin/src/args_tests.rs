@@ -1102,7 +1102,27 @@ fn test_daemon_servicedef_alias_subcommand_parses() {
 fn test_top_subcommand_parses() {
     let args = parse(&["clud", "top"]);
     match args.command {
-        Some(Command::Top { json }) => assert!(!json),
+        Some(Command::Top {
+            json,
+            once,
+            watch,
+            tree,
+            flat,
+            sort,
+            limit,
+            since,
+            originator,
+        }) => {
+            assert!(!json);
+            assert!(!once);
+            assert!(!watch);
+            assert!(!tree);
+            assert!(!flat);
+            assert_eq!(sort, TopSort::Cpu);
+            assert_eq!(limit, 20);
+            assert!(since.is_none());
+            assert!(originator.is_none());
+        }
         other => panic!("expected Top, got {other:?}"),
     }
     assert!(args.passthrough.is_empty());
@@ -1112,10 +1132,47 @@ fn test_top_subcommand_parses() {
 fn test_top_json_subcommand_parses() {
     let args = parse(&["clud", "top", "--json"]);
     match args.command {
-        Some(Command::Top { json }) => assert!(json),
+        Some(Command::Top { json, .. }) => assert!(json),
         other => panic!("expected Top --json, got {other:?}"),
     }
     assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_top_once_flat_sort_limit_since_originator_parses() {
+    let args = parse(&[
+        "clud",
+        "top",
+        "--once",
+        "--flat",
+        "--sort",
+        "rss",
+        "--limit",
+        "7",
+        "--since",
+        "5m",
+        "--originator",
+        "CLUD:123",
+    ]);
+    match args.command {
+        Some(Command::Top {
+            once,
+            flat,
+            sort,
+            limit,
+            since,
+            originator,
+            ..
+        }) => {
+            assert!(once);
+            assert!(flat);
+            assert_eq!(sort, TopSort::Rss);
+            assert_eq!(limit, 7);
+            assert_eq!(since.as_deref(), Some("5m"));
+            assert_eq!(originator.as_deref(), Some("CLUD:123"));
+        }
+        other => panic!("expected Top with options, got {other:?}"),
+    }
 }
 
 #[test]

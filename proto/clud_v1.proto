@@ -19,6 +19,7 @@ message ClientToDaemon {
     ShutdownRequest shutdown = 8;
     ReapOrphansRequest reap_orphans = 9;
     MetricsRequest metrics = 10;
+    ProcSnapshotRequest proc_snapshot = 11;
   }
   string request_id = 100;
 }
@@ -36,6 +37,7 @@ message DaemonToClient {
     ErrorResponse error = 9;
     ReapOrphansAckResponse reap_orphans_ack = 10;
     MetricsResponse metrics = 11;
+    ProcSnapshotResponse proc_snapshot = 12;
   }
   string request_id = 100;
 }
@@ -101,9 +103,20 @@ message ReapOrphansRequest {}
 
 message MetricsRequest {}
 
+message ProcSnapshotRequest {
+  uint64 include_dead_since_ms = 1;
+}
+
 message MetricsResponse {
   uint32 pid = 1;
   float cpu_pct = 2;
+}
+
+message ProcSnapshotResponse {
+  // JSON mirror of ProcTreeSnapshot. Keeping this opaque preserves the
+  // serde schema as the stable CLI contract while avoiding a large typed
+  // proto split for the v1 observability surface.
+  bytes snapshot_json = 1;
 }
 
 message ReapOrphansAckResponse {
