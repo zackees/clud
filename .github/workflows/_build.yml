@@ -72,14 +72,14 @@ jobs:
         uses: zackees/setup-soldr@v0.9.62
         with:
           toolchain: "1.94.1"
-          version: "0.7.45"
+          version: ${{ contains(inputs.runs-on, 'intel') && '0.7.45' || '0.7.104' }}
           cache: true
           build-cache-mode: thin
           shims: true
           linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
           preserve-source-mtimes: true
           solo-toolchain-cache: true
-          prebuild-deps: soldr-cook
+          prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
           prebuild-deps-flags: ${{ inputs.build-mode == 'release' && '--release --workspace' || '--workspace' }}
 
       - name: Restore source checkout

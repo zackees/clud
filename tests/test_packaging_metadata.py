@@ -2,28 +2,64 @@
 
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _build_system_requires() -> list[str]:
-    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    section_match = re.search(r"(?ms)^\[build-system\]\s*(.*?)(?=^\[|\Z)", text)
-    if section_match is None:
-        raise AssertionError("missing [build-system] section")
-
-    requires_match = re.search(r"(?ms)^requires\s*=\s*(\[.*?\])", section_match.group(1))
-    if requires_match is None:
-        raise AssertionError("missing build-system.requires")
-
-    return ast.literal_eval(requires_match.group(1))
+def _pyproject() -> dict:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        return tomllib.load(handle)
 
 
-def test_pip_build_requires_native_build_tools() -> None:
-    requirements = [requirement.lower() for requirement in _build_system_requires()]
+def test_pip_build_uses_clud_soldr_backend_wrapper() -> None:
+    build_system = _pyproject()["build-system"]
+    requirements = [requirement.lower() for requirement in build_system["requires"]]
 
-    assert any(requirement.startswith("maturin") for requirement in requirements)
-    assert any(requirement.startswith("cmake") for requirement in requirements)
+    assert build_system["build-backend"] == "build_backend"
+    assert build_system["backend-path"] == ["."]
+    assert any(requirement.startswith("soldr") for requirement in requirements)
+    assert any("platform_system" in requirement for requirement in requirements)
+    maturin_requirements = [
+        requirement for requirement in requirements if requirement.startswith("maturin")
+    ]
+    assert all(
+        "darwin" in requirement and "x86_64" in requirement
+        for requirement in maturin_requirements
+    )
+    assert not any(requirement.startswith("cmake") for requirement in requirements)
+
+
+def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
+    workflow_paths = sorted((ROOT / ".github" / "workflows").glob("_*.yml"))
+    version_lines = []
+    for path in workflow_paths:
+        text = path.read_text(encoding="utf-8")
+        if "zackees/setup-soldr" not in text:
+            continue
+        version_lines.extend(
+            line for line in re.findall(r"version:\s*(.+)", text) if "0.7." in line
+        )
+
+    assert version_lines
+    assert all("0.7.104" in line for line in version_lines)
+    assert all("0.7.45" not in line or "inputs.runs-on" in line for line in version_lines)
+
+
+def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
+    setup_workflows = [
+        path
+        for path in (ROOT / ".github" / "workflows").glob("_*.yml")
+        if "zackees/setup-soldr" in path.read_text(encoding="utf-8")
+    ]
+
+    assert setup_workflows
+    for path in setup_workflows:
+        text = path.read_text(encoding="utf-8")
+        assert (
+            "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
+            in text
+        )
