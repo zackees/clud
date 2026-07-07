@@ -21,6 +21,9 @@ do not write persistent skill files. Stale clud-managed copies under
 - [clud-pr/](clud-pr/README.md) - Implement a GitHub issue, PR follow-up, or
   freeform task inside a `.claude/` worktree, or take an open PR through
   CI/review fixes to merge; code changes follow RED -> GREEN.
+- [clud-fix/](clud-fix/README.md) - Drive a GitHub issue through PR merge,
+  issue closure, and validation that the reported reproduction is fixed on
+  main; code changes follow RED -> GREEN.
 - [clud-tag-release/](clud-tag-release/README.md) - Tag a release after
   validating version match, clean `main`, and no duplicate tag, then push and
   surface the auto-release workflow URL.
@@ -29,9 +32,9 @@ do not write persistent skill files. Stale clud-managed copies under
   fast incremental cargo builds via named volumes for `target/` + `CARGO_HOME`
   + `RUSTUP_HOME`, source bind-mounted, soldr-wrapped cargo, and a Python
   orchestrator.
-- [clud-improve/](clud-improve/SKILL.md) - Ask the user "how can clud improve?
-  be as specific as possible" and file the response as a GitHub issue against
-  `zackees/clud` when `gh auth status` succeeds.
+- [clud-improve/](clud-improve/SKILL.md) - File concrete clud improvement
+  reports directly as GitHub issues against `zackees/clud`; ask for details
+  only on a bare manual `/clud-improve` invocation.
 
 ## How Skills Ship
 

@@ -84,7 +84,7 @@
       vertical-align: top;
     }
     th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
-    td.path, td.id { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; word-break: break-all; }
+    td.path, td.id, td.command { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; word-break: break-all; }
     td.metric { font-family: ui-monospace, "Menlo", "Consolas", monospace; font-size: 12px; white-space: nowrap; }
     .badge {
       display: inline-block;
@@ -136,6 +136,8 @@
     <button class="tab" data-tab="gc">Garbage</button>
     <button class="tab" data-tab="repos">Repos</button>
     <button class="tab" data-tab="ctrl-c">Ctrl-C</button>
+    <button class="tab" data-tab="tools">Tools</button>
+    <button class="tab" data-tab="telemetry">Telemetry</button>
   </div>
 
   <section id="sessions" class="active">
@@ -160,6 +162,37 @@
     </div>
   </section>
 
+  <section id="telemetry">
+    <div class="card">
+      <h2>Telemetry by parent PID <span id="telemetry-count" class="meta"></span></h2>
+      <p class="meta" style="margin: 0 0 8px;">
+        Records posted by <code>clud log</code> (issue #469, beta). One row per parent
+        PID; click to inspect individual records and their <code>CLUD_*</code> env.
+      </p>
+      <div id="telemetry-body"><p class="empty">no telemetry recorded yet.</p></div>
+    </div>
+  </section>
+
+  <section id="tools">
+    <div class="card">
+      <h2>Tool calls <span id="tools-count" class="meta"></span></h2>
+      <div id="tools-aggregate"><p class="empty">loading...</p></div>
+      <div id="tools-body"><p class="empty">no tool calls recorded yet.</p></div>
+    </div>
+  </section>
+
+  <section id="telemetry-detail">
+    <div style="margin-bottom: 12px;">
+      <a id="telemetry-back" style="color: var(--accent); cursor: pointer; text-decoration: none;">← Back to Telemetry</a>
+      <span style="color: var(--muted); margin: 0 8px;">/</span>
+      <span id="telemetry-detail-pid" style="font-family: ui-monospace, monospace;"></span>
+    </div>
+    <div class="card">
+      <h2>Telemetry detail <span id="telemetry-detail-count" class="meta"></span></h2>
+      <div id="telemetry-detail-body"><p class="empty">loading…</p></div>
+    </div>
+  </section>
+
   <section id="ctrl-c">
     <div class="card">
       <h2>Ctrl-C exit times <span id="ctrl-c-count" class="meta"></span></h2>
@@ -173,24 +206,83 @@
 
   <script>
     const POLL_MS = 5000;
+    const TABS = ['sessions', 'gc', 'repos', 'ctrl-c', 'tools', 'telemetry'];
+    const DEFAULT_TAB = 'sessions';
     let lastState = null;
+    let currentRoute = { tab: DEFAULT_TAB, telemetryPid: null };
+
+    // Path-based routing via History API (issue #469). The daemon serves
+    // the SPA for any GET that isn't an API path, so deep-link to
+    // /telemetry/<pid> works on refresh. popstate covers browser
+    // back/forward.
+    function parsePath() {
+      const parts = location.pathname.split('/').filter(Boolean);
+      if (!parts.length) return { tab: DEFAULT_TAB, telemetryPid: null };
+      const head = parts[0];
+      if (head === 'index.html') return { tab: DEFAULT_TAB, telemetryPid: null };
+      if (head === 'telemetry') {
+        return { tab: 'telemetry', telemetryPid: parts[1] ? decodeURIComponent(parts[1]) : null };
+      }
+      if (TABS.includes(head)) return { tab: head, telemetryPid: null };
+      return { tab: DEFAULT_TAB, telemetryPid: null };
+    }
+
+    function navigate(path) {
+      if (location.pathname === path) {
+        applyRoute();
+      } else {
+        history.pushState(null, '', path);
+        applyRoute();
+      }
+    }
+
+    function applyRoute() {
+      currentRoute = parsePath();
+      const showTelemetryDetail = currentRoute.tab === 'telemetry' && currentRoute.telemetryPid;
+      document.querySelectorAll('.tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === currentRoute.tab);
+      });
+      document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+      if (showTelemetryDetail) {
+        document.getElementById('telemetry-detail').classList.add('active');
+        document.getElementById('telemetry-detail-pid').textContent = `pid ${currentRoute.telemetryPid}`;
+        loadTelemetryDetail(currentRoute.telemetryPid);
+      } else {
+        document.getElementById(currentRoute.tab).classList.add('active');
+      }
+    }
 
     document.querySelectorAll('.tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
-        tab.classList.add('active');
-        document.getElementById(tab.dataset.tab).classList.add('active');
-      });
+      tab.addEventListener('click', () => navigate('/' + tab.dataset.tab));
     });
+
+    document.getElementById('telemetry-back').addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (history.length > 1) history.back();
+      else navigate('/telemetry');
+    });
+
+    window.addEventListener('popstate', applyRoute);
 
     function fmtAge(unix) {
       if (!unix) return '-';
-      const secs = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+      const ms = unix > 10_000_000_000 ? unix : unix * 1000;
+      const secs = Math.max(0, Math.floor((Date.now() - ms) / 1000));
       if (secs < 60) return `${secs}s`;
       if (secs < 3600) return `${Math.floor(secs / 60)}m`;
       if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
       return `${Math.floor(secs / 86400)}d`;
+    }
+    function fmtDateTime(ms) {
+      if (!ms) return '-';
+      const d = new Date(ms > 10_000_000_000 ? ms : ms * 1000);
+      const yyyy = d.getFullYear();
+      const mo = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return `${yyyy}-${mo}-${day} ${hh}:${mm}:${ss}`;
     }
     function fmtUptime(s) {
       const h = Math.floor(s / 3600);
@@ -264,22 +356,30 @@
           '<p class="empty">no sessions recorded.</p>';
         return;
       }
+      const commandText = (s) => {
+        const command = s.command && s.command.length ? s.command : s.clud_argv;
+        return command && command.length ? command.join(' ') : '-';
+      };
       const rows = sessions.map(s => `
         <tr>
           <td class="id">${esc(s.id)}</td>
-          <td>${esc(s.name || '-')}</td>
-          <td><span class="badge kind">${esc(s.kind)}</span></td>
+          <td>${esc(s.backend || s.name || '-')}</td>
+          <td><span class="badge kind">${esc(s.kind)}</span>${s.launch_mode ? `<span class="badge kind">${esc(s.launch_mode)}</span>` : ''}</td>
           <td>${s.live
             ? '<span class="badge live">live</span>'
             : `<span class="badge gone">exit ${esc(s.exit_code ?? '?')}</span>`}</td>
-          <td>${esc(fmtAge(s.created_at))}</td>
+          <td class="metric" title="${esc(fmtDateTime(s.created_at))}">${esc(fmtAge(s.created_at))}</td>
+          <td class="metric">${esc(fmtDateTime(s.exited_at))}</td>
+          <td class="metric">${esc(fmtMs(s.duration_ms))}</td>
           <td class="metric">${renderCtrlC(s.ctrl_c)}</td>
+          <td class="path">${esc(s.repo_root || '-')}</td>
           <td class="path">${esc(s.cwd || '-')}</td>
+          <td class="command">${esc(commandText(s))}</td>
         </tr>`).join('');
       document.getElementById('sessions-body').innerHTML = `
         <table>
           <thead><tr>
-            <th>id</th><th>name</th><th>kind</th><th>state</th><th>age</th><th>ctrl-c</th><th>cwd</th>
+            <th>id</th><th>backend</th><th>kind</th><th>state</th><th>launched</th><th>exited</th><th>duration</th><th>ctrl-c</th><th>repo</th><th>cwd</th><th>launched with</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
@@ -389,6 +489,150 @@
         </table>`;
     }
 
+    function renderTools(data) {
+      data = data || {};
+      const entries = data.entries || [];
+      const aggregate = data.aggregate || [];
+      document.getElementById('tools-count').textContent = entries.length ? `(${entries.length})` : '';
+
+      if (aggregate.length) {
+        const aggregateRows = aggregate.map(b => `
+          <tr>
+            <td class="metric">${esc(b.label)}</td>
+            <td class="metric">${esc(b.total)}</td>
+            <td class="metric">${esc(b.success)}</td>
+            <td class="metric">${esc(b.failed)}</td>
+            <td class="metric">${esc(b.running)}</td>
+          </tr>`).join('');
+        document.getElementById('tools-aggregate').innerHTML = `
+          <table style="margin-bottom: 12px;">
+            <thead><tr>
+              <th>bucket</th><th>calls</th><th>ok</th><th>failed</th><th>running</th>
+            </tr></thead>
+            <tbody>${aggregateRows}</tbody>
+          </table>`;
+      } else {
+        document.getElementById('tools-aggregate').innerHTML = '';
+      }
+
+      if (!entries.length) {
+        document.getElementById('tools-body').innerHTML =
+          '<p class="empty">no tool calls recorded yet.</p>';
+        return;
+      }
+
+      const rows = entries.slice(0, 100).map(e => {
+        const state = e.exit_code === null || e.exit_code === undefined
+          ? '<span class="badge live">running</span>'
+          : e.exit_code === 0
+            ? '<span class="badge live">ok</span>'
+            : `<span class="badge warn">exit ${esc(e.exit_code)}</span>`;
+        const stderr = e.stderr_tail
+          ? `<details><summary>stderr</summary><pre style="white-space: pre-wrap; margin: 6px 0 0;">${esc(e.stderr_tail)}</pre></details>`
+          : '-';
+        return `
+          <tr>
+            <td class="path">${esc(e.name)}</td>
+            <td>${state}</td>
+            <td class="metric" title="${esc(fmtDateTime(e.start_time_ms))}">${esc(fmtAge(e.start_time_ms))}</td>
+            <td class="metric">${esc(fmtDateTime(e.end_time_ms))}</td>
+            <td class="path">${stderr}</td>
+          </tr>`;
+      }).join('');
+      document.getElementById('tools-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>tool</th><th>state</th><th>started</th><th>ended</th><th>failure stderr</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    function renderTelemetry(rows) {
+      rows = rows || [];
+      document.getElementById('telemetry-count').textContent = rows.length ? `(${rows.length})` : '';
+      if (!rows.length) {
+        document.getElementById('telemetry-body').innerHTML =
+          '<p class="empty">no telemetry recorded yet. Spawn a logger with <code>clud log --cmd "..." --fail-on-no-server</code> while <code>$CLUD_DAEMON_HTTP_SERVER</code> points here.</p>';
+        return;
+      }
+      const html = rows.map(r => `
+        <tr class="row-link" data-pid="${esc(r.parent_pid)}" style="cursor: pointer;">
+          <td class="id">${esc(r.parent_pid)}</td>
+          <td>${esc(r.entry_count)}</td>
+          <td class="metric" title="${esc(fmtUnixMs(r.last_at_ms))}">${esc(fmtAge(r.last_at_ms))}</td>
+        </tr>`).join('');
+      document.getElementById('telemetry-body').innerHTML = `
+        <table>
+          <thead><tr>
+            <th>parent pid</th><th>entries</th><th>last activity</th>
+          </tr></thead>
+          <tbody>${html}</tbody>
+        </table>`;
+      document.querySelectorAll('#telemetry-body tr.row-link').forEach(tr => {
+        tr.addEventListener('click', () => {
+          navigate('/telemetry/' + encodeURIComponent(tr.dataset.pid));
+        });
+      });
+    }
+
+    async function loadTelemetryDetail(pid) {
+      const body = document.getElementById('telemetry-detail-body');
+      const countEl = document.getElementById('telemetry-detail-count');
+      body.innerHTML = '<p class="empty">loading…</p>';
+      countEl.textContent = '';
+      try {
+        const resp = await fetch(`/telemetry/by-pid/${encodeURIComponent(pid)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const detail = await resp.json();
+        const entries = detail.entries || [];
+        countEl.textContent = entries.length ? `(${entries.length})` : '';
+        if (!entries.length) {
+          body.innerHTML = `<p class="empty">no entries recorded for pid ${esc(pid)}.</p>`;
+          return;
+        }
+        const rows = entries.map((e, i) => `
+          <tr>
+            <td class="metric" title="${esc(fmtUnixMs(e.received_at_ms))}">${esc(fmtUnixMs(e.received_at_ms))}</td>
+            <td class="path">${esc(e.cwd || '-')}</td>
+            <td class="command">${esc(e.cmd || '-')}</td>
+            <td>
+              <button class="button subtle" data-i="${i}">env (${Object.keys(e.env || {}).length})</button>
+              <div class="env-table" id="env-row-${i}" style="display: none; margin-top: 6px;"></div>
+            </td>
+          </tr>`).join('');
+        body.innerHTML = `
+          <table>
+            <thead><tr>
+              <th>received</th><th>cwd</th><th>cmd</th><th>env</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+        body.querySelectorAll('button[data-i]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const i = Number(btn.dataset.i);
+            const cell = body.querySelector(`#env-row-${i}`);
+            const env = entries[i].env || {};
+            if (cell.style.display === 'none') {
+              const keys = Object.keys(env).sort();
+              if (!keys.length) {
+                cell.innerHTML = '<i class="empty">no CLUD_* vars</i>';
+              } else {
+                const html = keys.map(k => `
+                  <tr><td class="id">${esc(k)}</td><td class="path">${esc(env[k])}</td></tr>`).join('');
+                cell.innerHTML = `<table style="margin-top: 4px;"><tbody>${html}</tbody></table>`;
+              }
+              cell.style.display = '';
+            } else {
+              cell.style.display = 'none';
+            }
+          });
+        });
+      } catch (err) {
+        body.innerHTML = `<p class="empty">failed to load: ${esc(err)}</p>`;
+      }
+    }
+
     async function doPurge(body, prompt) {
       if (!confirm(prompt)) return;
       try {
@@ -409,10 +653,14 @@
     }
 
     async function refresh() {
+      // Issue #471: /state.json and /telemetry are independent endpoints.
+      // Fire them in parallel; either response can render on its own and
+      // partial failure of one does not blank the other.
+      const stateP = fetch('/state.json').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
+      const telemetryP = fetch('/telemetry').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
+      const toolsP = fetch('/tools').then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)));
       try {
-        const resp = await fetch('/state.json');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const state = await resp.json();
+        const state = await stateP;
         lastState = state;
         renderHeader(state);
         renderSessions(state);
@@ -423,8 +671,21 @@
         document.getElementById('daemon-meta').textContent =
           `connection lost: ${err}`;
       }
+      try {
+        renderTelemetry(await telemetryP);
+      } catch (err) {
+        document.getElementById('telemetry-body').innerHTML =
+          `<p class="empty">failed to load telemetry: ${esc(err)}</p>`;
+      }
+      try {
+        renderTools(await toolsP);
+      } catch (err) {
+        document.getElementById('tools-body').innerHTML =
+          `<p class="empty">failed to load tool calls: ${esc(err)}</p>`;
+      }
     }
 
+    applyRoute();
     refresh();
     setInterval(refresh, POLL_MS);
   </script>

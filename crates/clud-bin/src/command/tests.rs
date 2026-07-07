@@ -1,10 +1,12 @@
 use super::builder::{
-    build_launch_plan, next_run_at_millis, parse_repeat_interval, repeat_implies_no_done_warning,
+    build_launch_plan, build_launch_plan_at, next_run_at_millis, parse_repeat_interval,
+    repeat_implies_no_done_warning,
 };
 use super::prompts::{build_fix_prompt, build_up_prompt, is_github_url, FIX_PROMPT};
 use super::types::LaunchPlan;
 use crate::args::Args;
 use crate::backend::{Backend, LaunchMode};
+use crate::clud_settings::DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE;
 
 fn parse(raw: &[&str]) -> Args {
     let raw: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
@@ -12,9 +14,21 @@ fn parse(raw: &[&str]) -> Args {
 }
 
 fn plan(raw: &[&str]) -> LaunchPlan {
-    let args = parse(raw);
+    let mut args = parse(raw);
     let backend = crate::backend::resolve_backend(args.claude, args.codex);
+    if matches!(backend, Backend::Codex) {
+        args.codex_config_overrides = vec![DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string()];
+    }
     build_launch_plan(&args, backend, backend.executable_name())
+}
+
+fn plan_at(raw: &[&str], cwd: &std::path::Path) -> LaunchPlan {
+    let mut args = parse(raw);
+    let backend = crate::backend::resolve_backend(args.claude, args.codex);
+    if matches!(backend, Backend::Codex) {
+        args.codex_config_overrides = vec![DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string()];
+    }
+    build_launch_plan_at(&args, backend, backend.executable_name(), cwd)
 }
 
 fn prompt_from_plan(p: &LaunchPlan) -> &str {
@@ -26,6 +40,25 @@ fn prompt_from_plan(p: &LaunchPlan) -> &str {
 /// For codex we emit the prompt positionally, so this picks it up.
 fn last_arg(p: &LaunchPlan) -> &str {
     p.command.last().map(String::as_str).unwrap_or("")
+}
+
+fn codex_prefix() -> Vec<String> {
+    vec![
+        "codex".to_string(),
+        "-c".to_string(),
+        DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string(),
+    ]
+}
+
+fn codex_exec_index(p: &LaunchPlan) -> usize {
+    p.command.iter().position(|arg| arg == "exec").unwrap()
+}
+
+fn codex_config_values(p: &LaunchPlan) -> Vec<&str> {
+    p.command
+        .windows(2)
+        .filter_map(|pair| (pair[0] == "-c").then_some(pair[1].as_str()))
+        .collect()
 }
 
 #[test]
@@ -52,12 +85,15 @@ fn test_codex_prompt_goes_through_exec_subcommand() {
     let p = plan(&["clud", "--codex", "-p", "hello"]);
     assert_eq!(
         p.command,
-        vec![
-            "codex",
-            "exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "hello",
+        [
+            codex_prefix(),
+            vec![
+                "exec".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "hello".to_string(),
+            ],
         ]
+        .concat()
     );
     // `codex exec` is non-interactive; subprocess mode is fine.
     assert_eq!(p.launch_mode, LaunchMode::Subprocess);
@@ -73,9 +109,62 @@ fn test_codex_interactive_defaults_to_pty_without_tty() {
     let p = plan(&["clud", "--codex"]);
     assert_eq!(
         p.command,
-        vec!["codex", "--dangerously-bypass-approvals-and-sandbox"]
+        [
+            codex_prefix(),
+            vec!["--dangerously-bypass-approvals-and-sandbox".to_string()],
+        ]
+        .concat()
     );
     assert_eq!(p.launch_mode, LaunchMode::Pty);
+}
+
+#[test]
+fn test_codex_keeps_native_agents_when_agents_md_exists() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("AGENTS.md"), "native agents").unwrap();
+    std::fs::write(repo.path().join("CODEX.md"), "codex fallback").unwrap();
+    std::fs::write(repo.path().join("CLAUDE.md"), "claude fallback").unwrap();
+
+    let p = plan_at(&["clud", "--codex"], repo.path());
+
+    assert!(!codex_config_values(&p)
+        .iter()
+        .any(|value| value.starts_with("project_doc_fallback_filenames=")));
+}
+
+#[test]
+fn test_codex_uses_codex_md_as_project_doc_fallback_before_claude_md() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("CODEX.md"), "codex fallback").unwrap();
+    std::fs::write(repo.path().join("CLAUDE.md"), "claude fallback").unwrap();
+
+    let p = plan_at(&["clud", "--codex"], repo.path());
+
+    assert!(codex_config_values(&p).contains(&r#"project_doc_fallback_filenames=["CODEX.md"]"#));
+    assert!(!codex_config_values(&p)
+        .iter()
+        .any(|value| value.contains("CLAUDE.md")));
+}
+
+#[test]
+fn test_codex_uses_claude_md_when_agents_and_codex_are_absent() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("CLAUDE.md"), "claude fallback").unwrap();
+
+    let p = plan_at(&["clud", "--codex"], repo.path());
+
+    assert!(codex_config_values(&p).contains(&r#"project_doc_fallback_filenames=["CLAUDE.md"]"#));
+}
+
+#[test]
+fn test_codex_project_doc_fallback_noops_when_no_instruction_file_exists() {
+    let repo = tempfile::tempdir().unwrap();
+
+    let p = plan_at(&["clud", "--codex"], repo.path());
+
+    assert!(!codex_config_values(&p)
+        .iter()
+        .any(|value| value.starts_with("project_doc_fallback_filenames=")));
 }
 
 #[test]
@@ -84,12 +173,15 @@ fn test_codex_continue_uses_resume_last() {
     let p = plan(&["clud", "--codex", "-c"]);
     assert_eq!(
         p.command,
-        vec![
-            "codex",
-            "resume",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--last",
+        [
+            codex_prefix(),
+            vec![
+                "resume".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--last".to_string(),
+            ],
         ]
+        .concat()
     );
     assert_eq!(p.launch_mode, LaunchMode::Pty);
 }
@@ -99,12 +191,15 @@ fn test_codex_resume_with_session_id() {
     let p = plan(&["clud", "--codex", "-r", "sess-123"]);
     assert_eq!(
         p.command,
-        vec![
-            "codex",
-            "resume",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "sess-123",
+        [
+            codex_prefix(),
+            vec![
+                "resume".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "sess-123".to_string(),
+            ],
         ]
+        .concat()
     );
 }
 
@@ -114,12 +209,15 @@ fn test_codex_model_uses_short_m() {
     let p = plan(&["clud", "--codex", "--model", "gpt-5"]);
     assert_eq!(
         p.command,
-        vec![
-            "codex",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-m",
-            "gpt-5"
+        [
+            codex_prefix(),
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "-m".to_string(),
+                "gpt-5".to_string(),
+            ],
         ]
+        .concat()
     );
 }
 
@@ -127,7 +225,7 @@ fn test_codex_model_uses_short_m() {
 fn test_codex_up_routes_through_exec() {
     let p = plan(&["clud", "--codex", "up"]);
     assert_eq!(p.command[0], "codex");
-    assert_eq!(p.command[1], "exec");
+    assert!(codex_exec_index(&p) > 0);
     // Prompt is positional (last arg), not behind `-p`.
     assert!(p.command.iter().all(|a| a != "-p"));
     assert!(last_arg(&p).contains("codeup"));
@@ -306,7 +404,7 @@ fn test_loop_repeat_with_done_override_restores_contract() {
 fn test_codex_loop_routes_through_exec() {
     let p = plan(&["clud", "--codex", "loop", "--loop-count", "5", "do stuff"]);
     assert_eq!(p.command[0], "codex");
-    assert_eq!(p.command[1], "exec");
+    assert!(codex_exec_index(&p) > 0);
     assert!(p
         .command
         .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
@@ -376,7 +474,7 @@ fn test_codex_loop_safe_mode_omits_bypass_flag() {
         .command
         .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     assert_eq!(p.command[0], "codex");
-    assert_eq!(p.command[1], "exec");
+    assert!(codex_exec_index(&p) > 0);
 }
 
 #[test]

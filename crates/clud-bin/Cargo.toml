@@ -9,9 +9,16 @@ homepage.workspace = true
 description = "Fast CLI for running Claude Code and Codex in YOLO mode"
 
 [dependencies]
+arboard = "3"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+# Native crash handler for SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT
+# on Unix and structured exceptions on Windows. By default it does NOT
+# attach a SIGINT / CTRL_C_EVENT handler, so the existing `ctrlc`-based
+# Ctrl-C path (#372 / `ctrl_c_track`) remains the authoritative handler
+# for Ctrl-C / Ctrl-Break.
+crash-handler = "0.7"
 ctrlc = "3"
 # Issue #13: voice-mode stack. Linux capture shells out to `arecord` on
 # F3 press so libasound is loaded only by that on-demand helper process,
@@ -56,7 +63,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 terminal_size = "0.4"
+# Plain serde-friendly TOML deserializer. Used by the shell::git_bash_resolver
+# manifest reader (issue #447); the existing toml_edit dep keeps round-trip
+# editing of settings.toml, but a one-shot `toml::from_str` is the cleanest
+# fit for an embedded vendor manifest.
+toml = "0.8"
 toml_edit = "0.25.11"
+# Issue #447: pure-Rust zip extraction for the vendored Git Bash bundle.
+# `deflate` is the only compression method present in git-bash-bin.zip;
+# disabling default features avoids pulling bzip2/zstd C deps.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 vt100 = "0.16"
 vte = "0.15"
 wasmi = "0.40.0"
@@ -71,6 +87,9 @@ tiny_http = "0.12"
 # (~50 LOC of platform glue: macOS `open`, Linux `xdg-open`, Windows
 # `cmd /c start`). One dep beats triplicate hand-rolled code.
 open = "5"
+# Issue #457: split EDITOR/VISUAL-style commands such as `code --wait`
+# without sending config paths through an ad hoc shell string.
+shell-words = "1.1"
 
 [dev-dependencies]
 serde_yaml = "0.9"
@@ -83,6 +102,20 @@ tempfile = "3"
 # `cargo build --bin clud`, so the production binary stays seam-free per
 # the upstream rule ("never compiled into production consumers").
 running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client", "originator-scan", "test-seams"] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# #468: ignored Win32 feasibility probe for user-land process/file
+# observation. Kept test-only so no production dependency graph changes.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 prost-build = "0.14"
@@ -143,3 +176,17 @@ windows-core = "0.61"
 [[bin]]
 name = "clud"
 path = "src/main.rs"
+
+# Slice 1 of #406 / #409: tiny PATH-resolved relay that lives at
+# `~/.clud/state/shims/python` etc. so any `python` invocation inside a
+# clud session goes through the daemon's ResolveInterpreter RPC.
+# Currently shares clud-bin's dep tree; the size-budget enforcement +
+# release-shim profile lands in slice 4 (#412) when the binary is
+# bundled into wheels.
+[[bin]]
+name = "clud-shim"
+path = "src/bin/clud_shim.rs"
+
+[[bin]]
+name = "clud-block-bad-cmd"
+path = "src/bin/clud_block_bad_cmd.rs"

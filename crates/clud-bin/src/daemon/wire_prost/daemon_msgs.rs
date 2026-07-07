@@ -9,7 +9,9 @@ use super::session::{
     session_to_proto, to_json_vec,
 };
 use super::{WireError, WireFrame, CLUD_JSON_PAYLOAD_PROTOCOL, CLUD_PROST_PAYLOAD_PROTOCOL};
-use crate::daemon::types::{DaemonRequest, DaemonResponse, GcOp, GcReply, WorkerLaunchSpec};
+use crate::daemon::types::{
+    DaemonRequest, DaemonResponse, GcOp, GcReply, ProcTreeSnapshot, WorkerLaunchSpec,
+};
 
 pub(in crate::daemon) fn encode_daemon_request_prost(
     request: &DaemonRequest,
@@ -84,6 +86,13 @@ fn daemon_request_to_proto(
             payload_json: to_json_vec(payload)?,
         }),
         DaemonRequest::Shutdown => Request::Shutdown(proto::ShutdownRequest {}),
+        DaemonRequest::ReapOrphans => Request::ReapOrphans(proto::ReapOrphansRequest {}),
+        DaemonRequest::Metrics => Request::Metrics(proto::MetricsRequest {}),
+        DaemonRequest::ProcSnapshot {
+            include_dead_since_ms,
+        } => Request::ProcSnapshot(proto::ProcSnapshotRequest {
+            include_dead_since_ms: *include_dead_since_ms,
+        }),
     };
     Ok(proto::ClientToDaemon {
         request: Some(request),
@@ -123,6 +132,11 @@ fn daemon_request_from_proto(proto: proto::ClientToDaemon) -> Result<DaemonReque
             payload: from_json_slice::<GcOp>(&gc.payload_json)?,
         }),
         Request::Shutdown(_) => Ok(DaemonRequest::Shutdown),
+        Request::ReapOrphans(_) => Ok(DaemonRequest::ReapOrphans),
+        Request::Metrics(_) => Ok(DaemonRequest::Metrics),
+        Request::ProcSnapshot(request) => Ok(DaemonRequest::ProcSnapshot {
+            include_dead_since_ms: request.include_dead_since_ms,
+        }),
     }
 }
 
@@ -174,6 +188,21 @@ fn daemon_response_to_proto(
         DaemonResponse::ShutdownAck { pid } => {
             Response::ShutdownAck(proto::ShutdownAckResponse { pid: *pid })
         }
+        DaemonResponse::ReapOrphansAck { found, reaped } => {
+            Response::ReapOrphansAck(proto::ReapOrphansAckResponse {
+                found: *found,
+                reaped: *reaped,
+            })
+        }
+        DaemonResponse::Metrics { pid, cpu_pct } => Response::Metrics(proto::MetricsResponse {
+            pid: *pid,
+            cpu_pct: *cpu_pct,
+        }),
+        DaemonResponse::ProcSnapshot { snapshot } => {
+            Response::ProcSnapshot(proto::ProcSnapshotResponse {
+                snapshot_json: to_json_vec(snapshot)?,
+            })
+        }
         DaemonResponse::Error { message } => Response::Error(proto::ErrorResponse {
             message: message.clone(),
         }),
@@ -212,6 +241,17 @@ fn daemon_response_from_proto(proto: proto::DaemonToClient) -> Result<DaemonResp
             reply: from_json_slice::<GcReply>(&gc.reply_json)?,
         }),
         Response::ShutdownAck(ack) => Ok(DaemonResponse::ShutdownAck { pid: ack.pid }),
+        Response::ReapOrphansAck(ack) => Ok(DaemonResponse::ReapOrphansAck {
+            found: ack.found,
+            reaped: ack.reaped,
+        }),
+        Response::Metrics(metrics) => Ok(DaemonResponse::Metrics {
+            pid: metrics.pid,
+            cpu_pct: metrics.cpu_pct,
+        }),
+        Response::ProcSnapshot(snapshot) => Ok(DaemonResponse::ProcSnapshot {
+            snapshot: from_json_slice::<ProcTreeSnapshot>(&snapshot.snapshot_json)?,
+        }),
         Response::Error(error) => Ok(DaemonResponse::Error {
             message: error.message,
         }),

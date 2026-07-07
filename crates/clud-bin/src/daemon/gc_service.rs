@@ -25,8 +25,6 @@ mod extern_repo;
 mod filesystem;
 
 use extern_repo::{extern_repo_is_purgeable, extern_repo_stale_after};
-#[cfg(test)]
-use extern_repo::{gh_pr_list_json_has_merged, parse_github_slug_from_remote_url};
 use filesystem::{
     collect_live_lock_paths, reap_trash_entries, remove_entry_and_delete_row,
     remove_entry_filesystem,
@@ -59,9 +57,6 @@ const DEFAULT_GC_AUTO_PURGE_ENABLED: bool = true;
 const DEFAULT_GC_PURGE_CONCURRENCY_CAP: usize = 8;
 const PERIODIC_GC_WORKTREE_STALE_AFTER: &str = "48h";
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
-
-#[cfg(test)]
-const ENV_TEST_GH_BIN: &str = "CLUD_TEST_GH_BIN";
 
 /// One client-initiated GC op handed from a connection thread (or HTTP
 /// handler) to the registry worker. The worker processes it inline and
@@ -469,6 +464,11 @@ fn run_periodic_purge_tick_with_free_space<F>(
             eprintln!("[clud] gc tick: trash error: {message}");
         }
     }
+
+    // Issue #423: daily 7-day sweep of stale uv-cache envs. The
+    // helper handles its own 24h sentinel under ~/.clud/state/ so
+    // this call is cheap on every tick (one stat + age compare).
+    crate::daemon::uv_cache_sweep::maybe_sweep_uv_cache();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

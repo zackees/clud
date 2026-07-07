@@ -12,12 +12,12 @@
 //! Loopback-only, no authentication — matches the trust model of the
 //! existing JSON IPC listener.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +32,7 @@ use super::types::{
     CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
 };
 use crate::ctrl_c_track::{self, CtrlCEvent};
+use crate::launch_log::{self, LaunchRecord};
 use crate::session_registry::LiveSession;
 
 /// Supplier of live session-registry rows. Injected at the dashboard
@@ -43,6 +44,30 @@ use crate::session_registry::LiveSession;
 /// on macOS x86 CI).
 pub(super) type LiveSessionsProvider =
     std::sync::Arc<dyn Fn() -> Vec<LiveSession> + Send + Sync + 'static>;
+
+/// Test-only public entry point: spawn the dashboard HTTP listener for
+/// telemetry-only scenarios (no GC backend). Integration tests under
+/// `tests/telemetry_endpoint.rs` use this to wire up the server without
+/// taking on the `gc_service::RegistryMsg` type that the full
+/// `spawn_dashboard` signature otherwise leaks.
+pub fn spawn_dashboard_telemetry_only(
+    state_dir: PathBuf,
+    ipc_port: u16,
+    started_at_unix: i64,
+    telemetry: TelemetryStore,
+) -> Option<u16> {
+    let live_provider: LiveSessionsProvider = std::sync::Arc::new(Vec::new);
+    let tool_telemetry = ToolTelemetryStore::new();
+    spawn_dashboard(
+        state_dir,
+        None,
+        ipc_port,
+        started_at_unix,
+        live_provider,
+        telemetry,
+        tool_telemetry,
+    )
+}
 
 /// Production provider: reads the redb session registry under the
 /// cross-process advisory lock. Errors are swallowed so a registry
@@ -62,6 +87,301 @@ const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard/index.html");
 /// Hard cap on a POST request body so a misbehaving client can't OOM the
 /// daemon. The purge payload is two short JSON fields; 16 KiB is generous.
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024;
+
+/// Issue #469 (beta): per-PID cap on telemetry entries. A runaway logger
+/// can't grow this past N — oldest entries get dropped first.
+const TELEMETRY_PER_PID_CAP: usize = 500;
+const TOOL_TELEMETRY_CAP: usize = 1000;
+
+/// Issue #469 — one telemetry record submitted by `clud log`. Mirrors
+/// `log_event::TelemetryPayload` plus the daemon-added receive timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryEntry {
+    pub parent_pid: u32,
+    pub time_ms: u64,
+    pub received_at_ms: u64,
+    pub cmd: String,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+}
+
+/// `POST /telemetry/log` body — same shape as the entry minus the
+/// server-side `received_at_ms` timestamp (daemon assigns it).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryIngest {
+    pub parent_pid: u32,
+    pub time_ms: u64,
+    pub cmd: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+/// Compact per-PID view returned inside `/state.json` — totals only, so
+/// the polled summary stays bounded regardless of entry count. The
+/// per-entry detail (with envs) lives behind `/telemetry/by-pid/<pid>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryPidSummary {
+    pub parent_pid: u32,
+    pub entry_count: usize,
+    pub last_at_ms: u64,
+}
+
+/// Full per-PID payload returned by `GET /telemetry/by-pid/<pid>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryPidDetail {
+    pub parent_pid: u32,
+    pub entries: Vec<TelemetryEntry>,
+}
+
+/// In-memory telemetry sink shared between the HTTP listener and any
+/// other daemon component that wants to read it. Lifetime = daemon
+/// lifetime; restart wipes it (persistence is a follow-up).
+#[derive(Debug, Default, Clone)]
+pub struct TelemetryStore {
+    inner: Arc<Mutex<TelemetryStoreInner>>,
+}
+
+#[derive(Debug, Default)]
+struct TelemetryStoreInner {
+    by_pid: HashMap<u32, VecDeque<TelemetryEntry>>,
+}
+
+impl TelemetryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append one entry. Trims the per-PID ring buffer to `TELEMETRY_PER_PID_CAP`
+    /// (drop-oldest).
+    pub fn push(&self, entry: TelemetryEntry) {
+        let mut guard = self.inner.lock().expect("telemetry store poisoned");
+        let dq = guard.by_pid.entry(entry.parent_pid).or_default();
+        dq.push_back(entry);
+        while dq.len() > TELEMETRY_PER_PID_CAP {
+            dq.pop_front();
+        }
+    }
+
+    /// Per-PID summary keyed by parent_pid, sorted by last activity desc.
+    pub fn summary(&self) -> Vec<TelemetryPidSummary> {
+        let guard = self.inner.lock().expect("telemetry store poisoned");
+        let mut rows: Vec<_> = guard
+            .by_pid
+            .iter()
+            .map(|(pid, dq)| {
+                let last_at_ms = dq.back().map(|e| e.received_at_ms).unwrap_or(0);
+                TelemetryPidSummary {
+                    parent_pid: *pid,
+                    entry_count: dq.len(),
+                    last_at_ms,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.last_at_ms.cmp(&a.last_at_ms));
+        rows
+    }
+
+    /// Full per-PID detail or `None` if the PID has no entries.
+    pub fn detail(&self, pid: u32) -> Option<TelemetryPidDetail> {
+        let guard = self.inner.lock().expect("telemetry store poisoned");
+        guard.by_pid.get(&pid).map(|dq| TelemetryPidDetail {
+            parent_pid: pid,
+            entries: dq.iter().cloned().collect(),
+        })
+    }
+}
+
+/// One `clud tool` invocation reported by the lightweight launcher.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallEntry {
+    pub id: String,
+    pub name: String,
+    pub start_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolEventIngest {
+    pub event: String,
+    pub id: String,
+    pub name: String,
+    pub start_time_ms: u64,
+    #[serde(default)]
+    pub end_time_ms: Option<u64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAggregateBucket {
+    pub label: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub total: usize,
+    pub success: usize,
+    pub failed: usize,
+    pub running: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolTelemetryView {
+    pub entries: Vec<ToolCallEntry>,
+    pub aggregate: Vec<ToolAggregateBucket>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ToolTelemetryStore {
+    inner: Arc<Mutex<ToolTelemetryStoreInner>>,
+}
+
+#[derive(Debug, Default)]
+struct ToolTelemetryStoreInner {
+    entries: VecDeque<ToolCallEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct DashboardTelemetryStores {
+    telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
+}
+
+impl ToolTelemetryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push_event(&self, event: ToolEventIngest) {
+        let mut guard = self.inner.lock().expect("tool telemetry store poisoned");
+        match event.event.as_str() {
+            "start" => {
+                if let Some(existing) = guard.entries.iter_mut().find(|entry| entry.id == event.id)
+                {
+                    existing.name = event.name;
+                    existing.start_time_ms = event.start_time_ms;
+                    return;
+                }
+                guard.entries.push_back(ToolCallEntry {
+                    id: event.id,
+                    name: event.name,
+                    start_time_ms: event.start_time_ms,
+                    end_time_ms: None,
+                    exit_code: None,
+                    stderr_tail: None,
+                });
+                while guard.entries.len() > TOOL_TELEMETRY_CAP {
+                    guard.entries.pop_front();
+                }
+            }
+            "finish" => {
+                if let Some(existing) = guard.entries.iter_mut().find(|entry| entry.id == event.id)
+                {
+                    existing.name = event.name;
+                    existing.start_time_ms = event.start_time_ms;
+                    existing.end_time_ms = event.end_time_ms;
+                    existing.exit_code = event.exit_code;
+                    existing.stderr_tail = event.stderr_tail;
+                } else {
+                    guard.entries.push_back(ToolCallEntry {
+                        id: event.id,
+                        name: event.name,
+                        start_time_ms: event.start_time_ms,
+                        end_time_ms: event.end_time_ms,
+                        exit_code: event.exit_code,
+                        stderr_tail: event.stderr_tail,
+                    });
+                }
+                while guard.entries.len() > TOOL_TELEMETRY_CAP {
+                    guard.entries.pop_front();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn view(&self) -> ToolTelemetryView {
+        self.view_at(current_unix_millis())
+    }
+
+    fn view_at(&self, now_ms: u64) -> ToolTelemetryView {
+        let guard = self.inner.lock().expect("tool telemetry store poisoned");
+        let mut entries: Vec<_> = guard.entries.iter().cloned().collect();
+        entries.sort_by(|a, b| b.start_time_ms.cmp(&a.start_time_ms));
+        ToolTelemetryView {
+            aggregate: tool_aggregate_at(&entries, now_ms),
+            entries,
+        }
+    }
+}
+
+fn tool_aggregate_at(entries: &[ToolCallEntry], now_ms: u64) -> Vec<ToolAggregateBucket> {
+    let mut buckets = Vec::new();
+    push_tool_bucket(
+        &mut buckets,
+        "last 10s",
+        now_ms.saturating_sub(10_000),
+        now_ms,
+    );
+    push_tool_bucket(
+        &mut buckets,
+        "10-20s",
+        now_ms.saturating_sub(20_000),
+        now_ms.saturating_sub(10_000),
+    );
+    push_tool_bucket(
+        &mut buckets,
+        "20-30s",
+        now_ms.saturating_sub(30_000),
+        now_ms.saturating_sub(20_000),
+    );
+    for minute in 1..=10 {
+        let end_ms = now_ms.saturating_sub(30_000 + ((minute - 1) * 60_000));
+        let start_ms = end_ms.saturating_sub(60_000);
+        push_tool_bucket(&mut buckets, &format!("{minute}m"), start_ms, end_ms);
+    }
+
+    for entry in entries {
+        if entry.start_time_ms < now_ms.saturating_sub(10 * 60_000) || entry.start_time_ms > now_ms
+        {
+            continue;
+        }
+        if let Some(bucket) = buckets.iter_mut().find(|bucket| {
+            entry.start_time_ms >= bucket.start_ms && entry.start_time_ms < bucket.end_ms
+        }) {
+            bucket.total += 1;
+            match entry.exit_code {
+                Some(0) => bucket.success += 1,
+                Some(_) => bucket.failed += 1,
+                None => bucket.running += 1,
+            }
+        }
+    }
+    buckets
+}
+
+fn push_tool_bucket(
+    buckets: &mut Vec<ToolAggregateBucket>,
+    label: &str,
+    start_ms: u64,
+    end_ms: u64,
+) {
+    buckets.push(ToolAggregateBucket {
+        label: label.to_string(),
+        start_ms,
+        end_ms,
+        total: 0,
+        success: 0,
+        failed: 0,
+        running: 0,
+    });
+}
 
 /// Aggregate document returned by `GET /state.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,9 +416,18 @@ pub struct DaemonStateView {
 pub struct SessionView {
     pub id: String,
     pub kind: String,
+    pub source: String,
+    pub backend: Option<String>,
+    pub launch_mode: Option<String>,
     pub name: Option<String>,
     pub cwd: Option<String>,
+    pub repo_root: Option<String>,
+    pub command: Vec<String>,
+    pub clud_argv: Vec<String>,
+    pub clud_pid: Option<u32>,
     pub created_at: Option<u64>,
+    pub exited_at: Option<u64>,
+    pub duration_ms: Option<u64>,
     pub detachable: bool,
     pub background: bool,
     pub attachable: bool,
@@ -169,6 +498,8 @@ pub(super) fn spawn_dashboard(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
+    telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
 ) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -194,6 +525,10 @@ pub(super) fn spawn_dashboard(
                 ipc_port,
                 started_at_unix,
                 live_sessions_provider,
+                DashboardTelemetryStores {
+                    telemetry,
+                    tool_telemetry,
+                },
             )
         });
     match res {
@@ -212,15 +547,21 @@ fn run_dashboard_loop(
     ipc_port: u16,
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
+    stores: DashboardTelemetryStores,
 ) {
     for request in server.incoming_requests() {
         let method = request.method().clone();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or(&url).to_string();
-        match (method, path.as_str()) {
-            (Method::Get, "/") | (Method::Get, "/index.html") => {
-                respond_html(request, 200, DASHBOARD_HTML.as_bytes());
+        // Telemetry detail route — `/telemetry/by-pid/<u32>`. Matched
+        // first so the catch-all SPA fallback below never claims it.
+        if method == Method::Get {
+            if let Some(rest) = path.strip_prefix("/telemetry/by-pid/") {
+                handle_telemetry_detail(request, rest, &stores.telemetry);
+                continue;
             }
+        }
+        match (method, path.as_str()) {
             (Method::Get, "/state.json") => {
                 handle_state(
                     request,
@@ -231,8 +572,27 @@ fn run_dashboard_loop(
                     live_sessions_provider.as_ref(),
                 );
             }
+            // Issue #471: telemetry summary lives at its own URL now
+            // (was previously bundled into `/state.json#telemetry`).
+            (Method::Get, "/telemetry") => {
+                handle_telemetry_summary(request, &stores.telemetry);
+            }
+            (Method::Get, "/tools") => {
+                handle_tools_summary(request, &stores.tool_telemetry);
+            }
             (Method::Post, "/gc/purge") => {
                 handle_purge(request, gc_tx.as_ref());
+            }
+            (Method::Post, "/telemetry/log") => {
+                handle_telemetry_log(request, &stores.telemetry);
+            }
+            (Method::Post, "/tools/event") => {
+                handle_tool_event(request, &stores.tool_telemetry);
+            }
+            // Any other GET is an SPA route — serve the dashboard so the
+            // History-API router takes over (refresh + deep-links).
+            (Method::Get, _) => {
+                respond_html(request, 200, DASHBOARD_HTML.as_bytes());
             }
             _ => {
                 respond_text(request, 404, b"not found");
@@ -323,6 +683,125 @@ fn handle_purge(mut request: Request, gc_tx: Option<&mpsc::Sender<RegistryMsg>>)
     }
 }
 
+/// Issue #471: per-PID summary list at its own URL. Returns the same
+/// `Vec<TelemetryPidSummary>` shape that the bundled
+/// `/state.json#telemetry` field used to carry — no behavior change
+/// for the SPA's existing render code beyond the fetch destination.
+fn handle_telemetry_summary(request: Request, telemetry: &TelemetryStore) {
+    let summary = telemetry.summary();
+    match serde_json::to_vec(&summary) {
+        Ok(bytes) => respond_json(request, 200, &bytes),
+        Err(err) => respond_json(
+            request,
+            500,
+            json_error_bytes(&format!("serialize failed: {err}")).as_slice(),
+        ),
+    }
+}
+
+fn handle_telemetry_log(mut request: Request, telemetry: &TelemetryStore) {
+    let body = match read_body(&mut request) {
+        Ok(b) => b,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("read body failed: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let payload: TelemetryIngest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("invalid JSON: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let received_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    telemetry.push(TelemetryEntry {
+        parent_pid: payload.parent_pid,
+        time_ms: payload.time_ms,
+        received_at_ms,
+        cmd: payload.cmd,
+        cwd: payload.cwd,
+        env: payload.env,
+    });
+    respond_json(request, 200, b"{}");
+}
+
+fn handle_tools_summary(request: Request, tool_telemetry: &ToolTelemetryStore) {
+    let view = tool_telemetry.view();
+    match serde_json::to_vec(&view) {
+        Ok(bytes) => respond_json(request, 200, &bytes),
+        Err(err) => respond_json(
+            request,
+            500,
+            json_error_bytes(&format!("serialize failed: {err}")).as_slice(),
+        ),
+    }
+}
+
+fn handle_tool_event(mut request: Request, tool_telemetry: &ToolTelemetryStore) {
+    let body = match read_body(&mut request) {
+        Ok(b) => b,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("read body failed: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let payload: ToolEventIngest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("invalid JSON: {err}")).as_slice(),
+            );
+            return;
+        }
+    };
+    tool_telemetry.push_event(payload);
+    respond_json(request, 200, b"{}");
+}
+
+fn handle_telemetry_detail(request: Request, pid_str: &str, telemetry: &TelemetryStore) {
+    let pid: u32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            respond_json(
+                request,
+                400,
+                json_error_bytes(&format!("invalid pid: {pid_str}")).as_slice(),
+            );
+            return;
+        }
+    };
+    let detail = telemetry.detail(pid).unwrap_or(TelemetryPidDetail {
+        parent_pid: pid,
+        entries: Vec::new(),
+    });
+    match serde_json::to_vec(&detail) {
+        Ok(bytes) => respond_json(request, 200, &bytes),
+        Err(err) => respond_json(
+            request,
+            500,
+            json_error_bytes(&format!("serialize failed: {err}")).as_slice(),
+        ),
+    }
+}
+
 fn respond_purge_reply(request: Request, reply: GcReply) {
     match reply {
         GcReply::PurgeOk { removed, skipped } => {
@@ -371,6 +850,7 @@ fn build_dashboard_state(
     let now_unix = current_unix();
 
     let mut sessions = read_session_views(state_dir).unwrap_or_default();
+    merge_launch_records(&mut sessions, launch_log::read_recent(state_dir));
     // Issue #190: surface direct-runner sessions (default `clud` invocation
     // path) by reading the redb session registry. The on-disk snapshot
     // files are only written by the centralized daemon worker, so without
@@ -463,9 +943,21 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
                 SessionKind::Subprocess => "subprocess".to_string(),
                 SessionKind::Pty => "pty".to_string(),
             },
+            source: "daemon".to_string(),
+            backend: snap.backend,
+            launch_mode: snap.launch_mode,
             name: snap.name,
             cwd: snap.cwd,
+            repo_root: snap.repo_root,
+            command: snap.command,
+            clud_argv: Vec::new(),
+            clud_pid: None,
             created_at: snap.created_at,
+            exited_at: snap.exited_at,
+            duration_ms: match (snap.created_at, snap.exited_at) {
+                (Some(start), Some(end)) => Some(end.saturating_sub(start)),
+                _ => None,
+            },
             detachable: snap.detachable,
             background: snap.background,
             attachable: snap.attachable,
@@ -493,19 +985,34 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
 /// `daemon::http::tests` module.
 fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<LiveSession>) {
     for row in live_sessions {
+        if sessions
+            .iter()
+            .any(|session| session.live && session.clud_pid == Some(row.pid))
+        {
+            continue;
+        }
         let id = format!("direct-{}", row.pid);
         sessions.push(SessionView {
             id,
             kind: "direct".to_string(),
+            source: "registry".to_string(),
+            backend: row.backend.clone(),
+            launch_mode: row.launch_mode.clone(),
             // Surface the backend selection (`claude` / `codex`) under the
             // session name column so users can tell which agent each
             // direct-runner row corresponds to.
             name: row.backend.clone(),
             cwd: row.cwd,
+            repo_root: None,
+            command: Vec::new(),
+            clud_argv: Vec::new(),
+            clud_pid: Some(row.pid),
             // `started_unix` is seconds; snapshot rows use milliseconds.
             // Convert so the dashboard's age formatter renders both the
             // same way without a per-kind unit-toggle.
             created_at: Some((row.started_unix.max(0) as u64) * 1000),
+            exited_at: None,
+            duration_ms: None,
             detachable: false,
             background: false,
             attachable: false,
@@ -521,6 +1028,40 @@ fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<L
     }
 
     // Newest first across the merged list.
+    sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
+}
+
+fn merge_launch_records(sessions: &mut Vec<SessionView>, records: Vec<LaunchRecord>) {
+    for record in records {
+        let live = record.exit_code.is_none() && pid_is_alive(record.clud_pid);
+        let duration_ms = record.duration_ms();
+        sessions.push(SessionView {
+            id: format!("launch-{}", record.id),
+            kind: record.source.clone(),
+            source: record.source,
+            backend: Some(record.backend.clone()),
+            launch_mode: Some(record.launch_mode.clone()),
+            name: Some(record.backend),
+            cwd: record.cwd,
+            repo_root: record.repo_root,
+            command: record.command,
+            clud_argv: record.clud_argv,
+            clud_pid: Some(record.clud_pid),
+            created_at: Some(record.launched_at_ms),
+            exited_at: record.exited_at_ms,
+            duration_ms,
+            detachable: false,
+            background: false,
+            attachable: false,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            exit_code: record.exit_code,
+            worker_port: 0,
+            live,
+            ctrl_c: None,
+        });
+    }
     sessions.sort_by(|a, b| b.created_at.unwrap_or(0).cmp(&a.created_at.unwrap_or(0)));
 }
 
@@ -676,6 +1217,13 @@ fn current_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 

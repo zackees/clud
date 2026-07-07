@@ -509,6 +509,11 @@ mod tests {
     #[test]
     fn activate_with_use_soldr_false_is_a_no_op_on_path() {
         let _g = isolate_path_env();
+        let baseline_dir = std::env::temp_dir().join("clud-shim-disabled-baseline");
+        std::fs::create_dir_all(&baseline_dir).unwrap();
+        unsafe {
+            std::env::set_var("PATH", baseline_dir.display().to_string());
+        }
         let baseline = std::env::var_os("PATH");
         let cfg = cfg_with_rust(RustConfig {
             use_soldr: false,

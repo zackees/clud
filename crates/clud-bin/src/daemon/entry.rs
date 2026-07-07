@@ -1,15 +1,20 @@
 use std::fs::OpenOptions;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::thread;
+use std::time::Duration;
 
-use crate::args::{Args, Command, DaemonSubcommand};
+use crate::args::{Args, Command, DaemonSubcommand, TopSort};
 use crate::backend::LaunchMode;
 use crate::command::{has_noninteractive_prompt, LaunchPlan};
 use crate::verbose_log;
 
 use super::attach::{attach_to_session, run_attach};
-use super::client::{ensure_daemon, probe_existing, request_daemon_shutdown, send_daemon_request};
+use super::client::{
+    daemon_client_proc_snapshot, ensure_daemon, probe_existing, request_daemon_shutdown,
+    send_daemon_request,
+};
 use super::commands::{run_kill, run_list, run_logs};
 use super::io_helpers::{read_json_file, resolve_backlog_bytes, terminal_dimensions};
 use super::paths::{daemon_info_path, state_dir};
@@ -104,6 +109,151 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
             run_running_process_diagnostics(state_dir, *json)
         }
     }
+}
+
+struct TopRunOptions<'a> {
+    json: bool,
+    once: bool,
+    watch: bool,
+    tree: bool,
+    flat: bool,
+    sort: TopSort,
+    limit: usize,
+    since: Option<&'a str>,
+    originator: Option<&'a str>,
+}
+
+fn run_top(state_dir: &Path, opts: TopRunOptions<'_>) -> i32 {
+    if let Err(err) = ensure_daemon(state_dir) {
+        eprintln!("error: daemon unavailable: {err}");
+        return 1;
+    }
+
+    let since_ms = match super::top::parse_since_ms(opts.since) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return 2;
+        }
+    };
+    let once = opts.once || (opts.json && !opts.watch);
+    let flat = opts.flat && !opts.tree;
+    if once {
+        return run_top_once(state_dir, since_ms, &opts, flat);
+    }
+    run_top_live(state_dir, since_ms, &opts, flat)
+}
+
+fn run_top_once(state_dir: &Path, since_ms: u64, opts: &TopRunOptions<'_>, flat: bool) -> i32 {
+    let snapshot = match daemon_client_proc_snapshot(state_dir, since_ms) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            eprintln!("error: daemon process snapshot unavailable: {err}");
+            return 1;
+        }
+    };
+    if opts.json {
+        let prepared =
+            super::top::prepare_snapshot(snapshot, opts.sort, flat, opts.limit, opts.originator);
+        match serde_json::to_string_pretty(&prepared) {
+            Ok(text) => println!("{text}"),
+            Err(err) => {
+                eprintln!("error: failed to render top JSON: {err}");
+                return 1;
+            }
+        }
+    } else {
+        print!(
+            "{}",
+            super::top::render_snapshot(&snapshot, opts.sort, flat, opts.limit, opts.originator)
+        );
+    }
+    0
+}
+
+fn run_top_live(state_dir: &Path, since_ms: u64, opts: &TopRunOptions<'_>, flat: bool) -> i32 {
+    let raw_mode = if opts.json {
+        false
+    } else {
+        crossterm::terminal::enable_raw_mode().is_ok()
+    };
+    let mut exit_code = 0;
+    loop {
+        let snapshot = match daemon_client_proc_snapshot(state_dir, since_ms) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                eprintln!("error: daemon process snapshot unavailable: {err}");
+                exit_code = 1;
+                break;
+            }
+        };
+        let interval_ms = snapshot.interval_ms.clamp(250, 5_000);
+        if opts.json {
+            let prepared = super::top::prepare_snapshot(
+                snapshot,
+                opts.sort,
+                flat,
+                opts.limit,
+                opts.originator,
+            );
+            match serde_json::to_string(&prepared) {
+                Ok(text) => println!("{text}"),
+                Err(err) => {
+                    eprintln!("error: failed to render top JSON: {err}");
+                    exit_code = 1;
+                    break;
+                }
+            }
+        } else {
+            print!("\x1b[2J\x1b[H");
+            print!(
+                "{}",
+                super::top::render_snapshot(
+                    &snapshot,
+                    opts.sort,
+                    flat,
+                    opts.limit,
+                    opts.originator,
+                )
+            );
+            println!("\npress q to quit");
+            let _ = io::stdout().flush();
+        }
+        if wait_for_top_tick_or_quit(Duration::from_millis(interval_ms), raw_mode) {
+            break;
+        }
+    }
+    if raw_mode {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+    exit_code
+}
+
+fn wait_for_top_tick_or_quit(duration: Duration, raw_mode: bool) -> bool {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        if raw_mode {
+            match crossterm::event::poll(Duration::from_millis(100)) {
+                Ok(true) => {
+                    if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                        if matches!(
+                            key.code,
+                            crossterm::event::KeyCode::Char('q')
+                                | crossterm::event::KeyCode::Char('Q')
+                                | crossterm::event::KeyCode::Esc
+                        ) {
+                            return true;
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        } else {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    false
 }
 
 fn run_running_process_diagnostics(state_dir: &Path, json: bool) -> i32 {
@@ -289,9 +439,40 @@ pub fn handle_special_command(args: &Args, interrupted: &AtomicBool) -> Option<i
             let state_dir = state_dir(args);
             Some(run_kill(&state_dir, session_id.as_deref(), *all))
         }
+        Some(Command::Slay) => {
+            let state_dir = state_dir(args);
+            Some(run_kill(&state_dir, None, true))
+        }
         Some(Command::List) => {
             let state_dir = state_dir(args);
             Some(run_list(&state_dir))
+        }
+        Some(Command::Top {
+            json,
+            once,
+            watch,
+            tree,
+            flat,
+            sort,
+            limit,
+            since,
+            originator,
+        }) => {
+            let state_dir = state_dir(args);
+            Some(run_top(
+                &state_dir,
+                TopRunOptions {
+                    json: *json,
+                    once: *once,
+                    watch: *watch,
+                    tree: *tree,
+                    flat: *flat,
+                    sort: *sort,
+                    limit: *limit,
+                    since: since.as_deref(),
+                    originator: originator.as_deref(),
+                },
+            ))
         }
         Some(Command::Logs {
             session_id,
@@ -498,7 +679,10 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         | DaemonResponse::AdoptKillAck { .. }
         | DaemonResponse::Gc { .. }
         | DaemonResponse::LiveCwds { .. }
-        | DaemonResponse::ShutdownAck { .. } => 1,
+        | DaemonResponse::ShutdownAck { .. }
+        | DaemonResponse::ReapOrphansAck { .. }
+        | DaemonResponse::Metrics { .. }
+        | DaemonResponse::ProcSnapshot { .. } => 1,
     }
 }
 
@@ -681,8 +865,10 @@ mod tests {
             keep_orphans: false,
             quiet_orphans: false,
             explain_orphans: false,
+            no_cpu_banner: false,
             command: None,
             passthrough: Vec::new(),
+            codex_config_overrides: Vec::new(),
         };
         assert!(experimental_enabled(&args));
     }

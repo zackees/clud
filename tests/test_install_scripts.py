@@ -56,6 +56,13 @@ def test_sh_installs_via_uv_tool_with_force() -> None:
     assert 'uv tool install --force "$spec"' in SH
 
 
+def test_sh_verifies_native_helper_after_install() -> None:
+    assert "verify_clud_install" in SH
+    assert "clud-block-bad-cmd" in SH
+    assert "permissionDecision" in SH
+    assert 'deny_command="bad"' in SH
+
+
 def test_sh_updates_shell_path() -> None:
     # POSIX hand-off to uv's own shell-profile editor.
     assert "uv tool update-shell" in SH
@@ -89,6 +96,13 @@ def test_ps1_supports_version_pin() -> None:
 
 def test_ps1_installs_via_uv_tool_with_force() -> None:
     assert "uv tool install --force $spec" in PS1
+
+
+def test_ps1_verifies_native_helper_after_install() -> None:
+    assert "Verify-CludInstall" in PS1
+    assert "clud-block-bad-cmd.exe" in PS1
+    assert "permissionDecision" in PS1
+    assert "$denyCommand = 'bad'" in PS1
 
 
 def test_ps1_path_mutation_is_idempotent() -> None:

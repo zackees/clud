@@ -24,7 +24,10 @@ use frame::{decode_wire_frame_line, encode_json_line, encode_wire_frame_line};
 use frame::{encode_legacy_json_frame, prost_frame};
 
 #[cfg(test)]
-use super::types::{CtrlCProfile, GcOp, GcReply, SessionSnapshot, WorkerLaunchSpec};
+use super::types::{
+    CtrlCProfile, GcOp, GcReply, ProcRow, ProcTier, ProcTreeSnapshot, SessionSnapshot,
+    WorkerLaunchSpec,
+};
 #[cfg(test)]
 use prost::Message;
 #[cfg(test)]

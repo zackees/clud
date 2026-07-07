@@ -293,6 +293,7 @@ impl WorkerShared {
             let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
             if guard.exit_code.is_none() {
                 guard.exit_code = Some(exit_code);
+                guard.exited_at = Some(unix_millis_now());
             }
             guard.clone()
         };
@@ -615,6 +616,10 @@ mod tests {
         let snap = SessionSnapshot {
             id: "test-session".into(),
             kind,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
             cwd: None,
             name: None,
             created_at: Some(0),
@@ -629,6 +634,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            exited_at: None,
             ctrl_c: None,
         };
         Arc::new(WorkerShared::new(
@@ -642,6 +648,10 @@ mod tests {
         let snap = SessionSnapshot {
             id: id.into(),
             kind: SessionKind::Subprocess,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
             cwd: None,
             name: None,
             created_at: Some(0),
@@ -656,6 +666,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            exited_at: None,
             ctrl_c: None,
         };
         let shared = Arc::new(WorkerShared::new(tmp.path().to_path_buf(), id.into(), snap));
@@ -893,6 +904,10 @@ mod tests {
         let snap = SessionSnapshot {
             id: "s".into(),
             kind: SessionKind::Subprocess,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
             cwd: None,
             name: None,
             created_at: Some(0),
@@ -907,6 +922,7 @@ mod tests {
             worker_port: 0,
             root_pid: None,
             exit_code: None,
+            exited_at: None,
             ctrl_c: None,
         };
         let shared = Arc::new(WorkerShared::new_with_backlog(

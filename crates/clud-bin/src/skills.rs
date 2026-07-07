@@ -55,6 +55,34 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-pr/SKILL.md"),
     },
     BundledSkill {
+        name: "clud-fix",
+        skill_md: include_str!("../assets/skills/clud-fix/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-fix-quick",
+        skill_md: include_str!("../assets/skills/clud-fix-quick/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-do",
+        skill_md: include_str!("../assets/skills/clud-do/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-review",
+        skill_md: include_str!("../assets/skills/clud-review/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-git",
+        skill_md: include_str!("../assets/skills/clud-git/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-git-diff",
+        skill_md: include_str!("../assets/skills/clud-git-diff/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-python-lint-deadcode",
+        skill_md: include_str!("../assets/skills/clud-python-lint-deadcode/SKILL.md"),
+    },
+    BundledSkill {
         name: "clud-tag-release",
         skill_md: include_str!("../assets/skills/clud-tag-release/SKILL.md"),
     },
@@ -73,6 +101,14 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "clud-improve",
         skill_md: include_str!("../assets/skills/clud-improve/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-docker-mac-x86",
+        skill_md: include_str!("../assets/skills/clud-docker-mac-x86/SKILL.md"),
+    },
+    BundledSkill {
+        name: "clud-docker-linux-build",
+        skill_md: include_str!("../assets/skills/clud-docker-linux-build/SKILL.md"),
     },
 ];
 
@@ -462,11 +498,13 @@ mod tests {
         assert!(names.contains(&"clud-issue"));
         assert!(names.contains(&"clud-issue-triage"));
         assert!(names.contains(&"clud-pr"));
+        assert!(names.contains(&"clud-fix"));
         assert!(names.contains(&"clud-tag-release"));
         assert!(names.contains(&"clud-docker-rust-app-dev"));
         assert!(names.contains(&"clud-windows-trash"));
         assert!(names.contains(&"clud-extern-repos"));
         assert!(names.contains(&"clud-improve"));
+        assert!(names.contains(&"clud-docker-mac-x86"));
     }
 
     #[test]
@@ -478,6 +516,50 @@ mod tests {
                 skill.name
             );
         }
+    }
+
+    #[test]
+    fn clud_improve_files_concrete_reports_without_generic_prompt() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-improve")
+            .expect("clud-improve must be bundled")
+            .skill_md;
+
+        for required in [
+            "Concrete report means file directly",
+            "Bare manual invocation asks once",
+            "If the skill was auto-selected and the current user message already contains a concrete clud report, use that message as the report.",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-improve skill missing argument-aware filing guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn clud_pr_teardown_requires_process_audit() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-pr")
+            .expect("clud-pr must be bundled")
+            .skill_md;
+
+        for required in [
+            "audit live processes before removing the worktree",
+            "stop only that exact process tree before cleanup",
+            "do not use a blind `rm -rf` retry loop",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-pr skill missing process-audit teardown guidance: {required}"
+            );
+        }
+        assert!(
+            !skill.contains("Follow the **Tear down** retry pattern"),
+            "clud-pr skill must not recommend blind retry teardown"
+        );
     }
 
     #[test]
@@ -499,6 +581,56 @@ mod tests {
             assert!(
                 skill.contains(required),
                 "clud-loop skill missing required Codex-native loop guidance: {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn clud_fix_skill_owns_issue_goal_and_meta_burndown() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-fix")
+            .expect("clud-fix must be bundled")
+            .skill_md;
+
+        for required in [
+            "/goal $clud-fix <issue-or-issue-url>",
+            "Complete meta issue #N",
+            "every child issue closed/validated",
+            "parent checklist updated",
+            "parent issue closed",
+            ".clud/fix/<owner>__<repo>__issue-<num>.json",
+            "Delegated `clud-pr` work must not invoke a nested `/goal`",
+            "Claude And Codex Parity",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-fix skill missing required orchestration guidance: {required}"
+            );
+        }
+
+        // clud-pr-merge was retired then brought back; clud-fix may now
+        // reference it again as a delegation target. No assertion either
+        // way — both shapes are valid.
+    }
+
+    #[test]
+    fn clud_pr_skill_supports_delegated_mode_without_nested_goal() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-pr")
+            .expect("clud-pr must be bundled")
+            .skill_md;
+
+        for required in [
+            "Delegated Mode",
+            "Do not invoke `/goal`",
+            "When called by [[clud-fix]], do not set or replace `/goal`",
+            "Return structured evidence",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-pr skill missing delegated-mode guidance: {required}"
             );
         }
     }
@@ -586,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_install_writes_bundled_skill_body_byte_for_byte() {
+    fn codex_install_writes_bundled_skill_bodies_byte_for_byte() {
         let home = tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
@@ -594,14 +726,21 @@ mod tests {
             .unwrap()
             .expect("codex backend should be active");
 
-        let expected = BUNDLED_SKILLS
-            .iter()
-            .find(|s| s.name == "clud-pr")
-            .expect("clud-pr must be bundled")
-            .skill_md;
-        let written =
-            std::fs::read_to_string(home.path().join(".codex/skills/clud-pr/SKILL.md")).unwrap();
-        assert_eq!(written, expected);
+        for skill_name in ["clud-pr", "clud-fix"] {
+            let expected = BUNDLED_SKILLS
+                .iter()
+                .find(|s| s.name == skill_name)
+                .unwrap_or_else(|| panic!("{skill_name} must be bundled"))
+                .skill_md;
+            let written = std::fs::read_to_string(
+                home.path()
+                    .join(".codex/skills")
+                    .join(skill_name)
+                    .join("SKILL.md"),
+            )
+            .unwrap();
+            assert_eq!(written, expected);
+        }
     }
 
     #[test]

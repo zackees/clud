@@ -33,7 +33,7 @@ multi-backend expander landed.
 | Backends targeted | Selected backend during global setup; Claude plus Codex today | Claude global setup only |
 | Source tree | `crates/clud-bin/assets/skills/` | Top-level `skills/` |
 | Existing file behavior | Skip, preserving user edits | Compare modulo whitespace; overwrite semantic divergence |
-| Bundled skills | `clud-loop`, `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos` | `clud-pr`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
+| Bundled skills | `clud-loop`, `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-fix`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos`, `clud-improve` | `clud-pr`, `clud-fix`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
 | Retired purge list | Stale clud-managed copies under `~/.agents/skills/` | `clud-pr-merge` |
 
 Both flows are non-fatal. A failure logs a `[clud] note: ...` line and launch
@@ -42,7 +42,7 @@ continues.
 ## Global Setup Flow
 
 `main()` resolves the backend, asks `launch_setup.rs` for a setup scope, and
-then builds the final `LaunchPlan`. If `~/.clud/settings.toml` contains a
+then builds the final `LaunchPlan`. If `~/.clud/settings.json` contains a
 backend-level global preference, future launches for that backend run global
 setup without prompting. Otherwise automation, piped stdin, `--dry-run`, and
 one-shot prompt launches default to session-only. Bare interactive launches can
@@ -65,6 +65,7 @@ When global setup is selected:
 | `clud-loop` | yes | no |
 | `clud-issue` | yes | yes |
 | `clud-pr` | yes | yes |
+| `clud-fix` | yes | yes |
 | `clud-issue-triage` | yes | no |
 | `clud-tag-release` | yes | no |
 | `clud-docker-rust-app-dev` | yes | no |

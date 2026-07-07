@@ -361,6 +361,72 @@ fn test_fix_subcommand() {
 }
 
 #[test]
+fn test_optimize_defaults_to_rust_global_soldr() {
+    let args = parse(&["clud", "optimize"]);
+    match args.command {
+        Some(Command::Optimize {
+            target,
+            global,
+            repo,
+            install_soldr,
+            use_soldr_shims,
+            ref soldr_version,
+        }) => {
+            assert_eq!(target, OptimizeTarget::Rust);
+            assert!(!global);
+            assert!(!repo);
+            assert!(install_soldr);
+            assert!(use_soldr_shims);
+            assert_eq!(soldr_version, "0.7.11");
+        }
+        other => panic!("expected Optimize subcommand, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_optimize_rust_repo_flags() {
+    let args = parse(&[
+        "clud",
+        "optimize",
+        "rust",
+        "--repo",
+        "--install-soldr=false",
+        "--use-soldr-shims=false",
+        "--soldr-version",
+        "1.2.3",
+    ]);
+    match args.command {
+        Some(Command::Optimize {
+            target,
+            global,
+            repo,
+            install_soldr,
+            use_soldr_shims,
+            ref soldr_version,
+        }) => {
+            assert_eq!(target, OptimizeTarget::Rust);
+            assert!(!global);
+            assert!(repo);
+            assert!(!install_soldr);
+            assert!(!use_soldr_shims);
+            assert_eq!(soldr_version, "1.2.3");
+        }
+        other => panic!("expected Optimize subcommand, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_optimize_soldr_alias_selects_rust() {
+    let args = parse(&["clud", "optimize", "soldr"]);
+    match args.command {
+        Some(Command::Optimize { target, .. }) => {
+            assert_eq!(target, OptimizeTarget::Rust);
+        }
+        other => panic!("expected Optimize subcommand, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_fix_with_url() {
     let args = parse(&[
         "clud",
@@ -466,6 +532,13 @@ fn test_kill_all() {
         }
         _ => panic!("expected Kill subcommand"),
     }
+}
+
+#[test]
+fn test_slay_subcommand() {
+    let args = parse(&["clud", "slay"]);
+    assert!(matches!(args.command, Some(Command::Slay)));
+    assert!(args.passthrough.is_empty());
 }
 
 #[test]
@@ -776,36 +849,30 @@ fn test_gc_list_kind_filter() {
 }
 
 #[test]
-fn test_gc_purge_with_duration() {
-    let args = parse(&["clud", "gc", "purge", "1d"]);
+fn test_gc_prune_kind_filter() {
+    let args = parse(&["clud", "gc", "prune", "--kind", "worktree"]);
     match args.command {
         Some(Command::Gc {
-            subcommand:
-                Some(GcSubcommand::Purge {
-                    ref duration,
-                    dry_run,
-                    yes,
-                    ref kind,
-                }),
+            subcommand: Some(GcSubcommand::Prune { dry_run, ref kind }),
         }) => {
-            assert_eq!(duration.as_deref(), Some("1d"));
             assert!(!dry_run);
-            assert!(!yes);
-            assert!(kind.is_none());
+            assert_eq!(kind.as_deref(), Some("worktree"));
         }
-        _ => panic!("expected Gc::Purge"),
+        _ => panic!("expected Gc::Prune"),
     }
 }
 
 #[test]
-fn test_gc_purge_without_duration_means_purge_all() {
-    // Issue #135 Phase 1: bare `clud gc purge` -> purge ALL non-live-locked.
+fn test_gc_purge_without_kind_parses_for_runtime_error() {
     let args = parse(&["clud", "gc", "purge"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::Purge { ref duration, .. }),
+            subcommand: Some(GcSubcommand::Purge { ref kind, .. }),
         }) => {
-            assert!(duration.is_none(), "purge with no arg -> None duration");
+            assert!(
+                kind.is_none(),
+                "runtime prints the custom missing-kind error"
+            );
         }
         _ => panic!("expected bare Gc::Purge"),
     }
@@ -817,7 +884,6 @@ fn test_gc_purge_dry_run_yes_kind() {
         "clud",
         "gc",
         "purge",
-        "7d",
         "--dry-run",
         "--yes",
         "--kind",
@@ -827,18 +893,69 @@ fn test_gc_purge_dry_run_yes_kind() {
         Some(Command::Gc {
             subcommand:
                 Some(GcSubcommand::Purge {
-                    ref duration,
                     dry_run,
                     yes,
                     ref kind,
                 }),
         }) => {
-            assert_eq!(duration.as_deref(), Some("7d"));
             assert!(dry_run);
             assert!(yes);
             assert_eq!(kind.as_deref(), Some("worktree"));
         }
         _ => panic!("expected Gc::Purge with flags"),
+    }
+}
+
+#[test]
+fn test_gc_purge_rejects_legacy_duration_positional() {
+    let argv: Vec<String> = ["clud", "gc", "purge", "7d"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let result = Args::try_parse_from(argv);
+    assert!(
+        result.is_err(),
+        "legacy purge duration positional should be rejected"
+    );
+}
+
+#[test]
+fn test_gc_all_defaults_to_prune() {
+    let args = parse(&["clud", "gc", "all"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand:
+                Some(GcSubcommand::All {
+                    purge,
+                    dry_run,
+                    yes,
+                }),
+        }) => {
+            assert!(!purge);
+            assert!(!dry_run);
+            assert!(!yes);
+        }
+        _ => panic!("expected Gc::All"),
+    }
+}
+
+#[test]
+fn test_gc_all_purge_yes() {
+    let args = parse(&["clud", "gc", "all", "--purge", "--yes"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand:
+                Some(GcSubcommand::All {
+                    purge,
+                    dry_run,
+                    yes,
+                }),
+        }) => {
+            assert!(purge);
+            assert!(!dry_run);
+            assert!(yes);
+        }
+        _ => panic!("expected Gc::All --purge --yes"),
     }
 }
 
@@ -858,6 +975,70 @@ fn test_gc_reconcile() {
         }) => {}
         _ => panic!("expected Gc::Reconcile"),
     }
+}
+
+#[test]
+fn test_config_bare_subcommand_parses() {
+    let args = parse(&["clud", "config"]);
+    match args.command {
+        Some(Command::Config { subcommand: None }) => {}
+        other => panic!("expected bare Config command, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_show_subcommand_parses() {
+    let args = parse(&["clud", "config", "show"]);
+    match args.command {
+        Some(Command::Config {
+            subcommand: Some(ConfigSubcommand::Show { json }),
+        }) => assert!(!json),
+        other => panic!("expected Config::Show, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_show_json_subcommand_parses() {
+    let args = parse(&["clud", "config", "show", "--json"]);
+    match args.command {
+        Some(Command::Config {
+            subcommand: Some(ConfigSubcommand::Show { json }),
+        }) => assert!(json),
+        other => panic!("expected Config::Show --json, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_edit_local_editor_subcommand_parses() {
+    let args = parse(&[
+        "clud",
+        "config",
+        "edit",
+        "--local",
+        "--editor",
+        "code --wait",
+    ]);
+    match args.command {
+        Some(Command::Config {
+            subcommand: Some(ConfigSubcommand::Edit { local, ref editor }),
+        }) => {
+            assert!(local);
+            assert_eq!(editor.as_deref(), Some("code --wait"));
+        }
+        other => panic!("expected Config::Edit --local --editor, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_flags_remain_backend_passthrough_outside_config_subcommand() {
+    let args = parse(&["clud", "--local", "--editor", "vim"]);
+
+    assert!(args.command.is_none());
+    assert_eq!(args.passthrough, vec!["--local", "--editor", "vim"]);
 }
 
 #[test]
@@ -914,5 +1095,127 @@ fn test_daemon_servicedef_alias_subcommand_parses() {
             subcommand: DaemonSubcommand::RunningProcess { json },
         }) => assert!(!json),
         other => panic!("expected Daemon::RunningProcess alias, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_top_subcommand_parses() {
+    let args = parse(&["clud", "top"]);
+    match args.command {
+        Some(Command::Top {
+            json,
+            once,
+            watch,
+            tree,
+            flat,
+            sort,
+            limit,
+            since,
+            originator,
+        }) => {
+            assert!(!json);
+            assert!(!once);
+            assert!(!watch);
+            assert!(!tree);
+            assert!(!flat);
+            assert_eq!(sort, TopSort::Cpu);
+            assert_eq!(limit, 20);
+            assert!(since.is_none());
+            assert!(originator.is_none());
+        }
+        other => panic!("expected Top, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_top_json_subcommand_parses() {
+    let args = parse(&["clud", "top", "--json"]);
+    match args.command {
+        Some(Command::Top { json, .. }) => assert!(json),
+        other => panic!("expected Top --json, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_top_once_flat_sort_limit_since_originator_parses() {
+    let args = parse(&[
+        "clud",
+        "top",
+        "--once",
+        "--flat",
+        "--sort",
+        "rss",
+        "--limit",
+        "7",
+        "--since",
+        "5m",
+        "--originator",
+        "CLUD:123",
+    ]);
+    match args.command {
+        Some(Command::Top {
+            once,
+            flat,
+            sort,
+            limit,
+            since,
+            originator,
+            ..
+        }) => {
+            assert!(once);
+            assert!(flat);
+            assert_eq!(sort, TopSort::Rss);
+            assert_eq!(limit, 7);
+            assert_eq!(since.as_deref(), Some("5m"));
+            assert_eq!(originator.as_deref(), Some("CLUD:123"));
+        }
+        other => panic!("expected Top with options, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_symbols_bare_subcommand_yields_none() {
+    let args = parse(&["clud", "symbols"]);
+    match args.command {
+        Some(Command::Symbols { ref subcommand }) => assert!(subcommand.is_none()),
+        other => panic!("expected Symbols, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_symbols_install_subcommand_parses() {
+    let args = parse(&["clud", "symbols", "install"]);
+    match args.command {
+        Some(Command::Symbols {
+            subcommand: Some(SymbolsSubcommand::Install),
+        }) => {}
+        other => panic!("expected Symbols::Install, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_symbols_verify_all_subcommand_parses() {
+    let args = parse(&["clud", "symbols", "verify", "--all"]);
+    match args.command {
+        Some(Command::Symbols {
+            subcommand: Some(SymbolsSubcommand::Verify { all }),
+        }) => assert!(all),
+        other => panic!("expected Symbols::Verify --all, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_symbols_verify_default_all_false() {
+    let args = parse(&["clud", "symbols", "verify"]);
+    match args.command {
+        Some(Command::Symbols {
+            subcommand: Some(SymbolsSubcommand::Verify { all }),
+        }) => assert!(!all),
+        other => panic!("expected Symbols::Verify (no --all), got {other:?}"),
     }
 }

@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
 use crate::args::Args;
@@ -43,6 +43,7 @@ pub enum SelectorEvent {
     Up,
     Down,
     Enter,
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +60,8 @@ impl Default for ScopeSelector {
 }
 
 impl ScopeSelector {
+    const RENDERED_LINES: usize = 4;
+
     pub fn selected(self) -> LaunchSetupScope {
         self.selected
     }
@@ -68,23 +71,35 @@ impl ScopeSelector {
             SelectorEvent::Up => self.selected = LaunchSetupScope::SessionOnly,
             SelectorEvent::Down => self.selected = LaunchSetupScope::Global,
             SelectorEvent::Enter => return Some(self.selected),
+            SelectorEvent::Cancel => return Some(LaunchSetupScope::SessionOnly),
         }
         None
     }
 
     pub fn render<W: Write>(&self, out: &mut W) -> io::Result<()> {
-        writeln!(out, "Launch setup scope (Up/Down, Enter):")?;
+        writeln!(out, "Launch setup scope")?;
+        writeln!(out, "  Up/Down move, Enter select, Esc session-only")?;
         writeln!(
             out,
-            "{} Session only",
+            "{} {} Session only   this launch",
+            cursor(self.selected == LaunchSetupScope::SessionOnly),
             marker(self.selected == LaunchSetupScope::SessionOnly)
         )?;
         writeln!(
             out,
-            "{} Globally",
+            "{} {} Globally       remember this backend",
+            cursor(self.selected == LaunchSetupScope::Global),
             marker(self.selected == LaunchSetupScope::Global)
         )?;
         out.flush()
+    }
+}
+
+fn cursor(selected: bool) -> &'static str {
+    if selected {
+        ">"
+    } else {
+        " "
     }
 }
 
@@ -127,8 +142,42 @@ pub fn scope_for_configured_launch(
     scope_for_non_prompting_launch(args, interactive_terminal)
 }
 
+pub fn scope_for_launch_selection(
+    args: &Args,
+    interactive_terminal: bool,
+    configured_scope: Option<LaunchSetupScope>,
+    configured_default_backend: Option<Backend>,
+    selected_backend: Backend,
+) -> Option<LaunchSetupScope> {
+    if should_prompt_for_scope(args, interactive_terminal)
+        && configured_default_backend.is_some_and(|backend| backend != selected_backend)
+    {
+        return None;
+    }
+    scope_for_configured_launch(args, interactive_terminal, configured_scope)
+}
+
+pub fn should_persist_prompted_default_backend(args: &Args, scope: LaunchSetupScope) -> bool {
+    !args.dry_run && (args.claude || args.codex) && matches!(scope, LaunchSetupScope::Global)
+}
+
 pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
     let _raw = RawModeGuard::enable()?;
+    write!(out, "\x1b[?25l")?;
+    out.flush()?;
+
+    let result = prompt_scope_inner(out);
+    let restore_result = write!(out, "\x1b[?25h").and_then(|_| out.flush());
+    match result {
+        Ok(scope) => restore_result.map(|_| scope),
+        Err(error) => {
+            let _ = restore_result;
+            Err(error)
+        }
+    }
+}
+
+fn prompt_scope_inner<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
     let mut selector = ScopeSelector::default();
     selector.render(out)?;
     let _ = drain_pending_terminal_events();
@@ -138,9 +187,18 @@ pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
             continue;
         };
         let event = match key.code {
+            KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "launch setup cancelled",
+                ));
+            }
             KeyCode::Up => SelectorEvent::Up,
             KeyCode::Down => SelectorEvent::Down,
+            KeyCode::Char('k') => SelectorEvent::Up,
+            KeyCode::Char('j') => SelectorEvent::Down,
             KeyCode::Enter => SelectorEvent::Enter,
+            KeyCode::Esc => SelectorEvent::Cancel,
             _ => continue,
         };
         if let Some(scope) = selector.handle(event) {
@@ -148,7 +206,7 @@ pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
             out.flush()?;
             return Ok(scope);
         }
-        write!(out, "\x1b[3A")?;
+        write!(out, "\x1b[{}A\x1b[J", ScopeSelector::RENDERED_LINES)?;
         selector.render(out)?;
     }
 }
@@ -308,6 +366,12 @@ impl HarnessSetupAction for CodexHookNormalizeAction {
 }
 
 pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
+    // Note: bundled Python tools (~/.clud/tools/*) are refreshed by
+    // foreground startup and daemon startup, not as part of this
+    // launch-setup pipeline. `clud tool run` also self-heals inline so
+    // first-run hooks bypass NotFound. The launch setup actions here are
+    // limited to backend-specific skills, drift tracking, and codex hook
+    // normalization.
     vec![
         Box::new(BundledSkillsAction {
             backend: Backend::Claude,
@@ -389,7 +453,7 @@ mod tests {
         selector.render(&mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "Launch setup scope (Up/Down, Enter):\n[x] Session only\n[ ] Globally\n"
+            "Launch setup scope\n  Up/Down move, Enter select, Esc session-only\n> [x] Session only   this launch\n  [ ] Globally       remember this backend\n"
         );
     }
 
@@ -407,15 +471,26 @@ mod tests {
     }
 
     #[test]
-    fn pending_enter_is_drained_before_prompt_accepts_input() {
+    fn selector_escape_chooses_session_only() {
+        let mut selector = ScopeSelector::default();
+        assert_eq!(selector.handle(SelectorEvent::Down), None);
+        assert_eq!(selector.selected(), LaunchSetupScope::Global);
+        assert_eq!(
+            selector.handle(SelectorEvent::Cancel),
+            Some(LaunchSetupScope::SessionOnly)
+        );
+    }
+
+    #[test]
+    fn pending_input_is_drained_before_prompt_accepts_input() {
         use crossterm::event::{KeyEvent, KeyModifiers};
         use std::cell::RefCell;
         use std::collections::VecDeque;
 
-        let events = RefCell::new(VecDeque::from([Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        ))]));
+        let events = RefCell::new(VecDeque::from([
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]));
 
         let drained = drain_pending_events(
             || Ok(!events.borrow().is_empty()),
@@ -423,7 +498,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(drained, 1);
+        assert_eq!(drained, 2);
         assert!(events.borrow().is_empty());
     }
 
@@ -469,6 +544,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_backend_that_differs_from_stored_default_prompts_again() {
+        let args = parse(&["clud", "--codex"]);
+        assert_eq!(
+            scope_for_launch_selection(
+                &args,
+                true,
+                Some(LaunchSetupScope::Global),
+                Some(Backend::Claude),
+                Backend::Codex,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_backend_matching_stored_default_uses_configured_scope() {
+        let args = parse(&["clud", "--codex"]);
+        assert_eq!(
+            scope_for_launch_selection(
+                &args,
+                true,
+                Some(LaunchSetupScope::Global),
+                Some(Backend::Codex),
+                Backend::Codex,
+            ),
+            Some(LaunchSetupScope::Global)
+        );
+    }
+
+    #[test]
+    fn one_shot_launches_do_not_prompt_when_backend_differs_from_default() {
+        let args = parse(&["clud", "--codex", "-p", "hello"]);
+        assert_eq!(
+            scope_for_launch_selection(
+                &args,
+                true,
+                Some(LaunchSetupScope::Global),
+                Some(Backend::Claude),
+                Backend::Codex,
+            ),
+            Some(LaunchSetupScope::Global)
+        );
+    }
+
+    #[test]
     fn configured_global_scope_applies_to_one_shot_launches() {
         let args = parse(&["clud", "--codex", "-p", "hello"]);
         assert_eq!(
@@ -484,6 +604,27 @@ mod tests {
             scope_for_configured_launch(&args, true, Some(LaunchSetupScope::Global)),
             Some(LaunchSetupScope::SessionOnly)
         );
+    }
+
+    #[test]
+    fn global_explicit_backend_selection_persists_default_backend() {
+        let args = parse(&["clud", "--codex"]);
+        assert!(should_persist_prompted_default_backend(
+            &args,
+            LaunchSetupScope::Global
+        ));
+        assert!(!should_persist_prompted_default_backend(
+            &args,
+            LaunchSetupScope::SessionOnly
+        ));
+        assert!(!should_persist_prompted_default_backend(
+            &parse(&["clud"]),
+            LaunchSetupScope::Global
+        ));
+        assert!(!should_persist_prompted_default_backend(
+            &parse(&["clud", "--codex", "--dry-run"]),
+            LaunchSetupScope::Global
+        ));
     }
 
     #[test]
@@ -562,6 +703,11 @@ mod tests {
         assert_eq!(report.ran, vec!["bundled-skills", "claude-drift-skills"]);
         assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists());
         assert!(!home.path().join(".agents").exists());
+        // Launch setup does not install bundled tools. Foreground startup,
+        // daemon startup, and `clud tool run` own that path. `.clud/` is
+        // created by the bundled-skills action for settings.json under codex
+        // setup, but the claude path does not touch it, so it stays absent
+        // here.
         assert!(!home.path().join(".clud").exists());
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout":5"#), "{hooks}");

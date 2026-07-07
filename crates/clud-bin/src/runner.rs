@@ -6,10 +6,14 @@
 //! the OLE drag-drop registration.
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::backend::Backend;
+use crate::clud_settings;
 use crate::command;
 use crate::console_setup::enable_console_vt_input;
+use crate::cpu_banner;
 use crate::loop_artifacts;
 use crate::loop_check::{
     check_loop_markers, check_loop_markers_with_output, loop_unconverged_exit,
@@ -93,6 +97,97 @@ pub fn child_env() -> Vec<(String, String)> {
     env
 }
 
+/// Wrap [`child_env`] with the per-backend shell policy from
+/// `~/.clud/settings.json`. When `shell.disable_powershell` resolves true for
+/// `backend` (issue #447):
+///
+/// - Both backends get `CLUD_DISABLE_POWERSHELL=1` so skills / CLAUDE.md
+///   content can branch on it.
+/// - Claude additionally gets `CLAUDE_CODE_USE_POWERSHELL_TOOL=0` (the
+///   undocumented env-var kill-switch extracted from the bundled binary's
+///   error strings) plus `CLAUDE_CODE_GIT_BASH_PATH` pointing at the lazily
+///   resolved vendored Git Bash (see [`crate::shell::git_bash_resolver`]).
+///   The PowerShell-tool toggle is set even if the resolver fails so Claude
+///   surfaces a hard error instead of silently falling back to PowerShell.
+/// - Codex has no equivalent env-var override (openai/codex#16717 is
+///   closed). The Codex side ships as a PreToolUse hook in a follow-up PR;
+///   here we just hand it `CLUD_DISABLE_POWERSHELL=1` for advisory use.
+///
+/// `Backend::Claude` is the case that actually changes behavior today.
+pub fn child_env_for_backend(backend: Backend) -> Vec<(String, String)> {
+    let home = clud_home_dir();
+    child_env_for_backend_at(backend, home.as_deref())
+}
+
+/// Test seam — accepts the home dir explicitly so the policy can be exercised
+/// against a temp directory without mutating the real `~/.clud/settings.json`.
+pub fn child_env_for_backend_at(backend: Backend, home: Option<&Path>) -> Vec<(String, String)> {
+    let mut env = child_env();
+    let Some(home) = home else {
+        return env;
+    };
+
+    let disable = match clud_settings::load_shell_disable_powershell_for_backend_at(home, backend) {
+        Ok(value) => value,
+        Err(_) => return env,
+    };
+    if !disable {
+        return env;
+    }
+
+    push_or_replace(&mut env, "CLUD_DISABLE_POWERSHELL", "1");
+
+    if !matches!(backend, Backend::Claude) {
+        return env;
+    }
+
+    // The PowerShell-tool toggle is set unconditionally — if the resolver
+    // below fails, Claude will hard-fail visibly with "Git Bash was not
+    // found and the PowerShell tool is disabled" rather than silently
+    // resurrecting PowerShell.
+    push_or_replace(&mut env, "CLAUDE_CODE_USE_POWERSHELL_TOOL", "0");
+
+    match crate::shell::git_bash_resolver::resolve_or_fetch_git_bash(home) {
+        Ok(path) => {
+            push_or_replace(
+                &mut env,
+                "CLAUDE_CODE_GIT_BASH_PATH",
+                &path.to_string_lossy(),
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "[clud] shell.disable_powershell=true but vendored bash fetch failed: {error}. \
+                 Set CLAUDE_CODE_GIT_BASH_PATH to a bash.exe already on disk to recover."
+            );
+        }
+    }
+
+    env
+}
+
+fn push_or_replace(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    env.retain(|(k, _)| k != key);
+    env.push((key.to_string(), value.to_string()));
+}
+
+fn clud_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(path) = std::env::var_os("USERPROFILE") {
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("HOME") {
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
 pub fn get_terminal_size() -> (u16, u16) {
     let probe = terminal_size::terminal_size().map(|(w, h)| (w.0, h.0));
     resolve_terminal_size(probe)
@@ -165,12 +260,17 @@ pub fn run_plan_subprocess(
     verbose: bool,
     interrupted: &AtomicBool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
+    cpu_banner_cfg: cpu_banner::CpuBannerCfg,
 ) -> i32 {
     use std::path::PathBuf;
 
     use running_process::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
 
-    let env = child_env();
+    // Issue #466: CPU-burn banner. Watcher thread joins on drop at function
+    // exit. Inert when cfg.enabled = false (no thread spawned).
+    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
+
+    let env = child_env_for_backend(plan.backend);
     let mut last_exit = 0i32;
 
     for iteration in 0..plan.iterations {
@@ -346,6 +446,7 @@ enum ProcessOutcome {
 /// `kill_tree` + bounded wait) so `--no-daemon` users still get cleanup.
 fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wrapped: bool) {
     if let Some(pid) = process.pid() {
+        crate::ctrl_c_track::record_forensics(Some(pid));
         match crate::daemon::default_state_dir() {
             Ok(state_dir) => {
                 if crate::daemon::try_handoff_kill_to_daemon(
@@ -374,6 +475,7 @@ fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wr
         process_tree::kill_tree(pid);
     } else {
         crate::ctrl_c_track::record_handoff(false, Some("no_child_pid"));
+        crate::ctrl_c_track::record_forensics(None);
     }
     let _ = process.kill();
     // Daemon-less fallback only: bounded wait so the legacy path doesn't
@@ -495,8 +597,14 @@ pub fn run_plan_pty(
     interrupted: &AtomicBool,
     dnd_enabled: bool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
+    cpu_banner_cfg: cpu_banner::CpuBannerCfg,
 ) -> i32 {
     use running_process::pty::NativePtyProcess;
+
+    // Issue #466: CPU-burn banner. Same shape as the subprocess runner —
+    // background thread joins on drop at function exit. Inert when
+    // cfg.enabled = false.
+    let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
     // Enable VT input on the Windows console for the whole PTY session.
     // The raw byte pump reads from clud's stdin, so PTY mode needs the
@@ -549,7 +657,7 @@ pub fn run_plan_pty(
         Option<()>,
     ) = (None, None);
 
-    let env = child_env();
+    let env = child_env_for_backend(plan.backend);
     let mut last_exit = 0i32;
     let terminal_capabilities = (plan.graphics.mode != crate::graphics::GraphicsMode::Off)
         .then(crate::graphics::detect_current_terminal);
@@ -821,5 +929,114 @@ mod tests {
         );
         let pyio_count = env.iter().filter(|(k, _)| k == "PYTHONIOENCODING").count();
         assert_eq!(pyio_count, 1, "PYTHONIOENCODING must appear exactly once");
+    }
+
+    fn env_lookup(env: &[(String, String)], key: &str) -> Option<String> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn child_env_for_backend_does_not_set_shell_vars_when_toggle_off() {
+        let home = tempfile::tempdir().unwrap();
+        for backend in [Backend::Claude, Backend::Codex] {
+            let env = child_env_for_backend_at(backend, Some(home.path()));
+            assert_eq!(env_lookup(&env, "CLUD_DISABLE_POWERSHELL"), None);
+            assert_eq!(env_lookup(&env, "CLAUDE_CODE_USE_POWERSHELL_TOOL"), None);
+            assert_eq!(env_lookup(&env, "CLAUDE_CODE_GIT_BASH_PATH"), None);
+        }
+    }
+
+    #[test]
+    fn child_env_for_backend_sets_clud_disable_for_both_backends_when_top_level_true() {
+        let home = tempfile::tempdir().unwrap();
+        clud_settings::save_shell_disable_powershell_at(home.path(), true).unwrap();
+
+        let codex_env = child_env_for_backend_at(Backend::Codex, Some(home.path()));
+        assert_eq!(
+            env_lookup(&codex_env, "CLUD_DISABLE_POWERSHELL").as_deref(),
+            Some("1"),
+            "Codex still gets the advisory env var so skills can branch"
+        );
+        // Codex has no env-var equivalent for the PowerShell tool itself
+        // — the load-bearing enforcement ships as a PreToolUse hook in a
+        // follow-up PR. Make sure we don't accidentally set Claude-only
+        // vars on the Codex path here.
+        assert_eq!(
+            env_lookup(&codex_env, "CLAUDE_CODE_USE_POWERSHELL_TOOL"),
+            None
+        );
+        assert_eq!(env_lookup(&codex_env, "CLAUDE_CODE_GIT_BASH_PATH"), None);
+    }
+
+    /// Pre-stage the resolver's warm-path artifacts under `home` so the
+    /// runner tests don't trigger a real 9 MB network fetch. Mirrors what
+    /// `git_bash_resolver::resolve_or_fetch_with` writes on a successful
+    /// fetch — the directory tree plus the sibling `.complete` sentinel.
+    fn warm_cache_vendored_bash(home: &Path) -> PathBuf {
+        let manifest = crate::shell::git_bash_resolver::embedded_manifest().unwrap();
+        let sha = &manifest.git_bash_bin.sha256;
+        let extraction = crate::shell::git_bash_resolver::extraction_dir(home, sha);
+        let bash_path = extraction.join(&manifest.git_bash_bin.relative_bash_path);
+        std::fs::create_dir_all(bash_path.parent().unwrap()).unwrap();
+        std::fs::write(&bash_path, b"#!/fake/bash test stub").unwrap();
+        std::fs::write(
+            crate::shell::git_bash_resolver::sentinel_path(home, sha),
+            b"warm",
+        )
+        .unwrap();
+        bash_path
+    }
+
+    #[test]
+    fn child_env_for_backend_sets_claude_kill_switch_when_claude_enabled() {
+        let home = tempfile::tempdir().unwrap();
+        clud_settings::save_shell_disable_powershell_at(home.path(), true).unwrap();
+        let expected_bash = warm_cache_vendored_bash(home.path());
+
+        let env = child_env_for_backend_at(Backend::Claude, Some(home.path()));
+        assert_eq!(
+            env_lookup(&env, "CLUD_DISABLE_POWERSHELL").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            env_lookup(&env, "CLAUDE_CODE_USE_POWERSHELL_TOOL").as_deref(),
+            Some("0"),
+            "Claude env-var kill-switch must be set when the toggle is on"
+        );
+        assert_eq!(
+            env_lookup(&env, "CLAUDE_CODE_GIT_BASH_PATH").as_deref(),
+            Some(expected_bash.to_string_lossy().as_ref()),
+            "CLAUDE_CODE_GIT_BASH_PATH must resolve to the warm-cached bash"
+        );
+    }
+
+    #[test]
+    fn child_env_for_backend_backend_override_blocks_top_level() {
+        let home = tempfile::tempdir().unwrap();
+        clud_settings::save_shell_disable_powershell_at(home.path(), true).unwrap();
+        clud_settings::save_shell_disable_powershell_for_backend_at(
+            home.path(),
+            Backend::Claude,
+            Some(false),
+        )
+        .unwrap();
+
+        let claude_env = child_env_for_backend_at(Backend::Claude, Some(home.path()));
+        assert_eq!(
+            env_lookup(&claude_env, "CLUD_DISABLE_POWERSHELL"),
+            None,
+            "Claude override=false must short-circuit env injection"
+        );
+        assert_eq!(
+            env_lookup(&claude_env, "CLAUDE_CODE_USE_POWERSHELL_TOOL"),
+            None
+        );
+
+        let codex_env = child_env_for_backend_at(Backend::Codex, Some(home.path()));
+        assert_eq!(
+            env_lookup(&codex_env, "CLUD_DISABLE_POWERSHELL").as_deref(),
+            Some("1"),
+            "Codex with null override should still inherit top-level true"
+        );
     }
 }

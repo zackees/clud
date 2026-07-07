@@ -18,8 +18,8 @@ use super::paths::{
 };
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
-    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow, RepoVisit,
-    SessionSnapshot, WorkerClientMessage,
+    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow,
+    ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
 };
 use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
@@ -31,17 +31,16 @@ use super::wire_prost::{
 ///
 /// 1. Fast path: read the info file, probe its PID + port; return if up.
 /// 2. Slow path: acquire `<state_dir>/daemon.lock` (issue #138 bringup
-///    serialization), re-probe under the lock, and only spawn `clud
-///    __daemon --state-dir <state_dir>` detached if a sibling didn't
-///    bring the daemon up while we waited. Lock releases when this
-///    function returns.
+///    serialization), clean stale state, re-probe under the lock, and
+///    only spawn `clud __daemon --state-dir <state_dir>` detached if a
+///    sibling didn't bring the daemon up while we waited. Lock releases
+///    when this function returns.
 ///
 /// Visible to `main.rs` (the `clud` binary) so it can call this during
 /// early startup. `pub` rather than `pub(crate)` because the binary is
 /// a separate crate within the package.
 pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(state_dir)?;
-    cleanup_stale_state(state_dir);
     if let Some(info) = probe_existing(state_dir) {
         if daemon_version_matches(&info) {
             return Ok(());
@@ -61,6 +60,7 @@ pub fn ensure_daemon(state_dir: &Path) -> io::Result<()> {
     }
 
     let _bringup_lock = acquire_bringup_lock(state_dir)?;
+    cleanup_stale_state(state_dir);
     // Re-probe under the lock: a sibling may have spawned while we waited.
     if let Some(info) = probe_existing(state_dir) {
         if daemon_version_matches(&info) {
@@ -190,6 +190,36 @@ pub(super) fn send_daemon_request(
     decode_daemon_response_line(&line).map_err(wire_error_to_io)
 }
 
+pub fn daemon_client_metrics(state_dir: &Path) -> io::Result<(u32, f32)> {
+    match send_daemon_request(state_dir, &DaemonRequest::Metrics)? {
+        DaemonResponse::Metrics { pid, cpu_pct } => Ok((pid, cpu_pct)),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
+pub(super) fn daemon_client_proc_snapshot(
+    state_dir: &Path,
+    include_dead_since_ms: u64,
+) -> io::Result<ProcTreeSnapshot> {
+    match send_daemon_request(
+        state_dir,
+        &DaemonRequest::ProcSnapshot {
+            include_dead_since_ms,
+        },
+    )? {
+        DaemonResponse::ProcSnapshot { snapshot } => Ok(snapshot),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
+
 pub(super) fn request_session_termination(
     state_dir: &Path,
     session_id: &str,
@@ -249,6 +279,40 @@ pub fn try_handoff_kill_to_daemon(state_dir: &Path, pids: &[u32], reason: Option
     // We could parse the ack here, but the wire contract guarantees the
     // daemon spawns its worker before replying; receiving any bytes back
     // means our PIDs are queued.
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    matches!(reader.read_line(&mut line), Ok(n) if n > 0)
+}
+
+/// Fire-and-forget: ask the daemon to sweep dead-originator CLUD orphans.
+/// Called from the foreground clud's exit hook. Tight 150ms read/write
+/// timeouts (mirrors `try_handoff_kill_to_daemon`) so a wedged daemon
+/// can't drag out CLI shutdown. Returns `true` when the ack arrives.
+///
+/// Failure modes (daemon down, version skew, network hiccup) all degrade
+/// silently — the daemon will still catch any dead-originator orphans on
+/// its next periodic sweep (`gc_service`-adjacent path), and the next
+/// `clud slay` invocation does the synchronous version.
+pub fn try_request_orphan_reap(state_dir: &Path) -> bool {
+    let info = match read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
+        Ok(info) => info,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], info.port)),
+        Duration::from_millis(150),
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+    let Ok(format) = daemon_wire_format_from_env() else {
+        return false;
+    };
+    if write_daemon_request(&mut stream, &DaemonRequest::ReapOrphans, format).is_err() {
+        return false;
+    }
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     matches!(reader.read_line(&mut line), Ok(n) if n > 0)
@@ -640,6 +704,36 @@ mod tests {
         super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();
     }
 
+    fn write_unfinished_session(state_dir: &Path, id: &str) {
+        fs::create_dir_all(sessions_dir(state_dir)).unwrap();
+        let session = SessionSnapshot {
+            id: id.to_string(),
+            kind: super::super::types::SessionKind::Subprocess,
+            backend: Some("codex".to_string()),
+            launch_mode: Some("subprocess".to_string()),
+            repo_root: None,
+            command: vec!["codex".to_string()],
+            cwd: None,
+            name: None,
+            created_at: Some(1),
+            detachable: false,
+            background: false,
+            attachable: false,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            daemon_pid: 1,
+            worker_pid: u32::MAX,
+            worker_port: 0,
+            root_pid: None,
+            exit_code: None,
+            exited_at: None,
+            ctrl_c: None,
+        };
+        super::super::io_helpers::write_json_file(&session_snapshot_path(state_dir, id), &session)
+            .unwrap();
+    }
+
     fn spawn_silent_peer() -> (u16, Arc<AtomicBool>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -708,6 +802,23 @@ mod tests {
         assert!(
             saw_request.load(Ordering::SeqCst),
             "stub peer should have observed the request before closing"
+        );
+    }
+
+    #[test]
+    fn ensure_daemon_fast_path_skips_stale_state_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (port, _saw_request) = spawn_silent_peer();
+        write_daemon_info(tmp.path(), std::process::id(), port);
+        write_unfinished_session(tmp.path(), "stale-session");
+
+        ensure_daemon(tmp.path()).expect("reachable daemon should satisfy fast path");
+
+        let session: SessionSnapshot =
+            read_json_file(&session_snapshot_path(tmp.path(), "stale-session")).unwrap();
+        assert_eq!(
+            session.exit_code, None,
+            "steady-state ensure_daemon must not scan and mutate session files"
         );
     }
 

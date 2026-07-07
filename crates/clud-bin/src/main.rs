@@ -1,13 +1,56 @@
 use clud::{
-    args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
-    ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard, launch_setup,
-    loop_artifacts, loop_spec, orphan_reaper, runner, runtime_cache, soldr_activate, startup,
-    trampoline, trash, ui, verbose_log, wasm, worktrees,
+    args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
+    cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
+    launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
+    runner, runtime_cache, soldr_activate, startup, symbols, tool_cli, tool_install, tools,
+    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
+    let mut args = args::Args::parse_with_passthrough();
+
+    // Fast tool path. Detect `clud tool ...` before
+    // normal clud startup so hook/tool invocations do not connect to the
+    // daemon, touch runtime-cache, start title keepers, or register as
+    // foreground clud sessions.
+    if let Some(args::Command::Tool { subcommand }) = &args.command {
+        unsafe {
+            std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
+            std::env::set_var(daemon::ENV_NO_DAEMON, "1");
+        }
+        std::process::exit(tool_cli::run(subcommand));
+    }
+
+    // Install the crash reporter first so a panic during the rest of startup
+    // (arg parsing, runtime-cache hop, drop-target registration, ...) still
+    // writes a JSON report under ~/.clud/state/crashes/. Idempotent; the
+    // daemon and worker process entries re-call install_native() with their
+    // own role to retag any future crash without reinstalling the hook.
+    //
+    // `install_native` covers SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT on
+    // Unix and structured exceptions on Windows in addition to Rust panics.
+    // It explicitly does NOT attach a SIGINT / CTRL_C_EVENT handler — the
+    // existing `ctrlc`-based path (`startup::install_ctrl_c_flag` below /
+    // #372 forensic capture) remains the authoritative Ctrl-C handler.
+    crash_report::install_native("foreground");
+
+    // Issue #408 (Layer 3 of three-layer UV_CACHE_DIR enforcement): pin
+    // every `uv` invocation spawned inside clud's process tree to
+    // `~/.clud/cache/uv/`, so per-script venvs for bundled tools never
+    // leak into the user's global `~/.cache/uv/`. The `clud tool run`
+    // subcommand (Layer 1) re-affirms the same value; both layers read
+    // from `tools::clud_uv_cache_dir()` so there is one source of truth.
+    //
+    // SAFETY: at this point we are still single-threaded (crash reporter
+    // installs handlers but does not spawn threads). Setting env vars
+    // before any other code runs is the standard cross-platform pattern
+    // for this case.
+    unsafe {
+        std::env::set_var("UV_CACHE_DIR", tools::clud_uv_cache_dir());
+    }
+
     verbose_log::init_launch_clock();
 
     if let Err(err) = runtime_cache::hop_to_runtime_cache_if_enabled() {
@@ -40,7 +83,6 @@ fn main() {
     console_title::set_for_current_cwd();
     console_title::keep_setting_in_background();
 
-    let mut args = args::Args::parse_with_passthrough();
     if args.verbose {
         match verbose_log::enable_file_logging() {
             Ok(path) => {
@@ -84,6 +126,12 @@ fn main() {
         std::process::exit(gc::run(&args, subcommand.clone()));
     }
 
+    // Issue #457: settings inspection/editing is self-contained. Dispatch
+    // before backend resolution so `clud config show` never starts an agent.
+    if let Some(args::Command::Config { subcommand }) = &args.command {
+        std::process::exit(config::run(&args, subcommand.clone()));
+    }
+
     // Issue #183: `clud ui` opens the local dashboard. Self-contained;
     // never launches a backend.
     if let Some(args::Command::Ui { json, no_open }) = &args.command {
@@ -99,6 +147,46 @@ fn main() {
     }) = &args.command
     {
         std::process::exit(trash::run(&args, paths, *cross_volume));
+    }
+
+    // Issue #469: `clud log --cmd "..."` posts one telemetry event to
+    // the always-on daemon's HTTP server. Discovers the daemon via
+    // `$CLUD_DAEMON_HTTP_SERVER`. Self-contained; never launches an
+    // agent backend.
+    if let Some(args::Command::Log {
+        cmd,
+        fail_on_no_server,
+    }) = &args.command
+    {
+        std::process::exit(log_event::run(cmd, *fail_on_no_server));
+    }
+
+    // #374 (PR 3): `clud symbols` inspects / verifies crash-report
+    // symbolication against the running binary. Self-contained; never
+    // launches a backend.
+    if let Some(args::Command::Symbols { subcommand }) = &args.command {
+        std::process::exit(symbols::run(&args, subcommand.clone()));
+    }
+
+    // `clud optimize` is machine/repo setup and never launches a backend.
+    if let Some(args::Command::Optimize {
+        target,
+        global,
+        repo,
+        install_soldr,
+        use_soldr_shims,
+        soldr_version,
+    }) = &args.command
+    {
+        std::process::exit(optimize::run(
+            &args,
+            *target,
+            *global,
+            *repo,
+            *install_soldr,
+            *use_soldr_shims,
+            soldr_version,
+        ));
     }
 
     // Issue #83: `--clean-worktrees` is a self-contained maintenance path.
@@ -132,6 +220,19 @@ fn main() {
             );
         }
     }
+    let auto_fix_hooks = if args.no_fix_hooks {
+        false
+    } else {
+        match clud_settings::load_auto_fix_hooks_enabled() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                eprintln!(
+                    "[clud] warning: failed to load hook-health settings: {error}; using default"
+                );
+                true
+            }
+        }
+    };
 
     // Issue #112: explicit hook-parity remediation path. This flag resets the
     // sticky opt-out, applies deterministic repairs, and asks the selected
@@ -199,20 +300,17 @@ fn main() {
         std::process::exit(exit_code);
     }
 
+    // Bundled Python tools are embedded in this binary via BUNDLED_TOOLS.
+    // Refresh managed copies during normal foreground startup so an
+    // upgraded clud binary replaces stale `~/.clud/tools/...` commands even
+    // when an older daemon is already running. `clud tool run` keeps its own
+    // inline self-heal path for hook invocations; dry-run remains no-write.
+    if !args.dry_run {
+        tool_install::ensure_installed();
+        clud::block_bad_cmd_rollout::run_startup_checks(auto_fix_hooks);
+    }
+
     if hook_health::should_check_launch(&args) {
-        let auto_fix_hooks = if args.no_fix_hooks {
-            false
-        } else {
-            match clud_settings::load_auto_fix_hooks_enabled() {
-                Ok(enabled) => enabled,
-                Err(error) => {
-                    eprintln!(
-                        "[clud] warning: failed to load hook-health settings: {error}; using default"
-                    );
-                    true
-                }
-            }
-        };
         if auto_fix_hooks && !args.dry_run {
             if let Err(error) = hook_health::apply_default_repairs() {
                 eprintln!("[clud] warning: failed to auto-repair hook health: {error}");
@@ -224,7 +322,16 @@ fn main() {
         hook_health::emit_launch_warnings();
     }
 
-    if !args.clean_worktrees && !args.fix_hooks {
+    // Large-file guard runs only on actual backend launches (bare `clud`,
+    // `clud --claude`, `clud --codex`, or piped/prompted variants). Skip
+    // for every subcommand path: `clud tool run`, `clud loop`, `clud gc`,
+    // `clud attach/kill/list/logs`, etc. — those are utility invocations
+    // (including compatibility hook shims such as `clud tool run ...`)
+    // where the warning would be noise, not signal. The subcommands that
+    // already short-circuit above via `std::process::exit` never reached
+    // this code anyway; this gate also covers `clud loop` and any future
+    // subcommand that falls through.
+    if args.command.is_none() && !args.clean_worktrees && !args.fix_hooks {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let root = loop_spec::git_root_from(&cwd);
         if args.verbose {
@@ -269,7 +376,37 @@ fn main() {
         verbose_log::log("[clud] daemon: skipped");
     }
 
-    let backend = backend::resolve_backend(args.claude, args.codex);
+    // After foreground startup has refreshed bundled tools, fire the
+    // hook-config scanner against the cwd. Warns on bare
+    // `uv run` in Pre/PostToolUse hooks of Python+Rust polyglot
+    // repos — the failure mode that turns every hook fire into a
+    // multi-minute Rust rebuild on maturin-backed projects (see the
+    // tool's docstring for the setuptools-co-existing-with-Cargo
+    // variant). Same gate as the large-file guard so the warning
+    // only fires for backend launches, not subcommand utility calls
+    // (`clud tool run`, `clud loop`, etc.).
+    if args.command.is_none() && !args.clean_worktrees && !args.fix_hooks {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let root = loop_spec::git_root_from(&cwd);
+        if args.verbose {
+            verbose_log::log("[clud] uv-run hook guard: scanning agent hooks");
+        }
+        uv_run_hook_guard::run(&root);
+    }
+
+    let configured_default_backend = if args.dry_run {
+        None
+    } else {
+        match clud_settings::load_default_backend() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("[clud] warning: failed to load default backend: {error}; using claude");
+                None
+            }
+        }
+    };
+    let backend =
+        backend::resolve_backend_with_default(args.claude, args.codex, configured_default_backend);
     let backend_path = {
         let mut bootstrap_host = backend_bootstrap::ProductionBackendBootstrapHost;
         let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
@@ -294,11 +431,12 @@ fn main() {
     };
 
     // Issue #242: mutable harness setup is scoped per launch until the user
-    // opts into a backend-level global preference. Dry-runs always remain
-    // session-only; otherwise a stored `~/.clud/settings.toml` scope wins.
-    // Bare interactive TUI launches without a stored scope can opt into global
-    // setup through a reusable selector. Global setup runs only the selected
-    // backend's actions.
+    // opts into a global selection. Dry-runs ignore stored preferences;
+    // otherwise `backend.default` controls bare launches and the selected
+    // backend's stored setup scope controls whether global setup runs.
+    // Interactive launches with an explicit backend can opt into global setup
+    // through the inline selector, and are prompted again when the explicit
+    // backend differs from `backend.default`.
     let setup_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
     let configured_scope = if args.dry_run {
         None
@@ -313,17 +451,26 @@ fn main() {
             }
         }
     };
-    let mut persist_global_scope = false;
-    let setup_scope = if let Some(scope) =
-        launch_setup::scope_for_configured_launch(&args, setup_interactive, configured_scope)
-    {
+    let mut persist_prompted_global_selection = false;
+    let setup_scope = if let Some(scope) = launch_setup::scope_for_launch_selection(
+        &args,
+        setup_interactive,
+        configured_scope,
+        configured_default_backend,
+        backend,
+    ) {
         scope
     } else {
         let mut err = io::stderr().lock();
         match launch_setup::prompt_scope(&mut err) {
             Ok(scope) => {
-                persist_global_scope = matches!(scope, launch_setup::LaunchSetupScope::Global);
+                persist_prompted_global_selection =
+                    launch_setup::should_persist_prompted_default_backend(&args, scope);
                 scope
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                eprintln!("[clud] launch setup cancelled");
+                std::process::exit(130);
             }
             Err(error) => {
                 eprintln!(
@@ -333,8 +480,9 @@ fn main() {
             }
         }
     };
-    if persist_global_scope {
-        if let Err(error) = clud_settings::save_launch_setup_scope(backend, setup_scope) {
+    if persist_prompted_global_selection {
+        if let Err(error) = clud_settings::save_global_launch_setup_selection(backend, setup_scope)
+        {
             eprintln!("[clud] note: could not save global setup preference: {error}");
         }
     }
@@ -346,6 +494,20 @@ fn main() {
     }
     if args.verbose {
         verbose_log::log(format_args!("[clud] setup scope: {}", setup_scope.as_str()));
+    }
+
+    if matches!(backend, backend::Backend::Codex) {
+        match clud_settings::load_or_init_codex_config_overrides(!args.dry_run) {
+            Ok(overrides) => {
+                args.codex_config_overrides = overrides;
+            }
+            Err(error) => {
+                eprintln!(
+                    "[clud] warning: failed to load Codex settings: {error}; using default Codex config overrides"
+                );
+                args.codex_config_overrides = clud_settings::default_codex_config_overrides();
+            }
+        }
     }
 
     let plan = command::build_launch_plan(&args, backend, &backend_path);
@@ -477,6 +639,25 @@ fn main() {
             "[clud] launch: direct runner"
         });
     }
+    let launch_log = if let Ok(state_dir) = daemon::default_state_dir() {
+        let source = if centralized { "centralized" } else { "direct" };
+        match launch_log::start_launch(&state_dir, &plan, source) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                eprintln!("[clud] warning: failed to record launch start: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // Issue #466: build the CPU-burn banner cfg from CLI flags + settings.
+    // Suppressed in non-interactive modes (`--dry-run`, `--detach`,
+    // `--detachable`, `--repeat`), by `--no-cpu-banner`, and by the
+    // `[foreground.cpu_banner] enabled = false` settings toggle. Builds an
+    // inert cfg in any of those cases so `BannerWatcher::spawn` is a no-op.
+    let cpu_banner_cfg = build_cpu_banner_cfg(&args, &plan);
+
     let exit_code = if centralized {
         daemon::run_centralized_session(&args, &plan, interrupted.as_ref())
     } else {
@@ -486,6 +667,7 @@ fn main() {
                 args.verbose,
                 interrupted.as_ref(),
                 loop_session.as_mut(),
+                cpu_banner_cfg,
             ),
             backend::LaunchMode::Pty => runner::run_plan_pty(
                 &plan,
@@ -493,9 +675,13 @@ fn main() {
                 interrupted.as_ref(),
                 startup::should_register_drop_target(&args),
                 loop_session.as_mut(),
+                cpu_banner_cfg,
             ),
         }
     };
+    if let Some(handle) = &launch_log {
+        handle.finish(exit_code);
+    }
     if let Some(session) = loop_session.as_mut() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
         session.on_loop_end(summary, err);
@@ -536,6 +722,19 @@ fn main() {
                 outcome.found, outcome.reaped
             ));
         }
+
+        // Have the daemon do a broader sweep on our behalf: any CLUD-tagged
+        // process whose originator is gone (e.g., a sibling clud was
+        // SIGKILL'd and never ran its own exit hook) gets reaped on the
+        // daemon's background thread. Fire-and-forget with a tight
+        // timeout; failure is silently absorbed — the daemon's periodic
+        // heartbeat sweep will catch anything we miss, and the next
+        // `clud slay` does the synchronous version.
+        if !args.keep_orphans {
+            if let Ok(state_dir) = daemon::default_state_dir() {
+                let _ = daemon::try_request_orphan_reap(&state_dir);
+            }
+        }
     }
     if args.verbose {
         verbose_log::log(format_args!("[clud] exit: code {exit_code}"));
@@ -547,6 +746,35 @@ fn main() {
     };
     flush_ctrl_c_exit_event(kind, exit_code);
     std::process::exit(exit_code);
+}
+
+/// Issue #466: assemble the [`cpu_banner::CpuBannerCfg`] from CLI flags
+/// and `~/.clud/settings.json`. Returns the disabled variant whenever the
+/// banner would be wrong to print: `--no-cpu-banner`, `--dry-run`,
+/// `--detach`, `--detachable`, `--repeat`, or the
+/// `[foreground.cpu_banner] enabled = false` settings toggle. Otherwise
+/// reads `heartbeat_secs` from settings (default 30) and resolves
+/// `num_cpus` via `std::thread::available_parallelism` (no syscall on the
+/// hot path; falls back to 1 if probing fails).
+fn build_cpu_banner_cfg(args: &args::Args, plan: &command::LaunchPlan) -> cpu_banner::CpuBannerCfg {
+    if args.no_cpu_banner
+        || args.dry_run
+        || args.detach
+        || args.detachable
+        || plan.repeat_schedule.is_some()
+    {
+        return cpu_banner::CpuBannerCfg::disabled();
+    }
+    let settings = clud_settings::load_cpu_banner_settings().unwrap_or_default();
+    if !settings.enabled {
+        return cpu_banner::CpuBannerCfg::disabled();
+    }
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mut cfg = cpu_banner::CpuBannerCfg::new(std::process::id(), num_cpus);
+    cfg.heartbeat_secs = settings.heartbeat_secs;
+    cfg
 }
 
 /// Write the cross-path Ctrl+C exit-timing event (issue: `clud ui` ctrl-c

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import platform
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 BuildMode = Literal["dev", "release"]
+REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd")
 
 
 def build_environment(mode: BuildMode, env: dict[str, str]) -> dict[str, str]:
@@ -57,6 +60,18 @@ def built_wheels() -> list[Path]:
     return sorted(DIST.glob("clud-*.whl"), key=lambda path: path.stat().st_mtime)
 
 
+def wheel_snapshot() -> dict[str, int]:
+    return {path.name: path.stat().st_mtime_ns for path in built_wheels()}
+
+
+def wheels_changed_since(snapshot: dict[str, int]) -> list[Path]:
+    return [
+        path
+        for path in built_wheels()
+        if snapshot.get(path.name) != path.stat().st_mtime_ns
+    ]
+
+
 def latest_wheel() -> Path:
     wheels = built_wheels()
     if not wheels:
@@ -86,6 +101,94 @@ def install_wheel(wheel: Path, *, env: dict[str, str]) -> int:
     for pth in (ROOT / ".venv").glob("**/site-packages/clud.pth"):
         with contextlib.suppress(OSError):
             pth.unlink()
+    return verify_installed_scripts(env=env)
+
+
+def _script_name(name: str) -> str:
+    return f"{name}.exe" if platform.system() == "Windows" else name
+
+
+def _installed_script(name: str) -> Path:
+    return Path(sys.executable).parent / _script_name(name)
+
+
+def verify_installed_scripts(*, env: dict[str, str]) -> int:
+    missing = [name for name in REQUIRED_SCRIPTS if not _installed_script(name).is_file()]
+    if missing:
+        print(
+            "installed wheel is missing scripts: " + ", ".join(missing),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+    guard = _installed_script("clud-block-bad-cmd")
+    deny_payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "bad" + " cmd"},
+        }
+    )
+    deny = subprocess.run(
+        [str(guard)],
+        input=deny_payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+        env=env,
+    )
+    if deny.returncode != 2 or "permissionDecision" not in deny.stdout or "deny" not in deny.stdout:
+        print(
+            "installed clud-block-bad-cmd deny smoke failed: "
+            f"rc={deny.returncode} stdout={deny.stdout!r} stderr={deny.stderr!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+    allow_payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo ok"},
+        }
+    )
+    allow = subprocess.run(
+        [str(guard)],
+        input=allow_payload,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+        env=env,
+    )
+    if allow.returncode != 0:
+        print(
+            "installed clud-block-bad-cmd allow smoke failed: "
+            f"rc={allow.returncode} stdout={allow.stdout!r} stderr={allow.stderr!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
+    return 0
+
+
+def verify_wheel_scripts(wheel: Path) -> int:
+    with zipfile.ZipFile(wheel) as archive:
+        members = {name.replace("\\", "/") for name in archive.namelist()}
+    missing = []
+    for name in REQUIRED_SCRIPTS:
+        script = _script_name(name)
+        if not any(member.endswith(f".data/scripts/{script}") for member in members):
+            missing.append(script)
+    if missing:
+        print(
+            f"built wheel {wheel.name} is missing scripts: " + ", ".join(missing),
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     return 0
 
 
@@ -94,14 +197,21 @@ def run_build(mode: BuildMode) -> int:
 
     env = build_environment(mode, build_env())
     DIST.mkdir(parents=True, exist_ok=True)
-    before = {path.name for path in built_wheels()}
+    before = wheel_snapshot()
     cmd = build_command(mode, env=env)
     print(f"build mode: {mode}", file=sys.stderr, flush=True)
     result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
     if result.returncode != 0:
         return result.returncode
-    for wheel in built_wheels():
+    changed_wheels = wheels_changed_since(before)
+    if not changed_wheels:
+        print("build completed but produced no wheel", file=sys.stderr, flush=True)
+        return 1
+    for wheel in changed_wheels:
         repair_windows_gnu_wheel(wheel)
+        verify = verify_wheel_scripts(wheel)
+        if verify != 0:
+            return verify
     if mode != "dev":
         return 0
 

@@ -10,11 +10,11 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Context:** clud is a CLI that orchestrates other CLIs (`claude`, `codex`) on Windows, Linux, and macOS. Its distribution channel needs to reach Python developers (the primary audience already running `pip install` for AI tooling) without forcing them to install a Rust toolchain or hand-pick a binary for their platform.
 
-**Decision:** Implement clud as a pure Rust binary in `crates/clud-bin`, then package and distribute it as a Python wheel using `maturin` with `[tool.maturin] bindings = "bin"`. Installing the wheel places the native `clud` executable onto the user's `PATH`. The Python package (`src/clud/__init__.py`) is a thin version shim with no runtime code.
+**Decision:** Implement clud as pure Rust binaries in `crates/clud-bin`, then package and distribute them as a Python wheel using `maturin` with `[tool.maturin] bindings = "bin"`. Installing the wheel places the native `clud` executable and helper executables such as `clud-block-bad-cmd` onto the user's `PATH`. The Python package (`src/clud/__init__.py`) is a thin version shim with no runtime code.
 
 **Rationale:**
 - Single artifact per platform: `pip install clud` works the same on Windows, macOS, and Linux without users picking a binary.
-- maturin's `bindings = "bin"` is the supported way to ship a CLI binary through PyPI; no custom wheel-building code needed.
+- maturin's `bindings = "bin"` is the supported way to ship CLI binaries through PyPI; no custom wheel-building code needed.
 - Rust gives us the runtime characteristics clud needs: predictable startup, no GC pauses on the PTY hot path, easy static binaries, and the `windows-rs`/`ConPTY`/COM ecosystem for Windows quirks (DD'd separately).
 - PyPI also reaches the audience that runs `uv tool install` and `pipx install`, both of which extract the binary into a managed `PATH`.
 
@@ -390,7 +390,7 @@ Note: this entry replaces what would have been [#290](https://github.com/zackees
 **Context:** zackees/clud#343 wires up a repo-scoped opt-in marker so that when a developer checks out a repo, `clud` can transparently route Rust toolchain calls (cargo / rustc / rustfmt / clippy-driver / rustdoc) through [soldr](https://github.com/zackees/soldr) by prepending soldr's shim dir to the session `PATH`. The design needs a single, unambiguous file at the repo root that:
 
 1. Declares the opt-in (presence + explicit field).
-2. Carries forward-compatible structured fields (the `[rust]` section: `use_soldr`, `install`, optional `version` pin — and room for future `[python]`, `[js]`, etc.).
+2. Carries forward-compatible structured fields (the `rust` section: `use_soldr`, `install`, optional `version` pin — and room for future `python`, `js`, etc.).
 3. Doesn't collide with existing repo dot-conventions.
 4. Reads symmetrically with the `.claude/` convention developers using Claude Code already know.
 
@@ -404,7 +404,7 @@ Earlier drafts considered `.clud` (bare file), `.clud.toml`, and `.clud/config.t
 
 Parser lives in [`crates/clud-bin/src/repo_clud_config.rs`](../crates/clud-bin/src/repo_clud_config.rs); session activator lives in [`crates/clud-bin/src/soldr_activate.rs`](../crates/clud-bin/src/soldr_activate.rs); main.rs calls `soldr_activate::activate_soldr_shims_if_requested()` right after `trampoline::unlock_exe()`.
 
-Schema (v1):
+Schema (v1 activation shape):
 
 ```json
 {
@@ -416,12 +416,31 @@ Schema (v1):
 }
 ```
 
+`clud optimize rust` also writes the equivalent current-main shape under
+`optimize.rust`:
+
+```json
+{
+  "optimize": {
+    "rust": {
+      "use_soldr_shims": true,
+      "install_soldr": true,
+      "soldr_version": "0.7.11"
+    }
+  }
+}
+```
+
+The parser accepts both forms. Direct `rust` keys win over `optimize.rust`
+keys inside the same file; repo-level values still win over user-level values
+per field.
+
 **Rationale:**
 
 - **Symmetry with `.claude/settings.json`.** Developers using Claude Code already understand `.claude/settings.json` as the "tracked, repo-scoped, JSON" config + `.claude/settings.local.json` as "gitignored local overrides". `.clud/settings.json` reuses that mental model verbatim. The `.gitignore` allowlist pattern is identical (`.clud/*` + `!.clud/settings.json` + `.clud/settings.local.json`).
 - **Directory, not bare file.** `.clud/` as a directory lets us grow new files later (`hooks/`, `commands/`, `agents/`, runtime state under `loop/`) without inventing a second top-level marker.
-- **JSON, not TOML.** JSON matches `.claude/settings.json`. Even though `clud_settings.rs` (the user-level settings at `~/.clud/settings.toml`) uses TOML via `toml_edit`, that's a hand-edited dev-config file. `.clud/settings.json` is a repo-checked-in file that may also be generated/edited by tools — JSON's strict syntax (no comments, explicit quoting) is the right trade-off when both humans and machines read/write it.
-- **`[rust]` nesting from day one.** Even though only the rust section exists today, scoping under `"rust"` means future `"python"` / `"js"` sections don't collide with `"use_soldr"` style top-level keys.
+- **JSON, not TOML.** JSON matches `.claude/settings.json` and the newer `~/.clud/settings.json` global settings file. `.clud/settings.json` may be generated or edited by tools, so JSON's strict syntax (no comments, explicit quoting) is the right trade-off when both humans and machines read/write it.
+- **`rust` nesting from day one.** Even though only the Rust activation section exists today, scoping under `"rust"` means future `"python"` / `"js"` sections don't collide with `"use_soldr"` style top-level keys.
 - **Soldr stays passive.** Soldr exposes only `soldr shims --json`. clud is the active consumer: clud reads `.clud/settings.json`, decides whether to call soldr, prepends `PATH`. Soldr knows nothing about `.clud/settings.json`. This dependency direction lets soldr-only consumers (no clud) call `soldr shims --json` themselves from any setup script.
 
 **Alternatives Considered:**
@@ -432,20 +451,23 @@ Schema (v1):
 | `.clud.toml` (file, distinct from `.clud/` dir) | No directory growth path. We'd need a second marker the moment we want `.clud/hooks/` or `.clud/commands/`. Splits the convention across two top-level paths. |
 | `.clud/config.toml` (TOML inside the dir) | Loses symmetry with `.claude/settings.json`. Developers already know the `.claude/` layout; the `.clud/` layout should read the same way without forcing a second mental model. |
 | Reuse `.claude/settings.json` with a new `"clud"` section | Crosses tool ownership. `.claude/settings.json` is Claude Code's file; adding clud-specific keys to it makes both tools' configs fragile to the other's schema evolution. clud should own its own file. |
-| `~/.clud/settings.toml` (user-level only, no repo file) | Misses the per-repo opt-in case — a developer who wants soldr routing for one Rust repo but not another can't express that with a user-level setting alone. The user-level file (`~/.clud/settings.toml`, owned by `clud_settings.rs`) and the repo-level file (`.clud/settings.json`, this DD) coexist; they answer different questions. |
+| `~/.clud/settings.json` (user-level only, no repo file) | Misses the per-repo opt-in case — a developer who wants soldr routing for one Rust repo but not another can't express that with a user-level setting alone. The user-level file (owned by `clud_settings.rs`) and the repo-level file (`.clud/settings.json`, this DD) coexist; repo wins per field for soldr activation. |
 
 **Consequences:**
 
 - **`.gitignore` change.** The `.clud/` blanket-ignore is replaced by `.clud/*` + `!.clud/settings.json` + `.clud/settings.local.json` (mirroring `.claude/*`). Existing `/clud-loop` runtime state under `.clud/loop/` stays gitignored via the wildcard.
 - **Session startup grows a fixed-cost probe.** `discover_repo_clud_config()` does an O(1) `fs::metadata` per parent dir up to the `.git` boundary. Negligible (~tens of microseconds), but it's a new mandatory step in the startup path. Repos without `.clud/settings.json` pay only the directory-walk; no `soldr` spawn happens.
-- **Soldr's own `.clud/settings.json` is its dogfood.** This PR adds a `.clud/settings.json` to the clud repo itself declaring `rust.use_soldr = true`, so every clud contributor's session automatically routes cargo through soldr per CLAUDE.md.
-- **The repo-level + user-level config files have orthogonal roles.** Repo-level (`.clud/settings.json`, this DD) = "what should clud do in *this* checkout"; user-level (`~/.clud/settings.toml`, DD-006 / `clud_settings.rs`) = "what should clud do for *me* regardless of checkout". They never overlap; agents and reviewers should not conflate them.
+- **Soldr's own `.clud/settings.json` is its dogfood.** This PR adds a `.clud/settings.json` to the clud repo itself declaring both `rust.use_soldr = true` and the current `optimize.rust.use_soldr_shims = true` shape, so every clud contributor's session automatically routes cargo through soldr per CLAUDE.md.
+- **Global settings must opt in explicitly.** `~/.clud/settings.json` now stores many unrelated clud preferences. The activation parser ignores a user-level file unless it contains a soldr directive (`rust.*` or `optimize.rust.*`), preventing unrelated global settings from enabling soldr in every repo. Repo-level `.clud/settings.json` remains the presence-based opt-in marker for #343.
 - **Reversal cost is moderate.** Renaming to a different filename later is a one-PR rename. Switching to TOML would mean a parser swap and rewriting `.clud/settings.json` to `.clud/settings.toml` everywhere — also one PR. Schema additions are append-only thanks to `#[serde(default)]` on every field.
 
 **Verification:** `crates/clud-bin/src/repo_clud_config.rs` ships unit tests covering:
 
-- Empty file = defaults (presence-only contract).
-- Missing `[rust]` section = defaults (forward-compat for future `[python]`).
+- Empty repo file = defaults (presence-only contract).
+- Missing `rust` section = defaults for repo files (forward-compat for future sections).
+- `optimize.rust` aliases emitted by `clud optimize rust`.
+- Direct `rust` keys win over `optimize.rust` aliases.
+- Unrelated user-level settings do not enable global soldr activation.
 - Explicit `use_soldr=false` honored.
 - Discovery walks up from a subdirectory.
 - Discovery stops at the `.git/` boundary (no cross-repo bleed).

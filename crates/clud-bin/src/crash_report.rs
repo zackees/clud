@@ -1,0 +1,729 @@
+//! Crash-report writer for clud.
+//!
+//! Two install entry points:
+//!
+//! - [`install`] sets up a Rust panic hook that writes a JSON record on every
+//!   `panic!()` before chaining to the previously-installed hook so stderr
+//!   behavior is preserved.
+//! - [`install_native`] additionally attaches a native crash handler (via the
+//!   `crash-handler` crate) for SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT
+//!   on Unix and structured exceptions (EXCEPTION_ACCESS_VIOLATION, etc.) on
+//!   Windows. The crate explicitly does not attach a SIGINT / CTRL_C_EVENT
+//!   handler, so the existing `ctrlc`-based Ctrl-C path (#372 /
+//!   `ctrl_c_track`) remains authoritative for user-initiated cancellation.
+//!
+//! Both paths share one writer that produces records at
+//! `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`, with rotation at 50
+//! reports.
+//!
+//! The first `install(role)` call surfaces a one-line stderr notice if there's
+//! a crash report newer than the last one this process tree saw, so the next
+//! launch tells the user something happened without spamming on every
+//! subsequent launch.
+//!
+//! Role can be updated by a later `install(role)` call (e.g. main.rs installs
+//! as `"foreground"`, then the daemon process re-installs as `"daemon"`
+//! before doing daemon work); the underlying hook is installed only once, so
+//! a crash inside the daemon writes one report tagged `"daemon"`, not two.
+
+use std::backtrace::Backtrace;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
+
+pub(crate) const MAX_REPORTS: usize = 50;
+const LAST_SEEN_FILE: &str = "last_seen";
+
+static CURRENT_ROLE: OnceLock<RwLock<String>> = OnceLock::new();
+static HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
+static NATIVE_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// JSON shape written to `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`.
+///
+/// All fields except `version`, `role`, `pid`, `timestamp_unix_ms`,
+/// `backtrace`, and `args` are optional because panic-driven and native-crash
+/// reports populate different subsets of the schema.
+#[derive(Serialize)]
+struct CrashReport {
+    version: &'static str,
+    role: String,
+    /// `"panic"` (Rust panic hook) or `"native"` (signal / structured
+    /// exception handler).
+    kind: &'static str,
+    pid: u32,
+    cwd: Option<String>,
+    args: Vec<String>,
+    timestamp_unix_ms: u128,
+    // Panic-only fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    panic_location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    panic_message: Option<String>,
+    // Native-crash-only fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal_or_exception: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exception_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    faulting_address: Option<String>,
+    backtrace: String,
+}
+
+/// Install (or update) the clud crash reporter for this process.
+///
+/// Called from `main.rs` (`role = "foreground"`), the daemon process entry
+/// (`role = "daemon"`), and the worker process entry (`role = "worker"`).
+/// Idempotent: the panic hook itself is installed exactly once per process;
+/// subsequent calls only update the role the hook will tag reports with.
+pub fn install(role: &str) {
+    let lock = CURRENT_ROLE.get_or_init(|| RwLock::new(role.to_string()));
+    if let Ok(mut w) = lock.write() {
+        *w = role.to_string();
+    }
+
+    HOOK_INSTALLED.get_or_init(|| {
+        if let Ok(dir) = crashes_dir() {
+            if let Some((_, path)) = surface_previous_report(&dir) {
+                eprintln!("clud: previous crash report at {}", path.display());
+                // Opportunistic symbol-status hint: if the report's
+                // backtrace has no `at FILE:LINE` frames, point the user
+                // at `clud symbols verify` (#374 PR 3). Best-effort; if
+                // we can't read or parse the report we stay quiet.
+                if let Ok(raw) = fs::read_to_string(&path) {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(bt) = value.get("backtrace").and_then(|v| v.as_str()) {
+                            if crate::symbols::is_unsymbolicated(bt) {
+                                eprintln!(
+                                    "clud: backtrace appears unsymbolicated; run `clud symbols verify` for diagnostic details"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let role = current_role();
+            let _ = write_panic_report(&role, info);
+            prev_hook(info);
+        }));
+    });
+}
+
+fn current_role() -> String {
+    CURRENT_ROLE
+        .get()
+        .and_then(|lock| lock.read().ok().map(|g| g.clone()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Returns `~/.clud/state/crashes/`, creating the directory if missing.
+///
+/// Exposed `pub(crate)` so the `symbols` subcommand reuses the same
+/// resolution logic (`CLUD_DAEMON_STATE_DIR` env override → home dir).
+pub(crate) fn crashes_dir() -> std::io::Result<PathBuf> {
+    let state_dir = crate::daemon::default_state_dir()?;
+    let dir = state_dir.join("crashes");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn write_panic_report(
+    role: &str,
+    info: &std::panic::PanicHookInfo<'_>,
+) -> std::io::Result<PathBuf> {
+    let dir = crashes_dir()?;
+    let pid = std::process::id();
+    let ts = now_unix_ms();
+    let path = dir.join(format!("{ts}-{role}-{pid}.json"));
+
+    let panic_location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+    let panic_message = panic_payload_to_string(info);
+    let backtrace = Backtrace::force_capture().to_string();
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let args = sanitize_args(std::env::args().collect());
+
+    let report = CrashReport {
+        version: env!("CARGO_PKG_VERSION"),
+        role: role.to_string(),
+        kind: "panic",
+        pid,
+        cwd,
+        args,
+        timestamp_unix_ms: ts,
+        panic_location,
+        panic_message: Some(panic_message),
+        signal_or_exception: None,
+        signal_number: None,
+        exception_code: None,
+        faulting_address: None,
+        backtrace,
+    };
+
+    let json = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string());
+    fs::write(&path, json)?;
+    let _ = prune_old_reports(&dir, MAX_REPORTS);
+    Ok(path)
+}
+
+/// Per-platform metadata extracted from `crash_handler::CrashContext`.
+#[derive(Default)]
+pub(crate) struct NativeCrashMeta {
+    pub signal_or_exception: Option<String>,
+    pub signal_number: Option<i32>,
+    pub exception_code: Option<i64>,
+    pub faulting_address: Option<String>,
+}
+
+fn write_native_report(role: &str, meta: NativeCrashMeta) -> std::io::Result<PathBuf> {
+    let dir = crashes_dir()?;
+    let pid = std::process::id();
+    let ts = now_unix_ms();
+    let path = dir.join(format!("{ts}-{role}-{pid}.json"));
+
+    // `Backtrace::force_capture()` allocates and is not async-signal-safe
+    // by POSIX rules. We accept the risk here because the process is
+    // already crashing and a useful backtrace beats strict signal
+    // safety — the alternative is no diagnostic at all. This matches the
+    // tradeoff `re_crash_handler` and similar production handlers make.
+    let backtrace = Backtrace::force_capture().to_string();
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let args = sanitize_args(std::env::args().collect());
+
+    let report = CrashReport {
+        version: env!("CARGO_PKG_VERSION"),
+        role: role.to_string(),
+        kind: "native",
+        pid,
+        cwd,
+        args,
+        timestamp_unix_ms: ts,
+        panic_location: None,
+        panic_message: None,
+        signal_or_exception: meta.signal_or_exception,
+        signal_number: meta.signal_number,
+        exception_code: meta.exception_code,
+        faulting_address: meta.faulting_address,
+        backtrace,
+    };
+
+    let json = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string());
+    fs::write(&path, json)?;
+    let _ = prune_old_reports(&dir, MAX_REPORTS);
+    Ok(path)
+}
+
+/// Attach the native crash handler from the `crash-handler` crate.
+///
+/// Must be called *after* [`install`] (so the role + reports dir + panic
+/// hook are already wired). Idempotent: subsequent calls are no-ops.
+///
+/// **Does not attach a SIGINT / CTRL_C_EVENT handler.** The `crash-handler`
+/// crate hooks SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGABRT on Unix and
+/// `SetUnhandledExceptionFilter` for structured exceptions on Windows.
+/// Neither path overlaps with the existing `ctrlc` handler installed by
+/// `startup::install_ctrl_c_flag`, so Ctrl-C / Ctrl-Break behavior
+/// (#372 / `ctrl_c_track`) continues unchanged.
+///
+/// The attached handler is intentionally leaked with `mem::forget` so it
+/// remains in place for the lifetime of the process — dropping the handle
+/// would un-register the handler.
+pub fn install_native(role: &str) {
+    install(role);
+    NATIVE_INSTALLED.get_or_init(|| {
+        let attach_result = unsafe {
+            crash_handler::CrashHandler::attach(crash_handler::make_crash_event(
+                |cc: &crash_handler::CrashContext| {
+                    let role = current_role();
+                    let meta = extract_native_meta(cc);
+                    let _ = write_native_report(&role, meta);
+                    // `Handled(false)` -> continue to default OS behavior
+                    // (terminate the process with the original signal /
+                    // exception). We only want to record evidence, not
+                    // pretend the crash didn't happen.
+                    crash_handler::CrashEventResult::Handled(false)
+                },
+            ))
+        };
+        match attach_result {
+            Ok(handler) => {
+                // Keep the handler alive for the process lifetime; dropping
+                // it would unregister our crash hook.
+                std::mem::forget(handler);
+            }
+            Err(err) => {
+                eprintln!("clud: failed to attach native crash handler: {err}");
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn extract_native_meta(cc: &crash_handler::CrashContext) -> NativeCrashMeta {
+    // `signalfd_siginfo` is plain-old-data populated by the kernel.
+    let signo = cc.siginfo.ssi_signo as i32;
+    let addr = cc.siginfo.ssi_addr as usize;
+    NativeCrashMeta {
+        signal_or_exception: Some(signal_name(signo).to_string()),
+        signal_number: Some(signo),
+        exception_code: None,
+        faulting_address: hex_addr(addr),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn extract_native_meta(cc: &crash_handler::CrashContext) -> NativeCrashMeta {
+    // mac uses Mach exceptions; `exception` is `Option<ExceptionInfo>`.
+    match &cc.exception {
+        Some(info) => NativeCrashMeta {
+            signal_or_exception: Some(mac_exception_kind_name(info.kind).to_string()),
+            signal_number: Some(info.kind as i32),
+            exception_code: Some(info.code as i64),
+            faulting_address: info
+                .subcode
+                .map(|s| format!("0x{s:x}"))
+                .or_else(|| hex_addr(info.code as usize)),
+        },
+        None => NativeCrashMeta::default(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn extract_native_meta(cc: &crash_handler::CrashContext) -> NativeCrashMeta {
+    // crash-context exposes the exception_code directly so we don't need
+    // to dereference exception_pointers just to read it. The faulting
+    // address still requires reading the ExceptionRecord.
+    let code = cc.exception_code as i64;
+    let addr = unsafe {
+        if cc.exception_pointers.is_null() {
+            0
+        } else {
+            let record = (*cc.exception_pointers).ExceptionRecord;
+            if record.is_null() {
+                0
+            } else {
+                (*record).ExceptionAddress as usize
+            }
+        }
+    };
+    NativeCrashMeta {
+        signal_or_exception: Some(windows_exception_name(code).to_string()),
+        signal_number: None,
+        exception_code: Some(code),
+        faulting_address: hex_addr(addr),
+    }
+}
+
+fn hex_addr(addr: usize) -> Option<String> {
+    if addr == 0 {
+        None
+    } else {
+        Some(format!("0x{addr:x}"))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn signal_name(signo: i32) -> &'static str {
+    // Linux signal numbers from <bits/signum.h>. Stable.
+    match signo {
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        11 => "SIGSEGV",
+        _ => "UNKNOWN",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_exception_kind_name(kind: u32) -> &'static str {
+    // `mach/exception_types.h` — `EXC_*` constants.
+    match kind {
+        1 => "EXC_BAD_ACCESS",
+        2 => "EXC_BAD_INSTRUCTION",
+        3 => "EXC_ARITHMETIC",
+        4 => "EXC_EMULATION",
+        5 => "EXC_SOFTWARE",
+        6 => "EXC_BREAKPOINT",
+        7 => "EXC_SYSCALL",
+        8 => "EXC_MACH_SYSCALL",
+        9 => "EXC_RPC_ALERT",
+        10 => "EXC_CRASH",
+        11 => "EXC_RESOURCE",
+        12 => "EXC_GUARD",
+        13 => "EXC_CORPSE_NOTIFY",
+        _ => "UNKNOWN",
+    }
+}
+
+#[cfg(target_os = "windows")]
+const EXCEPTION_ACCESS_VIOLATION: i64 = 0xC000_0005_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_IN_PAGE_ERROR: i64 = 0xC000_0006_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_ILLEGAL_INSTRUCTION: i64 = 0xC000_001D_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_INT_DIVIDE_BY_ZERO: i64 = 0xC000_0094_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_ARRAY_BOUNDS_EXCEEDED: i64 = 0xC000_008C_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_BREAKPOINT: i64 = 0x8000_0003_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_PRIV_INSTRUCTION: i64 = 0xC000_0096_u32 as i32 as i64;
+#[cfg(target_os = "windows")]
+const EXCEPTION_STACK_OVERFLOW: i64 = 0xC000_00FD_u32 as i32 as i64;
+
+#[cfg(target_os = "windows")]
+fn windows_exception_name(code: i64) -> &'static str {
+    // Reference values from `winnt.h` / NTSTATUS. Match via constants
+    // because pattern positions only accept constant expressions.
+    if code == EXCEPTION_ACCESS_VIOLATION {
+        "EXCEPTION_ACCESS_VIOLATION"
+    } else if code == EXCEPTION_IN_PAGE_ERROR {
+        "EXCEPTION_IN_PAGE_ERROR"
+    } else if code == EXCEPTION_ILLEGAL_INSTRUCTION {
+        "EXCEPTION_ILLEGAL_INSTRUCTION"
+    } else if code == EXCEPTION_INT_DIVIDE_BY_ZERO {
+        "EXCEPTION_INT_DIVIDE_BY_ZERO"
+    } else if code == EXCEPTION_ARRAY_BOUNDS_EXCEEDED {
+        "EXCEPTION_ARRAY_BOUNDS_EXCEEDED"
+    } else if code == EXCEPTION_BREAKPOINT {
+        "EXCEPTION_BREAKPOINT"
+    } else if code == EXCEPTION_PRIV_INSTRUCTION {
+        "EXCEPTION_PRIV_INSTRUCTION"
+    } else if code == EXCEPTION_STACK_OVERFLOW {
+        "EXCEPTION_STACK_OVERFLOW"
+    } else {
+        "UNKNOWN_EXCEPTION"
+    }
+}
+
+fn panic_payload_to_string(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
+}
+
+pub(crate) fn sanitize_args(raw: Vec<String>) -> Vec<String> {
+    raw.into_iter()
+        .map(|s| {
+            if looks_secret(&s) {
+                "<redacted>".to_string()
+            } else {
+                s
+            }
+        })
+        .collect()
+}
+
+fn looks_secret(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    for needle in [
+        "token=",
+        "secret=",
+        "password=",
+        "passwd=",
+        "api-key=",
+        "apikey=",
+        "auth=",
+        "authorization=",
+    ] {
+        if lower.contains(needle) {
+            return true;
+        }
+    }
+    // Long runs of base64/url-safe chars look like a bearer token.
+    if s.len() >= 40
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '+' || c == '='
+        })
+    {
+        return true;
+    }
+    false
+}
+
+pub(crate) fn prune_old_reports(dir: &Path, keep: usize) -> std::io::Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.ends_with(".json") && e.path().is_file()
+        })
+        .collect();
+
+    if entries.len() <= keep {
+        return Ok(());
+    }
+
+    // Sort by mtime ascending so we drop the oldest first.
+    entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+    let to_remove = entries.len() - keep;
+    for entry in entries.into_iter().take(to_remove) {
+        let _ = fs::remove_file(entry.path());
+    }
+    Ok(())
+}
+
+/// Scan `crashes_dir` for the newest report newer than the recorded
+/// `last_seen` watermark. On a hit, advance the watermark and return
+/// `Some((unix_ms, path))` so the caller can surface a one-line notice on
+/// stderr. Returns `None` when there's nothing new.
+pub(crate) fn surface_previous_report(crashes_dir: &Path) -> Option<(u128, PathBuf)> {
+    let last_seen_path = crashes_dir.join(LAST_SEEN_FILE);
+    let last_seen: u128 = fs::read_to_string(&last_seen_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    let mut newest: Option<(u128, PathBuf)> = None;
+    let entries = fs::read_dir(crashes_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy().into_owned();
+        if !name.ends_with(".json") {
+            continue;
+        }
+        // Filename layout: <unix_ms>-<role>-<pid>.json
+        let Some(ms_str) = name.split('-').next() else {
+            continue;
+        };
+        let Ok(ms) = ms_str.parse::<u128>() else {
+            continue;
+        };
+        if ms <= last_seen {
+            continue;
+        }
+        match newest {
+            Some((cur, _)) if cur >= ms => {}
+            _ => newest = Some((ms, entry.path())),
+        }
+    }
+
+    if let Some((ms, _)) = &newest {
+        if let Ok(mut f) = fs::File::create(&last_seen_path) {
+            let _ = writeln!(f, "{ms}");
+        }
+    }
+    newest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn sanitize_redacts_known_secret_keys_and_long_tokens() {
+        let input = vec![
+            "clud".to_string(),
+            "--repo=foo/bar".to_string(),
+            "GH_TOKEN=ghp_abcDEFghiJKLmnoPQRstuVWXyz0123456789".to_string(),
+            "secret=hunter2".to_string(),
+            "ghp_abcDEFghiJKLmnoPQRstuVWXyz0123456789abcd".to_string(),
+            "--flag".to_string(),
+            "short".to_string(),
+        ];
+        let out = sanitize_args(input);
+        assert_eq!(out[0], "clud");
+        assert_eq!(out[1], "--repo=foo/bar");
+        assert_eq!(out[2], "<redacted>", "token= prefix should be redacted");
+        assert_eq!(out[3], "<redacted>", "secret= prefix should be redacted");
+        assert_eq!(out[4], "<redacted>", "long base64 run should be redacted");
+        assert_eq!(out[5], "--flag");
+        assert_eq!(out[6], "short", "short non-secret strings pass through");
+    }
+
+    #[test]
+    fn prune_keeps_only_n_reports() -> std::io::Result<()> {
+        let dir = TempDir::new()?;
+        // Write 53 dummy reports. We don't care which 50 survive, only the
+        // count — mtime-based ordering for "which to drop" is exercised
+        // implicitly by `prune_old_reports`'s sort key.
+        for i in 0..53 {
+            fs::write(
+                dir.path().join(format!(
+                    "{}-test-{}.json",
+                    1_700_000_000_000_u128 + i as u128,
+                    i
+                )),
+                "{}",
+            )?;
+        }
+        prune_old_reports(dir.path(), 50)?;
+        let remaining: Vec<_> = fs::read_dir(dir.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+        assert_eq!(remaining.len(), 50, "should keep exactly 50 reports");
+        Ok(())
+    }
+
+    #[test]
+    fn prune_no_op_when_under_cap() -> std::io::Result<()> {
+        let dir = TempDir::new()?;
+        for i in 0..3 {
+            fs::write(dir.path().join(format!("{i}-test-{i}.json")), "{}")?;
+        }
+        prune_old_reports(dir.path(), 50)?;
+        let remaining = fs::read_dir(dir.path())?.count();
+        assert_eq!(remaining, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn prune_ignores_non_json_files() -> std::io::Result<()> {
+        let dir = TempDir::new()?;
+        fs::write(dir.path().join("last_seen"), "0")?;
+        for i in 0..52 {
+            fs::write(
+                dir.path().join(format!(
+                    "{}-test-{}.json",
+                    1_700_000_000_000_u128 + i as u128,
+                    i
+                )),
+                "{}",
+            )?;
+        }
+        prune_old_reports(dir.path(), 50)?;
+        // 50 .json + the last_seen sidecar = 51 entries.
+        assert!(
+            dir.path().join("last_seen").exists(),
+            "last_seen survives prune"
+        );
+        let jsons = fs::read_dir(dir.path())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .count();
+        assert_eq!(jsons, 50);
+        Ok(())
+    }
+
+    #[test]
+    fn surface_returns_newest_and_advances_last_seen() -> std::io::Result<()> {
+        let dir = TempDir::new()?;
+        fs::write(dir.path().join("100-test-1.json"), "{}")?;
+        fs::write(dir.path().join("200-test-2.json"), "{}")?;
+        fs::write(dir.path().join("150-test-3.json"), "{}")?;
+
+        let hit = surface_previous_report(dir.path()).expect("expected a newest report");
+        assert_eq!(hit.0, 200);
+        assert!(hit.1.ends_with("200-test-2.json"));
+        // last_seen file should now hold 200, so a re-scan returns None.
+        let last_seen = fs::read_to_string(dir.path().join("last_seen"))?;
+        assert_eq!(last_seen.trim(), "200");
+        assert!(surface_previous_report(dir.path()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn surface_returns_none_on_empty_dir() -> std::io::Result<()> {
+        let dir = TempDir::new()?;
+        assert!(surface_previous_report(dir.path()).is_none());
+        assert!(!dir.path().join("last_seen").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn hex_addr_handles_null_and_nonzero() {
+        assert_eq!(hex_addr(0), None);
+        assert_eq!(hex_addr(0x1).as_deref(), Some("0x1"));
+        assert_eq!(hex_addr(0xdead_beef).as_deref(), Some("0xdeadbeef"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_signal_names_cover_documented_signals() {
+        assert_eq!(signal_name(4), "SIGILL");
+        assert_eq!(signal_name(6), "SIGABRT");
+        assert_eq!(signal_name(7), "SIGBUS");
+        assert_eq!(signal_name(8), "SIGFPE");
+        assert_eq!(signal_name(11), "SIGSEGV");
+        assert_eq!(signal_name(0), "UNKNOWN");
+        assert_eq!(signal_name(99), "UNKNOWN");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_exception_kind_names_cover_common_exc_constants() {
+        assert_eq!(mac_exception_kind_name(1), "EXC_BAD_ACCESS");
+        assert_eq!(mac_exception_kind_name(2), "EXC_BAD_INSTRUCTION");
+        assert_eq!(mac_exception_kind_name(3), "EXC_ARITHMETIC");
+        assert_eq!(mac_exception_kind_name(6), "EXC_BREAKPOINT");
+        assert_eq!(mac_exception_kind_name(10), "EXC_CRASH");
+        assert_eq!(mac_exception_kind_name(0), "UNKNOWN");
+        assert_eq!(mac_exception_kind_name(999), "UNKNOWN");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_exception_names_cover_common_codes() {
+        // The bit pattern reinterpretation matters because NTSTATUS codes
+        // start at 0xC000_0000 (i.e. negative when interpreted as i32).
+        assert_eq!(
+            windows_exception_name(0xC000_0005_u32 as i32 as i64),
+            "EXCEPTION_ACCESS_VIOLATION"
+        );
+        assert_eq!(
+            windows_exception_name(0xC000_001D_u32 as i32 as i64),
+            "EXCEPTION_ILLEGAL_INSTRUCTION"
+        );
+        assert_eq!(
+            windows_exception_name(0xC000_0094_u32 as i32 as i64),
+            "EXCEPTION_INT_DIVIDE_BY_ZERO"
+        );
+        assert_eq!(
+            windows_exception_name(0x8000_0003_u32 as i32 as i64),
+            "EXCEPTION_BREAKPOINT"
+        );
+        assert_eq!(
+            windows_exception_name(0xC000_00FD_u32 as i32 as i64),
+            "EXCEPTION_STACK_OVERFLOW"
+        );
+        assert_eq!(windows_exception_name(0), "UNKNOWN_EXCEPTION");
+        assert_eq!(windows_exception_name(0x1234), "UNKNOWN_EXCEPTION");
+    }
+
+    // NB: there is intentionally no in-process unit test for
+    // `install_native()` itself. Calling it would attach a real signal /
+    // SEH handler that persists for the lifetime of the test binary and
+    // would intercept any subsequent test panic on Unix (since SIGABRT is
+    // hooked). The handler-attach path is exercised end-to-end by the
+    // production `install_native` call from main.rs and the daemon
+    // entries, and the underlying `crash-handler` crate has its own
+    // upstream tests proving the attach works. For manual reproduction:
+    //
+    //   - Linux/macOS: build clud, run `clud --version &` in the
+    //     background, then `kill -SEGV <pid>` and confirm a JSON file
+    //     with `"kind":"native"` and `"signal_or_exception":"SIGSEGV"`
+    //     appears in `~/.clud/state/crashes/`.
+    //   - Windows: build clud and from a debugger trigger an access
+    //     violation in the foreground process; confirm a JSON file with
+    //     `"signal_or_exception":"EXCEPTION_ACCESS_VIOLATION"` appears.
+}

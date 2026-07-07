@@ -49,9 +49,15 @@
 /// link-time dependency on `windows-sys`.
 pub const VK_RETURN: u16 = 0x0D;
 
+/// Windows virtual-key code for V. Ctrl+V is the clipboard-paste chord.
+pub const VK_V: u16 = 0x56;
+
 /// `KEY_EVENT_RECORD::dwControlKeyState` bit for Left- or Right-Shift.
 /// Mirrors `wincon.h`'s `SHIFT_PRESSED`.
 pub const SHIFT_PRESSED: u32 = 0x0010;
+
+/// `KEY_EVENT_RECORD::dwControlKeyState` bits for Left- or Right-Ctrl.
+pub const CTRL_PRESSED: u32 = 0x0004 | 0x0008;
 
 /// Subset of `KEY_EVENT_RECORD` the translator needs. Tests construct
 /// these directly without going through Windows APIs.
@@ -83,6 +89,15 @@ pub enum InputEvent {
 /// written to the child PTY's stdin. See the module-level docstring
 /// for the translation rules.
 pub fn translate(events: &[InputEvent]) -> Vec<u8> {
+    translate_with_clipboard(events, || {
+        crate::paste_image::handle_clipboard().ok().flatten()
+    })
+}
+
+pub fn translate_with_clipboard<F>(events: &[InputEvent], mut handle_clipboard: F) -> Vec<u8>
+where
+    F: FnMut() -> Option<Vec<u8>>,
+{
     let mut out = Vec::new();
     for event in events {
         let key = match event {
@@ -94,6 +109,12 @@ pub fn translate(events: &[InputEvent]) -> Vec<u8> {
             let shift = (key.control_key_state & SHIFT_PRESSED) != 0;
             out.push(if shift { b'\n' } else { b'\r' });
             continue;
+        }
+        if key.virtual_key_code == VK_V && (key.control_key_state & CTRL_PRESSED) != 0 {
+            if let Some(bytes) = handle_clipboard() {
+                out.extend_from_slice(&bytes);
+                continue;
+            }
         }
         // Regular char key. `unicode_char` is one UTF-16 code unit; for
         // BMP keys that's the full character. Surrogate pairs from
@@ -450,6 +471,20 @@ mod tests {
             key_down(VK_RETURN, b'\r' as u16, 0),
         ];
         assert_eq!(translate(&events), b"hi\nm\r");
+    }
+
+    #[test]
+    fn ctrl_v_uses_clipboard_image_bytes_when_available() {
+        let events = [key_down(VK_V, 0x16, CTRL_PRESSED)];
+        let bytes = translate_with_clipboard(&events, || Some(b"C:\\tmp\\paste.png\n".to_vec()));
+        assert_eq!(bytes, b"C:\\tmp\\paste.png\n");
+    }
+
+    #[test]
+    fn ctrl_v_falls_through_to_control_byte_when_clipboard_unavailable() {
+        let events = [key_down(VK_V, 0x16, CTRL_PRESSED)];
+        let bytes = translate_with_clipboard(&events, || None);
+        assert_eq!(bytes, vec![0x16]);
     }
 
     // ---------- from_input_record tests ----------

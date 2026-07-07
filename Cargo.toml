@@ -3,21 +3,42 @@ resolver = "2"
 members = [
     "crates/clud-bin",
     "testbins/mock-agent",
+    "testbins/probe-dll",
+    "testbins/probe-target",
+]
+exclude = [
+    "dylints/ban_manual_slash_normalize",
 ]
 
+[workspace.metadata.dylint]
+libraries = [{ path = "dylints/*" }]
+
 [workspace.package]
-version = "2.1.0"
+version = "2.3.0"
 edition = "2021"
 rust-version = "1.85"
 license-file = "LICENSE"
 repository = "https://github.com/zackees/clud"
 homepage = "https://github.com/zackees/clud"
 
+# `debug = "line-tables-only"` keeps file:line in panic stack traces (so
+# `bash test` failures resolve to source) without paying the full-DWARF
+# compile-time + wheel-size tax. Applied to dev AND release so a panic
+# in a production wheel still shows where it crashed.
 [profile.dev]
-debug = 0
+debug = "line-tables-only"
+
+# Optimize third-party crates at opt-level=1 in dev. Our own crates stay
+# at the cargo-default opt-level=0 for fast incremental rebuilds; deps
+# (regex / running-process / tokio / whisper-rs internals) are paid for
+# once on cold compile and then cached, so the per-iteration cost is
+# negligible while runtime performance in dev tests is meaningfully
+# better.
+[profile.dev.package."*"]
+opt-level = 1
 
 [profile.release]
-debug = 0
+debug = "line-tables-only"
 
 [patch.crates-io]
 whisper-rs = { path = "vendor/whisper-rs" }

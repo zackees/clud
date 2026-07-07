@@ -181,6 +181,9 @@ pub fn write_to_console_input(records_bytes: &[u8]) -> std::io::Result<()> {
     if records_bytes.is_empty() {
         return Ok(());
     }
+    // `is_multiple_of` is stable since 1.87; clud's MSRV is 1.85.
+    // Suppress the lint instead of bumping MSRV for one suggestion.
+    #[allow(clippy::manual_is_multiple_of)]
     if records_bytes.len() % INPUT_RECORD_SIZE != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

@@ -5,8 +5,9 @@
 # What this does:
 #   1. Ensures `uv` (https://docs.astral.sh/uv) is installed (idempotent;
 #      bootstraps it via Astral's official one-line installer if missing).
-#   2. Runs `uv tool install clud[==VERSION]`, which drops the `clud.exe`
-#      executable into uv's tool bin directory.
+#   2. Runs `uv tool install clud[==VERSION]`, which drops `clud.exe` and
+#      helper executables such as `clud-block-bad-cmd.exe` into uv's tool bin
+#      directory.
 #   3. Adds uv's tool bin directory to the User PATH (HKCU\Environment)
 #      so new terminals find `clud` without manual intervention.
 #   4. Prints the exact `Set-Item Env:PATH` line for the current session.
@@ -69,6 +70,42 @@ function Install-Clud {
     }
 }
 
+function Verify-CludInstall {
+    $toolBin = Get-UvToolBinDir
+    if (-not $toolBin) {
+        Write-ErrLine "could not determine uv tool bin dir after install"
+        exit 1
+    }
+    $cludExe = Join-Path $toolBin 'clud.exe'
+    $guardExe = Join-Path $toolBin 'clud-block-bad-cmd.exe'
+    if (-not (Test-Path $cludExe)) {
+        Write-ErrLine "installed clud is missing at $cludExe"
+        exit 1
+    }
+    if (-not (Test-Path $guardExe)) {
+        Write-ErrLine "installed clud is missing native helper at $guardExe; re-run this installer"
+        exit 1
+    }
+
+    $denyCommand = 'bad'
+    $denyCommand = "$denyCommand cmd"
+    $denyPayload = @{ tool_name = 'Bash'; tool_input = @{ command = $denyCommand } } | ConvertTo-Json -Compress
+    $denyOutput = $denyPayload | & $guardExe 2>$null
+    $denyCode = $LASTEXITCODE
+    if ($denyCode -ne 2 -or ($denyOutput -join "`n") -notmatch 'permissionDecision' -or ($denyOutput -join "`n") -notmatch 'deny') {
+        Write-ErrLine "native clud-block-bad-cmd deny smoke failed (exit $denyCode)"
+        exit 1
+    }
+
+    $allowPayload = @{ tool_name = 'Bash'; tool_input = @{ command = 'echo ok' } } | ConvertTo-Json -Compress
+    $null = $allowPayload | & $guardExe 2>$null
+    $allowCode = $LASTEXITCODE
+    if ($allowCode -ne 0) {
+        Write-ErrLine "native clud-block-bad-cmd allow smoke failed (exit $allowCode)"
+        exit 1
+    }
+}
+
 function Get-UvToolBinDir {
     try {
         $dir = (& uv tool dir --bin 2>$null | Out-String).Trim()
@@ -123,6 +160,7 @@ function Setup-Path {
 function Main {
     Ensure-Uv
     Install-Clud
+    Verify-CludInstall
     Setup-Path
 }
 

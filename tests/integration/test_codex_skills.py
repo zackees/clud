@@ -22,8 +22,11 @@ import pytest
 pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BUNDLED_SKILL_PATH = (
+BUNDLED_CLUD_PR_SKILL_PATH = (
     REPO_ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-pr" / "SKILL.md"
+)
+BUNDLED_CLUD_FIX_SKILL_PATH = (
+    REPO_ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-fix" / "SKILL.md"
 )
 
 
@@ -31,12 +34,28 @@ def test_bundled_clud_pr_skill_carries_managed_marker_and_frontmatter() -> None:
     """The source-of-truth SKILL.md must carry the marker the installer keys
     its purge on. If this drifts, every install/purge guarantee in
     ``skills.rs`` silently weakens."""
-    body = BUNDLED_SKILL_PATH.read_text(encoding="utf-8")
+    body = BUNDLED_CLUD_PR_SKILL_PATH.read_text(encoding="utf-8")
     assert body.startswith("---"), "SKILL.md must begin with YAML frontmatter"
     assert "<!-- managed-by: clud -->" in body, (
         "managed-by marker is required for purge_stale_agents_skills "
         "to recognize clud-managed copies"
     )
+
+
+def test_bundled_clud_fix_skill_carries_codex_install_metadata() -> None:
+    """Issue #353: clud-fix must be a multi-backend bundled skill so Codex
+    installs it under ~/.codex/skills just like the other clud skills."""
+    body = BUNDLED_CLUD_FIX_SKILL_PATH.read_text(encoding="utf-8")
+    assert body.startswith("---"), "SKILL.md must begin with YAML frontmatter"
+    assert "name: clud-fix" in body
+    assert "<!-- managed-by: clud -->" in body
+    assert "RED -> GREEN" in body
+    assert "clud-pr-merge" not in body
+    assert "/goal $clud-fix <issue-or-issue-url>" in body
+    assert "Complete meta issue #N" in body
+    assert "every child issue closed/validated" in body
+    assert "parent issue closed" in body
+    assert ".clud/fix/<owner>__<repo>__issue-<num>.json" in body
 
 
 def test_clud_codex_dry_run_does_not_crash(

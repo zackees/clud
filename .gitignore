@@ -1,5 +1,6 @@
 # Rust
 /target/
+dylints/**/target/
 **/*.rs.bk
 Cargo.lock
 !Cargo.lock
@@ -48,10 +49,10 @@ coverage-*.xml
 *.log
 .extern-repos/
 
-# clud repo-scoped config dir (DD-014): track `settings.json` (the
-# repo-level soldr-activation marker), ignore runtime state (loop/
-# cache, DONE/BLOCKED markers, local-overrides).
+# clud project config/runtime state: track settings.json, ignore runtime
+# state (loop/cache, DONE/BLOCKED markers, local overrides).
 .clud/*
+!.clud/
 !.clud/settings.json
 .clud/settings.local.json
 

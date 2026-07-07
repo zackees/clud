@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-uv sync --frozen --group dev --no-install-project 2>/dev/null || uv sync --group dev --no-install-project
-exec uv run --no-editable -m ci.lint "$@"
+# Sync dev deps but never install the project itself.
+uv sync --frozen --group dev --no-install-project 2>/dev/null \
+    || uv sync --group dev --no-install-project
+
+# Run the lint orchestrator via the synced venv's interpreter rather
+# than `uv run --no-editable` — the latter triggers a maturin wheel
+# rebuild on every fresh worktree, which on Windows fails the moment
+# `whisper-rs-sys`'s CMake step looks for `cl.exe` without MSVC's env
+# activated (issue #370). Lint doesn't need a built wheel: cargo fmt
+# and clippy work from the source tree, and ruff is a pure-Python
+# tool. Skipping the wheel build keeps lint fast and platform-neutral.
+if [[ -x .venv/Scripts/python.exe ]]; then
+    VENV_PY=.venv/Scripts/python.exe
+elif [[ -x .venv/bin/python ]]; then
+    VENV_PY=.venv/bin/python
+else
+    echo "lint: could not find .venv/{Scripts,bin}/python after uv sync" >&2
+    exit 1
+fi
+
+exec "$VENV_PY" -m ci.lint "$@"

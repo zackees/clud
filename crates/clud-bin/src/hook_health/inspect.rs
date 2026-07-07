@@ -77,6 +77,7 @@ pub(in crate::hook_health) fn collect_claude(
             summary.parse_errors.extend(parsed.parse_errors);
         }
     }
+    warn_on_claude_windows_stdin_bug(&mut summary);
     summary
 }
 
@@ -377,4 +378,29 @@ pub(in crate::hook_health) fn warn_on_powershell_exit_code_risk(summary: &mut Fr
             "Codex hook command in {source} uses a Windows batch wrapper without explicit `$LASTEXITCODE` propagation; a blocking hook may fail open."
         ));
     }
+}
+
+fn warn_on_claude_windows_stdin_bug(summary: &mut FrontendHookSummary) {
+    if !cfg!(target_os = "windows") || summary.hooks.is_empty() {
+        return;
+    }
+
+    let sources = summary
+        .hooks
+        .iter()
+        .map(|hook| display_path(&hook.source_path))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    summary.warnings.push(format!(
+        "Claude Code Windows hooks in {sources} may hit the upstream hook stdin bug cluster \
+         (https://github.com/anthropics/claude-code/issues/53177, duplicate root \
+         https://github.com/anthropics/claude-code/issues/36156): hook timeout with Python \
+         blocked in `sys.stdin.read()` / `json.load(sys.stdin)` means the hook is probably \
+         waiting for stdin EOF, while a clud policy denial exits deterministically with deny \
+         output / exit code 2. Workaround: in Claude settings, set \
+         `env.CLAUDE_CODE_GIT_BASH_PATH` to Git for Windows `bin\\bash.exe`, not \
+         `git-bash.exe`; locate it with `where bash`."
+    ));
 }

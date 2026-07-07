@@ -39,6 +39,10 @@ fn sample_snapshot() -> SessionSnapshot {
     SessionSnapshot {
         id: "sess-test".to_string(),
         kind: SessionKind::Subprocess,
+        backend: Some("codex".to_string()),
+        launch_mode: Some("subprocess".to_string()),
+        repo_root: Some("C:/work/repo".to_string()),
+        command: vec!["codex".to_string(), "exec".to_string()],
         cwd: Some("C:/work/repo".to_string()),
         name: Some("sample".to_string()),
         created_at: Some(42),
@@ -53,6 +57,7 @@ fn sample_snapshot() -> SessionSnapshot {
         worker_port: 9020,
         root_pid: Some(102),
         exit_code: None,
+        exited_at: None,
         ctrl_c: Some(sample_profile()),
     }
 }
@@ -70,6 +75,30 @@ fn sample_profile() -> CtrlCProfile {
         daemon_kill_ms: Some(1),
         fast_path: true,
     }
+}
+
+fn sample_proc_snapshot() -> ProcTreeSnapshot {
+    let mut snapshot = ProcTreeSnapshot::empty(2_000);
+    snapshot.sampled_at_ms = 123_456;
+    snapshot.rows.push(ProcRow {
+        pid: 42,
+        ppid: Some(10),
+        originator: "CLUD:10".to_string(),
+        originator_pid: Some(10),
+        session_id: Some("sess-test".to_string()),
+        session_name: Some("sample".to_string()),
+        cpu_pct: 7.5,
+        cpu_ewma_pct: 3.2,
+        rss_bytes: 128 * 1024 * 1024,
+        age_secs: 30,
+        command: "codex exec".to_string(),
+        depth: 1,
+        tier: ProcTier::Hot,
+        live: true,
+        exited_at_ms: None,
+    });
+    snapshot.recompute_summary();
+    snapshot
 }
 
 fn assert_json_parity<T>(original: &T, decoded: &T)
@@ -170,6 +199,11 @@ fn daemon_request_prost_roundtrips_json_shapes() {
             },
         },
         DaemonRequest::Shutdown,
+        DaemonRequest::ReapOrphans,
+        DaemonRequest::Metrics,
+        DaemonRequest::ProcSnapshot {
+            include_dead_since_ms: 5_000,
+        },
     ];
 
     for request in cases {
@@ -202,6 +236,17 @@ fn daemon_response_prost_roundtrips_json_shapes() {
             reply: GcReply::ListOk { rows: Vec::new() },
         },
         DaemonResponse::ShutdownAck { pid: 1234 },
+        DaemonResponse::ReapOrphansAck {
+            found: 3,
+            reaped: 3,
+        },
+        DaemonResponse::Metrics {
+            pid: 1234,
+            cpu_pct: 72.5,
+        },
+        DaemonResponse::ProcSnapshot {
+            snapshot: sample_proc_snapshot(),
+        },
         DaemonResponse::Error {
             message: "failed".to_string(),
         },

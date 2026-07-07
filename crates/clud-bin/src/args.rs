@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::graphics::GraphicsMode;
@@ -153,11 +153,24 @@ pub struct Args {
     #[arg(long = "explain-orphans")]
     pub explain_orphans: bool,
 
+    /// Issue #466: suppress the foreground CPU-burn banner for this
+    /// invocation. Banner is otherwise on by default; it polls the subtree
+    /// CPU every 2 s and emits `[clud] cpu N % …` to stderr when subtree
+    /// CPU crosses `max(50 %, 0.20 × num_cpus × 100 %)` for 3 sustained
+    /// ticks. Permanent opt-out via `[foreground.cpu_banner] enabled =
+    /// false` in `~/.clud/settings.json`.
+    #[arg(long = "no-cpu-banner")]
+    pub no_cpu_banner: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
     #[arg(last = true, id = "BACKEND_ARGS")]
     pub passthrough: Vec<String>,
+
+    /// Runtime Codex `-c` config overrides loaded from ~/.clud/settings.json.
+    #[arg(skip)]
+    pub codex_config_overrides: Vec<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -206,7 +219,39 @@ pub enum Command {
         #[arg(long = "all")]
         all: bool,
     },
+    /// Kill all active background sessions.
+    Slay,
     List,
+    /// Inspect daemon-sampled CPU/RSS process trees.
+    Top {
+        /// Emit machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+        /// Print one snapshot and exit.
+        #[arg(long = "once")]
+        once: bool,
+        /// Keep refreshing. With `--json`, prints one compact JSON object per line.
+        #[arg(long = "watch", conflicts_with = "once")]
+        watch: bool,
+        /// Render rows as a process tree. This is the default text mode.
+        #[arg(long = "tree", conflicts_with = "flat")]
+        tree: bool,
+        /// Render rows as one flat sorted table.
+        #[arg(long = "flat", conflicts_with = "tree")]
+        flat: bool,
+        /// Sort key for tree siblings and flat rows.
+        #[arg(long = "sort", value_enum, default_value_t = TopSort::Cpu)]
+        sort: TopSort,
+        /// Cap displayed rows per subtree in tree mode, or total rows in flat mode.
+        #[arg(long = "limit", default_value_t = 20)]
+        limit: usize,
+        /// Include dead PIDs sampled within this duration, e.g. `30s`, `5m`.
+        #[arg(long = "since", value_name = "DURATION")]
+        since: Option<String>,
+        /// Restrict output to one cohort, e.g. `CLUD:71584` or `71584`.
+        #[arg(long = "originator", value_name = "CLUD:PID")]
+        originator: Option<String>,
+    },
     /// pm2-style log viewer: dump or tail a session's captured output.
     ///
     /// With no session id, lists all sessions that have log files and prints
@@ -231,11 +276,18 @@ pub enum Command {
     /// Issue #110: tracked-entry garbage collection (redb-backed
     /// registry at `~/.clud/data.redb`).
     ///
-    /// Subcommands: `list`, `purge <duration>`, `reconcile`. Running
+    /// Subcommands: `list`, `prune`, `purge`, `all`, `reconcile`. Running
     /// `clud gc` with no subcommand prints this help summary.
     Gc {
         #[command(subcommand)]
         subcommand: Option<GcSubcommand>,
+    },
+    /// Inspect or edit clud settings.
+    ///
+    /// Running `clud config` with no subcommand prints this help summary.
+    Config {
+        #[command(subcommand)]
+        subcommand: Option<ConfigSubcommand>,
     },
     /// Issue #183: open the local web dashboard served by the always-on
     /// clud daemon. Shows live sessions, garbage tracking, and the repos
@@ -258,10 +310,81 @@ pub enum Command {
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+    /// Run and inspect bundled clud tools without starting the daemon.
+    Tool {
+        #[command(subcommand)]
+        subcommand: ToolSubcommand,
+    },
+    /// Issue #469 (beta prototype): POST one telemetry event to the
+    /// always-on clud daemon's HTTP server. Captures parent PID, time,
+    /// the `cmd` string passed in, the current working directory, and
+    /// every env var beginning with `CLUD_`. The daemon URL is read
+    /// from `$CLUD_DAEMON_HTTP_SERVER`. By default missing env / unreachable
+    /// daemon are silent (exit 0) so a hook caller is never broken; with
+    /// `--fail-on-no-server` either failure causes a non-zero exit so
+    /// tests can prove a real round-trip.
+    Log {
+        /// Free-form command string describing what the caller was doing.
+        /// Stored verbatim in the telemetry record.
+        #[arg(long = "cmd", short = 'c')]
+        cmd: String,
+        /// Exit non-zero if `CLUD_DAEMON_HTTP_SERVER` is unset OR the
+        /// POST fails. Without this flag, failures are swallowed.
+        #[arg(long = "fail-on-no-server")]
+        fail_on_no_server: bool,
+    },
+    /// Install and persist fast local tooling defaults.
+    Optimize {
+        /// Toolchain family to optimize. Defaults to Rust.
+        #[arg(value_enum, default_value_t = OptimizeTarget::Rust)]
+        target: OptimizeTarget,
+        /// Persist the recommendation in ~/.clud/settings.json.
+        #[arg(long = "global", conflicts_with = "repo")]
+        global: bool,
+        /// Write a repo-local .clud/settings.json directive.
+        #[arg(long = "repo", conflicts_with = "global")]
+        repo: bool,
+        /// Install soldr if it is missing from PATH.
+        #[arg(
+            long = "install-soldr",
+            default_value_t = true,
+            action = ArgAction::Set,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            value_parser = clap::value_parser!(bool),
+        )]
+        install_soldr: bool,
+        /// Enable soldr shims for future clud-managed Rust setup.
+        #[arg(
+            long = "use-soldr-shims",
+            default_value_t = true,
+            action = ArgAction::Set,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            value_parser = clap::value_parser!(bool),
+        )]
+        use_soldr_shims: bool,
+        /// soldr release version to install and persist.
+        #[arg(long = "soldr-version", default_value = "0.7.11")]
+        soldr_version: String,
+    },
     /// Control the always-on clud daemon.
     Daemon {
         #[command(subcommand)]
         subcommand: DaemonSubcommand,
+    },
+    /// Inspect or verify crash-report symbolication (#374 PR 3/3).
+    ///
+    /// clud builds with `debug = "line-tables-only"` embed every line
+    /// table in the binary itself, so there are no sidecar files to
+    /// install. This subcommand is an opportunistic verifier that
+    /// confirms the running binary can symbolicate recent crash reports
+    /// in `~/.clud/state/crashes/`. `clud symbols` (bare) prints a
+    /// summary; `clud symbols install` and `clud symbols verify` exit 1
+    /// when any inspected report is unsymbolicated.
+    Symbols {
+        #[command(subcommand)]
+        subcommand: Option<SymbolsSubcommand>,
     },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
@@ -281,7 +404,59 @@ pub enum Command {
     },
 }
 
-/// Subcommands under `clud daemon`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizeTarget {
+    #[value(alias = "soldr")]
+    Rust,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopSort {
+    Cpu,
+    Mem,
+    Rss,
+    Age,
+}
+
+/// Subcommands under `clud config`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigSubcommand {
+    /// Print global, local, and merged settings.
+    Show {
+        /// Emit machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Open a settings file in an editor.
+    Edit {
+        /// Edit repo-local .clud/settings.json instead of ~/.clud/settings.json.
+        #[arg(long = "local")]
+        local: bool,
+        /// Editor command to run, e.g. `code --wait`.
+        #[arg(long = "editor", value_name = "CMD")]
+        editor: Option<String>,
+    },
+}
+
+/// Subcommands under `clud symbols`. See `crates/clud-bin/src/symbols.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum SymbolsSubcommand {
+    /// Verify that the running binary's embedded line tables resolve
+    /// recent crash report backtraces. With the embed-everywhere
+    /// strategy, this is a no-op when symbols are already present and
+    /// a diagnostic when they're not. Exits 1 if any inspected report
+    /// is unsymbolicated.
+    Install,
+    /// Same as `install` but with an explicit `--all` toggle.
+    Verify {
+        /// Verify every report under `~/.clud/state/crashes/` rather
+        /// than just the most-recent one.
+        #[arg(long = "all")]
+        all: bool,
+    },
+}
+
+/// Subcommands under `clud daemon`. See `crates/clud-bin/src/daemon/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum DaemonSubcommand {
     /// Restart the daemon process so the next CLI call uses the current binary.
@@ -295,33 +470,143 @@ pub enum DaemonSubcommand {
     },
 }
 
+/// Subcommands under `clud tool`. See `crates/clud-bin/src/tool_run.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ToolSubcommand {
+    /// Invoke a bundled tool by its `~/.clud/tools/`-relative path,
+    /// forwarding any trailing args to the tool. Example:
+    /// `clud tool run github/pr_merge_watch.py 404 --interval 30`.
+    Run {
+        /// Path under `~/.clud/tools/` (e.g. `github/pr_merge_watch.py`).
+        rel_path: String,
+        /// Arguments forwarded verbatim to the tool. Use `--` to pass flags
+        /// the clud parser would otherwise consume.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// List tool invocations in the current clud session — slice 3 of #427.
+    List {
+        /// Emit a JSON array instead of the human-readable table.
+        #[arg(long = "json")]
+        json: bool,
+        /// Show the long-form `<session-pid>-<tool-id>` ID in the table.
+        #[arg(long = "long")]
+        long: bool,
+    },
+    /// Query the full JSONL log of one invocation with optional filters
+    /// — slice 4 of #427.
+    Log {
+        /// Reference to the invocation. Same forms as `tool info`.
+        reference: Option<String>,
+        /// Look up by the tool's own OS PID instead of session-local id.
+        #[arg(long = "pid")]
+        pid: Option<u32>,
+        /// Which stream to read: `stdout`, `stderr`, or `combined` (default).
+        #[arg(long = "stream", default_value = "combined")]
+        stream: String,
+        /// Only entries newer than `now - <duration>` (e.g. `5m`, `1h`).
+        #[arg(long = "since")]
+        since: Option<String>,
+        /// Only entries older than `now - <duration>`.
+        #[arg(long = "until")]
+        until: Option<String>,
+        /// Absolute time range as two integer epoch-ms values.
+        #[arg(long = "between", number_of_values = 2)]
+        between: Option<Vec<String>>,
+        /// Substring match on the decoded line text.
+        #[arg(long = "grep")]
+        grep: Option<String>,
+        /// Show only the first N matching entries.
+        #[arg(long = "head")]
+        head: Option<usize>,
+        /// Show only the last N matching entries.
+        #[arg(long = "tail")]
+        tail: Option<usize>,
+        /// Emit the raw JSONL stream instead of decoded text.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// History of tool invocations matching optional filters — slice 4
+    /// of #427.
+    Ledger {
+        /// Restrict to one tool name.
+        #[arg(long = "tool")]
+        tool: Option<String>,
+        /// Session scope: `current` (default), `previous`, or `all`.
+        #[arg(long = "session", default_value = "current")]
+        session: String,
+        /// Emit a JSON array instead of the human-readable table.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Show current state + last N lines of stdout/stderr for one
+    /// invocation — slice 3 of #427.
+    Info {
+        /// Reference to the invocation. Accepts:
+        /// * a bare session-local integer (`3`)
+        /// * a long-form `<session-pid>-<tool-id>` (`47180-3`)
+        /// * `@<tool-name>` or `@<tool-name>:N` for N-th-most-recent
+        ///
+        /// Omit to default to the most recently started invocation.
+        reference: Option<String>,
+        /// Look up by the tool's own OS PID instead of the session-local
+        /// integer. Bare integers always mean tool-id, not PID — use this
+        /// flag to disambiguate.
+        #[arg(long = "pid")]
+        pid: Option<u32>,
+        /// Number of trailing stdout/stderr lines to show per stream.
+        #[arg(long = "lines", default_value_t = 20)]
+        lines: usize,
+        /// Emit a JSON object instead of the human-readable view.
+        #[arg(long = "json")]
+        json: bool,
+    },
+}
+
 /// Subcommands under `clud gc`. See `crates/clud-bin/src/gc/`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcSubcommand {
-    /// Print every tracked entry, newest first.
+    /// Print tracked entries, newest first.
     List {
         /// Issue #135: emit a JSON array instead of the human-readable table.
         #[arg(long = "json")]
         json: bool,
-        /// Restrict to a single entry kind (e.g. `worktree`, `trash`).
+        /// Restrict to a single managed kind (e.g. `worktree`, `trash`).
         #[arg(long = "kind")]
         kind: Option<String>,
     },
-    /// Remove tracked entries older than `<duration>`. When `<duration>`
-    /// is omitted, purge ALL tracked entries that are not live-locked.
+    /// Drop stale/unreferenced entries for one managed kind.
+    Prune {
+        /// Preview the removal plan without touching anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Managed kind to prune (e.g. `worktree`, `uv-cache`, `trash`).
+        #[arg(long = "kind")]
+        kind: Option<String>,
+    },
+    /// Remove all entries for one managed kind. Destructive; requires `--yes`.
     Purge {
-        /// Duration (e.g. `30s`, `5m`, `2h`, `1d`). When omitted, purge
-        /// every non-live-locked entry regardless of age.
-        duration: Option<String>,
         /// Preview the removal plan without touching anything.
         #[arg(long = "dry-run")]
         dry_run: bool,
         /// Skip the interactive confirmation prompt.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
-        /// Restrict to a single entry kind (e.g. `worktree`).
+        /// Managed kind to purge (e.g. `worktree`, `uv-cache`, `trash`).
         #[arg(long = "kind")]
         kind: Option<String>,
+    },
+    /// Operate across every managed kind. Defaults to safe prune.
+    All {
+        /// Purge every managed kind instead of pruning stale entries.
+        #[arg(long = "purge")]
+        purge: bool,
+        /// Preview the removal plan without touching anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Required with `--purge`.
+        #[arg(long = "yes", short = 'y')]
+        yes: bool,
     },
     /// Walk `.claude/worktrees/` in the current repo and insert any
     /// previously-untracked worktree directories.
@@ -364,6 +649,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--stale-after",
         "--daemon",
         "--state-dir",
+        // Issue #469: `clud log --cmd "..."` arg.
+        "--cmd",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
@@ -399,11 +686,14 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--demo-gfx-sixel",
         "--help",
         "--version",
+        // Issue #469: `clud log --fail-on-no-server` bool flag.
+        "--fail-on-no-server",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "list", "logs", "gc", "ui",
-        "trash", "daemon", "__daemon", "__worker",
+        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
+        "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon",
+        "__worker",
     ];
 
     let mut in_subcommand = false;

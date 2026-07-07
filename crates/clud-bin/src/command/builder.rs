@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::args::{Args, Command};
 use crate::backend::{Backend, LaunchMode};
@@ -8,6 +8,11 @@ use crate::loop_spec::{done_marker_contract, git_root_from};
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
 use super::prompts::{build_fix_prompt, build_up_prompt, push_prompt, REBASE_PROMPT};
 use super::types::{LaunchPlan, LoopMarkers, RepeatSchedule};
+
+const CODEX_PROJECT_DOC_FALLBACK_KEY: &str = "project_doc_fallback_filenames";
+const CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG: &str = r#"project_doc_fallback_filenames=["CODEX.md"]"#;
+const CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG: &str =
+    r#"project_doc_fallback_filenames=["CLAUDE.md"]"#;
 
 /// Returns true if `args` carries a prompt that should run non-interactively
 /// (via `codex exec <prompt>` on the codex backend).
@@ -23,6 +28,16 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
 }
 
 pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    build_launch_plan_at(args, backend, backend_path, &cwd)
+}
+
+pub(crate) fn build_launch_plan_at(
+    args: &Args,
+    backend: Backend,
+    backend_path: &str,
+    cwd: &Path,
+) -> LaunchPlan {
     let mut cmd = vec![backend_path.to_string()];
     let mut iterations = 1u32;
     let mut repeat_schedule: Option<RepeatSchedule> = None;
@@ -32,6 +47,19 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
     let codex_uses_resume = matches!(backend, Backend::Codex)
         && !codex_uses_exec
         && (args.continue_session || args.resume.is_some());
+
+    if matches!(backend, Backend::Codex) {
+        for override_value in &args.codex_config_overrides {
+            cmd.push("-c".to_string());
+            cmd.push(override_value.clone());
+        }
+        if !has_codex_project_doc_fallback_override(&args.codex_config_overrides) {
+            if let Some(fallback_config) = codex_project_doc_fallback_config(cwd) {
+                cmd.push("-c".to_string());
+                cmd.push(fallback_config.to_string());
+            }
+        }
+    }
 
     if codex_uses_exec {
         cmd.push("exec".to_string());
@@ -75,8 +103,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
             repeat,
         }) => {
             iterations = *loop_count;
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let git_root = git_root_from(&cwd);
+            let git_root = git_root_from(cwd);
             let repeat_interval_secs = repeat
                 .as_deref()
                 .map(parse_repeat_interval)
@@ -89,7 +116,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
                 repeat_interval_secs.map(|interval_secs| RepeatSchedule { interval_secs });
             let use_done_markers = done.is_some() || (!*no_done && repeat_schedule.is_none());
             let marker_paths = if use_done_markers {
-                Some(resolve_marker_paths(&cwd, &git_root, done.as_deref()))
+                Some(resolve_marker_paths(cwd, &git_root, done.as_deref()))
             } else {
                 None
             };
@@ -133,11 +160,18 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         }
         Some(Command::Attach { .. })
         | Some(Command::Kill { .. })
+        | Some(Command::Slay)
         | Some(Command::List)
+        | Some(Command::Top { .. })
         | Some(Command::Logs { .. })
+        | Some(Command::Log { .. })
         | Some(Command::Gc { .. })
+        | Some(Command::Config { .. })
         | Some(Command::Ui { .. })
         | Some(Command::Trash { .. })
+        | Some(Command::Tool { .. })
+        | Some(Command::Optimize { .. })
+        | Some(Command::Symbols { .. })
         | Some(Command::Daemon { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}
@@ -224,9 +258,7 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         iterations,
         backend,
         launch_mode,
-        cwd: std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.to_string_lossy().to_string()),
+        cwd: Some(cwd.to_string_lossy().to_string()),
         graphics: GraphicsConfig {
             mode: args.graphics,
             image_path: args.graphics_image.clone(),
@@ -236,6 +268,29 @@ pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> L
         loop_markers,
         stream_json_progress,
     }
+}
+
+fn has_codex_project_doc_fallback_override(overrides: &[String]) -> bool {
+    overrides.iter().any(|value| {
+        value
+            .trim_start()
+            .strip_prefix(CODEX_PROJECT_DOC_FALLBACK_KEY)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    })
+}
+
+fn codex_project_doc_fallback_config(cwd: &Path) -> Option<&'static str> {
+    let repo_root = git_root_from(cwd);
+    if repo_root.join("AGENTS.md").is_file() {
+        return None;
+    }
+    if repo_root.join("CODEX.md").is_file() {
+        return Some(CODEX_MD_PROJECT_DOC_FALLBACK_CONFIG);
+    }
+    if repo_root.join("CLAUDE.md").is_file() {
+        return Some(CLAUDE_MD_PROJECT_DOC_FALLBACK_CONFIG);
+    }
+    None
 }
 
 /// Parse a `--repeat` duration string into seconds.

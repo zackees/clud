@@ -108,6 +108,32 @@ fn one_sided_hook_warnings_are_bidirectional() {
             && warning.contains("clud --fix-hooks")));
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn claude_windows_hook_stdin_bug_warning_mentions_workaround() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"python check.py"}]}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("github.com/anthropics/claude-code/issues/53177"))
+        .expect("Claude Windows hooks should report the upstream stdin bug");
+    assert!(warning.contains("hook timeout"), "{warning}");
+    assert!(warning.contains("policy denial"), "{warning}");
+    assert!(warning.contains("CLAUDE_CODE_GIT_BASH_PATH"), "{warning}");
+    assert!(warning.contains(r"bin\bash.exe"), "{warning}");
+    assert!(warning.contains("git-bash.exe"), "{warning}");
+    assert!(warning.contains("where bash"), "{warning}");
+}
+
 #[test]
 fn matcher_mismatch_warns() {
     let temp = tempdir().unwrap();
@@ -238,6 +264,69 @@ fn legacy_codex_hooks_feature_migration_preserves_existing_hooks_value() {
     let text = fs::read_to_string(config).unwrap();
     assert!(text.contains("hooks = true"), "{text}");
     assert!(!text.contains("codex_hooks"), "{text}");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn codex_batch_hook_exit_code_risk_warns_and_plans_repair() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let codex = repo.join(".codex").join("hooks.json");
+    write(
+        &codex,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\tools\\guard.cmd --check"}]}]}}"#,
+    );
+    write(
+        &home.join(".codex").join("config.toml"),
+        &format!(
+            "[projects.'{}']\ntrust_level = \"trusted\"\n{}",
+            codex_project_key(&repo),
+            trusted_state_for(&codex, 0, 0)
+        ),
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("may fail open")));
+    assert!(plan_repairs(&report).into_iter().any(|action| matches!(
+        action,
+        RepairAction::NormalizeCodexBatchHookExitCode { hooks_path } if hooks_path == codex
+    )));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn codex_batch_hook_exit_code_repair_appends_lastexitcode() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    let codex = repo.join(".codex").join("hooks.json");
+    write(
+        &codex,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"C:\\tools\\guard.cmd --check"},{"type":"command","command":"C:\\tools\\safe.cmd; exit $LASTEXITCODE"}]}]}}"#,
+    );
+    write(
+        &home.join(".codex").join("config.toml"),
+        &format!(
+            "[projects.'{}']\ntrust_level = \"trusted\"\n{}",
+            codex_project_key(&repo),
+            trusted_state_for(&codex, 0, 0)
+        ),
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+    apply_deterministic_repairs(deterministic_repair_actions(&report)).unwrap();
+
+    let text = fs::read_to_string(codex).unwrap();
+    assert!(
+        text.contains(r#"C:\\tools\\guard.cmd --check; exit $LASTEXITCODE"#),
+        "{text}"
+    );
+    assert_eq!(text.matches("safe.cmd; exit $LASTEXITCODE").count(), 1);
 }
 
 #[test]

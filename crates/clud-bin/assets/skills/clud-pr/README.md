@@ -1,6 +1,6 @@
 # clud-pr/
 
-Bundled skill that implements a GitHub issue, PR follow-up, or freeform task inside a `.claude/worktrees/<branch>/` worktree and ships it as one clean PR. It also owns PR merge mode, formerly `/clud-pr-merge`, for taking an open PR through CI/review fixes to merge. Triggers on `/clud-pr`, merge/land requests, a PR URL/number (triage mode), an issue URL/number, or any phrasing like "ship", "do-pr", or a task sentence with intent to deliver. Code changes follow RED -> GREEN: failing focused test/repro first, implementation second, passing signal before broad gates.
+Bundled skill that implements a GitHub issue, PR follow-up, or freeform task inside a `.claude/worktrees/<branch>/` worktree and ships it as one clean PR. It also owns PR merge mode, formerly `/clud-pr-merge`, for taking an open PR through CI/review fixes to merge. When delegated from `clud-fix`, it skips nested `/goal` setup and returns structured PR/merge evidence to the issue-level orchestrator. Triggers on `/clud-pr`, merge/land requests, a PR URL/number (triage mode), an issue URL/number, or any phrasing like "ship", "do-pr", or a task sentence with intent to deliver. Code changes follow RED -> GREEN: failing focused test/repro first, implementation second, passing signal before broad gates.
 
 ## Files
 

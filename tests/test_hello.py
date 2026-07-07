@@ -6,9 +6,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -109,11 +111,28 @@ def copied_clud_env(_source: Path) -> dict[str, str]:
     return env
 
 
+def _copy_clud_for_test(temp_dir: str) -> Path:
+    source = Path(CLUD)
+    launch = Path(temp_dir) / source.name
+    shutil.copy2(source, launch)
+    return launch
+
+
+def _fake_claude_on_path(bin_dir: Path) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        fake = bin_dir / "claude.cmd"
+        fake.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    else:
+        fake = bin_dir / "claude"
+        fake.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+
+
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as temp_dir:
         source = Path(CLUD)
-        launch = Path(temp_dir) / source.name
-        shutil.copy2(source, launch)
+        launch = _copy_clud_for_test(temp_dir)
         return subprocess.run(
             [str(launch), *args],
             capture_output=True,
@@ -122,6 +141,71 @@ def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProce
             input=input_data,
             env=copied_clud_env(source),
         )
+
+
+def _isolated_clud_env(source: Path, home: Path, state_dir: Path) -> dict[str, str]:
+    env = copied_clud_env(source)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["LOCALAPPDATA"] = str(home / "local-app-data")
+    env["XDG_STATE_HOME"] = str(home / ".local" / "state")
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["CLUD_HOOK_HOME"] = str(home)
+    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    env["CLUD_DATA_DB"] = str(state_dir / "data.redb")
+    return env
+
+
+def _shutdown_daemon(state_dir: Path) -> None:
+    info_path = state_dir / "daemon.json"
+    if not info_path.exists():
+        return
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    pid = int(info.get("pid") or 0)
+    try:
+        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=2) as sock:
+            sock.sendall(b'{"op":"shutdown"}\n')
+            sock.recv(4096)
+    except OSError:
+        return
+    deadline = time.monotonic() + 10
+    while (
+        (info_path.exists() or _pid_is_alive(pid))
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0 and f'"{pid}"' in result.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _snapshot_tree(root: Path) -> dict[str, tuple[bool, int, int | None, bytes | None]]:
+    snapshot: dict[str, tuple[bool, int, int | None, bytes | None]] = {}
+    for path in sorted(root.rglob("*")):
+        stat = path.stat()
+        rel = path.relative_to(root).as_posix()
+        if path.is_file():
+            snapshot[rel] = (False, stat.st_mtime_ns, stat.st_size, path.read_bytes())
+        else:
+            snapshot[rel] = (True, stat.st_mtime_ns, None, None)
+    return snapshot
 
 
 def test_help() -> None:
@@ -137,6 +221,125 @@ def test_version() -> None:
     result = _run("--version")
     assert result.returncode == 0
     assert result.stdout.strip() == f"clud {PROJECT_VERSION}"
+
+
+def test_gc_bare_prints_help_without_touching_clud_dir() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "daemon-state"
+        clud_dir = home / ".clud"
+        marker = clud_dir / "sentinel.txt"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("do not touch\n", encoding="utf-8")
+        before = _snapshot_tree(clud_dir)
+
+        result = subprocess.run(
+            [str(launch), "gc"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_isolated_clud_env(source, home, state_dir),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Commands:" in result.stdout or "SUBCOMMANDS:" in result.stdout
+        assert "KINDS:" in result.stdout
+        assert "uv-cache" in result.stdout
+        assert "all" in result.stdout
+        assert _snapshot_tree(clud_dir) == before
+
+
+def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "daemon-state"
+        env = _isolated_clud_env(source, home, state_dir)
+
+        uv_env = home / ".clud" / "cache" / "uv" / "environments-v2" / "stale-env"
+        uv_env.mkdir(parents=True)
+        (uv_env / "pyvenv.cfg").write_text("stale\n", encoding="utf-8")
+        old = time.time() - 8 * 24 * 60 * 60
+        os.utime(uv_env, (old, old))
+
+        victim = home / "victim.txt"
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_text("trash me\n", encoding="utf-8")
+        trash = subprocess.run(
+            [str(launch), "trash", "--cross-volume", str(victim)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+        try:
+            assert trash.returncode == 0, trash.stderr
+            assert not victim.exists()
+            trash_root = home / ".clud" / "trash"
+            assert any(trash_root.iterdir())
+
+            result = subprocess.run(
+                [str(launch), "gc", "all"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+
+            assert result.returncode == 0, result.stderr
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                trash_empty = not trash_root.exists() or not any(trash_root.iterdir())
+                if not uv_env.exists() and trash_empty:
+                    break
+                time.sleep(0.1)
+            assert not uv_env.exists(), result.stdout
+            assert not trash_root.exists() or not any(trash_root.iterdir()), result.stdout
+        finally:
+            _shutdown_daemon(state_dir)
+
+
+def test_top_once_json_arg_surface() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "daemon-state"
+        env = _isolated_clud_env(source, home, state_dir)
+        try:
+            result = subprocess.run(
+                [
+                    str(launch),
+                    "top",
+                    "--once",
+                    "--json",
+                    "--flat",
+                    "--sort",
+                    "rss",
+                    "--limit",
+                    "5",
+                    "--since",
+                    "5s",
+                    "--originator",
+                    "CLUD:0",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+            )
+
+            assert result.returncode == 0, result.stderr
+            data = json.loads(result.stdout)
+            assert data["schema_version"] == 1
+            assert data["interval_ms"] >= 250
+            assert isinstance(data["rows"], list)
+            assert "summary" in data
+        finally:
+            _shutdown_daemon(state_dir)
 
 
 def test_linux_binary_does_not_require_libasound_at_startup() -> None:
@@ -174,6 +377,37 @@ def test_dry_run_codex() -> None:
     data = json.loads(result.stdout)
     assert data["backend"] == "codex"
     assert data["launch_mode"] == "subprocess"
+
+
+def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    (repo / "CODEX.md").write_text("codex fallback", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = copied_clud_env(source)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        result = subprocess.run(
+            [str(launch), "--dry-run", "--codex", "-p", "hello"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert (
+        'project_doc_fallback_filenames=["CODEX.md"]'
+        in data["command"]
+    )
 
 
 def test_dry_run_pty_override() -> None:
@@ -374,6 +608,81 @@ def test_pipe_mode() -> None:
     data = json.loads(result.stdout)
     assert "-p" in data["command"]
     assert "piped prompt" in data["command"]
+
+
+def test_startup_refreshes_stale_managed_bundled_tool(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    home.mkdir()
+    _fake_claude_on_path(fake_bin)
+
+    hook = home / ".clud" / "tools" / "hooks" / "block-bad-cmd.py"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("# managed-by: clud\nprint('stale hook')\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = copied_clud_env(source)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            [
+                str(launch),
+                "--no-daemon",
+                "--no-fix-hooks",
+                "--no-cpu-banner",
+                "--no-dnd",
+                "--subprocess",
+                "-p",
+                "hello",
+            ],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    assert result.returncode == 0, (
+        f"startup launch failed (rc={result.returncode}): "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    updated = hook.read_text(encoding="utf-8")
+    assert "clud-block-bad-cmd" in updated
+    assert "compatibility shim" in updated.lower()
+    assert "stale hook" not in updated
+
+
+def test_dry_run_does_not_refresh_stale_managed_bundled_tool(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    hook = home / ".clud" / "tools" / "hooks" / "block-bad-cmd.py"
+    hook.parent.mkdir(parents=True)
+    stale = "# managed-by: clud\nprint('stale hook')\n"
+    hook.write_text(stale, encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = copied_clud_env(source)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["CLUD_HOOK_HOME"] = str(home)
+        result = subprocess.run(
+            [str(launch), "--dry-run", "-p", "hello"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert hook.read_text(encoding="utf-8") == stale
 
 
 def test_clean_worktrees_dry_run_smoke() -> None:

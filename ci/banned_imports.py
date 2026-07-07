@@ -80,7 +80,22 @@ def main() -> int:
     # NativeProcess in those tests would attach a Job Object that already
     # kills descendants on close, masking whether kill_tree's own walk
     # actually works.
-    exempt = {"trampoline.rs", "process_tree.rs"}
+    # win32_hooking_probe.rs is exempt — #468 is a research-only ignored
+    # integration test that deliberately constructs raw Win32 jobs, suspended
+    # children, and injection targets. running-process containment would mask
+    # exactly the primitives under measurement.
+    #
+    # clud_shim.rs is exempt — the shim's entire purpose is to `execvp`
+    # (Unix) or `CreateProcess` (Windows) and replace itself with the
+    # resolved Python interpreter. running-process's NativeProcess
+    # always spawns under containment, which is precisely the wrong
+    # semantics for a relay binary. See #406 / #409.
+    exempt = {
+        "trampoline.rs",
+        "process_tree.rs",
+        "win32_hooking_probe.rs",
+        "clud_shim.rs",
+    }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0
 

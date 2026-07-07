@@ -88,19 +88,38 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 
-### Bundled Skill Imports
+### Cross-cutting registries — extend in all required places
 
-When adding or renaming any imported/bundled skill, update the relevant `BUNDLED_SKILLS` registry and make sure the `SKILL.md` frontmatter parses with a real YAML parser. The guardrail tests live in `crates/clud-bin/src/skills.rs` for `crates/clud-bin/assets/skills/*/SKILL.md` imports and `crates/clud-bin/src/skill_install.rs` for root `skills/*/SKILL.md` imports. Run `soldr cargo test -p clud --lib skills::` and `soldr cargo test -p clud --lib skill_install::` after changing skill imports or frontmatter.
+Several features have a "single source of truth" registry that must be updated alongside the code change. Forgetting any of these causes silent misbehavior (passthrough instead of dispatch) or surprising failures (banned-import lint, missing bundled file). The full list:
+
+- **New top-level `Command` subcommand** → 3 places:
+  1. `Command` enum variant in `crates/clud-bin/src/args.rs`.
+  2. Dispatch arm in `crates/clud-bin/src/main.rs`.
+  3. **`subcommands: &[&str]` array in `args.rs::split_known_unknown` (~line 611)** — *gotcha*: a hardcoded list the unknown-flag-passthrough splitter uses; a missing entry routes your subcommand's argv to the backend agent as passthrough instead of dispatching it, and you get errors from the wrong layer (e.g., the backend complaining about your `--cmd` flag). Also extend `value_flags` / `bool_flags` arrays in the same function if your subcommand introduces new flags.
+
+- **New bundled skill** (`crates/clud-bin/assets/skills/*/SKILL.md`) → `BUNDLED_SKILLS` registry in `crates/clud-bin/src/skills.rs`; frontmatter must parse via a real YAML parser. Guardrail tests: `soldr cargo test -p clud --lib skills::`. Same applies to root `skills/*/SKILL.md` via `crates/clud-bin/src/skill_install.rs` (`soldr cargo test -p clud --lib skill_install::`).
+
+- **New bundled tool / hook** (`crates/clud-bin/assets/tools/<group>/*.py`) → `BUNDLED_TOOLS` array in `crates/clud-bin/src/tools.rs` with `include_str!` of the asset. Add a `bundled_includes_<tool>` guardrail test mirroring the existing ones (e.g. `bundled_includes_pr_merge_watch`, `bundled_includes_telemetry_hook`) so a future rename or removal doesn't silently break consumers. When retiring a managed bundled tool after users may have installed it, remove the bundle entry and add its old relative path to `PURGED_TOOLS` in `crates/clud-bin/src/tool_install.rs`; the purge only deletes files that still carry the `managed-by: clud` marker.
+
+- **Test that needs raw `std::process::Command`** → add the test filename to the exempt set in `ci/banned_imports.py`. The lint enforces that production subprocess execution goes through `running_process::NativeProcess`; exemptions exist for tests that deliberately need raw spawning because `NativeProcess` would attach a `Containment::Contained` Job Object that masks what's being tested. If your test errors with `BANNED — use running_process::NativeProcess instead`, decide whether `NativeProcess` would distort the test; if yes, add yourself to the exempt set with a comment explaining why.
 
 ## Test Coverage
 
-- ~104 Rust unit tests across arg parsing, command building, backend resolution, loop-spec (URL classification, GH-JSON parsing, marker files).
-- ~21 Python unit tests via `--dry-run` subprocess calls.
+- ~1100+ Rust tests (unit + integration) across arg parsing, command building, backend resolution, loop-spec, daemon HTTP, registry guardrails, and end-to-end flows.
+- ~185 Python tests, mostly `--dry-run` subprocess calls plus a smaller integration set.
 - Python integration tests run end-to-end against [`mock-agent`](testbins/mock-agent/README.md), including the `clud loop` DONE/BLOCKED marker contract.
 
 ## CI Matrix
 
-6 platforms × 4 job types = 24 GitHub Actions jobs:
+6 platforms × 4 job types = 24 GitHub Actions jobs.
+
+Job types (reusable workflows under `.github/workflows/_*.yml`):
+- `_lint.yml` — `bash lint`
+- `_unit-test.yml` — `bash test` (no `--integration`)
+- `_integration-test.yml` — `bash test --integration` (mock-agent end-to-end)
+- `_build.yml` — wheel build
+
+Platforms:
 - Linux x86 (`ubuntu-24.04`) + ARM (`ubuntu-24.04-arm`)
 - Windows x86 (`windows-2025`) + ARM (`windows-11-arm`)
 - macOS ARM (`macos-15`) + x86 (`macos-15-intel`)

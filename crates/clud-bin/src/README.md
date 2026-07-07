@@ -40,7 +40,18 @@ Entry and orchestration:
   `mod ...`.
 - `runner.rs` - per-iteration subprocess- and PTY-mode runner for a single
   `LaunchPlan`; owns child-env construction, stream-json fallback,
-  Ctrl-C-aware teardown, and OLE drag-drop registration wiring.
+  Ctrl-C-aware teardown, and OLE drag-drop registration wiring. The
+  backend-aware `child_env_for_backend` reads
+  `~/.clud/settings.json::shell.disable_powershell` and, for Claude, injects
+  the two undocumented kill-switch env vars `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`
+  + `CLAUDE_CODE_GIT_BASH_PATH` (resolved via
+  [`shell/`](shell/README.md)) — see issue #447.
+- `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
+  Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
+  `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a
+  system-wide Git for Windows install. Manifest at
+  `vendor/win32/git-bash-bin.toml`; cache at
+  `~/.clud/vendor/win32/git-bash-bin-<sha[..12]>/`.
 - `startup.rs` - launch-time helpers factored out of `main.rs`: drag-target
   gating (`--no-dnd`, `--dry-run`), session-cap enforcement, Ctrl+C flag
   installer.
@@ -93,12 +104,14 @@ Process management and GC:
   `cmd.exe -> node.exe` would orphan the real child.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
-- `gc/` - `clud gc list` / `purge` / `reconcile` CLI handlers and the
+- `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and the
   in-process `WorktreeScanner` thread. The GC registry itself lives inside the
   daemon.
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
   removes safe ones; `--dry-run` faithful.
+- `optimize.rs` - `clud optimize rust`: installs/persists soldr defaults and
+  writes repo-local `.clud/settings.json` directives.
 
 Platform glue:
 
@@ -109,6 +122,9 @@ Platform glue:
   sites stay portable.
 - `large_file_guard.rs` - startup-time `ignore`-crate walker that warns about
   source files large enough to choke agents (issue #132); hard 1 s deadline.
+- `path_norm.rs` - fbuild/zccache-style `NormalizedPath` and separator-safe
+  path-string helpers for cross-platform path keys, serialization, and
+  executable names received from another OS.
 - `launch_setup.rs` - session-only/global setup selector plus
   selected-backend persistent setup actions for skills and Codex hook
   normalization.
@@ -126,15 +142,53 @@ Skills and hooks:
   `PURGED_SKILLS`.
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation.
+- `block_bad_cmd_rollout.rs` - startup health/migration for the native
+  `clud-block-bad-cmd` helper: stale install warning plus exact old hook
+  command rewrites when the helper is available.
 - `codex_hook_normalize.rs` - issue #234: idempotent Codex global-setup pass
   that bumps any `~/.codex/hooks.json` handler `timeout: 5` to `30`
   (`~/.clud/settings.lock` fs4 guard, green status line on change).
 
 Diagnostics and misc:
 
+- `cpu_banner.rs` - issue #466: foreground CPU-burn banner. Spawns one
+  background `sysinfo` sampler that ticks every 2 s, sums `cpu_usage()` +
+  `memory()` over the parent-PID subtree rooted at our originator, and emits
+  `[clud] cpu N % · X.Y / Z cores · …` to stderr when subtree CPU crosses
+  `max(50 %, 0.20 × num_cpus × 100 %)` for 3 sustained ticks. Hysteretic
+  drop-out at 0.7×; 30 s heartbeat while sustained; clear-banner only after
+  ≥ 60 s episodes. Wired into `runner::run_plan_subprocess` and
+  `runner::run_plan_pty` via a `BannerWatcher` whose `Drop` joins the
+  thread. Suppressed by `--no-cpu-banner`, `--dry-run`, `--detach`,
+  `--detachable`, `--repeat`, and `[foreground.cpu_banner] enabled = false`
+  in `~/.clud/settings.json`. Slice of #463 (`clud top`).
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.
+- `crash_report.rs` - process panic hook + native crash handler installed
+  from `main.rs` (role=`foreground`), `daemon/server.rs::run_daemon`
+  (role=`daemon`), and `daemon/worker.rs::run_worker` (role=`worker`).
+  Both panic-driven and native-crash-driven (`crash-handler` crate;
+  SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT on Unix; structured exceptions on
+  Windows) reports share one writer producing JSON records with backtrace
+  under `~/.clud/state/crashes/<unix_ms>-<role>-<pid>.json`, prunes to
+  the 50 most recent, and surfaces a one-line stderr notice on the next
+  launch when a new report appears (plus a follow-up "backtrace appears
+  unsymbolicated; run `clud symbols verify`" line when the new report
+  has zero `at FILE:LINE` frames — #374 PR 3). `install_native()` is
+  idempotent — the hook is installed once per process; re-calling only
+  updates the role tag. Native install **does not attach a
+  SIGINT/CTRL_C_EVENT handler**, leaving the existing
+  `startup::install_ctrl_c_flag` / `ctrl_c_track` (#372) path
+  authoritative for Ctrl-C.
+- `symbols.rs` - `clud symbols` / `clud symbols install` / `clud symbols
+  verify [--all]` subcommand handler. With `debug = "line-tables-only"`
+  embedded in every build (#374 PR 1), no sidecar files need to be
+  fetched; the verifier confirms the running binary can resolve recent
+  crash reports' `at FILE:LINE` frames and exits 0/1 accordingly. The
+  bare `clud symbols` form prints a five-line summary. Self-contained
+  maintenance command; dispatched from `main.rs` before any backend
+  resolution. See `docs/architecture/crash-reports.md`.
 - `wasm.rs` - `wasmi`-based runner that loads a WASM module, registers a
   minimal `host.log` import, invokes a named export, and propagates the integer
   exit code.
@@ -146,9 +200,10 @@ Quick lookup, which file owns a given subcommand:
   `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
   in `daemon/` (dispatched from `daemon::handle_special_command`).
-- `clud gc list` / `purge` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
+- `clud gc list` / `prune` / `purge` / `all` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` -> `worktrees.rs`.
+- `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.
 
 ## Cross-Cutting Subsystems

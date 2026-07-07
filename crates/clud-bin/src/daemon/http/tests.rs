@@ -2,6 +2,7 @@ use super::*;
 use crate::daemon::gc_service::spawn_registry_worker_with;
 use crate::daemon::types::{CtrlCProfile, SessionKind, SessionSnapshot};
 use crate::gc::Registry;
+use crate::launch_log::LaunchRecord;
 use std::io::Write;
 
 fn write_fake_session(state_dir: &Path, id: &str, snap: SessionSnapshot) {
@@ -15,6 +16,10 @@ fn fake_snapshot(id: &str, name: &str, cwd: &str) -> SessionSnapshot {
     SessionSnapshot {
         id: id.to_string(),
         kind: SessionKind::Pty,
+        backend: Some("codex".to_string()),
+        launch_mode: Some("pty".to_string()),
+        repo_root: Some("/dev".to_string()),
+        command: vec!["codex".to_string(), "exec".to_string()],
         cwd: Some(cwd.to_string()),
         name: Some(name.to_string()),
         created_at: Some(500),
@@ -31,6 +36,7 @@ fn fake_snapshot(id: &str, name: &str, cwd: &str) -> SessionSnapshot {
         worker_port: 12345,
         root_pid: None,
         exit_code: None,
+        exited_at: None,
         ctrl_c: None,
     }
 }
@@ -88,6 +94,61 @@ fn build_state_with_empty_state_dir_returns_zeros() {
     assert_eq!(state.daemon.version, env!("CARGO_PKG_VERSION"));
 }
 
+#[test]
+fn tool_telemetry_merges_start_finish_and_aggregates_recent_calls() {
+    let store = ToolTelemetryStore::new();
+    let now = 1_700_000_000_000;
+    store.push_event(ToolEventIngest {
+        event: "start".to_string(),
+        id: "call-1".to_string(),
+        name: "hooks/check.py".to_string(),
+        start_time_ms: now - 5_000,
+        end_time_ms: None,
+        exit_code: None,
+        stderr_tail: None,
+    });
+    store.push_event(ToolEventIngest {
+        event: "finish".to_string(),
+        id: "call-1".to_string(),
+        name: "hooks/check.py".to_string(),
+        start_time_ms: now - 5_000,
+        end_time_ms: Some(now - 4_000),
+        exit_code: Some(2),
+        stderr_tail: Some("bad command".to_string()),
+    });
+    store.push_event(ToolEventIngest {
+        event: "finish".to_string(),
+        id: "call-2".to_string(),
+        name: "tools/ok.py".to_string(),
+        start_time_ms: now - 65_000,
+        end_time_ms: Some(now - 64_000),
+        exit_code: Some(0),
+        stderr_tail: None,
+    });
+
+    let view = store.view_at(now);
+    assert_eq!(view.entries.len(), 2);
+    assert_eq!(view.entries[0].id, "call-1");
+    assert_eq!(view.entries[0].exit_code, Some(2));
+    assert_eq!(view.entries[0].stderr_tail.as_deref(), Some("bad command"));
+
+    let last_10s = view
+        .aggregate
+        .iter()
+        .find(|bucket| bucket.label == "last 10s")
+        .unwrap();
+    assert_eq!(last_10s.total, 1);
+    assert_eq!(last_10s.failed, 1);
+
+    let one_min = view
+        .aggregate
+        .iter()
+        .find(|bucket| bucket.label == "1m")
+        .unwrap();
+    assert_eq!(one_min.total, 1);
+    assert_eq!(one_min.success, 1);
+}
+
 /// Issue #190: direct-runner `clud` invocations only show up in the
 /// redb session registry, not as JSON snapshots on disk. The dashboard
 /// must merge those rows in so the Sessions tab isn't perpetually
@@ -127,6 +188,49 @@ fn build_state_surfaces_direct_runner_registry_rows() {
     // The live-session count in the stats must include direct sessions
     // — that's what the dashboard header displays.
     assert_eq!(state.stats.live_session_count, 1);
+}
+
+#[test]
+fn build_state_surfaces_completed_foreground_launch_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let launches_dir = dir.path().join("launches");
+    std::fs::create_dir_all(&launches_dir).unwrap();
+    let record = LaunchRecord {
+        id: "1700000000000-4242".to_string(),
+        source: "direct".to_string(),
+        clud_pid: 4242,
+        backend: "codex".to_string(),
+        launch_mode: "subprocess".to_string(),
+        cwd: Some("/dev/fastled5".to_string()),
+        repo_root: Some("/dev/fastled5".to_string()),
+        command: vec!["codex".to_string(), "exec".to_string()],
+        clud_argv: vec!["clud".to_string(), "--codex".to_string()],
+        launched_at_ms: 1_700_000_000_000,
+        exited_at_ms: Some(1_700_000_010_000),
+        exit_code: Some(42),
+    };
+    std::fs::write(
+        launches_dir.join("1700000000000-4242.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+
+    let state = build_dashboard_state(dir.path(), None, 9999, 100, Vec::new()).expect("build");
+    assert_eq!(state.sessions.len(), 1);
+    let session = &state.sessions[0];
+    assert_eq!(session.id, "launch-1700000000000-4242");
+    assert_eq!(session.kind, "direct");
+    assert_eq!(session.backend.as_deref(), Some("codex"));
+    assert_eq!(session.launch_mode.as_deref(), Some("subprocess"));
+    assert_eq!(session.cwd.as_deref(), Some("/dev/fastled5"));
+    assert_eq!(session.repo_root.as_deref(), Some("/dev/fastled5"));
+    assert_eq!(session.command, vec!["codex", "exec"]);
+    assert_eq!(session.clud_argv, vec!["clud", "--codex"]);
+    assert_eq!(session.created_at, Some(1_700_000_000_000));
+    assert_eq!(session.exited_at, Some(1_700_000_010_000));
+    assert_eq!(session.duration_ms, Some(10_000));
+    assert_eq!(session.exit_code, Some(42));
+    assert!(!session.live);
 }
 
 #[test]
@@ -175,6 +279,10 @@ fn build_state_includes_ctrl_c_events_when_present() {
             } else {
                 "daemon_unreachable".to_string()
             }),
+            ctrl_event_kind: None,
+            forensics: None,
+            press_kind: None,
+            elapsed_since_prior_ms: None,
         };
         let path = edir.join(format!("{:013}-{}.json", event.exit_at_ms, event.pid));
         std::fs::write(&path, serde_json::to_vec(&event).unwrap()).unwrap();
@@ -262,6 +370,8 @@ fn end_to_end_state_endpoint_returns_all_three_kinds() {
         9999,
         100,
         empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
     )
     .expect("dashboard spawned");
 
@@ -279,6 +389,35 @@ fn end_to_end_state_endpoint_returns_all_three_kinds() {
     // Hit GET / and confirm the HTML asset is served.
     let html_body = fetch_path(port, "GET", "/", None).expect("fetch root");
     assert!(html_body.contains("clud dashboard"));
+}
+
+#[test]
+fn end_to_end_tool_event_endpoint_round_trips_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = spawn_dashboard(
+        dir.path().to_path_buf(),
+        None,
+        9999,
+        100,
+        empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
+    )
+    .expect("dashboard spawned");
+
+    let start = r#"{"event":"start","id":"call-http","name":"hooks/test.py","start_time_ms":1700000000000}"#;
+    let body = fetch_path(port, "POST", "/tools/event", Some(start.to_string())).expect("post");
+    assert_eq!(body, "{}");
+    let finish = r#"{"event":"finish","id":"call-http","name":"hooks/test.py","start_time_ms":1700000000000,"end_time_ms":1700000000100,"exit_code":1,"stderr_tail":"failed"}"#;
+    let body = fetch_path(port, "POST", "/tools/event", Some(finish.to_string())).expect("post");
+    assert_eq!(body, "{}");
+
+    let tools_body = fetch_path(port, "GET", "/tools", None).expect("tools");
+    let view: ToolTelemetryView = serde_json::from_str(&tools_body).expect("parse tools");
+    assert_eq!(view.entries.len(), 1);
+    assert_eq!(view.entries[0].name, "hooks/test.py");
+    assert_eq!(view.entries[0].exit_code, Some(1));
+    assert_eq!(view.entries[0].stderr_tail.as_deref(), Some("failed"));
 }
 
 #[test]
@@ -312,6 +451,8 @@ fn end_to_end_purge_kind_round_trip_mutates_registry() {
         9999,
         100,
         empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
     )
     .expect("dashboard spawned");
 
@@ -396,6 +537,8 @@ fn end_to_end_per_row_delete_only_targets_requested_id() {
         9999,
         100,
         empty_live_provider(),
+        TelemetryStore::new(),
+        ToolTelemetryStore::new(),
     )
     .expect("dashboard spawned");
 

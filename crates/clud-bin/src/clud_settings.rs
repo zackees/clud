@@ -1,18 +1,43 @@
-//! User-level clud settings persisted under `~/.clud/settings.toml`.
+//! User-level clud settings persisted under `~/.clud/settings.json`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
 use fs4::fs_std::FileExt;
-use toml_edit::{table, value, DocumentMut, Item};
+use serde_json::{json, Map, Value};
+use toml_edit::{DocumentMut, Item};
 
 use crate::backend::Backend;
 use crate::launch_setup::LaunchSetupScope;
 
 pub const CLUD_DIR_NAME: &str = ".clud";
-pub const SETTINGS_FILE_NAME: &str = "settings.toml";
+pub const SETTINGS_FILE_NAME: &str = "settings.json";
+pub const LEGACY_SETTINGS_FILE_NAME: &str = "settings.toml";
 pub const LOCK_FILE_NAME: &str = "settings.lock";
+pub const DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE: &str =
+    "plugins.\"github@openai-curated\".enabled=false";
+const CODEX_CONFIG_OVERRIDES_NOTE: &str =
+    "clud passes these strings as repeated `codex -c` config overrides before the Codex subcommand. Edit config_overrides to change plugin/connector behavior.";
+const SHELL_DISABLE_POWERSHELL_NOTE: &str =
+    "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustOptimizeSettings {
+    pub use_soldr_shims: bool,
+    pub install_soldr: bool,
+    pub soldr_version: String,
+}
+
+impl Default for RustOptimizeSettings {
+    fn default() -> Self {
+        Self {
+            use_soldr_shims: true,
+            install_soldr: true,
+            soldr_version: "0.7.11".to_string(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum SettingsError {
@@ -27,7 +52,7 @@ impl std::fmt::Display for SettingsError {
             SettingsError::NoHomeDir => write!(f, "could not resolve user home directory"),
             SettingsError::Io(error) => write!(f, "{error}"),
             SettingsError::Parse { path, error } => {
-                write!(f, "malformed TOML in {}: {error}", path.display())
+                write!(f, "malformed settings in {}: {error}", path.display())
             }
         }
     }
@@ -45,27 +70,181 @@ pub fn settings_path_at(home: &Path) -> PathBuf {
     home.join(CLUD_DIR_NAME).join(SETTINGS_FILE_NAME)
 }
 
+pub fn legacy_settings_path_at(home: &Path) -> PathBuf {
+    home.join(CLUD_DIR_NAME).join(LEGACY_SETTINGS_FILE_NAME)
+}
+
+pub fn default_codex_config_overrides() -> Vec<String> {
+    vec![DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE.to_string()]
+}
+
+pub fn home_dir_path() -> Result<PathBuf, SettingsError> {
+    home_dir().ok_or(SettingsError::NoHomeDir)
+}
+
+pub fn seeded_global_settings_document() -> Value {
+    let mut document = json!({});
+    seed_global_settings_defaults(&mut document);
+    document
+}
+
+pub fn seed_global_settings_defaults(document: &mut Value) {
+    if let Some(shell) = seed_object_entry(document, "shell") {
+        shell
+            .entry("disable_powershell".to_string())
+            .or_insert(Value::Bool(false));
+    }
+
+    if let Some(hook_health) = seed_object_entry(document, "hook_health") {
+        hook_health
+            .entry("auto_fix_hooks".to_string())
+            .or_insert(Value::Bool(true));
+    }
+
+    if let Some(daemon) = seed_object_entry(document, "daemon") {
+        let proc_sampler = daemon
+            .entry("proc_sampler".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(proc_sampler) = proc_sampler.as_object_mut() {
+            proc_sampler
+                .entry("interval_ms".to_string())
+                .or_insert(json!(2_000));
+        }
+    }
+
+    seed_codex_config_override_defaults(document);
+}
+
+pub fn load_or_init_global_settings() -> Result<Value, SettingsError> {
+    let home = home_dir_path()?;
+    load_or_init_global_settings_at(&home)
+}
+
+pub fn load_or_init_global_settings_at(home: &Path) -> Result<Value, SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let path = settings_path_at(home);
+    let mut document = read_settings_or_legacy(home)?;
+    let original = document.clone();
+    seed_global_settings_defaults(&mut document);
+    if document != original || !path.is_file() {
+        write_settings(&path, &document)?;
+    }
+    Ok(document)
+}
+
+pub fn read_settings_json_file(path: &Path) -> Result<Value, SettingsError> {
+    let text = fs::read_to_string(path)?;
+    if text.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    parse_json_settings(path, &text)
+}
+
+pub fn write_settings_json_file(path: &Path, document: &Value) -> Result<(), SettingsError> {
+    write_settings(path, document)
+}
+
+pub fn merged_settings_document(global: &Value, local: Option<&Value>) -> Value {
+    let mut merged = seeded_global_settings_document();
+    merge_settings_into(&mut merged, global);
+    if let Some(local) = local {
+        merge_settings_into(&mut merged, local);
+    }
+    merged
+}
+
+pub fn load_or_init_codex_config_overrides(
+    write_default: bool,
+) -> Result<Vec<String>, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_or_init_codex_config_overrides_at(&home, write_default)
+}
+
+pub fn load_or_init_codex_config_overrides_at(
+    home: &Path,
+    write_default: bool,
+) -> Result<Vec<String>, SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let path = settings_path_at(home);
+    let mut document = read_settings_or_legacy(home)?;
+
+    match read_codex_config_overrides(&document, &path)? {
+        Some(overrides) => Ok(overrides),
+        None if write_default => {
+            seed_global_settings_defaults(&mut document);
+            write_settings(&path, &document)?;
+            Ok(default_codex_config_overrides())
+        }
+        None => Ok(default_codex_config_overrides()),
+    }
+}
+
+pub fn load_default_backend() -> Result<Option<Backend>, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_default_backend_at(&home)
+}
+
+pub fn load_default_backend_at(home: &Path) -> Result<Option<Backend>, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    let Some(value) = document
+        .get("backend")
+        .and_then(|item| item.get("default"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(infer_default_backend_from_launch_setup(&document));
+    };
+    Ok(Backend::from_settings_str(value))
+}
+
+pub fn save_default_backend(backend: Backend) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_default_backend_at(&home, backend)
+}
+
+pub fn save_default_backend_at(home: &Path, backend: Backend) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        set_default_backend(document, backend);
+    })
+}
+
+pub fn save_global_launch_setup_selection(
+    backend: Backend,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_global_launch_setup_selection_at(&home, backend, scope)
+}
+
+pub fn save_global_launch_setup_selection_at(
+    home: &Path,
+    backend: Backend,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        set_default_backend(document, backend);
+        set_launch_setup_scope(document, backend, scope);
+    })
+}
+
 pub fn load_auto_fix_hooks_enabled() -> Result<bool, SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
     load_auto_fix_hooks_enabled_at(&home)
 }
 
 pub fn load_auto_fix_hooks_enabled_at(home: &Path) -> Result<bool, SettingsError> {
-    let path = settings_path_at(home);
-    if !path.exists() {
-        return Ok(true);
-    }
     let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
     let _lock = acquire_lock(&lock_path)?;
-    let text = fs::read_to_string(&path)?;
-    if text.trim().is_empty() {
-        return Ok(true);
-    }
-    let document = parse_settings(&path, &text)?;
+    let document = read_settings_or_legacy(home)?;
     Ok(document
         .get("hook_health")
         .and_then(|item| item.get("auto_fix_hooks"))
-        .and_then(Item::as_bool)
+        .and_then(Value::as_bool)
         .unwrap_or(true))
 }
 
@@ -75,38 +254,10 @@ pub fn save_auto_fix_hooks_enabled(enabled: bool) -> Result<(), SettingsError> {
 }
 
 pub fn save_auto_fix_hooks_enabled_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
-    let clud_dir = home.join(CLUD_DIR_NAME);
-    fs::create_dir_all(&clud_dir)?;
-    let lock_path = clud_dir.join(LOCK_FILE_NAME);
-    let _lock = acquire_lock(&lock_path)?;
-
-    let path = settings_path_at(home);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(SettingsError::Io(error)),
-    };
-    let mut document = if text.trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        parse_settings(&path, &text)?
-    };
-
-    if document
-        .get("hook_health")
-        .and_then(Item::as_table)
-        .is_none()
-    {
-        document["hook_health"] = table();
-    }
-    document["hook_health"]["auto_fix_hooks"] = value(enabled);
-
-    let mut body = document.to_string();
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    fs::write(path, body)?;
-    Ok(())
+    with_settings_document(home, |document| {
+        object_entry(document, "hook_health")
+            .insert("auto_fix_hooks".to_string(), Value::Bool(enabled));
+    })
 }
 
 pub fn load_launch_setup_scope(
@@ -120,22 +271,14 @@ pub fn load_launch_setup_scope_at(
     home: &Path,
     backend: Backend,
 ) -> Result<Option<LaunchSetupScope>, SettingsError> {
-    let path = settings_path_at(home);
-    if !path.exists() {
-        return Ok(None);
-    }
     let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
     let _lock = acquire_lock(&lock_path)?;
-    let text = fs::read_to_string(&path)?;
-    if text.trim().is_empty() {
-        return Ok(None);
-    }
-    let document = parse_settings(&path, &text)?;
+    let document = read_settings_or_legacy(home)?;
     let Some(scope) = document
         .get("launch_setup")
         .and_then(|item| item.get(backend_settings_key(backend)))
         .and_then(|item| item.get("scope"))
-        .and_then(Item::as_str)
+        .and_then(Value::as_str)
     else {
         return Ok(None);
     };
@@ -155,54 +298,500 @@ pub fn save_launch_setup_scope_at(
     backend: Backend,
     scope: LaunchSetupScope,
 ) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        set_launch_setup_scope(document, backend, scope);
+    })
+}
+
+pub fn load_shell_disable_powershell_for_backend(backend: Backend) -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_shell_disable_powershell_for_backend_at(&home, backend)
+}
+
+pub fn load_shell_disable_powershell_for_backend_at(
+    home: &Path,
+    backend: Backend,
+) -> Result<bool, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(resolve_shell_disable_powershell(&document, backend))
+}
+
+pub fn save_shell_disable_powershell(enabled: bool) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_shell_disable_powershell_at(&home, enabled)
+}
+
+pub fn save_shell_disable_powershell_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let shell = object_entry(document, "shell");
+        shell
+            .entry("disable_powershell_note".to_string())
+            .or_insert_with(|| Value::String(SHELL_DISABLE_POWERSHELL_NOTE.to_string()));
+        shell.insert("disable_powershell".to_string(), Value::Bool(enabled));
+    })
+}
+
+pub fn save_shell_disable_powershell_for_backend(
+    backend: Backend,
+    enabled: Option<bool>,
+) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_shell_disable_powershell_for_backend_at(&home, backend, enabled)
+}
+
+pub fn save_shell_disable_powershell_for_backend_at(
+    home: &Path,
+    backend: Backend,
+    enabled: Option<bool>,
+) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let shell = object_entry(document, "shell");
+        shell
+            .entry("disable_powershell_note".to_string())
+            .or_insert_with(|| Value::String(SHELL_DISABLE_POWERSHELL_NOTE.to_string()));
+        let backend_entry = shell
+            .entry(backend_settings_key(backend).to_string())
+            .or_insert_with(|| json!({}));
+        if !backend_entry.is_object() {
+            *backend_entry = json!({});
+        }
+        let backend_obj = backend_entry.as_object_mut().unwrap();
+        match enabled {
+            Some(value) => {
+                backend_obj.insert("disable_powershell".to_string(), Value::Bool(value));
+            }
+            None => {
+                backend_obj.insert("disable_powershell".to_string(), Value::Null);
+            }
+        }
+    })
+}
+
+fn resolve_shell_disable_powershell(document: &Value, backend: Backend) -> bool {
+    let shell = document.get("shell");
+    if let Some(per_backend) = shell
+        .and_then(|item| item.get(backend_settings_key(backend)))
+        .and_then(|item| item.get("disable_powershell"))
+        .and_then(Value::as_bool)
+    {
+        return per_backend;
+    }
+    shell
+        .and_then(|item| item.get("disable_powershell"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn save_rust_optimize_settings(settings: &RustOptimizeSettings) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_rust_optimize_settings_at(&home, settings)
+}
+
+pub fn save_rust_optimize_settings_at(
+    home: &Path,
+    settings: &RustOptimizeSettings,
+) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let optimize = object_entry(document, "optimize");
+        optimize.insert(
+            "rust".to_string(),
+            json!({
+                "use_soldr_shims": settings.use_soldr_shims,
+                "install_soldr": settings.install_soldr,
+                "soldr_version": settings.soldr_version.clone(),
+            }),
+        );
+    })
+}
+
+pub fn load_rust_optimize_settings_at(
+    home: &Path,
+) -> Result<Option<RustOptimizeSettings>, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    rust_optimize_from_json(&document)
+}
+
+/// Settings for the foreground CPU-burn banner (#466). Defaults: enabled,
+/// 30 s heartbeat. JSON shape:
+///
+/// ```json
+/// { "foreground": { "cpu_banner": { "enabled": false, "heartbeat_secs": 60 } } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuBannerSettings {
+    pub enabled: bool,
+    pub heartbeat_secs: u64,
+}
+
+impl Default for CpuBannerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            heartbeat_secs: 30,
+        }
+    }
+}
+
+pub fn load_cpu_banner_settings() -> Result<CpuBannerSettings, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_cpu_banner_settings_at(&home)
+}
+
+pub fn load_cpu_banner_settings_at(home: &Path) -> Result<CpuBannerSettings, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    let mut out = CpuBannerSettings::default();
+    let Some(section) = document
+        .get("foreground")
+        .and_then(|item| item.get("cpu_banner"))
+    else {
+        return Ok(out);
+    };
+    if let Some(enabled) = section.get("enabled").and_then(Value::as_bool) {
+        out.enabled = enabled;
+    }
+    if let Some(secs) = section.get("heartbeat_secs").and_then(Value::as_u64) {
+        out.heartbeat_secs = secs;
+    }
+    Ok(out)
+}
+
+fn with_settings_document<F>(home: &Path, mutate: F) -> Result<(), SettingsError>
+where
+    F: FnOnce(&mut Value),
+{
     let clud_dir = home.join(CLUD_DIR_NAME);
     fs::create_dir_all(&clud_dir)?;
     let lock_path = clud_dir.join(LOCK_FILE_NAME);
     let _lock = acquire_lock(&lock_path)?;
-
     let path = settings_path_at(home);
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+    let mut document = read_settings_or_legacy(home)?;
+    seed_global_settings_defaults(&mut document);
+    mutate(&mut document);
+    write_settings(&path, &document)
+}
+
+fn read_settings_or_legacy(home: &Path) -> Result<Value, SettingsError> {
+    let path = settings_path_at(home);
+    match fs::read_to_string(&path) {
+        Ok(text) if text.trim().is_empty() => return Ok(json!({})),
+        Ok(text) => return parse_json_settings(&path, &text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(SettingsError::Io(error)),
-    };
-    let mut document = if text.trim().is_empty() {
-        DocumentMut::new()
+    }
+
+    let legacy_path = legacy_settings_path_at(home);
+    match fs::read_to_string(&legacy_path) {
+        Ok(text) if text.trim().is_empty() => Ok(json!({})),
+        Ok(text) => parse_legacy_toml_settings(&legacy_path, &text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(json!({})),
+        Err(error) => Err(SettingsError::Io(error)),
+    }
+}
+
+fn parse_json_settings(path: &Path, text: &str) -> Result<Value, SettingsError> {
+    let value: Value = serde_json::from_str(text).map_err(|error| SettingsError::Parse {
+        path: path.to_path_buf(),
+        error: error.to_string(),
+    })?;
+    if value.is_object() {
+        Ok(value)
     } else {
-        parse_settings(&path, &text)?
+        Err(SettingsError::Parse {
+            path: path.to_path_buf(),
+            error: "root must be a JSON object".to_string(),
+        })
+    }
+}
+
+fn parse_legacy_toml_settings(path: &Path, text: &str) -> Result<Value, SettingsError> {
+    let document = text
+        .parse::<DocumentMut>()
+        .map_err(|error| SettingsError::Parse {
+            path: path.to_path_buf(),
+            error: error.to_string(),
+        })?;
+    let mut root = json!({});
+
+    if let Some(enabled) = document
+        .get("hook_health")
+        .and_then(|item| item.get("auto_fix_hooks"))
+        .and_then(Item::as_bool)
+    {
+        object_entry(&mut root, "hook_health")
+            .insert("auto_fix_hooks".to_string(), Value::Bool(enabled));
+    }
+
+    if let Some(default_backend) = document
+        .get("backend")
+        .and_then(|item| item.get("default"))
+        .and_then(Item::as_str)
+        .and_then(Backend::from_settings_str)
+    {
+        object_entry(&mut root, "backend").insert(
+            "default".to_string(),
+            Value::String(default_backend.executable_name().to_string()),
+        );
+    }
+
+    if let Some(launch_setup) = document.get("launch_setup").and_then(Item::as_table) {
+        for (backend, item) in launch_setup.iter() {
+            if let Some(scope) = item
+                .get("scope")
+                .and_then(Item::as_str)
+                .and_then(LaunchSetupScope::from_settings_str)
+            {
+                object_entry(&mut root, "launch_setup").insert(
+                    backend.to_string(),
+                    json!({ "scope": scope.as_str().to_string() }),
+                );
+            }
+        }
+    }
+
+    if let Some(rust) = document
+        .get("optimize")
+        .and_then(|item| item.get("rust"))
+        .and_then(Item::as_table)
+    {
+        let defaults = RustOptimizeSettings::default();
+        object_entry(&mut root, "optimize").insert(
+            "rust".to_string(),
+            json!({
+                "use_soldr_shims": rust
+                    .get("use_soldr_shims")
+                    .and_then(Item::as_bool)
+                    .unwrap_or(defaults.use_soldr_shims),
+                "install_soldr": rust
+                    .get("install_soldr")
+                    .and_then(Item::as_bool)
+                    .unwrap_or(defaults.install_soldr),
+                "soldr_version": rust
+                    .get("soldr_version")
+                    .and_then(Item::as_str)
+                    .unwrap_or(&defaults.soldr_version),
+            }),
+        );
+    }
+
+    if let Some(shell) = document.get("shell").and_then(Item::as_table) {
+        if let Some(enabled) = shell.get("disable_powershell").and_then(Item::as_bool) {
+            object_entry(&mut root, "shell")
+                .insert("disable_powershell".to_string(), Value::Bool(enabled));
+        }
+        for backend_key in ["claude", "codex"] {
+            let Some(per_backend) = shell.get(backend_key).and_then(Item::as_table) else {
+                continue;
+            };
+            let Some(value) = per_backend
+                .get("disable_powershell")
+                .and_then(Item::as_bool)
+            else {
+                continue;
+            };
+            object_entry(&mut root, "shell").insert(
+                backend_key.to_string(),
+                json!({ "disable_powershell": value }),
+            );
+        }
+    }
+
+    Ok(root)
+}
+
+fn rust_optimize_from_json(
+    document: &Value,
+) -> Result<Option<RustOptimizeSettings>, SettingsError> {
+    let Some(table) = document
+        .get("optimize")
+        .and_then(|item| item.get("rust"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(None);
     };
+    let defaults = RustOptimizeSettings::default();
+    Ok(Some(RustOptimizeSettings {
+        use_soldr_shims: table
+            .get("use_soldr_shims")
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.use_soldr_shims),
+        install_soldr: table
+            .get("install_soldr")
+            .and_then(Value::as_bool)
+            .unwrap_or(defaults.install_soldr),
+        soldr_version: table
+            .get("soldr_version")
+            .and_then(Value::as_str)
+            .unwrap_or(&defaults.soldr_version)
+            .to_string(),
+    }))
+}
 
-    if document
-        .get("launch_setup")
-        .and_then(Item::as_table)
-        .is_none()
-    {
-        document["launch_setup"] = table();
+fn write_settings(path: &Path, document: &Value) -> Result<(), SettingsError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    let backend_key = backend_settings_key(backend);
-    if document["launch_setup"]
-        .get(backend_key)
-        .and_then(Item::as_table)
-        .is_none()
-    {
-        document["launch_setup"][backend_key] = table();
-    }
-    document["launch_setup"][backend_key]["scope"] = value(scope.as_str());
-
-    let mut body = document.to_string();
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
+    let mut body =
+        serde_json::to_string_pretty(document).map_err(|error| SettingsError::Parse {
+            path: path.to_path_buf(),
+            error: error.to_string(),
+        })?;
+    body.push('\n');
     fs::write(path, body)?;
     Ok(())
 }
 
-fn parse_settings(path: &Path, text: &str) -> Result<DocumentMut, SettingsError> {
-    text.parse::<DocumentMut>()
-        .map_err(|error| SettingsError::Parse {
+fn read_codex_config_overrides(
+    document: &Value,
+    path: &Path,
+) -> Result<Option<Vec<String>>, SettingsError> {
+    let Some(value) = document
+        .get("codex")
+        .and_then(|item| item.get("config_overrides"))
+    else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(items) = value.as_array() else {
+        return Err(SettingsError::Parse {
             path: path.to_path_buf(),
-            error: error.to_string(),
-        })
+            error: "codex.config_overrides must be an array of strings".to_string(),
+        });
+    };
+    let mut overrides = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return Err(SettingsError::Parse {
+                path: path.to_path_buf(),
+                error: "codex.config_overrides must be an array of strings".to_string(),
+            });
+        };
+        if !text.trim().is_empty() {
+            overrides.push(text.to_string());
+        }
+    }
+    Ok(Some(overrides))
+}
+
+fn seed_codex_config_override_defaults(document: &mut Value) {
+    let Some(codex) = seed_object_entry(document, "codex") else {
+        return;
+    };
+    codex
+        .entry("config_overrides_note".to_string())
+        .or_insert_with(|| Value::String(CODEX_CONFIG_OVERRIDES_NOTE.to_string()));
+    codex
+        .entry("config_overrides".to_string())
+        .or_insert_with(|| {
+            Value::Array(
+                default_codex_config_overrides()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            )
+        });
+}
+
+fn merge_settings_into(target: &mut Value, source: &Value) {
+    let Some(source_obj) = source.as_object() else {
+        return;
+    };
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let target_obj = target.as_object_mut().unwrap();
+    for (key, source_value) in source_obj {
+        if source_value.is_null() {
+            continue;
+        }
+        match target_obj.get_mut(key) {
+            Some(target_value) if target_value.is_object() && source_value.is_object() => {
+                merge_settings_into(target_value, source_value);
+            }
+            Some(target_value) => {
+                *target_value = source_value.clone();
+            }
+            None if source_value.is_object() => {
+                let mut nested = json!({});
+                merge_settings_into(&mut nested, source_value);
+                target_obj.insert(key.clone(), nested);
+            }
+            None => {
+                target_obj.insert(key.clone(), source_value.clone());
+            }
+        }
+    }
+}
+
+fn set_default_backend(document: &mut Value, backend: Backend) {
+    object_entry(document, "backend").insert(
+        "default".to_string(),
+        Value::String(backend.executable_name().to_string()),
+    );
+}
+
+fn set_launch_setup_scope(document: &mut Value, backend: Backend, scope: LaunchSetupScope) {
+    let launch_setup = object_entry(document, "launch_setup");
+    let entry = launch_setup
+        .entry(backend_settings_key(backend).to_string())
+        .or_insert_with(|| json!({}));
+    if !entry.is_object() {
+        *entry = json!({});
+    }
+    entry.as_object_mut().unwrap().insert(
+        "scope".to_string(),
+        Value::String(scope.as_str().to_string()),
+    );
+}
+
+fn infer_default_backend_from_launch_setup(document: &Value) -> Option<Backend> {
+    let mut inferred = None;
+    for backend in [Backend::Claude, Backend::Codex] {
+        let is_global = document
+            .get("launch_setup")
+            .and_then(|item| item.get(backend_settings_key(backend)))
+            .and_then(|item| item.get("scope"))
+            .and_then(Value::as_str)
+            .and_then(LaunchSetupScope::from_settings_str)
+            == Some(LaunchSetupScope::Global);
+        if is_global {
+            if inferred.is_some() {
+                return None;
+            }
+            inferred = Some(backend);
+        }
+    }
+    inferred
+}
+
+fn object_entry<'a>(document: &'a mut Value, key: &str) -> &'a mut Map<String, Value> {
+    if !document.is_object() {
+        *document = json!({});
+    }
+    let root = document.as_object_mut().unwrap();
+    let entry = root.entry(key.to_string()).or_insert_with(|| json!({}));
+    if !entry.is_object() {
+        *entry = json!({});
+    }
+    entry.as_object_mut().unwrap()
+}
+
+fn seed_object_entry<'a>(document: &'a mut Value, key: &str) -> Option<&'a mut Map<String, Value>> {
+    if !document.is_object() {
+        *document = json!({});
+    }
+    let root = document.as_object_mut().unwrap();
+    if !root.contains_key(key) {
+        root.insert(key.to_string(), json!({}));
+    }
+    root.get_mut(key).and_then(Value::as_object_mut)
 }
 
 fn backend_settings_key(backend: Backend) -> &'static str {
@@ -266,6 +855,222 @@ mod tests {
     }
 
     #[test]
+    fn missing_codex_overrides_default_without_writing_on_dry_run() {
+        let home = tempdir().unwrap();
+
+        assert_eq!(
+            load_or_init_codex_config_overrides_at(home.path(), false).unwrap(),
+            default_codex_config_overrides()
+        );
+        assert!(!settings_path_at(home.path()).exists());
+    }
+
+    #[test]
+    fn missing_settings_file_has_no_default_backend() {
+        let home = tempdir().unwrap();
+        assert_eq!(load_default_backend_at(home.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn saves_default_backend() {
+        let home = tempdir().unwrap();
+
+        save_default_backend_at(home.path(), Backend::Codex).unwrap();
+
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
+    }
+
+    #[test]
+    fn infers_default_backend_from_sole_global_launch_setup_scope() {
+        let home = tempdir().unwrap();
+
+        save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
+
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+    }
+
+    #[test]
+    fn does_not_infer_default_backend_when_multiple_scopes_are_global() {
+        let home = tempdir().unwrap();
+
+        save_launch_setup_scope_at(home.path(), Backend::Claude, LaunchSetupScope::Global).unwrap();
+        save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
+
+        assert_eq!(load_default_backend_at(home.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn default_backend_preserves_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"codex":{"scope":"global"}}}"#,
+        )
+        .unwrap();
+
+        save_default_backend_at(home.path(), Backend::Claude).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["backend"]["default"], "claude");
+    }
+
+    #[test]
+    fn saves_global_launch_setup_selection_in_one_document() {
+        let home = tempdir().unwrap();
+
+        save_global_launch_setup_selection_at(
+            home.path(),
+            Backend::Codex,
+            LaunchSetupScope::Global,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
+            Some(LaunchSetupScope::Global)
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+    }
+
+    #[test]
+    fn first_run_codex_overrides_are_documented_in_settings_json() {
+        let home = tempdir().unwrap();
+
+        assert_eq!(
+            load_or_init_codex_config_overrides_at(home.path(), true).unwrap(),
+            default_codex_config_overrides()
+        );
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            json["codex"]["config_overrides"][0],
+            DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE
+        );
+        assert!(
+            json["codex"]["config_overrides_note"]
+                .as_str()
+                .unwrap()
+                .contains("codex -c"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn first_run_global_settings_seed_discoverable_defaults_only() {
+        let home = tempdir().unwrap();
+
+        let document = load_or_init_global_settings_at(home.path()).unwrap();
+
+        assert_eq!(document["shell"]["disable_powershell"], false);
+        assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
+        assert_eq!(document["daemon"]["proc_sampler"]["interval_ms"], 2_000);
+        assert_eq!(
+            document["codex"]["config_overrides"][0],
+            DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE
+        );
+        assert!(document.get("launch_setup").is_none());
+        assert!(document.get("optimize").is_none());
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        assert!(text.contains("\"shell\""));
+        assert!(text.contains("\"hook_health\""));
+        assert!(text.contains("\"daemon\""));
+        assert!(text.contains("\"codex\""));
+    }
+
+    #[test]
+    fn global_settings_seed_preserves_null_opinions() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"shell":{"disable_powershell":null},"hook_health":null,"codex":{"config_overrides":null}}"#,
+        )
+        .unwrap();
+
+        let document = load_or_init_global_settings_at(home.path()).unwrap();
+
+        assert!(document["shell"]["disable_powershell"].is_null());
+        assert!(document["hook_health"].is_null());
+        assert!(document["codex"]["config_overrides"].is_null());
+    }
+
+    #[test]
+    fn merged_settings_deep_merges_and_treats_null_as_defer() {
+        let global = json!({
+            "shell": {
+                "disable_powershell": true,
+                "claude": { "disable_powershell": false }
+            },
+            "codex": {
+                "config_overrides": ["global"],
+                "extra": { "a": 1, "b": 2 }
+            },
+            "unknown": { "global": true }
+        });
+        let local = json!({
+            "shell": {
+                "disable_powershell": null,
+                "claude": { "disable_powershell": true }
+            },
+            "codex": {
+                "config_overrides": ["local"],
+                "extra": { "b": null, "c": 3 }
+            },
+            "unknown": { "local": true }
+        });
+
+        let merged = merged_settings_document(&global, Some(&local));
+
+        assert_eq!(merged["shell"]["disable_powershell"], true);
+        assert_eq!(merged["shell"]["claude"]["disable_powershell"], true);
+        assert_eq!(merged["codex"]["config_overrides"], json!(["local"]));
+        assert_eq!(merged["codex"]["extra"]["a"], 1);
+        assert_eq!(merged["codex"]["extra"]["b"], 2);
+        assert_eq!(merged["codex"]["extra"]["c"], 3);
+        assert_eq!(merged["unknown"]["global"], true);
+        assert_eq!(merged["unknown"]["local"], true);
+    }
+
+    #[test]
+    fn existing_codex_overrides_are_user_owned() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"codex":{"config_overrides":[]}}"#).unwrap();
+
+        assert_eq!(
+            load_or_init_codex_config_overrides_at(home.path(), true).unwrap(),
+            Vec::<String>::new()
+        );
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains(DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE));
+    }
+
+    #[test]
     fn saves_auto_fix_hooks_sticky_opt_out_and_reset() {
         let home = tempdir().unwrap();
 
@@ -276,8 +1081,8 @@ mod tests {
         assert!(load_auto_fix_hooks_enabled_at(home.path()).unwrap());
 
         let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
-        assert!(text.contains("[hook_health]"), "{text}");
-        assert!(text.contains("auto_fix_hooks = true"), "{text}");
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["hook_health"]["auto_fix_hooks"], true);
     }
 
     #[test]
@@ -295,14 +1100,8 @@ mod tests {
             None
         );
         let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
-        assert!(
-            text.contains("[launch_setup.codex]"),
-            "settings TOML should use a backend-scoped table: {text}"
-        );
-        assert!(
-            text.contains("scope = \"global\""),
-            "settings TOML should persist the selected global scope: {text}"
-        );
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
     }
 
     #[test]
@@ -312,17 +1111,17 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            "[unrelated]\nvalue = \"kept\"\n\n[launch_setup.claude]\nscope = \"session-only\"\n",
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"claude":{"scope":"session-only"}}}"#,
         )
         .unwrap();
 
         save_launch_setup_scope_at(home.path(), Backend::Codex, LaunchSetupScope::Global).unwrap();
 
         let text = fs::read_to_string(path).unwrap();
-        assert!(text.contains("[unrelated]"), "{text}");
-        assert!(text.contains("value = \"kept\""), "{text}");
-        assert!(text.contains("[launch_setup.claude]"), "{text}");
-        assert!(text.contains("[launch_setup.codex]"), "{text}");
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["claude"]["scope"], "session-only");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
     }
 
     #[test]
@@ -332,17 +1131,236 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            "[unrelated]\nvalue = \"kept\"\n\n[launch_setup.codex]\nscope = \"global\"\n",
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"codex":{"scope":"global"}}}"#,
         )
         .unwrap();
 
         save_auto_fix_hooks_enabled_at(home.path(), false).unwrap();
 
         let text = fs::read_to_string(path).unwrap();
-        assert!(text.contains("[unrelated]"), "{text}");
-        assert!(text.contains("value = \"kept\""), "{text}");
-        assert!(text.contains("[launch_setup.codex]"), "{text}");
-        assert!(text.contains("[hook_health]"), "{text}");
-        assert!(text.contains("auto_fix_hooks = false"), "{text}");
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["hook_health"]["auto_fix_hooks"], false);
+    }
+
+    #[test]
+    fn saves_rust_optimize_settings() {
+        let home = tempdir().unwrap();
+        let settings = RustOptimizeSettings {
+            use_soldr_shims: true,
+            install_soldr: false,
+            soldr_version: "1.2.3".to_string(),
+        };
+
+        save_rust_optimize_settings_at(home.path(), &settings).unwrap();
+
+        assert_eq!(
+            load_rust_optimize_settings_at(home.path()).unwrap(),
+            Some(settings)
+        );
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["optimize"]["rust"]["use_soldr_shims"], true);
+        assert_eq!(json["optimize"]["rust"]["install_soldr"], false);
+        assert_eq!(json["optimize"]["rust"]["soldr_version"], "1.2.3");
+    }
+
+    #[test]
+    fn rust_optimize_settings_preserve_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"unrelated":{"value":"kept"}}"#).unwrap();
+
+        save_rust_optimize_settings_at(home.path(), &RustOptimizeSettings::default()).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert!(json["optimize"]["rust"].is_object());
+    }
+
+    #[test]
+    fn legacy_toml_is_read_and_migrated_on_next_save() {
+        let home = tempdir().unwrap();
+        let legacy = legacy_settings_path_at(home.path());
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy,
+            "[backend]\ndefault = \"codex\"\n\n[hook_health]\nauto_fix_hooks = false\n\n[launch_setup.codex]\nscope = \"global\"\n\n[optimize.rust]\nuse_soldr_shims = true\ninstall_soldr = false\nsoldr_version = \"9.9.9\"\n",
+        )
+        .unwrap();
+
+        assert!(!load_auto_fix_hooks_enabled_at(home.path()).unwrap());
+        assert_eq!(
+            load_default_backend_at(home.path()).unwrap(),
+            Some(Backend::Codex)
+        );
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
+            Some(LaunchSetupScope::Global)
+        );
+        assert_eq!(
+            load_rust_optimize_settings_at(home.path()).unwrap(),
+            Some(RustOptimizeSettings {
+                use_soldr_shims: true,
+                install_soldr: false,
+                soldr_version: "9.9.9".to_string(),
+            })
+        );
+
+        save_auto_fix_hooks_enabled_at(home.path(), true).unwrap();
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
+        assert_eq!(json["hook_health"]["auto_fix_hooks"], true);
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["optimize"]["rust"]["soldr_version"], "9.9.9");
+    }
+
+    #[test]
+    fn missing_shell_section_defaults_to_false_for_both_backends() {
+        let home = tempdir().unwrap();
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap()
+        );
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap()
+        );
+        assert!(!settings_path_at(home.path()).exists());
+    }
+
+    #[test]
+    fn top_level_disable_propagates_to_both_backends_when_overrides_null() {
+        let home = tempdir().unwrap();
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap()
+        );
+        assert!(load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap());
+    }
+
+    #[test]
+    fn backend_override_wins_over_top_level() {
+        let home = tempdir().unwrap();
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+        save_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude, Some(false))
+            .unwrap();
+
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap(),
+            "claude override should resolve false even when top-level is true"
+        );
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap(),
+            "codex with null override should inherit top-level true"
+        );
+    }
+
+    #[test]
+    fn saves_shell_disable_powershell_preserves_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"codex":{"scope":"global"}}}"#,
+        )
+        .unwrap();
+
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["shell"]["disable_powershell"], true);
+        assert!(
+            json["shell"]["disable_powershell_note"]
+                .as_str()
+                .unwrap()
+                .contains("PreToolUse hook"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn clearing_backend_override_falls_back_to_top_level() {
+        let home = tempdir().unwrap();
+        save_shell_disable_powershell_at(home.path(), true).unwrap();
+        save_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude, Some(false))
+            .unwrap();
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap()
+        );
+
+        save_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude, None).unwrap();
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap(),
+            "after clearing override claude should inherit top-level true"
+        );
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            json["shell"]["claude"]["disable_powershell"].is_null(),
+            "cleared override should serialize as JSON null, got: {text}"
+        );
+    }
+
+    #[test]
+    fn legacy_toml_shell_section_is_migrated() {
+        let home = tempdir().unwrap();
+        let legacy = legacy_settings_path_at(home.path());
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy,
+            "[shell]\ndisable_powershell = true\n\n[shell.codex]\ndisable_powershell = false\n",
+        )
+        .unwrap();
+
+        assert!(
+            load_shell_disable_powershell_for_backend_at(home.path(), Backend::Claude).unwrap(),
+            "claude should inherit top-level true from legacy TOML"
+        );
+        assert!(
+            !load_shell_disable_powershell_for_backend_at(home.path(), Backend::Codex).unwrap(),
+            "codex override should override top-level"
+        );
+    }
+
+    #[test]
+    fn cpu_banner_defaults_when_settings_missing() {
+        let home = tempdir().unwrap();
+        let got = load_cpu_banner_settings_at(home.path()).unwrap();
+        assert_eq!(got, CpuBannerSettings::default());
+    }
+
+    #[test]
+    fn cpu_banner_reads_enabled_override() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"foreground":{"cpu_banner":{"enabled":false}}}"#).unwrap();
+        let got = load_cpu_banner_settings_at(home.path()).unwrap();
+        assert!(!got.enabled);
+        assert_eq!(got.heartbeat_secs, 30, "default heartbeat preserved");
+    }
+
+    #[test]
+    fn cpu_banner_reads_heartbeat_override() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"foreground":{"cpu_banner":{"heartbeat_secs":120}}}"#,
+        )
+        .unwrap();
+        let got = load_cpu_banner_settings_at(home.path()).unwrap();
+        assert!(got.enabled, "default enabled preserved");
+        assert_eq!(got.heartbeat_secs, 120);
     }
 }

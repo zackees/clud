@@ -82,7 +82,7 @@ impl From<serde_json::Error> for GcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrackedRow {
     /// Monotonic id assigned at insert time. Stable across reopens so
-    /// `gc list` / `gc purge` keep referring to the same row.
+    /// list and delete paths keep referring to the same row.
     id: i64,
     repo_root: Option<String>,
     branch: Option<String>,

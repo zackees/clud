@@ -35,6 +35,11 @@
 //!   }
 //! }
 //! ```
+//!
+//! The current `clud optimize rust` command writes the equivalent shape under
+//! `"optimize": { "rust": { "use_soldr_shims": ..., "install_soldr": ...,
+//! "soldr_version": ... } }`. This parser accepts both forms. Direct `rust`
+//! keys win over `optimize.rust` keys within a file.
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -48,6 +53,7 @@ use std::path::{Path, PathBuf};
 #[serde(default)]
 pub struct RawRepoCludConfig {
     pub rust: RawRustConfig,
+    pub optimize: RawOptimizeConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -56,6 +62,20 @@ pub struct RawRustConfig {
     pub use_soldr: Option<bool>,
     pub install: Option<bool>,
     pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RawOptimizeConfig {
+    pub rust: RawOptimizeRustConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RawOptimizeRustConfig {
+    pub use_soldr_shims: Option<bool>,
+    pub install_soldr: Option<bool>,
+    pub soldr_version: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -97,14 +117,7 @@ impl Default for RustConfig {
 pub fn discover_effective_clud_config(start: &Path) -> Option<RepoCludConfig> {
     let user = discover_user_clud_config_raw();
     let repo = discover_repo_clud_config_raw(start);
-
-    if user.is_none() && repo.is_none() {
-        return None;
-    }
-
-    let user = user.unwrap_or_default();
-    let repo = repo.unwrap_or_default();
-    Some(resolve(merge(repo, user)))
+    resolve_effective_config(repo, user)
 }
 
 /// Public single-source variant used by tests + future direct
@@ -118,7 +131,38 @@ pub fn discover_repo_clud_config(start: &Path) -> Option<RepoCludConfig> {
 
 /// Read user-level `~/.clud/settings.json`, if present.
 pub fn discover_user_clud_config() -> Option<RepoCludConfig> {
-    discover_user_clud_config_raw().map(|raw| resolve(merge(raw, RawRepoCludConfig::default())))
+    discover_user_clud_config_raw()
+        .filter(has_soldr_directive)
+        .map(|raw| resolve(merge(raw, RawRepoCludConfig::default())))
+}
+
+fn resolve_effective_config(
+    repo: Option<RawRepoCludConfig>,
+    user: Option<RawRepoCludConfig>,
+) -> Option<RepoCludConfig> {
+    match (repo, user) {
+        (None, None) => None,
+        (None, Some(user)) if !has_soldr_directive(&user) => None,
+        (None, Some(user)) => Some(resolve(merge(user, RawRepoCludConfig::default()))),
+        (Some(repo), None) => Some(resolve(merge(repo, RawRepoCludConfig::default()))),
+        (Some(repo), Some(user)) => {
+            let user = if has_soldr_directive(&user) {
+                user
+            } else {
+                RawRepoCludConfig::default()
+            };
+            Some(resolve(merge(repo, user)))
+        }
+    }
+}
+
+fn has_soldr_directive(raw: &RawRepoCludConfig) -> bool {
+    raw.rust.use_soldr.is_some()
+        || raw.rust.install.is_some()
+        || raw.rust.version.is_some()
+        || raw.optimize.rust.use_soldr_shims.is_some()
+        || raw.optimize.rust.install_soldr.is_some()
+        || raw.optimize.rust.soldr_version.is_some()
 }
 
 // ---------------------------------------------------------------------
@@ -201,6 +245,11 @@ pub fn parse_raw_repo_clud_config(text: &str) -> Result<RawRepoCludConfig, Strin
             parsed.rust.version = None;
         }
     }
+    if let Some(v) = parsed.optimize.rust.soldr_version.as_deref() {
+        if v.trim().is_empty() {
+            parsed.optimize.rust.soldr_version = None;
+        }
+    }
     Ok(parsed)
 }
 
@@ -217,12 +266,24 @@ pub fn parse_repo_clud_config(text: &str) -> Result<RepoCludConfig, String> {
 /// Layer `lower` (e.g. user-level) under `upper` (e.g. repo-level).
 /// `upper` wins per-field where set.
 pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludConfig {
+    let upper = normalize_raw_rust(upper);
+    let lower = normalize_raw_rust(lower);
     RawRepoCludConfig {
         rust: RawRustConfig {
-            use_soldr: upper.rust.use_soldr.or(lower.rust.use_soldr),
-            install: upper.rust.install.or(lower.rust.install),
-            version: upper.rust.version.or(lower.rust.version),
+            use_soldr: upper.use_soldr.or(lower.use_soldr),
+            install: upper.install.or(lower.install),
+            version: upper.version.or(lower.version),
         },
+        optimize: RawOptimizeConfig::default(),
+    }
+}
+
+fn normalize_raw_rust(raw: RawRepoCludConfig) -> RawRustConfig {
+    let RawRepoCludConfig { rust, optimize } = raw;
+    RawRustConfig {
+        use_soldr: rust.use_soldr.or(optimize.rust.use_soldr_shims),
+        install: rust.install.or(optimize.rust.install_soldr),
+        version: rust.version.or(optimize.rust.soldr_version),
     }
 }
 
@@ -307,6 +368,27 @@ mod tests {
     }
 
     #[test]
+    fn optimize_rust_object_parses_as_activation_config() {
+        let cfg = parse_repo_clud_config(
+            r#"{"optimize":{"rust":{"use_soldr_shims":false,"install_soldr":false,"soldr_version":"0.7.11"}}}"#,
+        )
+        .expect("parses");
+        assert!(!cfg.rust.use_soldr);
+        assert!(!cfg.rust.install);
+        assert_eq!(cfg.rust.version.as_deref(), Some("0.7.11"));
+    }
+
+    #[test]
+    fn direct_rust_keys_win_over_optimize_rust_keys_in_same_file() {
+        let cfg = parse_repo_clud_config(
+            r#"{"rust":{"use_soldr":false,"version":"2.0.0"},"optimize":{"rust":{"use_soldr_shims":true,"soldr_version":"1.0.0"}}}"#,
+        )
+        .expect("parses");
+        assert!(!cfg.rust.use_soldr);
+        assert_eq!(cfg.rust.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
     fn explicit_use_soldr_false_is_honored() {
         let cfg = parse_repo_clud_config(r#"{"rust":{"use_soldr":false}}"#).expect("parses");
         assert!(!cfg.rust.use_soldr);
@@ -361,6 +443,32 @@ mod tests {
         assert!(!merged.rust.use_soldr, "repo wins");
         assert!(merged.rust.install, "repo unset → user wins");
         assert_eq!(merged.rust.version.as_deref(), Some("2.0.0"), "repo wins");
+    }
+
+    #[test]
+    fn merge_repo_optimize_overrides_user_rust_per_field() {
+        let user = parse_raw_repo_clud_config(
+            r#"{"rust":{"use_soldr":false,"install":false,"version":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let repo = parse_raw_repo_clud_config(
+            r#"{"optimize":{"rust":{"use_soldr_shims":true,"soldr_version":"2.0.0"}}}"#,
+        )
+        .unwrap();
+
+        let merged = resolve(merge(repo, user));
+        assert!(merged.rust.use_soldr, "repo optimize wins");
+        assert!(
+            !merged.rust.install,
+            "repo unset falls through to user rust field"
+        );
+        assert_eq!(merged.rust.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn unrelated_user_settings_do_not_enable_global_soldr_activation() {
+        let user = parse_raw_repo_clud_config(r#"{"shell":{"disable_powershell":true}}"#).unwrap();
+        assert_eq!(resolve_effective_config(None, Some(user)), None);
     }
 
     #[test]

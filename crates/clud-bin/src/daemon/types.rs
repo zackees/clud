@@ -74,6 +74,14 @@ pub(super) struct SessionSnapshot {
     pub(super) id: String,
     pub(super) kind: SessionKind,
     #[serde(default)]
+    pub(super) backend: Option<String>,
+    #[serde(default)]
+    pub(super) launch_mode: Option<String>,
+    #[serde(default)]
+    pub(super) repo_root: Option<String>,
+    #[serde(default)]
+    pub(super) command: Vec<String>,
+    #[serde(default)]
     pub(super) cwd: Option<String>,
     #[serde(default)]
     pub(super) name: Option<String>,
@@ -96,6 +104,8 @@ pub(super) struct SessionSnapshot {
     pub(super) worker_port: u16,
     pub(super) root_pid: Option<u32>,
     pub(super) exit_code: Option<i32>,
+    #[serde(default)]
+    pub(super) exited_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) ctrl_c: Option<CtrlCProfile>,
 }
@@ -198,6 +208,24 @@ pub(super) enum DaemonRequest {
     },
     /// Ask the daemon to exit after replying. Used by `clud daemon restart`.
     Shutdown,
+    /// Fire-and-forget: ask the daemon to sweep every CLUD-tagged process
+    /// whose originator is no longer alive and `kill_tree` each. Sent from
+    /// the foreground clud's exit hook so the daemon catches descendants
+    /// the foreground couldn't reap on its own (e.g., reparented away from
+    /// `self_pid`, or left behind by a SIGKILL'd sibling clud). The daemon
+    /// replies `ReapOrphansAck` immediately and does the sweep on a
+    /// background thread.
+    ReapOrphans,
+    /// Return lightweight daemon process metrics for foreground clients
+    /// that want ambient status without scraping dashboard JSON.
+    Metrics,
+    /// Return the daemon's most recent cached process-tree sample. The
+    /// daemon must not perform synchronous process enumeration for this
+    /// request; callers get whatever the background sampler last wrote.
+    ProcSnapshot {
+        #[serde(default)]
+        include_dead_since_ms: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -230,9 +258,114 @@ pub(super) enum DaemonResponse {
     ShutdownAck {
         pid: u32,
     },
+    /// Ack for [`DaemonRequest::ReapOrphans`]. Returned before the daemon
+    /// performs the kill (the sweep runs on a background thread), so the
+    /// CLI's exit path is never blocked. `found` and `reaped` are 0 in the
+    /// fast-path ack; populated only by the synchronous test path.
+    ReapOrphansAck {
+        found: u32,
+        reaped: u32,
+    },
+    Metrics {
+        pid: u32,
+        cpu_pct: f32,
+    },
+    ProcSnapshot {
+        snapshot: ProcTreeSnapshot,
+    },
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ProcTier {
+    Hot,
+    Warm,
+    Cold,
+    Frozen,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct ProcTreeSummary {
+    pub(super) process_count: usize,
+    pub(super) originator_count: usize,
+    pub(super) total_cpu_pct: f32,
+    pub(super) total_rss_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct ProcRow {
+    pub(super) pid: u32,
+    pub(super) ppid: Option<u32>,
+    pub(super) originator: String,
+    pub(super) originator_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) session_name: Option<String>,
+    pub(super) cpu_pct: f32,
+    pub(super) cpu_ewma_pct: f32,
+    pub(super) rss_bytes: u64,
+    pub(super) age_secs: u64,
+    pub(super) command: String,
+    pub(super) depth: u32,
+    pub(super) tier: ProcTier,
+    #[serde(default = "default_live_proc_row")]
+    pub(super) live: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) exited_at_ms: Option<u64>,
+}
+
+fn default_live_proc_row() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct ProcTreeSnapshot {
+    pub(super) schema_version: u32,
+    pub(super) sampled_at_ms: u64,
+    pub(super) sample_age_ms: u64,
+    pub(super) sampler_pid: u32,
+    pub(super) interval_ms: u64,
+    pub(super) rows: Vec<ProcRow>,
+    pub(super) summary: ProcTreeSummary,
+}
+
+impl ProcTreeSnapshot {
+    pub(super) fn empty(interval_ms: u64) -> Self {
+        Self {
+            schema_version: 1,
+            sampled_at_ms: unix_millis_now(),
+            sample_age_ms: 0,
+            sampler_pid: std::process::id(),
+            interval_ms,
+            rows: Vec::new(),
+            summary: ProcTreeSummary::default(),
+        }
+    }
+
+    pub(super) fn refresh_age(&mut self) {
+        self.sample_age_ms = unix_millis_now().saturating_sub(self.sampled_at_ms);
+    }
+
+    pub(super) fn recompute_summary(&mut self) {
+        let mut originators = std::collections::BTreeSet::new();
+        let mut total_cpu = 0.0_f32;
+        let mut total_rss = 0_u64;
+        for row in &self.rows {
+            originators.insert(row.originator.clone());
+            total_cpu += row.cpu_pct;
+            total_rss = total_rss.saturating_add(row.rss_bytes);
+        }
+        self.summary = ProcTreeSummary {
+            process_count: self.rows.len(),
+            originator_count: originators.len(),
+            total_cpu_pct: total_cpu,
+            total_rss_bytes: total_rss,
+        };
+    }
 }
 
 /// Issue #135: payload carried by `DaemonRequest::Gc`. Identical in
@@ -533,6 +666,84 @@ mod tests {
     fn list_live_cwds_request_serializes_as_tagged_op() {
         let wire = serde_json::to_string(&DaemonRequest::ListLiveCwds).unwrap();
         assert_eq!(wire, r#"{"op":"list_live_cwds"}"#);
+    }
+
+    #[test]
+    fn metrics_request_serializes_as_tagged_op() {
+        let wire = serde_json::to_string(&DaemonRequest::Metrics).unwrap();
+        assert_eq!(wire, r#"{"op":"metrics"}"#);
+    }
+
+    #[test]
+    fn proc_snapshot_request_roundtrips_dead_window() {
+        let request = DaemonRequest::ProcSnapshot {
+            include_dead_since_ms: 5_000,
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(wire.contains(r#""op":"proc_snapshot""#));
+        assert!(wire.contains(r#""include_dead_since_ms":5000"#));
+        let parsed: DaemonRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonRequest::ProcSnapshot {
+                include_dead_since_ms,
+            } => assert_eq!(include_dead_since_ms, 5_000),
+            other => panic!("expected ProcSnapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metrics_response_roundtrips() {
+        let response = DaemonResponse::Metrics {
+            pid: 142500,
+            cpu_pct: 72.5,
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(wire.contains(r#""op":"metrics""#));
+        assert!(wire.contains(r#""pid":142500"#));
+
+        let parsed: DaemonResponse = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonResponse::Metrics { pid, cpu_pct } => {
+                assert_eq!(pid, 142500);
+                assert!((cpu_pct - 72.5).abs() < f32::EPSILON);
+            }
+            other => panic!("expected Metrics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proc_snapshot_response_roundtrips() {
+        let mut snapshot = ProcTreeSnapshot::empty(2_000);
+        snapshot.rows.push(ProcRow {
+            pid: 42,
+            ppid: Some(7),
+            originator: "CLUD:7".to_string(),
+            originator_pid: Some(7),
+            session_id: Some("sess-test".to_string()),
+            session_name: None,
+            cpu_pct: 12.0,
+            cpu_ewma_pct: 8.0,
+            rss_bytes: 1024,
+            age_secs: 5,
+            command: "backend".to_string(),
+            depth: 1,
+            tier: ProcTier::Hot,
+            live: true,
+            exited_at_ms: None,
+        });
+        snapshot.recompute_summary();
+        let response = DaemonResponse::ProcSnapshot {
+            snapshot: snapshot.clone(),
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(wire.contains(r#""op":"proc_snapshot""#));
+        assert!(wire.contains(r#""schema_version":1"#));
+
+        let parsed: DaemonResponse = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            DaemonResponse::ProcSnapshot { snapshot: got } => assert_eq!(got, snapshot),
+            other => panic!("expected ProcSnapshot, got {other:?}"),
+        }
     }
 
     #[test]
