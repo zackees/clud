@@ -5,8 +5,9 @@
 //! `isolation: "worktree"`. Over a long debugging session these accumulate
 //! across repos and across `clud` invocations, and the existing
 //! `--clean-worktrees` flag only knows about the current repo. This module
-//! adds a per-user `redb` registry of every tracked entry, plus three CLI
-//! handlers (`list`, `purge`, `reconcile`).
+//! adds a per-user `redb` registry of every tracked entry, plus CLI
+//! handlers for `list`, `prune`, explicit destructive `purge`, `all`,
+//! and `reconcile`.
 //!
 //! Storage lives in a `tracked_entries` redb table keyed by `(kind, path)`
 //! whose value is a JSON-serialized row. The `kind` field is generic so

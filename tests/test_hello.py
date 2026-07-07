@@ -6,9 +6,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -141,6 +143,47 @@ def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProce
         )
 
 
+def _isolated_clud_env(source: Path, home: Path, state_dir: Path) -> dict[str, str]:
+    env = copied_clud_env(source)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["LOCALAPPDATA"] = str(home / "local-app-data")
+    env["XDG_STATE_HOME"] = str(home / ".local" / "state")
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["CLUD_HOOK_HOME"] = str(home)
+    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    env["CLUD_DATA_DB"] = str(state_dir / "data.redb")
+    return env
+
+
+def _shutdown_daemon(state_dir: Path) -> None:
+    info_path = state_dir / "daemon.json"
+    if not info_path.exists():
+        return
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    try:
+        with socket.create_connection(("127.0.0.1", int(info["port"])), timeout=2) as sock:
+            sock.sendall(b'{"op":"shutdown"}\n')
+            sock.recv(4096)
+    except OSError:
+        return
+    deadline = time.monotonic() + 5
+    while info_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _snapshot_tree(root: Path) -> dict[str, tuple[bool, int, int | None, bytes | None]]:
+    snapshot: dict[str, tuple[bool, int, int | None, bytes | None]] = {}
+    for path in sorted(root.rglob("*")):
+        stat = path.stat()
+        rel = path.relative_to(root).as_posix()
+        if path.is_file():
+            snapshot[rel] = (False, stat.st_mtime_ns, stat.st_size, path.read_bytes())
+        else:
+            snapshot[rel] = (True, stat.st_mtime_ns, None, None)
+    return snapshot
+
+
 def test_help() -> None:
     result = _run("--help")
     assert result.returncode == 0
@@ -154,6 +197,85 @@ def test_version() -> None:
     result = _run("--version")
     assert result.returncode == 0
     assert result.stdout.strip() == f"clud {PROJECT_VERSION}"
+
+
+def test_gc_bare_prints_help_without_touching_clud_dir() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "daemon-state"
+        clud_dir = home / ".clud"
+        marker = clud_dir / "sentinel.txt"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("do not touch\n", encoding="utf-8")
+        before = _snapshot_tree(clud_dir)
+
+        result = subprocess.run(
+            [str(launch), "gc"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_isolated_clud_env(source, home, state_dir),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Commands:" in result.stdout or "SUBCOMMANDS:" in result.stdout
+        assert "KINDS:" in result.stdout
+        assert "uv-cache" in result.stdout
+        assert "all" in result.stdout
+        assert _snapshot_tree(clud_dir) == before
+
+
+def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "daemon-state"
+        env = _isolated_clud_env(source, home, state_dir)
+
+        uv_env = home / ".clud" / "cache" / "uv" / "environments-v2" / "stale-env"
+        uv_env.mkdir(parents=True)
+        (uv_env / "pyvenv.cfg").write_text("stale\n", encoding="utf-8")
+        old = time.time() - 8 * 24 * 60 * 60
+        os.utime(uv_env, (old, old))
+
+        victim = home / "victim.txt"
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_text("trash me\n", encoding="utf-8")
+        trash = subprocess.run(
+            [str(launch), "trash", "--cross-volume", str(victim)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+        try:
+            assert trash.returncode == 0, trash.stderr
+            assert not victim.exists()
+            trash_root = home / ".clud" / "trash"
+            assert any(trash_root.iterdir())
+
+            result = subprocess.run(
+                [str(launch), "gc", "all"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+
+            assert result.returncode == 0, result.stderr
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                trash_empty = not trash_root.exists() or not any(trash_root.iterdir())
+                if not uv_env.exists() and trash_empty:
+                    break
+                time.sleep(0.1)
+            assert not uv_env.exists(), result.stdout
+            assert not trash_root.exists() or not any(trash_root.iterdir()), result.stdout
+        finally:
+            _shutdown_daemon(state_dir)
 
 
 def test_linux_binary_does_not_require_libasound_at_startup() -> None:

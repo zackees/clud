@@ -104,7 +104,7 @@ Process management and GC:
   `cmd.exe -> node.exe` would orphan the real child.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
-- `gc/` - `clud gc list` / `purge` / `reconcile` CLI handlers and the
+- `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and the
   in-process `WorktreeScanner` thread. The GC registry itself lives inside the
   daemon.
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
@@ -197,7 +197,7 @@ Quick lookup, which file owns a given subcommand:
   `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
   in `daemon/` (dispatched from `daemon::handle_special_command`).
-- `clud gc list` / `purge` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
+- `clud gc list` / `prune` / `purge` / `all` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.

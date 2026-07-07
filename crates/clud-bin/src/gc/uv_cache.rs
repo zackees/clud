@@ -12,7 +12,7 @@
 //!   `clud gc list --kind uv-cache`.
 //! - [`sweep_stale`] — remove `environments-v2/<hash>/` directories whose
 //!   mtime is older than [`STALE_THRESHOLD`]. Called both manually via
-//!   the future `clud gc prune --kind uv-cache` and from the daemon's
+//!   `clud gc prune --kind uv-cache` and from the daemon's
 //!   daily sweep tick (issue #423).
 //! - [`purge_all`] — nuclear `rm -rf ~/.clud/cache/uv/`. Requires
 //!   `--yes`. Used by `clud gc purge --kind uv-cache --yes`.
