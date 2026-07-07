@@ -101,6 +101,17 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
             .or_insert(Value::Bool(true));
     }
 
+    if let Some(daemon) = seed_object_entry(document, "daemon") {
+        let proc_sampler = daemon
+            .entry("proc_sampler".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(proc_sampler) = proc_sampler.as_object_mut() {
+            proc_sampler
+                .entry("interval_ms".to_string())
+                .or_insert(json!(2_000));
+        }
+    }
+
     seed_codex_config_override_defaults(document);
 }
 
@@ -974,6 +985,7 @@ mod tests {
 
         assert_eq!(document["shell"]["disable_powershell"], false);
         assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
+        assert_eq!(document["daemon"]["proc_sampler"]["interval_ms"], 2_000);
         assert_eq!(
             document["codex"]["config_overrides"][0],
             DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE
@@ -984,6 +996,7 @@ mod tests {
         let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
         assert!(text.contains("\"shell\""));
         assert!(text.contains("\"hook_health\""));
+        assert!(text.contains("\"daemon\""));
         assert!(text.contains("\"codex\""));
     }
 

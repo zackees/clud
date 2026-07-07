@@ -222,11 +222,35 @@ pub enum Command {
     /// Kill all active background sessions.
     Slay,
     List,
-    /// Print current clud daemon CPU metrics.
+    /// Inspect daemon-sampled CPU/RSS process trees.
     Top {
         /// Emit machine-readable JSON.
         #[arg(long = "json")]
         json: bool,
+        /// Print one snapshot and exit.
+        #[arg(long = "once")]
+        once: bool,
+        /// Keep refreshing. With `--json`, prints one compact JSON object per line.
+        #[arg(long = "watch", conflicts_with = "once")]
+        watch: bool,
+        /// Render rows as a process tree. This is the default text mode.
+        #[arg(long = "tree", conflicts_with = "flat")]
+        tree: bool,
+        /// Render rows as one flat sorted table.
+        #[arg(long = "flat", conflicts_with = "tree")]
+        flat: bool,
+        /// Sort key for tree siblings and flat rows.
+        #[arg(long = "sort", value_enum, default_value_t = TopSort::Cpu)]
+        sort: TopSort,
+        /// Cap displayed rows per subtree in tree mode, or total rows in flat mode.
+        #[arg(long = "limit", default_value_t = 20)]
+        limit: usize,
+        /// Include dead PIDs sampled within this duration, e.g. `30s`, `5m`.
+        #[arg(long = "since", value_name = "DURATION")]
+        since: Option<String>,
+        /// Restrict output to one cohort, e.g. `CLUD:71584` or `71584`.
+        #[arg(long = "originator", value_name = "CLUD:PID")]
+        originator: Option<String>,
     },
     /// pm2-style log viewer: dump or tail a session's captured output.
     ///
@@ -384,6 +408,14 @@ pub enum Command {
 pub enum OptimizeTarget {
     #[value(alias = "soldr")]
     Rust,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopSort {
+    Cpu,
+    Mem,
+    Rss,
+    Age,
 }
 
 /// Subcommands under `clud config`.
