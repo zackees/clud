@@ -108,6 +108,32 @@ fn one_sided_hook_warnings_are_bidirectional() {
             && warning.contains("clud --fix-hooks")));
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn claude_windows_hook_stdin_bug_warning_mentions_workaround() {
+    let temp = tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let home = temp.path().join("home");
+    write(
+        &repo.join(".claude").join("settings.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"python check.py"}]}]}}"#,
+    );
+
+    let report = inspect_paths(&repo, Some(&home));
+
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("github.com/anthropics/claude-code/issues/53177"))
+        .expect("Claude Windows hooks should report the upstream stdin bug");
+    assert!(warning.contains("hook timeout"), "{warning}");
+    assert!(warning.contains("policy denial"), "{warning}");
+    assert!(warning.contains("CLAUDE_CODE_GIT_BASH_PATH"), "{warning}");
+    assert!(warning.contains(r"bin\bash.exe"), "{warning}");
+    assert!(warning.contains("git-bash.exe"), "{warning}");
+    assert!(warning.contains("where bash"), "{warning}");
+}
+
 #[test]
 fn matcher_mismatch_warns() {
     let temp = tempdir().unwrap();

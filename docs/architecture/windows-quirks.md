@@ -2,7 +2,7 @@
 
 This doc is the inventory of every place `clud` has Windows-specific code,
 with the symptom each piece solves and the `file:line` where it lives. There
-are ten such carve-outs today: a self-rename trampoline so `pip install`
+are eleven such carve-outs today: a self-rename trampoline so `pip install`
 can overwrite a running `clud.exe`, the BatBadBat `.cmd`/`.bat` rewrite
 mandated by Rust 1.77+, an RAII guard for `ENABLE_VIRTUAL_TERMINAL_INPUT`, a
 `ReadConsoleInputW` translator that disambiguates Shift+Enter from plain
@@ -12,10 +12,11 @@ console window actually drops paths into the prompt, `CREATE_NO_WINDOW` for
 daemon-helper subprocesses that would otherwise flash a conhost window, a
 `whisper-rs` carve-out on `aarch64-pc-windows-msvc` where the sys-crate
 doesn't build, a Ctrl+C descendant-tree teardown that reaps orphaned backend
-grandchildren without tripping cmd.exe's batch-job prompt, and a Codex
+grandchildren without tripping cmd.exe's batch-job prompt, a Codex
 `PreToolUse` hook diagnostic for batch wrappers that do not propagate
-`$LASTEXITCODE`. All ten degrade to no-ops (or different mechanisms entirely)
-on POSIX.
+`$LASTEXITCODE`, and a Claude Code hook stdin diagnostic for the Windows
+pipe/TTY bug cluster. All eleven degrade to no-ops (or different mechanisms
+entirely) on POSIX.
 
 ## Why so many?
 
@@ -378,6 +379,56 @@ the codebase stays portable.
 
 - **POSIX behavior**: No-op. The scanner returns immediately unless
   `cfg!(target_os = "windows")` is true.
+
+### (k) Claude Code hook stdin EOF/TTY bug cluster
+
+- **Symptom**: Claude Code hooks on Windows can hang until their hook timeout
+  when the hook script does an unbounded read such as
+  `sys.stdin.read()`, `json.load(sys.stdin)`, or Node's
+  `process.stdin.on("end", ...)`. The upstream issue cluster reports three
+  related shapes: stdin is left open without EOF, stdin arrives empty, or
+  stdin is attached as a TTY instead of a pipe. The visible difference from a
+  clud policy denial is important: a policy denial returns immediately with
+  deny output / exit code 2; a stdin bug timeout often shows the hook blocked
+  inside the read call. See
+  <https://github.com/anthropics/claude-code/issues/53177> and duplicate/root
+  reports <https://github.com/anthropics/claude-code/issues/46177>,
+  <https://github.com/anthropics/claude-code/issues/48009>, and
+  <https://github.com/anthropics/claude-code/issues/36156>.
+
+- **Solution**: `hook_health::collect_claude` emits a Windows-only warning
+  whenever Claude Code hook settings are present. The diagnostic points to the
+  upstream bug cluster and preserves the reported workaround: set
+  `CLAUDE_CODE_GIT_BASH_PATH` to Git for Windows' real `bin\bash.exe`, not
+  `git-bash.exe`. A typical `~/.claude/settings.json` entry is:
+
+  ```json
+  {
+    "env": {
+      "CLAUDE_CODE_GIT_BASH_PATH": "C:\\Program Files\\Git\\bin\\bash.exe"
+    }
+  }
+  ```
+
+  Run `where bash` to locate candidates, but check the result: the desired
+  path ends in `Git\bin\bash.exe`. Avoid `git-bash.exe` because that is the
+  MinTTY launcher, not the non-MinTTY Bash executable Claude Code needs for
+  this workaround. clud's own managed hooks also avoid unbounded stdin reads:
+  `block-bad-cmd.py` uses bounded pipe reads, and `telemetry.py` uses the same
+  timeout-safe pattern so an open hook stdin pipe cannot wedge the hook.
+
+- **File**: `crates/clud-bin/src/hook_health/inspect.rs`
+  (`warn_on_claude_windows_stdin_bug`);
+  `crates/clud-bin/assets/tools/hooks/block-bad-cmd.py`
+  (`_read_stdin_bounded`);
+  `crates/clud-bin/assets/tools/hooks/telemetry.py`
+  (`_read_stdin_bounded`). Runtime coverage lives in
+  `tests/test_hook_stdin.py`; the hook-health diagnostic guardrail lives in
+  `crates/clud-bin/src/hook_health_tests.rs`.
+
+- **POSIX behavior**: No-op. The diagnostic returns immediately unless
+  `cfg!(target_os = "windows")` is true, and POSIX hook subprocesses receive
+  normal pipe EOF semantics from Claude Code.
 
 ## Cross-cutting patterns
 

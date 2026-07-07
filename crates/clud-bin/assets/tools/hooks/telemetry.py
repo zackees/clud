@@ -44,7 +44,9 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
+import threading
 import time
 import urllib.request
 from typing import Any
@@ -54,6 +56,20 @@ HTTP_TIMEOUT_SEC = 2.0
 # Truncate the cmd summary so the dashboard table stays readable and
 # the in-memory ring buffer doesn't bloat on huge tool_input blobs.
 CMD_MAX_LEN = 200
+STDIN_READ_CHUNK_BYTES = 64 * 1024
+STDIN_READ_MAX_BYTES = 1024 * 1024
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return max(0.01, value)
+
+
+STDIN_READ_IDLE_TIMEOUT_SEC = _float_env("CLUD_TELEMETRY_STDIN_IDLE_TIMEOUT_SEC", 0.25)
+STDIN_READ_DEADLINE_SEC = _float_env("CLUD_TELEMETRY_STDIN_DEADLINE_SEC", 2.0)
 
 
 def _cmd_summary(payload: dict[str, Any]) -> str:
@@ -82,13 +98,58 @@ def _cmd_summary(payload: dict[str, Any]) -> str:
     return f"{tool_name}: {snippet}"
 
 
+def _read_stdin_bounded() -> str:
+    """Read hook JSON without waiting forever for EOF on Windows hook pipes."""
+    out: queue.Queue[bytes | BaseException | None] = queue.Queue()
+
+    def worker() -> None:
+        try:
+            fd = sys.stdin.fileno()
+            while True:
+                chunk = os.read(fd, STDIN_READ_CHUNK_BYTES)
+                if not chunk:
+                    out.put(None)
+                    return
+                out.put(chunk)
+        except BaseException as exc:  # pragma: no cover - defensive fallback path
+            out.put(exc)
+
+    thread = threading.Thread(target=worker, name="clud-telemetry-stdin-reader", daemon=True)
+    thread.start()
+
+    chunks: list[bytes] = []
+    byte_count = 0
+    deadline = time.monotonic() + STDIN_READ_DEADLINE_SEC
+    idle_until: float | None = None
+    while True:
+        now = time.monotonic()
+        wait_until = deadline if idle_until is None else min(deadline, idle_until)
+        if now >= wait_until:
+            break
+        try:
+            item = out.get(timeout=max(0.001, wait_until - now))
+        except queue.Empty:
+            break
+        if item is None:
+            break
+        if isinstance(item, BaseException):
+            break
+        chunks.append(item)
+        byte_count += len(item)
+        idle_until = time.monotonic() + STDIN_READ_IDLE_TIMEOUT_SEC
+        if byte_count >= STDIN_READ_MAX_BYTES:
+            break
+
+    return b"".join(chunks).decode("utf-8", errors="replace").lstrip("\ufeff")
+
+
 def main() -> int:
     try:
         server = os.environ.get("CLUD_DAEMON_HTTP_SERVER", "").strip()
         if not server:
             return 0  # No daemon configured. Silent no-op.
 
-        raw = sys.stdin.read()
+        raw = _read_stdin_bounded()
         if not raw.strip():
             return 0
 
