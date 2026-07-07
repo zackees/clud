@@ -1,4 +1,4 @@
-"""Assert that a Windows wheel's clud.exe was built against MSVC, not MinGW.
+"""Assert that a Windows wheel's clud*.exe scripts use MSVC, not MinGW.
 
 Issue #27: the test harness and dev workflow pin the MSVC toolchain via
 `ci/env.py::build_env()`, but nothing at the CI layer asserts the
@@ -8,8 +8,8 @@ ever slipped, we'd ship a wheel depending on `libstdc++-6.dll` /
 Windows, so the binary would fail to start for any user who doesn't
 happen to have a MinGW install on PATH.
 
-This script opens a wheel, extracts `scripts/clud.exe`, and asserts its
-PE import table has no MinGW runtime entries. It reads the PE headers
+This script opens a wheel, extracts every `.data/scripts/clud*.exe`, and asserts
+each PE import table has no MinGW runtime entries. It reads the PE headers
 directly (no dumpbin / no VS tools needed), so it runs on any platform
 with Python stdlib — useful for local verification as well as CI.
 
@@ -26,8 +26,8 @@ import sys
 import zipfile
 from pathlib import Path
 
-# MinGW runtime DLLs that MUST NOT appear in the import table of a clud.exe
-# we ship. Exact casing is matched case-insensitively when scanning.
+# MinGW runtime DLLs that MUST NOT appear in the import table of any
+# clud*.exe we ship. Exact casing is matched case-insensitively when scanning.
 FORBIDDEN_DLL_PREFIXES = (
     "libstdc++",
     "libgcc_s",
@@ -126,18 +126,20 @@ def forbidden_imports(dll_names: list[str]) -> list[str]:
     return hits
 
 
+def _is_clud_script_exe(member: str) -> bool:
+    normalized = member.replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1]
+    return "/scripts/" in normalized and name.startswith("clud") and name.endswith(".exe")
+
+
 def check_wheel(wheel_path: Path) -> list[str]:
     """Return a list of error messages; empty list means the wheel is clean."""
     errors: list[str] = []
     with zipfile.ZipFile(wheel_path) as archive:
-        exe_members = [
-            name
-            for name in archive.namelist()
-            if name.endswith("/clud.exe") or name.endswith("\\clud.exe")
-        ]
+        exe_members = [name for name in archive.namelist() if _is_clud_script_exe(name)]
         if not exe_members:
             # Not a Windows wheel — skip silently; this script is for .whl
-            # files that actually carry clud.exe.
+            # files that actually carry clud*.exe scripts.
             return []
         for member in exe_members:
             try:

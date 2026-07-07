@@ -467,8 +467,8 @@ def test_startup_refreshes_stale_managed_bundled_tool(tmp_path: Path) -> None:
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
     updated = hook.read_text(encoding="utf-8")
-    assert "def _read_stdin_bounded() -> str" in updated
-    assert "stdin_read_incomplete " in updated
+    assert "clud-block-bad-cmd" in updated
+    assert "compatibility shim" in updated.lower()
     assert "stale hook" not in updated
 
 

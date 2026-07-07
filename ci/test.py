@@ -64,8 +64,8 @@ def _find_target_binary(name: str, env: dict[str, str]) -> Path | None:
     return None
 
 
-def _installed_clud_script() -> Path | None:
-    candidate = Path(sys.executable).parent / _binary_name("clud")
+def _installed_script(name: str) -> Path | None:
+    candidate = Path(sys.executable).parent / _binary_name(name)
     if candidate.is_file():
         return candidate
     return None
@@ -76,19 +76,28 @@ def _prepare_pytest_binaries(
     *,
     prefer_installed_clud: bool,
 ) -> dict[str, str] | None:
-    installed_clud = _installed_clud_script() if prefer_installed_clud else None
-    packages = ["mock-agent"] if installed_clud is not None else ["clud", "mock-agent"]
+    installed_clud = _installed_script("clud") if prefer_installed_clud else None
+    installed_block_guard = (
+        _installed_script("clud-block-bad-cmd") if prefer_installed_clud else None
+    )
+    packages = (
+        ["mock-agent"]
+        if installed_clud is not None and installed_block_guard is not None
+        else ["clud", "mock-agent"]
+    )
     cmd = _cargo(["build", *[arg for package in packages for arg in ("-p", package)]], env=env)
     if run(cmd, env=env) != 0:
         return None
 
     clud_binary = installed_clud or _find_target_binary("clud", env)
+    block_guard_binary = installed_block_guard or _find_target_binary("clud-block-bad-cmd", env)
     mock_agent_binary = _find_target_binary("mock-agent", env)
-    if clud_binary is None or mock_agent_binary is None:
+    if clud_binary is None or block_guard_binary is None or mock_agent_binary is None:
         missing = [
             name
             for name, binary in (
                 ("clud", clud_binary),
+                ("clud-block-bad-cmd", block_guard_binary),
                 ("mock-agent", mock_agent_binary),
             )
             if binary is None
@@ -98,6 +107,7 @@ def _prepare_pytest_binaries(
 
     pytest_env = env.copy()
     pytest_env["CLUD_TEST_BINARY"] = str(clud_binary)
+    pytest_env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] = str(block_guard_binary)
     pytest_env["CLUD_TEST_MOCK_AGENT_BINARY"] = str(mock_agent_binary)
     return pytest_env
 

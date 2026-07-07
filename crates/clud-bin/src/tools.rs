@@ -138,11 +138,11 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
     BundledTool {
         rel_path: "hooks/block-bad-cmd.py",
         body: include_str!("../assets/tools/hooks/block-bad-cmd.py"),
-        // PreToolUse hook: reads a small JSON blob from stdin, decides
-        // allow/deny, exits. The decision IS the work; killing mid-run
-        // loses the verdict — `Killable`. Hook runners cap themselves
-        // at a few seconds, so the 30s ceiling here is a backstop, not
-        // an expected wall-clock.
+        // Compatibility shim for hand-written hook configs that still call
+        // `clud tool run hooks/block-bad-cmd.py`. The normal hot path is
+        // the PyPI-shipped native `clud-block-bad-cmd` executable. The
+        // shim execs that binary, so the decision IS still the work;
+        // killing mid-run loses the verdict — `Killable`.
         kill_semantics: KillSemantics::Killable,
         command_timeout: Duration::from_secs(30),
         progress_timeout: None,
@@ -354,6 +354,24 @@ mod tests {
             names.contains(&"hooks/uv_run_hook_guard.py"),
             "BUNDLED_TOOLS must include hooks/uv_run_hook_guard.py; \
              got {names:?}",
+        );
+    }
+
+    /// Issue #489: the old Python command guard stays in BUNDLED_TOOLS only
+    /// as a compatibility shim. The native binary owns the policy logic.
+    #[test]
+    fn bundled_includes_block_bad_cmd_compat_shim() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "hooks/block-bad-cmd.py")
+            .expect("compatibility shim must remain for existing hook configs");
+        assert!(
+            tool.body.contains("clud-block-bad-cmd"),
+            "block-bad-cmd.py must delegate to the native binary",
+        );
+        assert!(
+            tool.body.contains("compatibility"),
+            "block-bad-cmd.py must document that it is compatibility-only",
         );
     }
 

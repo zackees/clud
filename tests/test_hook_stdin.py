@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BLOCK_BAD_CMD = (
-    ROOT / "crates" / "clud-bin" / "assets" / "tools" / "hooks" / "block-bad-cmd.py"
-)
 TELEMETRY = (
     ROOT / "crates" / "clud-bin" / "assets" / "tools" / "hooks" / "telemetry.py"
 )
@@ -30,17 +28,41 @@ def _hook_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _binary_name(name: str) -> str:
+    return f"{name}.exe" if sys.platform == "win32" else name
+
+
+def _block_bad_cmd_binary() -> Path:
+    env_binary = os.environ.get("CLUD_TEST_BLOCK_BAD_CMD_BINARY")
+    if env_binary and Path(env_binary).is_file():
+        return Path(env_binary)
+
+    clud_binary = os.environ.get("CLUD_TEST_BINARY")
+    if clud_binary:
+        sibling = Path(clud_binary).with_name(_binary_name("clud-block-bad-cmd"))
+        if sibling.is_file():
+            return sibling
+
+    resolved = shutil.which(_binary_name("clud-block-bad-cmd"))
+    if resolved:
+        return Path(resolved)
+
+    raise AssertionError("clud-block-bad-cmd test binary not found")
+
+
 def _run_hook_with_open_stdin(
     tmp_path: Path,
     payload: str | None,
-    script: Path = BLOCK_BAD_CMD,
+    argv: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = _hook_env(tmp_path / "home")
     if extra_env:
         env.update(extra_env)
+    if argv is None:
+        argv = [str(_block_bad_cmd_binary())]
     proc = subprocess.Popen(
-        [sys.executable, str(script)],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -98,6 +120,13 @@ def test_block_bad_cmd_allows_missing_payload_without_waiting_for_stdin_eof(
     assert "raw_stdin_bytes=0" in log
 
 
+def test_block_bad_cmd_allows_malformed_json(tmp_path: Path) -> None:
+    result = _run_hook_with_open_stdin(tmp_path, "{not-json")
+
+    assert result.returncode == 0
+    assert "permissionDecision" not in result.stdout
+
+
 def test_telemetry_hook_reads_payload_without_waiting_for_stdin_eof(
     tmp_path: Path,
 ) -> None:
@@ -111,7 +140,7 @@ def test_telemetry_hook_reads_payload_without_waiting_for_stdin_eof(
     result = _run_hook_with_open_stdin(
         tmp_path,
         payload,
-        script=TELEMETRY,
+        argv=[sys.executable, str(TELEMETRY)],
         extra_env={"CLUD_DAEMON_HTTP_SERVER": "not-a-valid-url"},
     )
 
@@ -129,5 +158,9 @@ def test_tracked_soldr_hooks_read_payload_without_waiting_for_stdin_eof(
     )
 
     for script in (CLAUDE_SOLDR_HOOK, CODEX_SOLDR_HOOK):
-        result = _run_hook_with_open_stdin(tmp_path, payload, script=script)
+        result = _run_hook_with_open_stdin(
+            tmp_path,
+            payload,
+            argv=[sys.executable, str(script)],
+        )
         assert result.returncode == 0, script
