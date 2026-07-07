@@ -87,6 +87,9 @@ tiny_http = "0.12"
 # (~50 LOC of platform glue: macOS `open`, Linux `xdg-open`, Windows
 # `cmd /c start`). One dep beats triplicate hand-rolled code.
 open = "5"
+# Issue #457: split EDITOR/VISUAL-style commands such as `code --wait`
+# without sending config paths through an ad hoc shell string.
+shell-words = "1.1"
 
 [dev-dependencies]
 serde_yaml = "0.9"

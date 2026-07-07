@@ -1,5 +1,5 @@
 use clud::{
-    args, backend, backend_bootstrap, clud_settings, command, console_setup, console_title,
+    args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
     cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
     launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
     runner, runtime_cache, startup, symbols, tool_cli, tool_install, tools, trampoline, trash, ui,
@@ -116,6 +116,12 @@ fn main() {
     // so a registry-less host can still run `clud gc reconcile`.
     if let Some(args::Command::Gc { subcommand }) = &args.command {
         std::process::exit(gc::run(&args, subcommand.clone()));
+    }
+
+    // Issue #457: settings inspection/editing is self-contained. Dispatch
+    // before backend resolution so `clud config show` never starts an agent.
+    if let Some(args::Command::Config { subcommand }) = &args.command {
+        std::process::exit(config::run(&args, subcommand.clone()));
     }
 
     // Issue #183: `clud ui` opens the local dashboard. Self-contained;

@@ -978,6 +978,70 @@ fn test_gc_reconcile() {
 }
 
 #[test]
+fn test_config_bare_subcommand_parses() {
+    let args = parse(&["clud", "config"]);
+    match args.command {
+        Some(Command::Config { subcommand: None }) => {}
+        other => panic!("expected bare Config command, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_show_subcommand_parses() {
+    let args = parse(&["clud", "config", "show"]);
+    match args.command {
+        Some(Command::Config {
+            subcommand: Some(ConfigSubcommand::Show { json }),
+        }) => assert!(!json),
+        other => panic!("expected Config::Show, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_show_json_subcommand_parses() {
+    let args = parse(&["clud", "config", "show", "--json"]);
+    match args.command {
+        Some(Command::Config {
+            subcommand: Some(ConfigSubcommand::Show { json }),
+        }) => assert!(json),
+        other => panic!("expected Config::Show --json, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_edit_local_editor_subcommand_parses() {
+    let args = parse(&[
+        "clud",
+        "config",
+        "edit",
+        "--local",
+        "--editor",
+        "code --wait",
+    ]);
+    match args.command {
+        Some(Command::Config {
+            subcommand: Some(ConfigSubcommand::Edit { local, ref editor }),
+        }) => {
+            assert!(local);
+            assert_eq!(editor.as_deref(), Some("code --wait"));
+        }
+        other => panic!("expected Config::Edit --local --editor, got {other:?}"),
+    }
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn test_config_flags_remain_backend_passthrough_outside_config_subcommand() {
+    let args = parse(&["clud", "--local", "--editor", "vim"]);
+
+    assert!(args.command.is_none());
+    assert_eq!(args.passthrough, vec!["--local", "--editor", "vim"]);
+}
+
+#[test]
 fn test_trash_command_parses_paths_and_cross_volume() {
     let args = parse(&[
         "clud",

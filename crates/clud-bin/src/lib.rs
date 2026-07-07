@@ -12,6 +12,7 @@ pub mod capture;
 pub mod clud_settings;
 pub mod codex_hook_normalize;
 pub mod command;
+pub mod config;
 pub mod console_input;
 pub mod console_setup;
 pub mod console_title;

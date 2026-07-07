@@ -258,6 +258,13 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: Option<GcSubcommand>,
     },
+    /// Inspect or edit clud settings.
+    ///
+    /// Running `clud config` with no subcommand prints this help summary.
+    Config {
+        #[command(subcommand)]
+        subcommand: Option<ConfigSubcommand>,
+    },
     /// Issue #183: open the local web dashboard served by the always-on
     /// clud daemon. Shows live sessions, garbage tracking, and the repos
     /// clud has been launched in. Loopback only.
@@ -377,6 +384,26 @@ pub enum Command {
 pub enum OptimizeTarget {
     #[value(alias = "soldr")]
     Rust,
+}
+
+/// Subcommands under `clud config`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConfigSubcommand {
+    /// Print global, local, and merged settings.
+    Show {
+        /// Emit machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Open a settings file in an editor.
+    Edit {
+        /// Edit repo-local .clud/settings.json instead of ~/.clud/settings.json.
+        #[arg(long = "local")]
+        local: bool,
+        /// Editor command to run, e.g. `code --wait`.
+        #[arg(long = "editor", value_name = "CMD")]
+        editor: Option<String>,
+    },
 }
 
 /// Subcommands under `clud symbols`. See `crates/clud-bin/src/symbols.rs`.
@@ -633,7 +660,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
-        "log", "gc", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon",
+        "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon",
         "__worker",
     ];
 
