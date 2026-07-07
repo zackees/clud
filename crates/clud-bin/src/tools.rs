@@ -520,6 +520,34 @@ mod tests {
         }
     }
 
+    /// Issue #502: the soldr docker-build stack must not spend the first
+    /// command installing soldr or rebuilding soldr's daemon state from
+    /// scratch. The generated image bakes the release tarball in, and the
+    /// run wrapper keeps /root/.soldr in a named Docker volume.
+    #[test]
+    fn docker_build_soldr_image_bakes_soldr_and_persists_home() {
+        let soldr = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_build_soldr.py")
+            .expect("soldr stack tool must exist");
+        for required_marker in [
+            "ARG SOLDR_VERSION=0.8.0",
+            "soldr-v${SOLDR_VERSION}-x86_64-unknown-linux-gnu.tar.zst",
+            "soldr-clang-shim cargo-chef crgx",
+            "soldr --version",
+            "soldr_home = \"/root/.soldr\"",
+            "(\"soldr-home\", \"/root/.soldr\")",
+            "\"soldr-home\"",
+        ] {
+            assert!(
+                soldr.body.contains(required_marker),
+                "docker_build_soldr.py must contain `{required_marker}` so \
+                 the helper image has a baked soldr install and a persistent \
+                 soldr home volume",
+            );
+        }
+    }
+
     /// Every bundled tool body must start with the canonical PEP 723
     /// uv-run shebang. Two reasons:
     ///   1. `clud tool run` execs `uv run <path>` explicitly, but users
