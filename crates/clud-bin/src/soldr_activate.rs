@@ -1,7 +1,8 @@
 //! Session-startup soldr activation.
 //!
-//! Called early from `main.rs` (before any subprocess spawn that might
-//! resolve `cargo` / `rustc` from PATH). The flow:
+//! Called from `main.rs` after self-contained utility commands and dry-run
+//! exits, but before daemon/backend subprocesses that might resolve `cargo`
+//! / `rustc` from PATH. The flow:
 //!
 //! 1. [`crate::repo_clud_config::discover_effective_clud_config`] merges
 //!    user-level `~/.clud/settings.json` under repo-level
@@ -35,7 +36,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const SOLDR_SHIMS_TIMEOUT: Duration = Duration::from_secs(15);
+const SOLDR_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 const SOLDR_INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
+const MIN_SOLDR_SHIMS_VERSION: VersionTriple = VersionTriple(0, 7, 55);
 
 /// Env-var that opts into chatty activation logging. Default is silent
 /// so clud's stderr stays empty across normal sessions — `clud` is a
@@ -152,6 +155,8 @@ struct ShimInfo {
 /// caller's `eprintln!` — caller appends "`.clud/settings.json
 /// directive ignored`").
 fn run_soldr_shims_json() -> Result<ShimInfo, String> {
+    ensure_soldr_supports_shims()?;
+
     let argv = vec![
         "soldr".to_string(),
         "shims".to_string(),
@@ -215,6 +220,74 @@ fn run_soldr_shims_json() -> Result<ShimInfo, String> {
         path_entry,
         soldr_version: parsed.soldr_version,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct VersionTriple(u64, u64, u64);
+
+fn ensure_soldr_supports_shims() -> Result<(), String> {
+    let argv = vec!["soldr".to_string(), "--version".to_string()];
+    let (exit_code, combined) = match run_capturing(argv, SOLDR_VERSION_TIMEOUT) {
+        Ok(t) => t,
+        Err(SubprocError::Spawn(err)) => {
+            return Err(format!("failed to spawn `soldr --version`: {err}"));
+        }
+        Err(SubprocError::Timeout) => {
+            return Err(format!(
+                "soldr --version timed out after {}s",
+                SOLDR_VERSION_TIMEOUT.as_secs()
+            ));
+        }
+        Err(SubprocError::Wait(err)) => {
+            return Err(format!("waiting on `soldr --version` failed: {err}"));
+        }
+    };
+
+    if exit_code != 0 {
+        let snippet: String = combined.chars().take(200).collect();
+        return Err(format!(
+            "soldr --version exited with code {exit_code}; output: {snippet}"
+        ));
+    }
+
+    let Some(version) = parse_first_version_triple(&combined) else {
+        let snippet: String = combined.chars().take(200).collect();
+        return Err(format!(
+            "soldr --version returned no parseable version; output: {snippet}"
+        ));
+    };
+
+    if version < MIN_SOLDR_SHIMS_VERSION {
+        return Err(format!(
+            "this soldr is too old (v{}.{}.{}; needs v{}.{}.{}+ for 'shims')",
+            version.0,
+            version.1,
+            version.2,
+            MIN_SOLDR_SHIMS_VERSION.0,
+            MIN_SOLDR_SHIMS_VERSION.1,
+            MIN_SOLDR_SHIMS_VERSION.2
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_first_version_triple(text: &str) -> Option<VersionTriple> {
+    for token in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '.') {
+        let trimmed = token.trim_start_matches('v');
+        let mut parts = trimmed.split('.');
+        let Some(major) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(minor) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(patch) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        return Some(VersionTriple(major, minor, patch));
+    }
+    None
 }
 
 /// Prepend `path_entry` to `PATH` (idempotent — skip if already at
@@ -547,5 +620,28 @@ mod tests {
         let pinned = version.map(|v| format!("soldr=={v}"));
         let pkg = pinned.as_deref().unwrap_or("soldr");
         assert_eq!(pkg, "soldr");
+    }
+
+    #[test]
+    fn version_parser_finds_soldr_semver_token() {
+        assert_eq!(
+            parse_first_version_triple("soldr 0.8.0"),
+            Some(VersionTriple(0, 8, 0))
+        );
+        assert_eq!(
+            parse_first_version_triple("soldr v0.7.55\n"),
+            Some(VersionTriple(0, 7, 55))
+        );
+        assert_eq!(
+            parse_first_version_triple("setup-soldr: using soldr 0.7.45"),
+            Some(VersionTriple(0, 7, 45))
+        );
+    }
+
+    #[test]
+    fn shims_version_floor_rejects_old_soldr() {
+        assert!(VersionTriple(0, 7, 45) < MIN_SOLDR_SHIMS_VERSION);
+        assert!(VersionTriple(0, 7, 55) >= MIN_SOLDR_SHIMS_VERSION);
+        assert!(VersionTriple(0, 8, 0) >= MIN_SOLDR_SHIMS_VERSION);
     }
 }
