@@ -125,15 +125,18 @@ The tracked-entry subcommands are thin IPC clients against the daemon. `--no-dae
   `kind / age / agent_id / branch / path` plus a `live_locked` flag computed by the daemon
   by parsing `git worktree list --porcelain` and extracting `(pid <N>)` from any
   `locked <reason>` line.
-- **`clud gc prune --kind <name> [--dry-run]`** and
+- **`clud gc prune <kind> [--dry-run]`** and
   **`clud gc all [--dry-run]`** call `daemon::gc_client_purge` with the kind-specific safe
   prune policy. Worktree-like rows use the built-in stale duration, extern-repo rows rely on
   their filesystem-mtime purgeability gate, trash rows are reaped, and `uv-cache` uses its
   filesystem-only stale-env sweep.
-- **`clud gc purge --kind <name> [--dry-run] --yes`** and
+- **`clud gc purge <kind> --yes [--dry-run]`** and
   **`clud gc all --purge --yes [--dry-run]`** are the destructive forms. The CLI requires
-  `--kind` for single-kind purge and `--yes` for destructive all-kind purge before contacting
-  the daemon. The daemon selects candidates, partitions out live-locked worktrees or live
+  a kind for single-kind purge and `--yes` for any destructive purge before contacting
+  the daemon. Since #506 the kind is a positional argument (`--kind <name>` survives as a
+  compatibility alias), and the pseudo-kind `all` routes prune/purge to the same
+  every-managed-kind sweep as `clud gc all`: `clud gc purge all --yes` ≡
+  `clud gc all --purge --yes`. The daemon selects candidates, partitions out live-locked worktrees or live
   session CWD ancestors, and:
   - `--dry-run` reports `removed` (the number that *would* be deleted) plus `skipped`. Replies
     `GcReply::PurgeOk { removed, skipped }` synchronously.

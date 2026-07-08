@@ -575,16 +575,21 @@ pub enum GcSubcommand {
         #[arg(long = "kind")]
         kind: Option<String>,
     },
-    /// Drop stale/unreferenced entries for one managed kind.
+    /// Drop stale/unreferenced entries for one managed kind, or `all`.
     Prune {
         /// Preview the removal plan without touching anything.
         #[arg(long = "dry-run")]
         dry_run: bool,
-        /// Managed kind to prune (e.g. `worktree`, `uv-cache`, `trash`).
-        #[arg(long = "kind")]
+        /// Managed kind to prune (e.g. `worktree`, `uv-cache`, `trash`),
+        /// or `all` for every managed kind (issue #506).
+        #[arg(value_name = "KIND", conflicts_with = "kind")]
+        kind_pos: Option<String>,
+        /// Compatibility alias for the positional `KIND`.
+        #[arg(long = "kind", value_name = "KIND")]
         kind: Option<String>,
     },
-    /// Remove all entries for one managed kind. Destructive; requires `--yes`.
+    /// Remove all entries for one managed kind, or `all`. Destructive;
+    /// requires `--yes`.
     Purge {
         /// Preview the removal plan without touching anything.
         #[arg(long = "dry-run")]
@@ -592,8 +597,12 @@ pub enum GcSubcommand {
         /// Skip the interactive confirmation prompt.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
-        /// Managed kind to purge (e.g. `worktree`, `uv-cache`, `trash`).
-        #[arg(long = "kind")]
+        /// Managed kind to purge (e.g. `worktree`, `uv-cache`, `trash`),
+        /// or `all` for every managed kind (issue #506).
+        #[arg(value_name = "KIND", conflicts_with = "kind")]
+        kind_pos: Option<String>,
+        /// Compatibility alias for the positional `KIND`.
+        #[arg(long = "kind", value_name = "KIND")]
         kind: Option<String>,
     },
     /// Operate across every managed kind. Defaults to safe prune.
