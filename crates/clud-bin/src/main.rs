@@ -299,7 +299,11 @@ fn main() {
     // have exited (`clud log`, `clud gc`, `clud config`, etc.) so those fast
     // paths don't block on toolchain probing, but before daemon/backend
     // startup so every launched agent subprocess inherits the shim PATH.
-    soldr_activate::activate_soldr_shims_if_requested();
+    // `--dry-run` intentionally skips this because it never launches the
+    // backend process whose toolchain PATH we need to modify.
+    if !args.dry_run {
+        soldr_activate::activate_soldr_shims_if_requested();
+    }
 
     // Bundled Python tools are embedded in this binary via BUNDLED_TOOLS.
     // Refresh managed copies during normal foreground startup so an
