@@ -49,8 +49,12 @@ coverage-*.xml
 *.log
 .extern-repos/
 
-# clud loop state (GH issue cache, DONE/BLOCKED markers)
+# clud project config/runtime state: track settings.json, ignore runtime
+# state (loop/cache, DONE/BLOCKED markers, local overrides).
 .clud/*
+!.clud/
+!.clud/settings.json
+.clud/settings.local.json
 
 # Claude Code: ignore ephemeral session/cache state, keep project config
 # (settings + hooks + commands + agents + skills are checked in).
@@ -61,7 +65,3 @@ coverage-*.xml
 !.claude/agents/
 !.claude/skills/
 .claude/settings.local.json
-
-# clud project settings
-!.clud/
-!.clud/settings.json

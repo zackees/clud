@@ -301,7 +301,7 @@ class TestDaemonSessionHardening:
             "list-name",
             "--",
             "--mock-sleep-ms",
-            "3000",
+            "10000",
         )
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0

@@ -2,8 +2,8 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
     cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
     launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
-    runner, runtime_cache, startup, symbols, tool_cli, tool_install, tools, trampoline, trash, ui,
-    uv_run_hook_guard, verbose_log, wasm, worktrees,
+    runner, runtime_cache, soldr_activate, startup, symbols, tool_cli, tool_install, tools,
+    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -290,6 +290,19 @@ fn main() {
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
         flush_ctrl_c_exit_event(ctrl_c_track::InvocationKind::Attach, exit_code);
         std::process::exit(exit_code);
+    }
+
+    // zackees/clud#343: backend launches from repos with `.clud/settings.json`
+    // and `rust.use_soldr = true` route cargo / rustc / rustfmt /
+    // clippy-driver / rustdoc through soldr by prepending soldr's shim
+    // dir to PATH in-process. Run after self-contained utility commands
+    // have exited (`clud log`, `clud gc`, `clud config`, etc.) so those fast
+    // paths don't block on toolchain probing, but before daemon/backend
+    // startup so every launched agent subprocess inherits the shim PATH.
+    // `--dry-run` intentionally skips this because it never launches the
+    // backend process whose toolchain PATH we need to modify.
+    if !args.dry_run {
+        soldr_activate::activate_soldr_shims_if_requested();
     }
 
     // Bundled Python tools are embedded in this binary via BUNDLED_TOOLS.

@@ -1,9 +1,15 @@
 {
+  "_comment": "clud repo-scoped settings - DD-014. Tracked in version control. Local overrides go in .clud/settings.local.json (gitignored).",
   "optimize": {
     "rust": {
       "install_soldr": true,
       "soldr_version": "0.7.11",
       "use_soldr_shims": true
     }
+  },
+  "rust": {
+    "use_soldr": true,
+    "install": true,
+    "version": "0.7.11"
   }
 }
