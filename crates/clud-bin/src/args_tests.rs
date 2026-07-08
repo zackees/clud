@@ -853,9 +853,15 @@ fn test_gc_prune_kind_filter() {
     let args = parse(&["clud", "gc", "prune", "--kind", "worktree"]);
     match args.command {
         Some(Command::Gc {
-            subcommand: Some(GcSubcommand::Prune { dry_run, ref kind }),
+            subcommand:
+                Some(GcSubcommand::Prune {
+                    dry_run,
+                    ref kind_pos,
+                    ref kind,
+                }),
         }) => {
             assert!(!dry_run);
+            assert!(kind_pos.is_none());
             assert_eq!(kind.as_deref(), Some("worktree"));
         }
         _ => panic!("expected Gc::Prune"),
@@ -895,27 +901,73 @@ fn test_gc_purge_dry_run_yes_kind() {
                 Some(GcSubcommand::Purge {
                     dry_run,
                     yes,
+                    ref kind_pos,
                     ref kind,
                 }),
         }) => {
             assert!(dry_run);
             assert!(yes);
+            assert!(kind_pos.is_none());
             assert_eq!(kind.as_deref(), Some("worktree"));
         }
         _ => panic!("expected Gc::Purge with flags"),
     }
 }
 
+/// Issue #506 changed `gc purge <ARG>` from a clap parse error into a
+/// positional KIND, so the pre-#110 duration positional (`gc purge 7d`)
+/// now parses here and is rejected at runtime by `validate_pre_daemon`
+/// as an unknown kind (see `gc::cli` tests).
 #[test]
-fn test_gc_purge_rejects_legacy_duration_positional() {
-    let argv: Vec<String> = ["clud", "gc", "purge", "7d"]
+fn test_gc_purge_legacy_duration_positional_parses_as_kind() {
+    let args = parse(&["clud", "gc", "purge", "7d"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand: Some(GcSubcommand::Purge { ref kind_pos, .. }),
+        }) => assert_eq!(kind_pos.as_deref(), Some("7d")),
+        _ => panic!("expected Gc::Purge with positional kind"),
+    }
+}
+
+// ---------- issue #506: positional KIND + `all` pseudo-kind ----------
+
+#[test]
+fn test_gc_purge_positional_all_parses() {
+    let args = parse(&["clud", "gc", "purge", "all", "--yes"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand:
+                Some(GcSubcommand::Purge {
+                    yes, ref kind_pos, ..
+                }),
+        }) => {
+            assert!(yes);
+            assert_eq!(kind_pos.as_deref(), Some("all"));
+        }
+        _ => panic!("expected Gc::Purge with positional `all`"),
+    }
+}
+
+#[test]
+fn test_gc_prune_positional_kind_parses() {
+    let args = parse(&["clud", "gc", "prune", "worktree"]);
+    match args.command {
+        Some(Command::Gc {
+            subcommand: Some(GcSubcommand::Prune { ref kind_pos, .. }),
+        }) => assert_eq!(kind_pos.as_deref(), Some("worktree")),
+        _ => panic!("expected Gc::Prune with positional kind"),
+    }
+}
+
+#[test]
+fn test_gc_purge_positional_conflicts_with_kind_flag() {
+    let argv: Vec<String> = ["clud", "gc", "purge", "trash", "--kind", "worktree", "--yes"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let result = Args::try_parse_from(argv);
     assert!(
-        result.is_err(),
-        "legacy purge duration positional should be rejected"
+        Args::try_parse_from(argv).is_err(),
+        "positional KIND and --kind together must be a parse error"
     );
 }
 
