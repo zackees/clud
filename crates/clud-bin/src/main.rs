@@ -60,14 +60,6 @@ fn main() {
     // Windows: rename ourselves so pip can always overwrite clud.exe.
     trampoline::unlock_exe();
 
-    // zackees/clud#343: when the repo ships `.clud/settings.json` with
-    // `rust.use_soldr = true`, route cargo / rustc / rustfmt /
-    // clippy-driver / rustdoc through soldr by prepending soldr's shim
-    // dir to PATH in-process. Must run before any subprocess spawn that
-    // could resolve those binaries (i.e., before `runner::run`,
-    // `daemon::*`, hook spawns, etc.). See DD-014.
-    soldr_activate::activate_soldr_shims_if_requested();
-
     // Stamp the console title with `clud <cwd-name>` so the active
     // window is identifiable at a glance. Windows-only effective; a
     // no-op on POSIX (out of scope per the originating request).
@@ -299,6 +291,15 @@ fn main() {
         flush_ctrl_c_exit_event(ctrl_c_track::InvocationKind::Attach, exit_code);
         std::process::exit(exit_code);
     }
+
+    // zackees/clud#343: backend launches from repos with `.clud/settings.json`
+    // and `rust.use_soldr = true` route cargo / rustc / rustfmt /
+    // clippy-driver / rustdoc through soldr by prepending soldr's shim
+    // dir to PATH in-process. Run after self-contained utility commands
+    // have exited (`clud log`, `clud gc`, `clud config`, etc.) so those fast
+    // paths don't block on toolchain probing, but before daemon/backend
+    // startup so every launched agent subprocess inherits the shim PATH.
+    soldr_activate::activate_soldr_shims_if_requested();
 
     // Bundled Python tools are embedded in this binary via BUNDLED_TOOLS.
     // Refresh managed copies during normal foreground startup so an
