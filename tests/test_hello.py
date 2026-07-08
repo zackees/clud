@@ -111,6 +111,11 @@ def copied_clud_env(_source: Path) -> dict[str, str]:
     return env
 
 
+def _copied_clud_tempdir() -> tempfile.TemporaryDirectory:
+    """Return a tempdir safe for copied Windows executable launches."""
+    return tempfile.TemporaryDirectory(ignore_cleanup_errors=sys.platform == "win32")
+
+
 def _copy_clud_for_test(temp_dir: str) -> Path:
     source = Path(CLUD)
     launch = Path(temp_dir) / source.name
@@ -130,7 +135,7 @@ def _fake_claude_on_path(bin_dir: Path) -> None:
 
 
 def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         return subprocess.run(
@@ -180,12 +185,15 @@ def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            return True
         return result.returncode == 0 and f'"{pid}"' in result.stdout
     try:
         os.kill(pid, 0)
@@ -224,7 +232,7 @@ def test_version() -> None:
 
 
 def test_gc_bare_prints_help_without_touching_clud_dir() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         home = Path(temp_dir) / "home"
@@ -252,7 +260,7 @@ def test_gc_bare_prints_help_without_touching_clud_dir() -> None:
 
 
 def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         home = Path(temp_dir) / "home"
@@ -303,7 +311,7 @@ def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
 
 
 def test_top_once_json_arg_surface() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         home = Path(temp_dir) / "home"
@@ -386,7 +394,7 @@ def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
     home.mkdir()
     (repo / "CODEX.md").write_text("codex fallback", encoding="utf-8")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         env = copied_clud_env(source)
@@ -622,7 +630,7 @@ def test_startup_refreshes_stale_managed_bundled_tool(tmp_path: Path) -> None:
     hook.parent.mkdir(parents=True)
     hook.write_text("# managed-by: clud\nprint('stale hook')\n", encoding="utf-8")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         env = copied_clud_env(source)
@@ -666,7 +674,7 @@ def test_dry_run_does_not_refresh_stale_managed_bundled_tool(tmp_path: Path) -> 
     stale = "# managed-by: clud\nprint('stale hook')\n"
     hook.write_text(stale, encoding="utf-8")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         env = copied_clud_env(source)
@@ -735,7 +743,7 @@ def test_fix_hooks_dry_run_plans_without_writing(tmp_path: Path) -> None:
     )
     home.mkdir()
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = Path(temp_dir) / source.name
         shutil.copy2(source, launch)
