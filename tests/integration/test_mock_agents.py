@@ -749,3 +749,47 @@ class TestStdinForwarding:
         report = self._parse_report(report_file, result.stdout, result.stderr)
         assert report["stdin"] is not None
         assert "/path/to/dropped.txt" in report["stdin"]
+
+
+class TestLargeFileWarningStartup:
+    """Regression for zackees/clud#515: the large-source-file warning must
+    list every offending file (path + size) on a *normal* backend launch,
+    not just the header. The bug wiped the detail lines during Codex PTY
+    startup while `--dry-run` (which never starts a backend) showed them.
+    """
+
+    def _repo_with_big_file(self, tmp_path: Path) -> tuple[Path, str]:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        name = "huge.rs"
+        # Comfortably over the 40 kB / ~1000 LOC guard threshold.
+        (repo / name).write_text("x" * (60 * 1024))
+        return repo, name
+
+    def test_entries_present_on_normal_codex_startup(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        repo, name = self._repo_with_big_file(tmp_path)
+        result = _run(clud_binary, "--codex", "-p", "hello", env=mock_env, cwd=repo)
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "large source files" in result.stderr, (
+            f"warning header missing on normal startup:\n{result.stderr}"
+        )
+        # The regression: the file entry (not only the header) must be present.
+        assert name in result.stderr, (
+            f"file entry '{name}' missing from normal-startup warning:\n{result.stderr}"
+        )
+
+    def test_normal_startup_matches_dry_run_entries(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        repo, name = self._repo_with_big_file(tmp_path)
+        normal = _run(clud_binary, "--codex", "-p", "hello", env=mock_env, cwd=repo)
+        dry = _run(
+            clud_binary, "--codex", "--dry-run", "-p", "hello", env=mock_env, cwd=repo
+        )
+        # Both paths surface the same file entry — parity is the acceptance
+        # criterion: normal startup must not silently drop what dry-run shows.
+        assert name in dry.stderr, f"dry-run missing entry:\n{dry.stderr}"
+        assert name in normal.stderr, f"normal startup missing entry:\n{normal.stderr}"

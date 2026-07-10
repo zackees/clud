@@ -13,6 +13,7 @@
 //! deadline trips, stderr reports a partial-scan note instead of stalling.
 
 use ignore::{DirEntry, WalkBuilder, WalkState};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -176,26 +177,57 @@ fn is_pruned_nested_git(root: &Path, e: &DirEntry) -> bool {
     false
 }
 
+/// Write the warning to stderr. Issue #515: the header and every file entry
+/// are composed into a single buffer and emitted with one locked, flushed
+/// `write_all`, rather than a sequence of `eprintln!` calls. On Windows,
+/// `clud --codex` launches the backend through a ConPTY that repaints the
+/// viewport when the child attaches; detail lines emitted as separate writes
+/// just before takeover were being wiped, leaving only the header. One
+/// flushed block commits the whole warning up front so the entries survive —
+/// and matches the content `--dry-run` prints (which never starts a PTY).
 fn emit(files: &[LargeFile], total: usize, timed_out: bool) {
+    let Some(message) = format_report(files, total, timed_out) else {
+        return;
+    };
+    let stderr = std::io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_all(message.as_bytes());
+    let _ = handle.flush();
+}
+
+/// Compose the complete warning block (header + every file entry + optional
+/// `(N more)` tail and partial-scan note) as one string, or `None` when there
+/// is nothing to report. Pure so the exact bytes emitted at startup can be
+/// asserted in tests — the regression guard for issue #515, where the entries
+/// must never be dropped from or split out of the emitted warning.
+fn format_report(files: &[LargeFile], total: usize, timed_out: bool) -> Option<String> {
     if files.is_empty() {
         if timed_out {
-            eprintln!("[clud] note: large-file scan exceeded 1s budget — skipping");
+            return Some(
+                "[clud] note: large-file scan exceeded 1s budget — skipping\n".to_string(),
+            );
         }
-        return;
+        return None;
     }
-    eprintln!(
-        "[clud] warning: large source files (\u{2265}40 kB) detected — AI may get stuck on these; recommend refactoring:"
+    let mut out = String::new();
+    out.push_str(
+        "[clud] warning: large source files (\u{2265}40 kB) detected — AI may get stuck on these; recommend refactoring:\n",
     );
     for f in files {
-        eprintln!("  {} ({})", f.rel_path.display(), human_kb(f.size));
+        out.push_str(&format!(
+            "  {} ({})\n",
+            f.rel_path.display(),
+            human_kb(f.size)
+        ));
     }
     let extra = total.saturating_sub(files.len());
     if extra > 0 {
-        eprintln!("  ({extra} more)");
+        out.push_str(&format!("  ({extra} more)\n"));
     }
     if timed_out {
-        eprintln!("[clud] note: scan stopped at 1s — report may be partial");
+        out.push_str("[clud] note: scan stopped at 1s — report may be partial\n");
     }
+    Some(out)
 }
 
 fn human_kb(bytes: u64) -> String {
@@ -356,6 +388,67 @@ mod tests {
     fn report_sizes_human_readable() {
         assert_eq!(human_kb(112 * 1024), "112 kB");
         assert_eq!(human_kb(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    // --- Issue #515: the emitted warning must carry every file entry as one
+    // atomic block, identical to what `--dry-run` shows. `format_report` is the
+    // single source both the normal-startup and dry-run paths format through,
+    // so asserting its output guards against entries being dropped or split.
+
+    fn lf(path: &str, size: u64) -> LargeFile {
+        LargeFile {
+            rel_path: PathBuf::from(path),
+            size,
+        }
+    }
+
+    #[test]
+    fn format_report_includes_header_and_every_entry() {
+        let files = vec![
+            lf("crates/running-process/src/lib.rs", 52 * 1024),
+            lf("crates/running-process/src/daemon/services.rs", 50 * 1024),
+        ];
+        let out = format_report(&files, files.len(), false).expect("should report");
+        // One atomic block: header + both entries, each on its own line.
+        assert!(
+            out.contains("large source files"),
+            "missing header: {out:?}"
+        );
+        for f in &files {
+            let line = format!("  {} ({})", f.rel_path.display(), human_kb(f.size));
+            assert!(out.contains(&line), "missing entry {line:?} in {out:?}");
+        }
+        // Entries are not dropped: header line + 2 entry lines.
+        assert_eq!(out.lines().count(), 3, "unexpected line count: {out:?}");
+        assert!(out.ends_with('\n'), "block must end with a newline");
+    }
+
+    #[test]
+    fn format_report_truncated_shows_more_tail() {
+        let files: Vec<LargeFile> = (0..REPORT_LIMIT)
+            .map(|i| lf(&format!("f{i}.rs"), 60 * 1024))
+            .collect();
+        // total exceeds shown → a "(N more)" tail must appear.
+        let out = format_report(&files, REPORT_LIMIT + 3, false).expect("should report");
+        assert!(out.contains("(3 more)"), "missing more-tail: {out:?}");
+    }
+
+    #[test]
+    fn format_report_empty_is_none_unless_timed_out() {
+        assert_eq!(format_report(&[], 0, false), None);
+        let note = format_report(&[], 0, true).expect("timeout note");
+        assert!(note.contains("exceeded 1s budget"), "got: {note:?}");
+    }
+
+    #[test]
+    fn format_report_partial_scan_note_follows_entries() {
+        let files = vec![lf("big.rs", 80 * 1024)];
+        let out = format_report(&files, 1, true).expect("should report");
+        assert!(out.contains("  big.rs ("), "entry must be present: {out:?}");
+        assert!(
+            out.contains("scan stopped at 1s"),
+            "partial-scan note must be present: {out:?}"
+        );
     }
 
     #[test]
