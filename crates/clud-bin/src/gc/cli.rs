@@ -82,10 +82,24 @@ const ALL_KIND: &str = "all";
 /// every downstream check sees a single `kind` field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GcAction {
-    List { json: bool, kind: Option<String> },
-    Prune { dry_run: bool, kind: Option<String> },
-    Purge { dry_run: bool, yes: bool, kind: Option<String> },
-    All { purge: bool, dry_run: bool, yes: bool },
+    List {
+        json: bool,
+        kind: Option<String>,
+    },
+    Prune {
+        dry_run: bool,
+        kind: Option<String>,
+    },
+    Purge {
+        dry_run: bool,
+        yes: bool,
+        kind: Option<String>,
+    },
+    All {
+        purge: bool,
+        dry_run: bool,
+        yes: bool,
+    },
     Reconcile,
 }
 
@@ -684,13 +698,22 @@ mod tests {
     /// parses as a positional kind and must be rejected here at runtime.
     #[test]
     fn legacy_duration_positional_rejected_as_unknown_kind() {
-        assert_eq!(validate_pre_daemon(&purge(Some("7d"), false, true)), Some(2));
+        assert_eq!(
+            validate_pre_daemon(&purge(Some("7d"), false, true)),
+            Some(2)
+        );
     }
 
     #[test]
     fn purge_kind_requires_yes_before_daemon() {
-        assert_eq!(validate_pre_daemon(&purge(Some("trash"), false, false)), Some(2));
-        assert_eq!(validate_pre_daemon(&purge(Some("trash"), true, false)), None);
+        assert_eq!(
+            validate_pre_daemon(&purge(Some("trash"), false, false)),
+            Some(2)
+        );
+        assert_eq!(
+            validate_pre_daemon(&purge(Some("trash"), true, false)),
+            None
+        );
     }
 
     #[test]
@@ -710,14 +733,23 @@ mod tests {
     #[test]
     fn all_pseudo_kind_is_valid_for_prune_and_purge() {
         assert_eq!(validate_pre_daemon(&prune(Some(ALL_KIND))), None);
-        assert_eq!(validate_pre_daemon(&purge(Some(ALL_KIND), false, true)), None);
+        assert_eq!(
+            validate_pre_daemon(&purge(Some(ALL_KIND), false, true)),
+            None
+        );
         // Like single-kind purge, --dry-run previews without --yes.
-        assert_eq!(validate_pre_daemon(&purge(Some(ALL_KIND), true, false)), None);
+        assert_eq!(
+            validate_pre_daemon(&purge(Some(ALL_KIND), true, false)),
+            None
+        );
     }
 
     #[test]
     fn purge_all_without_yes_fails_before_daemon() {
-        assert_eq!(validate_pre_daemon(&purge(Some(ALL_KIND), false, false)), Some(2));
+        assert_eq!(
+            validate_pre_daemon(&purge(Some(ALL_KIND), false, false)),
+            Some(2)
+        );
     }
 
     #[test]

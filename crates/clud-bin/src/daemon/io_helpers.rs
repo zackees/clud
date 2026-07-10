@@ -10,14 +10,23 @@ use super::types::ENV_BACKLOG_BYTES;
 
 pub(super) fn child_env() -> Vec<(String, String)> {
     let originator_key = running_process::ORIGINATOR_ENV_VAR;
+    // Issue #509: session temp redirect. Strip any inherited TMPDIR/TMP/TEMP
+    // so the override below isn't shadowed by a stale value carried in from
+    // the parent env.
+    let overrides = crate::gc::session_tmp::env_overrides();
+    let strip_temp = !overrides.is_empty();
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key != "IN_CLUD" && key != originator_key)
+        .filter(|(key, _)| {
+            !strip_temp || !crate::gc::session_tmp::OVERRIDDEN_KEYS.contains(&key.as_str())
+        })
         .collect();
     env.push(("IN_CLUD".to_string(), "1".to_string()));
     env.push((
         originator_key.to_string(),
         format!("CLUD:{}", std::process::id()),
     ));
+    env.extend(overrides);
     env
 }
 

@@ -961,10 +961,12 @@ fn test_gc_prune_positional_kind_parses() {
 
 #[test]
 fn test_gc_purge_positional_conflicts_with_kind_flag() {
-    let argv: Vec<String> = ["clud", "gc", "purge", "trash", "--kind", "worktree", "--yes"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let argv: Vec<String> = [
+        "clud", "gc", "purge", "trash", "--kind", "worktree", "--yes",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     assert!(
         Args::try_parse_from(argv).is_err(),
         "positional KIND and --kind together must be a parse error"

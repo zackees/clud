@@ -25,6 +25,8 @@ mod cli;
 mod reconcile;
 mod registry;
 mod scanner;
+pub mod session_tmp;
+pub mod target_sweep;
 pub mod uv_cache;
 
 pub use cli::run;
