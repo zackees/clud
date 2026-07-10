@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -469,6 +470,118 @@ fn run_periodic_purge_tick_with_free_space<F>(
     // helper handles its own 24h sentinel under ~/.clud/state/ so
     // this call is cheap on every tick (one stat + age compare).
     crate::daemon::uv_cache_sweep::maybe_sweep_uv_cache();
+
+    // Issues #509/#510: the session-temp (48h) and target/ (opt-in) sweeps
+    // walk the filesystem and can take a while, so they run on a detached
+    // background thread rather than blocking this tick loop. They prioritize
+    // by disk pressure and system load — see `spawn_maintenance_sweeps`.
+    spawn_maintenance_sweeps(disk_config);
+}
+
+/// Guards against overlapping background maintenance sweeps. The tick fires
+/// every cadence; a long `target/` walk can outlast one interval, so we never
+/// spawn a second sweep thread while one is still in flight.
+static MAINTENANCE_SWEEP_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Global-CPU ceiling (percent) above which the non-urgent sweeps defer.
+const ENV_GC_SWEEP_MAX_CPU_PCT: &str = "CLUD_GC_SWEEP_MAX_CPU_PCT";
+const DEFAULT_GC_SWEEP_MAX_CPU_PCT: f32 = 60.0;
+
+/// What the background maintenance sweep should do this cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceAction {
+    /// Disk is low — reclaim immediately, bypassing the sentinel throttle.
+    RunUrgent,
+    /// Disk is fine and the box is idle — run the throttled sweeps.
+    RunNormal,
+    /// Disk is fine but the box is busy — skip; the next tick retries.
+    Defer,
+}
+
+/// Pure decision: disk pressure wins over everything (reclaim now); otherwise
+/// only run when the machine is not under load.
+fn maintenance_action(low_disk: bool, cpu_busy: bool) -> MaintenanceAction {
+    if low_disk {
+        MaintenanceAction::RunUrgent
+    } else if cpu_busy {
+        MaintenanceAction::Defer
+    } else {
+        MaintenanceAction::RunNormal
+    }
+}
+
+/// Issues #509/#510: fan the filesystem sweeps onto a detached thread so a
+/// long walk never blocks the GC tick loop. At most one sweep thread runs at
+/// a time (guarded by [`MAINTENANCE_SWEEP_IN_FLIGHT`]).
+fn spawn_maintenance_sweeps(disk_config: &GcDiskWatchdogConfig) {
+    if MAINTENANCE_SWEEP_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // A previous sweep is still running — don't stack another.
+        return;
+    }
+    let warn_free_bytes = disk_config.warn_free_bytes;
+    let spawned = std::thread::Builder::new()
+        .name("clud-gc-sweep".to_string())
+        .spawn(move || {
+            run_maintenance_sweeps(warn_free_bytes);
+            MAINTENANCE_SWEEP_IN_FLIGHT.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        // Thread spawn failed — release the guard so the next tick can retry.
+        MAINTENANCE_SWEEP_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// Body of the background sweep thread. Runs the CPU sample + disk probe here
+/// (off the tick loop) and then dispatches per [`maintenance_action`].
+fn run_maintenance_sweeps(warn_free_bytes: u64) {
+    let low_disk = maintenance_disk_pressure(warn_free_bytes);
+    // Only pay for the ~200ms CPU sample when it can change the decision.
+    let cpu_busy = if low_disk { false } else { system_cpu_busy() };
+    match maintenance_action(low_disk, cpu_busy) {
+        MaintenanceAction::RunUrgent => {
+            crate::daemon::session_tmp_sweep::sweep_now();
+            crate::daemon::target_sweep::sweep_now();
+        }
+        MaintenanceAction::RunNormal => {
+            crate::daemon::session_tmp_sweep::maybe_sweep_session_tmp();
+            crate::daemon::target_sweep::maybe_sweep_targets();
+        }
+        MaintenanceAction::Defer => {}
+    }
+}
+
+/// True when free space on the `~/.clud` volume (session temp + uv cache live
+/// there) or any configured target root is below `warn_free_bytes`.
+fn maintenance_disk_pressure(warn_free_bytes: u64) -> bool {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = crate::gc::session_tmp::session_tmp_dir() {
+        paths.push(dir);
+    }
+    paths.extend(crate::daemon::target_sweep::configured_roots());
+    paths.iter().any(|path| {
+        matches!(free_space_bytes_for_path(path), Ok(free) if free < warn_free_bytes)
+    })
+}
+
+/// Sample global CPU usage over a short window; true when above the configured
+/// ceiling (default 60%, override `CLUD_GC_SWEEP_MAX_CPU_PCT`). Called on the
+/// background thread, so the mandatory ~200ms settle never touches the tick.
+fn system_cpu_busy() -> bool {
+    let ceiling = sweep_cpu_ceiling_pct(std::env::var(ENV_GC_SWEEP_MAX_CPU_PCT).ok().as_deref());
+    let mut sys = sysinfo::System::new();
+    sys.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_cpu_usage();
+    sys.global_cpu_usage() > ceiling
+}
+
+fn sweep_cpu_ceiling_pct(raw: Option<&str>) -> f32 {
+    raw.and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .unwrap_or(DEFAULT_GC_SWEEP_MAX_CPU_PCT)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

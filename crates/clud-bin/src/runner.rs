@@ -94,6 +94,14 @@ pub fn child_env() -> Vec<(String, String)> {
         env.push(("PYTHONUTF8".to_string(), "1".to_string()));
     }
 
+    // Issue #509: point the backend agent's temp dir at ~/.clud/tmp so its
+    // scatter of temp files lands where the daemon can reclaim them. Empty
+    // when disabled (CLUD_SESSION_TMP=0) or the dir can't be created, in
+    // which case the child keeps the OS temp dir.
+    for (key, value) in crate::gc::session_tmp::env_overrides() {
+        push_or_replace(&mut env, &key, &value);
+    }
+
     env
 }
 

@@ -159,6 +159,44 @@ The tracked-entry subcommands are thin IPC clients against the daemon. `--no-dae
 Bare `clud gc` (no subcommand) prints help and exits 0 without contacting the daemon
 (`crates/clud-bin/src/gc/cli.rs`).
 
+## Filesystem sweeps (non-registry)
+
+Alongside the redb-tracked kinds, the daemon's periodic tick
+(`run_periodic_purge_tick` in `crates/clud-bin/src/daemon/gc_service.rs`) runs three
+**filesystem-only** sweeps that have no registry row — they operate directly on directories
+under `~/.clud` (and, opt-in, on external dev roots). Each self-throttles via a sentinel
+timestamp under `~/.clud/state/` so the per-tick cost is one stat + age compare.
+
+| Sweep | Target | Age gate | Cadence sentinel | Enabled |
+|---|---|---|---|---|
+| uv-cache (#423) | `~/.clud/cache/uv/environments-v2/` | 7d | `uv-cache-sweep.last` (24h) | always |
+| session-temp (#509) | `~/.clud/tmp/` | 48h | `session-tmp-sweep.last` (6h) | default on |
+| target (#510) | `target/` dirs under `CLUD_GC_TARGET_ROOTS` | 14d | `target-sweep.last` (24h) | opt-in |
+
+**Session temp (#509).** At session launch the backend agent's temp env (`TMPDIR` on Unix,
+`TMP`+`TEMP` on Windows) is pointed at `~/.clud/tmp` by both env builders
+(`runner.rs::child_env` and `daemon/io_helpers.rs::child_env`) via
+`crate::gc::session_tmp::env_overrides`, so the agent's temp scatter lands somewhere the daemon
+can reclaim. Set `CLUD_SESSION_TMP=0` to keep the OS temp dir. If the dir can't be created the
+override is silently skipped (the child keeps the OS temp dir) — launch never fails on this.
+
+**Target reclamation (#510).** Opt-in: does nothing unless `CLUD_GC_TARGET_ROOTS` names one or
+more dev roots (OS path-list separated). The sweep walks each root (bounded depth, skipping
+`.git`/`node_modules`/`.claude` and not descending into a found `target/`), and removes `target/`
+dirs — identified by a sibling `Cargo.toml` — whose mtime is older than
+`CLUD_GC_TARGET_STALE_DAYS` (default 14). Default-off because reclaiming `target/` forces a
+rebuild; the long mtime gate is the cheap stand-in for "no live build owns this."
+
+**Background thread + prioritization.** The session-temp and target sweeps walk the filesystem
+and can take a while, so the tick spawns them on a detached `clud-gc-sweep` thread rather than
+blocking the registry tick loop; an `AtomicBool` guard prevents overlapping sweeps. Priority
+(`maintenance_action` in `gc_service.rs`):
+
+- **Disk low** — free space on the `~/.clud` volume or any target root below the watchdog warn
+  threshold (`CLUD_GC_WARN_FREE_GB`): reclaim immediately, bypassing the sentinel throttle.
+- **Otherwise** — only run when global CPU is under `CLUD_GC_SWEEP_MAX_CPU_PCT` (default 60%);
+  if the box is busy, skip this cycle and let the next tick retry.
+
 ## Worktree scanner
 
 `WorktreeScanner` (`crates/clud-bin/src/gc/scanner.rs`) is a polling thread spawned at clud startup
