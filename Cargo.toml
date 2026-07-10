@@ -14,7 +14,7 @@ exclude = [
 libraries = [{ path = "dylints/*" }]
 
 [workspace.package]
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 rust-version = "1.85"
 license-file = "LICENSE"

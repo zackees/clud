@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "clud"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "arboard",
  "base64",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "mock-agent"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -1979,11 +1979,11 @@ dependencies = [
 
 [[package]]
 name = "probe-dll"
-version = "2.3.0"
+version = "2.4.0"
 
 [[package]]
 name = "probe-target"
-version = "2.3.0"
+version = "2.4.0"
 
 [[package]]
 name = "proc-macro-crate"
