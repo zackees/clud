@@ -561,9 +561,9 @@ fn maintenance_disk_pressure(warn_free_bytes: u64) -> bool {
         paths.push(dir);
     }
     paths.extend(crate::daemon::target_sweep::configured_roots());
-    paths.iter().any(|path| {
-        matches!(free_space_bytes_for_path(path), Ok(free) if free < warn_free_bytes)
-    })
+    paths
+        .iter()
+        .any(|path| matches!(free_space_bytes_for_path(path), Ok(free) if free < warn_free_bytes))
 }
 
 /// Sample global CPU usage over a short window; true when above the configured

@@ -12,7 +12,10 @@ mod parallel;
 fn maintenance_action_prioritizes_low_disk() {
     // Low disk always runs urgently, even when the CPU is busy.
     assert_eq!(maintenance_action(true, true), MaintenanceAction::RunUrgent);
-    assert_eq!(maintenance_action(true, false), MaintenanceAction::RunUrgent);
+    assert_eq!(
+        maintenance_action(true, false),
+        MaintenanceAction::RunUrgent
+    );
 }
 
 #[test]
@@ -22,7 +25,10 @@ fn maintenance_action_defers_when_busy_and_disk_ok() {
 
 #[test]
 fn maintenance_action_runs_normal_when_idle_and_disk_ok() {
-    assert_eq!(maintenance_action(false, false), MaintenanceAction::RunNormal);
+    assert_eq!(
+        maintenance_action(false, false),
+        MaintenanceAction::RunNormal
+    );
 }
 
 #[test]
@@ -30,9 +36,18 @@ fn sweep_cpu_ceiling_defaults_and_overrides() {
     assert_eq!(sweep_cpu_ceiling_pct(None), DEFAULT_GC_SWEEP_MAX_CPU_PCT);
     assert_eq!(sweep_cpu_ceiling_pct(Some("  75 ")), 75.0);
     // Garbage / non-positive falls back to the default.
-    assert_eq!(sweep_cpu_ceiling_pct(Some("nan")), DEFAULT_GC_SWEEP_MAX_CPU_PCT);
-    assert_eq!(sweep_cpu_ceiling_pct(Some("0")), DEFAULT_GC_SWEEP_MAX_CPU_PCT);
-    assert_eq!(sweep_cpu_ceiling_pct(Some("-5")), DEFAULT_GC_SWEEP_MAX_CPU_PCT);
+    assert_eq!(
+        sweep_cpu_ceiling_pct(Some("nan")),
+        DEFAULT_GC_SWEEP_MAX_CPU_PCT
+    );
+    assert_eq!(
+        sweep_cpu_ceiling_pct(Some("0")),
+        DEFAULT_GC_SWEEP_MAX_CPU_PCT
+    );
+    assert_eq!(
+        sweep_cpu_ceiling_pct(Some("-5")),
+        DEFAULT_GC_SWEEP_MAX_CPU_PCT
+    );
 }
 
 // ENV_DATA_DB is process-global; serialize so two test threads
