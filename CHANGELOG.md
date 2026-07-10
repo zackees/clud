@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 2.4.0 - 2026-07-10
+
+- Daemon GC now reclaims two disk sinks its redb registry never tracked: the
+  backend agent's OS temp scatter and stale Rust `target/` output. Session temp
+  is redirected to `~/.clud/tmp` at launch (`TMPDIR` on Unix, `TMP`+`TEMP` on
+  Windows; default on, `CLUD_SESSION_TMP=0` opts out) and swept of entries older
+  than 48h. `target/` reclamation is opt-in via `CLUD_GC_TARGET_ROOTS`
+  (`CLUD_GC_TARGET_STALE_DAYS`, default 14). Both sweeps run on a detached
+  background thread that prioritizes by disk pressure, else defers until system
+  CPU is under `CLUD_GC_SWEEP_MAX_CPU_PCT` (default 60%). See zackees/clud#509,
+  zackees/clud#510, zackees/clud#511.
+
 ## 2.3.0 - 2026-07-07
 
 - Native `clud-block-bad-cmd` rollout is now end-to-end: install scripts verify
