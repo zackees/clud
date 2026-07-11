@@ -90,11 +90,20 @@ def main() -> int:
     # resolved Python interpreter. running-process's NativeProcess
     # always spawns under containment, which is precisely the wrong
     # semantics for a relay binary. See #406 / #409.
+    #
+    # ctrlc_signal_kinds.rs / ctrlc_windows_events.rs are exempt (#517) —
+    # these tests send a real OS signal / console-control event to the
+    # exact spawned pid (`libc::kill` / `GenerateConsoleCtrlEvent`) and
+    # assert on clud's captured interrupt reason. NativeProcess always
+    # spawns under containment (a Windows Job Object), which is
+    # irrelevant to what's under test and would only add noise.
     exempt = {
         "trampoline.rs",
         "process_tree.rs",
         "win32_hooking_probe.rs",
         "clud_shim.rs",
+        "ctrlc_signal_kinds.rs",
+        "ctrlc_windows_events.rs",
     }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0

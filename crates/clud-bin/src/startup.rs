@@ -184,7 +184,80 @@ pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
         eprintln!("[clud] warning: failed to install Ctrl+C handler: {}", e);
     }
     install_windows_ctrl_event_probe();
+    install_unix_termination_probe(&interrupted);
     interrupted
+}
+
+/// Issue #517: install clud's own handler for `SIGTERM` / `SIGHUP` /
+/// `SIGQUIT` — three signals the unmodified `ctrlc` crate never touches
+/// (its `termination` feature, which would add `SIGTERM`/`SIGHUP`, is not
+/// enabled). Without this, `SIGHUP` (controlling terminal closed) and
+/// `SIGQUIT` (Ctrl+\\) kill the process under the OS default disposition
+/// before any clud code runs, and `SIGTERM` (e.g. `docker stop`) is
+/// likewise unobserved.
+///
+/// Deliberately mirrors [`install_windows_ctrl_event_probe`]'s "record the
+/// specific kind, then flip the same flag `ctrlc` flips for Ctrl+C" shape
+/// — but the mechanism differs because Unix has no OS-level handler
+/// chaining the way `SetConsoleCtrlHandler` does. Rather than replacing
+/// `ctrlc`'s installed `SIGINT` handler (which a second raw `sigaction`
+/// call would silently clobber), this claims three signals `ctrlc` never
+/// registers at all, so there is nothing to chain to and no vendoring of
+/// `ctrlc` is required.
+///
+/// Uses `signal_hook::iterator::Signals` — the same pattern already used
+/// for `SIGWINCH` in `session.rs` — which delivers signals to a plain
+/// background thread via a self-pipe rather than running our code inside
+/// actual signal-handler context, so no `unsafe`/async-signal-safety
+/// reasoning is needed here (unlike the Windows probe above, which must
+/// run inside the OS console-handler thread).
+#[cfg(unix)]
+fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
+    use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let mut signals = match Signals::new([SIGTERM, SIGHUP, SIGQUIT]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[clud] warning: failed to install SIGTERM/SIGHUP/SIGQUIT handler: {}",
+                e
+            );
+            return;
+        }
+    };
+    let flag = Arc::clone(interrupted);
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        for sig in signals.forever() {
+            crate::ctrl_c_track::record_observed();
+            crate::ctrl_c_track::record_event_kind(unix_termination_signal_kind(sig));
+            flag.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
+/// Pure `signal number -> CtrlEventKind` mapping for the three signals
+/// [`install_unix_termination_probe`] registers. Factored out so the
+/// mapping is unit-testable without spawning a thread or sending a real
+/// signal (the integration test in `tests/ctrlc_signal_kinds.rs` covers
+/// the end-to-end real-signal path).
+#[cfg(unix)]
+fn unix_termination_signal_kind(sig: i32) -> crate::ctrl_c_track::CtrlEventKind {
+    use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
+    match sig {
+        SIGTERM => crate::ctrl_c_track::CtrlEventKind::Term,
+        SIGHUP => crate::ctrl_c_track::CtrlEventKind::Hup,
+        SIGQUIT => crate::ctrl_c_track::CtrlEventKind::Quit,
+        _ => crate::ctrl_c_track::CtrlEventKind::Unknown,
+    }
+}
+
+#[cfg(not(unix))]
+fn install_unix_termination_probe(_interrupted: &Arc<AtomicBool>) {
+    // SIGTERM/SIGHUP/SIGQUIT don't exist on Windows; the console-control
+    // probe above already covers the equivalent close/logoff/shutdown
+    // events.
 }
 
 /// Install a `SetConsoleCtrlHandler` probe whose only job is to record
@@ -307,6 +380,16 @@ pub(crate) fn run_ctrl_c_handler(
         record_observed_returning_prior, record_press_kind, CtrlPressKind,
     };
     use std::sync::atomic::Ordering;
+
+    // Issue #517: on Unix, `ctrlc` (without the `termination` feature)
+    // only ever installs a SIGINT handler, so every press that reaches
+    // this closure unambiguously means SIGINT/Ctrl+C. On Windows the
+    // kind is already stamped by `install_windows_ctrl_event_probe`
+    // *before* this handler runs (it can be CtrlC, CtrlBreak, ...), so
+    // stamping CtrlC here unconditionally would silently overwrite a
+    // more specific Windows event with the wrong one.
+    #[cfg(not(windows))]
+    crate::ctrl_c_track::record_event_kind(crate::ctrl_c_track::CtrlEventKind::CtrlC);
 
     let prior_ms = record_observed_returning_prior();
     let elapsed_ms = if prior_ms == 0 {
@@ -685,6 +768,63 @@ mod tests {
         assert!(
             interrupted.load(Ordering::SeqCst),
             "non-Windows: a single press MUST flip interrupted"
+        );
+    }
+
+    /// Issue #517: on Unix, every press through `run_ctrl_c_handler` is
+    /// unambiguously SIGINT (ctrlc's `termination` feature is off, so
+    /// nothing else routes through this closure) and must stamp
+    /// `CtrlEventKind::CtrlC` so the dashboard's `ctrl_event_kind` field
+    /// is populated on Unix the same way the Windows probe populates it.
+    #[cfg(not(windows))]
+    #[test]
+    fn ctrl_c_press_on_non_windows_records_ctrl_c_event_kind() {
+        let _guard = crate::ctrl_c_track::test_state_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_handler_state();
+        let interrupted = AtomicBool::new(false);
+
+        assert_eq!(crate::ctrl_c_track::observed_event_kind(), None);
+        let _ = super::run_ctrl_c_handler(false, true, &interrupted, |_| {}, |_| {});
+        assert_eq!(
+            crate::ctrl_c_track::observed_event_kind(),
+            Some(crate::ctrl_c_track::CtrlEventKind::CtrlC),
+            "SIGINT press must stamp CtrlEventKind::CtrlC on Unix"
+        );
+    }
+
+    /// Issue #517: the SIGTERM/SIGHUP/SIGQUIT -> CtrlEventKind mapping
+    /// used by the Unix termination probe.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_signal_kind_maps_known_signals() {
+        use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};
+        assert_eq!(
+            super::unix_termination_signal_kind(SIGTERM),
+            crate::ctrl_c_track::CtrlEventKind::Term
+        );
+        assert_eq!(
+            super::unix_termination_signal_kind(SIGHUP),
+            crate::ctrl_c_track::CtrlEventKind::Hup
+        );
+        assert_eq!(
+            super::unix_termination_signal_kind(SIGQUIT),
+            crate::ctrl_c_track::CtrlEventKind::Quit
+        );
+    }
+
+    /// Any signal number outside the registered set (which should never
+    /// happen in practice, since `Signals::new` only ever delivers what
+    /// it was constructed with) must funnel into `Unknown` rather than
+    /// panicking — matches the same defensive default as
+    /// `CtrlEventKind::from_raw`.
+    #[cfg(unix)]
+    #[test]
+    fn unix_termination_signal_kind_maps_unknown_signal_to_unknown() {
+        assert_eq!(
+            super::unix_termination_signal_kind(9999),
+            crate::ctrl_c_track::CtrlEventKind::Unknown
         );
     }
 

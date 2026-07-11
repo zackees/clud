@@ -84,9 +84,10 @@ impl InvocationKind {
     }
 }
 
-/// Specific console-control event that fired clud's interrupt handler.
+/// Specific console-control event / signal that fired clud's interrupt
+/// handler.
 ///
-/// `ctrlc::set_handler` folds five distinct Windows events
+/// On Windows, `ctrlc::set_handler` folds five distinct console events
 /// (`CTRL_C_EVENT`, `CTRL_BREAK_EVENT`, `CTRL_CLOSE_EVENT`,
 /// `CTRL_LOGOFF_EVENT`, `CTRL_SHUTDOWN_EVENT`) into one callback, so by
 /// default we can't tell a real keyboard Ctrl+C from a
@@ -95,8 +96,17 @@ impl InvocationKind {
 /// the ctrlc handler runs and stores the result here so the dashboard
 /// can show *which* event actually fired.
 ///
-/// `None` in [`CtrlCEvent::ctrl_event_kind`] means the probe never ran
-/// (Unix builds, or pre-upgrade event files).
+/// On Unix, `ctrlc` (without the `termination` feature, which clud does
+/// not enable) only ever installs a `SIGINT` handler — so `CtrlC` is
+/// stamped directly by [`crate::startup::run_ctrl_c_handler`]. clud
+/// separately installs its own handler (issue #517) for `SIGTERM` /
+/// `SIGHUP` / `SIGQUIT` — signals `ctrlc` never touches — so those get
+/// their own variants below and flip the same interrupted flag as
+/// Ctrl+C.
+///
+/// `None` in [`CtrlCEvent::ctrl_event_kind`] means no probe/handler
+/// stamped a kind for this process's observed interrupt (pre-upgrade
+/// event files, or a code path that predates this field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CtrlEventKind {
@@ -121,9 +131,27 @@ pub enum CtrlEventKind {
     /// `CTRL_SHUTDOWN_EVENT`. System shutdown. Same service-process
     /// caveat as `CtrlLogoff`.
     CtrlShutdown,
-    /// The probe saw a `dwCtrlType` value the Win32 docs don't define.
-    /// Stored so a future Windows revision that adds a new control
-    /// event doesn't get silently dropped on the floor.
+    /// `SIGTERM` on Unix. Typically `kill`, `docker stop`, or a
+    /// process supervisor (systemd, launchd) asking clud to exit
+    /// gracefully. Windows has no direct equivalent; this variant is
+    /// only ever stamped on Unix builds.
+    Term,
+    /// `SIGHUP` on Unix. The controlling terminal (or its session
+    /// leader) went away — the closest Unix analogue of Windows'
+    /// `CTRL_CLOSE_EVENT`. Without clud's own handler this signal
+    /// kills the process under the OS default disposition before any
+    /// clud code runs; issue #517 makes it a normal, observed
+    /// interrupt instead.
+    Hup,
+    /// `SIGQUIT` on Unix (Ctrl+\\ at the terminal). The direct Unix
+    /// analogue of a terminal-forced quit. Without clud's own handler
+    /// this triggers the OS default disposition (core dump +
+    /// terminate) and bypasses clud's interrupt path entirely.
+    Quit,
+    /// The probe saw a `dwCtrlType` value the Win32 docs don't define,
+    /// or (in principle) an unmapped signal number. Stored so a future
+    /// OS revision that adds a new control event doesn't get silently
+    /// dropped on the floor.
     Unknown,
 }
 
@@ -185,6 +213,12 @@ impl CtrlEventKind {
             CtrlEventKind::CtrlClose => 2,
             CtrlEventKind::CtrlLogoff => 5,
             CtrlEventKind::CtrlShutdown => 6,
+            // 3, 4, and 7-99 are left open in case a future Windows
+            // revision defines a new dwCtrlType in that range — Unix-only
+            // variants live at 100+ so the two spaces never collide.
+            CtrlEventKind::Term => 100,
+            CtrlEventKind::Hup => 101,
+            CtrlEventKind::Quit => 102,
             CtrlEventKind::Unknown => u32::MAX - 1,
         }
     }
@@ -199,6 +233,9 @@ impl CtrlEventKind {
             2 => CtrlEventKind::CtrlClose,
             5 => CtrlEventKind::CtrlLogoff,
             6 => CtrlEventKind::CtrlShutdown,
+            100 => CtrlEventKind::Term,
+            101 => CtrlEventKind::Hup,
+            102 => CtrlEventKind::Quit,
             _ => CtrlEventKind::Unknown,
         }
     }
@@ -956,6 +993,9 @@ mod tests {
             CtrlEventKind::CtrlClose,
             CtrlEventKind::CtrlLogoff,
             CtrlEventKind::CtrlShutdown,
+            CtrlEventKind::Term,
+            CtrlEventKind::Hup,
+            CtrlEventKind::Quit,
             CtrlEventKind::Unknown,
         ] {
             let raw = kind.to_raw();
@@ -969,10 +1009,11 @@ mod tests {
 
     #[test]
     fn ctrl_event_kind_from_raw_maps_undefined_to_unknown() {
-        // Windows reserves 3, 4, and 7+ as undocumented / future-use values.
+        // Windows reserves 3, 4, and 7-99 as undocumented / future-use
+        // values (100+ is reserved by this crate for Unix-only variants).
         // Anything outside the known set must funnel into Unknown so a
         // future Windows revision can't crash forensics.
-        for raw in [3u32, 4, 7, 99, u32::MAX, u32::MAX - 1] {
+        for raw in [3u32, 4, 7, 99, 103, u32::MAX, u32::MAX - 1] {
             assert_eq!(CtrlEventKind::from_raw(raw), CtrlEventKind::Unknown);
         }
     }
@@ -1000,6 +1041,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&CtrlEventKind::CtrlShutdown).unwrap(),
             "\"ctrl_shutdown\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::Term).unwrap(),
+            "\"term\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::Hup).unwrap(),
+            "\"hup\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CtrlEventKind::Quit).unwrap(),
+            "\"quit\""
         );
         assert_eq!(
             serde_json::to_string(&CtrlEventKind::Unknown).unwrap(),

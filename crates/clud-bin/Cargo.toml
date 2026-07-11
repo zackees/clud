@@ -190,3 +190,12 @@ path = "src/bin/clud_shim.rs"
 [[bin]]
 name = "clud-block-bad-cmd"
 path = "src/bin/clud_block_bad_cmd.rs"
+
+# Issue #517: test-only probe binary. Installs the real production
+# `startup::install_ctrl_c_flag` handler and reports which
+# `CtrlEventKind` fired, so `tests/ctrlc_signal_kinds.rs` and
+# `tests/ctrlc_windows_events.rs` can drive it with real OS signals /
+# console-control events instead of re-implementing the handler.
+[[bin]]
+name = "clud-ctrlc-probe"
+path = "src/bin/clud_ctrlc_probe.rs"
