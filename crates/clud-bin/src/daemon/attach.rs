@@ -27,6 +27,31 @@ use crate::voice::VoiceMode;
 
 const INTERRUPT_EXIT_GRACE: Duration = Duration::from_millis(500);
 
+/// Issue #517: log the captured [`crate::ctrl_c_track::CtrlEventKind`]
+/// reason (Ctrl+C, SIGTERM, SIGHUP, SIGQUIT, window-close, ...) at the
+/// moment `attach_to_session`'s interrupt-decision logic observes it, so
+/// the new signal/console-event plumbing added by #517 is visible in real
+/// runs. `site` identifies which of the interrupt-consulting call sites
+/// (`attach_to_session`, `run_remote_interactive` via its
+/// `InterruptRequested` result, `prompt_continue_in_background_terminal`)
+/// triggered the log, without logging on every poll-loop tick — only the
+/// two points where an interrupt actually changes behavior.
+///
+/// Deliberately logging only, not deciding: issue #517 explicitly scopes
+/// out changing the background-prompt/skip-prompt *decision* logic based
+/// on the reason — that's a follow-up once the reason has been observed
+/// in practice.
+pub(super) fn log_observed_interrupt_reason(site: &str) {
+    match crate::ctrl_c_track::observed_event_kind() {
+        Some(kind) => {
+            crate::verbose_log::log(format!("[clud] interrupt reason ({site}): {kind:?}"))
+        }
+        None => crate::verbose_log::log(format!(
+            "[clud] interrupt reason ({site}): unknown (no probe fired)"
+        )),
+    }
+}
+
 /// `PtyInputSink` impl that forwards bytes to the daemon-owned PTY as a
 /// `WorkerClientMessage::Input` TCP frame. This is what lets centralized
 /// mode wire `VoiceMode` (and other `InteractiveHooks` impls) without
@@ -274,6 +299,7 @@ pub(super) fn attach_to_session(
     let (local_result, backgrounded) = match local_result {
         LocalAttachResult::Completed(code) => (code, false),
         LocalAttachResult::InterruptRequested(interrupt) => {
+            log_observed_interrupt_reason("attach_to_session");
             interrupted.store(false, Ordering::SeqCst);
             if session.detachable {
                 match prompt_continue_in_background(interrupted) {
@@ -385,6 +411,11 @@ fn run_remote_interactive(
     let (_dnd_guard, dnd_rx): (Option<()>, Option<std::sync::mpsc::Receiver<Vec<u8>>>) =
         (None, None);
     loop {
+        // Issue #517: this loop polls every 25ms, so the reason is
+        // deliberately NOT logged here (would spam the log on every
+        // tick). `attach_to_session`'s single `InterruptRequested` match
+        // arm logs it once, covering both this path and
+        // `wait_for_remote_or_interrupt`'s.
         if interrupted.load(Ordering::SeqCst) {
             return LocalAttachResult::InterruptRequested(LocalInterruptProfile::now());
         }
@@ -537,6 +568,7 @@ fn prompt_continue_in_background_terminal(interrupted: &AtomicBool) -> Backgroun
             return BackgroundPromptDecision::ContinueInBackground;
         }
         if interrupted.swap(false, Ordering::SeqCst) {
+            log_observed_interrupt_reason("prompt_continue_in_background_terminal");
             eprintln!();
             return BackgroundPromptDecision::EndSession;
         }

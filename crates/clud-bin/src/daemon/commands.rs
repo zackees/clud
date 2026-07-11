@@ -219,6 +219,10 @@ pub(super) fn run_logs(
     // terminated (and any final bytes have been drained).
     loop {
         if interrupted.load(Ordering::SeqCst) {
+            // Issue #517: `clud logs --follow` is another site where an
+            // observed interrupt changes behavior (early return instead
+            // of continuing to tail), so log the reason here too.
+            super::attach::log_observed_interrupt_reason("logs_follow");
             return 130;
         }
         match follow_read(&path, offset) {
