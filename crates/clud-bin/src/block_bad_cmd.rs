@@ -25,6 +25,7 @@ const MAX_SUBSTITUTION_RECURSION_DEPTH: usize = 8;
 /// text-parsing this would race `command_words()`'s own env-assignment
 /// stripping.
 const BAD_CMD_OVERRIDE_ENV: &str = "CLUD_BAD_CMD_OVERRIDE";
+const PR_WATCH_REPLACEMENT: &str = "clud tool run github/pr_merge_watch.py <PR>";
 
 pub const STDIN_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub const STDIN_READ_MAX_BYTES: usize = 1024 * 1024;
@@ -370,6 +371,11 @@ fn evaluate_command_into(
         return;
     }
 
+    if let Some(reason) = blocking_pr_wait_reason(command_text, dialect) {
+        evaluation.reason = Some(reason);
+        return;
+    }
+
     for segment in split_shell_segments(command_text, dialect) {
         let segment = segment.trim();
         if segment.is_empty() {
@@ -461,6 +467,116 @@ fn evaluate_command_into(
             return;
         }
     }
+}
+
+fn blocking_pr_wait_reason(command_text: &str, dialect: ShellDialect) -> Option<String> {
+    let segments = split_shell_segments(command_text, dialect);
+    for segment in &segments {
+        let words = command_words(segment);
+        if native_gh_waiter(&words) {
+            return Some(format!(
+                "GitHub CLI watch commands wait locally and do not cancel the remaining matrix on first required failure. Use `{PR_WATCH_REPLACEMENT}` instead."
+            ));
+        }
+    }
+
+    let is_loop = segments
+        .iter()
+        .any(|segment| is_polling_loop_head(segment, dialect));
+    if !is_loop {
+        return None;
+    }
+
+    for inner in scan_command_substitutions(command_text) {
+        let words = command_words(&inner);
+        if gh_poll_target(&words) {
+            return Some(format!(
+                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead."
+            ));
+        }
+    }
+
+    let words = tokenize(command_text);
+    for (index, word) in words.iter().enumerate() {
+        if program_name(word) == "gh" && gh_poll_target(&words[index..]) {
+            return Some(format!(
+                "Hand-written PR polling loops can wait for the entire matrix after a required check is already red. Use `{PR_WATCH_REPLACEMENT}` instead."
+            ));
+        }
+    }
+    None
+}
+
+fn is_polling_loop_head(segment: &str, dialect: ShellDialect) -> bool {
+    let words = command_words(segment);
+    let Some(word) = words.first() else {
+        return false;
+    };
+    let head = program_name(word);
+    let keyword = head.split_once('(').map_or(head.as_str(), |(name, _)| name);
+    let compact: String = segment.chars().filter(|ch| !ch.is_whitespace()).collect();
+    match dialect {
+        ShellDialect::Posix => {
+            matches!(keyword, "until" | "while") || compact.starts_with("for((;;))")
+        }
+        ShellDialect::PowerShell => {
+            matches!(keyword, "while" | "do") || compact.starts_with("for(;;)")
+        }
+        ShellDialect::Cmd => false,
+    }
+}
+
+fn native_gh_waiter(words: &[String]) -> bool {
+    if words.first().is_none_or(|word| program_name(word) != "gh") {
+        return false;
+    }
+    let positionals = gh_positionals(&words[1..]);
+    (positionals.starts_with(&["pr", "checks"])
+        && words
+            .iter()
+            .any(|word| word == "--watch" || word.starts_with("--watch=")))
+        || positionals.starts_with(&["run", "watch"])
+}
+
+fn gh_poll_target(words: &[String]) -> bool {
+    if words.first().is_none_or(|word| program_name(word) != "gh") {
+        return false;
+    }
+    let positionals = gh_positionals(&words[1..]);
+    if positionals.starts_with(&["pr", "checks"])
+        || positionals.starts_with(&["run", "view"])
+        || positionals.starts_with(&["run", "list"])
+    {
+        return true;
+    }
+    positionals.starts_with(&["pr", "view"])
+        && words.iter().any(|word| {
+            word.eq_ignore_ascii_case("statusCheckRollup")
+                || word.to_ascii_lowercase().contains("statuscheckrollup")
+        })
+        && words
+            .iter()
+            .any(|word| word == "--json" || word.starts_with("--json="))
+}
+
+fn gh_positionals(arguments: &[String]) -> Vec<&str> {
+    const OPTIONS_WITH_VALUE: &[&str] = &["--repo", "-R", "--hostname"];
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let word = arguments[index].as_str();
+        if OPTIONS_WITH_VALUE.contains(&word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        positionals.push(word);
+        index += 1;
+    }
+    positionals
 }
 
 /// Evaluate the repo/user-configured generic `bad_commands` rules
@@ -1264,6 +1380,7 @@ fn split_shell_segments(command_text: &str, dialect: ShellDialect) -> Vec<String
     let mut segments = Vec::new();
     let mut buf = String::new();
     let mut quote: Option<char> = None;
+    let mut loop_header_paren_depth = 0usize;
     let mut i = 0usize;
     while i < chars.len() {
         let ch = chars[i];
@@ -1291,6 +1408,22 @@ fn split_shell_segments(command_text: &str, dialect: ShellDialect) -> Vec<String
             buf.push(ch);
             buf.push(chars[i + 1]);
             i += 2;
+            continue;
+        }
+        if loop_header_paren_depth > 0 {
+            buf.push(ch);
+            if ch == '(' {
+                loop_header_paren_depth += 1;
+            } else if ch == ')' {
+                loop_header_paren_depth -= 1;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '(' && buf.trim().eq_ignore_ascii_case("for") {
+            loop_header_paren_depth = 1;
+            buf.push(ch);
+            i += 1;
             continue;
         }
         if ch == '#' && dialect != ShellDialect::Cmd && is_shell_comment_start(&chars, i) {
@@ -1874,6 +2007,105 @@ mod tests {
         assert!(allows(&format!(
             "echo before && soldr {TOOL_RS_COMPILER} --version"
         )));
+    }
+
+    #[test]
+    fn blocks_native_github_pr_watchers() {
+        for command in [
+            "gh pr checks 528 --watch",
+            "gh pr checks --repo zackees/clud 528 --fail-fast --watch",
+            "gh --repo zackees/clud pr checks --watch 528",
+            "gh pr checks 528 --watch --interval 60",
+            "gh run watch 123456 --exit-status",
+            "gh run --repo zackees/clud watch 123456",
+            "env GH_HOST=github.com gh run watch 123456",
+        ] {
+            let reason = evaluate_command(command, None, false, &[])
+                .reason
+                .unwrap_or_else(|| panic!("{command} should be denied"));
+            assert!(
+                reason.contains("clud tool run github/pr_merge_watch.py <PR>"),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_hand_written_pr_polling_loops() {
+        let infinite_for = "for ((;;)); do gh pr checks 528; sleep 30; done";
+        let infinite_for_segments = split_shell_segments(infinite_for, ShellDialect::Posix);
+        assert!(
+            infinite_for_segments
+                .iter()
+                .any(|segment| is_polling_loop_head(segment, ShellDialect::Posix)),
+            "segments={infinite_for_segments:?}"
+        );
+        for (command, dialect) in [
+            (
+                "until gh pr checks 528; do sleep 60; done",
+                ShellDialect::Posix,
+            ),
+            (
+                "while true; do gh pr view 528 --json statusCheckRollup; sleep 30; done",
+                ShellDialect::Posix,
+            ),
+            (
+                "while true; do gh --repo zackees/clud pr view 528 --json=state,statusCheckRollup; sleep 30; done",
+                ShellDialect::Posix,
+            ),
+            (
+                "until [ \"$(gh run view 123 --json jobs,status)\" ]; do sleep 30; done",
+                ShellDialect::Posix,
+            ),
+            (
+                "while ($true) { gh run list --branch feat/x; Start-Sleep 30 }",
+                ShellDialect::PowerShell,
+            ),
+            (
+                infinite_for,
+                ShellDialect::Posix,
+            ),
+            (
+                "do { gh run list --branch feat/x; Start-Sleep 30 } while ($true)",
+                ShellDialect::PowerShell,
+            ),
+            (
+                "while($true) { gh pr checks 528; Start-Sleep 30 }",
+                ShellDialect::PowerShell,
+            ),
+        ] {
+            let evaluation = evaluate_command_with_policy_and_dialect(
+                command,
+                None,
+                false,
+                &[],
+                &[],
+                dialect,
+            );
+            let reason = evaluation
+                .reason
+                .unwrap_or_else(|| panic!("{command} should be denied"));
+            assert!(reason.contains("pr_merge_watch.py"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn allows_pr_status_snapshots_searches_prose_and_blessed_watcher() {
+        for command in [
+            "gh pr checks 528",
+            "gh pr view 528 --json state,mergeStateStatus,statusCheckRollup",
+            "gh run view 123456 --json jobs,status",
+            "gh run list --branch feat/x",
+            "for pr in 101 102; do gh pr checks \"$pr\"; done",
+            "foreach ($pr in 101,102) { gh pr checks $pr }",
+            "clud tool run github/pr_merge_watch.py 528",
+            "rg 'gh pr checks 528 --watch' docs/",
+            "printf 'wait unless explicitly disabled\\n'",
+            "Write-Output 'gh run watch 123456'",
+            "python - <<'PY'\nprint('until gh pr checks 528; do sleep 60; done')\nPY",
+        ] {
+            assert!(allows(command), "{command} should be allowed");
+        }
     }
 
     #[test]
