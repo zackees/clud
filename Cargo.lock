@@ -422,6 +422,7 @@ dependencies = [
  "prost-build",
  "protox",
  "redb",
+ "regex",
  "rodio",
  "running-process",
  "serde",

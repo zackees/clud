@@ -112,6 +112,21 @@ Process management and GC:
   removes safe ones; `--dry-run` faithful.
 - `optimize.rs` - `clud optimize rust`: installs/persists soldr defaults and
   writes repo-local `.clud/settings.json` directives.
+- `repo_clud_config.rs` - `.clud/settings.json` discovery + parser, both
+  repo-level and user-level (two-level merge, repo wins per scalar field).
+  Owns the `rust.use_soldr` activation schema (DD-014) and the generic
+  `bad_commands` rule schema (DD-016) — repo maintainers add their own
+  "bad command → blessed replacement" rules here (e.g. banning bare
+  `playwright` in favor of a project's `npm run test:integration`); see
+  DD-016 for the full field reference and a copy-pasteable example.
+  `bad_commands` concatenates across repo/user levels instead of
+  overriding, unlike the scalar `rust.*` fields.
+- `block_bad_cmd.rs` - native `clud-block-bad-cmd` PreToolUse hook binary:
+  hardcoded Rust-toolchain enforcement (`RUST_TOOLS` → `soldr <tool>`) plus
+  the generic `bad_commands` rule engine from `repo_clud_config.rs` (DD-016)
+  — shell-segment scanning, nested-shell/`eval`/command-substitution
+  recursion, `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE`
+  escape hatch.
 
 Platform glue:
 

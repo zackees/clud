@@ -472,7 +472,10 @@ mod tests {
     use crate::repo_clud_config::RustConfig;
 
     fn cfg_with_rust(r: RustConfig) -> RepoCludConfig {
-        RepoCludConfig { rust: r }
+        RepoCludConfig {
+            rust: r,
+            bad_commands: Vec::new(),
+        }
     }
 
     fn isolate_path_env() -> PathGuard {

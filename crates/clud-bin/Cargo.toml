@@ -90,6 +90,10 @@ open = "5"
 # Issue #457: split EDITOR/VISUAL-style commands such as `code --wait`
 # without sending config paths through an ad hoc shell string.
 shell-words = "1.1"
+# zackees/clud#519: generic `bad_commands` rule matching in the
+# block-bad-cmd hook — glob patterns compile to an anchored regex, and
+# `match_mode: "regex"` rules use this directly.
+regex = "1"
 
 [dev-dependencies]
 serde_yaml = "0.9"
