@@ -475,7 +475,7 @@ pub enum DaemonSubcommand {
 pub enum ToolSubcommand {
     /// Invoke a bundled tool by its `~/.clud/tools/`-relative path,
     /// forwarding any trailing args to the tool. Example:
-    /// `clud tool run github/pr_merge_watch.py 404 --interval 30`.
+    /// `clud tool run github/pr_merge_watch.py 404`.
     Run {
         /// Path under `~/.clud/tools/` (e.g. `github/pr_merge_watch.py`).
         rel_path: String,

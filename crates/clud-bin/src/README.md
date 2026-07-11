@@ -122,7 +122,9 @@ Process management and GC:
   `bad_commands` concatenates across repo/user levels instead of
   overriding, unlike the scalar `rust.*` fields.
 - `block_bad_cmd.rs` - native `clud-block-bad-cmd` PreToolUse hook binary:
-  hardcoded Rust-toolchain enforcement (`RUST_TOOLS` → `soldr <tool>`) plus
+  hardcoded Rust-toolchain enforcement (`RUST_TOOLS` → `soldr <tool>`),
+  blocking GitHub PR waiter enforcement (`gh ... --watch` / hand-written
+  polling loops → `clud tool run github/pr_merge_watch.py <PR>`), plus
   the generic `bad_commands` rule engine from `repo_clud_config.rs` (DD-016)
   — shell-segment scanning, nested-shell/`eval`/command-substitution
   recursion, `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE`
