@@ -507,7 +507,16 @@ fn evaluate_generic_rules(
             return Some(message);
         }
 
-        if cleared_this_round.is_empty() {
+        // `soldr` is a universally-trusted transparent wrapper (mirrors
+        // the hardcoded `if first == "soldr" { continue; }` fast path
+        // for RUST_TOOLS below) — the scan advances past it regardless
+        // of whether any individual rule happens to list it in its own
+        // `passthrough_prefixes`. That field only controls whether a
+        // *specific* rule is exempted from firing on the wrapper token
+        // itself; it must not gate whether *other* rules get to look
+        // past it, or `soldr <bad-program>` would be allowed for any
+        // rule that never explicitly opted into trusting soldr.
+        if cleared_this_round.is_empty() && !head.eq_ignore_ascii_case("soldr") {
             break;
         }
         active = still_active;
@@ -566,15 +575,37 @@ fn strip_heredoc_bodies(text: &str) -> String {
         let line = lines[i];
         out_lines.push(line);
         if let Some(delim) = find_heredoc_delimiter(line) {
-            i += 1;
-            while i < lines.len() {
-                let body_line = lines[i];
-                if body_line.trim_start_matches('\t') == delim {
+            let body_start = i + 1;
+            let mut j = body_start;
+            let mut terminator_index = None;
+            while j < lines.len() {
+                // Trim a trailing '\r' too: `text` may have originated
+                // from a CRLF payload split on '\n' alone, leaving a
+                // stray '\r' that would otherwise make a real
+                // terminator line fail to match `delim`.
+                let body_line = lines[j].trim_start_matches('\t').trim_end_matches('\r');
+                if body_line == delim {
+                    terminator_index = Some(j);
                     break;
                 }
-                i += 1;
+                j += 1;
             }
-            i += 1; // skip the terminator line itself too
+            match terminator_index {
+                Some(terminator_index) => {
+                    // Skip the body lines (never scanned as commands)
+                    // and the terminator line itself.
+                    i = terminator_index + 1;
+                }
+                None => {
+                    // No matching terminator found (malformed/adversarial
+                    // input, e.g. a mismatched delimiter). Fail toward
+                    // *more* scanning, not less: keep every line from
+                    // here on in the output rather than silently
+                    // dropping real trailing commands unscanned.
+                    out_lines.extend_from_slice(&lines[body_start..]);
+                    i = lines.len();
+                }
+            }
             continue;
         }
         i += 1;
@@ -585,8 +616,42 @@ fn strip_heredoc_bodies(text: &str) -> String {
 fn find_heredoc_delimiter(line: &str) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut idx = 0usize;
+    let mut quote: Option<char> = None;
+    let mut arithmetic_depth = 0i32;
     while idx + 1 < chars.len() {
-        if chars[idx] == '<' && chars[idx + 1] == '<' {
+        let c = chars[idx];
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            idx += 1;
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            idx += 1;
+            continue;
+        }
+        // `$((...))` arithmetic expansion: `<<` inside it is the
+        // left-shift operator, never a heredoc redirection. Track
+        // depth via the paren-balance already used for `$(...)`
+        // elsewhere; here we only need to know "inside or not" per
+        // line, so a simple depth counter on `((`/`))` suffices.
+        if c == '$' && idx + 2 < chars.len() && chars[idx + 1] == '(' && chars[idx + 2] == '(' {
+            arithmetic_depth += 1;
+            idx += 3;
+            continue;
+        }
+        if arithmetic_depth > 0 {
+            if c == '(' {
+                arithmetic_depth += 1;
+            } else if c == ')' {
+                arithmetic_depth -= 1;
+            }
+            idx += 1;
+            continue;
+        }
+        if c == '<' && chars[idx + 1] == '<' {
             // exclude here-strings (`<<<`), which are single-line data.
             if idx + 2 < chars.len() && chars[idx + 2] == '<' {
                 idx += 1;
@@ -599,7 +664,7 @@ fn find_heredoc_delimiter(line: &str) -> Option<String> {
             while j < chars.len() && chars[j] == ' ' {
                 j += 1;
             }
-            let quote = if j < chars.len() && (chars[j] == '\'' || chars[j] == '"') {
+            let delim_quote = if j < chars.len() && (chars[j] == '\'' || chars[j] == '"') {
                 let q = chars[j];
                 j += 1;
                 Some(q)
@@ -615,7 +680,7 @@ fn find_heredoc_delimiter(line: &str) -> Option<String> {
                 continue;
             }
             let delimiter: String = chars[start..j].iter().collect();
-            let _ = quote;
+            let _ = delim_quote;
             return Some(delimiter);
         }
         idx += 1;
@@ -1710,6 +1775,66 @@ mod tests {
     }
 
     #[test]
+    fn generic_rule_heredoc_terminator_survives_crlf_payload() {
+        // A payload that originated with CRLF line endings but was split
+        // on '\n' alone would otherwise leave a stray '\r' on the
+        // terminator line, making it fail to match `delim` and (before
+        // the fix) silently drop every line after it from scanning.
+        let rules = [playwright_rule()];
+        assert!(allows_with_rules(
+            "cat <<'EOF'\r\nharmless data\r\nEOF\r\nnpm run test:integration",
+            &rules
+        ));
+        assert!(denies_with_rules(
+            "cat <<'EOF'\r\nharmless data\r\nEOF\r\nplaywright run",
+            &rules
+        ));
+    }
+
+    #[test]
+    fn generic_rule_unterminated_heredoc_does_not_swallow_trailing_command() {
+        // A heredoc whose terminator never appears (malformed or
+        // adversarial input, e.g. a deliberately mismatched delimiter)
+        // must not cause every subsequent line to be silently dropped
+        // from scanning — that would let a real trailing invocation
+        // slip through unscanned. Fail toward scanning more, not less.
+        let rules = [playwright_rule()];
+        assert!(denies_with_rules(
+            "cat <<'EOF'\nharmless data\nplaywright run",
+            &rules
+        ));
+        assert!(denies_with_rules(
+            "cat <<'EOF'\nharmless data\nNOT_THE_REAL_DELIMITER\nplaywright run",
+            &rules
+        ));
+    }
+
+    #[test]
+    fn generic_rule_arithmetic_left_shift_is_not_a_heredoc() {
+        // `$((n << 1))` is arithmetic left-shift, not heredoc
+        // redirection. Regression test for a real bug found in review:
+        // misidentifying it as a heredoc start would strip every
+        // subsequent line (looking for a nonexistent terminator),
+        // silently dropping a real trailing invocation from scanning.
+        let rules = [playwright_rule()];
+        assert!(denies_with_rules(
+            "echo $((n << 1))\nplaywright run",
+            &rules
+        ));
+    }
+
+    #[test]
+    fn generic_rule_quoted_double_angle_is_not_a_heredoc() {
+        // `<<` appearing inside a quoted string (e.g. as literal text
+        // being grepped for) is not a heredoc redirection either.
+        let rules = [playwright_rule()];
+        assert!(denies_with_rules(
+            "grep \"a << EOF\" f\nplaywright run",
+            &rules
+        ));
+    }
+
+    #[test]
     fn generic_rule_denied_across_literal_newline_outside_heredoc() {
         let rules = [playwright_rule()];
         assert!(denies_with_rules("echo hi\nplaywright run", &rules));
@@ -1738,18 +1863,22 @@ mod tests {
 
     #[test]
     fn generic_rule_passthrough_prefix_is_a_quotable_glob() {
+        // Use a fictional wrapper name (not "soldr", which is
+        // universally trusted regardless of passthrough_prefixes — see
+        // `generic_rule_passthrough_prefix_not_configured_still_denies`)
+        // so this test isolates glob-quotability specifically.
         let mut rule = playwright_rule();
-        rule.passthrough_prefixes = vec!["soldr-*".to_string()];
+        rule.passthrough_prefixes = vec!["myproxy-*".to_string()];
         let rules = [rule];
         // Prefixes matching the glob are recognized wrappers -> the rule
         // is cleared and does not re-fire on what follows.
-        assert!(allows_with_rules("soldr-v2 playwright run", &rules));
-        assert!(allows_with_rules("soldr-nightly playwright run", &rules));
-        // A wrapper word that does NOT match the glob (bare "soldr", no
-        // suffix) is just an unrecognized program; "playwright" is its
-        // argument, not a nested invocation — same principle as
+        assert!(allows_with_rules("myproxy-v2 playwright run", &rules));
+        assert!(allows_with_rules("myproxy-nightly playwright run", &rules));
+        // A wrapper word that does NOT match the glob (bare "myproxy",
+        // no suffix) is just an unrecognized program; "playwright" is
+        // its argument, not a nested invocation — same principle as
         // `rg playwright` staying allowed.
-        assert!(allows_with_rules("soldr playwright run", &rules));
+        assert!(allows_with_rules("myproxy playwright run", &rules));
         // The glob passthrough config must not weaken base matching:
         // a direct, unwrapped invocation is still denied.
         assert!(denies_with_rules("playwright run", &rules));
@@ -1780,6 +1909,25 @@ mod tests {
         foo_rule.passthrough_prefixes = Vec::new();
         let rules = [playwright_rule(), foo_rule];
         assert!(allows_with_rules("soldr playwright run", &rules));
+        assert!(denies_with_rules("soldr foo run", &rules));
+    }
+
+    #[test]
+    fn generic_rule_passthrough_prefix_not_configured_still_denies() {
+        // `soldr` must be treated as a universally-trusted transparent
+        // wrapper for scan advancement purposes, independent of whether
+        // *this particular* rule lists it in its own
+        // `passthrough_prefixes` — otherwise a rule with no passthrough
+        // config at all would incorrectly let `soldr <its bad program>`
+        // through just because nothing ever advances the scan past
+        // `soldr`. Regression test for a real bug found in review: this
+        // must hold even when `foo_rule` is the *only* configured rule
+        // (no other rule's passthrough incidentally causes advancement).
+        let mut foo_rule = playwright_rule();
+        foo_rule.id = Some("no-foo".to_string());
+        foo_rule.pattern = "foo".to_string();
+        foo_rule.passthrough_prefixes = Vec::new();
+        let rules = [foo_rule];
         assert!(denies_with_rules("soldr foo run", &rules));
     }
 
