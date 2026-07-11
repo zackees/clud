@@ -58,6 +58,8 @@ pub struct RawRepoCludConfig {
     pub optimize: RawOptimizeConfig,
     #[serde(deserialize_with = "deserialize_bad_commands")]
     pub bad_commands: Vec<BadCommandRule>,
+    #[serde(deserialize_with = "deserialize_bad_pipelines")]
+    pub bad_pipelines: Vec<BadPipelineRule>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -104,6 +106,44 @@ pub struct BadCommandRule {
     pub replacement: String,
     pub reason: String,
     pub passthrough_prefixes: Vec<String>,
+    pub allow_override: bool,
+    pub through_wrappers: Vec<String>,
+    pub arguments: Option<ArgumentMatcher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchPattern {
+    pub pattern: String,
+    pub match_mode: MatchMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArgumentMatcher {
+    pub prefix: Vec<MatchPattern>,
+    pub ordered: Vec<MatchPattern>,
+    pub contiguous: Vec<MatchPattern>,
+    pub any: Vec<MatchPattern>,
+    pub all: Vec<MatchPattern>,
+    pub none: Vec<MatchPattern>,
+    pub short_flags_any: Vec<char>,
+    pub short_flags_all: Vec<char>,
+    pub any_of: Vec<ArgumentMatcher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandMatcher {
+    pub pattern: String,
+    pub match_mode: MatchMode,
+    pub through_wrappers: Vec<String>,
+    pub arguments: Option<ArgumentMatcher>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadPipelineRule {
+    pub id: Option<String>,
+    pub stages: Vec<CommandMatcher>,
+    pub replacement: String,
+    pub reason: String,
     pub allow_override: bool,
 }
 
@@ -208,6 +248,11 @@ fn parse_bad_command_rule(value: &serde_json::Value) -> Result<BadCommandRule, S
         .get("allow_override")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let through_wrappers = parse_wrappers(object.get("through_wrappers"))?;
+    let arguments = object
+        .get("arguments")
+        .map(|value| parse_argument_matcher(value, 0))
+        .transpose()?;
 
     compile_match_pattern(&pattern, match_mode)?;
 
@@ -219,6 +264,249 @@ fn parse_bad_command_rule(value: &serde_json::Value) -> Result<BadCommandRule, S
         reason,
         passthrough_prefixes,
         allow_override,
+        through_wrappers,
+        arguments,
+    })
+}
+
+const MAX_ARGUMENT_MATCHER_DEPTH: usize = 8;
+
+fn parse_match_mode(value: Option<&serde_json::Value>, context: &str) -> Result<MatchMode, String> {
+    match value.and_then(serde_json::Value::as_str) {
+        None | Some("glob") => Ok(MatchMode::Glob),
+        Some("regex") => Ok(MatchMode::Regex),
+        Some(other) => Err(format!(
+            "{context} has unknown match_mode {other:?}; expected \"glob\" or \"regex\""
+        )),
+    }
+}
+
+fn parse_match_pattern(value: &serde_json::Value, context: &str) -> Result<MatchPattern, String> {
+    let (pattern, match_mode) = if let Some(pattern) = value.as_str() {
+        (pattern.to_string(), MatchMode::Glob)
+    } else {
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{context} pattern must be a string or JSON object"))?;
+        for key in object.keys() {
+            if !["match", "match_mode"].contains(&key.as_str()) {
+                return Err(format!("{context} pattern has unknown field {key:?}"));
+            }
+        }
+        let pattern = object
+            .get("match")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{context} pattern missing required string field \"match\""))?
+            .to_string();
+        let mode = parse_match_mode(object.get("match_mode"), context)?;
+        (pattern, mode)
+    };
+    compile_match_pattern(&pattern, match_mode)
+        .map_err(|err| format!("{context} has invalid pattern {pattern:?}: {err}"))?;
+    Ok(MatchPattern {
+        pattern,
+        match_mode,
+    })
+}
+
+fn parse_pattern_array(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Vec<MatchPattern>, String> {
+    let Some(value) = object.get(field) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("arguments.{field} must be an array"))?;
+    array
+        .iter()
+        .map(|item| parse_match_pattern(item, &format!("arguments.{field}")))
+        .collect()
+}
+
+fn parse_short_flags(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Vec<char>, String> {
+    let Some(value) = object.get(field) else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("arguments.{field} must be an array"))?;
+    array
+        .iter()
+        .map(|item| {
+            let raw = item
+                .as_str()
+                .ok_or_else(|| format!("arguments.{field} entries must be strings"))?;
+            let mut chars = raw.chars();
+            let flag = chars
+                .next()
+                .ok_or_else(|| format!("arguments.{field} entries must be one flag character"))?;
+            if chars.next().is_some() || flag == '-' {
+                return Err(format!(
+                    "arguments.{field} entry {raw:?} must be one flag character without '-'"
+                ));
+            }
+            Ok(flag)
+        })
+        .collect()
+}
+
+fn parse_argument_matcher(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<ArgumentMatcher, String> {
+    if depth > MAX_ARGUMENT_MATCHER_DEPTH {
+        return Err(format!(
+            "arguments.any_of nesting exceeds {MAX_ARGUMENT_MATCHER_DEPTH} levels"
+        ));
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| "arguments must be a JSON object".to_string())?;
+    const FIELDS: &[&str] = &[
+        "prefix",
+        "ordered",
+        "contiguous",
+        "any",
+        "all",
+        "none",
+        "short_flags_any",
+        "short_flags_all",
+        "any_of",
+    ];
+    for key in object.keys() {
+        if !FIELDS.contains(&key.as_str()) {
+            return Err(format!("arguments has unknown field {key:?}"));
+        }
+    }
+    let any_of = match object.get("any_of") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| "arguments.any_of must be an array".to_string())?
+            .iter()
+            .map(|branch| parse_argument_matcher(branch, depth + 1))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+    let matcher = ArgumentMatcher {
+        prefix: parse_pattern_array(object, "prefix")?,
+        ordered: parse_pattern_array(object, "ordered")?,
+        contiguous: parse_pattern_array(object, "contiguous")?,
+        any: parse_pattern_array(object, "any")?,
+        all: parse_pattern_array(object, "all")?,
+        none: parse_pattern_array(object, "none")?,
+        short_flags_any: parse_short_flags(object, "short_flags_any")?,
+        short_flags_all: parse_short_flags(object, "short_flags_all")?,
+        any_of,
+    };
+    let has_predicate = !matcher.prefix.is_empty()
+        || !matcher.ordered.is_empty()
+        || !matcher.contiguous.is_empty()
+        || !matcher.any.is_empty()
+        || !matcher.all.is_empty()
+        || !matcher.none.is_empty()
+        || !matcher.short_flags_any.is_empty()
+        || !matcher.short_flags_all.is_empty()
+        || !matcher.any_of.is_empty();
+    if !has_predicate {
+        return Err("arguments must contain at least one non-empty predicate".to_string());
+    }
+    Ok(matcher)
+}
+
+fn parse_wrappers(value: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| "through_wrappers must be an array".to_string())?;
+    let wrappers = array
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(|value| value.to_ascii_lowercase())
+                .ok_or_else(|| "through_wrappers entries must be strings".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for wrapper in &wrappers {
+        if !["sudo", "env", "command", "exec"].contains(&wrapper.as_str()) {
+            return Err(format!(
+                "unsupported through_wrappers entry {wrapper:?}; expected sudo, env, command, or exec"
+            ));
+        }
+    }
+    Ok(wrappers)
+}
+
+fn parse_command_matcher(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<CommandMatcher, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be a JSON object"))?;
+    let pattern = object
+        .get("match")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{context} missing required string field \"match\""))?
+        .to_string();
+    let match_mode = parse_match_mode(object.get("match_mode"), context)?;
+    compile_match_pattern(&pattern, match_mode)
+        .map_err(|err| format!("{context} has invalid pattern {pattern:?}: {err}"))?;
+    Ok(CommandMatcher {
+        pattern,
+        match_mode,
+        through_wrappers: parse_wrappers(object.get("through_wrappers"))?,
+        arguments: object
+            .get("arguments")
+            .map(|value| parse_argument_matcher(value, 0))
+            .transpose()?,
+    })
+}
+
+fn parse_bad_pipeline_rule(value: &serde_json::Value) -> Result<BadPipelineRule, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "bad_pipelines entry is not a JSON object".to_string())?;
+    let stages = object
+        .get("stages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "bad_pipelines entry missing required array field \"stages\"".to_string())?
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| parse_command_matcher(stage, &format!("bad_pipelines stage {index}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    if stages.len() < 2 {
+        return Err("bad_pipelines entry must contain at least two stages".to_string());
+    }
+    let replacement = object
+        .get("replacement")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "bad_pipelines entry missing required string field \"replacement\"".to_string()
+        })?
+        .to_string();
+    Ok(BadPipelineRule {
+        id: object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        stages,
+        replacement,
+        reason: object
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        allow_override: object
+            .get("allow_override")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -233,6 +521,23 @@ where
             Ok(rule) => rules.push(rule),
             Err(err) => {
                 eprintln!("clud: skipping malformed bad_commands rule: {err}; ignoring");
+            }
+        }
+    }
+    Ok(rules)
+}
+
+fn deserialize_bad_pipelines<'de, D>(deserializer: D) -> Result<Vec<BadPipelineRule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    let mut rules = Vec::with_capacity(raw.len());
+    for entry in raw {
+        match parse_bad_pipeline_rule(&entry) {
+            Ok(rule) => rules.push(rule),
+            Err(err) => {
+                eprintln!("clud: skipping malformed bad_pipelines rule: {err}; ignoring");
             }
         }
     }
@@ -260,6 +565,22 @@ fn concat_dedupe_bad_commands(
     result
 }
 
+fn concat_dedupe_bad_pipelines(
+    upper: Vec<BadPipelineRule>,
+    lower: Vec<BadPipelineRule>,
+) -> Vec<BadPipelineRule> {
+    let upper_ids: HashSet<&str> = upper.iter().filter_map(|r| r.id.as_deref()).collect();
+    let mut result: Vec<BadPipelineRule> = lower
+        .into_iter()
+        .filter(|r| match &r.id {
+            Some(id) => !upper_ids.contains(id.as_str()),
+            None => true,
+        })
+        .collect();
+    result.extend(upper);
+    result
+}
+
 // ---------------------------------------------------------------------
 // Resolved types — what the rest of the binary actually consumes.
 // ---------------------------------------------------------------------
@@ -268,6 +589,7 @@ fn concat_dedupe_bad_commands(
 pub struct RepoCludConfig {
     pub rust: RustConfig,
     pub bad_commands: Vec<BadCommandRule>,
+    pub bad_pipelines: Vec<BadPipelineRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +669,7 @@ fn has_directive(raw: &RawRepoCludConfig) -> bool {
         || raw.optimize.rust.install_soldr.is_some()
         || raw.optimize.rust.soldr_version.is_some()
         || !raw.bad_commands.is_empty()
+        || !raw.bad_pipelines.is_empty()
 }
 
 // ---------------------------------------------------------------------
@@ -453,6 +776,8 @@ pub fn parse_repo_clud_config(text: &str) -> Result<RepoCludConfig, String> {
 pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludConfig {
     let upper_bad_commands = upper.bad_commands.clone();
     let lower_bad_commands = lower.bad_commands.clone();
+    let upper_bad_pipelines = upper.bad_pipelines.clone();
+    let lower_bad_pipelines = lower.bad_pipelines.clone();
     let upper_rust = normalize_raw_rust(upper);
     let lower_rust = normalize_raw_rust(lower);
     RawRepoCludConfig {
@@ -463,6 +788,7 @@ pub fn merge(upper: RawRepoCludConfig, lower: RawRepoCludConfig) -> RawRepoCludC
         },
         optimize: RawOptimizeConfig::default(),
         bad_commands: concat_dedupe_bad_commands(upper_bad_commands, lower_bad_commands),
+        bad_pipelines: concat_dedupe_bad_pipelines(upper_bad_pipelines, lower_bad_pipelines),
     }
 }
 
@@ -471,6 +797,7 @@ fn normalize_raw_rust(raw: RawRepoCludConfig) -> RawRustConfig {
         rust,
         optimize,
         bad_commands: _,
+        bad_pipelines: _,
     } = raw;
     RawRustConfig {
         use_soldr: rust.use_soldr.or(optimize.rust.use_soldr_shims),
@@ -493,6 +820,7 @@ pub fn resolve(raw: RawRepoCludConfig) -> RepoCludConfig {
             version,
         },
         bad_commands: raw.bad_commands,
+        bad_pipelines: raw.bad_pipelines,
     }
 }
 
@@ -785,6 +1113,114 @@ mod tests {
         assert!(rule.passthrough_prefixes.is_empty());
         assert!(!rule.allow_override);
         assert_eq!(rule.reason, "");
+    }
+
+    #[test]
+    fn bad_command_argument_matchers_parse_with_per_pattern_modes() {
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_commands":[{"match":"kubectl","replacement":"dry run first","arguments":{"ordered":["delete","namespace"],"any":["production",{"match":"^prod-[a-z]+$","match_mode":"regex"}],"none":["--dry-run=server"],"short_flags_all":["f","d"],"any_of":[{"contiguous":["-n","auto"]}]}}]}"#,
+        )
+        .expect("parses");
+        let arguments = cfg.bad_commands[0]
+            .arguments
+            .as_ref()
+            .expect("arguments parsed");
+        assert_eq!(arguments.ordered.len(), 2);
+        assert_eq!(arguments.any.len(), 2);
+        assert_eq!(arguments.any[0].match_mode, MatchMode::Glob);
+        assert_eq!(arguments.any[1].match_mode, MatchMode::Regex);
+        assert_eq!(arguments.none.len(), 1);
+        assert_eq!(arguments.short_flags_all, vec!['f', 'd']);
+        assert_eq!(arguments.any_of.len(), 1);
+    }
+
+    #[test]
+    fn malformed_nested_argument_pattern_skips_only_that_rule() {
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_commands":[{"match":"git","replacement":"safe","arguments":{"any":[{"match":"(","match_mode":"regex"}]}},{"match":"rm","replacement":"safe"}]}"#,
+        )
+        .expect("top-level config parses");
+        assert_eq!(cfg.bad_commands.len(), 1);
+        assert_eq!(cfg.bad_commands[0].pattern, "rm");
+    }
+
+    #[test]
+    fn bad_pipeline_rules_parse_and_default_stage_patterns_to_glob() {
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_pipelines":[{"id":"no-download-to-shell","stages":[{"match":"curl"},{"match":"^(?:ba)?sh$","match_mode":"regex"}],"replacement":"download then inspect","reason":"hidden code"}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(cfg.bad_pipelines.len(), 1);
+        let rule = &cfg.bad_pipelines[0];
+        assert_eq!(rule.stages.len(), 2);
+        assert_eq!(rule.stages[0].match_mode, MatchMode::Glob);
+        assert_eq!(rule.stages[1].match_mode, MatchMode::Regex);
+    }
+
+    #[test]
+    fn malformed_pipeline_rule_is_skipped_without_losing_valid_rules() {
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_pipelines":[{"stages":[{"match":"curl"}],"replacement":"invalid"},{"stages":[{"match":"curl"},{"match":"sh"}],"replacement":"inspect"}]}"#,
+        )
+        .expect("top-level config parses");
+        assert_eq!(cfg.bad_pipelines.len(), 1);
+        assert_eq!(cfg.bad_pipelines[0].stages.len(), 2);
+    }
+
+    #[test]
+    fn bad_pipelines_merge_and_dedupe_by_id_like_bad_commands() {
+        let user = parse_raw_repo_clud_config(
+            r#"{"bad_pipelines":[{"id":"shared","stages":[{"match":"wget"},{"match":"sh"}],"replacement":"user"},{"id":"user-only","stages":[{"match":"cat"},{"match":"sh"}],"replacement":"user"}]}"#,
+        )
+        .unwrap();
+        let repo = parse_raw_repo_clud_config(
+            r#"{"bad_pipelines":[{"id":"shared","stages":[{"match":"curl"},{"match":"sh"}],"replacement":"repo"}]}"#,
+        )
+        .unwrap();
+        let merged = resolve(merge(repo, user));
+        assert_eq!(merged.bad_pipelines.len(), 2);
+        let shared = merged
+            .bad_pipelines
+            .iter()
+            .find(|rule| rule.id.as_deref() == Some("shared"))
+            .unwrap();
+        assert_eq!(shared.replacement, "repo");
+    }
+
+    #[test]
+    fn bad_pipelines_alone_count_as_an_activation_directive() {
+        let raw = parse_raw_repo_clud_config(
+            r#"{"bad_pipelines":[{"stages":[{"match":"curl"},{"match":"sh"}],"replacement":"inspect"}]}"#,
+        )
+        .unwrap();
+        assert!(has_directive(&raw));
+    }
+
+    #[test]
+    fn unsupported_wrapper_skips_only_the_malformed_rule() {
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_commands":[{"match":"rm","through_wrappers":["mystery"],"replacement":"bad"},{"match":"git","replacement":"good"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.bad_commands.len(), 1);
+        assert_eq!(cfg.bad_commands[0].pattern, "git");
+    }
+
+    #[test]
+    fn typoed_or_empty_argument_matcher_skips_the_containing_rule() {
+        for arguments in [
+            r#"{"ayn":["--force"]}"#,
+            r#"{}"#,
+            r#"{"any_of":[{}]}"#,
+            r#"{"any":[]}"#,
+        ] {
+            let json = format!(
+                r#"{{"bad_commands":[{{"match":"git","arguments":{arguments},"replacement":"bad"}},{{"match":"rm","replacement":"good"}}]}}"#
+            );
+            let cfg = parse_repo_clud_config(&json).unwrap();
+            assert_eq!(cfg.bad_commands.len(), 1, "{arguments}");
+            assert_eq!(cfg.bad_commands[0].pattern, "rm", "{arguments}");
+        }
     }
 
     #[test]

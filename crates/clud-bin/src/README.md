@@ -127,6 +127,9 @@ Process management and GC:
   — shell-segment scanning, nested-shell/`eval`/command-substitution
   recursion, `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE`
   escape hatch.
+  DD-017 extends these rules with structured argument predicates, known-wrapper
+  unwrapping, and a sibling `bad_pipelines` array. Both rule arrays concatenate
+  across repo/user settings and dedupe by `id`.
 
 Platform glue:
 

@@ -475,6 +475,7 @@ mod tests {
         RepoCludConfig {
             rust: r,
             bad_commands: Vec::new(),
+            bad_pipelines: Vec::new(),
         }
     }
 
