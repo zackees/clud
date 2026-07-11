@@ -211,6 +211,16 @@ pub fn install_ctrl_c_flag(verbose: bool) -> Arc<AtomicBool> {
 /// actual signal-handler context, so no `unsafe`/async-signal-safety
 /// reasoning is needed here (unlike the Windows probe above, which must
 /// run inside the OS console-handler thread).
+///
+/// Behavior change to be aware of: once this is installed, clud no
+/// longer *dies* on `SIGTERM`/`SIGHUP`/`SIGQUIT` — it sets `interrupted`,
+/// same as Ctrl+C, which is only honored by code paths that poll it. A
+/// path that never checks `interrupted` will now ignore these signals
+/// entirely rather than being killed by them, until whatever sent the
+/// signal escalates (e.g. `docker stop`'s SIGKILL after its grace
+/// window). This is the intended trade — "observe and decide" instead of
+/// "die immediately" — but is worth knowing before assuming a hung
+/// process will always respond to a bare SIGTERM.
 #[cfg(unix)]
 fn install_unix_termination_probe(interrupted: &Arc<AtomicBool>) {
     use signal_hook::consts::signal::{SIGHUP, SIGQUIT, SIGTERM};

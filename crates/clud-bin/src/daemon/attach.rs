@@ -41,7 +41,7 @@ const INTERRUPT_EXIT_GRACE: Duration = Duration::from_millis(500);
 /// out changing the background-prompt/skip-prompt *decision* logic based
 /// on the reason — that's a follow-up once the reason has been observed
 /// in practice.
-fn log_observed_interrupt_reason(site: &str) {
+pub(super) fn log_observed_interrupt_reason(site: &str) {
     match crate::ctrl_c_track::observed_event_kind() {
         Some(kind) => {
             crate::verbose_log::log(format!("[clud] interrupt reason ({site}): {kind:?}"))
