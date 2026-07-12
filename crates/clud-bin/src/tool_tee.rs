@@ -112,6 +112,21 @@ impl TeeWriter {
         Ok(n)
     }
 
+    /// Emit logical lines captured by `running-process`. Its capture API
+    /// removes line terminators, so restore them before writing to the caller
+    /// and JSONL logs. Without this, downstream line readers buffer until the
+    /// tool exits even though clud drains output throughout the run.
+    pub fn emit_captured_batch(&mut self, events: &[StreamEvent]) -> io::Result<usize> {
+        let mut n = 0;
+        for event in events {
+            let mut terminated = event.clone();
+            terminated.line.push(b'\n');
+            self.emit(&terminated)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// Flush all three JSONL files. Called at the very end of the tool
     /// invocation so the on-disk log is intact even if the parent dies
     /// immediately afterward.
@@ -239,6 +254,38 @@ mod tests {
         assert_eq!(stdout.len(), 2);
         let stderr = read_lines(&log_dir.join("stderr.jsonl"));
         assert_eq!(stderr.len(), 1);
+    }
+
+    #[test]
+    fn emit_captured_batch_restores_stdout_and_stderr_delimiters() {
+        let tmp = TempDir::new().unwrap();
+        let log_dir = tmp.path();
+        let mut w = TeeWriter::open(log_dir).unwrap();
+        let events = vec![
+            StreamEvent {
+                stream: StreamKind::Stdout,
+                line: b"first".to_vec(),
+            },
+            StreamEvent {
+                stream: StreamKind::Stderr,
+                line: b"second".to_vec(),
+            },
+        ];
+
+        assert_eq!(w.emit_captured_batch(&events).unwrap(), 2);
+        w.flush().unwrap();
+
+        let combined = read_lines(&log_dir.join("combined.jsonl"));
+        let first = STANDARD_NO_PAD
+            .decode(combined[0]["bytes"].as_str().unwrap())
+            .unwrap();
+        let second = STANDARD_NO_PAD
+            .decode(combined[1]["bytes"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(first, b"first\n");
+        assert_eq!(second, b"second\n");
+        assert_eq!(combined[0]["stream"], "stdout");
+        assert_eq!(combined[1]["stream"], "stderr");
     }
 
     #[test]
