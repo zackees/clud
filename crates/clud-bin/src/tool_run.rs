@@ -146,25 +146,22 @@ fn run_passthrough(
     });
     process.start().map_err(io::Error::other)?;
     let mut watchdog = Watchdog::for_rel_path(rel_path);
-    let mut emitted_stdout = 0usize;
-    let mut emitted_stderr = 0usize;
+    let mut emitted = 0usize;
     let mut last_drain_count = 0usize;
     let exit_code = loop {
         match process.wait(Some(DRAIN_POLL_INTERVAL)) {
             Ok(code) => break code,
             Err(ProcessError::Timeout) => {
-                (emitted_stdout, emitted_stderr) =
-                    drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
-                let drain_count = emitted_stdout + emitted_stderr;
-                if drain_count > last_drain_count {
+                emitted = drain_passthrough_output(&process, emitted);
+                if emitted > last_drain_count {
                     watchdog.note_output();
-                    last_drain_count = drain_count;
+                    last_drain_count = emitted;
                 }
                 match watchdog.check() {
                     WatchdogDecision::Continue => continue,
                     WatchdogDecision::KillAndAbort(reason) => {
                         let _ = process.kill();
-                        let _ = drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
+                        let _ = drain_passthrough_output(&process, emitted);
                         let stderr_tail = stderr_tail_200(&process.captured_stderr().concat());
                         let _ = emit_passthrough_abort_diagnostic(
                             rel_path,
@@ -178,7 +175,7 @@ fn run_passthrough(
                         return Ok(124);
                     }
                     WatchdogDecision::ResumeLater(reason) => {
-                        let _ = drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
+                        let _ = drain_passthrough_output(&process, emitted);
                         let mut err = io::stderr().lock();
                         let _ = writeln!(err, "{}", watchdog.render_in_progress(reason));
                         let _ = err.flush();
@@ -189,7 +186,7 @@ fn run_passthrough(
             Err(other) => return Err(io::Error::other(other)),
         }
     };
-    let _ = drain_passthrough_output(&process, emitted_stdout, emitted_stderr);
+    let _ = drain_passthrough_output(&process, emitted);
     telemetry.finish(
         exit_code,
         stderr_tail_200(&process.captured_stderr().concat()),
@@ -418,30 +415,46 @@ fn run_with_session(
     Ok(exit_code)
 }
 
-fn drain_passthrough_output(
+fn drain_passthrough_output(process: &NativeProcess, emitted: usize) -> usize {
+    let combined = process.captured_combined();
+    for event in combined.iter().skip(emitted) {
+        match event.stream {
+            running_process::StreamKind::Stdout => {
+                let _ = write_captured_line(&mut io::stdout().lock(), &event.line);
+            }
+            running_process::StreamKind::Stderr => {
+                let _ = write_captured_line(&mut io::stderr().lock(), &event.line);
+            }
+        }
+    }
+    combined.len()
+}
+
+#[cfg(test)]
+fn drain_passthrough_output_to(
     process: &NativeProcess,
-    emitted_stdout: usize,
-    emitted_stderr: usize,
-) -> (usize, usize) {
-    let stdout = process.captured_stdout();
-    if stdout.len() > emitted_stdout {
-        let mut out = io::stdout().lock();
-        for chunk in &stdout[emitted_stdout..] {
-            let _ = out.write_all(chunk);
-        }
-        let _ = out.flush();
+    emitted: usize,
+    stdout_writer: &mut impl Write,
+    stderr_writer: &mut impl Write,
+) -> usize {
+    let combined = process.captured_combined();
+    for event in combined.iter().skip(emitted) {
+        let writer: &mut dyn Write = match event.stream {
+            running_process::StreamKind::Stdout => stdout_writer,
+            running_process::StreamKind::Stderr => stderr_writer,
+        };
+        let _ = write_captured_line(writer, &event.line);
     }
+    combined.len()
+}
 
-    let stderr = process.captured_stderr();
-    if stderr.len() > emitted_stderr {
-        let mut err = io::stderr().lock();
-        for chunk in &stderr[emitted_stderr..] {
-            let _ = err.write_all(chunk);
-        }
-        let _ = err.flush();
-    }
-
-    (stdout.len(), stderr.len())
+/// `running-process` exposes captured output as logical lines with the line
+/// terminator removed. Restore that delimiter before forwarding so callers
+/// reading a pipe receive each line immediately instead of waiting for EOF.
+fn write_captured_line(writer: &mut dyn Write, line: &[u8]) -> io::Result<()> {
+    writer.write_all(line)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 /// Drain captured combined output from `emitted..` and route it through
@@ -451,7 +464,7 @@ fn drain_passthrough_output(
 fn drain_into_tee(process: &NativeProcess, tee: &mut TeeWriter, emitted: usize) -> usize {
     let combined = process.captured_combined();
     if combined.len() > emitted {
-        let _ = tee.emit_batch(&combined[emitted..]);
+        let _ = tee.emit_captured_batch(&combined[emitted..]);
     }
     combined.len()
 }
@@ -1070,6 +1083,84 @@ mod tests {
     use std::fs::File;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn captured_line_restores_delimiter_for_incremental_readers() {
+        let mut output = Vec::new();
+        write_captured_line(&mut output, b"first").unwrap();
+        assert_eq!(output, b"first\n");
+    }
+
+    #[test]
+    fn captured_subprocess_output_is_forwardable_before_exit() {
+        let executable = std::env::current_exe().unwrap();
+        let mut env = std::env::vars().collect::<Vec<_>>();
+        env.push(("CLUD_STREAMING_FIXTURE_CHILD".to_string(), "1".to_string()));
+        let process = NativeProcess::new(ProcessConfig {
+            command: CommandSpec::Argv(vec![
+                executable.to_string_lossy().into_owned(),
+                "--ignored".to_string(),
+                "--exact".to_string(),
+                "tool_run::tests::incremental_output_fixture_child".to_string(),
+                "--nocapture".to_string(),
+            ]),
+            cwd: None,
+            env: Some(env),
+            capture: true,
+            stderr_mode: StderrMode::Pipe,
+            creationflags: None,
+            create_process_group: false,
+            stdin_mode: StdinMode::Null,
+            nice: None,
+        });
+        process.start().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut emitted = 0;
+        let mut first_before_exit = false;
+        while std::time::Instant::now() < deadline {
+            match process.wait(Some(Duration::from_millis(50))) {
+                Err(ProcessError::Timeout) => {
+                    emitted =
+                        drain_passthrough_output_to(&process, emitted, &mut stdout, &mut stderr);
+                    if stdout.windows(b"first\n".len()).any(|w| w == b"first\n") {
+                        first_before_exit = true;
+                        break;
+                    }
+                }
+                Ok(code) => panic!("fixture exited with {code} before first was observed"),
+                Err(error) => panic!("fixture wait failed: {error}"),
+            }
+        }
+        assert!(
+            first_before_exit,
+            "first line was not forwardable before exit"
+        );
+
+        assert_eq!(process.wait(None).unwrap(), 7);
+        let _ = drain_passthrough_output_to(&process, emitted, &mut stdout, &mut stderr);
+        assert!(
+            stderr.windows(b"second\n".len()).any(|w| w == b"second\n"),
+            "stderr line missing from captured output: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture invoked by captured_subprocess_output_is_forwardable_before_exit"]
+    fn incremental_output_fixture_child() {
+        if std::env::var_os("CLUD_STREAMING_FIXTURE_CHILD").is_none() {
+            return;
+        }
+        println!("first");
+        io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_secs(1));
+        eprintln!("second");
+        io::stderr().flush().unwrap();
+        std::process::exit(7);
+    }
 
     /// Regression: ensure the resolved tool path is exactly
     /// `<tools_root>/<rel_path>`. A prior version called
