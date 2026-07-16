@@ -110,6 +110,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "clud-docker-linux-build",
         skill_md: include_str!("../assets/skills/clud-docker-linux-build/SKILL.md"),
     },
+    BundledSkill {
+        name: "clud-docker-recover",
+        skill_md: include_str!("../assets/skills/clud-docker-recover/SKILL.md"),
+    },
 ];
 
 /// One CLI backend that consumes `SKILL.md` files. Adding support for a
@@ -505,6 +509,7 @@ mod tests {
         assert!(names.contains(&"clud-extern-repos"));
         assert!(names.contains(&"clud-improve"));
         assert!(names.contains(&"clud-docker-mac-x86"));
+        assert!(names.contains(&"clud-docker-recover"));
     }
 
     #[test]

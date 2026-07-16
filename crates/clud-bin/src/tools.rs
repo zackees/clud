@@ -227,6 +227,14 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         quiet_ok: false,
     },
     BundledTool {
+        rel_path: "docker/docker_recover.py",
+        body: include_str!("../assets/tools/docker/docker_recover.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(60 * 3),
+        progress_timeout: Some(Duration::from_secs(30)),
+        quiet_ok: false,
+    },
+    BundledTool {
         rel_path: "python/lint_deadcode.py",
         body: include_str!("../assets/tools/python/lint_deadcode.py"),
         // Vulture scans the source tree and exits with the report.
@@ -455,6 +463,29 @@ mod tests {
             assert!(
                 names.contains(&required),
                 "BUNDLED_TOOLS must include {required}; got {names:?}",
+            );
+        }
+    }
+
+    /// Issue #531: recovery must be available before a Linux build attempts
+    /// to use an unavailable Desktop engine. Keep its storage safety contract
+    /// visible at the embedded-asset boundary.
+    #[test]
+    fn bundled_includes_docker_recover() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_recover.py")
+            .expect("docker recovery tool must be bundled");
+        for required_marker in [
+            "CustomWslDistroDir",
+            "docker_recover.py doctor",
+            "--yes",
+            "NEVER compacts",
+            "mutate Docker storage",
+        ] {
+            assert!(
+                tool.body.contains(required_marker),
+                "docker_recover.py must contain `{required_marker}`"
             );
         }
     }
