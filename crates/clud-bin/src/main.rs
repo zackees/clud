@@ -2,8 +2,8 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
     cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
     launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
-    runner, runtime_cache, soldr_activate, startup, symbols, tool_cli, tool_install, tools,
-    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, tool_cli, tool_install,
+    tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -158,6 +158,12 @@ fn main() {
     // launches a backend.
     if let Some(args::Command::Symbols { subcommand }) = &args.command {
         std::process::exit(symbols::run(&args, subcommand.clone()));
+    }
+
+    // `clud settings` is an interactive global-settings TUI, self-contained;
+    // never launches a backend.
+    if let Some(args::Command::Settings { list }) = &args.command {
+        std::process::exit(settings_tui::run(*list));
     }
 
     // `clud optimize` is machine/repo setup and never launches a backend.

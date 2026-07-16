@@ -326,10 +326,7 @@ mod tests {
         assert_eq!(report.stale_commands_blocked, 0);
         let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
         let codex = fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
-        assert!(
-            claude.contains(r#""command": "clud-cmd-scan""#),
-            "{claude}"
-        );
+        assert!(claude.contains(r#""command": "clud-cmd-scan""#), "{claude}");
         assert!(
             codex.contains(r#""command": "clud-cmd-scan; exit $LASTEXITCODE""#),
             "{codex}"
@@ -364,10 +361,7 @@ mod tests {
 
         let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
         let codex = fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
-        assert!(
-            claude.contains(r#""command": "clud-cmd-scan""#),
-            "{claude}"
-        );
+        assert!(claude.contains(r#""command": "clud-cmd-scan""#), "{claude}");
         assert!(
             codex.contains(r#""command": "clud-cmd-scan; exit $LASTEXITCODE""#),
             "{codex}"

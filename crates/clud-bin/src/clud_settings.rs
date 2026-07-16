@@ -21,6 +21,8 @@ const CODEX_CONFIG_OVERRIDES_NOTE: &str =
     "clud passes these strings as repeated `codex -c` config overrides before the Codex subcommand. Edit config_overrides to change plugin/connector behavior.";
 const SHELL_DISABLE_POWERSHELL_NOTE: &str =
     "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
+const GIT_PR_WAIT_FAIL_FAST_NOTE: &str =
+    "When true, cmd-scan denies raw `gh pr checks --watch` / `gh run watch` and hand-rolled PR-status polling loops, pointing the agent at the bundled fail-fast waiter (`clud tool run github/pr_merge_watch.py <PR>`) instead. Off by default; toggle with `clud settings`.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustOptimizeSettings {
@@ -99,6 +101,11 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
         hook_health
             .entry("auto_fix_hooks".to_string())
             .or_insert(Value::Bool(true));
+    }
+
+    if let Some(git) = seed_object_entry(document, "git") {
+        git.entry("pr_wait_fail_fast".to_string())
+            .or_insert(Value::Bool(false));
     }
 
     if let Some(daemon) = seed_object_entry(document, "daemon") {
@@ -257,6 +264,38 @@ pub fn save_auto_fix_hooks_enabled_at(home: &Path, enabled: bool) -> Result<(), 
     with_settings_document(home, |document| {
         object_entry(document, "hook_health")
             .insert("auto_fix_hooks".to_string(), Value::Bool(enabled));
+    })
+}
+
+/// PR-wait fail-fast git command improvements (`clud settings` toggle).
+/// Off by default — see `GIT_PR_WAIT_FAIL_FAST_NOTE`.
+pub fn load_pr_wait_fail_fast_enabled() -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_pr_wait_fail_fast_enabled_at(&home)
+}
+
+pub fn load_pr_wait_fail_fast_enabled_at(home: &Path) -> Result<bool, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("git")
+        .and_then(|item| item.get("pr_wait_fail_fast"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+pub fn save_pr_wait_fail_fast_enabled(enabled: bool) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_pr_wait_fail_fast_enabled_at(&home, enabled)
+}
+
+pub fn save_pr_wait_fail_fast_enabled_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let git = object_entry(document, "git");
+        git.entry("pr_wait_fail_fast_note".to_string())
+            .or_insert_with(|| Value::String(GIT_PR_WAIT_FAIL_FAST_NOTE.to_string()));
+        git.insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
     })
 }
 
@@ -855,6 +894,51 @@ mod tests {
     }
 
     #[test]
+    fn missing_settings_file_defaults_pr_wait_fail_fast_disabled() {
+        let home = tempdir().unwrap();
+        assert!(!load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
+    }
+
+    #[test]
+    fn saves_pr_wait_fail_fast_sticky_opt_in_and_reset() {
+        let home = tempdir().unwrap();
+
+        save_pr_wait_fail_fast_enabled_at(home.path(), true).unwrap();
+        assert!(load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
+
+        save_pr_wait_fail_fast_enabled_at(home.path(), false).unwrap();
+        assert!(!load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
+
+        let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["git"]["pr_wait_fail_fast"], false);
+        assert!(json["git"]["pr_wait_fail_fast_note"]
+            .as_str()
+            .unwrap()
+            .contains("gh pr checks --watch"));
+    }
+
+    #[test]
+    fn pr_wait_fail_fast_setting_preserves_existing_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"unrelated":{"value":"kept"},"launch_setup":{"codex":{"scope":"global"}}}"#,
+        )
+        .unwrap();
+
+        save_pr_wait_fail_fast_enabled_at(home.path(), true).unwrap();
+
+        let text = fs::read_to_string(path).unwrap();
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["unrelated"]["value"], "kept");
+        assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+        assert_eq!(json["git"]["pr_wait_fail_fast"], true);
+    }
+
+    #[test]
     fn missing_codex_overrides_default_without_writing_on_dry_run() {
         let home = tempdir().unwrap();
 
@@ -985,6 +1069,7 @@ mod tests {
 
         assert_eq!(document["shell"]["disable_powershell"], false);
         assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
+        assert_eq!(document["git"]["pr_wait_fail_fast"], false);
         assert_eq!(document["daemon"]["proc_sampler"]["interval_ms"], 2_000);
         assert_eq!(
             document["codex"]["config_overrides"][0],
@@ -996,6 +1081,7 @@ mod tests {
         let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
         assert!(text.contains("\"shell\""));
         assert!(text.contains("\"hook_health\""));
+        assert!(text.contains("\"git\""));
         assert!(text.contains("\"daemon\""));
         assert!(text.contains("\"codex\""));
     }

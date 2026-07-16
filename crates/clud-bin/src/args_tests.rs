@@ -416,6 +416,24 @@ fn test_optimize_rust_repo_flags() {
 }
 
 #[test]
+fn test_settings_defaults_to_interactive() {
+    let args = parse(&["clud", "settings"]);
+    match args.command {
+        Some(Command::Settings { list }) => assert!(!list),
+        other => panic!("expected Settings subcommand, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_settings_list_flag() {
+    let args = parse(&["clud", "settings", "--list"]);
+    match args.command {
+        Some(Command::Settings { list }) => assert!(list),
+        other => panic!("expected Settings subcommand, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_optimize_soldr_alias_selects_rust() {
     let args = parse(&["clud", "optimize", "soldr"]);
     match args.command {

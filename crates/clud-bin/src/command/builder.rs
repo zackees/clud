@@ -172,6 +172,7 @@ pub(crate) fn build_launch_plan_at(
         | Some(Command::Tool { .. })
         | Some(Command::Optimize { .. })
         | Some(Command::Symbols { .. })
+        | Some(Command::Settings { .. })
         | Some(Command::Daemon { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}

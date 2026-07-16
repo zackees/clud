@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- New `clud settings` interactive TUI: a small, cross-platform checkbox menu
+  over global booleans in `~/.clud/settings.json` (space toggles, q quits
+  and prompts to save if anything changed). `clud settings --list` prints
+  current values non-interactively. First setting: `git.pr_wait_fail_fast`
+  (off by default) gates the PR-wait fail-fast git command improvements —
+  previously always-on — behind an explicit opt-in.
+
 ## 2.4.0 - 2026-07-10
 
 - Daemon GC now reclaims two disk sinks its redb registry never tracked: the
