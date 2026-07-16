@@ -221,7 +221,11 @@ pub fn run() -> i32 {
     } else {
         None
     };
-    let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+    // Best-effort: a missing/unreadable global settings file must never
+    // block the hook itself — fall back to the documented off default.
+    let pr_wait_fail_fast_enabled =
+        crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false);
+    let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         &payload.command,
         Some(&payload.cwd),
         allow_hybrid_uv_run,
@@ -229,6 +233,7 @@ pub fn run() -> i32 {
         &config.bad_pipelines,
         shell_dialect_for_tool(&payload.tool_name),
         repo_root.as_deref(),
+        pr_wait_fail_fast_enabled,
     );
     for message in &evaluation.log_messages {
         append_log(message);
@@ -432,7 +437,6 @@ fn evaluate_command_with_policy_and_dialect(
 /// the `.extern-repos/` clone guard (zackees/clud#532). Callers that
 /// don't need the guard (or want it disabled, e.g. because `cwd` isn't
 /// known to be inside a repo) pass `None`.
-#[allow(clippy::too_many_arguments)]
 fn evaluate_command_with_policy_dialect_and_repo_root(
     command_text: &str,
     cwd: Option<&Path>,
@@ -442,12 +446,44 @@ fn evaluate_command_with_policy_dialect_and_repo_root(
     dialect: ShellDialect,
     repo_root: Option<&Path>,
 ) -> CommandEvaluation {
+    // `true` here (not the `clud settings` default of `false`) preserves
+    // this wrapper's historical behavior for existing callers/tests that
+    // predate the pr_wait_fail_fast toggle — only `run()` passes the real
+    // settings-derived value, via the fuller function below.
+    evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+        command_text,
+        cwd,
+        allow_hybrid_uv_run,
+        bad_commands,
+        bad_pipelines,
+        dialect,
+        repo_root,
+        true,
+    )
+}
+
+/// Same as [`evaluate_command_with_policy_dialect_and_repo_root`], plus
+/// `pr_wait_fail_fast_enabled` — gates `blocking_pr_wait_reason` behind the
+/// `clud settings` toggle (default off; see `clud_settings::
+/// GIT_PR_WAIT_FAIL_FAST_NOTE`) rather than it firing unconditionally.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+    command_text: &str,
+    cwd: Option<&Path>,
+    allow_hybrid_uv_run: bool,
+    bad_commands: &[BadCommandRule],
+    bad_pipelines: &[BadPipelineRule],
+    dialect: ShellDialect,
+    repo_root: Option<&Path>,
+    pr_wait_fail_fast_enabled: bool,
+) -> CommandEvaluation {
     let context = EvaluationContext {
         cwd,
         allow_hybrid_uv_run,
         bad_commands,
         bad_pipelines,
         repo_root,
+        pr_wait_fail_fast_enabled,
     };
     let mut evaluation = CommandEvaluation::default();
     evaluate_command_into(command_text, &context, dialect, 0, &mut evaluation);
@@ -460,6 +496,7 @@ struct EvaluationContext<'a> {
     bad_commands: &'a [BadCommandRule],
     bad_pipelines: &'a [BadPipelineRule],
     repo_root: Option<&'a Path>,
+    pr_wait_fail_fast_enabled: bool,
 }
 
 fn evaluate_command_into(
@@ -507,9 +544,11 @@ fn evaluate_command_into(
         return;
     }
 
-    if let Some(reason) = blocking_pr_wait_reason(command_text, dialect) {
-        evaluation.reason = Some(reason);
-        return;
+    if context.pr_wait_fail_fast_enabled {
+        if let Some(reason) = blocking_pr_wait_reason(command_text, dialect) {
+            evaluation.reason = Some(reason);
+            return;
+        }
     }
 
     for segment in split_shell_segments(command_text, dialect) {
@@ -2461,6 +2500,48 @@ mod tests {
     }
 
     #[test]
+    fn pr_wait_fail_fast_gate_off_allows_raw_gh_watch() {
+        // `clud settings`' pr_wait_fail_fast toggle defaults to false; with
+        // the gate explicitly off, the raw watcher command that the
+        // always-on tests above deny must be allowed.
+        let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+            "gh pr checks 528 --watch",
+            None,
+            false,
+            &[],
+            &[],
+            ShellDialect::Posix,
+            None,
+            false,
+        );
+        assert!(
+            evaluation.reason.is_none(),
+            "gate off should allow the raw watch command"
+        );
+    }
+
+    #[test]
+    fn pr_wait_fail_fast_gate_on_denies_raw_gh_watch() {
+        // Regression pin for the explicit gate-on path (mirrors the
+        // always-on wrapper's default behavior exercised by
+        // blocks_native_github_pr_watchers above).
+        let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
+            "gh pr checks 528 --watch",
+            None,
+            false,
+            &[],
+            &[],
+            ShellDialect::Posix,
+            None,
+            true,
+        );
+        let reason = evaluation
+            .reason
+            .expect("gate on should deny the raw watch command");
+        assert!(reason.contains("pr_merge_watch.py"));
+    }
+
+    #[test]
     fn env_prefixed_rust_tools_are_denied() {
         assert!(denies(&format!("FOO=bar {TOOL_RS_BUILD} build")));
         assert!(denies(&format!("env FOO=bar {TOOL_RS_BUILD} build")));
@@ -3426,7 +3507,8 @@ mod tests {
             path: PathBuf::from("/repo/.extern-repos/foo"),
             origin_cwd: PathBuf::from("/repo/.extern-repos"),
         };
-        let input = git_path_capture_insert_input(&capture, Some(Path::new("/repo")), 1_700_000_000);
+        let input =
+            git_path_capture_insert_input(&capture, Some(Path::new("/repo")), 1_700_000_000);
         assert_eq!(input.kind, crate::gc::SIBLING_CLONE_KIND);
         assert_eq!(input.path, capture.path.to_string_lossy());
         assert_eq!(input.repo_root.as_deref(), Some("/repo"));
@@ -3493,7 +3575,10 @@ mod tests {
         assert_eq!(evaluation.git_path_captures.len(), 1);
         let capture = &evaluation.git_path_captures[0];
         assert_eq!(capture.path, cwd.join("bar"));
-        assert_eq!(gc_registry_kind(capture.kind), crate::gc::SIBLING_CLONE_KIND);
+        assert_eq!(
+            gc_registry_kind(capture.kind),
+            crate::gc::SIBLING_CLONE_KIND
+        );
     }
 
     #[test]
@@ -3573,9 +3658,8 @@ mod tests {
                 assert!(evaluation
                     .log_messages
                     .iter()
-                    .any(|m| m.contains("BAD_CMD_OVERRIDE") && m.contains(
-                        "git-clone-outside-extern-repos"
-                    )));
+                    .any(|m| m.contains("BAD_CMD_OVERRIDE")
+                        && m.contains("git-clone-outside-extern-repos")));
             },
         );
     }

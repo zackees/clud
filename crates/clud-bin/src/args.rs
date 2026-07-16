@@ -386,6 +386,17 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: Option<SymbolsSubcommand>,
     },
+    /// Interactively toggle global clud settings (zackees/clud).
+    ///
+    /// Drops into a small cross-platform TUI checkbox menu over
+    /// `~/.clud/settings.json` (created with defaults on first use, same as
+    /// every other `clud_settings` consumer). Space toggles, q quits and
+    /// prompts to save if anything changed.
+    Settings {
+        /// Print current settings and exit; no TUI, no raw terminal mode.
+        #[arg(long = "list")]
+        list: bool,
+    },
     #[command(name = "__daemon", hide = true)]
     InternalDaemon {
         #[arg(long = "state-dir")]
@@ -697,12 +708,14 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--version",
         // Issue #469: `clud log --fail-on-no-server` bool flag.
         "--fail-on-no-server",
+        // `clud settings --list` bool flag.
+        "--list",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
-        "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "__daemon",
-        "__worker",
+        "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "settings",
+        "__daemon", "__worker",
     ];
 
     let mut in_subcommand = false;

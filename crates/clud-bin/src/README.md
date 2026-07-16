@@ -121,17 +121,26 @@ Process management and GC:
   DD-016 for the full field reference and a copy-pasteable example.
   `bad_commands` concatenates across repo/user levels instead of
   overriding, unlike the scalar `rust.*` fields.
-- `block_bad_cmd.rs` - native `clud-block-bad-cmd` PreToolUse hook binary:
-  hardcoded Rust-toolchain enforcement (`RUST_TOOLS` → `soldr <tool>`),
-  blocking GitHub PR waiter enforcement (`gh ... --watch` / hand-written
-  polling loops → `clud tool run github/pr_merge_watch.py <PR>`), plus
-  the generic `bad_commands` rule engine from `repo_clud_config.rs` (DD-016)
-  — shell-segment scanning, nested-shell/`eval`/command-substitution
-  recursion, `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE`
-  escape hatch.
+- `block_bad_cmd.rs` - native `cmd-scan` PreToolUse hook binary (formerly
+  `block-bad-cmd`; `clud-block-bad-cmd` still ships as a compat binary, see
+  `block_bad_cmd_rollout.rs`): hardcoded Rust-toolchain enforcement
+  (`RUST_TOOLS` → `soldr <tool>`), GitHub PR waiter enforcement (`gh ...
+  --watch` / hand-written polling loops → `clud tool run
+  github/pr_merge_watch.py <PR>`) gated behind the `clud settings`
+  `git.pr_wait_fail_fast` toggle (off by default, see `settings_tui.rs`),
+  eager GC tracking of `git clone`/`git worktree add` destinations plus a
+  `.extern-repos/` clone guard (zackees/clud#532), and the generic
+  `bad_commands` rule engine from `repo_clud_config.rs` (DD-016) — shell-segment
+  scanning, nested-shell/`eval`/command-substitution recursion,
+  `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE` escape hatch.
   DD-017 extends these rules with structured argument predicates, known-wrapper
   unwrapping, and a sibling `bad_pipelines` array. Both rule arrays concatenate
   across repo/user settings and dedupe by `id`.
+- `settings_tui.rs` - `clud settings`: small cross-platform TUI checkbox menu
+  over global boolean settings in `~/.clud/settings.json` (`clud_settings.rs`
+  owns persistence). Pure `Menu` state machine + crossterm raw-mode I/O shell,
+  same split as `launch_setup.rs`'s `ScopeSelector`. `--list` prints current
+  values non-interactively.
 
 Platform glue:
 
@@ -225,6 +234,7 @@ Quick lookup, which file owns a given subcommand:
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.
+- `clud settings [--list]` -> `settings_tui.rs`.
 
 ## Cross-Cutting Subsystems
 
