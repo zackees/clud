@@ -195,6 +195,16 @@ path = "src/bin/clud_shim.rs"
 name = "clud-block-bad-cmd"
 path = "src/bin/clud_block_bad_cmd.rs"
 
+# zackees/clud#532: `cmd-scan` is the new canonical name for the
+# `block-bad-cmd` native hook now that it also does eager GC tracking
+# of `git clone`/`git worktree add`, not just command blocking.
+# `clud-block-bad-cmd` above ships unchanged for one release so already
+# -wired hook configs keep working; `block_bad_cmd_rollout.rs` migrates
+# them to this binary once it is resolvable on PATH.
+[[bin]]
+name = "clud-cmd-scan"
+path = "src/bin/clud_cmd_scan.rs"
+
 # Issue #517: test-only probe binary. Installs the real production
 # `startup::install_ctrl_c_flag` handler and reports which
 # `CtrlEventKind` fired, so `tests/ctrlc_signal_kinds.rs` and

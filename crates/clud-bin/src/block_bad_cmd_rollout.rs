@@ -1,20 +1,27 @@
-//! Rollout helpers for the native `clud-block-bad-cmd` hook binary.
+//! Rollout helpers for the native `cmd-scan` hook binary (formerly
+//! `block-bad-cmd`).
 //!
 //! #489/#490 moved the command-guard policy into a native helper, but older
 //! installs and hook configs can still route through
-//! `clud tool run hooks/block-bad-cmd.py`. This module owns the narrow
-//! first-run repair path: detect an installed clud missing the helper and
-//! rewrite only the exact old managed hook commands once the helper is
-//! resolvable on PATH.
+//! `clud tool run hooks/block-bad-cmd.py`. #532 renamed the native helper
+//! itself from `clud-block-bad-cmd` to `clud-cmd-scan` (it now also does
+//! eager GC tracking of `git clone`/`git worktree add`, not just command
+//! blocking), so there are now two legacy command shapes to migrate away
+//! from. This module owns the narrow first-run repair path: detect an
+//! installed clud missing the helper and rewrite only the exact old managed
+//! hook commands once the helper is resolvable on PATH.
 
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const OLD_COMMAND: &str = "clud tool run hooks/block-bad-cmd.py";
-const OLD_COMMAND_EXIT: &str = "clud tool run hooks/block-bad-cmd.py; exit $LASTEXITCODE";
-const NEW_COMMAND: &str = "clud-block-bad-cmd";
-const NEW_COMMAND_EXIT: &str = "clud-block-bad-cmd; exit $LASTEXITCODE";
+const LEGACY_PYTHON_SHIM_COMMAND: &str = "clud tool run hooks/block-bad-cmd.py";
+const LEGACY_PYTHON_SHIM_COMMAND_EXIT: &str =
+    "clud tool run hooks/block-bad-cmd.py; exit $LASTEXITCODE";
+const LEGACY_NATIVE_COMMAND: &str = "clud-block-bad-cmd";
+const LEGACY_NATIVE_COMMAND_EXIT: &str = "clud-block-bad-cmd; exit $LASTEXITCODE";
+const NEW_COMMAND: &str = "clud-cmd-scan";
+const NEW_COMMAND_EXIT: &str = "clud-cmd-scan; exit $LASTEXITCODE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallProbe {
@@ -109,7 +116,7 @@ pub fn native_helper_on_path() -> Option<PathBuf> {
 }
 
 pub fn native_helper_name() -> &'static str {
-    native_binary_name("clud-block-bad-cmd")
+    native_binary_name("clud-cmd-scan")
 }
 
 fn native_binary_name(name: &'static str) -> &'static str {
@@ -117,7 +124,7 @@ fn native_binary_name(name: &'static str) -> &'static str {
     {
         match name {
             "clud" => "clud.exe",
-            "clud-block-bad-cmd" => "clud-block-bad-cmd.exe",
+            "clud-cmd-scan" => "clud-cmd-scan.exe",
             "clud-shim" => "clud-shim.exe",
             _ => name,
         }
@@ -241,8 +248,8 @@ fn command_is_stale(command: &str) -> bool {
 
 fn replacement_command(command: &str) -> Option<&'static str> {
     match command {
-        OLD_COMMAND => Some(NEW_COMMAND),
-        OLD_COMMAND_EXIT => Some(NEW_COMMAND_EXIT),
+        LEGACY_PYTHON_SHIM_COMMAND | LEGACY_NATIVE_COMMAND => Some(NEW_COMMAND),
+        LEGACY_PYTHON_SHIM_COMMAND_EXIT | LEGACY_NATIVE_COMMAND_EXIT => Some(NEW_COMMAND_EXIT),
         _ => None,
     }
 }
@@ -320,16 +327,72 @@ mod tests {
         let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
         let codex = fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
         assert!(
-            claude.contains(r#""command": "clud-block-bad-cmd""#),
+            claude.contains(r#""command": "clud-cmd-scan""#),
             "{claude}"
         );
         assert!(
-            codex.contains(r#""command": "clud-block-bad-cmd; exit $LASTEXITCODE""#),
+            codex.contains(r#""command": "clud-cmd-scan; exit $LASTEXITCODE""#),
             "{codex}"
         );
 
         let second = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
         assert_eq!(second, MigrationReport::default());
+    }
+
+    #[test]
+    fn migrates_legacy_native_block_bad_cmd_command_to_cmd_scan() {
+        // #532: a hook config already migrated once (python shim ->
+        // `clud-block-bad-cmd`) must also be carried forward to the
+        // renamed `clud-cmd-scan` binary.
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        write(
+            &home.join(".claude/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"clud-block-bad-cmd"}]}]}}"#,
+        );
+        write(
+            &home.join(".codex/hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"clud-block-bad-cmd; exit $LASTEXITCODE"}]}]}}"#,
+        );
+
+        let report = migrate_hook_configs_at(&repo, Some(&home), true).unwrap();
+
+        assert_eq!(report.files_changed, 2);
+        assert_eq!(report.commands_changed, 2);
+        assert_eq!(report.stale_commands_blocked, 0);
+
+        let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        let codex = fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
+        assert!(
+            claude.contains(r#""command": "clud-cmd-scan""#),
+            "{claude}"
+        );
+        assert!(
+            codex.contains(r#""command": "clud-cmd-scan; exit $LASTEXITCODE""#),
+            "{codex}"
+        );
+    }
+
+    #[test]
+    fn missing_helper_blocks_rewrite_of_legacy_native_command() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let path = home.join(".claude/settings.json");
+        write(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"clud-block-bad-cmd"}]}]}}"#,
+        );
+
+        let report = migrate_hook_configs_at(&repo, Some(&home), false).unwrap();
+
+        assert_eq!(report.files_changed, 0);
+        assert_eq!(report.commands_changed, 0);
+        assert_eq!(report.stale_commands_blocked, 1);
+        assert!(fs::read_to_string(path)
+            .unwrap()
+            .contains("clud-block-bad-cmd"));
     }
 
     #[test]

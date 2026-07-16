@@ -122,11 +122,35 @@ pub enum Decision {
     Deny { reason: String },
 }
 
+/// A `git clone` / `git worktree add` destination detected while scanning
+/// a command (zackees/clud#532), captured so `cmd-scan` can eagerly hand
+/// the path off to the clud daemon's GC registry instead of waiting for
+/// `WorktreeScanner`'s passive poll to discover it. Detection is pure
+/// string/path parsing over the already-tokenized command words — no git
+/// subprocess or daemon IPC happens here, which is what makes it cheap to
+/// unit test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPathCapture {
+    pub kind: &'static str,
+    pub path: PathBuf,
+    pub origin_cwd: PathBuf,
+}
+
+pub const GIT_CLONE_CAPTURE_KIND: &str = "git-clone";
+pub const GIT_WORKTREE_ADD_CAPTURE_KIND: &str = "git-worktree-add";
+
+/// `git clone` destinations outside a repo's `.extern-repos/` are denied
+/// by default; this is the rule id an agent sets via
+/// `CLUD_BAD_CMD_OVERRIDE` to bypass the guard for one call (zackees/clud#532).
+const CLONE_EXTERN_REPOS_GUARD_RULE_ID: &str = "git-clone-outside-extern-repos";
+const EXTERN_REPOS_DIR_NAME: &str = ".extern-repos";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandEvaluation {
     pub reason: Option<String>,
     pub warnings: Vec<String>,
     pub log_messages: Vec<String>,
+    pub git_path_captures: Vec<GitPathCapture>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,13 +211,24 @@ pub fn run() -> i32 {
         crate::repo_clud_config::discover_effective_clud_config(&payload.cwd).unwrap_or_default();
 
     let allow_hybrid_uv_run = std::env::var("CLUD_UV_RUST_ALLOW_ALL").ok().as_deref() == Some("1");
-    let evaluation = evaluate_command_with_policy_and_dialect(
+    // zackees/clud#532: the repo-root lookup below shells out to `git`, so
+    // it's gated on a cheap substring check — this hook fires on every
+    // single Bash tool call, and the vast majority never mention `clone` or
+    // `worktree`, so most invocations skip the subprocess entirely.
+    let may_touch_git_paths = command_may_contain_clone_or_worktree_add(&payload.command);
+    let repo_root = if may_touch_git_paths {
+        locate_repo_root_from(&payload.cwd)
+    } else {
+        None
+    };
+    let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
         &payload.command,
         Some(&payload.cwd),
         allow_hybrid_uv_run,
         &config.bad_commands,
         &config.bad_pipelines,
         shell_dialect_for_tool(&payload.tool_name),
+        repo_root.as_deref(),
     );
     for message in &evaluation.log_messages {
         append_log(message);
@@ -213,8 +248,81 @@ pub fn run() -> i32 {
         return 2;
     }
 
+    // zackees/clud#532: the command is actually going to run, so any git
+    // clone / worktree-add destination it detected gets handed to the
+    // daemon's GC registry now instead of waiting for the passive
+    // `WorktreeScanner` poll to notice it on disk. Best-effort: a daemon
+    // that isn't up yet must never block the tool call itself.
+    for capture in &evaluation.git_path_captures {
+        report_git_path_capture_to_daemon(capture, repo_root.as_deref());
+    }
+
     append_log("allowed");
     0
+}
+
+/// Cheap, conservative pre-filter for whether `command_text` could possibly
+/// contain a `git clone` or `git worktree add` invocation, used to skip the
+/// `git` subprocess spawn in `locate_repo_root_from` for the vast majority
+/// of hook invocations that have nothing to do with either (zackees/clud#532).
+/// Deliberately loose — a false positive here just costs one extra `git
+/// rev-parse`; a false negative would silently disable the guard/tracking
+/// for a real clone, so this only ever narrows on the *absence* of these
+/// substrings, never tries to parse the command.
+fn command_may_contain_clone_or_worktree_add(command_text: &str) -> bool {
+    let lower = command_text.to_ascii_lowercase();
+    lower.contains("clone") || lower.contains("worktree")
+}
+
+/// `git -C`/global-flag invocations aside (see `detect_git_path_capture`'s
+/// doc comment), resolve the main repo root containing `start`, if any.
+/// Returns `None` when `start` isn't inside a git working tree — the only
+/// place in this module that shells out to git, kept isolated here so the
+/// rest of the evaluation pipeline stays pure and unit-testable without a
+/// real repo. Delegates to `worktrees::locate_main_repo_root_from` rather
+/// than re-parsing `--git-common-dir` output itself.
+fn locate_repo_root_from(start: &Path) -> Option<PathBuf> {
+    crate::worktrees::locate_main_repo_root_from(start).ok()
+}
+
+/// Pure construction of the GC-registry insert payload for a detected
+/// capture — split out from `report_git_path_capture_to_daemon` so the
+/// (kind, path, repo_root) mapping is unit-testable without a real daemon
+/// (zackees/clud#532).
+fn git_path_capture_insert_input(
+    capture: &GitPathCapture,
+    repo_root: Option<&Path>,
+    now_unix: i64,
+) -> crate::gc::InsertInput {
+    crate::gc::InsertInput {
+        kind: gc_registry_kind(capture.kind).to_string(),
+        path: capture.path.to_string_lossy().to_string(),
+        repo_root: repo_root.map(|p| p.to_string_lossy().to_string()),
+        branch: None,
+        agent_id: None,
+        now_unix,
+    }
+}
+
+fn report_git_path_capture_to_daemon(capture: &GitPathCapture, repo_root: Option<&Path>) {
+    let Ok(state_dir) = crate::daemon::default_state_dir() else {
+        return;
+    };
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let input = git_path_capture_insert_input(capture, repo_root, now_unix);
+    match crate::daemon::gc_client_insert(&state_dir, &input) {
+        Ok(()) => append_log(&format!(
+            "git_path_capture_tracked kind={} path={:?}",
+            capture.kind, capture.path
+        )),
+        Err(error) => append_log(&format!(
+            "git_path_capture_daemon_insert_failed kind={} path={:?} error={error}",
+            capture.kind, capture.path
+        )),
+    }
 }
 
 pub fn parse_payload(raw: &str, process_cwd: &Path) -> Option<HookPayloadView> {
@@ -308,11 +416,38 @@ fn evaluate_command_with_policy_and_dialect(
     bad_pipelines: &[BadPipelineRule],
     dialect: ShellDialect,
 ) -> CommandEvaluation {
+    evaluate_command_with_policy_dialect_and_repo_root(
+        command_text,
+        cwd,
+        allow_hybrid_uv_run,
+        bad_commands,
+        bad_pipelines,
+        dialect,
+        None,
+    )
+}
+
+/// Same as [`evaluate_command_with_policy_and_dialect`], plus `repo_root`
+/// — the main repo root that `cwd` resolves inside, if any, used only by
+/// the `.extern-repos/` clone guard (zackees/clud#532). Callers that
+/// don't need the guard (or want it disabled, e.g. because `cwd` isn't
+/// known to be inside a repo) pass `None`.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_command_with_policy_dialect_and_repo_root(
+    command_text: &str,
+    cwd: Option<&Path>,
+    allow_hybrid_uv_run: bool,
+    bad_commands: &[BadCommandRule],
+    bad_pipelines: &[BadPipelineRule],
+    dialect: ShellDialect,
+    repo_root: Option<&Path>,
+) -> CommandEvaluation {
     let context = EvaluationContext {
         cwd,
         allow_hybrid_uv_run,
         bad_commands,
         bad_pipelines,
+        repo_root,
     };
     let mut evaluation = CommandEvaluation::default();
     evaluate_command_into(command_text, &context, dialect, 0, &mut evaluation);
@@ -324,6 +459,7 @@ struct EvaluationContext<'a> {
     allow_hybrid_uv_run: bool,
     bad_commands: &'a [BadCommandRule],
     bad_pipelines: &'a [BadPipelineRule],
+    repo_root: Option<&'a Path>,
 }
 
 fn evaluate_command_into(
@@ -393,6 +529,16 @@ fn evaluate_command_into(
                 return;
             }
             continue;
+        }
+
+        if let Some(capture) = detect_git_path_capture(&words, context.cwd) {
+            if let Some(reason) =
+                extern_repos_violation_reason(&capture, context.repo_root, evaluation)
+            {
+                evaluation.reason = Some(reason);
+                return;
+            }
+            evaluation.git_path_captures.push(capture);
         }
 
         if let Some(reason) = evaluate_structured_rules(&words, context.bad_commands, evaluation) {
@@ -750,6 +896,212 @@ fn deny_message(reason: &str, replacement: &str, id: Option<&str>, allow_overrid
         ));
     }
     message
+}
+
+/// Detect a `git clone <repo> [<dir>]` or `git worktree add <path>`
+/// invocation in one already-tokenized segment and compute the
+/// destination path it would create (zackees/clud#532). Pure — no
+/// filesystem or git subprocess access, so callers (including tests) can
+/// drive it with fabricated `words`/`cwd` and no real repo.
+///
+/// Deliberately a pragmatic subset: recognizes the common `clone`/`add`
+/// flags that take a value so they don't get mistaken for the
+/// destination positional, but does not attempt to model every git flag
+/// (e.g. a leading global `git -C <dir> clone ...`). Unrecognized shapes
+/// simply return `None` — a missed capture just means that one call isn't
+/// eagerly tracked (the passive `WorktreeScanner` poll is still a
+/// fallback for anything landing under the conventional directories), it
+/// never blocks or misreports a command.
+fn detect_git_path_capture(words: &[String], cwd: Option<&Path>) -> Option<GitPathCapture> {
+    // `command_words` already unwraps `env`/`command`/`exec` for every
+    // segment, but `sudo` is only unwrapped per-rule (opt-in via
+    // `through_wrappers`) elsewhere in this file, so `sudo git clone ...`
+    // would otherwise reach here with `words[0] == "sudo"` and silently
+    // skip both tracking and the .extern-repos guard (zackees/clud#532).
+    let unwrapped;
+    let words = if program_name(words.first()?) == "sudo" {
+        unwrapped = unwrap_sudo(words)?;
+        unwrapped
+    } else {
+        words
+    };
+    if program_name(words.first()?) != "git" {
+        return None;
+    }
+    let origin_cwd = cwd
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    match words.get(1).map(String::as_str) {
+        Some("clone") => {
+            let dest = git_clone_destination(&words[2..])?;
+            Some(GitPathCapture {
+                kind: GIT_CLONE_CAPTURE_KIND,
+                path: resolve_against(&origin_cwd, &dest),
+                origin_cwd,
+            })
+        }
+        Some("worktree") if words.get(2).map(String::as_str) == Some("add") => {
+            let dest = git_worktree_add_destination(&words[3..])?;
+            Some(GitPathCapture {
+                kind: GIT_WORKTREE_ADD_CAPTURE_KIND,
+                path: resolve_against(&origin_cwd, &dest),
+                origin_cwd,
+            })
+        }
+        _ => None,
+    }
+}
+
+const GIT_CLONE_OPTIONS_WITH_VALUE: &[&str] = &[
+    "--branch",
+    "-b",
+    "--origin",
+    "-o",
+    "--depth",
+    "--config",
+    "-c",
+    "--template",
+    "--reference",
+    "--reference-if-able",
+    "--separate-git-dir",
+    "--filter",
+    "--shallow-since",
+    "--shallow-exclude",
+    "--jobs",
+    "-j",
+    "--bundle-uri",
+];
+
+/// `args` is everything after `git clone`. Returns the directory the
+/// clone would land in: the explicit second positional if given, else
+/// derived from the repo URL/path's basename (mirroring real `git
+/// clone`'s own default).
+fn git_clone_destination(args: &[String]) -> Option<String> {
+    let positionals = collect_positionals(args, GIT_CLONE_OPTIONS_WITH_VALUE);
+    match positionals.len() {
+        0 => None,
+        1 => Some(derive_clone_dir_from_repo(&positionals[0])),
+        _ => Some(positionals[1].clone()),
+    }
+}
+
+fn derive_clone_dir_from_repo(repo: &str) -> String {
+    let trimmed = repo.trim_end_matches('/');
+    let base = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
+    base.strip_suffix(".git").unwrap_or(base).to_string()
+}
+
+const GIT_WORKTREE_ADD_OPTIONS_WITH_VALUE: &[&str] = &["-b", "-B", "--reason"];
+
+/// `args` is everything after `git worktree add`. Returns the first
+/// positional (the worktree path); a trailing `<commit-ish>` positional,
+/// if present, is not the destination and is ignored.
+fn git_worktree_add_destination(args: &[String]) -> Option<String> {
+    collect_positionals(args, GIT_WORKTREE_ADD_OPTIONS_WITH_VALUE)
+        .into_iter()
+        .next()
+}
+
+/// Walk `args`, skipping recognized value-taking flags (and their
+/// values), boolean flags, and an inline `--flag=value` form, collecting
+/// everything else as positionals. `--` ends flag parsing.
+fn collect_positionals(args: &[String], options_with_value: &[&str]) -> Vec<String> {
+    let mut positionals = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            positionals.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+        if arg.starts_with('-') {
+            if arg.contains('=') {
+                i += 1;
+            } else if options_with_value.contains(&arg.as_str()) {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        positionals.push(arg.clone());
+        i += 1;
+    }
+    positionals
+}
+
+/// Join `candidate` against `base` if relative, then lexically collapse
+/// `.`/`..` components without touching the filesystem — the destination
+/// usually doesn't exist yet (the clone/worktree-add hasn't run), so a
+/// real `canonicalize()` isn't an option here.
+fn resolve_against(base: &Path, candidate: &str) -> PathBuf {
+    let candidate_path = Path::new(candidate);
+    let combined = if candidate_path.is_absolute() {
+        candidate_path.to_path_buf()
+    } else {
+        base.join(candidate_path)
+    };
+    lexically_normalize(&combined)
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// If `capture` is a `git clone` landing outside `repo_root`'s
+/// `.extern-repos/`, return the deny reason (zackees/clud#532) — unless
+/// `CLUD_BAD_CMD_OVERRIDE` carries a matching bypass, in which case the
+/// acceptance is logged and `None` is returned so the clone proceeds (and
+/// still gets tracked by the caller). `repo_root: None` (cwd isn't known
+/// to be inside a repo) means the guard doesn't apply at all.
+fn extern_repos_violation_reason(
+    capture: &GitPathCapture,
+    repo_root: Option<&Path>,
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    if capture.kind != GIT_CLONE_CAPTURE_KIND {
+        return None;
+    }
+    let repo_root = repo_root?;
+    let extern_repos_dir = repo_root.join(EXTERN_REPOS_DIR_NAME);
+    if capture.path.starts_with(&extern_repos_dir) {
+        return None;
+    }
+    if let Some(override_reason) = accepted_override_reason(CLONE_EXTERN_REPOS_GUARD_RULE_ID) {
+        evaluation.log_messages.push(format!(
+            "BAD_CMD_OVERRIDE accepted rule={CLONE_EXTERN_REPOS_GUARD_RULE_ID} reason={override_reason:?} path={:?}",
+            capture.path
+        ));
+        return None;
+    }
+    Some(format!(
+        "git clone outside of .extern-repos is discouraged. Set {BAD_CMD_OVERRIDE_ENV}=\"{CLONE_EXTERN_REPOS_GUARD_RULE_ID}:<your reason for needing the raw command>\" to do it anyway, otherwise use .extern-repos/**."
+    ))
+}
+
+/// Maps a [`GitPathCapture::kind`] to the `clud gc` registry `kind`
+/// string it should be tracked under, reusing the existing tracked-entry
+/// taxonomy and its already-implemented sweep/prune policy (zackees/clud#532)
+/// rather than introducing a bespoke one: a `git worktree add` destination
+/// is exactly what `WORKTREE_KIND` already models, and an ad hoc `git
+/// clone` is exactly what `SIBLING_CLONE_KIND` already models.
+fn gc_registry_kind(capture_kind: &str) -> &'static str {
+    if capture_kind == GIT_WORKTREE_ADD_CAPTURE_KIND {
+        crate::gc::WORKTREE_KIND
+    } else {
+        crate::gc::SIBLING_CLONE_KIND
+    }
 }
 
 fn pattern_matches(token: &str, pattern: &MatchPattern) -> bool {
@@ -2968,6 +3320,318 @@ mod tests {
     #[test]
     fn generic_no_rules_configured_allows_all() {
         assert!(allows_with_rules("playwright run", &[]));
+    }
+
+    // ---------- zackees/clud#532: git clone / worktree-add tracking ----------
+    //
+    // These tests never spawn a real `git` process and never contact a real
+    // clud daemon (both would make the test environment-dependent and slow)
+    // — they exercise the pure detection/guard logic directly, which is the
+    // seam production code hands off to `report_git_path_capture_to_daemon`.
+    // Proving `evaluation.git_path_captures` contains the right
+    // (kind, path, origin_cwd) IS the proof that the destination would be
+    // handed to the daemon's GC registry for later cleanup.
+
+    #[test]
+    fn git_clone_capture_records_explicit_destination_and_origin_cwd() {
+        let cwd = PathBuf::from("/repo/.extern-repos");
+        let words = command_words("git clone https://example.com/foo.git bar");
+        let capture = detect_git_path_capture(&words, Some(&cwd)).expect("clone should capture");
+        assert_eq!(capture.kind, GIT_CLONE_CAPTURE_KIND);
+        assert_eq!(capture.path, cwd.join("bar"));
+        assert_eq!(capture.origin_cwd, cwd);
+    }
+
+    #[test]
+    fn git_clone_capture_derives_dir_from_repo_url_when_no_explicit_dest() {
+        let cwd = PathBuf::from("/repo/.extern-repos");
+        let words = command_words("git clone git@github.com:zackees/soldr.git");
+        let capture = detect_git_path_capture(&words, Some(&cwd)).unwrap();
+        assert_eq!(capture.path, cwd.join("soldr"));
+    }
+
+    #[test]
+    fn git_clone_capture_skips_known_value_flags_when_finding_positionals() {
+        let cwd = PathBuf::from("/repo/.extern-repos");
+        let words = command_words(
+            "git clone --depth 1 --branch main --origin upstream https://example.com/foo.git bar",
+        );
+        let capture = detect_git_path_capture(&words, Some(&cwd)).unwrap();
+        assert_eq!(capture.path, cwd.join("bar"));
+    }
+
+    #[test]
+    fn git_worktree_add_capture_records_destination() {
+        let cwd = PathBuf::from("/repo");
+        let words = command_words("git worktree add .claude/worktrees/agent-42 -b agent-42");
+        let capture = detect_git_path_capture(&words, Some(&cwd)).unwrap();
+        assert_eq!(capture.kind, GIT_WORKTREE_ADD_CAPTURE_KIND);
+        assert_eq!(capture.path, cwd.join(".claude/worktrees/agent-42"));
+    }
+
+    #[test]
+    fn git_clone_capture_survives_env_wrapper() {
+        // `command_words` already unwraps `env` unconditionally for every
+        // segment, so this must be captured exactly like a bare `git clone`.
+        let cwd = PathBuf::from("/repo/.extern-repos");
+        let words = command_words("env FOO=bar git clone https://example.com/foo.git bar");
+        let capture = detect_git_path_capture(&words, Some(&cwd))
+            .expect("env-wrapped clone should still be captured");
+        assert_eq!(capture.path, cwd.join("bar"));
+    }
+
+    #[test]
+    fn git_clone_capture_survives_sudo_wrapper() {
+        let cwd = PathBuf::from("/repo/.extern-repos");
+        let words = command_words("sudo git clone https://example.com/foo.git bar");
+        let capture = detect_git_path_capture(&words, Some(&cwd))
+            .expect("sudo-wrapped clone should still be captured, not silently skipped");
+        assert_eq!(capture.kind, GIT_CLONE_CAPTURE_KIND);
+        assert_eq!(capture.path, cwd.join("bar"));
+    }
+
+    #[test]
+    fn git_worktree_add_capture_survives_sudo_wrapper() {
+        let cwd = PathBuf::from("/repo");
+        let words = command_words("sudo git worktree add .claude/worktrees/agent-9");
+        let capture = detect_git_path_capture(&words, Some(&cwd))
+            .expect("sudo-wrapped worktree add should still be captured");
+        assert_eq!(capture.kind, GIT_WORKTREE_ADD_CAPTURE_KIND);
+        assert_eq!(capture.path, cwd.join(".claude/worktrees/agent-9"));
+    }
+
+    #[test]
+    fn command_may_contain_clone_or_worktree_add_is_a_conservative_prefilter() {
+        assert!(command_may_contain_clone_or_worktree_add(
+            "git clone https://example.com/foo.git"
+        ));
+        assert!(command_may_contain_clone_or_worktree_add(
+            "git worktree add .claude/worktrees/agent-1"
+        ));
+        assert!(command_may_contain_clone_or_worktree_add(
+            "GIT CLONE shouted in caps still matches (case-insensitive)"
+        ));
+        assert!(!command_may_contain_clone_or_worktree_add("ls -la"));
+        assert!(!command_may_contain_clone_or_worktree_add(
+            "cat foo.txt && echo done"
+        ));
+    }
+
+    #[test]
+    fn git_path_capture_insert_input_threads_repo_root() {
+        // Regression test: the repo_root run() already resolved must reach
+        // the GC registry row, not be dropped on the floor as `None`.
+        let capture = GitPathCapture {
+            kind: GIT_CLONE_CAPTURE_KIND,
+            path: PathBuf::from("/repo/.extern-repos/foo"),
+            origin_cwd: PathBuf::from("/repo/.extern-repos"),
+        };
+        let input = git_path_capture_insert_input(&capture, Some(Path::new("/repo")), 1_700_000_000);
+        assert_eq!(input.kind, crate::gc::SIBLING_CLONE_KIND);
+        assert_eq!(input.path, capture.path.to_string_lossy());
+        assert_eq!(input.repo_root.as_deref(), Some("/repo"));
+        assert_eq!(input.now_unix, 1_700_000_000);
+    }
+
+    #[test]
+    fn git_path_capture_insert_input_allows_no_repo_root() {
+        let capture = GitPathCapture {
+            kind: GIT_WORKTREE_ADD_CAPTURE_KIND,
+            path: PathBuf::from("/scratch/bar"),
+            origin_cwd: PathBuf::from("/scratch"),
+        };
+        let input = git_path_capture_insert_input(&capture, None, 0);
+        assert_eq!(input.kind, crate::gc::WORKTREE_KIND);
+        assert!(input.repo_root.is_none());
+    }
+
+    #[test]
+    fn git_worktree_other_subcommands_are_not_captured() {
+        let cwd = PathBuf::from("/repo");
+        for command in [
+            "git worktree list",
+            "git worktree remove .claude/worktrees/agent-1",
+            "git worktree prune",
+            "git worktree lock .claude/worktrees/agent-1",
+        ] {
+            let words = command_words(command);
+            assert!(
+                detect_git_path_capture(&words, Some(&cwd)).is_none(),
+                "{command} should not be captured"
+            );
+        }
+    }
+
+    #[test]
+    fn non_git_and_unrelated_git_subcommands_are_not_captured() {
+        let cwd = PathBuf::from("/repo");
+        for command in ["git status", "git commit -m msg", "echo git clone foo"] {
+            let words = command_words(command);
+            assert!(
+                detect_git_path_capture(&words, Some(&cwd)).is_none(),
+                "{command} should not be captured"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_command_collects_git_path_captures_end_to_end() {
+        let cwd = PathBuf::from("/repo/.extern-repos");
+        let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+            "git clone https://example.com/foo.git bar",
+            Some(&cwd),
+            false,
+            &[],
+            &[],
+            ShellDialect::Posix,
+            Some(Path::new("/repo")),
+        );
+        assert!(
+            evaluation.reason.is_none(),
+            "clone under .extern-repos should be allowed"
+        );
+        assert_eq!(evaluation.git_path_captures.len(), 1);
+        let capture = &evaluation.git_path_captures[0];
+        assert_eq!(capture.path, cwd.join("bar"));
+        assert_eq!(gc_registry_kind(capture.kind), crate::gc::SIBLING_CLONE_KIND);
+    }
+
+    #[test]
+    fn evaluate_command_maps_worktree_add_capture_to_worktree_kind() {
+        let cwd = PathBuf::from("/repo");
+        let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+            "git worktree add .claude/worktrees/agent-7",
+            Some(&cwd),
+            false,
+            &[],
+            &[],
+            ShellDialect::Posix,
+            Some(Path::new("/repo")),
+        );
+        assert!(evaluation.reason.is_none());
+        let capture = &evaluation.git_path_captures[0];
+        assert_eq!(gc_registry_kind(capture.kind), crate::gc::WORKTREE_KIND);
+    }
+
+    #[test]
+    fn git_clone_outside_extern_repos_is_denied_with_bypass_hint() {
+        // Serialize against other tests in this module that mutate
+        // `CLUD_BAD_CMD_OVERRIDE` (process-global, tests run concurrently):
+        // without this, a concurrently-running override test could make
+        // this test's "denied without a matching override" assumption
+        // spuriously false. Mirrors
+        // `generic_rule_override_hint_in_deny_message_helps_agent_construct_bypass`.
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            let cwd = PathBuf::from("/repo");
+            let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+                "git clone https://example.com/foo.git ../scratch/foo",
+                Some(&cwd),
+                false,
+                &[],
+                &[],
+                ShellDialect::Posix,
+                Some(Path::new("/repo")),
+            );
+            let reason = evaluation
+                .reason
+                .expect("clone outside .extern-repos should be denied");
+            assert!(reason.contains(".extern-repos"));
+            assert!(reason.contains(BAD_CMD_OVERRIDE_ENV));
+            assert!(reason.contains(CLONE_EXTERN_REPOS_GUARD_RULE_ID));
+            assert!(
+                evaluation.git_path_captures.is_empty(),
+                "a denied clone never runs, so it must not be tracked"
+            );
+        });
+    }
+
+    #[test]
+    fn git_clone_outside_extern_repos_bypassed_via_override_is_still_tracked() {
+        temp_env(
+            BAD_CMD_OVERRIDE_ENV,
+            "git-clone-outside-extern-repos:one-off scratch clone",
+            || {
+                let cwd = PathBuf::from("/repo");
+                let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+                    "git clone https://example.com/foo.git ../scratch/foo",
+                    Some(&cwd),
+                    false,
+                    &[],
+                    &[],
+                    ShellDialect::Posix,
+                    Some(Path::new("/repo")),
+                );
+                assert!(
+                    evaluation.reason.is_none(),
+                    "matching override should bypass the guard"
+                );
+                assert_eq!(
+                    evaluation.git_path_captures.len(),
+                    1,
+                    "bypassed clone still executes, so it must still be tracked"
+                );
+                assert!(evaluation
+                    .log_messages
+                    .iter()
+                    .any(|m| m.contains("BAD_CMD_OVERRIDE") && m.contains(
+                        "git-clone-outside-extern-repos"
+                    )));
+            },
+        );
+    }
+
+    #[test]
+    fn git_clone_outside_extern_repos_override_mismatch_still_denies() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            let cwd = PathBuf::from("/repo");
+            let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+                "git clone https://example.com/foo.git ../scratch/foo",
+                Some(&cwd),
+                false,
+                &[],
+                &[],
+                ShellDialect::Posix,
+                Some(Path::new("/repo")),
+            );
+            assert!(evaluation.reason.is_some());
+            assert!(evaluation.git_path_captures.is_empty());
+        });
+    }
+
+    #[test]
+    fn git_clone_outside_repo_context_is_not_guarded_but_is_still_tracked() {
+        // `repo_root: None` models a cwd that isn't known to be inside any
+        // git repo (e.g. `clud` launched from a scratch directory) — the
+        // .extern-repos guard doesn't apply, but the clone is still
+        // captured for GC tracking.
+        let cwd = PathBuf::from("/scratch");
+        let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+            "git clone https://example.com/foo.git bar",
+            Some(&cwd),
+            false,
+            &[],
+            &[],
+            ShellDialect::Posix,
+            None,
+        );
+        assert!(evaluation.reason.is_none());
+        assert_eq!(evaluation.git_path_captures.len(), 1);
+    }
+
+    #[test]
+    fn git_clone_directly_under_extern_repos_root_is_allowed() {
+        let cwd = PathBuf::from("/repo");
+        let evaluation = evaluate_command_with_policy_dialect_and_repo_root(
+            "git clone https://example.com/foo.git .extern-repos/foo",
+            Some(&cwd),
+            false,
+            &[],
+            &[],
+            ShellDialect::Posix,
+            Some(Path::new("/repo")),
+        );
+        assert!(evaluation.reason.is_none());
+        assert_eq!(evaluation.git_path_captures.len(), 1);
     }
 
     /// Serializes env-var mutation across tests in this module (env is
