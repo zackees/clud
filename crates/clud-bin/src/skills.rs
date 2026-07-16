@@ -110,6 +110,10 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "clud-docker-linux-build",
         skill_md: include_str!("../assets/skills/clud-docker-linux-build/SKILL.md"),
     },
+    BundledSkill {
+        name: "clud-docker-recover",
+        skill_md: include_str!("../assets/skills/clud-docker-recover/SKILL.md"),
+    },
 ];
 
 /// One CLI backend that consumes `SKILL.md` files. Adding support for a
@@ -505,6 +509,36 @@ mod tests {
         assert!(names.contains(&"clud-extern-repos"));
         assert!(names.contains(&"clud-improve"));
         assert!(names.contains(&"clud-docker-mac-x86"));
+        assert!(names.contains(&"clud-docker-recover"));
+    }
+
+    /// Issue #531: the Docker-recovery skill must trigger on the failure
+    /// modes from the incident (engine pipe absent, WSL/Docker startup
+    /// failures, Docker VM disk/memory questions) and must carry the
+    /// non-destructive, config-driven storage guidance from the follow-up
+    /// comment. Locks the load-bearing guarantees into the embedded body.
+    #[test]
+    fn clud_docker_recover_skill_is_non_destructive_and_config_driven() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "clud-docker-recover")
+            .expect("clud-docker-recover must be bundled")
+            .skill_md;
+
+        for required in [
+            "clud tool run docker/docker_recover.py doctor",
+            "read-only",
+            "CustomWslDistroDir",
+            "DataFolder",
+            "never compacts, prunes, deletes, resets, or",
+            "images and volumes",
+            "attempts = 10, interval = 2s",
+        ] {
+            assert!(
+                skill.contains(required),
+                "clud-docker-recover skill missing required guidance: {required:?}"
+            );
+        }
     }
 
     #[test]

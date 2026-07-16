@@ -35,6 +35,12 @@ do not write persistent skill files. Stale clud-managed copies under
 - [clud-improve/](clud-improve/SKILL.md) - File concrete clud improvement
   reports directly as GitHub issues against `zackees/clud`; ask for details
   only on a bare manual `/clud-improve` invocation.
+- [clud-docker-recover/](clud-docker-recover/SKILL.md) - Diagnose and recover
+  a wedged Docker Desktop (engine pipe/socket absent, WSL/Docker startup
+  failures) via the bundled `docker/docker_recover.py` tool. Read-only
+  `doctor` first; confirmation-gated `restart`/`reset`; Windows storage disks
+  resolved from Docker Desktop's real config (never the assumed C: default)
+  and never compacted or deleted automatically.
 
 ## How Skills Ship
 
