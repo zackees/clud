@@ -758,8 +758,17 @@ fn path_try_exists(path: &Path) -> Result<bool, String> {
 /// `git worktree list --porcelain` from that worktree still reports the main
 /// worktree first, so we can use the current directory as a starting point.
 pub fn locate_main_repo_root() -> Result<PathBuf, String> {
+    locate_main_repo_root_from(Path::new("."))
+}
+
+/// Same as [`locate_main_repo_root`], but resolved relative to an arbitrary
+/// `start` directory instead of the process's current directory
+/// (zackees/clud#532: `cmd-scan`'s per-hook-invocation repo-root lookup needs
+/// to resolve from the tool call's reported `cwd`, which can differ from the
+/// hook process's own cwd).
+pub fn locate_main_repo_root_from(start: &Path) -> Result<PathBuf, String> {
     let out = run_git(
-        Path::new("."),
+        start,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     let common = PathBuf::from(out.trim());
