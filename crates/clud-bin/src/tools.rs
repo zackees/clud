@@ -238,6 +238,21 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         progress_timeout: Some(std::time::Duration::from_secs(120)),
         quiet_ok: false,
     },
+    // docker-recover — Docker Desktop recovery + diagnostics (issue #531).
+    // `Killable`: the tool process IS the work (restart/reset drive Docker
+    // Desktop; `doctor` is a fast read-only probe). `doctor` finishes in
+    // seconds, but `restart`/`reset` cycle WSL + Docker Desktop and can take
+    // minutes, so the ceiling is a 10-minute cap with a 2-minute progress
+    // watchdog — the bounded readiness poll prints a line every 2s, so any
+    // true hang trips the progress timeout well before the ceiling.
+    BundledTool {
+        rel_path: "docker/docker_recover.py",
+        body: include_str!("../assets/tools/docker/docker_recover.py"),
+        kill_semantics: KillSemantics::Killable,
+        command_timeout: Duration::from_secs(60 * 10),
+        progress_timeout: Some(Duration::from_secs(120)),
+        quiet_ok: false,
+    },
 ];
 
 /// The single source of truth for the `UV_CACHE_DIR` value used by every
@@ -516,6 +531,119 @@ mod tests {
             assert!(
                 tool.body.contains("not implemented in v0"),
                 "{stub_stack} stack must clearly mark not-yet-implemented subcommands",
+            );
+        }
+    }
+
+    /// Issue #531: the Docker recovery tool ships as a standalone bundled
+    /// tool so an agent can diagnose an unavailable Desktop engine before
+    /// attempting a build. If this fires, the entry was renamed/removed and
+    /// the clud-docker-recover SKILL.md invocation silently breaks.
+    #[test]
+    fn bundled_includes_docker_recover() {
+        let names: Vec<&str> = BUNDLED_TOOLS.iter().map(|t| t.rel_path).collect();
+        assert!(
+            names.contains(&"docker/docker_recover.py"),
+            "BUNDLED_TOOLS must include docker/docker_recover.py; got {names:?}",
+        );
+    }
+
+    /// The docker-recover exit codes are the public contract every caller
+    /// (SKILL.md, future tooling) depends on — lock them into the docstring.
+    #[test]
+    fn docker_recover_documents_exit_codes() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_recover.py")
+            .expect("docker_recover.py must be in BUNDLED_TOOLS");
+        for code_line in [
+            "Exit codes:",
+            "3   destructive action refused pending confirmation",
+            "4   destructive action refused",
+            "64  requested but deliberately not auto-executed",
+        ] {
+            assert!(
+                tool.body.contains(code_line),
+                "docker_recover.py docstring must document `{code_line}`",
+            );
+        }
+    }
+
+    /// The four subcommands are the tool's CLI surface. A rename that drops
+    /// one (e.g. `doctor`) would break the SKILL.md invocation table.
+    #[test]
+    fn docker_recover_declares_subcommands() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_recover.py")
+            .expect("docker_recover.py must be in BUNDLED_TOOLS");
+        for func in [
+            "def cmd_doctor",
+            "def cmd_restart",
+            "def cmd_reset",
+            "def cmd_disk",
+            "def cmd_gc",
+        ] {
+            assert!(
+                tool.body.contains(func),
+                "docker_recover.py must implement `{func}`",
+            );
+        }
+    }
+
+    /// Issue #531 GC enhancement: the `gc`/`trim` subcommand reclaims only
+    /// dangling objects (unused images, stopped containers, anonymous
+    /// unreferenced volumes), runs default-safe (no confirmation gate),
+    /// never touches named volumes or running-container images, and is more
+    /// aggressive on the system volume. Lock the safety contract in.
+    #[test]
+    fn docker_recover_gc_reclaims_only_dangling_objects_safely() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_recover.py")
+            .expect("docker_recover.py must be in BUNDLED_TOOLS");
+        for marker in [
+            "def plan_gc",
+            "def gc_age_threshold_hours",
+            "def is_system_volume",
+            "def recommended_remedy",
+            "images backing a running container",
+            "named volumes and running-container images were preserved",
+            "more aggressive on the system/boot volume",
+            "clud schedule",
+        ] {
+            assert!(
+                tool.body.contains(marker),
+                "docker_recover.py gc must contain `{marker}` to hold the \
+                 default-safe, dangling-only reclaim contract",
+            );
+        }
+    }
+
+    /// Issue #531 hard rule: the tool must never auto-mutate Docker storage,
+    /// must resolve Windows disks from real config (not the C: default), and
+    /// must gate destructive actions behind confirmation + an unambiguous
+    /// candidate. These markers keep the contract visible at the bundle
+    /// boundary as well as in the SKILL.md.
+    #[test]
+    fn docker_recover_never_auto_mutates_storage() {
+        let tool = BUNDLED_TOOLS
+            .iter()
+            .find(|t| t.rel_path == "docker/docker_recover.py")
+            .expect("docker_recover.py must be in BUNDLED_TOOLS");
+        for marker in [
+            "CustomWslDistroDir",
+            "DataFolder",
+            "settings-store.json",
+            "NEVER compacts, prunes, deletes, resets, or",
+            "compact, delete, prune, reset, or mutate Docker storage automatically",
+            "def disk_action_gate",
+            "def resolve_windows_docker_disks",
+        ] {
+            assert!(
+                tool.body.contains(marker),
+                "docker_recover.py must contain `{marker}` to hold the \
+                 non-destructive, config-driven storage contract",
             );
         }
     }
