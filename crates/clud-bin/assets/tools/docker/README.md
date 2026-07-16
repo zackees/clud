@@ -12,6 +12,7 @@ Bundled Python tools that drive Docker-based Linux build harnesses. Installed un
 | [`docker_build_soldr.py`](docker_build_soldr.py) | Rust + soldr + zccache stack. The reference implementation. The image bakes in soldr, and persistent anonymous volumes hold `target/`, `CARGO_HOME`, `RUSTUP_HOME`, the cargo-chef recipe cache, and `/root/.soldr`; source bind-mounted read-only at `/src`. |
 | [`docker_build_python.py`](docker_build_python.py) | uv-managed Python stack. **v0 scope: `init` only.** Other subcommands return EX_USAGE (64) with a clear "needs author work" notice. |
 | [`docker_build_cpp.py`](docker_build_cpp.py) | CMake + ccache stack. **v0 scope: `init` only.** Same status as python. |
+| [`docker_recover.py`](docker_recover.py) | Read-only Docker/Desktop diagnostics plus an explicit restart path. Resolves configured VHD/raw locations before defaults and never mutates storage. |
 
 ## Invocation shapes
 
@@ -20,6 +21,8 @@ clud tool run docker/docker-build.py <stack> <path> [subcommand]   # trampoline
 clud tool run docker/docker_build_soldr.py <path> [subcommand]     # direct
 clud tool run docker/docker_build_python.py <path> [subcommand]    # direct
 clud tool run docker/docker_build_cpp.py <path> [subcommand]       # direct
+clud tool run docker/docker_recover.py doctor                       # diagnose engine + storage
+clud tool run docker/docker_recover.py restart --yes                # restart after confirmation
 ```
 
 `<path>` defaults to `.`. Subcommands: `init` / `up` / `run` / `shell` / `verify` / `clean` / `doctor` — identical across every per-stack tool so the trampoline is a pure dispatcher.
