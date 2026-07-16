@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- The native `bad-cmd` PreToolUse hook is renamed `cmd-scan` (new `clud-cmd-scan`
+  binary; `clud-block-bad-cmd` ships unchanged for one release and existing
+  hook configs are migrated forward automatically, mirroring the earlier
+  python-shim rollout). `cmd-scan` now also eagerly hands `git clone`/`git
+  worktree add` destinations to the clud daemon's GC registry as soon as the
+  command is allowed to run, instead of waiting on `WorktreeScanner`'s passive
+  poll, and denies `git clone` outside a repo's `.extern-repos/` by default
+  (bypass via `CLUD_BAD_CMD_OVERRIDE`, same mechanism as other rules).
+  See zackees/clud#532.
+
 ## 2.4.0 - 2026-07-10
 
 - Daemon GC now reclaims two disk sinks its redb registry never tracked: the
