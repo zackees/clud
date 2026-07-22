@@ -921,9 +921,7 @@ where
                     }
                     if requested_interrupt {
                         if options.verbose {
-                            verbose_log::log(
-                                "[clud] pty pump: interrupt via extra_rx Ctrl+C byte",
-                            );
+                            verbose_log::log("[clud] pty pump: interrupt via extra_rx Ctrl+C byte");
                         }
                         break interrupt_pty_process(process, options.verbose);
                     }
@@ -971,10 +969,7 @@ where
                         }
                         for _ in 0..events.releases {
                             if let Err(err) = hooks.on_f3_release(&mut sink) {
-                                eprintln!(
-                                    "[clud] warning: voice F3 release hook failed: {}",
-                                    err
-                                );
+                                eprintln!("[clud] warning: voice F3 release hook failed: {}", err);
                             }
                         }
                     }
