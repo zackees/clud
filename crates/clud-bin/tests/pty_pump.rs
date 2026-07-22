@@ -4,14 +4,18 @@
 //! variants: verbatim stdin forwarding (issue #46), voice-mode F3 hooks
 //! (issues #13, #41), idle ticks, Ctrl-C / interrupt propagation, resize-channel
 //! delivery, prompt exit on child death, raw-mode panic safety, and the
-//! Shift+Enter extra_rx round trip (issue #141).
+//! Shift+Enter extra_rx round trip (issue #141). Also covers the dedicated
+//! stdout-writer-thread decoupling from issue #538 (a slow terminal sink
+//! must not delay stdin forwarding) via the `..._for_test` writer-injection
+//! seam.
 //!
 //! Lives separately from `tests/pty_behavior.rs` so each integration-test
 //! binary stays under the 1K-LOC ceiling. Shared helpers come from
 //! `tests/common/mod.rs`.
 
-use std::io::Cursor;
-use std::sync::atomic::AtomicBool;
+use std::io::{Cursor, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use running_process::pty::NativePtyProcess;
@@ -700,4 +704,206 @@ fn extra_rx_ctrl_c_byte_interrupts_pump() {
             exit
         );
     }
+}
+
+// ─── Issue #538: dedicated writer thread decouples stdin forwarding from a
+// stalled stdout sink ────────────────────────────────────────────────────
+
+/// `Read` source fed by an `mpsc::Sender<Vec<u8>>`, so a test can push
+/// stdin bytes into the pump's byte-stream reader thread at a precise
+/// moment (unlike `Cursor`, which hands over all its bytes immediately and
+/// then EOFs). Blocks in `read()` until a chunk arrives or the sender is
+/// dropped (EOF). Owns its `Receiver`, so it satisfies the pump's
+/// `R: Read + Send + 'static` bound.
+struct ChannelReader {
+    rx: mpsc::Receiver<Vec<u8>>,
+    pending: Vec<u8>,
+}
+
+impl ChannelReader {
+    fn new(rx: mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            rx,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pending.is_empty() {
+            match self.rx.recv() {
+                Ok(chunk) => self.pending = chunk,
+                Err(_) => return Ok(0), // sender dropped -> EOF
+            }
+        }
+        let n = buf.len().min(self.pending.len());
+        buf[..n].copy_from_slice(&self.pending[..n]);
+        self.pending.drain(..n);
+        Ok(n)
+    }
+}
+
+/// A `Write` sink whose `flush()` blocks for a fixed duration — standing in
+/// for a terminal that's slow to accept output (the issue #538 repro case:
+/// high CPU load). Counters are `Arc`-backed so a clone kept by the test
+/// can observe writer-thread activity after the sink itself has been moved
+/// into the pump.
+#[derive(Clone)]
+struct SlowSink {
+    sleep: Duration,
+    flush_calls: std::sync::Arc<AtomicUsize>,
+}
+
+impl SlowSink {
+    fn new(sleep: Duration) -> Self {
+        Self {
+            sleep,
+            flush_calls: std::sync::Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl Write for SlowSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.sleep);
+        Ok(())
+    }
+}
+
+/// Acceptance criterion (issue #538): "Keystroke-to-PTY forwarding no
+/// longer waits on terminal `flush()` (verified by a test with an
+/// artificially slow stdout sink: input forwarding latency stays low while
+/// output stalls)."
+///
+/// Drives the real pump (`run_raw_pty_pump_full_with_writer_for_test`)
+/// against a live PTY child that flushes one sizeable output burst at
+/// startup, with a `SlowSink` standing in for the terminal. Once the
+/// dedicated writer thread has actually entered its slow `flush()` (polled
+/// via `flush_calls`, not a fixed sleep guess — this is what proves the
+/// premise instead of assuming it), a stdin byte is pushed and timed via
+/// `NativePtyProcess::pty_input_bytes_total()`, a counter `write_impl`
+/// bumps synchronously and independently of whether the child ever reads
+/// it. Pre-#538, output read → filter → write → flush ran inline ahead of
+/// stdin draining in the same loop turn, so a slow `flush()` would have
+/// delayed this measurement by roughly `SINK_SLEEP`; the dedicated writer
+/// thread (fed over an unbounded channel that never blocks `send`)
+/// decouples them.
+#[test]
+fn stdin_forwarding_stays_fast_while_output_sink_stalls() {
+    require_pty_or_skip!("stdin_forwarding_stays_fast_while_output_sink_stalls");
+
+    // The gap between these two is the test's discriminating power:
+    // pre-#538 the inline `flush()` put a full SINK_SLEEP (or more) in
+    // front of stdin forwarding, so even a heavily loaded CI runner only
+    // clears MAX_FORWARD_LATENCY when the decoupling actually works.
+    const SINK_SLEEP: Duration = Duration::from_millis(500);
+    const MAX_FORWARD_LATENCY: Duration = Duration::from_millis(200);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ansi_path = tmp.path().join("burst.txt");
+    // One sizeable, plain-ASCII burst the child flushes immediately at
+    // startup (before it ever touches stdin) — enough to occupy the slow
+    // sink's flush() for the full SINK_SLEEP once the pump's reader/writer
+    // threads pick it up. Plain ASCII so the OSC title stripper is a no-op.
+    std::fs::write(&ansi_path, "x".repeat(8000)).expect("write ansi burst");
+
+    let agent = mock_agent_path();
+    let argv = vec![
+        agent.to_string_lossy().to_string(),
+        "--mock-ansi-script".to_string(),
+        ansi_path.to_string_lossy().to_string(),
+        // Keeps the child alive well past our measurement window without
+        // touching stdin at all, so it can never race the test's own
+        // stdin push.
+        "--mock-sleep-ms".to_string(),
+        "3000".to_string(),
+    ];
+
+    let process = NativePtyProcess::new(argv, None, None, 24, 80, None).expect("new pty");
+    process.set_echo(false);
+    process.start_impl().expect("start");
+    // Let the child start and flush its burst into the PTY's read queue.
+    std::thread::sleep(Duration::from_millis(150));
+
+    let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
+    let stdin_source = ChannelReader::new(stdin_rx);
+    let (_resize_tx, resize_rx) = mpsc::channel::<(u16, u16)>();
+    let interrupted = AtomicBool::new(false);
+    let mut hooks = CountingHooks::new(false);
+    let sink = SlowSink::new(SINK_SLEEP);
+    let sink_stats = sink.clone();
+
+    std::thread::scope(|scope| {
+        let pump = scope.spawn(|| {
+            clud::session::run_raw_pty_pump_full_with_writer_for_test(
+                &process,
+                &interrupted,
+                &mut hooks,
+                stdin_source,
+                resize_rx,
+                None,
+                sink,
+            )
+        });
+
+        // Don't guess when the writer thread is mid-flush — poll for it.
+        // This is the test's proof that the premise ("output is genuinely
+        // stalled right now") actually holds at measurement time.
+        let stall_deadline = Instant::now() + Duration::from_secs(5);
+        while sink_stats.flush_calls.load(Ordering::SeqCst) == 0 && Instant::now() < stall_deadline
+        {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            sink_stats.flush_calls.load(Ordering::SeqCst) >= 1,
+            "test premise unmet: writer thread never entered flush() on the slow sink \
+             within 5s, so it never actually stalled"
+        );
+
+        let before = process.pty_input_bytes_total();
+        let start = Instant::now();
+        stdin_tx.send(b"x".to_vec()).expect("send stdin byte");
+
+        let forward_deadline = Instant::now() + Duration::from_secs(1);
+        let mut after = before;
+        while Instant::now() < forward_deadline {
+            after = process.pty_input_bytes_total();
+            if after > before {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        let elapsed = start.elapsed();
+
+        // Tear down: flip the interrupt flag so the pump (and its reader
+        // + writer threads) unwind, then join before asserting so a
+        // failure doesn't leak the scoped thread.
+        interrupted.store(true, Ordering::SeqCst);
+        drop(stdin_tx);
+        let _ = pump.join().expect("pump thread panicked");
+
+        assert!(
+            after > before,
+            "stdin byte never reached pty_input_bytes_total within 1s while the output \
+             sink was stalled (before={before}, after={after}); forwarding may be blocked \
+             behind the writer thread"
+        );
+        assert!(
+            elapsed < MAX_FORWARD_LATENCY,
+            "stdin forwarding took {:?} while the output sink was stalled in a {:?} \
+             flush() — expected forwarding to be decoupled from the writer thread \
+             (issue #538), i.e. well under the sink's stall duration",
+            elapsed,
+            SINK_SLEEP
+        );
+    });
+
+    let _ = process.wait_impl(Some(2.0));
+    let _ = process.close_impl();
 }
