@@ -937,13 +937,25 @@ mod tests {
 
     #[test]
     fn sample_interval_medium_subtree_backs_off_to_5s() {
-        assert_eq!(sample_interval(26), Duration::from_secs(5), "26 crosses into 26-50");
-        assert_eq!(sample_interval(50), Duration::from_secs(5), "50 is the 26-50 boundary");
+        assert_eq!(
+            sample_interval(26),
+            Duration::from_secs(5),
+            "26 crosses into 26-50"
+        );
+        assert_eq!(
+            sample_interval(50),
+            Duration::from_secs(5),
+            "50 is the 26-50 boundary"
+        );
     }
 
     #[test]
     fn sample_interval_large_subtree_backs_off_to_10s() {
-        assert_eq!(sample_interval(51), Duration::from_secs(10), "51 crosses into >50");
+        assert_eq!(
+            sample_interval(51),
+            Duration::from_secs(10),
+            "51 crosses into >50"
+        );
         assert_eq!(sample_interval(500), Duration::from_secs(10));
     }
 
