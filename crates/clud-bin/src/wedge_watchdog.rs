@@ -237,6 +237,9 @@ impl WedgeWatchdogCfg {
         }
     }
 
+    /// Only called from the Windows watchdog loop; other platforms have no
+    /// sampler, so gate it to keep `-D dead_code` green on the CI matrix.
+    #[cfg(windows)]
     fn detector_cfg(&self) -> WedgeDetectorCfg {
         WedgeDetectorCfg {
             user_pct_threshold: self.user_pct_threshold,
