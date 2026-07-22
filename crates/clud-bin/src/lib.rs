@@ -75,5 +75,6 @@ pub mod uv_run_hook_guard;
 pub mod verbose_log;
 pub mod voice;
 pub mod wasm;
+pub mod wedge_watchdog;
 pub mod win_creation_flags;
 pub mod worktrees;
