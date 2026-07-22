@@ -19,7 +19,12 @@
 //!   sums `cpu_usage()` + `memory()` across the subtree rooted at
 //!   `originator_pid`. Uses the parent-PID graph (cheap), not the
 //!   env-tag scan (expensive); breakaway descendants escape this view
-//!   and are #340 territory.
+//!   and are #340 territory. Issue #540: most ticks do a *targeted*
+//!   sysinfo refresh of just the cached subtree pids instead of a
+//!   full-system refresh, and the tick cadence itself backs off
+//!   ([`sample_interval`]) as the subtree grows, so a large fan-out
+//!   (rustc/node swarms, several concurrent clud sessions) can't turn
+//!   the banner meant to report CPU burn into a measurable contributor.
 //! - [`BannerWatcher`] — background thread that joins the two on a
 //!   `tick` cadence and writes banners to stderr. Drop joins the
 //!   thread.
@@ -65,6 +70,55 @@ const ABSOLUTE_FLOOR_PCT: f32 = 50.0;
 
 /// Relative fraction of host capacity that triggers the banner.
 const RELATIVE_HOST_FRACTION: f32 = 0.20;
+
+/// Issue #540: how long a [`Sampler`]'s cached subtree pid list is reused
+/// before the next tick pays for a full-system walk to rediscover
+/// new/dead descendants. Deliberately slower than every `sample_interval`
+/// tier (2 s/5 s/10 s) — the expensive part of a tick is the full-system
+/// `refresh_processes_specifics(ProcessesToUpdate::All, ..)` enumeration,
+/// not the cheap DFS over the resulting parent-PID map, so backing off
+/// *that* is what bounds the cost. Between rebuilds, ticks use a targeted
+/// `ProcessesToUpdate::Some(&cached_pids)` refresh instead.
+const TREE_REBUILD_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Issue #540: subtree-size tiers below which a full-system rebuild+refresh
+/// every `DEFAULT_TICK` is cheap enough not to matter. Above them, the
+/// sampler backs off `sample_interval()` so a large fan-out (rustc/node
+/// swarms, several concurrent clud sessions) doesn't turn the banner
+/// itself into a measurable CPU cost.
+const SMALL_SUBTREE_MAX: usize = 25;
+const MEDIUM_SUBTREE_MAX: usize = 50;
+
+/// Pure function: adaptive tick cadence for [`BannerWatcher`]'s loop,
+/// keyed off the subtree size observed on the *previous* tick. `<= 25`
+/// procs uses the normal [`DEFAULT_TICK`] (2 s); `26..=50` backs off to
+/// 5 s; `> 50` backs off to 10 s. Banner accuracy/latency may lag by up
+/// to this interval while sustained/heartbeat state is unaffected — see
+/// [`CpuBannerState::poll`], which counts ticks, not wall-clock time.
+pub fn sample_interval(subtree_size: usize) -> Duration {
+    if subtree_size <= SMALL_SUBTREE_MAX {
+        DEFAULT_TICK
+    } else if subtree_size <= MEDIUM_SUBTREE_MAX {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(10)
+    }
+}
+
+/// Pure decision for whether [`Sampler::tick`] must pay for a full-system
+/// walk this tick (vs. reusing the cached subtree pid list for a targeted
+/// refresh). Rebuilds when the cache is empty (first tick), when there is
+/// no record of a prior walk, or when the prior walk is at least
+/// [`TREE_REBUILD_INTERVAL`] old.
+fn needs_tree_rebuild(cache_empty: bool, last_walk: Option<Instant>, now: Instant) -> bool {
+    if cache_empty {
+        return true;
+    }
+    match last_walk {
+        None => true,
+        Some(walked_at) => now.duration_since(walked_at) >= TREE_REBUILD_INTERVAL,
+    }
+}
 
 /// Caller-built configuration. `enabled = false` makes [`BannerWatcher::spawn`]
 /// a no-op and [`CpuBannerState::poll`] always return `None`.
@@ -313,13 +367,27 @@ impl CpuBannerState {
     }
 }
 
-/// Sysinfo-backed sampler. Owns one persistent `System` and refreshes
-/// CPU + memory per tick (the cheap shape per the parent #463 cost
-/// analysis). Subtree is the parent-PID-graph walk from `originator_pid`
-/// — well-behaved descendants, not breakaway children.
+/// Sysinfo-backed sampler. Owns one persistent `System`. Issue #540: most
+/// ticks now do a *targeted* `ProcessesToUpdate::Some(&cached_pids)`
+/// refresh of just the tracked subtree instead of a full-system refresh;
+/// the subtree pid list itself (which requires a full-system walk to
+/// discover new/dead descendants) is only rebuilt every
+/// [`TREE_REBUILD_INTERVAL`]. Subtree is the parent-PID-graph walk from
+/// `originator_pid` — well-behaved descendants, not breakaway children.
+///
+/// Staleness trade-offs (accepted per #540): descendants spawned after
+/// the last walk are invisible until the next rebuild, dead pids merely
+/// drop out of the sums, and a recycled pid could briefly count a foreign
+/// process — all bounded by `TREE_REBUILD_INTERVAL` and irrelevant to the
+/// banner's coarse thresholds.
 pub struct Sampler {
     system: System,
     started_at: Instant,
+    /// Subtree pid list from the last full-system walk. Reused for
+    /// targeted refreshes until [`needs_tree_rebuild`] says otherwise.
+    cached_pids: Vec<Pid>,
+    /// When `cached_pids` was last (re)built. `None` before the first tick.
+    last_tree_walk: Option<Instant>,
 }
 
 impl Sampler {
@@ -327,22 +395,47 @@ impl Sampler {
         Self {
             system: System::new(),
             started_at: Instant::now(),
+            cached_pids: Vec::new(),
+            last_tree_walk: None,
         }
     }
 
-    pub fn tick(&mut self, originator_pid: u32) -> Sample {
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_cpu().with_memory(),
-        );
+    /// Test-only hook: force the *next* `tick` to rebuild the subtree pid
+    /// list via a full-system refresh, regardless of
+    /// [`TREE_REBUILD_INTERVAL`]. Used by the #540 cost benchmark to
+    /// reproduce the pre-fix "full refresh every tick" baseline so it can
+    /// be measured against the new targeted-refresh behavior.
+    #[cfg(test)]
+    fn force_rebuild_next_tick(&mut self) {
+        self.last_tree_walk = None;
+    }
 
+    pub fn tick(&mut self, originator_pid: u32) -> Sample {
         let root = Pid::from_u32(originator_pid);
-        let pids = collect_subtree(&self.system, root);
+        let now = Instant::now();
+        let refresh_kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
+
+        if needs_tree_rebuild(self.cached_pids.is_empty(), self.last_tree_walk, now) {
+            // Full-system refresh: the only way to discover new/dead
+            // descendants and rebuild the parent-PID graph.
+            self.system
+                .refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+            self.cached_pids = collect_subtree(&self.system, root);
+            self.last_tree_walk = Some(now);
+        } else {
+            // Targeted refresh: only the cached subtree pids (#540) — the
+            // cost win over the old every-tick full refresh.
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&self.cached_pids),
+                true,
+                refresh_kind,
+            );
+        }
+
         let mut subtree_cpu_pct = 0.0_f32;
         let mut subtree_rss = 0_u64;
         let mut count = 0_usize;
-        for pid in &pids {
+        for pid in &self.cached_pids {
             if let Some(proc) = self.system.process(*pid) {
                 subtree_cpu_pct += proc.cpu_usage();
                 subtree_rss += proc.memory();
@@ -375,6 +468,14 @@ fn collect_subtree(system: &System, root: Pid) -> Vec<Pid> {
             children.entry(parent).or_default().push(*pid);
         }
     }
+    collect_subtree_from_children(&children, root)
+}
+
+/// DFS over a pre-built parent→children pid map starting at `root`.
+/// Includes `root` even if it has no entry in `children`. Split out from
+/// [`collect_subtree`] so the walk itself is unit-testable against a
+/// hand-built map, without a real `sysinfo::System` (#540).
+fn collect_subtree_from_children(children: &HashMap<Pid, Vec<Pid>>, root: Pid) -> Vec<Pid> {
     let mut stack = vec![root];
     let mut out = vec![root];
     while let Some(cur) = stack.pop() {
@@ -439,11 +540,18 @@ fn run_watcher_loop(cfg: CpuBannerCfg, stop_rx: mpsc::Receiver<()>) {
     // Prime: sysinfo needs two refreshes for non-zero cpu_usage. Do one
     // up-front so the first real tick has meaningful data.
     let _ = sampler.tick(cfg.originator_pid);
+    // Issue #540: adaptive cadence from here on — a large subtree backs
+    // off the tick interval so the sampler's own refresh cost stays
+    // bounded. `cfg.tick` (== DEFAULT_TICK) seeds the first real wait,
+    // which matches what `sample_interval` would return for a small
+    // subtree anyway.
+    let mut interval = cfg.tick;
     loop {
-        if stop_rx.recv_timeout(cfg.tick).is_ok() {
+        if stop_rx.recv_timeout(interval).is_ok() {
             return;
         }
         let sample = sampler.tick(cfg.originator_pid);
+        interval = sample_interval(sample.proc_count);
         if let Some(line) = state.poll(sample, &cfg) {
             eprintln!("{}", line.render());
         }
@@ -816,5 +924,162 @@ mod tests {
         let mut w = BannerWatcher::spawn(CpuBannerCfg::disabled());
         w.stop();
         // Drop is fine — should not panic / hang.
+    }
+
+    // -- Issue #540: adaptive sample interval + targeted-refresh pid list --
+
+    #[test]
+    fn sample_interval_small_subtree_uses_default_tick() {
+        assert_eq!(sample_interval(0), DEFAULT_TICK);
+        assert_eq!(sample_interval(1), DEFAULT_TICK);
+        assert_eq!(sample_interval(25), DEFAULT_TICK, "25 is the <=25 boundary");
+    }
+
+    #[test]
+    fn sample_interval_medium_subtree_backs_off_to_5s() {
+        assert_eq!(sample_interval(26), Duration::from_secs(5), "26 crosses into 26-50");
+        assert_eq!(sample_interval(50), Duration::from_secs(5), "50 is the 26-50 boundary");
+    }
+
+    #[test]
+    fn sample_interval_large_subtree_backs_off_to_10s() {
+        assert_eq!(sample_interval(51), Duration::from_secs(10), "51 crosses into >50");
+        assert_eq!(sample_interval(500), Duration::from_secs(10));
+    }
+
+    /// Pid-list building exercised against a hand-built (mocked) process
+    /// tree — no `sysinfo::System` involved. Verifies the DFS walk
+    /// includes root + all descendants and excludes unrelated subtrees.
+    #[test]
+    fn collect_subtree_from_children_walks_mocked_tree() {
+        let root = Pid::from_u32(1);
+        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+        // root(1) -> 2, 3 ; 2 -> 4 ; 4 -> 5 (deep chain)
+        children.insert(root, vec![Pid::from_u32(2), Pid::from_u32(3)]);
+        children.insert(Pid::from_u32(2), vec![Pid::from_u32(4)]);
+        children.insert(Pid::from_u32(4), vec![Pid::from_u32(5)]);
+        // Unrelated subtree rooted elsewhere must not leak in.
+        children.insert(Pid::from_u32(99), vec![Pid::from_u32(100)]);
+
+        let mut pids: Vec<u32> = collect_subtree_from_children(&children, root)
+            .into_iter()
+            .map(Pid::as_u32)
+            .collect();
+        pids.sort_unstable();
+        assert_eq!(pids, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn collect_subtree_from_children_root_with_no_children() {
+        let root = Pid::from_u32(42);
+        let children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+        let pids = collect_subtree_from_children(&children, root);
+        assert_eq!(pids, vec![root]);
+    }
+
+    /// Pure decision logic for the tree-rebuild cadence: empty cache or a
+    /// walk older than `TREE_REBUILD_INTERVAL` forces a rebuild; a recent
+    /// walk does not. Exercised without any real timing/sleep by doing
+    /// `Instant` arithmetic instead of `Instant::now()` deltas.
+    #[test]
+    fn needs_tree_rebuild_pure_decision() {
+        let t0 = Instant::now();
+        assert!(
+            needs_tree_rebuild(true, Some(t0), t0),
+            "empty cache always rebuilds"
+        );
+        assert!(
+            needs_tree_rebuild(false, None, t0),
+            "no prior walk always rebuilds"
+        );
+        let just_under = t0 + TREE_REBUILD_INTERVAL - Duration::from_millis(1);
+        assert!(
+            !needs_tree_rebuild(false, Some(t0), just_under),
+            "under the interval should reuse the cached list"
+        );
+        let at_or_over = t0 + TREE_REBUILD_INTERVAL;
+        assert!(
+            needs_tree_rebuild(false, Some(t0), at_or_over),
+            "at/over the interval should rebuild"
+        );
+    }
+
+    /// Issue #540 acceptance criterion: measured sampler cost for a 50+
+    /// process subtree. `#[ignore]`d — spawns real child processes and
+    /// takes >1 s; run manually via:
+    /// `soldr cargo test -p clud-bin --lib cpu_banner::tests::bench_sampler_cost_50_procs -- --ignored --nocapture`
+    ///
+    /// Compares the old-behavior full-refresh-every-tick cost against the
+    /// new targeted-refresh cost for the same subtree, so the delta (not
+    /// just the absolute number, which is host-dependent) documents the
+    /// fix. See the PR body for a captured run's numbers.
+    #[test]
+    #[ignore]
+    fn bench_sampler_cost_50_procs() {
+        use std::process::{Child, Command, Stdio};
+
+        const SPAWN_COUNT: usize = 55;
+        let mut children: Vec<Child> = Vec::new();
+        for _ in 0..SPAWN_COUNT {
+            // Windows: `ping -n 31 127.0.0.1` ≈ a 30 s sleep. Deliberately
+            // NOT `cmd /C timeout /T 30` — with Git-for-Windows on PATH,
+            // `timeout` can resolve to GNU coreutils' timeout, which
+            // rejects `/T` and exits instantly, collapsing the subtree
+            // this bench is supposed to measure.
+            let spawned = if cfg!(windows) {
+                Command::new("ping")
+                    .args(["-n", "31", "127.0.0.1"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            } else {
+                Command::new("sleep")
+                    .arg("30")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            };
+            if let Ok(c) = spawned {
+                children.push(c);
+            }
+        }
+        // Let the OS register the new process-table entries.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let self_pid = std::process::id();
+        let mut sampler = Sampler::new();
+        let primed = sampler.tick(self_pid);
+        println!("subtree size after spawn: {}", primed.proc_count);
+
+        const ITERS: u32 = 20;
+
+        // Old-behavior baseline: force a full rebuild every tick.
+        let full_start = Instant::now();
+        for _ in 0..ITERS {
+            sampler.force_rebuild_next_tick();
+            sampler.tick(self_pid);
+        }
+        let full_elapsed = full_start.elapsed();
+
+        // New behavior: within the rebuild window, ticks are targeted.
+        let targeted_start = Instant::now();
+        for _ in 0..ITERS {
+            sampler.tick(self_pid);
+        }
+        let targeted_elapsed = targeted_start.elapsed();
+
+        println!(
+            "full-refresh: {ITERS} ticks in {full_elapsed:?} ({:?}/tick)",
+            full_elapsed / ITERS
+        );
+        println!(
+            "targeted-refresh: {ITERS} ticks in {targeted_elapsed:?} ({:?}/tick)",
+            targeted_elapsed / ITERS
+        );
+
+        for c in &mut children {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
