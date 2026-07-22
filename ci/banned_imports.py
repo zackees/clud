@@ -97,6 +97,11 @@ def main() -> int:
     # assert on clud's captured interrupt reason. NativeProcess always
     # spawns under containment (a Windows Job Object), which is
     # irrelevant to what's under test and would only add noise.
+    #
+    # cpu_banner.rs is exempt (#540) — production code uses sysinfo (no
+    # subprocess spawning), but the #[cfg(test)] #[ignore]d sampler-cost
+    # bench deliberately uses std::process::Command to spawn a 55-process
+    # fixture subtree, mirroring the process_tree.rs exemption.
     exempt = {
         "trampoline.rs",
         "process_tree.rs",
@@ -104,6 +109,7 @@ def main() -> int:
         "clud_shim.rs",
         "ctrlc_signal_kinds.rs",
         "ctrlc_windows_events.rs",
+        "cpu_banner.rs",
     }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0
