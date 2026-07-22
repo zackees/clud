@@ -81,7 +81,10 @@ Console and terminal:
   attaches.
 - `session.rs` - raw-PTY pump (`run_raw_pty_pump`), resize handling, F3 voice
   observer hook, OSC-title stripper integration, dropped-path injection on the
-  PTY master.
+  PTY master. Since issue #538 the pump splits output onto a dedicated
+  reader thread + stdout-writer thread (`run_output_writer`) so a slow
+  terminal flush never delays stdin forwarding — see
+  `docs/architecture/session-lifecycle.md` and DD-018.
 
 Loop subsystem (`clud loop`):
 
