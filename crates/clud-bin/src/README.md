@@ -191,6 +191,19 @@ Diagnostics and misc:
   thread. Suppressed by `--no-cpu-banner`, `--dry-run`, `--detach`,
   `--detachable`, `--repeat`, and `[foreground.cpu_banner] enabled = false`
   in `~/.clud/settings.json`. Slice of #463 (`clud top`).
+- `wedge_watchdog.rs` - issue #541: detects a wedged backend TUI (one thread
+  pinned ≥ 90% of one core in user-mode with near-zero process IO-write bytes,
+  sustained for `DEFAULT_REQUIRED_STREAK` × `DEFAULT_TICK` ≈ 90 s). Pure
+  `WedgeDetector` state machine (`Healthy` / `Suspect{streak}` / `Wedged`) is
+  platform-free and exhaustively unit tested; the Windows-only sampler walks
+  the monitored pid's process subtree via `Toolhelp32` + `GetThreadTimes` +
+  `GetProcessIoCounters`. On `Wedged`, `WedgeWatchdog` (same
+  `Drop`-joins-thread shape as `BannerWatcher` above) prints one rate-limited
+  stderr warning naming the backend and a `codex resume`-style recovery
+  hint, and logs the measured signature via `verbose_log`. Wired into
+  `runner::run_plan_subprocess` and `runner::run_plan_pty`. No-op on
+  non-Windows. E2E probes against real spinning threads live in
+  `tests/wedge_watchdog_e2e.rs` (ignored; run manually).
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.

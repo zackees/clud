@@ -24,6 +24,7 @@ use crate::stream_json;
 use crate::subprocess;
 use crate::verbose_log;
 use crate::voice;
+use crate::wedge_watchdog;
 use crate::win_creation_flags;
 
 /// Merge two optional byte channels into one. Used by `run_plan_pty`
@@ -361,6 +362,13 @@ pub fn run_plan_subprocess(
         if verbose {
             verbose_log::log("[clud] subprocess: started");
         }
+        // Issue #541: wedge watchdog. Fresh per iteration (new pid each
+        // time); dropped at the end of this loop body, which joins its
+        // background thread promptly (see `WedgeWatchdog::stop`).
+        let _wedge_watchdog = wedge_watchdog::WedgeWatchdog::spawn_for_pid(
+            process.pid(),
+            plan.backend.executable_name(),
+        );
 
         // Issue #95: in stream-json mode we also accumulate the rendered
         // output so we can fall back to scanning for the
@@ -779,6 +787,12 @@ pub fn run_plan_pty(
         if verbose {
             verbose_log::log("[clud] pty: started");
         }
+        // Issue #541: wedge watchdog. See the matching comment in
+        // `run_plan_subprocess` — same per-iteration lifetime.
+        let _wedge_watchdog = wedge_watchdog::WedgeWatchdog::spawn_for_pid(
+            process.pid().ok().flatten(),
+            plan.backend.executable_name(),
+        );
 
         if let Some(header) = &header {
             write_terminal_bytes(&header.bytes);
