@@ -15,6 +15,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
+use super::conhost_reaper;
 use super::daemon_events;
 use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
@@ -164,6 +165,12 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // never blocks the accept loop. Sleeps in 1s slices so shutdown is
     // promptly observed.
     spawn_orphan_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
+
+    // Issue #539: bounded reaper for orphaned conhost.exe processes left
+    // behind by codex's tool-subprocess spawns (see
+    // `conhost_reaper.rs` for the orphan definition + safety invariants).
+    // No-op on non-Windows.
+    spawn_conhost_reap_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
 
     loop {
         match listener.accept() {
@@ -702,6 +709,65 @@ fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<A
             }
             run_orphan_sweep(&state_dir, "periodic", None);
         });
+}
+
+/// Issue #539: periodic sweep for orphaned `conhost.exe` processes (codex
+/// tool-subprocess accumulation). Mirrors [`spawn_orphan_sweeper`]'s
+/// shutdown-responsive sleep-in-1s-slices loop, but runs on
+/// [`conhost_reaper::SWEEP_INTERVAL`] (60s) since [`conhost_reaper::sweep_once`]
+/// is a cheap no-op off Windows and doesn't need the tighter 30s cadence.
+fn spawn_conhost_reap_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<AtomicBool>) {
+    if !cfg!(windows) {
+        // `conhost.exe` doesn't exist off Windows — skip spinning up a
+        // thread that would just sleep in a loop forever.
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("clud-conhost-reap".to_string())
+        .spawn(move || loop {
+            let mut remaining = conhost_reaper::SWEEP_INTERVAL;
+            while remaining > Duration::ZERO {
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    return;
+                }
+                let slice = remaining.min(Duration::from_secs(1));
+                thread::sleep(slice);
+                remaining = remaining.saturating_sub(slice);
+            }
+            if shutdown_requested.load(Ordering::SeqCst) {
+                return;
+            }
+            run_conhost_reap_sweep(&state_dir);
+        });
+}
+
+fn run_conhost_reap_sweep(state_dir: &Path) {
+    let started = Instant::now();
+    let report = conhost_reaper::sweep_once();
+    if report.scanned_conhosts == 0 && report.reaped.is_empty() {
+        // Nothing to say — skip the log write on the (common) empty tick.
+        return;
+    }
+    daemon_events::log_event(
+        state_dir,
+        "conhost_reap_finished",
+        [
+            ("scanned_conhosts", json!(report.scanned_conhosts)),
+            ("reaped_count", json!(report.reaped.len())),
+            (
+                "reaped",
+                json!(report
+                    .reaped
+                    .iter()
+                    .map(|(pid, dead_parent_pid)| json!({
+                        "pid": pid,
+                        "dead_parent_pid": dead_parent_pid,
+                    }))
+                    .collect::<Vec<_>>()),
+            ),
+            ("duration_ms", json!(started.elapsed().as_millis())),
+        ],
+    );
 }
 
 fn spawn_orphan_reap_once(
