@@ -357,3 +357,142 @@ fn paste_normalizer_two_pastes_back_to_back() {
     let out = p.process(b"\x1b[200~foo\x1b[201~bar\x1b[200~baz\x1b[201~");
     assert_eq!(out, b"\x1b[200~foo\x1b[201~bar\x1b[200~baz\x1b[201~");
 }
+
+// ─── run_output_writer — dedicated writer-thread coalescing (issue #538) ──
+//
+// The pump used to do one `write_all` + one `flush` per chunk, inline in
+// the same loop turn that forwarded stdin, so a slow terminal `flush()`
+// delayed keystroke delivery and a chatty child multiplied syscalls. Now a
+// dedicated writer thread (`run_output_writer`) drains everything already
+// queued before issuing a single write+flush per wakeup. These tests
+// exercise that helper directly — no PTY needed — so the O(1)-flush
+// property is verified deterministically rather than depending on OS PTY
+// buffering timing.
+
+use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
+
+/// A `Write` sink that counts `write()` and `flush()` calls and records
+/// every byte it was handed, so tests can assert both "how many syscalls"
+/// and "what bytes, in what order".
+#[derive(Clone, Default)]
+struct CountingSink {
+    write_calls: std::sync::Arc<AtomicUsize>,
+    flush_calls: std::sync::Arc<AtomicUsize>,
+    received: std::sync::Arc<Mutex<Vec<u8>>>,
+}
+
+impl io::Write for CountingSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        self.received.lock().expect("lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Acceptance criterion: "a burst of N small output chunks results in
+/// O(1) flushes, not N." Sending the whole burst BEFORE the writer
+/// thread's first `recv()` call (then closing the channel) guarantees
+/// every chunk is already queued when the writer wakes, so this
+/// deterministically forces one coalesced batch instead of racing the
+/// writer thread's wakeup against the sends.
+#[test]
+fn output_writer_coalesces_a_burst_into_one_write_and_one_flush() {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let sink = CountingSink::default();
+
+    let n = 200;
+    let mut expected = Vec::new();
+    for i in 0..n {
+        let byte = b'a' + (i % 26) as u8;
+        tx.send(vec![byte]).expect("send");
+        expected.push(byte);
+    }
+    // Closing the channel lets `run_output_writer`'s loop terminate once
+    // it has drained everything already queued.
+    drop(tx);
+
+    let sink_for_writer = sink.clone();
+    let handle = std::thread::spawn(move || run_output_writer(rx, sink_for_writer));
+    handle.join().expect("writer thread panicked");
+
+    assert_eq!(
+        sink.write_calls.load(Ordering::SeqCst),
+        1,
+        "expected exactly one write() for a fully-queued burst of {n} chunks"
+    );
+    assert_eq!(
+        sink.flush_calls.load(Ordering::SeqCst),
+        1,
+        "expected exactly one flush() for a fully-queued burst of {n} chunks"
+    );
+    assert_eq!(
+        *sink.received.lock().expect("lock"),
+        expected,
+        "coalesced bytes must be concatenated in send order, byte-accurate"
+    );
+}
+
+/// A single chunk still results in exactly one write+flush (no
+/// off-by-one from the coalescing loop).
+#[test]
+fn output_writer_single_chunk_is_one_write_and_one_flush() {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let sink = CountingSink::default();
+    tx.send(b"hello".to_vec()).expect("send");
+    drop(tx);
+
+    let sink_for_writer = sink.clone();
+    let handle = std::thread::spawn(move || run_output_writer(rx, sink_for_writer));
+    handle.join().expect("writer thread panicked");
+
+    assert_eq!(sink.write_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.flush_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*sink.received.lock().expect("lock"), b"hello");
+}
+
+/// Empty chunks must not trigger a write/flush at all (mirrors the old
+/// `if !filtered.is_empty()` guard this replaces).
+#[test]
+fn output_writer_skips_write_for_all_empty_chunks() {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let sink = CountingSink::default();
+    tx.send(Vec::new()).expect("send");
+    tx.send(Vec::new()).expect("send");
+    drop(tx);
+
+    let sink_for_writer = sink.clone();
+    let handle = std::thread::spawn(move || run_output_writer(rx, sink_for_writer));
+    handle.join().expect("writer thread panicked");
+
+    assert_eq!(sink.write_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(sink.flush_calls.load(Ordering::SeqCst), 0);
+}
+
+/// A slow sink must not stop the writer from eventually draining and
+/// exiting cleanly once the channel closes — i.e. "flush remaining
+/// chunks first" on shutdown, exercised without a live PTY.
+#[test]
+fn output_writer_flushes_remaining_chunks_before_exiting() {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let sink = CountingSink::default();
+    tx.send(b"first".to_vec()).expect("send");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    tx.send(b"second".to_vec()).expect("send");
+    drop(tx);
+
+    let sink_for_writer = sink.clone();
+    let handle = std::thread::spawn(move || run_output_writer(rx, sink_for_writer));
+    handle.join().expect("writer thread panicked");
+
+    assert_eq!(
+        *sink.received.lock().expect("lock"),
+        b"firstsecond",
+        "both chunks must land, in order, before the writer thread exits"
+    );
+}

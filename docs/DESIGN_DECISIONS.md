@@ -594,3 +594,20 @@ Pipeline relationships live in a sibling `bad_pipelines` array. Stages are order
 ```
 
 Both arrays concatenate across user and repo settings and dedupe by `id` with the repo definition winning. Pipeline rules share the existing per-rule override behavior. Matching embedded programs (`python -c`, encoded `eval`, generated scripts), variable indirection, and deliberate evasion remain out of scope: these rules are cooperative guardrails, not a security sandbox.
+
+## DD-018: PTY pump uses a dedicated stdout-writer thread fed by an unbounded channel, not a smaller output-read timeout
+
+**Context:** zackees/clud#538. `run_raw_pty_pump_full_verbose`'s single loop did `read_chunk_impl → OSC-strip → write_all → flush()` to the real terminal *before* draining stdin each turn. Under high CPU load (the reported symptom, `clud --codex`), a slow terminal `flush()` blocked the same loop turn that would otherwise forward the next keystroke, and the loop's cadence was floored at the output read's 10 ms timeout regardless. Shrinking the timeout alone doesn't fix it — the write+flush is still inline ahead of stdin, so a genuinely slow terminal still stalls forwarding for however long `flush()` takes, timeout notwithstanding.
+
+**Decision:** Split output handling onto two dedicated threads, opened via `std::thread::scope` (`process: &NativePtyProcess` is a borrow, not an owned `Arc`, and its fields are already internally `Mutex`/`Atomic`-guarded for concurrent access — see the existing `daemon/worker.rs` reader+writer pair):
+
+- A **reader thread** calls `read_chunk_impl`, OSC-strips, and coalesces anything else already queued via non-blocking `read_chunk_impl(Some(0.0))` before sending once over an **unbounded** `mpsc` channel. Unbounded is load-bearing: `send` must never block, or a stalled writer would eventually stall the reader (and transitively the shutdown-detection path) exactly like the bug being fixed — just one hop removed instead of zero. The tradeoff is an unbounded memory backlog if the sink stalls indefinitely; acceptable because PTY output is bounded by what the child actually writes, and the writer thread only stalls on genuinely slow real terminals, not indefinitely.
+- A **writer thread** (`run_output_writer`) blocks on the channel, drains everything else pending with `try_recv()`, and issues exactly one `write_all` + one `flush()` per wakeup — turning a burst of N chunks into O(1) syscalls instead of N unbuffered writes.
+- The **main thread** never touches output. It blocks on `stdin_rx.recv_timeout(STDIN_IDLE_POLL)` (5 ms) instead of the old output-read timeout; `recv_timeout` wakes immediately once a chunk is sent, so the 5 ms bound only governs idle re-polling of resize/hooks/exit, not keystroke latency.
+
+The destination writer is a generic parameter (`W: Write + Send`) rather than hardcoded `io::stdout()`, via a `#[doc(hidden)]` `..._for_test` seam — tests inject a slow or counting sink to verify the decoupling and the O(1)-flush property without needing to control real terminal I/O timing.
+
+**Alternatives rejected:**
+- *Just lower the 10 ms timeout.* Doesn't address the root cause (write+flush is still inline and blocking); only shrinks the idle floor, not the stall-while-flushing floor.
+- *Bounded channel with a small capacity.* Reintroduces the coupling this fix removes — once the bound fills, `send` blocks and the reader (and eventually shutdown detection) stalls behind the same slow writer.
+- *`Arc<NativePtyProcess>` + `thread::spawn` instead of `thread::scope`.* Would work, but `NativePtyProcess` is already passed around by borrow throughout `session.rs`, and every existing pump variant/test takes `&NativePtyProcess`; `thread::scope` gets the same concurrent-thread guarantee without changing that signature or adding reference counting.
