@@ -1197,7 +1197,10 @@ mod tests {
             .iter()
             .map(|event| event["op"].as_str().unwrap())
             .collect();
-        assert_eq!(ops, ["gc_started", "gc_finished", "gc_started", "gc_finished"]);
+        assert_eq!(
+            ops,
+            ["gc_started", "gc_finished", "gc_started", "gc_finished"]
+        );
     }
 
     fn read_daemon_events(state_dir: &Path) -> Vec<serde_json::Value> {

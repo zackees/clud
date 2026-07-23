@@ -86,7 +86,10 @@ fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
             file: OpenOptions::new().create(true).append(true).open(path)?,
         });
     }
-    let file = &mut writer.as_mut().expect("cached event writer just opened").file;
+    let file = &mut writer
+        .as_mut()
+        .expect("cached event writer just opened")
+        .file;
     file.write_all(&buf)?;
     file.flush()
 }
