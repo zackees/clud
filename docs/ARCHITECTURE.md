@@ -20,6 +20,8 @@ re-explaining.
 
 ## Quick Reference
 
+- **"How do I measure idle daemon and client cost?"** -> [idle CPU benchmark](../bench/idle_cpu/README.md)
+
 - **"How does `clud loop` decide when to stop?"** -> [loop-subsystem.md](architecture/loop-subsystem.md)
 - **"How do `attach` / `list` / `kill` talk to the daemon?"** -> [daemon-ipc.md](architecture/daemon-ipc.md)
 - **"What happens between Ctrl-D and process exit in a PTY session?"** -> [session-lifecycle.md](architecture/session-lifecycle.md)
