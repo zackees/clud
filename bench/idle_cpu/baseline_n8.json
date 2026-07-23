@@ -1,0 +1,132 @@
+{
+  "head": "4716eac59c1cdb8984780d810547408f52fddbe5",
+  "per_process": [
+    {
+      "cpu_seconds": 9.765625,
+      "ctx_switches": 312627,
+      "missing_at_end": false,
+      "pid": 2500,
+      "role": "daemon"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 33092,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 8.34375,
+      "ctx_switches": 31819,
+      "missing_at_end": false,
+      "pid": 34700,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 43524,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 7.90625,
+      "ctx_switches": 34855,
+      "missing_at_end": false,
+      "pid": 44600,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 40480,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 8.21875,
+      "ctx_switches": 33109,
+      "missing_at_end": false,
+      "pid": 14980,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 47680,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 8.15625,
+      "ctx_switches": 31845,
+      "missing_at_end": false,
+      "pid": 48836,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 29200,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 7.875,
+      "ctx_switches": 33646,
+      "missing_at_end": false,
+      "pid": 47980,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 19328,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 8.421875,
+      "ctx_switches": 32612,
+      "missing_at_end": false,
+      "pid": 23440,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 41476,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 8.046875,
+      "ctx_switches": 33425,
+      "missing_at_end": false,
+      "pid": 27804,
+      "role": "client-worker"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 36172,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 8.296875,
+      "ctx_switches": 31384,
+      "missing_at_end": false,
+      "pid": 33888,
+      "role": "client-worker"
+    }
+  ],
+  "sessions": 8,
+  "timestamp": "2026-07-23T00:16:13.020850+00:00",
+  "totals": {
+    "client_cpu_seconds": 65.265625,
+    "daemon_cpu_seconds": 9.765625,
+    "event_lines_appended": 5
+  },
+  "window_secs": 60.0
+}

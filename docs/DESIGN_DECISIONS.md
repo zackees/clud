@@ -611,3 +611,29 @@ The destination writer is a generic parameter (`W: Write + Send`) rather than ha
 - *Just lower the 10 ms timeout.* Doesn't address the root cause (write+flush is still inline and blocking); only shrinks the idle floor, not the stall-while-flushing floor.
 - *Bounded channel with a small capacity.* Reintroduces the coupling this fix removes — once the bound fills, `send` blocks and the reader (and eventually shutdown detection) stalls behind the same slow writer.
 - *`Arc<NativePtyProcess>` + `thread::spawn` instead of `thread::scope`.* Would work, but `NativePtyProcess` is already passed around by borrow throughout `session.rs`, and every existing pump variant/test takes `&NativePtyProcess`; `thread::scope` gets the same concurrent-thread guarantee without changing that signature or adding reference counting.
+
+---
+
+## DD-019: Idle CPU measurements are standalone, machine-local baselines with opt-in budgets
+
+**Context:** Idle-cost fixes in #542 need a repeatable end-to-end signal for
+both client sessions and the detached daemon. A normal pytest case cannot own
+that role: its global 90-second timeout is shorter than a representative
+60-second sample plus setup and teardown, and absolute CPU measurements on
+shared CI runners are noisy.
+
+**Decision:** Keep the harness in `bench/idle_cpu` as `python -m
+bench.idle_cpu.harness`. It uses the integration suite's mock-agent pattern to
+start a fresh daemon and detached non-PTY sessions, samples cumulative
+per-process CPU time through `psutil`, and counts appended daemon-event lines.
+The report is JSON; its pure assembly and budget comparison live in
+`report.py` and are covered by ordinary fast pytest tests. Committed N=1 and
+N=8 reports are local reference baselines. Budget enforcement is explicitly
+opt-in through `--budget` or `CLUD_BENCH_BUDGET=1`, allowing 20% CPU variation
+and one event line.
+
+**Consequences:** The harness is suitable for a quiet developer machine or a
+scheduled dedicated runner, never default CI. Baselines must be refreshed only
+with a documented, intentional idle-cost change. Once #543 and #544 remove the
+current no-op GC event stream, its zero/near-zero event budget becomes a direct
+regression guard for that churn.

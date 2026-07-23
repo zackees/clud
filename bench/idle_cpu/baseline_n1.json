@@ -1,0 +1,34 @@
+{
+  "head": "4716eac59c1cdb8984780d810547408f52fddbe5",
+  "per_process": [
+    {
+      "cpu_seconds": 5.0625,
+      "ctx_switches": 298020,
+      "missing_at_end": false,
+      "pid": 34800,
+      "role": "daemon"
+    },
+    {
+      "cpu_seconds": 0,
+      "ctx_switches": 0,
+      "missing_at_end": false,
+      "pid": 39440,
+      "role": "client-root"
+    },
+    {
+      "cpu_seconds": 7.96875,
+      "ctx_switches": 41304,
+      "missing_at_end": false,
+      "pid": 28028,
+      "role": "client-worker"
+    }
+  ],
+  "sessions": 1,
+  "timestamp": "2026-07-23T00:14:50.853015+00:00",
+  "totals": {
+    "client_cpu_seconds": 7.96875,
+    "daemon_cpu_seconds": 5.0625,
+    "event_lines_appended": 5
+  },
+  "window_secs": 60.0
+}

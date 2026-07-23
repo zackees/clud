@@ -52,6 +52,12 @@ tests/                     # Python tests (unit + integration)
 
 ### How to navigate
 
+#### Performance benchmarks
+
+Standalone, opt-in performance harnesses live in [`bench/README.md`](bench/README.md).
+They are not pytest tests; use the idle CPU runbook there when validating an
+end-to-end daemon/client performance change.
+
 - **Where is X implemented?** Start at [`crates/clud-bin/src/README.md`](crates/clud-bin/src/README.md). It groups every top-level `.rs` file by concern and includes a "Quick lookup — which file owns a given subcommand" table.
 - **What's in this directory?** Each directory's `README.md` lists its files, key public items with `file:line` refs, and who calls into it.
 - **How does a subsystem work end-to-end?** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — topic docs that span multiple directories (loop, daemon IPC, session lifecycle, skill system, gc/registry, Windows quirks, launch plan).
