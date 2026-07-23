@@ -95,9 +95,9 @@ struct TrackedRow {
 /// One entry from the `tracked_entries` table.
 ///
 /// **NOTE on `last_seen_unix`**: that field used to live here and on the
-/// SQLite schema, but `WorktreeScanner` was upserting it every ~2s with
-/// no consumer (purge filters on `created_unix`). It was removed when the
-/// scanner switched from upsert to insert-on-first-detection.
+/// SQLite schema, but legacy polling scanners upserted it every ~2s with no
+/// consumer (purge filters on `created_unix`). It was removed when discovery
+/// switched to insert-on-first-detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackedEntry {
     pub id: i64,
@@ -259,8 +259,8 @@ impl Registry {
     /// Insert a new entry keyed by `(kind, path)`. **No-op if a row with
     /// the same `(kind, path)` already exists** — the existing row is
     /// left exactly as-is (no field updates, no write). This is the
-    /// scanner-friendly contract: `WorktreeScanner` calls this every
-    /// cycle, and we want to avoid ~0.5 writes/sec of pure churn.
+    /// watcher-friendly contract: repeated reconciliation passes must avoid
+    /// pure write churn.
     /// Returns `true` when a row was inserted and `false` when it already
     /// existed, so callers can avoid recording no-op mutations.
     pub fn insert_if_new(&self, input: &InsertInput) -> Result<bool, GcError> {

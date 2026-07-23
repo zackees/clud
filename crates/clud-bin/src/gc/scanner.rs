@@ -1,146 +1,40 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::Duration;
+//! Legacy scanner-root derivation retained after #546 removes client polling.
+//!
+//! Foreground clients now compute these three roots once and register them with
+//! the daemon; they do not own a thread, a per-client `seen` cache, or a poll
+//! loop.
 
-use super::reconcile::{best_effort_branch, path_matches_repo_root, ScanKind};
-use super::registry::now_unix;
-use super::InsertInput;
+use std::path::Path;
+
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::path::PathBuf;
+
+use crate::daemon::GcWatchRoot;
 use crate::worktrees;
 
-// ---------- background scanner thread ----------
+#[cfg(test)]
+use super::reconcile::{path_matches_repo_root, ScanKind};
+#[cfg(test)]
+use super::registry::now_unix;
+use super::{EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND};
+#[cfg(test)]
+use super::InsertInput;
 
-/// Polling scanner that watches a `.claude/worktrees/` directory and
-/// inserts new agent-* subdirs into the registry as they appear.
-/// Cancels cooperatively via `Arc<AtomicBool>`.
-///
-/// Issue #135 Phase 1: the scanner now sends `gc.insert` IPC ops to the
-/// daemon instead of opening redb directly. If the daemon is unreachable
-/// the scanner logs once at debug level and stops trying for the rest of
-/// the session. Phase 2 moves this entire scanner into the daemon
-/// process; for now the scanner thread still lives in the clud-bin
-/// process.
-pub struct WorktreeScanner {
-    cancel: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl WorktreeScanner {
-    /// Spawn a scanner watching the *current* repo's `.claude/worktrees/`.
-    /// Returns `None` if the repo root can't be located — the caller logs
-    /// and continues.
-    pub fn maybe_spawn() -> Option<Self> {
-        let main_root = match worktrees::locate_main_repo_root() {
-            Ok(p) => p,
-            Err(_) => {
-                // Not inside a git repo (e.g. running `clud` from /tmp).
-                // No worktrees to scan — skip spawning.
-                return None;
-            }
-        };
-        let watch_dir = main_root.join(".claude").join("worktrees");
-        Some(Self::spawn_with_kind(
-            watch_dir,
-            Some(main_root),
-            ScanKind::Worktree,
-        ))
-    }
-
-    /// Spawn a scanner watching the current repo's `.extern-repos/`.
-    /// Returns `None` if the repo root can't be located.
-    pub fn maybe_spawn_extern_repos() -> Option<Self> {
-        let main_root = match worktrees::locate_main_repo_root() {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-        let watch_dir = main_root.join(".extern-repos");
-        Some(Self::spawn_with_kind(
-            watch_dir,
-            Some(main_root),
-            ScanKind::ExternRepo,
-        ))
-    }
-
-    /// Spawn a scanner watching top-level sibling temp clones next to the
-    /// current repo. Returns `None` if the repo root can't be located or
-    /// has no parent directory.
-    pub fn maybe_spawn_sibling_clones() -> Option<Self> {
-        let main_root = match worktrees::locate_main_repo_root() {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-        let parent = main_root.parent()?.to_path_buf();
-        Some(Self::spawn_with_kind(
-            parent,
-            Some(main_root),
-            ScanKind::SiblingClone,
-        ))
-    }
-
-    /// Explicit spawn. Tests pass a custom watch dir. Inserts go through
-    /// the GC daemon IPC; if the daemon is unreachable the scanner gives
-    /// up silently.
-    pub fn spawn(watch_dir: PathBuf, repo_root: Option<PathBuf>) -> Self {
-        Self::spawn_with_kind(watch_dir, repo_root, ScanKind::Worktree)
-    }
-
-    fn spawn_with_kind(
-        watch_dir: PathBuf,
-        repo_root: Option<PathBuf>,
-        scan_kind: ScanKind,
-    ) -> Self {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_t = cancel.clone();
-        let thread_name = format!("clud-gc-scanner-{}", scan_kind.kind());
-        let handle = std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || run_scanner_loop(watch_dir, repo_root, scan_kind, cancel_t))
-            .expect("spawn scanner thread");
-        Self {
-            cancel,
-            handle: Some(handle),
-        }
-    }
-
-    /// Signal cancellation **without** waiting for the worker thread.
-    ///
-    /// Issue #285 rec 3: callers that hold several scanners (the main
-    /// launch path holds three) can call `signal_cancel` on all of them
-    /// first, then drop each guard, so the joins overlap rather than
-    /// serializing 3 × poll-interval of latency into the Ctrl-C exit
-    /// path. Safe to call from `&self` because the only state mutated
-    /// is the cancel `AtomicBool`.
-    pub fn signal_cancel(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
-    }
-
-    /// Signal cancellation and wait for the worker thread to exit.
-    pub fn cancel(&mut self) {
-        self.cancel.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for WorktreeScanner {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
-/// Walk `watch_dir` once, sending `gc.insert` IPC ops for each matching
-/// immediate subdir. Returns `Err` on the first IPC failure so the caller
-/// can stop retrying.
+/// Injectable effects for the former client scanner's pure discovery seam.
+/// The daemon watcher uses the production reconciliation path; these remain
+/// so its discovery invariants keep unit coverage without a background thread.
+#[cfg(test)]
 pub(in crate::gc) struct ScanDeps<'a> {
     pub(in crate::gc) insert: &'a mut dyn FnMut(&InsertInput) -> Result<(), String>,
     pub(in crate::gc) branch_of: &'a dyn Fn(&Path) -> Option<String>,
 }
 
-/// Scan one directory with injectable side effects so tests can prove known
-/// paths avoid both branch lookups and IPC.
+/// Scan one immediate directory level and insert matching paths once. This is
+/// deliberately synchronous and side-effect-injected; it is test support, not
+/// a client-owned polling loop.
+#[cfg(test)]
 pub(in crate::gc) fn scan_once_with(
     watch_dir: &Path,
     repo_root: Option<&Path>,
@@ -149,45 +43,34 @@ pub(in crate::gc) fn scan_once_with(
     deps: &mut ScanDeps<'_>,
 ) -> Result<(), String> {
     let entries = match std::fs::read_dir(watch_dir) {
-        Ok(it) => it,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("read_dir({:?}): {e}", watch_dir)),
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("read_dir({watch_dir:?}): {err}")),
     };
     for entry in entries.flatten() {
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if !ft.is_dir() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         let name = entry.file_name();
-        let name_str = match name.to_str() {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        if !scan_kind.accepts_dir_name(&name_str, repo_root) {
+        let Some(name) = name.to_str() else { continue };
+        if !scan_kind.accepts_dir_name(name, repo_root) {
             continue;
         }
         let path = entry.path();
         if matches!(scan_kind, ScanKind::SiblingClone)
-            && repo_root
-                .map(|root| path_matches_repo_root(&path, root))
-                .unwrap_or(false)
+            && repo_root.is_some_and(|root| path_matches_repo_root(&path, root))
         {
             continue;
         }
         if seen.contains(&path) {
             continue;
         }
-        let path_str = path.to_string_lossy().to_string();
-        let branch = (deps.branch_of)(&path);
         let input = InsertInput {
             kind: scan_kind.kind().to_string(),
-            path: path_str,
-            repo_root: repo_root.map(|p| p.to_string_lossy().to_string()),
-            branch,
-            agent_id: scan_kind.agent_id(&name_str),
+            path: path.to_string_lossy().to_string(),
+            repo_root: repo_root.map(|root| root.to_string_lossy().to_string()),
+            branch: (deps.branch_of)(&path),
+            agent_id: scan_kind.agent_id(name),
             now_unix: now_unix(),
         };
         (deps.insert)(&input)?;
@@ -196,53 +79,51 @@ pub(in crate::gc) fn scan_once_with(
     Ok(())
 }
 
-fn scan_once_via_ipc(
-    watch_dir: &Path,
-    repo_root: Option<&Path>,
-    scan_kind: ScanKind,
-    seen: &mut HashSet<PathBuf>,
-) -> Result<(), String> {
-    let mut insert = |input: &InsertInput| {
-        let state_dir = crate::daemon::default_state_dir().map_err(|e| e.to_string())?;
-        crate::daemon::gc_client_insert(&state_dir, input).map_err(|e| e.to_string())
+pub fn watch_roots_for_current_repo() -> Vec<GcWatchRoot> {
+    let Ok(root) = worktrees::locate_main_repo_root() else {
+        return Vec::new();
     };
-    let branch_of = |path: &Path| best_effort_branch(path);
-    let mut deps = ScanDeps {
-        insert: &mut insert,
-        branch_of: &branch_of,
-    };
-    scan_once_with(watch_dir, repo_root, scan_kind, seen, &mut deps)
+    watch_roots_for_repo(&root)
 }
 
-fn run_scanner_loop(
-    watch_dir: PathBuf,
-    repo_root: Option<PathBuf>,
-    scan_kind: ScanKind,
-    cancel: Arc<AtomicBool>,
-) {
-    let repo_root_ref = repo_root.as_deref();
-    let mut ipc_failed = false;
-    let mut seen = HashSet::new();
-    while !cancel.load(Ordering::SeqCst) {
-        if !ipc_failed {
-            if let Err(e) = scan_once_via_ipc(&watch_dir, repo_root_ref, scan_kind, &mut seen) {
-                // Best-effort: log once, then stop trying.
-                if std::env::var_os("CLUD_GC_SCANNER_VERBOSE").is_some() {
-                    eprintln!("[clud] debug: gc scanner: daemon ipc failed: {e}");
-                }
-                ipc_failed = true;
-            }
-        }
-        // Interruptible sleep: 80 × 25ms = ~2s outer cycle, but
-        // cancellable within ~25ms. Issue #285 rec 3 dropped this from
-        // 100ms granularity so the Ctrl-C teardown's scanner joins
-        // don't add up to several hundred ms of dead time before the
-        // shell returns.
-        for _ in 0..80 {
-            if cancel.load(Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+pub(crate) fn watch_roots_for_repo(root: &Path) -> Vec<GcWatchRoot> {
+    let repo_root = root.to_string_lossy().to_string();
+    let mut roots = vec![
+        GcWatchRoot {
+            kind: WORKTREE_KIND.to_string(),
+            watch_dir: root.join(".claude").join("worktrees").to_string_lossy().to_string(),
+            repo_root: Some(repo_root.clone()),
+        },
+        GcWatchRoot {
+            kind: EXTERN_REPO_KIND.to_string(),
+            watch_dir: root.join(".extern-repos").to_string_lossy().to_string(),
+            repo_root: Some(repo_root.clone()),
+        },
+    ];
+    if let Some(parent) = root.parent() {
+        roots.push(GcWatchRoot {
+            kind: SIBLING_CLONE_KIND.to_string(),
+            watch_dir: parent.to_string_lossy().to_string(),
+            repo_root: Some(repo_root),
+        });
+    }
+    roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_roots_derivation_matches_legacy_scanner_roots() {
+        let root = std::path::Path::new("C:/repo");
+        let roots = watch_roots_for_repo(root);
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots[0].kind, WORKTREE_KIND);
+        assert_eq!(std::path::Path::new(&roots[0].watch_dir), root.join(".claude/worktrees"));
+        assert_eq!(roots[1].kind, EXTERN_REPO_KIND);
+        assert_eq!(std::path::Path::new(&roots[1].watch_dir), root.join(".extern-repos"));
+        assert_eq!(roots[2].kind, SIBLING_CLONE_KIND);
+        assert_eq!(roots[2].watch_dir, "C:");
     }
 }

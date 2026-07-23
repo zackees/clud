@@ -591,19 +591,16 @@ fn main() {
     }
     let _session_guard = startup::enforce_session_cap();
 
-    // Issue #110/#181/#178: spawn background GC scanners. They poll the
-    // current repo's `.claude/worktrees/`, `.extern-repos/`, and sibling
-    // temp-clone directories every ~2s and insert newly-detected tracked
-    // entries.
-    // Existing rows are left alone — the scanner is insert-only, no
-    // write churn. `Drop` joins the worker thread; explicit `drop` below
-    // sequences cancellation before the session-registry guard.
+    // Issues #545/#546: register conventional discovery roots with the
+    // long-lived daemon. This is one best-effort IPC exchange; the daemon
+    // deduplicates roots across foreground clients and owns all watching.
     if args.verbose {
-        verbose_log::log("[clud] worktree scanner: starting");
+        verbose_log::log("[clud] gc watch roots: registering with daemon");
     }
-    let _scanner_guard = gc::WorktreeScanner::maybe_spawn();
-    let _extern_repo_scanner_guard = gc::WorktreeScanner::maybe_spawn_extern_repos();
-    let _sibling_clone_scanner_guard = gc::WorktreeScanner::maybe_spawn_sibling_clones();
+    let roots = gc::watch_roots_for_current_repo();
+    if let Ok(state_dir) = daemon::default_state_dir() {
+        let _ = daemon::try_register_gc_watch(&state_dir, &roots);
+    }
 
     // Clear stale DONE/BLOCKED markers from a prior run so that loops don't
     // short-circuit on iteration 1. See loop_spec for semantics.
@@ -697,23 +694,6 @@ fn main() {
         let (summary, err) = runner::summarize_loop_outcome(exit_code);
         session.on_loop_end(summary, err);
     }
-    // Issue #285 rec 3: signal cancellation on all three scanner guards
-    // *before* dropping any of them so the three worker threads wake up
-    // concurrently. The subsequent `drop` calls then join in parallel
-    // rather than serializing 3 × scanner-poll-interval of dead time
-    // into the Ctrl-C exit path.
-    if let Some(g) = _sibling_clone_scanner_guard.as_ref() {
-        g.signal_cancel();
-    }
-    if let Some(g) = _extern_repo_scanner_guard.as_ref() {
-        g.signal_cancel();
-    }
-    if let Some(g) = _scanner_guard.as_ref() {
-        g.signal_cancel();
-    }
-    drop(_sibling_clone_scanner_guard);
-    drop(_extern_repo_scanner_guard);
-    drop(_scanner_guard);
     drop(_session_guard);
     drop(_dnd_subprocess_guard);
     // Issue #340: detect env-tagged orphans we are about to leave behind and

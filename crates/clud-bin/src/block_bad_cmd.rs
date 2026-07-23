@@ -125,7 +125,7 @@ pub enum Decision {
 /// A `git clone` / `git worktree add` destination detected while scanning
 /// a command (zackees/clud#532), captured so `cmd-scan` can eagerly hand
 /// the path off to the clud daemon's GC registry instead of waiting for
-/// `WorktreeScanner`'s passive poll to discover it. Detection is pure
+/// the daemon-owned watcher fallback to discover it. Detection is pure
 /// string/path parsing over the already-tokenized command words — no git
 /// subprocess or daemon IPC happens here, which is what makes it cheap to
 /// unit test.
@@ -255,8 +255,8 @@ pub fn run() -> i32 {
 
     // zackees/clud#532: the command is actually going to run, so any git
     // clone / worktree-add destination it detected gets handed to the
-    // daemon's GC registry now instead of waiting for the passive
-    // `WorktreeScanner` poll to notice it on disk. Best-effort: a daemon
+    // daemon's GC registry now instead of waiting for its shared watcher
+    // fallback to notice it on disk. Best-effort: a daemon
     // that isn't up yet must never block the tool call itself.
     for capture in &evaluation.git_path_captures {
         report_git_path_capture_to_daemon(capture, repo_root.as_deref());
@@ -948,8 +948,8 @@ fn deny_message(reason: &str, replacement: &str, id: Option<&str>, allow_overrid
 /// destination positional, but does not attempt to model every git flag
 /// (e.g. a leading global `git -C <dir> clone ...`). Unrecognized shapes
 /// simply return `None` — a missed capture just means that one call isn't
-/// eagerly tracked (the passive `WorktreeScanner` poll is still a
-/// fallback for anything landing under the conventional directories), it
+/// eagerly tracked (the daemon-owned watcher is still a fallback for anything
+/// landing under the conventional directories), it
 /// never blocks or misreports a command.
 fn detect_git_path_capture(words: &[String], cwd: Option<&Path>) -> Option<GitPathCapture> {
     // `command_words` already unwraps `env`/`command`/`exec` for every

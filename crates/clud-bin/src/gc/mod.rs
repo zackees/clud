@@ -13,13 +13,9 @@
 //! whose value is a JSON-serialized row. The `kind` field is generic so
 //! future kinds (caches, daemon state) drop in without a migration.
 //!
-//! The DB also gets watched by a background `WorktreeScanner` thread,
-//! spawned from `main.rs` for the lifetime of a normal `clud` launch.
-//! It polls `.claude/worktrees/` every ~2 seconds and inserts any new
-//! `agent-*` directory it spots. **Existing rows are left alone** —
-//! the scanner is insert-only, no write churn on every cycle.
-//! Cancellation is cooperative via an `Arc<AtomicBool>`; `Drop` joins
-//! the thread.
+//! Foreground launches register conventional discovery roots with the session
+//! daemon. The daemon owns one deduplicated OS watcher per root plus a bounded
+//! fallback reconciliation schedule; it inserts only previously unseen rows.
 
 mod cli;
 mod reconcile;
@@ -34,11 +30,12 @@ pub use reconcile::{
     extract_pid_from_lock_reason, reconcile_dir, reconcile_extern_repos_dir, reconcile_repo_root,
     reconcile_sibling_clones_dir, run_reconcile, ScanResult,
 };
+pub(crate) use reconcile::{reconcile_registered_dir, watch_event_may_affect_registration};
 pub use registry::{
     default_data_db_path, GcError, InsertInput, Registry, RepoVisit, TrackedEntry, ENV_DATA_DB,
     EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND,
 };
-pub use scanner::WorktreeScanner;
+pub use scanner::watch_roots_for_current_repo;
 
 #[cfg(test)]
 use reconcile::is_sibling_clone_dir_name;

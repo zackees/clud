@@ -15,15 +15,17 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::gc::{
-    reconcile_repo_root, InsertInput, Registry, TrackedEntry, EXTERN_REPO_KIND, SIBLING_CLONE_KIND,
-    WORKTREE_KIND,
+    reconcile_registered_dir, reconcile_repo_root, InsertInput, Registry, TrackedEntry,
+    EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND,
 };
 use crate::worktrees;
 
-use super::types::{GcOp, GcReply, ListRow};
+use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 
 mod extern_repo;
 mod filesystem;
+
+use super::watch_service as gc_watch_service;
 
 use extern_repo::{extern_repo_is_purgeable, extern_repo_stale_after};
 use filesystem::{
@@ -77,6 +79,9 @@ pub(super) struct GcRequestMsg {
 pub(super) enum RegistryMsg {
     Op(GcRequestMsg),
     PurgeCompletion(PurgeCompletion),
+    /// A daemon watch root needs its insert-only reconciliation pass. The
+    /// notification thread never touches redb directly.
+    WatchRescan(Vec<GcWatchRoot>),
 }
 
 /// Issue #268: result of one entry's parallel filesystem deletion,
@@ -304,12 +309,14 @@ fn run_worker_loop(
     tick_cadence: Option<Duration>,
     live_cwds_provider: LiveCwdsProvider,
 ) {
+    let mut watch_service = None;
     let Some(tick_cadence) = tick_cadence else {
         while let Ok(msg) = rx.recv() {
             handle_registry_msg(
                 &registry,
                 &pool_tx,
                 &completion_tx,
+                &mut watch_service,
                 msg,
                 &live_cwds_provider,
             );
@@ -326,6 +333,7 @@ fn run_worker_loop(
                     &registry,
                     &pool_tx,
                     &completion_tx,
+                    &mut watch_service,
                     msg,
                     &live_cwds_provider,
                 );
@@ -352,22 +360,43 @@ fn handle_registry_msg(
     registry: &Registry,
     pool_tx: &mpsc::Sender<PurgeJob>,
     completion_tx: &mpsc::Sender<RegistryMsg>,
+    watch_service: &mut Option<gc_watch_service::WatchService>,
     msg: RegistryMsg,
     live_cwds_provider: &LiveCwdsProvider,
 ) {
     match msg {
         RegistryMsg::Op(req) => {
-            let reply = process_op(
-                registry,
-                pool_tx,
-                completion_tx,
-                req.op,
-                live_cwds_provider(),
-            );
+            let reply = match req.op {
+                GcOp::Watch {
+                    kind,
+                    watch_dir,
+                    repo_root,
+                } => {
+                    let service = watch_service
+                        .get_or_insert_with(|| gc_watch_service::spawn(completion_tx.clone()));
+                    let _ = service.register(GcWatchRoot {
+                        kind,
+                        watch_dir,
+                        repo_root,
+                    });
+                    GcReply::WatchOk
+                }
+                op => process_op(registry, pool_tx, completion_tx, op, live_cwds_provider()),
+            };
             // Hung-up callers are fine — the worker keeps serving the rest.
             let _ = req.reply_tx.send(reply);
         }
         RegistryMsg::PurgeCompletion(c) => apply_purge_completion(registry, c),
+        RegistryMsg::WatchRescan(roots) => {
+            for root in roots {
+                let _ = reconcile_registered_dir(
+                    registry,
+                    &root.kind,
+                    Path::new(&root.watch_dir),
+                    root.repo_root.as_deref().map(Path::new),
+                );
+            }
+        }
     }
 }
 
@@ -815,6 +844,7 @@ fn process_op(
     live_cwds: Vec<PathBuf>,
 ) -> GcReply {
     match op {
+        GcOp::Watch { .. } => unreachable!("watch registration is handled before process_op"),
         GcOp::List { kind } => match registry.list(kind.as_deref()) {
             Ok(rows) => {
                 let live_locks = collect_live_lock_paths();

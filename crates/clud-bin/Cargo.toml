@@ -33,6 +33,11 @@ dirs = "5"
 # Issue #132: gitignore-aware repo walk for the startup large-file guard.
 # Matches the major version ripgrep / fd use; no feature flags needed.
 ignore = "0.4"
+# Issue #545: daemon-owned, non-recursive filesystem discovery.  The
+# reconciliation fallback in `daemon::watch_service` bounds missed Windows
+# notifications / watcher failure, so `notify` is never the sole source of
+# truth.
+notify = "7"
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # Issue #73 / #110: embedded KV store for the session and tracked-entry

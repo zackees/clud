@@ -18,8 +18,8 @@ use super::paths::{
 };
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
-    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, ListRow,
-    ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
+    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, GcWatchRoot,
+    ListRow, ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
 };
 use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
@@ -611,6 +611,50 @@ pub fn gc_client_insert(state_dir: &Path, input: &InsertInput) -> io::Result<()>
     }
 }
 
+/// Register daemon-owned GC discovery roots without delaying foreground
+/// startup. An old daemon closes the stream on the unknown operation; all
+/// transport/version-skew failures intentionally degrade to no discovery for
+/// this client rather than breaking the backend launch (#545/#546).
+pub fn try_register_gc_watch(state_dir: &Path, roots: &[GcWatchRoot]) -> bool {
+    if roots.is_empty() {
+        return true;
+    }
+    let info = match read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)) {
+        Ok(info) => info,
+        Err(_) => return false,
+    };
+    let Ok(format) = daemon_wire_format_from_env() else {
+        return false;
+    };
+    for root in roots {
+        let mut stream = match TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], info.port)),
+            Duration::from_millis(150),
+        ) {
+            Ok(stream) => stream,
+            Err(_) => return false,
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+        let request = DaemonRequest::Gc {
+            payload: GcOp::Watch {
+                kind: root.kind.clone(),
+                watch_dir: root.watch_dir.clone(),
+                repo_root: root.repo_root.clone(),
+            },
+        };
+        if write_daemon_request(&mut stream, &request, format).is_err() {
+            return false;
+        }
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if !matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Issue #183: upsert a `repo_visits` row. Called by `clud` startup
 /// when CWD is inside a git repo. Errors are swallowed by the caller —
 /// failing to record a visit must never block a launch.
@@ -752,6 +796,17 @@ mod tests {
         });
 
         (port, saw_request)
+    }
+
+    #[test]
+    fn try_register_gc_watch_is_silent_when_daemon_is_unreachable() {
+        let state = tempfile::tempdir().unwrap();
+        let roots = [GcWatchRoot {
+            kind: "worktree".to_string(),
+            watch_dir: state.path().join("worktrees").to_string_lossy().to_string(),
+            repo_root: None,
+        }];
+        assert!(!try_register_gc_watch(state.path(), &roots));
     }
 
     fn spawn_shutdown_ack_peer() -> (u16, mpsc::Receiver<String>) {
