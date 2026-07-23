@@ -152,9 +152,15 @@ fn session_is_live(session: &SessionSnapshot) -> bool {
     if !pid_is_alive(session.worker_pid) {
         return false;
     }
-    if let Some(root_pid) = session.root_pid {
-        if !pid_is_alive(root_pid) {
-            return false;
+    // A repeat worker owns the long-lived job. Its `root_pid` is only the
+    // currently running child and can remain stale for a moment after that
+    // child exits, before the worker persists its sleeping state. Do not hide
+    // the repeat job during that handoff window.
+    if session.repeat_interval_secs.is_none() {
+        if let Some(root_pid) = session.root_pid {
+            if !pid_is_alive(root_pid) {
+                return false;
+            }
         }
     }
     true
@@ -204,6 +210,42 @@ mod tests {
             ctrl_c: None,
         };
         write_json_file(&session_snapshot_path(state_dir, id), &snap).unwrap();
+    }
+
+    #[test]
+    fn list_background_sessions_keeps_repeat_worker_during_stale_child_pid_window() {
+        let tmp = TempDir::new().unwrap();
+        let snap = SessionSnapshot {
+            id: "repeat-job".into(),
+            kind: SessionKind::Subprocess,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
+            cwd: None,
+            name: Some("repeat background task".into()),
+            created_at: Some(1),
+            detachable: false,
+            background: true,
+            attachable: false,
+            repeat_interval_secs: Some(1),
+            repeat_next_run_at: None,
+            repeat_running: true,
+            daemon_pid: 0,
+            worker_pid: std::process::id(),
+            worker_port: 0,
+            // The short-lived child exited before the repeat worker persisted
+            // its next sleeping state. The worker remains the job's owner.
+            root_pid: Some(u32::MAX),
+            exit_code: None,
+            exited_at: None,
+            ctrl_c: None,
+        };
+        write_json_file(&session_snapshot_path(tmp.path(), "repeat-job"), &snap).unwrap();
+
+        let sessions = list_background_sessions(tmp.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "repeat-job");
     }
 
     #[test]
