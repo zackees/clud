@@ -91,7 +91,11 @@ pub(crate) fn watch_roots_for_repo(root: &Path) -> Vec<GcWatchRoot> {
     let mut roots = vec![
         GcWatchRoot {
             kind: WORKTREE_KIND.to_string(),
-            watch_dir: root.join(".claude").join("worktrees").to_string_lossy().to_string(),
+            watch_dir: root
+                .join(".claude")
+                .join("worktrees")
+                .to_string_lossy()
+                .to_string(),
             repo_root: Some(repo_root.clone()),
         },
         GcWatchRoot {
@@ -120,9 +124,15 @@ mod tests {
         let roots = watch_roots_for_repo(root);
         assert_eq!(roots.len(), 3);
         assert_eq!(roots[0].kind, WORKTREE_KIND);
-        assert_eq!(std::path::Path::new(&roots[0].watch_dir), root.join(".claude/worktrees"));
+        assert_eq!(
+            std::path::Path::new(&roots[0].watch_dir),
+            root.join(".claude/worktrees")
+        );
         assert_eq!(roots[1].kind, EXTERN_REPO_KIND);
-        assert_eq!(std::path::Path::new(&roots[1].watch_dir), root.join(".extern-repos"));
+        assert_eq!(
+            std::path::Path::new(&roots[1].watch_dir),
+            root.join(".extern-repos")
+        );
         assert_eq!(roots[2].kind, SIBLING_CLONE_KIND);
         assert_eq!(roots[2].watch_dir, "C:");
     }
