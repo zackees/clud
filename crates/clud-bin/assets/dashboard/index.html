@@ -122,6 +122,12 @@
       flex-wrap: wrap;
     }
     .stats b { color: var(--fg); font-weight: 600; }
+    .process-root { border-left: 4px solid var(--accent); box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 10%, transparent); }
+    .process-node { margin: 7px 0 0; padding: 9px 12px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--card) 88%, var(--accent)); }
+    .process-node.hot { border-color: var(--warn); } .process-node.warm { border-color: var(--accent); }
+    .process-children { margin-left: 22px; padding-left: 14px; border-left: 1px dashed var(--border); }
+    .process-title { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-weight:600; }
+    .process-meta { color:var(--muted); font:12px ui-monospace, monospace; margin-top:4px; word-break:break-all; }
   </style>
 </head>
 <body>
@@ -138,6 +144,7 @@
     <button class="tab" data-tab="ctrl-c">Ctrl-C</button>
     <button class="tab" data-tab="tools">Tools</button>
     <button class="tab" data-tab="telemetry">Telemetry</button>
+    <button class="tab" data-tab="processes">Processes</button>
   </div>
 
   <section id="sessions" class="active">
@@ -170,6 +177,14 @@
         PID; click to inspect individual records and their <code>CLUD_*</code> env.
       </p>
       <div id="telemetry-body"><p class="empty">no telemetry recorded yet.</p></div>
+    </div>
+  </section>
+
+  <section id="processes">
+    <div class="card process-root">
+      <h2>Live clud process trees <span id="processes-count" class="meta"></span></h2>
+      <p class="meta">Cached daemon sample. CWD is shown when the originating session recorded one.</p>
+      <div id="processes-body"><p class="empty">loading…</p></div>
     </div>
   </section>
 
@@ -206,7 +221,7 @@
 
   <script>
     const POLL_MS = 5000;
-    const TABS = ['sessions', 'gc', 'repos', 'ctrl-c', 'tools', 'telemetry'];
+    const TABS = ['sessions', 'gc', 'repos', 'ctrl-c', 'tools', 'telemetry', 'processes'];
     const DEFAULT_TAB = 'sessions';
     let lastState = null;
     let currentRoute = { tab: DEFAULT_TAB, telemetryPid: null };
@@ -489,6 +504,22 @@
         </table>`;
     }
 
+    function renderProcesses(state) {
+      const rows = (state.process_tree && state.process_tree.rows) || [];
+      const body = document.getElementById('processes-body');
+      document.getElementById('processes-count').textContent = rows.length ? `(${rows.length})` : '';
+      if (!rows.length) { body.innerHTML = '<p class="empty">no clud-associated processes are currently sampled.</p>'; return; }
+      const byParent = new Map(); const ids = new Set(rows.map(r => r.pid));
+      rows.forEach(r => { const p = r.ppid; if (!byParent.has(p)) byParent.set(p, []); byParent.get(p).push(r); });
+      const roots = rows.filter(r => !ids.has(r.ppid));
+      const node = (r, isRoot = false) => {
+        const kids = byParent.get(r.pid) || []; const tier = r.tier || 'cold';
+        const cwd = r.cwd || '-';
+        return `<details class="process-node ${esc(tier)}" open><summary class="process-title"><span class="badge kind">${esc(isRoot ? 'CLUD' : 'child')}</span><span>${esc(r.command || 'process')}</span><span class="badge ${r.live ? 'live' : 'gone'}">${r.live ? 'live' : 'exited'}</span></summary><div class="process-meta">pid ${esc(r.pid)} · ppid ${esc(r.ppid ?? '-')} · cwd ${esc(cwd)} · ${esc(Number(r.cpu_pct || 0).toFixed(1))}% CPU · ${esc(Math.round((r.rss_bytes || 0) / 1048576))} MiB · age ${esc(r.age_secs || 0)}s</div>${kids.length ? `<div class="process-children">${kids.map(child => node(child)).join('')}</div>` : ''}</details>`;
+      };
+      body.innerHTML = roots.map(root => node(root, true)).join('');
+    }
+
     function renderTools(data) {
       data = data || {};
       const entries = data.entries || [];
@@ -667,6 +698,7 @@
         renderGc(state);
         renderRepos(state);
         renderCtrlCEvents(state);
+        renderProcesses(state);
       } catch (err) {
         document.getElementById('daemon-meta').textContent =
           `connection lost: ${err}`;

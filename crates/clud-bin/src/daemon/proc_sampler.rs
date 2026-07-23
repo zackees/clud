@@ -363,6 +363,13 @@ fn included_pids(
     sessions: &SessionIndex,
 ) -> BTreeSet<u32> {
     let mut included = BTreeSet::new();
+    // #571: roots must include every live clud process, not merely backend
+    // processes that happened to inherit RUNNING_PROCESS_ORIGINATOR.
+    for (pid, process) in system.processes() {
+        if is_clud_process(process) {
+            include_subtree(pid.as_u32(), children_by_parent, &mut included);
+        }
+    }
     for pid in originator_cache.keys().copied() {
         if system.process(Pid::from_u32(pid)).is_some() {
             include_subtree(pid, children_by_parent, &mut included);
@@ -375,6 +382,13 @@ fn included_pids(
         }
     }
     included
+}
+
+fn is_clud_process(process: &sysinfo::Process) -> bool {
+    matches!(
+        process.name().to_string_lossy().to_ascii_lowercase().as_str(),
+        "clud" | "clud.exe"
+    )
 }
 
 fn include_subtree(
