@@ -1,3 +1,8 @@
+use std::cell::Cell;
+use std::collections::HashSet;
+
+use super::reconcile::ScanKind;
+use super::scanner::{scan_once_with, ScanDeps};
 use super::*;
 
 fn fresh_db_path(tag: &str) -> PathBuf {
@@ -125,6 +130,24 @@ fn insert_if_new_is_noop_on_existing() {
         after[0].id, before.id,
         "id must be stable across re-inserts"
     );
+}
+
+#[test]
+fn insert_if_new_returns_true_then_false() {
+    let reg = fresh_registry("inserted-flag");
+    let input = InsertInput {
+        kind: "worktree".to_string(),
+        path: "/tmp/flag".to_string(),
+        repo_root: None,
+        branch: Some("first".to_string()),
+        agent_id: None,
+        now_unix: 100,
+    };
+    assert!(reg.insert_if_new(&input).unwrap());
+    assert_eq!(reg.insert_write_transactions(), 1);
+    assert!(!reg.insert_if_new(&input).unwrap());
+    assert_eq!(reg.insert_write_transactions(), 1);
+    assert_eq!(reg.list(None).unwrap()[0].branch.as_deref(), Some("first"));
 }
 
 #[test]
@@ -401,6 +424,100 @@ fn reconcile_dir_is_idempotent_and_does_not_churn() {
         "second pass must not modify the existing row"
     );
     assert_eq!(after.id, before.id, "id must remain stable");
+}
+
+#[test]
+fn scan_skips_known_paths_after_first_success() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("agent-x")).unwrap();
+    let mut seen = HashSet::new();
+    let inserts = Cell::new(0);
+    let branches = Cell::new(0);
+    let mut insert = |_input: &InsertInput| {
+        inserts.set(inserts.get() + 1);
+        Ok(())
+    };
+    let branch_of = |_path: &std::path::Path| {
+        branches.set(branches.get() + 1);
+        Some("main".to_string())
+    };
+    let mut deps = ScanDeps {
+        insert: &mut insert,
+        branch_of: &branch_of,
+    };
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    assert_eq!(inserts.get(), 1);
+    assert_eq!(branches.get(), 1);
+}
+
+#[test]
+fn scan_does_not_memoize_failed_inserts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("agent-x")).unwrap();
+    let mut seen = HashSet::new();
+    let inserts = Cell::new(0);
+    let mut insert = |_input: &InsertInput| {
+        inserts.set(inserts.get() + 1);
+        if inserts.get() == 1 {
+            Err("daemon unavailable".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    let branch_of = |_path: &std::path::Path| Some("main".to_string());
+    let mut deps = ScanDeps {
+        insert: &mut insert,
+        branch_of: &branch_of,
+    };
+    assert!(scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).is_err());
+    assert!(seen.is_empty());
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    assert_eq!(inserts.get(), 2);
+    assert_eq!(seen.len(), 1);
+}
+
+#[test]
+fn scan_discovers_new_dir_with_warm_memo() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("agent-x")).unwrap();
+    let mut seen = HashSet::new();
+    let inserts = Cell::new(0);
+    let mut insert = |_input: &InsertInput| {
+        inserts.set(inserts.get() + 1);
+        Ok(())
+    };
+    let branch_of = |_path: &std::path::Path| Some("main".to_string());
+    let mut deps = ScanDeps {
+        insert: &mut insert,
+        branch_of: &branch_of,
+    };
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    std::fs::create_dir_all(dir.path().join("agent-y")).unwrap();
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    assert_eq!(inserts.get(), 2);
+    assert_eq!(seen.len(), 2);
+}
+
+#[test]
+fn scan_defers_branch_lookup_until_after_memo_check() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("agent-x")).unwrap();
+    let mut seen = HashSet::new();
+    let branches = Cell::new(0);
+    let mut insert = |_input: &InsertInput| Ok(());
+    let branch_of = |_path: &std::path::Path| {
+        branches.set(branches.get() + 1);
+        Some("main".to_string())
+    };
+    let mut deps = ScanDeps {
+        insert: &mut insert,
+        branch_of: &branch_of,
+    };
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    branches.set(0);
+    scan_once_with(dir.path(), None, ScanKind::Worktree, &mut seen, &mut deps).unwrap();
+    assert_eq!(branches.get(), 0);
 }
 
 // Issue #135: the scanner now talks IPC to the always-on clud daemon
