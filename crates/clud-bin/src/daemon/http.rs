@@ -397,6 +397,9 @@ pub struct DashboardState {
     #[serde(default)]
     pub ctrl_c_events: Vec<CtrlCEvent>,
     pub stats: Stats,
+    /// Cached daemon process sample, consumed by the Processes dashboard tab.
+    #[serde(default)]
+    pub process_tree: serde_json::Value,
 }
 
 /// Meta about the daemon serving this dashboard.
@@ -902,6 +905,28 @@ fn build_dashboard_state(
         repo_count: repos.len(),
     };
 
+    // The daemon RPC returns the sampler's cached snapshot; this HTTP worker
+    // never does an expensive process-table scan of its own.
+    let mut process_tree = super::client::daemon_client_proc_snapshot(state_dir, 0)
+        .ok()
+        .and_then(|snapshot| serde_json::to_value(snapshot).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let cwd_by_session: HashMap<String, String> = sessions
+        .iter()
+        .filter_map(|session| session.cwd.clone().map(|cwd| (session.id.clone(), cwd)))
+        .collect();
+    if let Some(rows) = process_tree.get_mut("rows").and_then(serde_json::Value::as_array_mut) {
+        for row in rows {
+            let cwd = row
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| cwd_by_session.get(id))
+                .cloned()
+                .unwrap_or_else(|| "-".to_string());
+            row["cwd"] = serde_json::Value::String(cwd);
+        }
+    }
+
     Ok(DashboardState {
         daemon: DaemonStateView {
             pid: std::process::id(),
@@ -917,6 +942,7 @@ fn build_dashboard_state(
         repos,
         ctrl_c_events,
         stats,
+        process_tree,
     })
 }
 
