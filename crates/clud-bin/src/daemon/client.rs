@@ -605,7 +605,7 @@ pub fn gc_client_insert(state_dir: &Path, input: &InsertInput) -> io::Result<()>
             created_unix: Some(input.now_unix),
         },
     )? {
-        GcReply::InsertOk => Ok(()),
+        GcReply::InsertOk { .. } => Ok(()),
         GcReply::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::other(format!("unexpected gc reply: {other:?}"))),
     }

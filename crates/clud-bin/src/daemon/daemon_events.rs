@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +11,13 @@ use super::paths::daemon_events_path;
 
 const MAX_EVENT_LOG_BYTES: u64 = 1024 * 1024;
 const EVENT_LOG_BACKUP_SUFFIX: &str = "1";
-static APPEND_LOCK: Mutex<()> = Mutex::new(());
+
+struct CachedWriter {
+    path: PathBuf,
+    file: File,
+}
+
+static WRITER: Mutex<Option<CachedWriter>> = Mutex::new(None);
 
 pub(super) fn log_event(
     state_dir: &Path,
@@ -41,10 +47,26 @@ fn base_event(op: &str) -> Map<String, Value> {
 }
 
 fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
-    let _guard = APPEND_LOCK
+    let mut writer = WRITER
         .lock()
-        .map_err(|_| io::Error::other("daemon event log append lock poisoned"))?;
-    rotate_if_needed(path)?;
+        .map_err(|_| io::Error::other("daemon event log writer lock poisoned"))?;
+    if writer.as_ref().is_some_and(|cached| cached.path != path) {
+        *writer = None;
+    }
+    let metadata = fs::metadata(path).ok();
+    if metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.len() >= MAX_EVENT_LOG_BYTES)
+    {
+        // Windows cannot rename an open file without FILE_SHARE_DELETE.
+        // Drop our cached handle before rotating, then open the fresh file.
+        *writer = None;
+        rotate_if_needed(path)?;
+    } else if metadata.is_none() {
+        // A different actor removed the active file; do not keep writing to
+        // its unlinked handle.
+        *writer = None;
+    }
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("missing daemon event log parent"))?;
@@ -58,7 +80,13 @@ fn append_event_line(path: &Path, event: &Value) -> io::Result<()> {
     let mut buf =
         serde_json::to_vec(event).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     buf.push(b'\n');
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    if writer.is_none() {
+        *writer = Some(CachedWriter {
+            path: path.to_path_buf(),
+            file: OpenOptions::new().create(true).append(true).open(path)?,
+        });
+    }
+    let file = &mut writer.as_mut().expect("cached event writer just opened").file;
     file.write_all(&buf)?;
     file.flush()
 }
@@ -131,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn rotates_existing_log_before_append_when_over_cap() {
+    fn cached_handle_survives_rotation() {
         let tmp = tempfile::tempdir().unwrap();
         let path = daemon_events_path(tmp.path());
         fs::write(&path, vec![b'x'; (MAX_EVENT_LOG_BYTES + 1) as usize]).unwrap();
@@ -143,6 +171,11 @@ mod tests {
         let lines = read_lines(&path);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["op"], "after_rotate");
+
+        log_event(tmp.path(), "after_rotate_again", []);
+        let lines = read_lines(&path);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["op"], "after_rotate_again");
     }
 
     // NB: the reader-vs-writer atomicity intent originally captured by a

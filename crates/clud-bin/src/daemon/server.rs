@@ -470,11 +470,24 @@ fn gc_reply_op(reply: &GcReply) -> &'static str {
         GcReply::PurgeOk { .. } => "purge_ok",
         GcReply::PurgeStarted { .. } => "purge_started",
         GcReply::ReconcileOk { .. } => "reconcile_ok",
-        GcReply::InsertOk => "insert_ok",
+        GcReply::InsertOk { .. } => "insert_ok",
         GcReply::RepoVisitOk => "repo_visit_ok",
         GcReply::RepoVisitsOk { .. } => "repo_visits_ok",
         GcReply::Error { .. } => "error",
     }
+}
+
+fn should_journal_reply(reply: &GcReply) -> bool {
+    match reply {
+        GcReply::Error { .. } | GcReply::PurgeOk { .. } | GcReply::PurgeStarted { .. } => true,
+        GcReply::ReconcileOk { inserted } => *inserted > 0,
+        GcReply::InsertOk { inserted } => *inserted,
+        GcReply::ListOk { .. } | GcReply::RepoVisitOk | GcReply::RepoVisitsOk { .. } => false,
+    }
+}
+
+fn gc_trace_enabled() -> bool {
+    std::env::var("CLUD_DAEMON_TRACE_GC").as_deref() == Ok("1")
 }
 
 /// Hand a GC op to the registry worker and await the reply. Returns a
@@ -486,13 +499,16 @@ fn dispatch_gc_op(
     request_id: u64,
     op: super::types::GcOp,
 ) -> GcReply {
-    daemon_events::log_event(state_dir, "gc_started", [("request_id", json!(request_id))]);
+    let trace = gc_trace_enabled();
+    if trace {
+        daemon_events::log_event(state_dir, "gc_started", [("request_id", json!(request_id))]);
+    }
     let started = Instant::now();
     let Some(tx) = gc_tx else {
         let reply = GcReply::Error {
             message: "gc registry unavailable in this daemon".to_string(),
         };
-        log_gc_finished(state_dir, request_id, started, &reply);
+        log_gc_finished(state_dir, request_id, started, &reply, trace);
         return reply;
     };
     let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
@@ -503,7 +519,7 @@ fn dispatch_gc_op(
         let reply = GcReply::Error {
             message: "gc registry worker stopped".to_string(),
         };
-        log_gc_finished(state_dir, request_id, started, &reply);
+        log_gc_finished(state_dir, request_id, started, &reply, trace);
         return reply;
     }
     let reply = reply_rx
@@ -511,11 +527,20 @@ fn dispatch_gc_op(
         .unwrap_or_else(|_| GcReply::Error {
             message: "gc registry worker timed out".to_string(),
         });
-    log_gc_finished(state_dir, request_id, started, &reply);
+    log_gc_finished(state_dir, request_id, started, &reply, trace);
     reply
 }
 
-fn log_gc_finished(state_dir: &Path, request_id: u64, started: Instant, reply: &GcReply) {
+fn log_gc_finished(
+    state_dir: &Path,
+    request_id: u64,
+    started: Instant,
+    reply: &GcReply,
+    trace: bool,
+) {
+    if !trace && !should_journal_reply(reply) {
+        return;
+    }
     daemon_events::log_event(
         state_dir,
         "gc_finished",
@@ -1010,6 +1035,170 @@ mod tests {
     // median's σ/√N variance drops below the 1.5× budget margin.
     const DAEMON_WIRE_PERF_WARMUP_SAMPLES: usize = 8;
     const DAEMON_WIRE_PERF_MEASURED_SAMPLES: usize = 25;
+
+    fn gc_event_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("gc event test lock poisoned")
+    }
+
+    fn test_gc_insert(path: &str) -> DaemonRequest {
+        DaemonRequest::Gc {
+            payload: super::super::types::GcOp::Insert {
+                kind: "worktree".to_string(),
+                path: path.to_string(),
+                repo_root: None,
+                branch: None,
+                agent_id: None,
+                created_unix: Some(100),
+            },
+        }
+    }
+
+    fn test_gc_worker(tmp: &Path) -> mpsc::Sender<RegistryMsg> {
+        let registry = crate::gc::Registry::open_at(&tmp.join("gc.redb")).unwrap();
+        super::super::gc_service::spawn_registry_worker_with(registry).unwrap()
+    }
+
+    #[test]
+    fn should_journal_reply_covers_variant_matrix() {
+        let rows = Vec::new();
+        let cases = [
+            (GcReply::ListOk { rows: rows.clone() }, false),
+            (
+                GcReply::PurgeOk {
+                    removed: 0,
+                    skipped: 0,
+                },
+                true,
+            ),
+            (
+                GcReply::PurgeStarted {
+                    dispatched: 0,
+                    skipped: 0,
+                },
+                true,
+            ),
+            (GcReply::ReconcileOk { inserted: 0 }, false),
+            (GcReply::ReconcileOk { inserted: 1 }, true),
+            (GcReply::InsertOk { inserted: false }, false),
+            (GcReply::InsertOk { inserted: true }, true),
+            (GcReply::RepoVisitOk, false),
+            (GcReply::RepoVisitsOk { rows: Vec::new() }, false),
+            (
+                GcReply::Error {
+                    message: "failed".to_string(),
+                },
+                true,
+            ),
+        ];
+        for (reply, expected) in cases {
+            assert_eq!(should_journal_reply(&reply), expected, "{reply:?}");
+        }
+    }
+
+    #[test]
+    fn noop_insert_dispatch_writes_no_events() {
+        let _guard = gc_event_test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+        let tx = test_gc_worker(tmp.path());
+
+        let first = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            Some(&tx),
+            test_gc_insert("/tmp/journal-noop"),
+        );
+        assert!(matches!(
+            first,
+            DaemonResponse::Gc {
+                reply: GcReply::InsertOk { inserted: true }
+            }
+        ));
+        let after_first = read_daemon_events(tmp.path());
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0]["op"], "gc_finished");
+
+        let second = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            Some(&tx),
+            test_gc_insert("/tmp/journal-noop"),
+        );
+        assert!(matches!(
+            second,
+            DaemonResponse::Gc {
+                reply: GcReply::InsertOk { inserted: false }
+            }
+        ));
+        assert_eq!(read_daemon_events(tmp.path()).len(), after_first.len());
+    }
+
+    #[test]
+    fn mutating_and_error_ops_still_journal_gc_finished() {
+        let _guard = gc_event_test_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+        let tx = test_gc_worker(tmp.path());
+        let _ = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            Some(&tx),
+            test_gc_insert("/tmp/journal-mutation"),
+        );
+        let _ = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            None,
+            test_gc_insert("/tmp/journal-error"),
+        );
+        let events = read_daemon_events(tmp.path());
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event["op"] == "gc_finished"));
+        assert_eq!(events[0]["response_op"], "insert_ok");
+        assert_eq!(events[1]["response_op"], "error");
+    }
+
+    #[test]
+    fn trace_gate_restores_full_stream() {
+        let _guard = gc_event_test_lock();
+        let prior = std::env::var_os("CLUD_DAEMON_TRACE_GC");
+        std::env::set_var("CLUD_DAEMON_TRACE_GC", "1");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("CLUD_DAEMON_TRACE_GC", value);
+                } else {
+                    std::env::remove_var("CLUD_DAEMON_TRACE_GC");
+                }
+            }
+        }
+        let _restore = Restore(prior);
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+        let tx = test_gc_worker(tmp.path());
+        let _ = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            Some(&tx),
+            test_gc_insert("/tmp/journal-trace"),
+        );
+        let _ = dispatch_daemon_request(
+            tmp.path(),
+            &workers,
+            Some(&tx),
+            test_gc_insert("/tmp/journal-trace"),
+        );
+        let events = read_daemon_events(tmp.path());
+        let ops: Vec<&str> = events
+            .iter()
+            .map(|event| event["op"].as_str().unwrap())
+            .collect();
+        assert_eq!(ops, ["gc_started", "gc_finished", "gc_started", "gc_finished"]);
+    }
 
     fn read_daemon_events(state_dir: &Path) -> Vec<serde_json::Value> {
         let path = daemon_events_path(state_dir);
