@@ -134,6 +134,9 @@ mod tests {
             root.join(".extern-repos")
         );
         assert_eq!(roots[2].kind, SIBLING_CLONE_KIND);
-        assert_eq!(roots[2].watch_dir, "C:");
+        assert_eq!(
+            std::path::Path::new(&roots[2].watch_dir),
+            root.parent().expect("test repository has a parent")
+        );
     }
 }
