@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -133,10 +134,19 @@ impl Drop for WorktreeScanner {
 /// Walk `watch_dir` once, sending `gc.insert` IPC ops for each matching
 /// immediate subdir. Returns `Err` on the first IPC failure so the caller
 /// can stop retrying.
-fn scan_once_via_ipc(
+pub(in crate::gc) struct ScanDeps<'a> {
+    pub(in crate::gc) insert: &'a mut dyn FnMut(&InsertInput) -> Result<(), String>,
+    pub(in crate::gc) branch_of: &'a dyn Fn(&Path) -> Option<String>,
+}
+
+/// Scan one directory with injectable side effects so tests can prove known
+/// paths avoid both branch lookups and IPC.
+pub(in crate::gc) fn scan_once_with(
     watch_dir: &Path,
     repo_root: Option<&Path>,
     scan_kind: ScanKind,
+    seen: &mut HashSet<PathBuf>,
+    deps: &mut ScanDeps<'_>,
 ) -> Result<(), String> {
     let entries = match std::fs::read_dir(watch_dir) {
         Ok(it) => it,
@@ -167,8 +177,11 @@ fn scan_once_via_ipc(
         {
             continue;
         }
+        if seen.contains(&path) {
+            continue;
+        }
         let path_str = path.to_string_lossy().to_string();
-        let branch = best_effort_branch(&path);
+        let branch = (deps.branch_of)(&path);
         let input = InsertInput {
             kind: scan_kind.kind().to_string(),
             path: path_str,
@@ -177,10 +190,28 @@ fn scan_once_via_ipc(
             agent_id: scan_kind.agent_id(&name_str),
             now_unix: now_unix(),
         };
-        let state_dir = crate::daemon::default_state_dir().map_err(|e| e.to_string())?;
-        crate::daemon::gc_client_insert(&state_dir, &input).map_err(|e| e.to_string())?;
+        (deps.insert)(&input)?;
+        seen.insert(path);
     }
     Ok(())
+}
+
+fn scan_once_via_ipc(
+    watch_dir: &Path,
+    repo_root: Option<&Path>,
+    scan_kind: ScanKind,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    let mut insert = |input: &InsertInput| {
+        let state_dir = crate::daemon::default_state_dir().map_err(|e| e.to_string())?;
+        crate::daemon::gc_client_insert(&state_dir, input).map_err(|e| e.to_string())
+    };
+    let branch_of = |path: &Path| best_effort_branch(path);
+    let mut deps = ScanDeps {
+        insert: &mut insert,
+        branch_of: &branch_of,
+    };
+    scan_once_with(watch_dir, repo_root, scan_kind, seen, &mut deps)
 }
 
 fn run_scanner_loop(
@@ -191,9 +222,10 @@ fn run_scanner_loop(
 ) {
     let repo_root_ref = repo_root.as_deref();
     let mut ipc_failed = false;
+    let mut seen = HashSet::new();
     while !cancel.load(Ordering::SeqCst) {
         if !ipc_failed {
-            if let Err(e) = scan_once_via_ipc(&watch_dir, repo_root_ref, scan_kind) {
+            if let Err(e) = scan_once_via_ipc(&watch_dir, repo_root_ref, scan_kind, &mut seen) {
                 // Best-effort: log once, then stop trying.
                 if std::env::var_os("CLUD_GC_SCANNER_VERBOSE").is_some() {
                     eprintln!("[clud] debug: gc scanner: daemon ipc failed: {e}");

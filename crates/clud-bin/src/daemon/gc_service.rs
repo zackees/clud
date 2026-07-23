@@ -899,7 +899,7 @@ fn process_op(
                 now_unix: created_unix.unwrap_or_else(now_unix),
             };
             match registry.insert_if_new(&input) {
-                Ok(()) => GcReply::InsertOk,
+                Ok(_) => GcReply::InsertOk,
                 Err(e) => GcReply::Error {
                     message: e.to_string(),
                 },

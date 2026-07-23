@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
@@ -150,6 +152,8 @@ pub struct RepoVisit {
 /// `insert_if_new` callers can never mint duplicate ids.
 pub struct Registry {
     db: Database,
+    #[cfg(test)]
+    insert_write_transactions: AtomicUsize,
 }
 
 impl Registry {
@@ -173,7 +177,11 @@ impl Registry {
         }
         let db = Database::create(path)?;
         Self::bootstrap_schema(&db)?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            #[cfg(test)]
+            insert_write_transactions: AtomicUsize::new(0),
+        })
     }
 
     fn bootstrap_schema(db: &Database) -> Result<(), GcError> {
@@ -253,7 +261,16 @@ impl Registry {
     /// left exactly as-is (no field updates, no write). This is the
     /// scanner-friendly contract: `WorktreeScanner` calls this every
     /// cycle, and we want to avoid ~0.5 writes/sec of pure churn.
-    pub fn insert_if_new(&self, input: &InsertInput) -> Result<(), GcError> {
+    /// Returns `true` when a row was inserted and `false` when it already
+    /// existed, so callers can avoid recording no-op mutations.
+    pub fn insert_if_new(&self, input: &InsertInput) -> Result<bool, GcError> {
+        if registry_has_entry(self, &input.kind, &input.path)? {
+            // The daemon registry worker serializes inserts, so this
+            // read-before-write probe has no check-then-write race.
+            return Ok(false);
+        }
+        #[cfg(test)]
+        self.insert_write_transactions.fetch_add(1, Ordering::Relaxed);
         let wtxn = self.db.begin_write()?;
         {
             let mut table = wtxn.open_table(TRACKED)?;
@@ -263,7 +280,7 @@ impl Registry {
                 // without committing.
                 drop(table);
                 drop(wtxn);
-                return Ok(());
+                return Ok(false);
             }
             // Mint a new id from META[next_id].
             let mut meta = wtxn.open_table(META)?;
@@ -282,7 +299,12 @@ impl Registry {
             table.insert(key, bytes.as_slice())?;
         }
         wtxn.commit()?;
-        Ok(())
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::gc) fn insert_write_transactions(&self) -> usize {
+        self.insert_write_transactions.load(Ordering::Relaxed)
     }
 
     /// Return every row, newest first. Optionally filter by kind.
