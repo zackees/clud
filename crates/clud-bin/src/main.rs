@@ -1,9 +1,9 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
-    cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, large_file_guard,
-    launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper,
-    runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, tool_cli, tool_install,
-    tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, job_orphan_reaper,
+    large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize,
+    orphan_reaper, runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, tool_cli,
+    tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -386,6 +386,10 @@ fn main() {
     } else if args.verbose {
         verbose_log::log("[clud] daemon: skipped");
     }
+
+    // #569: the persistent daemon deliberately starts before this foreground
+    // process joins the Windows tracking job, so it can outlive the CLI.
+    let _job_orphan_reaper = job_orphan_reaper::ForegroundJobTracker::install();
 
     // After foreground startup has refreshed bundled tools, fire the
     // hook-config scanner against the cwd. Warns on bare
