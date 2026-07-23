@@ -18,8 +18,8 @@ use super::paths::{
 };
 use super::process_utils::{pid_is_alive, signal_process_tree};
 use super::types::{
-    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, GcWatchRoot,
-    ListRow, ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
+    CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, GcWatchRoot, ListRow,
+    ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
 };
 use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,

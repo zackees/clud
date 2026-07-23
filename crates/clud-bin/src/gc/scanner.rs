@@ -18,9 +18,9 @@ use crate::worktrees;
 use super::reconcile::{path_matches_repo_root, ScanKind};
 #[cfg(test)]
 use super::registry::now_unix;
-use super::{EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND};
 #[cfg(test)]
 use super::InsertInput;
+use super::{EXTERN_REPO_KIND, SIBLING_CLONE_KIND, WORKTREE_KIND};
 
 /// Injectable effects for the former client scanner's pure discovery seam.
 /// The daemon watcher uses the production reconciliation path; these remain

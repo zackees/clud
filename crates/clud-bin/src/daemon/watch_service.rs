@@ -97,9 +97,12 @@ fn run(
     tx: mpsc::Sender<ServiceMsg>,
     registry_tx: mpsc::Sender<RegistryMsg>,
 ) {
-    let watcher_result = RecommendedWatcher::new(move |event| {
-        let _ = tx.send(ServiceMsg::Event(event));
-    }, Config::default());
+    let watcher_result = RecommendedWatcher::new(
+        move |event| {
+            let _ = tx.send(ServiceMsg::Event(event));
+        },
+        Config::default(),
+    );
     // The fallback scan remains active if the OS watcher itself cannot be
     // created. Avoid making daemon bring-up depend on native watch APIs.
     let mut watcher = watcher_result.ok();
@@ -219,14 +222,22 @@ fn next_wait(roots: &WatchRegistry, now: Instant) -> Duration {
     let next = roots
         .roots
         .values()
-        .flat_map(|entry| [entry.next_fallback, entry.settle_at.unwrap_or(entry.next_fallback)])
+        .flat_map(|entry| {
+            [
+                entry.next_fallback,
+                entry.settle_at.unwrap_or(entry.next_fallback),
+            ]
+        })
         .min()
         .unwrap_or(now + Duration::from_secs(1));
-    next.saturating_duration_since(now).min(Duration::from_secs(1))
+    next.saturating_duration_since(now)
+        .min(Duration::from_secs(1))
 }
 
 fn normalize_root(mut root: GcWatchRoot) -> GcWatchRoot {
-    root.watch_dir = normalize_path(Path::new(&root.watch_dir)).to_string_lossy().to_string();
+    root.watch_dir = normalize_path(Path::new(&root.watch_dir))
+        .to_string_lossy()
+        .to_string();
     root.repo_root = root
         .repo_root
         .as_deref()
@@ -254,7 +265,10 @@ pub(super) fn next_backoff(previous: Duration, changed: bool) -> Duration {
     if changed {
         return INITIAL_BACKOFF;
     }
-    previous.saturating_mul(2).min(MAX_BACKOFF).max(INITIAL_BACKOFF)
+    previous
+        .saturating_mul(2)
+        .min(MAX_BACKOFF)
+        .max(INITIAL_BACKOFF)
 }
 
 #[cfg(test)]
@@ -275,20 +289,43 @@ mod tests {
         let now = Instant::now();
         let path = dir.path().to_string_lossy();
         let mut registry = WatchRegistry::default();
-        assert!(registry.register(root(&path, "worktree", Some("repo-a")), now).1);
+        assert!(
+            registry
+                .register(root(&path, "worktree", Some("repo-a")), now)
+                .1
+        );
         let second = registry.register(root(&path, "sibling-clone", Some("repo-b")), now);
         assert!(!second.1);
         assert!(second.2);
-        assert!(!registry.register(root(&path, "sibling-clone", Some("repo-b")), now).2);
+        assert!(
+            !registry
+                .register(root(&path, "sibling-clone", Some("repo-b")), now)
+                .2
+        );
         assert_eq!(registry.roots.len(), 1);
-        assert_eq!(registry.roots.values().next().unwrap().registrations.len(), 2);
+        assert_eq!(
+            registry.roots.values().next().unwrap().registrations.len(),
+            2
+        );
     }
 
     #[test]
     fn next_backoff_doubles_and_resets() {
-        assert_eq!(next_backoff(Duration::from_secs(30), false), Duration::from_secs(60));
-        assert_eq!(next_backoff(Duration::from_secs(480), false), Duration::from_secs(900));
-        assert_eq!(next_backoff(Duration::from_secs(900), false), Duration::from_secs(900));
-        assert_eq!(next_backoff(Duration::from_secs(900), true), Duration::from_secs(30));
+        assert_eq!(
+            next_backoff(Duration::from_secs(30), false),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(480), false),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(900), false),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(900), true),
+            Duration::from_secs(30)
+        );
     }
 }

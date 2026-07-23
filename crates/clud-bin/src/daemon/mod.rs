@@ -19,17 +19,17 @@ mod target_sweep;
 mod top;
 mod types;
 pub mod uv_cache_sweep;
+mod watch_service;
 mod wire_prost;
 mod worker;
 mod worker_shared;
-mod watch_service;
 
+pub use client::try_register_gc_watch;
 pub use client::{
     daemon_client_metrics, ensure_daemon, gc_client_insert, gc_client_list,
     gc_client_list_repo_visits, gc_client_purge, gc_client_reconcile, gc_client_record_repo_visit,
     try_handoff_kill_to_daemon, try_request_orphan_reap, GcPurgeOutcome,
 };
-pub use client::try_register_gc_watch;
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 pub use http::{
     dashboard_url_from_info, fetch_state_json, read_dashboard_info, read_dashboard_port,
@@ -43,5 +43,5 @@ pub use http::{
     TelemetryPidDetail, TelemetryPidSummary, TelemetryStore,
 };
 pub use paths::{default_state_dir, default_trash_dir};
-pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};
 pub use types::GcWatchRoot;
+pub use types::{ListRow, RepoVisit, ENV_NO_DAEMON};

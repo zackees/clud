@@ -31,7 +31,11 @@ def main() -> int:
 
     if check_banned_imports() != 0:
         return 1
-    if run(_cargo(["fmt", "--all", "--check"])) != 0:
+    # setup-soldr's cargo shim can otherwise omit repository discovery for
+    # `.rustfmt.toml` on some runner/architecture combinations. Pin the
+    # checked formatting contract explicitly so local and CI layout agree.
+    fmt_args = ["fmt", "--all", "--check", "--", "--config-path", ".rustfmt.toml"]
+    if run(_cargo(fmt_args)) != 0:
         return 1
     if run(_cargo(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])) != 0:
         return 1

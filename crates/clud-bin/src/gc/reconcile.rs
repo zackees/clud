@@ -126,7 +126,10 @@ pub(crate) fn watch_event_may_affect_registration(
     let Ok(relative) = event_path.strip_prefix(watch_dir) else {
         return false;
     };
-    let Some(name) = relative.components().next().and_then(|part| part.as_os_str().to_str())
+    let Some(name) = relative
+        .components()
+        .next()
+        .and_then(|part| part.as_os_str().to_str())
     else {
         return true;
     };

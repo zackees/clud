@@ -94,7 +94,9 @@ fn watch_registration_acks_before_initial_scan_and_discovers_matching_child() {
     loop {
         let (list_tx, list_rx) = mpsc::sync_channel(1);
         tx.send(RegistryMsg::Op(GcRequestMsg {
-            op: GcOp::List { kind: Some(WORKTREE_KIND.to_string()) },
+            op: GcOp::List {
+                kind: Some(WORKTREE_KIND.to_string()),
+            },
             reply_tx: list_tx,
         }))
         .unwrap();
@@ -104,7 +106,10 @@ fn watch_registration_acks_before_initial_scan_and_discovers_matching_child() {
         ) {
             break;
         }
-        assert!(Instant::now() < deadline, "watch initial scan did not complete");
+        assert!(
+            Instant::now() < deadline,
+            "watch initial scan did not complete"
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }
