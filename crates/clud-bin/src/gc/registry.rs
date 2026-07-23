@@ -270,7 +270,8 @@ impl Registry {
             return Ok(false);
         }
         #[cfg(test)]
-        self.insert_write_transactions.fetch_add(1, Ordering::Relaxed);
+        self.insert_write_transactions
+            .fetch_add(1, Ordering::Relaxed);
         let wtxn = self.db.begin_write()?;
         {
             let mut table = wtxn.open_table(TRACKED)?;
