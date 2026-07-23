@@ -374,6 +374,15 @@ impl ProcTreeSnapshot {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "gc_op", rename_all = "snake_case")]
 pub(crate) enum GcOp {
+    /// Issue #545: register one non-recursive daemon-owned discovery root.
+    /// Registration is idempotent; the daemon canonicalizes and deduplicates
+    /// roots shared by concurrent foreground clients.
+    Watch {
+        kind: String,
+        watch_dir: String,
+        #[serde(default)]
+        repo_root: Option<String>,
+    },
     List {
         #[serde(default)]
         kind: Option<String>,
@@ -428,6 +437,9 @@ pub(crate) enum GcOp {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "gc_op", rename_all = "snake_case")]
 pub(crate) enum GcReply {
+    /// `gc.watch` acknowledgement. The initial scan is deliberately queued
+    /// after this reply so foreground launch never waits on discovery.
+    WatchOk,
     ListOk {
         rows: Vec<ListRow>,
     },
@@ -471,6 +483,16 @@ pub(crate) enum GcReply {
     Error {
         message: String,
     },
+}
+
+/// One logical GC-discovery registration. This lives on the JSON IPC wire so
+/// foreground clients can hand the daemon all three legacy scanner roots in a
+/// bounded, fire-and-forget burst.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GcWatchRoot {
+    pub kind: String,
+    pub watch_dir: String,
+    pub repo_root: Option<String>,
 }
 
 /// Row shape returned by `gc.list`. Stable JSON schema for the CLI; the
@@ -684,6 +706,19 @@ mod tests {
         let wire = serde_json::to_string(&GcReply::InsertOk { inserted: true }).unwrap();
         assert!(wire.contains(r#""gc_op":"insert_ok""#));
         assert!(wire.contains(r#""inserted":true"#));
+    }
+
+    #[test]
+    fn watch_op_serializes_as_tagged_gc_op() {
+        let op = GcOp::Watch {
+            kind: "worktree".to_string(),
+            watch_dir: "/tmp/worktrees".to_string(),
+            repo_root: Some("/tmp/repo".to_string()),
+        };
+        let wire = serde_json::to_string(&op).unwrap();
+        assert!(wire.contains(r#""gc_op":"watch""#));
+        let parsed: GcOp = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(parsed, GcOp::Watch { .. }));
     }
 
     #[test]

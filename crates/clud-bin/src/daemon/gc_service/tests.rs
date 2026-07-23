@@ -67,6 +67,53 @@ fn spawn_test_worker(
     spawn_test_worker_with_tick(db_path, "0")
 }
 
+#[test]
+fn watch_registration_acks_before_initial_scan_and_discovers_matching_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let worktrees = temp.path().join(".claude").join("worktrees");
+    fs::create_dir_all(worktrees.join("agent-zz")).unwrap();
+    let db = temp.path().join("registry.redb");
+    let (tx, _guard) = spawn_test_worker(&db);
+
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    tx.send(RegistryMsg::Op(GcRequestMsg {
+        op: GcOp::Watch {
+            kind: WORKTREE_KIND.to_string(),
+            watch_dir: worktrees.to_string_lossy().to_string(),
+            repo_root: Some(temp.path().to_string_lossy().to_string()),
+        },
+        reply_tx,
+    }))
+    .unwrap();
+    assert!(matches!(
+        reply_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        GcReply::WatchOk
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (list_tx, list_rx) = mpsc::sync_channel(1);
+        tx.send(RegistryMsg::Op(GcRequestMsg {
+            op: GcOp::List {
+                kind: Some(WORKTREE_KIND.to_string()),
+            },
+            reply_tx: list_tx,
+        }))
+        .unwrap();
+        if matches!(
+            list_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            GcReply::ListOk { rows } if rows.len() == 1 && rows[0].path.ends_with("agent-zz")
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watch initial scan did not complete"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn spawn_test_worker_with_tick(
     db_path: &Path,
     tick_secs: &str,
@@ -183,6 +230,9 @@ fn drain_purge_completions(
             }
             Ok(RegistryMsg::Op(_)) => {
                 // Tests don't drive ops through this channel; ignore.
+            }
+            Ok(RegistryMsg::WatchRescan(_)) => {
+                // Watch notifications are irrelevant to periodic-purge tests.
             }
             Err(_) => return drained,
         }

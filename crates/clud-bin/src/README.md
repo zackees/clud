@@ -5,7 +5,7 @@ a backend agent (`claude` or `codex`) in YOLO mode, optionally through a PTY,
 with first-class support for loop iterations, drag-and-drop, voice input, and a
 per-user daemon for backgrounded/detachable sessions. `main.rs` does
 cross-cutting startup work (trampoline unlock, console title, launch setup
-selection, session-cap registration, GC scanner) and then hands off to
+selection, session-cap registration, GC watch registration) and then hands off to
 `runner.rs`, which drives the per-iteration subprocess/PTY launch loop for a
 single [`LaunchPlan`]. Submodules under `command/`, `daemon/`, `dnd/`, and
 `voice/` carry the bulk of the domain logic; the top-level `.rs` files here are
@@ -33,7 +33,7 @@ Entry and orchestration:
 
 - `main.rs` - process entry: launch clock, trampoline unlock, console title
   stamp + keeper, launch setup selection, large-file guard, session-cap
-  registration, GC scanner, dispatch to runner / daemon / hook-health / GC
+  registration, GC watch registration, dispatch to runner / daemon / hook-health / GC
   subcommands.
 - `lib.rs` - library facade so integration tests under `tests/` can link
   against internals; `main.rs` imports through this rather than re-declaring
@@ -107,9 +107,9 @@ Process management and GC:
   `cmd.exe -> node.exe` would orphan the real child.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
-- `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and the
-  in-process `WorktreeScanner` thread. The GC registry itself lives inside the
-  daemon.
+- `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and
+  daemon-watch root derivation. The GC registry and its shared watcher live inside
+  the daemon.
 - `worktrees.rs` - `--clean-worktrees` (issue #83): enumerates via
   `git worktree list --porcelain`, classifies clean / dirty / unpushed / gone,
   removes safe ones; `--dry-run` faithful.

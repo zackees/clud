@@ -97,6 +97,56 @@ pub fn reconcile_sibling_clones_dir(
     reconcile_dir_with_kind(registry, parent, Some(repo_root), ScanKind::SiblingClone)
 }
 
+/// Daemon watch-service entry point. A registration describes one of the
+/// three legacy scanner roots; keep the filter and insert-only semantics in
+/// this module so notification-triggered scans and explicit reconciliation
+/// cannot diverge.
+pub(crate) fn reconcile_registered_dir(
+    registry: &Registry,
+    kind: &str,
+    watch_dir: &Path,
+    repo_root: Option<&Path>,
+) -> Result<ScanResult, GcError> {
+    let scan_kind = scan_kind_for_watch(kind)?;
+    reconcile_dir_with_kind(registry, watch_dir, repo_root, scan_kind)
+}
+
+/// Return whether a filesystem event could change a registration's immediate
+/// child set. This rejects unrelated descendants under the broad sibling root
+/// before they can schedule an expensive reconciliation pass.
+pub(crate) fn watch_event_may_affect_registration(
+    kind: &str,
+    watch_dir: &Path,
+    repo_root: Option<&Path>,
+    event_path: &Path,
+) -> bool {
+    if event_path == watch_dir {
+        return true;
+    }
+    let Ok(relative) = event_path.strip_prefix(watch_dir) else {
+        return false;
+    };
+    let Some(name) = relative
+        .components()
+        .next()
+        .and_then(|part| part.as_os_str().to_str())
+    else {
+        return true;
+    };
+    scan_kind_for_watch(kind)
+        .map(|scan_kind| scan_kind.accepts_dir_name(name, repo_root))
+        .unwrap_or(false)
+}
+
+fn scan_kind_for_watch(kind: &str) -> Result<ScanKind, GcError> {
+    match kind {
+        WORKTREE_KIND => Ok(ScanKind::Worktree),
+        EXTERN_REPO_KIND => Ok(ScanKind::ExternRepo),
+        SIBLING_CLONE_KIND => Ok(ScanKind::SiblingClone),
+        other => Err(GcError::Io(format!("unknown GC watch kind: {other}"))),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(in crate::gc) enum ScanKind {
     Worktree,

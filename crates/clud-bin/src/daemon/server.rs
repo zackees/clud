@@ -466,6 +466,7 @@ fn sample_daemon_cpu_pct() -> f32 {
 
 fn gc_reply_op(reply: &GcReply) -> &'static str {
     match reply {
+        GcReply::WatchOk => "watch_ok",
         GcReply::ListOk { .. } => "list_ok",
         GcReply::PurgeOk { .. } => "purge_ok",
         GcReply::PurgeStarted { .. } => "purge_started",
@@ -479,6 +480,7 @@ fn gc_reply_op(reply: &GcReply) -> &'static str {
 
 fn should_journal_reply(reply: &GcReply) -> bool {
     match reply {
+        GcReply::WatchOk => false,
         GcReply::Error { .. } | GcReply::PurgeOk { .. } | GcReply::PurgeStarted { .. } => true,
         GcReply::ReconcileOk { inserted } => *inserted > 0,
         GcReply::InsertOk { inserted } => *inserted,

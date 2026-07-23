@@ -520,26 +520,26 @@ fn scan_defers_branch_lookup_until_after_memo_check() {
     assert_eq!(branches.get(), 0);
 }
 
-// Issue #135: the scanner now talks IPC to the always-on clud daemon
-// rather than opening redb directly. Verifying the end-to-end insert
-// path lives in `daemon/gc_service.rs::tests` and the Python
-// integration tests; here we only verify the scanner cancels promptly.
-
 #[test]
-fn scanner_cancels_promptly() {
-    // Force the IPC path to be disabled so the scanner doesn't
-    // attempt a real daemon spawn in CI.
-    std::env::set_var(crate::daemon::ENV_NO_DAEMON, "1");
-    let dir = tempfile::tempdir().unwrap();
-    let mut scanner = WorktreeScanner::spawn(dir.path().to_path_buf(), None);
-    let start = std::time::Instant::now();
-    scanner.cancel();
-    let elapsed = start.elapsed();
-    // The chunked sleep wakes every 100ms; cancellation should be
-    // observed well before one full 2s scan cycle. Allow some slack
-    // for slow CI runners.
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "cancel took too long: {elapsed:?}"
-    );
+fn watch_event_filter_rejects_unrelated_sibling_workspace_churn() {
+    let parent = std::path::Path::new("C:/dev");
+    let repo = parent.join("clud");
+    assert!(watch_event_may_affect_registration(
+        SIBLING_CLONE_KIND,
+        parent,
+        Some(&repo),
+        &parent.join("clud-issue-545/src/main.rs"),
+    ));
+    assert!(!watch_event_may_affect_registration(
+        SIBLING_CLONE_KIND,
+        parent,
+        Some(&repo),
+        &parent.join("unrelated/target/debug/build.log"),
+    ));
+    assert!(watch_event_may_affect_registration(
+        WORKTREE_KIND,
+        &repo.join(".claude/worktrees"),
+        Some(&repo),
+        &repo.join(".claude/worktrees/agent-a/.git"),
+    ));
 }
