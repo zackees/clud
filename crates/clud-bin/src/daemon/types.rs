@@ -456,7 +456,12 @@ pub(crate) enum GcReply {
     ReconcileOk {
         inserted: usize,
     },
-    InsertOk,
+    InsertOk {
+        /// `false` is the conservative compatibility default for an old
+        /// daemon that did not report whether the registry changed.
+        #[serde(default)]
+        inserted: bool,
+    },
     /// Issue #183: ack for a successful `GcOp::RecordRepoVisit` upsert.
     RepoVisitOk,
     /// Issue #183: payload for `GcOp::ListRepoVisits`.
@@ -666,6 +671,19 @@ mod tests {
     fn list_live_cwds_request_serializes_as_tagged_op() {
         let wire = serde_json::to_string(&DaemonRequest::ListLiveCwds).unwrap();
         assert_eq!(wire, r#"{"op":"list_live_cwds"}"#);
+    }
+
+    #[test]
+    fn insert_ok_reply_deserializes_without_inserted_field() {
+        let reply: GcReply = serde_json::from_str(r#"{"gc_op":"insert_ok"}"#).unwrap();
+        assert!(matches!(reply, GcReply::InsertOk { inserted: false }));
+    }
+
+    #[test]
+    fn insert_ok_reply_roundtrips_inserted_field() {
+        let wire = serde_json::to_string(&GcReply::InsertOk { inserted: true }).unwrap();
+        assert!(wire.contains(r#""gc_op":"insert_ok""#));
+        assert!(wire.contains(r#""inserted":true"#));
     }
 
     #[test]

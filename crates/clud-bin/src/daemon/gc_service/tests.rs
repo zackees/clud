@@ -289,7 +289,7 @@ fn round_trip_insert_then_list() {
             created_unix: Some(100),
         },
     );
-    assert!(matches!(resp, GcReply::InsertOk));
+    assert!(matches!(resp, GcReply::InsertOk { inserted: true }));
 
     let resp = call(&tx, GcOp::List { kind: None });
     match resp {
