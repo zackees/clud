@@ -15,22 +15,13 @@ def _pyproject() -> dict:
         return tomllib.load(handle)
 
 
-def test_pip_build_uses_clud_soldr_backend_wrapper() -> None:
+def test_pip_build_uses_soldr_pep517_backend() -> None:
     build_system = _pyproject()["build-system"]
     requirements = [requirement.lower() for requirement in build_system["requires"]]
 
-    assert build_system["build-backend"] == "build_backend"
-    assert build_system["backend-path"] == ["."]
-    assert any(requirement.startswith("soldr") for requirement in requirements)
-    assert any("platform_system" in requirement for requirement in requirements)
-    maturin_requirements = [
-        requirement for requirement in requirements if requirement.startswith("maturin")
-    ]
-    assert all(
-        "darwin" in requirement and "x86_64" in requirement
-        for requirement in maturin_requirements
-    )
-    assert not any(requirement.startswith("cmake") for requirement in requirements)
+    assert build_system["build-backend"] == "soldr"
+    assert "backend-path" not in build_system
+    assert requirements == ["soldr>=0.8.24"]
 
 
 def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
