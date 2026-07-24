@@ -386,7 +386,11 @@ fn included_pids(
 
 fn is_clud_process(process: &sysinfo::Process) -> bool {
     matches!(
-        process.name().to_string_lossy().to_ascii_lowercase().as_str(),
+        process
+            .name()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .as_str(),
         "clud" | "clud.exe"
     )
 }

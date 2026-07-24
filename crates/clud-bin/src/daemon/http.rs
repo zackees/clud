@@ -915,7 +915,10 @@ fn build_dashboard_state(
         .iter()
         .filter_map(|session| session.cwd.clone().map(|cwd| (session.id.clone(), cwd)))
         .collect();
-    if let Some(rows) = process_tree.get_mut("rows").and_then(serde_json::Value::as_array_mut) {
+    if let Some(rows) = process_tree
+        .get_mut("rows")
+        .and_then(serde_json::Value::as_array_mut)
+    {
         for row in rows {
             let cwd = row
                 .get("session_id")
