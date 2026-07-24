@@ -252,17 +252,6 @@ def activate() -> None:
     )
 
 
-def _apply_sccache(env: dict[str, str]) -> dict[str, str]:
-    if _soldr_shims_requested(env):
-        return env
-    if env.get("RUSTC_WRAPPER"):
-        return env
-    sccache = shutil.which("sccache", path=env.get("PATH"))
-    if sccache:
-        env["RUSTC_WRAPPER"] = sccache
-    return env
-
-
 def clean_env() -> dict[str, str]:
     activate()
     env = os.environ.copy()
@@ -277,7 +266,6 @@ def clean_env() -> dict[str, str]:
         env.pop("CARGO", None)
         env.pop("RUSTC", None)
         env.pop("RUSTC_WRAPPER", None)
-    env = _apply_sccache(env)
     return env
 
 

@@ -59,22 +59,17 @@ def _cargo_build_env() -> dict[str, str]:
         return os.environ.copy()
 
 
-def _build_env_without_sccache() -> dict[str, str]:
-    """Cargo build env with sccache disabled.
+def _build_env_without_rustc_wrapper() -> dict[str, str]:
+    """Cargo build env with an inherited compiler wrapper disabled.
 
-    Why: when RUSTC_WRAPPER=sccache (CI default), cargo invokes rustc via
-    sccache, which lazily starts a persistent server daemon. That server
-    **inherits the subprocess stdio pipe handles** and keeps them open for
-    its whole idle lifetime — so `capture_output=True` never sees EOF and
-    `communicate()` hangs indefinitely on Windows runners. Stripping the
-    wrapper for the fixture's cargo call avoids the inheritance entirely.
-    The CI test orchestrator already builds the workspace binaries and passes
-    their paths through the environment; this fallback call is usually a local
-    no-op incremental build. See #37.
+    A persistent wrapper daemon can inherit subprocess stdio pipe handles and
+    keep them open for its whole idle lifetime, so `capture_output=True` never
+    sees EOF on Windows runners. The CI orchestrator already builds workspace
+    binaries and passes their paths through the environment; this fallback is
+    normally a local no-op incremental build. See #37.
     """
     env = _cargo_build_env()
     env.pop("RUSTC_WRAPPER", None)
-    env.pop("SCCACHE_GHA_ENABLED", None)
     return env
 
 
@@ -166,15 +161,14 @@ def _cargo_build_inherit_stdio(package: str) -> None:
 
     Capturing cargo's output through pipes on Windows GHA runners caused an
     indefinite hang (#37): `communicate()` waited for pipe EOF but a
-    grand-child sccache server daemon — or some other long-lived descendant
-    — kept the inheritable pipe handles open. Letting cargo's output go
-    straight to the CI log sidesteps the issue entirely and still produces
-    the artifacts at a deterministic path.
+    long-lived grand-child wrapper daemon kept the inheritable pipe handles
+    open. Letting cargo's output go straight to the CI log sidesteps the issue
+    entirely and still produces the artifacts at a deterministic path.
     """
     result = subprocess.run(
         _cargo_argv(["build", "-p", package]),
         cwd=ROOT,
-        env=_build_env_without_sccache(),
+        env=_build_env_without_rustc_wrapper(),
     )
     if result.returncode != 0:
         raise RuntimeError(

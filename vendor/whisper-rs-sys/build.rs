@@ -200,6 +200,9 @@ fn main() {
         .define("WHISPER_ALL_WARNINGS_3RD_PARTY", "OFF")
         .define("WHISPER_BUILD_TESTS", "OFF")
         .define("WHISPER_BUILD_EXAMPLES", "OFF")
+        // Soldr/zccache owns Rust compilation caching. Do not let ggml
+        // auto-detect a stray system sccache and bypass that toolchain.
+        .define("GGML_CCACHE", "OFF")
         .very_verbose(true)
         .pic(true);
 

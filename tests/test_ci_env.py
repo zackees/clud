@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from ci import env as ci_env
 
@@ -68,3 +69,25 @@ def test_cargo_argv_falls_back_to_bare_cargo(monkeypatch) -> None:
     monkeypatch.setattr(ci_env, "soldr_path", lambda env=None: None)
 
     assert ci_env.cargo_argv(["check"], env={}) == ["cargo", "check"]
+
+
+def test_clean_env_never_auto_configures_sccache(monkeypatch) -> None:
+    monkeypatch.setattr(ci_env, "activate", lambda: None)
+    monkeypatch.setattr(ci_env.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(ci_env, "toolchain_name", lambda: "1.94.1")
+    monkeypatch.delenv("RUSTC_WRAPPER", raising=False)
+    monkeypatch.setattr(
+        ci_env.shutil,
+        "which",
+        lambda command, **_kwargs: "/tools/sccache" if command == "sccache" else None,
+    )
+
+    assert "RUSTC_WRAPPER" not in ci_env.clean_env()
+
+
+def test_vendored_whisper_disables_native_sccache_autodetection() -> None:
+    build_script = (
+        Path(__file__).resolve().parents[1] / "vendor" / "whisper-rs-sys" / "build.rs"
+    ).read_text(encoding="utf-8")
+
+    assert '.define("GGML_CCACHE", "OFF")' in build_script

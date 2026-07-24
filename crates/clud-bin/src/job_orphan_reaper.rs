@@ -61,7 +61,7 @@ mod imp {
                 let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
                 let port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1).ok()?;
                 let assoc = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
-                    CompletionKey: job.0 as *mut c_void,
+                    CompletionKey: job.0,
                     CompletionPort: port,
                 };
                 if SetInformationJobObject(
@@ -78,9 +78,15 @@ mod imp {
                     return None;
                 }
                 let stop = Arc::new(AtomicBool::new(false));
+                // windows::Win32::Foundation::HANDLE intentionally does not
+                // implement Send because it wraps a raw pointer. The kernel
+                // handle value itself is process-wide and remains owned by
+                // ForegroundJobTracker, so pass only its integer value across
+                // the thread boundary and reconstruct the typed wrapper there.
+                let port_value = port.0 as usize;
                 let listener = thread::spawn({
                     let stop = Arc::clone(&stop);
-                    move || listen(port, stop)
+                    move || listen(HANDLE(port_value as *mut c_void), stop)
                 });
                 Some(Self {
                     job,
@@ -111,7 +117,7 @@ mod imp {
             if unsafe { GetQueuedCompletionStatus(port, &mut message, &mut key, &mut payload, 200) }
                 .is_err()
             {
-                if unsafe { GetLastError() } == WAIT_TIMEOUT {
+                if unsafe { GetLastError().0 } == WAIT_TIMEOUT.0 {
                     continue;
                 }
                 break;
