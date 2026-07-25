@@ -17,5 +17,8 @@ RUSTUP_TOOLCHAIN=nightly-2026-04-16 ZCCACHE_DISABLE=1 soldr --no-cache cargo dyl
 Dylint 6.0.1 still has one upstream artifact-naming gap: on Ubuntu and
 Windows it can build the lint cdylib without creating the toolchain-suffixed
 alias that `cargo dylint` immediately looks up. The CI workflow has one narrow
-recovery for that reproduced missing-alias shape, then reruns Dylint once. It
-does not build or override a custom driver.
+recovery for that reproduced missing-alias shape, then reruns Dylint once.
+The published driver's own builder also unsets the toolchain environment that
+its build script requires. CI therefore builds `dylint_driver = 6.0.1` with
+the pinned nightly; it no longer clones a git revision or mixes release and
+repository sources.

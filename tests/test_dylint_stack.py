@@ -36,13 +36,19 @@ def test_dylint_stack_versions_stay_in_lockstep() -> None:
     }
 
 
-def test_dylint_workflow_has_no_legacy_driver_or_generic_retry_loop() -> None:
+def test_dylint_workflow_has_no_legacy_git_driver_or_generic_retry_loop() -> None:
     workflow = (ROOT / ".github" / "workflows" / "dylint.yml").read_text(
         encoding="utf-8"
     )
+    driver_builder = (ROOT / "ci" / "build_dylint_driver.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert "build_dylint_driver.py" not in workflow
-    assert "DYLINT_DRIVER_PATH" not in workflow
+    assert "Build published Dylint driver" in workflow
+    assert 'DYLINT_VERSION = "6.0.1"' in driver_builder
+    assert 'dylint_driver = "={DYLINT_VERSION}"' in driver_builder
+    assert "git clone" not in driver_builder
+    assert "4bd91ce" not in driver_builder
     assert "for attempt in" not in workflow
     assert workflow.count("cargo dylint --all") == 2
     assert "Dylint 6.0.1 can build the cdylib successfully" in workflow

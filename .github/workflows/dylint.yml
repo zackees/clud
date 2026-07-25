@@ -35,6 +35,9 @@ jobs:
       - name: Install Dylint
         timeout-minutes: 10
         run: soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.1 --locked
+      - name: Build published Dylint driver
+        timeout-minutes: 15
+        run: uv run --no-project python ci/build_dylint_driver.py
       - name: Check dylint formatting
         run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
@@ -52,7 +55,9 @@ jobs:
 
           # Dylint 6.0.1 can build the cdylib successfully without creating the
           # @<toolchain> alias it immediately requires. Reproduced on Ubuntu in
-          # https://github.com/zackees/clud/actions/runs/30172921153.
+          # https://github.com/zackees/clud/actions/runs/30172921153. Its own
+          # driver builder also drops required toolchain state (run 30173166314),
+          # so the preceding step supplies the published 6.0.1 driver.
           host="$(RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr rustc -vV | sed -n 's/^host: //p')"
           toolchain="nightly-2026-04-16-${host}"
           library_root="target/dylint/libraries/${toolchain}"
