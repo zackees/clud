@@ -5,8 +5,8 @@ with the symptom each piece solves and the `file:line` where it lives. There
 are eleven such carve-outs today: a self-rename trampoline so `pip install`
 can overwrite a running `clud.exe`, the BatBadBat `.cmd`/`.bat` rewrite
 mandated by Rust 1.77+, an RAII guard for `ENABLE_VIRTUAL_TERMINAL_INPUT`, a
-`ReadConsoleInputW` translator that disambiguates Shift+Enter from plain
-Enter, a console-title keeper that re-stamps `clud <cwd>` when child TUIs
+small policy adapter over running-process's native `ReadConsoleInputW`
+translator, a console-title keeper that re-stamps `clud <cwd>` when child TUIs
 overwrite it, an OLE `IDropTarget` adapter so dragging a file onto the
 console window actually drops paths into the prompt, `CREATE_NO_WINDOW` for
 daemon-helper subprocesses that would otherwise flash a conhost window, a
@@ -127,35 +127,32 @@ the codebase stays portable.
   constructor at `:44` returns the empty-struct form. POSIX terminals are
   already in canonical VT mode and need no opt-in.
 
-### (d) Shift+Enter via `ReadConsoleInputW` (issue #141)
+### (d) Native terminal input via running-process (issues #141 / #575)
 
-- **Symptom**: Pressing Shift+Enter in `clud` should insert a literal
-  newline into the backend's prompt (so the user can type a multi-line
-  message), but conhost strips modifier-key state before producing the
-  `\r` byte on stdin. A byte-stream reader can't distinguish Enter from
-  Shift+Enter.
+- **Symptoms**:
+  - Conhost strips modifier state from the byte stream, so a byte reader
+    cannot distinguish Shift+Enter from plain Enter (#141).
+  - Clud's former local translator only handled Enter, Ctrl+V, and nonzero
+    Unicode characters. Navigation key records have `UnicodeChar == 0`, so
+    arrows and Home/End/Insert/Delete/Page keys were dropped or surfaced as
+    malformed CSI suffixes in Codex (#575).
 
-- **Solution**: Read input via `ReadConsoleInputW` (which exposes
-  `KEY_EVENT_RECORD::dwControlKeyState`) and translate the records to
-  PTY-stdin bytes:
-  - `VK_RETURN` (0x0D) key-down with `SHIFT_PRESSED` (0x0010) set → `\n`
-    (0x0A) — the "insert newline in the prompt" byte.
-  - `VK_RETURN` key-down without `SHIFT_PRESSED` → `\r` (0x0D) — the usual
-    "submit" byte. Ctrl+Enter and Alt+Enter intentionally fall through to
-    plain `\r` so we don't silently change behavior of any existing
-    backend binding.
-  - Any other key-down with a non-zero `unicode_char` emits the UTF-8
-    encoding of that UTF-16 code unit.
-  - Key-up events and non-key records (mouse, focus, buffer-size, menu,
-    window) are dropped at the `InputEvent::NonKey` variant.
+- **Solution**: `running_process::pty::terminal_input::TerminalInputCore` is
+  the authoritative Windows console reader. It owns console-mode
+  save/restore, `ReadConsoleInputW`, generic virtual-key translation,
+  modifiers, repeat counts, and
+  `RUNNING_PROCESS_NATIVE_TERMINAL_INPUT_TRACE_PATH`. Clud forwards each
+  `TerminalInputEventRecord::data` value as one PTY channel chunk, preserving
+  complete sequences such as `ESC [ D`. Its adapter changes only two
+  product-specific policies:
+  - Shift+Enter's upstream CSI-u representation becomes literal `\n`, keeping
+    clud's established multi-line prompt behavior.
+  - Ctrl+V may become a saved clipboard-image path; otherwise the upstream
+    control byte passes through.
 
-  The translator itself is a pure function
-  (`translate(&[InputEvent]) -> Vec<u8>`), which is what makes the unit
-  tests runnable on every CI host.
-
-- **File**: `crates/clud-bin/src/console_input.rs:71` (`translate`);
-  `VK_RETURN` constant at `:36`; `SHIFT_PRESSED` constant at `:40`. The
-  whole module is gated `#![cfg(windows)]` at `:31`.
+- **File**: `crates/clud-bin/src/console_input.rs`
+  (`spawn_console_input_reader`, `adapt_event_with_clipboard`); construction
+  and lifetime ownership in `crates/clud-bin/src/runner.rs`.
 
 - **POSIX behavior**: Different mechanism. POSIX terminals deliver
   Shift+Enter as the same `\r` as plain Enter at the kernel layer —
@@ -471,20 +468,21 @@ the codebase stays portable.
   failure logs to stderr (or stays silent) and the launch continues.
   None of them can block a `clud` invocation.
 
-## Testing on non-Windows
+## Testing coverage
 
 Most of these modules are no-op stubs on POSIX, which means the Linux/macOS
 unit-test runs cover only the dispatch logic, not the OS calls themselves.
-Two exceptions worth flagging:
 
-- `console_input::translate` (the Shift+Enter translator) is a pure
-  function over a `&[InputEvent]` slice. Tests construct
-  `InputEvent::Key { ... }` values directly and assert on the output
-  `Vec<u8>`, so the full translation contract is unit-tested on every
-  platform — see the seven `#[test]` cases in
-  `crates/clud-bin/src/console_input.rs:97-198`.
+- On the Windows matrix, `console_input` unit tests construct upstream
+  `TerminalInputEventRecord`s and pin clud's Shift+Enter/Ctrl+V policy plus
+  atomic event forwarding. The Windows integration test
+  `shift_enter_dual_reader.rs` passes native `KEY_EVENT_RECORD`s through
+  running-process's real translator and verifies arrow/Home/End/Insert/Delete/
+  Page sequences plus trace bytes even on a headless runner. When stdin is an
+  attached console, the same test additionally injects records with
+  `WriteConsoleInputW` and observes the production `TerminalInputCore` reader.
 
-- `console_title::OscTitleStripper` is also a pure byte filter and is
+- Cross-platform, `console_title::OscTitleStripper` is a pure byte filter and is
   fully unit-tested cross-platform — including split-across-chunks,
   back-to-back OSCs, and passthrough for OSC 8/10/52/133. See the test
   cases at `crates/clud-bin/src/console_title.rs:395-513`.

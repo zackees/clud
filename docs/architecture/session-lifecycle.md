@@ -26,7 +26,7 @@ moves on; the RAII guards restore console mode on drop.
 | `crates/clud-bin/src/session/bracketed_paste.rs` | `BracketedPasteNormalizer`. |
 | `crates/clud-bin/src/console_setup.rs` | `ConsoleVtGuard` RAII for `ENABLE_VIRTUAL_TERMINAL_INPUT`. |
 | `crates/clud-bin/src/console_title.rs` | One-shot title stamp, daemon keeper thread, `OscTitleStripper` stream filter. |
-| `crates/clud-bin/src/console_input.rs` | Issue #141 Shift+Enter translator (`KEY_EVENT_RECORD` → bytes). |
+| `crates/clud-bin/src/console_input.rs` | Adapter over `running-process::TerminalInputCore`; preserves clud-specific Shift+Enter/Ctrl+V policy and forwards complete translated key events (#141/#575). |
 | `crates/clud-bin/src/capture.rs` | `TerminalCapture` — `vt100` parser plus the sticky-mode `vte` sniffer. Used by the daemon worker for attach repaint. |
 | `crates/clud-bin/src/dnd/injectors.rs` | `pty_master_injector` adapter that the OLE callback writes through. |
 | `crates/clud-bin/src/voice/mode.rs` | `VoiceMode::on_f3_press` / `on_f3_release` / `on_tick`, the only `InteractiveHooks` implementor in production. |
@@ -191,14 +191,18 @@ Three sources can put bytes onto the PTY master during a session. Two run on
 the pump thread (synchronous, single-writer), one runs on the GUI thread
 that owns the console window:
 
-1. **Keyboard** — `stdin_source` (production = `io::stdin`) is read by the
-   detached reader thread at `session.rs:762-785`. On Windows interactive
-   stdin, `normalize_interactive_console_stdin_chunk` rewrites 0x08 → 0x7f so
-   Backspace aligns with xterm. The Shift+Enter translation in
-   `console_input::translate` (`console_input.rs:71`) maps `VK_RETURN` +
-   `SHIFT_PRESSED` → `\n` and plain Enter → `\r`. The translator is a pure
-   function over `&[InputEvent]`; the thread that calls `ReadConsoleInputW`
-   and feeds it lands in a follow-up patch — see issue #141.
+1. **Keyboard** — POSIX and piped input use the detached byte-stream reader in
+   `session.rs`. On an interactive Windows console,
+   `running_process::pty::terminal_input::TerminalInputCore` is the sole
+   console consumer for each PTY iteration and owns mode restoration,
+   `ReadConsoleInputW`, virtual-key translation, modifiers, repeat counts, and
+   optional byte tracing. The reader and its receiver are recreated together
+   for every `clud loop` iteration. Clud's `console_input` adapter forwards
+   every upstream event as one `extra_rx` chunk, except that it deliberately
+   maps upstream's Shift+Enter CSI-u event to the established literal `\n`
+   contract and may replace Ctrl+V with a saved clipboard-image path. This
+   keeps navigation sequences such as `ESC [ D` complete and gives generic
+   translation one authoritative owner (#141/#575).
 2. **Drag-and-drop** — `pty_master_injector`
    (`crates/clud-bin/src/dnd/injectors.rs:138`) wraps the PTY master in
    `Arc<Mutex<Box<dyn Write + Send>>>` so the OLE `IDropTarget::Drop`
@@ -298,7 +302,7 @@ The resize-watcher thread observes the closed `resize_tx` and exits.
 | `TerminalCapture::snapshot_bytes` | `crates/clud-bin/src/capture.rs:132` |
 | `ConsoleVtGuard` | `crates/clud-bin/src/console_setup.rs:8` |
 | `enable_console_vt_input` | `crates/clud-bin/src/console_setup.rs:26` |
-| `console_input::translate` | `crates/clud-bin/src/console_input.rs:71` |
+| `console_input::spawn_console_input_reader` | `crates/clud-bin/src/console_input.rs` |
 | `console_title::set_for_current_cwd` | `crates/clud-bin/src/console_title.rs:48` |
 | `console_title::keep_setting_in_background` | `crates/clud-bin/src/console_title.rs:70` |
 | Title keeper thread entry (Windows) | `crates/clud-bin/src/console_title.rs:76` |

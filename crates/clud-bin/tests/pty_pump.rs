@@ -538,29 +538,27 @@ fn raw_pump_restores_raw_mode_on_panic() {
     let _ = process.close_impl();
 }
 
-/// Issue #141 follow-up: bytes from `extra_rx` reach the child PTY
-/// exactly as `console_input::translate()` produces them. The pump
-/// doesn't know or care that the bytes came from a console-input
-/// translator — it forwards `extra_rx` chunks to the child the same
-/// way it would forward stdin. This integration test asserts that
-/// invariant by:
+/// Issues #141/#575: translated events from the native console-input adapter
+/// reach the child PTY unchanged. The pump doesn't know or care where the
+/// bytes came from — it forwards `extra_rx` chunks to the child the same way
+/// it would forward stdin. This integration test asserts that invariant by:
 ///
-///   1. Building `console_input::translate()` over a synthetic event
-///      stream containing Shift+Enter and plain Enter.
-///   2. Sending the translated bytes through `extra_rx`.
+///   1. Injecting upstream terminal events into clud's real adapter.
+///   2. Sending the adapter receiver through the production PTY pump.
 ///   3. Capturing the child's stdin via `--mock-stdin-raw-to`.
-///   4. Asserting both `\n` (Shift+Enter) and `\r` (plain Enter) made
-///      the round trip.
+///   4. Asserting complete arrow CSI chunks plus Shift+Enter `\n` and plain
+///      Enter `\r` made the round trip.
 ///
-/// Windows-only because `console_input` is `#[cfg(windows)]`. The
-/// underlying pump path (`run_raw_pty_pump_with_extra_rx`) works on
-/// every platform; this test just exercises the Windows path.
+/// The separate `shift_enter_dual_reader` test keeps the upstream translation
+/// and trace assertions active on headless Windows. This child-PTY half uses
+/// the standard canary because ConPTY cannot reliably run when the parent
+/// process has redirected output.
 #[cfg(windows)]
 #[test]
-fn extra_rx_forwards_shift_enter_translated_bytes_to_pty() {
-    require_pty_or_skip!("extra_rx_forwards_shift_enter_translated_bytes_to_pty");
+fn extra_rx_forwards_native_terminal_adapter_bytes_to_pty() {
+    require_pty_or_skip!("extra_rx_forwards_native_terminal_adapter_bytes_to_pty");
 
-    use clud::console_input::{translate, InputEvent, KeyEvent, SHIFT_PRESSED, VK_RETURN};
+    use running_process::pty::terminal_input::{TerminalInputCore, TerminalInputEventRecord};
 
     let agent = mock_agent_path();
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -579,34 +577,36 @@ fn extra_rx_forwards_shift_enter_translated_bytes_to_pty() {
     process.start_impl().expect("start");
     std::thread::sleep(Duration::from_millis(150));
 
-    // What the production reader would emit for a Shift+Enter + plain
-    // Enter sequence. The pump treats these bytes as opaque — exactly
-    // the surface this test pins.
-    let translated = translate(&[
-        InputEvent::Key(KeyEvent {
-            key_down: true,
-            virtual_key_code: VK_RETURN,
-            unicode_char: b'\r' as u16,
-            control_key_state: SHIFT_PRESSED,
-        }),
-        InputEvent::Key(KeyEvent {
-            key_down: true,
-            virtual_key_code: VK_RETURN,
-            unicode_char: b'\r' as u16,
-            control_key_state: 0,
-        }),
-    ]);
-    assert_eq!(translated, b"\n\r", "translator output drifted");
+    let core = std::sync::Arc::new(TerminalInputCore::new());
+    {
+        let mut state = core.state.lock().expect("terminal input state");
+        state.closed = false;
+    }
+    let mut input = clud::console_input::spawn_terminal_input_adapter(std::sync::Arc::clone(&core))
+        .expect("spawn terminal input adapter");
+    let extra_rx = input.take_receiver().expect("terminal input receiver");
 
-    // Send the translated bytes via extra_rx. A short sleep before
-    // sending lets the pump enter its main loop; the child's stdin
-    // line-mode buffer holds the bytes until newline (mock-sleep then
-    // reads them all).
-    let (extra_tx, extra_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(80));
-        let _ = extra_tx.send(translated.clone());
-    });
+    let event = |data: &[u8], virtual_key_code: u16, shift: bool| TerminalInputEventRecord {
+        data: data.to_vec(),
+        submit: virtual_key_code == 0x0D && !shift,
+        shift,
+        ctrl: false,
+        alt: false,
+        virtual_key_code,
+        repeat_count: 1,
+    };
+    {
+        let mut state = core.state.lock().expect("terminal input state");
+        state.events.extend([
+            event(b"\x1b[D", 0x25, false),
+            event(b"\x1b[B", 0x28, false),
+            event(b"\x1b[C", 0x27, false),
+            event(b"\x1b[A", 0x26, false),
+            event(b"\x1b[13;2u", 0x0D, true),
+            event(b"\r", 0x0D, false),
+        ]);
+    }
+    core.condvar.notify_all();
 
     let interrupted = AtomicBool::new(false);
     let mut hooks = CountingHooks::new(false);
@@ -624,6 +624,11 @@ fn extra_rx_forwards_shift_enter_translated_bytes_to_pty() {
     let _ = process.close_impl();
 
     let got = std::fs::read(&raw_stdin).unwrap_or_default();
+    assert!(
+        got.windows(b"\x1b[D\x1b[B\x1b[C\x1b[A".len())
+            .any(|window| window == b"\x1b[D\x1b[B\x1b[C\x1b[A"),
+        "complete navigation sequences must reach the child PTY; got {got:?}"
+    );
     assert!(
         got.contains(&b'\n'),
         "Shift+Enter translation must produce a literal \\n in the child's stdin; got {:?}",
