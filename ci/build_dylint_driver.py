@@ -1,4 +1,4 @@
-"""Build a Dylint driver from the git revision used by the lint crate."""
+"""Build the published Dylint driver with its required toolchain environment."""
 
 from __future__ import annotations
 
@@ -9,9 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-DYLINT_REPO = "https://github.com/trailofbits/dylint"
-DYLINT_REV = "4bd91ce7729b74c7ee5664bbb588f7baf30b4a09"
-TOOLCHAIN_CHANNEL = "nightly-2026-03-26"
+DYLINT_VERSION = "6.0.1"
+TOOLCHAIN_CHANNEL = "nightly-2026-04-16"
 
 
 def run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
@@ -41,11 +40,10 @@ def rustc_toolchain_root(full_toolchain: str) -> Path:
     return Path(rustc).resolve().parent.parent
 
 
-def write_driver_package(package: Path, dylint_checkout: Path, full_toolchain: str) -> None:
+def write_driver_package(package: Path, full_toolchain: str) -> None:
     src = package / "src"
     src.mkdir(parents=True)
 
-    driver_path = str((dylint_checkout / "driver").resolve()).replace("\\", "\\\\")
     (package / "Cargo.toml").write_text(
         f"""
 [package]
@@ -56,7 +54,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0"
 env_logger = "0.11"
-dylint_driver = {{ path = "{driver_path}" }}
+dylint_driver = "={DYLINT_VERSION}"
 """.lstrip(),
         encoding="utf-8",
     )
@@ -94,7 +92,8 @@ def append_github_env(name: str, value: Path) -> None:
 
 
 def main() -> int:
-    full_toolchain = f"{TOOLCHAIN_CHANNEL}-{rustc_host()}"
+    host = rustc_host()
+    full_toolchain = f"{TOOLCHAIN_CHANNEL}-{host}"
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir())).resolve()
     driver_root = runner_temp / "dylint-drivers"
     driver_dir = driver_root / full_toolchain
@@ -102,14 +101,10 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="clud-dylint-") as temp:
         temp_path = Path(temp)
-        checkout = temp_path / "dylint"
         package = temp_path / "driver-package"
 
-        run(["git", "clone", "--filter=blob:none", DYLINT_REPO, str(checkout)])
-        run(["git", "-C", str(checkout), "checkout", DYLINT_REV])
-
         package.mkdir()
-        write_driver_package(package, checkout, full_toolchain)
+        write_driver_package(package, full_toolchain)
 
         env = os.environ.copy()
         env["RUSTUP_TOOLCHAIN"] = full_toolchain
@@ -126,13 +121,26 @@ def main() -> int:
             env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} {rpath}".strip()
 
         run(
-            ["rustup", "run", TOOLCHAIN_CHANNEL, "cargo", "build"],
+            ["soldr", "--no-cache", "cargo", "build"],
             cwd=package,
             env=env,
         )
 
         exe_suffix = ".exe" if os.name == "nt" else ""
-        built_driver = package / "target" / "debug" / f"dylint_driver-{full_toolchain}{exe_suffix}"
+        binary_name = f"dylint_driver-{full_toolchain}{exe_suffix}"
+        candidate_drivers = [
+            package / "target" / "debug" / binary_name,
+            package / "target" / host / "debug" / binary_name,
+        ]
+        built_driver = next(
+            (candidate for candidate in candidate_drivers if candidate.is_file()),
+            None,
+        )
+        if built_driver is None:
+            searched = "\n".join(f"  - {candidate}" for candidate in candidate_drivers)
+            raise FileNotFoundError(
+                f"built Dylint driver was not found; searched:\n{searched}"
+            )
         installed_driver = driver_dir / "dylint-driver"
         shutil.copy2(built_driver, installed_driver)
         if os.name == "nt":
