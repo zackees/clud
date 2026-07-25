@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.4.1 - 2026-07-25
+
 - Windows PTY input now uses running-process's native terminal translator
   instead of clud's narrower duplicate, so arrow, Home/End,
   Insert/Delete, and Page Up/Down keys reach Codex as complete escape
