@@ -42,4 +42,26 @@ jobs:
       - name: Run dylint over workspace
         run: |
           export PATH="${CARGO_HOME}/bin:${PATH}"
+          set +e
+          RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr --no-cache cargo dylint --all -- --workspace --all-targets
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+
+          # Dylint 6.0.1 can build the cdylib successfully without creating the
+          # @<toolchain> alias it immediately requires. Reproduced on Ubuntu in
+          # https://github.com/zackees/clud/actions/runs/30172921153.
+          host="$(RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr rustc -vV | sed -n 's/^host: //p')"
+          toolchain="nightly-2026-04-16-${host}"
+          library_root="target/dylint/libraries/${toolchain}"
+          expected="${library_root}/release/libban_manual_slash_normalize@${toolchain}.so"
+          candidate="$(find "${library_root}" -path '*/release/libban_manual_slash_normalize.so' -print -quit)"
+          if [ -z "$candidate" ] || [ -e "$expected" ]; then
+            echo "::error::Dylint failed without the reproduced missing-alias artifact shape"
+            exit "$rc"
+          fi
+          mkdir -p "$(dirname "$expected")"
+          cp "$candidate" "$expected"
           RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr --no-cache cargo dylint --all -- --workspace --all-targets

@@ -13,3 +13,9 @@ rustup toolchain install nightly-2026-04-16 --component llvm-tools-preview --com
 soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.1 --locked
 RUSTUP_TOOLCHAIN=nightly-2026-04-16 ZCCACHE_DISABLE=1 soldr --no-cache cargo dylint --all -- --workspace --all-targets
 ```
+
+Dylint 6.0.1 still has one upstream artifact-naming gap: on Ubuntu and
+Windows it can build the lint cdylib without creating the toolchain-suffixed
+alias that `cargo dylint` immediately looks up. The CI workflow has one narrow
+recovery for that reproduced missing-alias shape, then reruns Dylint once. It
+does not build or override a custom driver.

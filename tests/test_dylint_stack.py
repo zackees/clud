@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import tomllib
@@ -30,15 +31,18 @@ def test_dylint_stack_versions_stay_in_lockstep() -> None:
         f"cargo install cargo-dylint dylint-link --version {DYLINT_VERSION} --locked"
         in workflow
     )
-    assert workflow.count(DYLINT_NIGHTLY) == 3
+    assert set(re.findall(r"nightly-\d{4}-\d{2}-\d{2}", workflow)) == {
+        DYLINT_NIGHTLY
+    }
 
 
-def test_dylint_workflow_has_no_legacy_driver_or_alias_retry() -> None:
+def test_dylint_workflow_has_no_legacy_driver_or_generic_retry_loop() -> None:
     workflow = (ROOT / ".github" / "workflows" / "dylint.yml").read_text(
         encoding="utf-8"
     )
 
     assert "build_dylint_driver.py" not in workflow
     assert "DYLINT_DRIVER_PATH" not in workflow
-    assert "@${toolchain}" not in workflow
     assert "for attempt in" not in workflow
+    assert workflow.count("cargo dylint --all") == 2
+    assert "Dylint 6.0.1 can build the cdylib successfully" in workflow
