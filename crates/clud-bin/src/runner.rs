@@ -622,13 +622,6 @@ pub fn run_plan_pty(
     // cfg.enabled = false.
     let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
-    // Enable VT input on the Windows console for the whole PTY session.
-    // The raw byte pump reads from clud's stdin, so PTY mode needs the
-    // console to emit terminal-style bytes. In subprocess mode the child
-    // inherits the console directly and must be allowed to configure input
-    // modes itself.
-    let _console_guard = enable_console_vt_input();
-
     // Issue #79 / #65 / #66: register the console IDropTarget for PTY
     // launches. The injector writes into `dnd_rx` which the pump drains
     // and forwards to the PTY master. Held for the full launch — the
@@ -645,33 +638,6 @@ pub fn run_plan_pty(
         let _ = dnd_enabled;
         (None, None)
     };
-
-    // Issue #141 follow-up: spawn the Windows console-input reader so
-    // Shift+Enter inserts `\n` even under bare cmd.exe in conhost. The
-    // reader produces a `Receiver<Vec<u8>>` we merge with `dnd_rx` for
-    // the pump's first iteration. Held for the whole function so the
-    // console mode is restored on Drop. Skipped if stdin isn't a real
-    // console (the reader can't function on a piped stdin).
-    #[cfg(windows)]
-    let (mut console_input_rx, _console_input_guards) = if session::terminals_are_interactive() {
-        match crate::console_input::spawn_console_input_reader() {
-            Ok((mut handle, mode_guard)) => {
-                let rx = handle.take_receiver();
-                (rx, Some((handle, mode_guard)))
-            }
-            Err(e) => {
-                eprintln!("[clud] note: console-input reader unavailable: {e}");
-                (None, None)
-            }
-        }
-    } else {
-        (None, None)
-    };
-    #[cfg(not(windows))]
-    let (mut console_input_rx, _console_input_guards): (
-        Option<std::sync::mpsc::Receiver<Vec<u8>>>,
-        Option<()>,
-    ) = (None, None);
 
     let env = child_env_for_backend(plan.backend);
     let mut last_exit = 0i32;
@@ -800,23 +766,43 @@ pub fn run_plan_pty(
         let header_restore = header.as_ref().map(|header| header.restore_bytes.clone());
         let graphics_resize = header.as_ref().map(|_| plan.graphics.clone());
         let mut hooks = voice::VoiceMode::from_env();
-        let _raw_guard = session::enter_raw_mode_if_tty();
-        // First iteration takes ownership of the side-channel receivers
-        // (drag-drop bytes and, on Windows, console-input bytes from
-        // the Shift+Enter reader); subsequent iterations get None. We
-        // can't clone an `mpsc::Receiver`, and the OLE registration is
-        // a one-shot for the whole process anyway (see `RefreshConfig`
-        // — the worker thread is shared across iterations). The console
-        // reader behaves similarly: its worker keeps running for the
-        // life of `run_plan_pty`, but only iteration 0 sees its bytes.
-        // For typical single-iteration invocations this is irrelevant;
-        // for `clud loop` it's an accepted limitation tracked in the
-        // PR body.
-        let extra_rx = if iteration == 0 {
-            merge_extra_rx(dnd_rx.take(), console_input_rx.take())
+
+        // Issues #141 and #575: native Windows console capture is scoped to
+        // one PTY iteration, exactly like the receiver consumed by the pump.
+        // Recreate it for every loop iteration so no detached core can keep
+        // draining the console after its channel has been retired.
+        #[cfg(windows)]
+        let (console_input_rx, _console_input_guard) = if session::terminals_are_interactive() {
+            match crate::console_input::spawn_console_input_reader() {
+                Ok(mut handle) => {
+                    let rx = handle.take_receiver();
+                    (rx, Some(handle))
+                }
+                Err(e) => {
+                    eprintln!("[clud] note: console-input reader unavailable: {e}");
+                    (None, None)
+                }
+            }
         } else {
-            None
+            (None, None)
         };
+        #[cfg(not(windows))]
+        let (console_input_rx, _console_input_guard): (
+            Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+            Option<()>,
+        ) = (None, None);
+
+        // Start TerminalInputCore first so it snapshots the true original
+        // Windows console mode. VT input is layered on afterward and restored
+        // before the core returns to that original mode. On the byte-stream
+        // fallback (or POSIX), this remains the normal VT-input guard.
+        let _console_guard = enable_console_vt_input();
+        let _raw_guard = session::enter_raw_mode_if_tty();
+
+        // The OLE drag-drop receiver is one-shot for the process, while the
+        // native keyboard receiver above is fresh on every iteration.
+        let dnd_for_iteration = if iteration == 0 { dnd_rx.take() } else { None };
+        let extra_rx = merge_extra_rx(dnd_for_iteration, console_input_rx);
         let exit_code = session::run_raw_pty_pump_with_extra_rx_verbose_and_graphics(
             &process,
             interrupted,
@@ -827,6 +813,8 @@ pub fn run_plan_pty(
             graphics_resize,
         );
         drop(_raw_guard);
+        drop(_console_guard);
+        drop(_console_input_guard);
         if let Some(bytes) = header_restore.as_deref() {
             write_terminal_bytes(bytes);
         }

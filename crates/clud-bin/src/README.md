@@ -68,8 +68,10 @@ CLI surface and backend resolution:
 
 Console and terminal:
 
-- `console_input.rs` - Windows `ReadConsoleInputW` translator (issue #141):
-  pure-function map from `KEY_EVENT_RECORD` slices to PTY stdin bytes.
+- `console_input.rs` - Windows adapter over
+  `running_process::pty::terminal_input::TerminalInputCore` (issues #141 /
+  #575): forwards upstream's complete virtual-key translations atomically
+  while retaining clud's Shift+Enter-LF and Ctrl+V image policies.
 - `console_setup.rs` - RAII guard that enables
   `ENABLE_VIRTUAL_TERMINAL_INPUT` for the lifetime of a PTY session and
   restores the prior console mode on drop; no-op on POSIX.

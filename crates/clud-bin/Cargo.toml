@@ -125,6 +125,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
+# #575: construct native KEY_EVENT_RECORD values in the consumer regression
+# test and pass them through running-process's authoritative translator.
+winapi = { version = "0.3", features = ["wincon", "winuser"] }
 
 [build-dependencies]
 prost-build = "0.14"

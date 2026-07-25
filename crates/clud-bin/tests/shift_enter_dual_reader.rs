@@ -1,42 +1,19 @@
-//! RED test for the dual-reader race on Windows that prevents
-//! Shift+Enter from reliably producing `\n` even after issue #141
-//! landed the `ReadConsoleInputW` translator.
+//! Production-path Windows terminal-input regression test.
 //!
-//! The production wiring in `runner::run_plan_pty` spawns
-//! `console_input::spawn_console_input_reader()` (which calls
-//! `ReadConsoleInputW` and translates Shift+Enter to `\n`) *and* the
-//! pump's stdin reader thread in `session::run_raw_pty_pump_full_verbose`
-//! (which calls `io::stdin().read(...)`, i.e. `ReadFile` on the same
-//! STDIN handle). Both consume the same console input queue. The
-//! `ReadFile`-based reader sees Shift+Enter as a bare `\r` byte because
-//! conhost strips modifier state before producing the byte stream — so
-//! whichever reader wins the race for a given keystroke dictates what
-//! the child PTY ultimately receives.
-//!
-//! This test makes the race explicit:
-//!
-//! 1. Spawn the production `console_input` reader (the same one
-//!    `runner.rs:534` uses).
-//! 2. Spawn an `io::stdin()` reader thread (the same one
-//!    `session.rs:581` uses).
-//! 3. Inject N synthetic Shift+Enter `KEY_EVENT_RECORD`s into the
-//!    test process's STDIN console queue via `WriteConsoleInputW`.
-//! 4. Drain both channels for a fixed window.
-//! 5. Assert that every injected Shift+Enter surfaces as `\n` on the
-//!    aggregated byte stream.
-//!
-//! With the bug present, the `io::stdin()` reader will steal some
-//! (often most) of the events and produce `\r` for them, so the
-//! `\n` count drops below N. The test asserts the strict invariant:
-//! all N must survive as `\n`.
+//! The test injects real `KEY_EVENT_RECORD`s into the process console with
+//! `WriteConsoleInputW`, then observes the bytes emitted by clud's
+//! `TerminalInputCore` adapter. It covers the navigation-key failure from
+//! issue #575 and the Shift+Enter compatibility behavior from issue #141.
 
 #![cfg(windows)]
 
-use std::io::{IsTerminal, Read};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::ffi::OsString;
+use std::io::IsTerminal;
+use std::time::Duration;
 
 use clud::console_input::spawn_console_input_reader;
+use running_process::pty::terminal_input::translate_console_key_event;
+use winapi::um::wincontypes::KEY_EVENT_RECORD as WinapiKeyEventRecord;
 use windows::Win32::System::Console::{
     GetStdHandle, WriteConsoleInputW, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD,
     KEY_EVENT_RECORD_0, STD_INPUT_HANDLE,
@@ -45,119 +22,145 @@ use windows_core::BOOL;
 
 const VK_RETURN: u16 = 0x0D;
 const SHIFT_PRESSED: u32 = 0x0010;
+const TRACE_ENV: &str = "RUNNING_PROCESS_NATIVE_TERMINAL_INPUT_TRACE_PATH";
 
-fn shift_enter_record(key_down: bool) -> INPUT_RECORD {
+struct EnvRestore {
+    previous: Option<OsString>,
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.take() {
+            std::env::set_var(TRACE_ENV, value);
+        } else {
+            std::env::remove_var(TRACE_ENV);
+        }
+    }
+}
+
+fn key_record(key_down: bool, virtual_key: u16, unicode: u16, control: u32) -> INPUT_RECORD {
     INPUT_RECORD {
         EventType: KEY_EVENT as u16,
         Event: INPUT_RECORD_0 {
             KeyEvent: KEY_EVENT_RECORD {
                 bKeyDown: BOOL(if key_down { 1 } else { 0 }),
                 wRepeatCount: 1,
-                wVirtualKeyCode: VK_RETURN,
+                wVirtualKeyCode: virtual_key,
                 wVirtualScanCode: 0,
                 uChar: KEY_EVENT_RECORD_0 {
-                    UnicodeChar: b'\r' as u16,
+                    UnicodeChar: unicode,
                 },
-                dwControlKeyState: SHIFT_PRESSED,
+                dwControlKeyState: control,
             },
         },
     }
 }
 
-/// RED: `clud` is supposed to translate Shift+Enter into `\n` for the
-/// child PTY (issue #141). When the runner wires both the
-/// `console_input` `ReadConsoleInputW` worker *and* the pump's
-/// `io::stdin()` `ReadFile` thread against the same STDIN handle, the
-/// `ReadFile` path sees Shift+Enter as a bare `\r` (conhost strips
-/// modifiers before the byte stream is produced). Whichever reader
-/// wins the race per keystroke decides whether the child sees `\n`
-/// (the modifier-aware translator won) or `\r` (the byte-stream reader
-/// won). The user-visible symptom: "Shift+Enter still doesn't work on
-/// Windows" even though the unit tests for `translate()` are green.
-///
-/// This test pins the desired invariant: with both readers active on a
-/// real console, every injected Shift+Enter must surface as `\n` on
-/// the combined output. Today it fails because the byte-stream reader
-/// steals a fraction of the events and emits `\r`.
+fn inject_key(virtual_key: u16, unicode: u16, control: u32) {
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("GetStdHandle");
+    let records = [
+        key_record(true, virtual_key, unicode, control),
+        key_record(false, virtual_key, unicode, control),
+    ];
+    let mut written = 0;
+    unsafe { WriteConsoleInputW(handle, &records, &mut written) }.expect("WriteConsoleInputW");
+    assert_eq!(written, 2, "WriteConsoleInputW must write down/up records");
+}
+
+fn upstream_key_record(virtual_key: u16, unicode: u16, control: u32) -> WinapiKeyEventRecord {
+    // SAFETY: zero is a valid baseline for KEY_EVENT_RECORD and its union. We
+    // initialize every field consumed by running-process before use.
+    let mut record: WinapiKeyEventRecord = unsafe { std::mem::zeroed() };
+    record.bKeyDown = 1;
+    record.wRepeatCount = 1;
+    record.wVirtualKeyCode = virtual_key;
+    record.dwControlKeyState = control;
+    // SAFETY: UnicodeChar is the union arm consumed by
+    // `translate_console_key_event`.
+    unsafe {
+        *record.uChar.UnicodeChar_mut() = unicode;
+    }
+    record
+}
+
 #[test]
-fn shift_enter_survives_dual_reader_race() {
+fn native_reader_translates_navigation_and_preserves_shift_enter() {
+    let temp = tempfile::tempdir().expect("trace tempdir");
+    let trace_path = temp.path().join("native-input.trace");
+    let _env_restore = EnvRestore {
+        previous: std::env::var_os(TRACE_ENV),
+    };
+    std::env::set_var(TRACE_ENV, &trace_path);
+
+    const NAVIGATION_CASES: &[(u16, &[u8])] = &[
+        (0x25, b"\x1b[D"),  // Left
+        (0x28, b"\x1b[B"),  // Down
+        (0x27, b"\x1b[C"),  // Right
+        (0x26, b"\x1b[A"),  // Up
+        (0x24, b"\x1b[H"),  // Home
+        (0x23, b"\x1b[F"),  // End
+        (0x2D, b"\x1b[2~"), // Insert
+        (0x2E, b"\x1b[3~"), // Delete
+        (0x21, b"\x1b[5~"), // Page Up
+        (0x22, b"\x1b[6~"), // Page Down
+    ];
+
+    // Always exercise the exact running-process translator clud consumes,
+    // including its trace output. This remains meaningful in headless test
+    // runners where STDIN is not an attached console.
+    for &(virtual_key, expected) in NAVIGATION_CASES {
+        let record = upstream_key_record(virtual_key, 0, 0);
+        let translated = translate_console_key_event(&record).expect("translated navigation event");
+        assert_eq!(
+            translated.data, expected,
+            "upstream virtual-key code {virtual_key:#x}"
+        );
+    }
+
     if !std::io::stdin().is_terminal() {
         eprintln!(
-            "shift_enter_survives_dual_reader_race: SKIP \
-             (stdin not a real console in this test runner)"
+            "native_reader_translates_navigation_and_preserves_shift_enter: \
+             production console capture SKIP (stdin not a real console)"
         );
-        return;
+    } else {
+        let mut input = spawn_console_input_reader().expect("spawn native terminal reader");
+        let rx = input.take_receiver().expect("terminal input receiver");
+
+        // Each key event must arrive as one complete chunk. In particular, the
+        // leading Escape byte may not be split from or dropped before the CSI
+        // suffix reaches Codex.
+        for &(virtual_key, expected) in NAVIGATION_CASES {
+            inject_key(virtual_key, 0, 0);
+            let got = rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("translated navigation event");
+            assert_eq!(got, expected, "virtual-key code {virtual_key:#x}");
+        }
+
+        // running-process emits CSI-u for Shift+Enter; clud deliberately
+        // retains its historical literal-LF contract at the adapter boundary.
+        inject_key(VK_RETURN, b'\r' as u16, SHIFT_PRESSED);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("Shift+Enter event"),
+            b"\n"
+        );
+
+        inject_key(VK_RETURN, b'\r' as u16, 0);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("plain Enter event"),
+            b"\r"
+        );
+
+        drop(input);
     }
 
-    let (mut console_handle, _mode_guard) =
-        spawn_console_input_reader().expect("spawn_console_input_reader");
-    let console_rx = console_handle
-        .take_receiver()
-        .expect("ConsoleInputHandle::take_receiver");
-
-    // Mimic the pump's stdin reader thread in
-    // `session::run_raw_pty_pump_full_verbose` (session.rs:581) — same
-    // call shape, same target handle, no normalization.
-    let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
-    let _stdin_thread = std::thread::spawn(move || {
-        let mut reader = std::io::stdin();
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if stdin_tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Let both readers settle on the input queue.
-    std::thread::sleep(Duration::from_millis(50));
-
-    const N: usize = 16;
-    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("GetStdHandle");
-    for _ in 0..N {
-        // Mirror what a real Shift+Enter keystroke produces: a key-down
-        // followed by a key-up record.
-        let records = [shift_enter_record(true), shift_enter_record(false)];
-        let mut written: u32 = 0;
-        unsafe { WriteConsoleInputW(handle, &records, &mut written) }.expect("WriteConsoleInputW");
-        assert_eq!(written, 2, "WriteConsoleInputW must write both records");
-        // Small delay so each Shift+Enter event is independently
-        // observable rather than getting batched into one ReadFile.
-        std::thread::sleep(Duration::from_millis(8));
+    let trace = std::fs::read_to_string(&trace_path).expect("native input trace");
+    for expected_hex in ["[1b 5b 44]", "[1b 5b 42]", "[1b 5b 43]", "[1b 5b 41]"] {
+        assert!(
+            trace.contains(&format!("translated bytes={expected_hex}")),
+            "trace did not contain {expected_hex}: {trace}"
+        );
     }
-
-    // Drain both channels for a fixed window.
-    let mut combined: Vec<u8> = Vec::new();
-    let deadline = Instant::now() + Duration::from_millis(800);
-    while Instant::now() < deadline {
-        let mut progress = false;
-        while let Ok(chunk) = console_rx.try_recv() {
-            combined.extend_from_slice(&chunk);
-            progress = true;
-        }
-        while let Ok(chunk) = stdin_rx.try_recv() {
-            combined.extend_from_slice(&chunk);
-            progress = true;
-        }
-        if !progress {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    let nl_count = combined.iter().filter(|&&b| b == b'\n').count();
-    let cr_count = combined.iter().filter(|&&b| b == b'\r').count();
-
-    assert_eq!(
-        nl_count, N,
-        "RED: only {nl_count}/{N} Shift+Enter events survived as \\n; \
-         {cr_count} surfaced as \\r (stolen by the io::stdin() ReadFile \
-         reader). Combined bytes: {:?}",
-        combined
-    );
 }

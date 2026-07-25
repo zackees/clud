@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Windows PTY input now uses running-process's native terminal translator
+  instead of clud's narrower duplicate, so arrow, Home/End,
+  Insert/Delete, and Page Up/Down keys reach Codex as complete escape
+  sequences. Clud's existing Shift+Enter, Ctrl+C, and Ctrl+V behavior is
+  preserved. See zackees/clud#575.
 - New `clud settings` interactive TUI: a small, cross-platform checkbox menu
   over global booleans in `~/.clud/settings.json` (space toggles, q quits
   and prompts to save if anything changed). `clud settings --list` prints
