@@ -19,7 +19,7 @@
 //! entirely — those descendants are intentionally outliving the foreground
 //! `clud` per (6) in the issue. The caller is responsible for that gate.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::process_tree;
 
@@ -284,6 +284,7 @@ fn extract_port(command: &str) -> Option<String> {
 /// foreground process exits. Returns counts for the caller's summary log.
 pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
     let all = running_process::originator::find_processes_by_originator("CLUD");
+    let tagged = tagged_pids(&all);
 
     // Only act on descendants whose originator points at *us*. Anything
     // pointing at a different CLUD:<pid> belongs to a concurrent clud
@@ -299,7 +300,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
         .collect();
 
     let header = format!("[clud] orphan scan on exit (originator=CLUD:{self_pid}):");
-    report_and_reap(mine, &header, opts)
+    report_and_reap(mine, &header, opts, &tagged)
 }
 
 /// Scan for *abandoned* CLUD-tagged descendants whose originator process is
@@ -312,6 +313,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
 /// process — anything CLUD-tagged with a dead originator is fair game.
 pub fn reap_orphans(opts: &ReapOpts) -> ReapOutcome {
     let all = running_process::originator::find_processes_by_originator("CLUD");
+    let tagged = tagged_pids(&all);
     let orphans: Vec<Descendant> = all
         .into_iter()
         .filter(|p| !p.parent_alive)
@@ -323,12 +325,32 @@ pub fn reap_orphans(opts: &ReapOpts) -> ReapOutcome {
         .collect();
 
     let header = "[clud] orphan sweep (dead originator):".to_string();
-    report_and_reap(orphans, &header, opts)
+    report_and_reap(orphans, &header, opts, &tagged)
+}
+
+/// PIDs of every process currently carrying a `CLUD:` originator tag.
+///
+/// This is the reaper's definition of "agent-spawned". The tag is inherited
+/// transitively, so everything the backend and its shells spawn carries it —
+/// and a process that spawned itself as a daemon has stripped it (see
+/// `running-process` #683). Used as the [`process_tree::kill_tree_filtered`]
+/// predicate so a tree walk never crosses into a declared daemon.
+fn tagged_pids(all: &[running_process::originator::OriginatorProcessInfo]) -> HashSet<u32> {
+    all.iter().map(|p| p.pid).collect()
 }
 
 /// Shared classify / report / kill body for both entry points. Returns a
 /// default outcome when `descendants` is empty so callers can skip noise.
-fn report_and_reap(descendants: Vec<Descendant>, header: &str, opts: &ReapOpts) -> ReapOutcome {
+///
+/// `tagged` is the full set of originator-tagged PIDs; the tree walk is
+/// pruned at anything outside it so a daemon that dropped the tag survives
+/// even when it is a PPID-descendant of something being reaped.
+fn report_and_reap(
+    descendants: Vec<Descendant>,
+    header: &str,
+    opts: &ReapOpts,
+    tagged: &HashSet<u32>,
+) -> ReapOutcome {
     let found = descendants.len();
     if found == 0 {
         return ReapOutcome::default();
@@ -393,7 +415,7 @@ fn report_and_reap(descendants: Vec<Descendant>, header: &str, opts: &ReapOpts) 
     let mut reaped = 0usize;
     let mut reaped_pids = Vec::with_capacity(descendants.len());
     for d in &descendants {
-        process_tree::kill_tree(d.pid);
+        process_tree::kill_tree_filtered(d.pid, &|pid| tagged.contains(&pid));
         reaped += 1;
         reaped_pids.push(d.pid);
     }

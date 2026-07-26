@@ -44,6 +44,40 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 /// tens of seconds; the minimal refresh is sub-second, which is the budget
 /// we have on the Ctrl+C path.
 pub fn kill_tree(pid: u32) {
+    kill_tree_filtered(pid, &|_| true);
+}
+
+/// Kill the tree rooted at `pid`, consulting `may_kill` for every process.
+///
+/// `may_kill(pid) == false` **prunes**: that process is spared *and so is its
+/// entire subtree*. Sparing a daemon while killing its children would leave
+/// it wedged mid-work, which is worse than either extreme — a build daemon's
+/// compiler children are its in-flight work, not leaked garbage.
+///
+/// # Why a caller-supplied predicate instead of a policy baked in here
+///
+/// The two callers want opposite things. Automatic reapers (shell exit,
+/// orphan sweep) must spare declared daemons — a `zccache`/`soldr`/`fbuild`
+/// server started by an agent bash command is not leaked garbage, and killing
+/// it throws away a warm cache shared with every other session. Deliberate
+/// kills (`clud kill`, `clud slay`, Ctrl+C) mean *everything*, and pass the
+/// permissive predicate via [`kill_tree`].
+///
+/// # Why the predicate takes only a PID
+///
+/// This runs on the Ctrl+C path, so the snapshot is deliberately built with
+/// `ProcessRefreshKind::nothing()` (see the note on [`kill_tree`]) — no
+/// cmdline, no environment. A predicate needing richer facts must precompute
+/// them and close over the result; [`crate::orphan_reaper`] already has the
+/// originator-tagged PID set in hand and closes over that. Keeping the
+/// predicate a pure PID lookup is what preserves the sub-second budget.
+///
+/// Note this is deliberately *not* a name allowlist. "Is this a daemon?" is
+/// answered by whether the process carries the inherited
+/// `RUNNING_PROCESS_ORIGINATOR` tag: everything an agent spawns inherits it
+/// transitively, and a process that spawned itself as a daemon has stripped
+/// it. Matching on image names would misfire on every unrelated build.
+pub fn kill_tree_filtered(pid: u32, may_kill: &dyn Fn(u32) -> bool) {
     let mut system = System::new();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let root = Pid::from_u32(pid);
@@ -51,11 +85,15 @@ pub fn kill_tree(pid: u32) {
         // Already dead, or never existed. Nothing to do.
         return;
     }
+    if !may_kill(pid) {
+        // Root is exempt — the whole tree is pruned.
+        return;
+    }
 
     // Kill leaves first, root last. `descendants` is BFS order
     // (root's children, then grandchildren, ...); reversing gets us
     // deepest-first.
-    let mut descendants = descendant_pids(&system, root);
+    let mut descendants = descendant_pids_filtered(&system, root, may_kill);
     descendants.reverse();
     descendants.push(root);
 
@@ -72,7 +110,13 @@ pub fn kill_tree(pid: u32) {
     }
 }
 
-fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
+/// BFS the parent→child graph from `root`, pruning any subtree whose root
+/// `may_kill` rejects.
+fn descendant_pids_filtered(
+    system: &System,
+    root: Pid,
+    may_kill: &dyn Fn(u32) -> bool,
+) -> Vec<Pid> {
     let mut children: std::collections::HashMap<Pid, Vec<Pid>> = std::collections::HashMap::new();
     for (pid, process) in system.processes() {
         if let Some(parent) = process.parent() {
@@ -84,6 +128,11 @@ fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
     while let Some(current) = stack.pop() {
         if let Some(next) = children.get(&current) {
             for child in next {
+                // Pruned, not just skipped: an exempt process keeps its own
+                // descendants, so we never descend past it.
+                if !may_kill(child.as_u32()) {
+                    continue;
+                }
                 descendants.push(*child);
                 stack.push(*child);
             }
@@ -140,6 +189,61 @@ pub fn try_break_group(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use std::collections::HashMap;
+
+    /// Build a fake parent→children graph and run the same prune walk
+    /// `descendant_pids_filtered` performs, without touching real processes.
+    fn walk(edges: &[(u32, u32)], root: u32, may_kill: &dyn Fn(u32) -> bool) -> Vec<u32> {
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (parent, child) in edges {
+            children.entry(*parent).or_default().push(*child);
+        }
+        let mut stack = vec![root];
+        let mut out = Vec::new();
+        while let Some(current) = stack.pop() {
+            if let Some(next) = children.get(&current) {
+                for child in next {
+                    if !may_kill(*child) {
+                        continue;
+                    }
+                    out.push(*child);
+                    stack.push(*child);
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    // shell(10) → bash(11) → cargo(12) → zccache-daemon(13) → compiler(14)
+    const EDGES: &[(u32, u32)] = &[(10, 11), (11, 12), (12, 13), (13, 14)];
+
+    #[test]
+    fn permissive_filter_reaps_the_whole_tree() {
+        assert_eq!(walk(EDGES, 10, &|_| true), vec![11, 12, 13, 14]);
+    }
+
+    /// The daemon is spared AND so is the compiler child beneath it —
+    /// sparing the daemon but killing its in-flight work would leave it
+    /// wedged, which is worse than either extreme.
+    #[test]
+    fn exempt_process_prunes_its_entire_subtree() {
+        let tagged = |pid: u32| pid != 13;
+        assert_eq!(walk(EDGES, 10, &tagged), vec![11, 12]);
+    }
+
+    /// An exempt process deeper in the tree must not spare its ancestors —
+    /// the leaked bash/cargo above it are still garbage.
+    #[test]
+    fn exemption_does_not_propagate_upward() {
+        let out = walk(EDGES, 10, &|pid| pid != 14);
+        assert!(out.contains(&13), "daemon's parent still reaped: {out:?}");
+        assert!(!out.contains(&14));
     }
 }
 
