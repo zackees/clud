@@ -1,5 +1,5 @@
 [build-system]
-requires = ["soldr>=0.8.24"]
+requires = ["soldr>=0.8.25"]
 build-backend = "soldr"
 
 [project]
