@@ -814,6 +814,15 @@ pub fn run_plan_pty(
         );
         drop(_raw_guard);
         drop(_console_guard);
+        // Windows-only: there the guard is a real `ConsoleInputHandle` whose
+        // Drop retires the reader's channel, and dropping it here is what
+        // scopes capture to one PTY iteration (#141, #575). Everywhere else
+        // the binding is the `Option<()>` stub declared above — `Copy`, so
+        // `drop()` is a no-op and trips `dropping_copy_types` under
+        // `-D warnings`. Note `let _ = guard` is NOT an alternative: a
+        // wildcard pattern does not move, so it would silently stop dropping
+        // the real handle on Windows.
+        #[cfg(windows)]
         drop(_console_input_guard);
         if let Some(bytes) = header_restore.as_deref() {
             write_terminal_bytes(bytes);
