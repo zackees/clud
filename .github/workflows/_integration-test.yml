@@ -37,14 +37,6 @@ jobs:
       # own documented escape hatch and always wins, raising the limit to
       # 1000/hr. See zackees/soldr#1879.
       SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # TEMPORARY (zackees/soldr#1880): soldr cook auto-hydrate restores
-      # the cached target/ tree without the executable bit, so cargo cannot
-      # run the restored build-script-build binaries and dies with
-      # "Permission denied (os error 13)" on an arbitrary crate. Re-running
-      # does not help -- the same poisoned cache entry is restored again.
-      # Fixed by zackees/soldr#1889; REMOVE THIS once a soldr release
-      # containing that fix is in use. Costs a cold build, not correctness.
-      SOLDR_COOK_AUTO_HYDRATE: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -94,7 +86,15 @@ jobs:
           linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
           preserve-source-mtimes: true
           solo-toolchain-cache: true
-          prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
+          # TEMPORARY (zackees/soldr#1880): the soldr-cook prebuild restores
+          # a cached target/ tree whose build-script-build binaries come back
+          # without the executable bit, so cargo dies with "Permission denied
+          # (os error 13)" on a rotating, arbitrary crate. Re-running does not
+          # help -- the same cache entry is restored again. Windows already ran
+          # with 'none' and never hit this, which is what identified the cook
+          # prebuild as the trigger. Restore the conditional once soldr ships
+          # the fix. Costs a cold dependency build, not correctness.
+          prebuild-deps: none
           prebuild-deps-flags: "--workspace"
 
       - name: Restore source checkout
