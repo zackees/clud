@@ -284,7 +284,7 @@ fn extract_port(command: &str) -> Option<String> {
 /// foreground process exits. Returns counts for the caller's summary log.
 pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
     let all = running_process::originator::find_processes_by_originator("CLUD");
-    let tagged = tagged_pids(&all);
+    let daemons = declared_daemon_pids();
 
     // Only act on descendants whose originator points at *us*. Anything
     // pointing at a different CLUD:<pid> belongs to a concurrent clud
@@ -300,7 +300,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
         .collect();
 
     let header = format!("[clud] orphan scan on exit (originator=CLUD:{self_pid}):");
-    report_and_reap(mine, &header, opts, &tagged)
+    report_and_reap(mine, &header, opts, &daemons)
 }
 
 /// Scan for *abandoned* CLUD-tagged descendants whose originator process is
@@ -313,7 +313,7 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
 /// process — anything CLUD-tagged with a dead originator is fair game.
 pub fn reap_orphans(opts: &ReapOpts) -> ReapOutcome {
     let all = running_process::originator::find_processes_by_originator("CLUD");
-    let tagged = tagged_pids(&all);
+    let daemons = declared_daemon_pids();
     let orphans: Vec<Descendant> = all
         .into_iter()
         .filter(|p| !p.parent_alive)
@@ -325,31 +325,48 @@ pub fn reap_orphans(opts: &ReapOpts) -> ReapOutcome {
         .collect();
 
     let header = "[clud] orphan sweep (dead originator):".to_string();
-    report_and_reap(orphans, &header, opts, &tagged)
+    report_and_reap(orphans, &header, opts, &daemons)
 }
 
-/// PIDs of every process currently carrying a `CLUD:` originator tag.
+/// PIDs of every process that has **declared itself a daemon** by setting
+/// `RUNNING_PROCESS_IS_DAEMON` (running-process #685/#686, released in
+/// 4.6.3).
 ///
-/// This is the reaper's definition of "agent-spawned". The tag is inherited
-/// transitively, so everything the backend and its shells spawn carries it —
-/// and a process that spawned itself as a daemon has stripped it (see
-/// `running-process` #683). Used as the [`process_tree::kill_tree_filtered`]
-/// predicate so a tree walk never crosses into a declared daemon.
-fn tagged_pids(all: &[running_process::originator::OriginatorProcessInfo]) -> HashSet<u32> {
-    all.iter().map(|p| p.pid).collect()
+/// This is the reaper's spare-list, and it replaces the previous
+/// tag-presence test (#522).
+///
+/// The old predicate killed a PID only when it carried a `CLUD:` originator
+/// tag, which conflated two very different populations, because sparing
+/// *prunes the whole subtree*:
+///
+/// - a genuine daemon, which strips the tag deliberately (#683) — correct
+///   to spare;
+/// - any descendant that merely lost the tag, because some link in the
+///   spawn chain rebuilt its environment (a login shell, `env -i`, a
+///   service wrapper, a setuid hop). Those are ordinary abandoned
+///   processes, and sparing them also shielded everything beneath them.
+///
+/// Absence of a tag cannot distinguish the two: "did not declare itself"
+/// and "had its environment clobbered" look identical. A positive marker
+/// can, so the predicate now spares only what actually claims daemon-hood
+/// and lets the tree walk reach env-stripped descendants.
+fn declared_daemon_pids() -> HashSet<u32> {
+    running_process::originator::find_declared_daemon_pids()
 }
 
 /// Shared classify / report / kill body for both entry points. Returns a
 /// default outcome when `descendants` is empty so callers can skip noise.
 ///
-/// `tagged` is the full set of originator-tagged PIDs; the tree walk is
-/// pruned at anything outside it so a daemon that dropped the tag survives
-/// even when it is a PPID-descendant of something being reaped.
+/// `daemons` is the set of PIDs that declared themselves daemons; the tree
+/// walk is pruned at those (and therefore at their subtrees) so a daemon
+/// survives even when it is a PPID-descendant of something being reaped.
+/// Everything else in the tree is reachable, including descendants whose
+/// environment was rebuilt and no longer carries the originator tag (#522).
 fn report_and_reap(
     descendants: Vec<Descendant>,
     header: &str,
     opts: &ReapOpts,
-    tagged: &HashSet<u32>,
+    daemons: &HashSet<u32>,
 ) -> ReapOutcome {
     let found = descendants.len();
     if found == 0 {
@@ -415,7 +432,7 @@ fn report_and_reap(
     let mut reaped = 0usize;
     let mut reaped_pids = Vec::with_capacity(descendants.len());
     for d in &descendants {
-        process_tree::kill_tree_filtered(d.pid, &|pid| tagged.contains(&pid));
+        process_tree::kill_tree_filtered(d.pid, &|pid| !daemons.contains(&pid));
         reaped += 1;
         reaped_pids.push(d.pid);
     }
@@ -435,6 +452,54 @@ fn report_and_reap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape of the predicate is the whole of #522, so assert it
+    /// directly rather than only through the callers.
+    ///
+    /// Old rule: kill only tagged PIDs. New rule: kill unless the PID
+    /// declared itself a daemon.
+    fn may_kill(daemons: &HashSet<u32>, pid: u32) -> bool {
+        !daemons.contains(&pid)
+    }
+
+    /// A declared daemon is spared. This is what keeps zccache/soldr/fbuild
+    /// alive across a clud exit, and it is why the marker exists.
+    #[test]
+    fn declared_daemon_is_spared() {
+        let daemons: HashSet<u32> = [4242].into_iter().collect();
+        assert!(!may_kill(&daemons, 4242));
+    }
+
+    /// The regression #522 actually reports: a descendant whose environment
+    /// was rebuilt somewhere in the spawn chain carries no originator tag,
+    /// yet is an ordinary abandoned process. The old predicate spared it --
+    /// and, because sparing prunes, everything beneath it too.
+    #[test]
+    fn untagged_non_daemon_is_reapable() {
+        let daemons: HashSet<u32> = [4242].into_iter().collect();
+        assert!(
+            may_kill(&daemons, 9001),
+            "an env-stripped descendant that never declared itself a daemon \
+             must stay reachable (regression of #522)"
+        );
+    }
+
+    /// Absence of evidence is not evidence of daemon-hood. With no marker
+    /// anywhere, nothing is spared -- the previous behavior spared
+    /// everything untagged, which is the inversion this fixes.
+    #[test]
+    fn empty_daemon_set_spares_nothing() {
+        let daemons: HashSet<u32> = HashSet::new();
+        assert!(may_kill(&daemons, 1));
+        assert!(may_kill(&daemons, u32::MAX));
+    }
+
+    /// The query must not blow up when nothing has declared itself; a scan
+    /// on a machine with no daemons is the common case.
+    #[test]
+    fn declared_daemon_pids_is_callable() {
+        let _ = declared_daemon_pids();
+    }
 
     #[test]
     fn classify_vite_preview_with_port() {
