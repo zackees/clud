@@ -21,7 +21,7 @@ def test_pip_build_uses_soldr_pep517_backend() -> None:
 
     assert build_system["build-backend"] == "soldr"
     assert "backend-path" not in build_system
-    assert requirements == ["soldr>=0.8.24"]
+    assert requirements == ["soldr>=0.8.25"]
 
 
 def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
