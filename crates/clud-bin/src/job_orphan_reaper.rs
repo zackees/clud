@@ -146,20 +146,21 @@ mod imp {
                         // when the shell exits — throwing away a warm cache
                         // shared with every other session.
                         //
-                        // "Declared daemon" == carries no CLUD originator
-                        // tag: the tag is inherited transitively by
-                        // everything a session spawns, and `spawn_daemon`
-                        // strips it (running-process #683). Scanned here
-                        // rather than cached because a shell exit is rare
-                        // and the set must be current at kill time.
-                        let tagged: std::collections::HashSet<u32> =
-                            running_process::originator::find_processes_by_originator("CLUD")
-                                .iter()
-                                .map(|p| p.pid)
-                                .collect();
+                        // "Declared daemon" == sets RUNNING_PROCESS_IS_DAEMON
+                        // (running-process #685/#686). This used to mean
+                        // "carries no CLUD originator tag", but absence is
+                        // ambiguous: it equally describes a descendant whose
+                        // environment was rebuilt by some link in the spawn
+                        // chain, and sparing prunes the whole subtree, so
+                        // those escaped along with everything under them
+                        // (#522). Scanned here rather than cached because a
+                        // shell exit is rare and the set must be current at
+                        // kill time.
+                        let daemons: std::collections::HashSet<u32> =
+                            running_process::originator::find_declared_daemon_pids();
                         for root in roots {
                             crate::process_tree::kill_tree_filtered(root, &|pid| {
-                                tagged.contains(&pid)
+                                !daemons.contains(&pid)
                             });
                         }
                     }
