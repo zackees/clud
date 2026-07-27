@@ -37,6 +37,16 @@ jobs:
       CFLAGS: "-g0"
       CXXFLAGS: "-g0"
       CLUD_USE_SOLDR_SHIMS: "1"
+      # soldr resolves managed tools (maturin) through the GitHub
+      # releases API. That lookup crosses repositories (PyO3/maturin),
+      # and soldr deliberately refuses to reuse GITHUB_TOKEN for a repo
+      # other than the one being built -- so it goes out unauthenticated
+      # at 60 req/hr per runner IP, shared by every concurrent job, and
+      # returns HTTP 403. soldr then fails the build outright even when a
+      # usable maturin is already cached. SOLDR_GITHUB_TOKEN is soldr's
+      # own documented escape hatch and always wins, raising the limit to
+      # 1000/hr. See zackees/soldr#1879.
+      SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,7 +96,15 @@ jobs:
           linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
           preserve-source-mtimes: true
           solo-toolchain-cache: true
-          prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
+          # TEMPORARY (zackees/soldr#1880): the soldr-cook prebuild restores
+          # a cached target/ tree whose build-script-build binaries come back
+          # without the executable bit, so cargo dies with "Permission denied
+          # (os error 13)" on a rotating, arbitrary crate. Re-running does not
+          # help -- the same cache entry is restored again. Windows already ran
+          # with 'none' and never hit this, which is what identified the cook
+          # prebuild as the trigger. Restore the conditional once soldr ships
+          # the fix. Costs a cold dependency build, not correctness.
+          prebuild-deps: none
           prebuild-deps-flags: ${{ inputs.build-mode == 'release' && '--release --workspace' || '--workspace' }}
 
       - name: Restore source checkout
