@@ -11,6 +11,9 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   ZCCACHE_DISABLE: "1"
+  # Authenticate soldr's cross-repo managed-tool lookups so they are not
+  # rate-limited to 60 req/hr per runner IP. See zackees/soldr#1879.
+  SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   dylint:
