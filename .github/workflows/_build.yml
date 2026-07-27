@@ -47,6 +47,14 @@ jobs:
       # own documented escape hatch and always wins, raising the limit to
       # 1000/hr. See zackees/soldr#1879.
       SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # TEMPORARY (zackees/soldr#1880): soldr cook auto-hydrate restores
+      # the cached target/ tree without the executable bit, so cargo cannot
+      # run the restored build-script-build binaries and dies with
+      # "Permission denied (os error 13)" on an arbitrary crate. Re-running
+      # does not help -- the same poisoned cache entry is restored again.
+      # Fixed by zackees/soldr#1889; REMOVE THIS once a soldr release
+      # containing that fix is in use. Costs a cold build, not correctness.
+      SOLDR_COOK_AUTO_HYDRATE: "0"
     steps:
       - uses: actions/checkout@v4
 
