@@ -51,22 +51,6 @@ def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
 
 
 def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
-    """Windows must never run the soldr dependency cook.
-
-    Asserted as an invariant rather than as one exact literal. Two
-    settings satisfy it: the usual `runner.os == 'Windows'` conditional,
-    and a blanket `none` that disables the cook everywhere.
-
-    The blanket form is currently in force as a workaround for
-    zackees/soldr#1880: the cook prebuild restores a cached `target/`
-    tree whose `build-script-build` binaries come back without the
-    executable bit, so cargo dies with "Permission denied (os error 13)"
-    on a rotating, arbitrary crate. Revert to the conditional once a
-    soldr release carrying the fix is pinned.
-    """
-    conditional = "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
-    blanket = "prebuild-deps: none"
-
     setup_workflows = [
         path
         for path in (ROOT / ".github" / "workflows").glob("_*.yml")
@@ -76,12 +60,7 @@ def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
     assert setup_workflows
     for path in setup_workflows:
         text = path.read_text(encoding="utf-8")
-        assert conditional in text or blanket in text, (
-            f"{path.name}: prebuild-deps must either exempt Windows via the "
-            f"runner.os conditional or disable the cook entirely with 'none'"
-        )
-        # Either way, no workflow may hand Windows an unconditional cook.
-        assert "prebuild-deps: soldr-cook" not in text, (
-            f"{path.name}: unconditional 'soldr-cook' would run the dependency "
-            f"cook on Windows"
+        assert (
+            "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
+            in text
         )
