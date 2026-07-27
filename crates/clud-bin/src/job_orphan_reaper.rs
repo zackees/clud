@@ -138,8 +138,30 @@ mod imp {
                             (process.parent_pid == pid).then_some(child)
                         })
                         .collect();
-                    for root in roots {
-                        crate::process_tree::kill_tree(root);
+                    if !roots.is_empty() {
+                        // Spare declared daemons. A build cache server
+                        // (zccache/soldr/fbuild) lazily started by a command
+                        // in this very shell is a PPID-descendant of one of
+                        // these roots, so an unfiltered walk would reap it
+                        // when the shell exits — throwing away a warm cache
+                        // shared with every other session.
+                        //
+                        // "Declared daemon" == carries no CLUD originator
+                        // tag: the tag is inherited transitively by
+                        // everything a session spawns, and `spawn_daemon`
+                        // strips it (running-process #683). Scanned here
+                        // rather than cached because a shell exit is rare
+                        // and the set must be current at kill time.
+                        let tagged: std::collections::HashSet<u32> =
+                            running_process::originator::find_processes_by_originator("CLUD")
+                                .iter()
+                                .map(|p| p.pid)
+                                .collect();
+                        for root in roots {
+                            crate::process_tree::kill_tree_filtered(root, &|pid| {
+                                tagged.contains(&pid)
+                            });
+                        }
                     }
                 }
                 ACTIVE_PROCESS_ZERO => known.clear(),
