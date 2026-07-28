@@ -7,7 +7,7 @@
 //! toolchain calls through soldr by prepending soldr's shim dir to the
 //! session `PATH` (see [`crate::soldr_activate`] and zackees/clud#343).
 //!
-//! ## Two-level layout (DD-014)
+//! ## Three-level layout (DD-014, extended by issue #525)
 //!
 //! - **User-level** `~/.clud/settings.json` — defaults that apply to
 //!   every repo the user opens. Lives next to the existing
@@ -15,12 +15,18 @@
 //!   settings, owned by [`crate::clud_settings`]).
 //! - **Repo-level** `<repo-root>/.clud/settings.json` — per-repo
 //!   overrides. Lands in version control alongside other repo configs.
+//! - **Repo-local** `<repo-root>/.clud/settings.local.json` — the
+//!   gitignored per-developer layer. Documented and gitignored from the
+//!   start but never actually read until #525, so rules placed there were
+//!   silently ignored.
 //!
-//! Merge semantics: **repo wins per-field**. A field unset at the repo
-//! level falls through to the user-level value; a field unset at both
-//! levels uses the baked-in default. This is identical to how
-//! `.claude/settings.json` layers with `~/.claude/settings.json` in
-//! Claude Code.
+//! Merge semantics: **repo-local > repo > user**, per field. A field unset
+//! at one level falls through to the next; unset everywhere uses the
+//! baked-in default. `bad_commands` and `bad_pipelines` instead concatenate
+//! across layers, deduplicated by `id` with the higher layer winning, so a
+//! local override can replace one shared rule without restating the rest.
+//! This mirrors how `.claude/settings.json` layers with
+//! `~/.claude/settings.json` in Claude Code.
 //!
 //! Schema (v1):
 //!
@@ -676,6 +682,10 @@ fn has_directive(raw: &RawRepoCludConfig) -> bool {
 // Raw discovery (Option-shaped) — used by the merge.
 // ---------------------------------------------------------------------
 
+/// Gitignored per-developer override, layered above `settings.json` in the
+/// same `.clud/` directory (issue #525).
+pub const LOCAL_SETTINGS_FILE: &str = "settings.local.json";
+
 fn discover_repo_clud_config_raw(start: &Path) -> Option<RawRepoCludConfig> {
     let mut cursor: PathBuf = if start.is_absolute() {
         start.to_path_buf()
@@ -687,9 +697,31 @@ fn discover_repo_clud_config_raw(start: &Path) -> Option<RawRepoCludConfig> {
     }
 
     loop {
-        let candidate = cursor.join(".clud").join("settings.json");
-        if candidate.is_file() {
-            return read_and_parse_raw(&candidate, "repo-level");
+        let clud_dir = cursor.join(".clud");
+        let shared = clud_dir.join("settings.json");
+        let local = clud_dir.join(LOCAL_SETTINGS_FILE);
+        // Issue #525: `.clud/settings.local.json` is documented and gitignored
+        // as the user-local override layer but was never read, so a
+        // `bad_commands` rule placed there was silently ignored.
+        //
+        // Both files are consulted at the *same* directory, and either one is
+        // enough to stop the walk. Requiring `settings.json` to exist first
+        // would make a local-only override invisible, which is the very shape
+        // a gitignored override file is for.
+        let found_local = local
+            .is_file()
+            .then(|| read_and_parse_raw(&local, "repo-local"));
+        let found_shared = shared
+            .is_file()
+            .then(|| read_and_parse_raw(&shared, "repo-level"));
+        if found_local.is_some() || found_shared.is_some() {
+            // Local wins per field; `merge` already concatenates and dedupes
+            // `bad_commands` by id with the upper layer taking precedence.
+            return match (found_local.flatten(), found_shared.flatten()) {
+                (Some(local), Some(shared)) => Some(merge(local, shared)),
+                (Some(local), None) => Some(local),
+                (None, shared) => shared,
+            };
         }
         if cursor.join(".git").exists() {
             return None;
@@ -840,8 +872,119 @@ mod tests {
         fs::write(dir.join("settings.json"), body).expect("write settings.json");
     }
 
+    fn write_local_settings(root: &Path, body: &str) {
+        let dir = root.join(".clud");
+        fs::create_dir_all(&dir).expect("mkdir .clud");
+        fs::write(dir.join(LOCAL_SETTINGS_FILE), body).expect("write settings.local.json");
+    }
+
     fn mark_repo_root(root: &Path) {
         fs::create_dir_all(root.join(".git")).expect("mkdir .git");
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #525: the repo-local override layer.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_local_only_settings_file_is_honored() {
+        // The reported bug: a rule in the gitignored override file was
+        // silently ignored. Note there is deliberately no `settings.json`
+        // here — requiring one would keep a local-only override invisible,
+        // which is the whole point of the file.
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_local_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"local-rule","match":"playwright","replacement":"npm run test"}]}"#,
+        );
+        let cfg = discover_repo_clud_config(tmp.path()).expect("local settings must be found");
+        assert_eq!(cfg.bad_commands.len(), 1);
+        assert_eq!(cfg.bad_commands[0].id.as_deref(), Some("local-rule"));
+    }
+
+    #[test]
+    fn local_settings_win_over_shared_for_scalars() {
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_settings(tmp.path(), r#"{"rust":{"use_soldr":true}}"#);
+        write_local_settings(tmp.path(), r#"{"rust":{"use_soldr":false}}"#);
+        let cfg = discover_repo_clud_config(tmp.path()).expect("config");
+        assert!(!cfg.rust.use_soldr, "repo-local must win over repo");
+    }
+
+    #[test]
+    fn shared_settings_still_apply_where_local_is_silent() {
+        // The layer is an override, not a replacement: a local file that
+        // mentions one field must not discard the rest of the shared config.
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_settings(
+            tmp.path(),
+            r#"{"rust":{"use_soldr":false,"version":"1.90.0"}}"#,
+        );
+        write_local_settings(tmp.path(), r#"{"rust":{"use_soldr":true}}"#);
+        let cfg = discover_repo_clud_config(tmp.path()).expect("config");
+        assert!(cfg.rust.use_soldr, "local override applies");
+        assert_eq!(
+            cfg.rust.version.as_deref(),
+            Some("1.90.0"),
+            "untouched shared field must survive"
+        );
+    }
+
+    #[test]
+    fn bad_command_rules_concatenate_across_the_local_layer() {
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"shared","match":"curl","replacement":"shared repl"}]}"#,
+        );
+        write_local_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"local","match":"wget","replacement":"local repl"}]}"#,
+        );
+        let cfg = discover_repo_clud_config(tmp.path()).expect("config");
+        let ids: Vec<Option<&str>> = cfg.bad_commands.iter().map(|r| r.id.as_deref()).collect();
+        assert_eq!(ids.len(), 2, "both layers' rules must survive: {ids:?}");
+        assert!(ids.contains(&Some("local")) && ids.contains(&Some("shared")));
+    }
+
+    #[test]
+    fn a_local_rule_replaces_the_shared_rule_with_the_same_id() {
+        // Dedupe by id is what lets a developer retune one shared rule
+        // without restating the whole list.
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"dupe","match":"curl","replacement":"shared repl"}]}"#,
+        );
+        write_local_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"dupe","match":"curl","replacement":"local repl"}]}"#,
+        );
+        let cfg = discover_repo_clud_config(tmp.path()).expect("config");
+        assert_eq!(cfg.bad_commands.len(), 1, "same id must not duplicate");
+        assert_eq!(cfg.bad_commands[0].replacement, "local repl");
+    }
+
+    #[test]
+    fn a_malformed_local_file_does_not_discard_the_shared_config() {
+        // Fail-open, matching the existing behaviour for a malformed
+        // settings.json: a broken override must not silently disarm the
+        // shared rules it was meant to extend.
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"shared","match":"curl","replacement":"shared repl"}]}"#,
+        );
+        write_local_settings(tmp.path(), "{ not json");
+        let cfg = discover_repo_clud_config(tmp.path()).expect("shared config must survive");
+        assert_eq!(cfg.bad_commands.len(), 1);
+        assert_eq!(cfg.bad_commands[0].id.as_deref(), Some("shared"));
     }
 
     // -----------------------------------------------------------------
