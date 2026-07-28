@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::io_helpers::read_json_file;
 use super::paths::{session_snapshot_path, sessions_dir};
-use super::process_utils::pid_is_alive;
+use super::process_utils::identity_is_alive;
 use super::types::SessionSnapshot;
 
 /// Resolve a user-provided session identifier to the canonical session ID.
@@ -149,7 +149,10 @@ fn session_is_live(session: &SessionSnapshot) -> bool {
     if session.exit_code.is_some() {
         return false;
     }
-    if !pid_is_alive(session.worker_pid) {
+    // Identity, not bare PID: a session whose worker exited long ago must not
+    // read as live again because the OS reissued its number to an unrelated
+    // process (issue #558). `clud kill` and attach both act on this answer.
+    if !identity_is_alive(&session.worker_identity()) {
         return false;
     }
     // A repeat worker owns the long-lived job. Its `root_pid` is only the
@@ -157,8 +160,8 @@ fn session_is_live(session: &SessionSnapshot) -> bool {
     // child exits, before the worker persists its sleeping state. Do not hide
     // the repeat job during that handoff window.
     if session.repeat_interval_secs.is_none() {
-        if let Some(root_pid) = session.root_pid {
-            if !pid_is_alive(root_pid) {
+        if let Some(root) = session.root_identity() {
+            if !identity_is_alive(&root) {
                 return false;
             }
         }
@@ -205,6 +208,9 @@ mod tests {
             worker_pid,
             worker_port: 0,
             root_pid: None,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code,
             exited_at: exit_code.map(|_| created_at + 1000),
             ctrl_c: None,
@@ -237,6 +243,9 @@ mod tests {
             // The short-lived child exited before the repeat worker persisted
             // its next sleeping state. The worker remains the job's owner.
             root_pid: Some(u32::MAX),
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code: None,
             exited_at: None,
             ctrl_c: None,
@@ -246,6 +255,47 @@ mod tests {
         let sessions = list_background_sessions(tmp.path());
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "repeat-job");
+    }
+
+    #[test]
+    fn a_recycled_worker_pid_does_not_resurrect_a_dead_session() {
+        // Issue #558. The snapshot names a PID that really is running -- this
+        // very test process -- but pins it to a start time that process never
+        // had. That is exactly the shape left behind when a worker exits and
+        // the OS hands its number to something unrelated: `pid_is_alive`
+        // answers "yes", and the session would come back as attachable, with
+        // `clud kill` then aimed at an innocent process.
+        //
+        // Synthetic on purpose: forcing the OS to actually recycle a PID is
+        // not something a test can do deterministically on any platform.
+        let tmp = TempDir::new().unwrap();
+        let live_pid = std::process::id();
+        let real_start = crate::process_identity::self_start_time();
+        assert!(
+            real_start != crate::process_identity::UNKNOWN_START_TIME,
+            "this platform must report a start time for the running process"
+        );
+
+        write_snapshot_with_cwd_and_pid(tmp.path(), "recycled", 1, None, None, live_pid);
+        let path = session_snapshot_path(tmp.path(), "recycled");
+        let mut snap = read_json_file::<SessionSnapshot>(&path).unwrap();
+        snap.worker_pid_start = real_start.wrapping_add(1);
+        write_json_file(&path, &snap).unwrap();
+        assert!(!session_is_live(&snap));
+        assert!(list_background_sessions(tmp.path()).is_empty());
+
+        // Control: the same record with the true start time is live, so the
+        // assertion above is about identity and not about some other field.
+        snap.worker_pid_start = real_start;
+        write_json_file(&path, &snap).unwrap();
+        assert!(session_is_live(&snap));
+        assert_eq!(list_background_sessions(tmp.path()).len(), 1);
+
+        // And a record from an older clud, carrying no start time at all,
+        // keeps the pre-#558 PID-only behaviour rather than reading as stale.
+        snap.worker_pid_start = crate::process_identity::UNKNOWN_START_TIME;
+        write_json_file(&path, &snap).unwrap();
+        assert!(session_is_live(&snap));
     }
 
     #[test]

@@ -13,12 +13,13 @@ use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, Stdi
 
 use crate::graphics::GraphicsConfig;
 use crate::launch_log;
+use crate::process_identity::{self, ProcessIdentity};
 use crate::subprocess;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::io_helpers::{child_env, read_json_file};
 use super::paths::spec_path;
-use super::process_utils::pid_is_alive;
+use super::process_utils::identity_is_alive;
 use super::types::{
     CtrlCProfile, SessionKind, SessionRuntime, SessionSnapshot, WorkerClientMessage,
     WorkerLaunchSpec, WorkerServerMessage, DEFAULT_BACKLOG_LIMIT_BYTES,
@@ -92,6 +93,13 @@ pub(super) fn run_worker(
         worker_pid: std::process::id(),
         worker_port,
         root_pid: None,
+        // Issue #558: pin each PID to the process that holds it now, so a
+        // later reader can tell this worker from whatever inherits its
+        // number. The daemon is by construction alive at this point, so
+        // reading its start time here is accurate.
+        daemon_pid_start: process_identity::start_time_of(daemon_pid),
+        worker_pid_start: process_identity::self_start_time(),
+        root_pid_start: process_identity::UNKNOWN_START_TIME,
         exit_code: None,
         exited_at: None,
         ctrl_c: None,
@@ -143,11 +151,15 @@ pub(super) fn run_worker(
         let runtime = runtime.clone();
         let state_dir = state_dir.to_path_buf();
         let session_id = session_id.to_string();
+        // Issue #558: watch the daemon *process*. Polling a bare PID would
+        // keep this worker alive forever if an unrelated process inherited
+        // the daemon's number after it died.
+        let daemon = shared.snapshot().daemon_identity();
         thread::spawn(move || loop {
             if shared.snapshot().exit_code.is_some() {
                 break;
             }
-            if !pid_is_alive(daemon_pid) {
+            if !identity_is_alive(&daemon) {
                 runtime.cleanup_tree();
                 shared.broadcast_exit(137);
                 let _ = persist_snapshot(&state_dir, &session_id, &shared);
@@ -238,6 +250,9 @@ fn run_repeat_worker(
         worker_pid: std::process::id(),
         worker_port: 0,
         root_pid: None,
+        daemon_pid_start: process_identity::start_time_of(daemon_pid),
+        worker_pid_start: process_identity::self_start_time(),
+        root_pid_start: process_identity::UNKNOWN_START_TIME,
         exit_code: None,
         exited_at: None,
         ctrl_c: None,
@@ -264,8 +279,14 @@ fn run_repeat_worker(
         return 1;
     }
 
+    // Issue #558: watch the daemon *process*, not its PID. A worker that
+    // outlives its daemon must exit; one that keeps running because an
+    // unrelated process inherited the daemon's number is an orphan the
+    // reapers then have to clean up.
+    let daemon = shared.snapshot().daemon_identity();
+
     loop {
-        if !pid_is_alive(daemon_pid) {
+        if !identity_is_alive(&daemon) {
             shared.set_exit_code(137);
             shared.close_transcript();
             let _ = persist_snapshot(state_dir, session_id, &shared);
@@ -274,7 +295,7 @@ fn run_repeat_worker(
         }
 
         shared.set_repeat_state(true, None);
-        if !run_repeat_once(&repeat_run_command, spec, daemon_pid, &shared) {
+        if !run_repeat_once(&repeat_run_command, spec, &daemon, &shared) {
             shared.close_transcript();
             let _ = persist_snapshot(state_dir, session_id, &shared);
             let _ = fs::remove_file(spec_path(state_dir, session_id));
@@ -295,7 +316,7 @@ fn run_repeat_worker(
             .as_millis() as u64)
             < next_run_at
         {
-            if !pid_is_alive(daemon_pid) {
+            if !identity_is_alive(&daemon) {
                 shared.set_exit_code(137);
                 shared.close_transcript();
                 let _ = persist_snapshot(state_dir, session_id, &shared);
@@ -310,7 +331,7 @@ fn run_repeat_worker(
 fn run_repeat_once(
     command: &[String],
     spec: &WorkerLaunchSpec,
-    daemon_pid: u32,
+    daemon: &ProcessIdentity,
     shared: &Arc<WorkerShared>,
 ) -> bool {
     let process = Arc::new(NativeProcess::new(ProcessConfig {
@@ -337,7 +358,7 @@ fn run_repeat_once(
     shared.set_root_pid(process.pid());
 
     loop {
-        if !pid_is_alive(daemon_pid) {
+        if !identity_is_alive(daemon) {
             let _ = process.kill();
             let _ = process.wait(Some(Duration::from_secs(2)));
             shared.set_exit_code(137);
@@ -809,6 +830,9 @@ mod tests {
             worker_pid: std::process::id(),
             worker_port: 0,
             root_pid: None,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code: None,
             exited_at: None,
             ctrl_c: None,

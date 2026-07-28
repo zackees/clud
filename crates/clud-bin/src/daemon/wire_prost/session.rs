@@ -3,6 +3,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use super::proto;
 use super::WireError;
 use crate::daemon::types::{CtrlCProfile, SessionKind, SessionSnapshot};
+use crate::process_identity::UNKNOWN_START_TIME;
 
 pub(in crate::daemon::wire_prost) fn session_to_proto(
     session: &SessionSnapshot,
@@ -30,6 +31,9 @@ pub(in crate::daemon::wire_prost) fn session_to_proto(
         exit_code: session.exit_code,
         exited_at: session.exited_at,
         ctrl_c: session.ctrl_c.as_ref().map(profile_to_proto),
+        daemon_pid_start: Some(session.daemon_pid_start),
+        worker_pid_start: Some(session.worker_pid_start),
+        root_pid_start: Some(session.root_pid_start),
     }
 }
 
@@ -59,6 +63,12 @@ pub(in crate::daemon::wire_prost) fn session_from_proto(
         exit_code: session.exit_code,
         exited_at: session.exited_at,
         ctrl_c: session.ctrl_c.map(profile_from_proto),
+        // A peer that predates issue #558 sends no start times; the missing
+        // value degrades `ProcessIdentity` to the PID-only comparison this
+        // code already used, rather than making every PID look stale.
+        daemon_pid_start: session.daemon_pid_start.unwrap_or(UNKNOWN_START_TIME),
+        worker_pid_start: session.worker_pid_start.unwrap_or(UNKNOWN_START_TIME),
+        root_pid_start: session.root_pid_start.unwrap_or(UNKNOWN_START_TIME),
     })
 }
 

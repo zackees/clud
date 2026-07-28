@@ -12,6 +12,7 @@ use running_process::telemetry::{
 };
 
 use crate::capture::TerminalCapture;
+use crate::process_identity;
 
 use super::io_helpers::{read_json_file, write_json_file};
 use super::paths::{session_log_path, session_snapshot_path};
@@ -280,9 +281,17 @@ impl WorkerShared {
     }
 
     pub(super) fn set_root_pid(&self, root_pid: Option<u32>) {
+        // Issue #558: capture the start time in the same breath as the PID,
+        // and outside the lock -- the process-table walk is the expensive
+        // part, and only this method writes `root_pid`.
+        let root_pid_start = match root_pid {
+            Some(pid) => process_identity::start_time_of(pid),
+            None => process_identity::UNKNOWN_START_TIME,
+        };
         let snapshot = {
             let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
             guard.root_pid = root_pid;
+            guard.root_pid_start = root_pid_start;
             guard.clone()
         };
         let _ = self.persist_snapshot(&snapshot);
@@ -633,6 +642,9 @@ mod tests {
             worker_pid: 0,
             worker_port: 0,
             root_pid: None,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code: None,
             exited_at: None,
             ctrl_c: None,
@@ -665,6 +677,9 @@ mod tests {
             worker_pid: 0,
             worker_port: 0,
             root_pid: None,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code: None,
             exited_at: None,
             ctrl_c: None,
@@ -921,6 +936,9 @@ mod tests {
             worker_pid: 0,
             worker_port: 0,
             root_pid: None,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code: None,
             exited_at: None,
             ctrl_c: None,
