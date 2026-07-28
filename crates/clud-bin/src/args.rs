@@ -712,31 +712,54 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--list",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
+    // The single subcommand whose own parser consumes `--` as data rather than
+    // as clud's end-of-flags marker. See the `--` branch below (issue #508).
+    const SEPARATOR_OWNING_SUBCOMMAND: &str = "tool";
+
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
         "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "settings",
         "__daemon", "__worker",
     ];
 
-    let mut in_subcommand = false;
+    // Which subcommand we are inside, once one has been seen. `None` means the
+    // tokens still belong to clud's own top-level flags.
+    let mut subcommand: Option<&str> = None;
 
     while i < raw.len() {
         let arg = &raw[i];
 
-        if arg == "--" {
+        // Issue #508: who owns `--` depends on which subcommand we are inside.
+        //
+        // Normally it keeps its usual meaning — end clud's own flags, hand the
+        // rest to the backend agent — which is what `clud loop task -- --verbose`
+        // relies on.
+        //
+        // `clud tool run <tool> … -- <cmd…>` is the exception: there the
+        // separator is *data* for the bundled tool, which does its own
+        // `run -- <cmd…>` split. Diverting it into `passthrough`, which nothing
+        // on the tool path ever reads, is what made the documented invocation
+        // fail with `run: missing command`.
+        //
+        // The exception is deliberately one subcommand rather than "any
+        // subcommand": `ToolSubcommand::Run::args` is the only argument in this
+        // CLI declared `trailing_var_arg`, i.e. the only parser that asks for
+        // raw argv. Handing `--` to a subcommand that does not expect it makes
+        // clap reject the unknown flag and exit the process.
+        if arg == "--" && subcommand != Some(SEPARATOR_OWNING_SUBCOMMAND) {
             unknown.extend_from_slice(&raw[i + 1..]);
             break;
         }
 
-        if in_subcommand {
+        if subcommand.is_some() {
             known.push(arg.clone());
             i += 1;
             continue;
         }
 
-        if subcommands.contains(&arg.as_str()) {
+        if let Some(name) = subcommands.iter().find(|name| *name == &arg.as_str()) {
             known.push(arg.clone());
-            in_subcommand = true;
+            subcommand = Some(name);
             i += 1;
             continue;
         }
