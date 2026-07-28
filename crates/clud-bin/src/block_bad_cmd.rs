@@ -143,6 +143,10 @@ pub const GIT_WORKTREE_ADD_CAPTURE_KIND: &str = "git-worktree-add";
 /// by default; this is the rule id an agent sets via
 /// `CLUD_BAD_CMD_OVERRIDE` to bypass the guard for one call (zackees/clud#532).
 const CLONE_EXTERN_REPOS_GUARD_RULE_ID: &str = "git-clone-outside-extern-repos";
+/// zackees/clud#589: `find /` never terminates and, on Windows/MSYS,
+/// leaks handles until the whole host stops being able to start
+/// processes. See `find_filesystem_root_reason`.
+const FIND_FS_ROOT_RULE_ID: &str = "find-filesystem-root";
 const EXTERN_REPOS_DIR_NAME: &str = ".extern-repos";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -578,6 +582,11 @@ fn evaluate_command_into(
                 return;
             }
             evaluation.git_path_captures.push(capture);
+        }
+
+        if let Some(reason) = find_filesystem_root_reason(&words, evaluation) {
+            evaluation.reason = Some(reason);
+            return;
         }
 
         if let Some(reason) = evaluate_structured_rules(&words, context.bad_commands, evaluation) {
@@ -1127,6 +1136,135 @@ fn extern_repos_violation_reason(
     Some(format!(
         "git clone outside of .extern-repos is discouraged. Set {BAD_CMD_OVERRIDE_ENV}=\"{CLONE_EXTERN_REPOS_GUARD_RULE_ID}:<your reason for needing the raw command>\" to do it anyway, otherwise use .extern-repos/**."
     ))
+}
+
+/// If `words` is a `find` rooted at a filesystem root, return the deny
+/// reason (zackees/clud#589) — unless `CLUD_BAD_CMD_OVERRIDE` carries a
+/// matching bypass, in which case the acceptance is logged and `None` is
+/// returned.
+///
+/// Why this is worth a default block rather than a doc note: a whole-
+/// filesystem `find` never completes, and on Windows `/` is the MSYS root,
+/// where the traversal leaks directory handles indefinitely. Three of them
+/// on one host reached 14.7M handles / 10.6 GB of paged pool, after which
+/// *every* new process failed `DllMain` with `STATUS_DLL_INIT_FAILED`. The
+/// resulting build failures name a random innocent crate and appear to be
+/// fixed by lowering `-j`, so they read as a nondeterministic cache bug —
+/// it cost several debugging sessions and a wrongly-filed upstream issue.
+///
+/// `-maxdepth` deliberately does NOT exempt the command: one of those three
+/// processes was `find / -maxdepth 9` and still hit 863k handles in 24
+/// minutes. A depth bound limits recursion depth, not breadth.
+fn find_filesystem_root_reason(
+    words: &[String],
+    evaluation: &mut CommandEvaluation,
+) -> Option<String> {
+    if program_name(words.first()?) != "find" {
+        return None;
+    }
+
+    let mut index = 1;
+    // Leading options, per find's grammar: `find [-H|-L|-P] [-D opts]
+    // [-Olevel] [path...] [expression]`.
+    while let Some(word) = words.get(index) {
+        match word.as_str() {
+            "-H" | "-L" | "-P" => index += 1,
+            "-D" => index += 2,
+            other if other.starts_with("-O") => index += 1,
+            _ => break,
+        }
+    }
+
+    // Path operands run until the first expression token. Stopping here
+    // keeps an argument like `-newer /` or `-path /` out of the check.
+    let mut offender = None;
+    while let Some(word) = words.get(index) {
+        if word.starts_with('-') || matches!(word.as_str(), "(" | ")" | "!" | ",") {
+            break;
+        }
+        if is_filesystem_root(word) {
+            offender = Some(word.clone());
+            break;
+        }
+        index += 1;
+    }
+    let offender = offender?;
+
+    if let Some(override_reason) = accepted_override_reason(FIND_FS_ROOT_RULE_ID) {
+        evaluation.log_messages.push(format!(
+            "BAD_CMD_OVERRIDE accepted rule={FIND_FS_ROOT_RULE_ID} reason={override_reason:?} path={offender:?}"
+        ));
+        return None;
+    }
+
+    Some(format!(
+        "`find {offender}` walks the entire filesystem: it does not terminate, and on Windows/MSYS it leaks handles until no process on the host can start (clud#589). Scope the search to a real directory, or use the Glob/Grep tools. Note `-maxdepth` does not make this safe. To do it anyway, set {BAD_CMD_OVERRIDE_ENV}=\"{FIND_FS_ROOT_RULE_ID}:<your reason for needing the raw command>\" for this tool call and re-run the exact same command unchanged."
+    ))
+}
+
+/// True when `path` is an absolute path denoting a filesystem root.
+///
+/// Relative paths always return false — resolving them needs a cwd, and
+/// `find ../..` is not the shape that causes trouble in practice.
+///
+/// The Windows drive-root forms are gated to Windows, and the MSYS form
+/// (`/c/`) deliberately requires a trailing slash. Windows' own `find.exe`
+/// takes `/V`, `/C`, `/N`, `/I` switches, which are indistinguishable from
+/// a bare MSYS drive root; requiring the slash keeps `find /V "x" file`
+/// working. The cost is that `find /c` (no slash) is not caught, which is
+/// an acceptable trade against blocking a legitimate command.
+fn is_filesystem_root(path: &str) -> bool {
+    let normalized = path.trim_matches(&['\'', '"'][..]).replace('\\', "/");
+
+    let rest = if let Some(after_drive) = drive_relative_remainder(&normalized) {
+        // `C:` / `C:/` — Windows only; on Unix this is an ordinary
+        // relative filename that happens to contain a colon.
+        if !cfg!(windows) {
+            return false;
+        }
+        after_drive
+    } else if let Some(stripped) = normalized.strip_prefix('/') {
+        if cfg!(windows) && is_msys_drive_root(&normalized) {
+            return true;
+        }
+        stripped
+    } else {
+        return false;
+    };
+
+    // Collapse `.` and `..`; an empty result means we landed on the root.
+    let mut stack: Vec<&str> = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.is_empty()
+}
+
+/// `C:` or `C:/foo` → `Some("")` / `Some("foo")`; anything else → `None`.
+fn drive_relative_remainder(normalized: &str) -> Option<&str> {
+    let mut chars = normalized.chars();
+    if !chars.next()?.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    Some(normalized.get(2..).unwrap_or_default())
+}
+
+/// `/c/`, `//c/` — an MSYS drive root, which must carry the trailing
+/// slash to stay distinguishable from a Windows `find /C` switch.
+fn is_msys_drive_root(normalized: &str) -> bool {
+    let trimmed = normalized.trim_start_matches('/');
+    let mut chars = trimmed.chars();
+    let Some(letter) = chars.next() else {
+        // The string was nothing but slashes: that is the root itself.
+        return true;
+    };
+    letter.is_ascii_alphabetic() && chars.as_str().chars().all(|c| c == '/') && trimmed.len() > 1
 }
 
 /// Maps a [`GitPathCapture::kind`] to the `clud gc` registry `kind`
@@ -3720,6 +3858,148 @@ mod tests {
 
     /// Serializes env-var mutation across tests in this module (env is
     /// process-global) and restores the prior value afterward.
+    // ---- zackees/clud#589: whole-filesystem `find` ----
+
+    #[test]
+    fn find_at_filesystem_root_is_denied_with_bypass_hint() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            let reason =
+                forbidden_reason("find / -name foo.h", None, &[]).expect("find / should be denied");
+            assert!(reason.contains(FIND_FS_ROOT_RULE_ID), "{reason}");
+            assert!(reason.contains(BAD_CMD_OVERRIDE_ENV), "{reason}");
+        });
+    }
+
+    /// The regression that matters. One of the three processes that took
+    /// the host down in clud#589 was `find / -maxdepth 9`: it still reached
+    /// 863k handles in 24 minutes, because a depth bound limits recursion
+    /// depth, not breadth. Any future "but it's bounded" exemption must
+    /// fail this test.
+    #[test]
+    fn maxdepth_does_not_exempt_a_filesystem_root_find() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            for command in [
+                "find / -maxdepth 1 -name foo",
+                "find / -maxdepth 9 -type d -name 'running-process-core-*'",
+            ] {
+                assert!(
+                    forbidden_reason(command, None, &[]).is_some(),
+                    "-maxdepth must not exempt: {command}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn find_root_is_denied_through_leading_options_and_dot_segments() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            for command in [
+                "find / -name x",
+                "find // -name x",
+                "find /. -name x",
+                "find /usr/.. -name x",
+                "find -L / -name x",
+                "find -P -O3 / -name x",
+            ] {
+                assert!(
+                    forbidden_reason(command, None, &[]).is_some(),
+                    "should be denied: {command}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn scoped_and_relative_finds_are_allowed() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            for command in [
+                "find . -name foo",
+                "find src -type f",
+                "find /home/user/project -name foo",
+                "find /usr/../usr/bin -name foo",
+                "find ../.. -name foo",
+                "find",
+            ] {
+                assert!(
+                    forbidden_reason(command, None, &[]).is_none(),
+                    "should be allowed: {command}"
+                );
+            }
+        });
+    }
+
+    /// Root-looking tokens that are *expression arguments*, not traversal
+    /// roots, must not trip the guard.
+    #[test]
+    fn root_as_an_expression_argument_is_not_a_traversal_root() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            for command in ["find . -path /", "find . -newer /"] {
+                assert!(
+                    forbidden_reason(command, None, &[]).is_none(),
+                    "should be allowed: {command}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn find_at_root_is_allowed_with_a_matching_override() {
+        temp_env(
+            BAD_CMD_OVERRIDE_ENV,
+            "find-filesystem-root:auditing a one-off host-wide search",
+            || {
+                assert!(
+                    forbidden_reason("find / -name foo", None, &[]).is_none(),
+                    "a matching override should permit the command"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn override_without_a_reason_does_not_bypass() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "find-filesystem-root:   ", || {
+            assert!(
+                forbidden_reason("find / -name foo", None, &[]).is_some(),
+                "an empty reason must not bypass the guard"
+            );
+        });
+    }
+
+    /// Windows `find.exe` uses `/V`, `/C`, `/N`, `/I` switches, which look
+    /// exactly like a bare MSYS drive root. Requiring the trailing slash on
+    /// the MSYS form is what keeps these working.
+    #[test]
+    fn windows_find_switches_are_not_mistaken_for_drive_roots() {
+        temp_env(BAD_CMD_OVERRIDE_ENV, "unrelated-rule:reason", || {
+            for command in ["find /V \"needle\" file.txt", "find /C /I \"x\" f.txt"] {
+                assert!(
+                    forbidden_reason(command, None, &[]).is_none(),
+                    "should be allowed: {command}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn filesystem_root_predicate_covers_posix_and_windows_forms() {
+        assert!(is_filesystem_root("/"));
+        assert!(is_filesystem_root("///"));
+        assert!(is_filesystem_root("/./"));
+        assert!(is_filesystem_root("/tmp/.."));
+        assert!(!is_filesystem_root("/tmp"));
+        assert!(!is_filesystem_root("."));
+        assert!(!is_filesystem_root("relative/path"));
+        // Drive and MSYS roots are Windows-only; on Unix `C:` is just a
+        // filename and `/c/` is an ordinary directory.
+        assert_eq!(is_filesystem_root("C:/"), cfg!(windows));
+        assert_eq!(is_filesystem_root("C:"), cfg!(windows));
+        assert_eq!(is_filesystem_root("/c/"), cfg!(windows));
+        assert!(!is_filesystem_root("/c"));
+        assert!(!is_filesystem_root("/c/Users"));
+        assert!(!is_filesystem_root("C:/Users"));
+    }
+
     fn temp_env(key: &str, value: &str, f: impl FnOnce()) {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
