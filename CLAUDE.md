@@ -117,13 +117,14 @@ Several features have a "single source of truth" registry that must be updated a
 
 ## CI Matrix
 
-6 platforms × 4 job types = 24 GitHub Actions jobs.
+6 platforms × 2 job types = 12 GitHub Actions jobs.
 
 Job types (reusable workflows under `.github/workflows/_*.yml`):
-- `_lint.yml` — `bash lint`
-- `_unit-test.yml` — `bash test` (no `--integration`)
-- `_integration-test.yml` — `bash test --integration` (mock-agent end-to-end)
-- `_build.yml` — wheel build
+- `_preflight.yml` — one job per platform: setup once, then `bash lint` →
+  `bash test` → dev wheel → `bash test --integration`. Replaces the former
+  `_lint` / `_unit-test` / `_integration-test` trio, which each repeated the
+  whole checkout + soldr-cache setup and re-ran lint twice per platform.
+- `_build.yml` — wheel build (release-artifact path, deliberately separate)
 
 Platforms:
 - Linux x86 (`ubuntu-24.04`) + ARM (`ubuntu-24.04-arm`)

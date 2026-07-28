@@ -1,4 +1,23 @@
-name: Lint Template
+name: Preflight Template
+
+# Consolidated per-platform preflight: ONE job per platform that does the
+# setup exactly once, then runs lint -> unit tests -> dev build ->
+# integration tests sequentially against it.
+#
+# The previous shape was three sibling workflows (_lint, _unit-test,
+# _integration-test), each a separate workflow run, each repeating
+# checkout + setup-python + setup-uv + venv cache + mold + setup-soldr
+# (with its cache restore) + uv sync before doing any work. Per platform
+# that setup was paid three times, and `_unit-test` additionally ran the
+# full `ci.lint` before its tests -- so lint executed twice per platform,
+# once in a lane whose only job was to run it.
+#
+# Sequential steps in one job share the venv, target/ and soldr cache
+# directly, so the expensive parts happen once. 6 platforms x 3 lanes ->
+# 6 preflight runs.
+#
+# `_build.yml` deliberately stays separate: it is the release-artifact
+# path (release profile, wheel publication), not the dev loop.
 
 on:
   workflow_call:
@@ -6,18 +25,28 @@ on:
       runs-on:
         required: true
         type: string
+      artifact-name:
+        required: false
+        type: string
+        default: ""
+      integration:
+        description: Run the dev build + integration tests. Off leaves a lint + unit-test lane.
+        required: false
+        type: boolean
+        default: true
 
 jobs:
-  lint:
+  preflight:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 45
     env:
       RUST_BACKTRACE: "1"
+      CLUD_INTEGRATION_TESTS: "1"
       # Issue #13 follow-up: whisper-rs-sys vendors `std::filesystem::path`
       # which requires macOS 10.15+. Rust on stable defaults to 10.12,
-      # which fails on the macos-15-intel runner. Force-bump so cargo
-      # clippy compiles the same C++ source successfully (no-op on
-      # Linux/Windows).
+      # which fails on the macos-15-intel runner. Force-bump so the
+      # vendored C++ build sees the modern SDK target on every macOS
+      # job (no-op on Linux/Windows).
       MACOSX_DEPLOYMENT_TARGET: "10.15"
       CFLAGS: "-g0"
       CXXFLAGS: "-g0"
@@ -68,9 +97,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends mold
 
       # Issue #68: setup-soldr owns Rust provisioning plus build/target caching.
-      # Shims keep cargo fmt, clippy-driver, and all cargo subcommands routed
-      # through soldr/zccache. Install mold before setup so dependency cooking
-      # and clippy share the same linker fingerprint.
+      # Shims keep the dev wheel build and integration helper cargo build
+      # routed through soldr/zccache. Install mold before setup so dependency
+      # cooking and the dev wheel build share the same linker fingerprint.
       - name: Setup soldr
         uses: zackees/setup-soldr@v0.9.66
         with:
@@ -118,6 +147,9 @@ jobs:
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11 -v
 
+      # Lint first: it is the cheapest gate and it warms target/ for the
+      # test steps below, which is precisely the sharing the old
+      # three-workflow split threw away.
       - name: Lint
         shell: bash
         run: |
@@ -126,6 +158,47 @@ jobs:
             ulimit -v 13000000
           fi
           uv run --no-editable -m ci.lint
+
+      - name: Unit Tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            ulimit -v 13000000
+          fi
+          uv run --no-editable -m ci.test
+
+      - name: Dev build
+        if: ${{ inputs.integration }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            ulimit -v 13000000
+          fi
+          uv run --no-editable -m ci.build_wheel --dev
+
+      - name: Integration Tests
+        if: ${{ inputs.integration }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            ulimit -v 13000000
+          fi
+          uv run --no-editable -m ci.test --integration
+
+      - name: Verify Windows wheel has no MinGW runtime imports
+        if: ${{ inputs.integration && runner.os == 'Windows' }}
+        run: uv run python -m ci.check_windows_wheel --dist-dir dist/
+
+      - name: Upload dist artifacts
+        if: ${{ inputs.integration && inputs.artifact-name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist/*
+          if-no-files-found: error
 
       - name: Diagnose Linux build failure
         if: ${{ failure() && runner.os == 'Linux' }}
@@ -150,6 +223,6 @@ jobs:
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: failure-logs-lint-${{ inputs.runs-on }}
+          name: failure-logs-preflight-${{ inputs.runs-on }}
           path: logs/*
           if-no-files-found: warn

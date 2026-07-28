@@ -1,4 +1,4 @@
-name: Windows x86 Unit Test
+name: Windows x86 Preflight
 on:
   push:
 concurrency:
@@ -6,6 +6,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   call:
-    uses: ./.github/workflows/_unit-test.yml
+    uses: ./.github/workflows/_preflight.yml
     with:
       runs-on: windows-2025
+      artifact-name: wheels-windows-x86
