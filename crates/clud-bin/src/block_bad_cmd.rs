@@ -1539,19 +1539,112 @@ fn passthrough_prefix_match<'a>(
     })
 }
 
-/// Check the real process environment (never the command text — see
-/// the module-level `BAD_CMD_OVERRIDE_ENV` doc comment) for an
-/// override matching `rule_id`, with a mandatory non-empty reason.
-/// Returns the reason string on an accepted override.
-fn accepted_override_reason(rule_id: &str) -> Option<String> {
-    let raw = std::env::var(BAD_CMD_OVERRIDE_ENV).ok()?;
-    let (override_id, reason) = raw.split_once(':')?;
-    let reason = reason.trim();
-    if override_id == rule_id && !reason.is_empty() {
-        Some(reason.to_string())
-    } else {
-        None
+/// What happened when a rule consulted [`BAD_CMD_OVERRIDE_ENV`].
+///
+/// Issue #519 asks for both accepted bypasses *and* rejected attempts in the
+/// audit trail. Collapsing every rejection into `None`, as this used to,
+/// leaves a log that records only successes — so a run of malformed or
+/// wrong-id attempts (someone probing which rule id unlocks a guard, or an
+/// agent repeatedly getting the syntax wrong) is invisible to review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OverrideOutcome {
+    /// The variable is unset — the ordinary case, and deliberately not logged:
+    /// every guarded command that nobody tried to bypass would emit a line.
+    NotAttempted,
+    Accepted(String),
+    /// Set, well-formed, but naming a different rule. Expected when several
+    /// guards evaluate one command and only one is being overridden, so it is
+    /// recorded rather than treated as suspicious on its own.
+    RejectedIdMismatch {
+        attempted_id: String,
+    },
+    /// `<id>` with no `:reason`, or a blank one. Fails closed, per the issue:
+    /// an override without a stated reason is not an override.
+    RejectedMissingReason,
+}
+
+impl OverrideOutcome {
+    fn rejection_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::RejectedIdMismatch { .. } => Some("id_mismatch"),
+            Self::RejectedMissingReason => Some("missing_reason"),
+            _ => None,
+        }
     }
+}
+
+/// Classify the override attempt for `rule_id` from the real process
+/// environment (never the command text — see the module-level
+/// `BAD_CMD_OVERRIDE_ENV` doc comment).
+fn classify_override(rule_id: &str) -> OverrideOutcome {
+    let Ok(raw) = std::env::var(BAD_CMD_OVERRIDE_ENV) else {
+        return OverrideOutcome::NotAttempted;
+    };
+    let Some((override_id, reason)) = raw.split_once(':') else {
+        // `CLUD_BAD_CMD_OVERRIDE=some-rule` with no reason at all.
+        return OverrideOutcome::RejectedMissingReason;
+    };
+    if override_id != rule_id {
+        return OverrideOutcome::RejectedIdMismatch {
+            attempted_id: override_id.to_string(),
+        };
+    }
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return OverrideOutcome::RejectedMissingReason;
+    }
+    OverrideOutcome::Accepted(reason.to_string())
+}
+
+/// Classify, record, and answer the only question callers care about: may this
+/// command proceed?
+///
+/// Behaviour is unchanged from the previous `Option`-returning form — the
+/// same inputs accept and reject — but every attempt now leaves a
+/// machine-readable trail.
+fn accepted_override_reason(rule_id: &str) -> Option<String> {
+    let outcome = classify_override(rule_id);
+    log_override_attempt(rule_id, &outcome);
+    match outcome {
+        OverrideOutcome::Accepted(reason) => Some(reason),
+        _ => None,
+    }
+}
+
+/// Append one `bad_cmd_override` event, in the structured shape #519
+/// specifies, to the same log stream the hook already writes.
+///
+/// JSON rather than the previous prose line so the trail is greppable and
+/// countable — "how often was this rule overridden, and by whom" should not
+/// require parsing English.
+fn log_override_attempt(rule_id: &str, outcome: &OverrideOutcome) {
+    if matches!(outcome, OverrideOutcome::NotAttempted) {
+        return;
+    }
+    let accepted = matches!(outcome, OverrideOutcome::Accepted(_));
+    let mut event = serde_json::json!({
+        "event": "bad_cmd_override",
+        "rule_id": rule_id,
+        "accepted": accepted,
+    });
+    if let OverrideOutcome::Accepted(reason) = outcome {
+        event["reason"] = serde_json::Value::String(reason.clone());
+    }
+    if let Some(rejection) = outcome.rejection_reason() {
+        event["rejection_reason"] = serde_json::Value::String(rejection.to_string());
+    }
+    if let OverrideOutcome::RejectedIdMismatch { attempted_id } = outcome {
+        event["attempted_rule_id"] = serde_json::Value::String(attempted_id.clone());
+    }
+    // The session id is best-effort: the hook runs as its own process and may
+    // not have one. Absent is better than a fabricated value in an audit
+    // record.
+    if let Ok(session_id) = std::env::var("CLUD_SESSION_ID") {
+        if !session_id.is_empty() {
+            event["session_id"] = serde_json::Value::String(session_id);
+        }
+    }
+    append_log(&event.to_string());
 }
 
 /// Detect and strip heredoc bodies (`<<'DELIM'`, `<<DELIM`, `<<-DELIM`)
@@ -3998,6 +4091,108 @@ mod tests {
         assert!(!is_filesystem_root("/c"));
         assert!(!is_filesystem_root("/c/Users"));
         assert!(!is_filesystem_root("C:/Users"));
+    }
+
+    // Issue #519: the override audit trail. `classify_override` is tested
+    // directly rather than through a guard, so each outcome is pinned without
+    // depending on which rule happens to be evaluated first.
+
+    #[test]
+    fn an_unset_override_is_not_an_attempt() {
+        // Must stay distinct from a rejection: logging every guarded command
+        // that nobody tried to bypass would bury the real attempts.
+        let key = BAD_CMD_OVERRIDE_ENV;
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        assert_eq!(classify_override("any-rule"), OverrideOutcome::NotAttempted);
+        if let Some(v) = prev {
+            std::env::set_var(key, v);
+        }
+    }
+
+    #[test]
+    fn a_well_formed_override_is_accepted_with_its_reason() {
+        temp_env(
+            BAD_CMD_OVERRIDE_ENV,
+            "my-rule:  debugging a flake  ",
+            || {
+                assert_eq!(
+                    classify_override("my-rule"),
+                    // Reason is trimmed; surrounding whitespace is not meaning.
+                    OverrideOutcome::Accepted("debugging a flake".to_string())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn an_override_for_another_rule_is_recorded_as_a_mismatch() {
+        // Expected whenever several guards evaluate one command, so it is
+        // recorded rather than treated as suspicious on its own -- but it must
+        // not silently vanish either.
+        temp_env(BAD_CMD_OVERRIDE_ENV, "other-rule:some reason", || {
+            assert_eq!(
+                classify_override("my-rule"),
+                OverrideOutcome::RejectedIdMismatch {
+                    attempted_id: "other-rule".to_string()
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn an_override_without_a_reason_fails_closed() {
+        // Both shapes: no separator at all, and a blank reason.
+        temp_env(BAD_CMD_OVERRIDE_ENV, "my-rule", || {
+            assert_eq!(
+                classify_override("my-rule"),
+                OverrideOutcome::RejectedMissingReason
+            );
+        });
+        temp_env(BAD_CMD_OVERRIDE_ENV, "my-rule:   ", || {
+            assert_eq!(
+                classify_override("my-rule"),
+                OverrideOutcome::RejectedMissingReason
+            );
+        });
+    }
+
+    #[test]
+    fn accepted_override_reason_still_answers_the_same_way() {
+        // The logging refactor must not change who gets through. This is the
+        // behaviour every guard depends on.
+        temp_env(BAD_CMD_OVERRIDE_ENV, "my-rule:a reason", || {
+            assert_eq!(
+                accepted_override_reason("my-rule"),
+                Some("a reason".to_string())
+            );
+            assert_eq!(accepted_override_reason("different-rule"), None);
+        });
+        temp_env(BAD_CMD_OVERRIDE_ENV, "my-rule:", || {
+            assert_eq!(accepted_override_reason("my-rule"), None);
+        });
+    }
+
+    #[test]
+    fn rejection_reasons_are_named_for_the_audit_record() {
+        assert_eq!(
+            OverrideOutcome::RejectedIdMismatch {
+                attempted_id: "x".to_string()
+            }
+            .rejection_reason(),
+            Some("id_mismatch")
+        );
+        assert_eq!(
+            OverrideOutcome::RejectedMissingReason.rejection_reason(),
+            Some("missing_reason")
+        );
+        assert_eq!(
+            OverrideOutcome::Accepted("r".to_string()).rejection_reason(),
+            None
+        );
+        assert_eq!(OverrideOutcome::NotAttempted.rejection_reason(), None);
     }
 
     fn temp_env(key: &str, value: &str, f: impl FnOnce()) {
