@@ -27,10 +27,14 @@ jobs:
       # and soldr deliberately refuses to reuse GITHUB_TOKEN for a repo
       # other than the one being built -- so it goes out unauthenticated
       # at 60 req/hr per runner IP, shared by every concurrent job, and
-      # returns HTTP 403. soldr then fails the build outright even when a
-      # usable maturin is already cached. SOLDR_GITHUB_TOKEN is soldr's
-      # own documented escape hatch and always wins, raising the limit to
-      # 1000/hr. See zackees/soldr#1879.
+      # returns HTTP 403. SOLDR_GITHUB_TOKEN is soldr's own documented
+      # escape hatch and always wins, raising the limit to 1000/hr.
+      #
+      # zackees/soldr#1879 (fixed by soldr#1885, shipped in v0.8.25) means
+      # a 403 no longer hard-fails the build -- soldr now falls back to a
+      # cached tool that satisfies the constraint. Keep the token anyway:
+      # it avoids the 403 in the first place, and the fallback cannot help
+      # a runner whose tool cache is cold.
       SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -81,15 +85,22 @@ jobs:
           linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
           preserve-source-mtimes: true
           solo-toolchain-cache: true
-          # TEMPORARY (zackees/soldr#1880): the soldr-cook prebuild restores
-          # a cached target/ tree whose build-script-build binaries come back
-          # without the executable bit, so cargo dies with "Permission denied
-          # (os error 13)" on a rotating, arbitrary crate. Re-running does not
-          # help -- the same cache entry is restored again. Windows already ran
-          # with 'none' and never hit this, which is what identified the cook
-          # prebuild as the trigger. Restore the conditional once soldr ships
-          # the fix. Costs a cold dependency build, not correctness.
-          prebuild-deps: none
+          # Windows skips the dependency cook; every other platform runs it.
+          #
+          # A blanket 'none' sat here as a workaround for zackees/soldr#1880:
+          # hydrate restored build-script binaries without the executable bit,
+          # so cargo died with "Permission denied (os error 13)" on a rotating,
+          # arbitrary crate. Fixed upstream by soldr#1889 (restore the tar
+          # header mode on hydrate) and soldr#1914 (stage-and-rename so exec
+          # cannot hit ETXTBSY), shipped in v0.8.25 and v0.8.26 respectively --
+          # both below the v0.8.27 pinned above.
+          #
+          # The bug was self-perpetuating: `soldr save` captured the 0644 tree,
+          # so `load` faithfully restored 0644 and re-running never recovered.
+          # Only key rotation clears that. The cook base key embeds the soldr
+          # version (`...-soldrv0.8.24` in the original report), so pinning
+          # 0.8.27 already rotates past every poisoned entry.
+          prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
           prebuild-deps-flags: "--workspace"
 
       - name: Restore source checkout
