@@ -1214,7 +1214,7 @@ fn find_filesystem_root_reason(
 /// working. The cost is that `find /c` (no slash) is not caught, which is
 /// an acceptable trade against blocking a legitimate command.
 fn is_filesystem_root(path: &str) -> bool {
-    let normalized = path.trim_matches(&['\'', '"'][..]).replace('\\', "/");
+    let normalized = crate::path_norm::slash_separators(path.trim_matches(&['\'', '"'][..]));
 
     let rest = if let Some(after_drive) = drive_relative_remainder(&normalized) {
         // `C:` / `C:/` — Windows only; on Unix this is an ordinary
