@@ -20,7 +20,61 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// 40 kB ≈ 1000 LOC at clud's measured ~37 bytes/line (see issue #132).
+///
+/// Doubles as the yellow tier's floor (issue #557): anything worth listing is
+/// worth colouring, so there is no uncoloured band.
 pub const SIZE_THRESHOLD: u64 = 40 * 1024;
+
+/// At or above this a file is "very degenerate" (issue #557) and renders red
+/// rather than yellow. Inclusive — 300 kB exactly is red — chosen for
+/// predictability and pinned by test.
+pub const SEVERE_SIZE_THRESHOLD: u64 = 300 * 1024;
+
+/// Whether [`format_report`] emits ANSI colour.
+///
+/// A parameter rather than ambient state, so the byte-exact report tests (the
+/// issue #515 regression guard) stay deterministic and keep asserting plain
+/// bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Plain,
+    Ansi,
+}
+
+impl ColorMode {
+    /// Colour only when stderr is a terminal and `NO_COLOR` is unset.
+    ///
+    /// Separated from the environment probe so the decision is testable
+    /// without a terminal.
+    pub fn decide(stderr_is_terminal: bool, no_color_set: bool) -> Self {
+        if stderr_is_terminal && !no_color_set {
+            Self::Ansi
+        } else {
+            Self::Plain
+        }
+    }
+
+    fn for_stderr() -> Self {
+        use std::io::IsTerminal;
+        Self::decide(
+            std::io::stderr().is_terminal(),
+            std::env::var_os("NO_COLOR").is_some(),
+        )
+    }
+
+    /// Escape pair wrapping one entry, empty in [`ColorMode::Plain`].
+    fn entry_wrap(self, size: u64) -> (&'static str, &'static str) {
+        match self {
+            ColorMode::Plain => ("", ""),
+            ColorMode::Ansi if size >= SEVERE_SIZE_THRESHOLD => (ANSI_RED, ANSI_RESET),
+            ColorMode::Ansi => (ANSI_YELLOW, ANSI_RESET),
+        }
+    }
+}
+
+const ANSI_RED: &str = "\u{1b}[31m";
+const ANSI_YELLOW: &str = "\u{1b}[33m";
+const ANSI_RESET: &str = "\u{1b}[0m";
 
 /// Hard wall-clock deadline for the entire walk. Per user requirement
 /// the check stops at 1 s even if files remain unvisited.
@@ -186,7 +240,9 @@ fn is_pruned_nested_git(root: &Path, e: &DirEntry) -> bool {
 /// flushed block commits the whole warning up front so the entries survive —
 /// and matches the content `--dry-run` prints (which never starts a PTY).
 fn emit(files: &[LargeFile], total: usize, timed_out: bool) {
-    let Some(message) = format_report(files, total, timed_out) else {
+    // Issue #557: colour is inline bytes inside the same composed string, so
+    // the single-write guarantee above is unaffected.
+    let Some(message) = format_report(files, total, timed_out, ColorMode::for_stderr()) else {
         return;
     };
     let stderr = std::io::stderr();
@@ -200,7 +256,17 @@ fn emit(files: &[LargeFile], total: usize, timed_out: bool) {
 /// is nothing to report. Pure so the exact bytes emitted at startup can be
 /// asserted in tests — the regression guard for issue #515, where the entries
 /// must never be dropped from or split out of the emitted warning.
-fn format_report(files: &[LargeFile], total: usize, timed_out: bool) -> Option<String> {
+///
+/// Issue #557: entries carry a severity tier — red at or above
+/// [`SEVERE_SIZE_THRESHOLD`], yellow for everything else listed. The header
+/// and `(N more)` tail stay uncoloured so the block reads as a list with
+/// emphasis rather than a wall of colour.
+fn format_report(
+    files: &[LargeFile],
+    total: usize,
+    timed_out: bool,
+    color: ColorMode,
+) -> Option<String> {
     if files.is_empty() {
         if timed_out {
             return Some(
@@ -214,8 +280,9 @@ fn format_report(files: &[LargeFile], total: usize, timed_out: bool) -> Option<S
         "[clud] warning: large source files (\u{2265}40 kB) detected — AI may get stuck on these; recommend refactoring:\n",
     );
     for f in files {
+        let (open, close) = color.entry_wrap(f.size);
         out.push_str(&format!(
-            "  {} ({})\n",
+            "  {open}{} ({}){close}\n",
             f.rel_path.display(),
             human_kb(f.size)
         ));
@@ -408,7 +475,8 @@ mod tests {
             lf("crates/running-process/src/lib.rs", 52 * 1024),
             lf("crates/running-process/src/daemon/services.rs", 50 * 1024),
         ];
-        let out = format_report(&files, files.len(), false).expect("should report");
+        let out =
+            format_report(&files, files.len(), false, ColorMode::Plain).expect("should report");
         // One atomic block: header + both entries, each on its own line.
         assert!(
             out.contains("large source files"),
@@ -423,27 +491,124 @@ mod tests {
         assert!(out.ends_with('\n'), "block must end with a newline");
     }
 
+    // Issue #557: severity tiers. Asserted as exact bytes, because the point
+    // of the feature is the escape sequences a terminal receives.
+
+    #[test]
+    fn ansi_mode_paints_severe_entries_red_and_the_rest_yellow() {
+        let files = vec![lf("huge.rs", 320 * 1024), lf("big.rs", 45 * 1024)];
+        let out =
+            format_report(&files, files.len(), false, ColorMode::Ansi).expect("should report");
+        assert!(
+            out.contains("\u{1b}[31mhuge.rs (320 kB)\u{1b}[0m"),
+            "320 kB must be red: {out:?}"
+        );
+        assert!(
+            out.contains("\u{1b}[33mbig.rs (45 kB)\u{1b}[0m"),
+            "45 kB must be yellow: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_red_boundary_is_inclusive_at_300_kb() {
+        // Pinned deliberately: "300 kB exactly" is the kind of edge that
+        // silently drifts when someone rewrites the comparison.
+        let at = vec![lf("at.rs", SEVERE_SIZE_THRESHOLD)];
+        let below = vec![lf("below.rs", SEVERE_SIZE_THRESHOLD - 1)];
+        let at_out = format_report(&at, 1, false, ColorMode::Ansi).expect("report");
+        let below_out = format_report(&below, 1, false, ColorMode::Ansi).expect("report");
+        assert!(
+            at_out.contains(ANSI_RED),
+            "300 kB exactly must be red: {at_out:?}"
+        );
+        assert!(
+            below_out.contains(ANSI_YELLOW) && !below_out.contains(ANSI_RED),
+            "one byte under 300 kB must be yellow: {below_out:?}"
+        );
+    }
+
+    #[test]
+    fn no_listed_entry_is_ever_uncolored_in_ansi_mode() {
+        // The user's clarification: there is no uncoloured band — if a file is
+        // worth listing it is at least yellow. A future tier added between the
+        // floor and 300 kB must not reintroduce one.
+        let files = vec![
+            lf("a.rs", SIZE_THRESHOLD),
+            lf("b.rs", 100 * 1024),
+            lf("c.rs", SEVERE_SIZE_THRESHOLD),
+            lf("d.rs", 5 * 1024 * 1024),
+        ];
+        let out =
+            format_report(&files, files.len(), false, ColorMode::Ansi).expect("should report");
+        for line in out.lines().filter(|l| l.starts_with("  ")) {
+            assert!(
+                line.contains(ANSI_RED) || line.contains(ANSI_YELLOW),
+                "entry line is uncoloured: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_mode_emits_no_escapes_at_any_size() {
+        let files = vec![lf("huge.rs", 900 * 1024), lf("big.rs", 45 * 1024)];
+        let out =
+            format_report(&files, files.len(), false, ColorMode::Plain).expect("should report");
+        assert!(
+            !out.contains('\u{1b}'),
+            "plain mode must stay byte-identical to the pre-#557 format: {out:?}"
+        );
+    }
+
+    #[test]
+    fn header_and_more_tail_stay_uncolored() {
+        // Per-entry severity only: colouring the header would make the block
+        // read as one alarm rather than a scannable list.
+        let files: Vec<LargeFile> = (0..REPORT_LIMIT)
+            .map(|i| lf(&format!("f{i}.rs"), 400 * 1024))
+            .collect();
+        let out =
+            format_report(&files, REPORT_LIMIT + 3, false, ColorMode::Ansi).expect("should report");
+        let header = out.lines().next().expect("header");
+        assert!(!header.contains('\u{1b}'), "header coloured: {header:?}");
+        let tail = out
+            .lines()
+            .find(|l| l.contains("more)"))
+            .expect("more-tail");
+        assert!(!tail.contains('\u{1b}'), "tail coloured: {tail:?}");
+    }
+
+    #[test]
+    fn color_is_off_unless_stderr_is_a_terminal_and_no_color_is_unset() {
+        assert_eq!(ColorMode::decide(true, false), ColorMode::Ansi);
+        // Piped output — the `--dry-run` case that must stay byte-identical.
+        assert_eq!(ColorMode::decide(false, false), ColorMode::Plain);
+        // NO_COLOR wins even on a terminal.
+        assert_eq!(ColorMode::decide(true, true), ColorMode::Plain);
+        assert_eq!(ColorMode::decide(false, true), ColorMode::Plain);
+    }
+
     #[test]
     fn format_report_truncated_shows_more_tail() {
         let files: Vec<LargeFile> = (0..REPORT_LIMIT)
             .map(|i| lf(&format!("f{i}.rs"), 60 * 1024))
             .collect();
         // total exceeds shown → a "(N more)" tail must appear.
-        let out = format_report(&files, REPORT_LIMIT + 3, false).expect("should report");
+        let out = format_report(&files, REPORT_LIMIT + 3, false, ColorMode::Plain)
+            .expect("should report");
         assert!(out.contains("(3 more)"), "missing more-tail: {out:?}");
     }
 
     #[test]
     fn format_report_empty_is_none_unless_timed_out() {
-        assert_eq!(format_report(&[], 0, false), None);
-        let note = format_report(&[], 0, true).expect("timeout note");
+        assert_eq!(format_report(&[], 0, false, ColorMode::Plain), None);
+        let note = format_report(&[], 0, true, ColorMode::Plain).expect("timeout note");
         assert!(note.contains("exceeded 1s budget"), "got: {note:?}");
     }
 
     #[test]
     fn format_report_partial_scan_note_follows_entries() {
         let files = vec![lf("big.rs", 80 * 1024)];
-        let out = format_report(&files, 1, true).expect("should report");
+        let out = format_report(&files, 1, true, ColorMode::Plain).expect("should report");
         assert!(out.contains("  big.rs ("), "entry must be present: {out:?}");
         assert!(
             out.contains("scan stopped at 1s"),
