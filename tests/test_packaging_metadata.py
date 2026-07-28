@@ -15,6 +15,40 @@ def _pyproject() -> dict:
         return tomllib.load(handle)
 
 
+def test_declared_versions_move_in_lockstep() -> None:
+    """`pyproject.toml`, the Cargo workspace, and `clud.__version__` agree.
+
+    This exists because they did not. `src/clud/__init__.py` sat at 2.2.0
+    while the other two were at 2.4.1 — five releases of drift — so
+    `import clud; clud.__version__` reported a version that had not shipped in
+    months. Nothing caught it, because nothing compared them.
+
+    The Python shim is the easy one to forget: neither maturin nor cargo ever
+    reads it, so a stale value breaks no build and produces no error anywhere.
+    Only a human importing the package sees the wrong number.
+    """
+    pyproject_version = _pyproject()["project"]["version"]
+
+    cargo_match = re.search(
+        r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(encoding="utf-8"), re.M
+    )
+    assert cargo_match, "no version in Cargo.toml"
+
+    shim_match = re.search(
+        r'^__version__ = "([^"]+)"',
+        (ROOT / "src" / "clud" / "__init__.py").read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert shim_match, "no __version__ in src/clud/__init__.py"
+
+    assert pyproject_version == cargo_match.group(1) == shim_match.group(1), (
+        "version drift: "
+        f"pyproject.toml={pyproject_version}, "
+        f"Cargo.toml={cargo_match.group(1)}, "
+        f"clud.__version__={shim_match.group(1)}"
+    )
+
+
 def test_pip_build_uses_soldr_pep517_backend() -> None:
     build_system = _pyproject()["build-system"]
     requirements = [requirement.lower() for requirement in build_system["requires"]]
