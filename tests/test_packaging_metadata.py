@@ -57,12 +57,16 @@ def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
     settings satisfy it: the usual `runner.os == 'Windows'` conditional,
     and a blanket `none` that disables the cook everywhere.
 
-    The blanket form is currently in force as a workaround for
-    zackees/soldr#1880: the cook prebuild restores a cached `target/`
-    tree whose `build-script-build` binaries come back without the
-    executable bit, so cargo dies with "Permission denied (os error 13)"
-    on a rotating, arbitrary crate. Revert to the conditional once a
-    soldr release carrying the fix is pinned.
+    The conditional form is in force. A blanket `none` was in force for a
+    while as a workaround for zackees/soldr#1880 (hydrate restored
+    `build-script-build` binaries without the executable bit, so cargo died
+    with "Permission denied (os error 13)" on a rotating, arbitrary crate).
+    That was fixed upstream by soldr#1889 and soldr#1914, shipped in
+    v0.8.25/v0.8.26 — both below the v0.8.27 this repo pins — so the cook is
+    enabled again everywhere except Windows.
+
+    Both forms stay acceptable here because this test guards the Windows
+    invariant, not which of the two ways it is currently achieved.
     """
     conditional = "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
     blanket = "prebuild-deps: none"
