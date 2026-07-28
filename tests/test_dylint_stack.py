@@ -21,7 +21,7 @@ def _toml(path: Path) -> dict:
 def test_dylint_stack_versions_stay_in_lockstep() -> None:
     lint_manifest = _toml(LINT_DIR / "Cargo.toml")
     toolchain = _toml(LINT_DIR / "rust-toolchain.toml")
-    workflow = (ROOT / ".github" / "workflows" / "dylint.yml").read_text(
+    workflow = (ROOT / ".github" / "workflows" / "_dylint.yml").read_text(
         encoding="utf-8"
     )
 
@@ -37,7 +37,7 @@ def test_dylint_stack_versions_stay_in_lockstep() -> None:
 
 
 def test_dylint_workflow_has_no_legacy_git_driver_or_generic_retry_loop() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "dylint.yml").read_text(
+    workflow = (ROOT / ".github" / "workflows" / "_dylint.yml").read_text(
         encoding="utf-8"
     )
     driver_builder = (ROOT / "ci" / "build_dylint_driver.py").read_text(

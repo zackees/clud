@@ -58,30 +58,41 @@ def test_pip_build_uses_soldr_pep517_backend() -> None:
     assert requirements == ["soldr>=0.8.27"]
 
 
+#: Every place a `zackees/setup-soldr` step can live. Since the CI redesign the
+#: build-side pin lives in a composite action rather than a workflow, so a glob
+#: over `.github/workflows` alone would silently stop checking the pin that
+#: matters most.
+def _setup_soldr_sources() -> list[Path]:
+    paths = [
+        *sorted((ROOT / ".github" / "workflows").glob("*.yml")),
+        *sorted((ROOT / ".github" / "actions").glob("*/action.yml")),
+    ]
+    return [path for path in paths if "zackees/setup-soldr" in path.read_text(encoding="utf-8")]
+
+
 def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
-    workflow_paths = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
-    action_pins = []
-    version_lines = []
-    for path in workflow_paths:
+    """Every soldr pin must satisfy pyproject's `soldr>=0.8.27`.
+
+    The PEP 517 backend and the CI cargo shims share one daemon socket, and
+    mixing protocol versions across it resets the connection (#580). Asserted
+    as a version-ordering invariant rather than by matching literal substrings
+    of one blessed version, which is what previously made this test depend on
+    a single workflow file continuing to exist.
+    """
+    minimum = (0, 8, 27)
+    sources = _setup_soldr_sources()
+    assert sources
+
+    action_pins: list[str] = []
+    for path in sources:
         text = path.read_text(encoding="utf-8")
-        if "zackees/setup-soldr" not in text:
-            continue
         action_pins.extend(re.findall(r"uses:\s*zackees/setup-soldr@(\S+)", text))
-        version_lines.extend(
-            line
-            for line in re.findall(r"version:\s*(.+)", text)
-            if "0.8.0" in line or "0.7." in line
-        )
+        for raw in re.findall(r"^\s*version:\s*\"?(\d+\.\d+\.\d+)\"?\s*$", text, re.MULTILINE):
+            parts = tuple(int(part) for part in raw.split("."))
+            assert parts >= minimum, f"{path}: soldr {raw} is below the required 0.8.27"
 
     assert action_pins
     assert all(pin == "v0.9.66" for pin in action_pins)
-    assert version_lines
-    assert all("0.8.0" in line for line in version_lines)
-    assert all("0.7.104" not in line for line in version_lines)
-    assert all(
-        "0.7.45" not in line or ("inputs.runs-on" in line and "intel" in line)
-        for line in version_lines
-    )
 
 
 def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
@@ -96,7 +107,7 @@ def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
     `build-script-build` binaries without the executable bit, so cargo died
     with "Permission denied (os error 13)" on a rotating, arbitrary crate).
     That was fixed upstream by soldr#1889 and soldr#1914, shipped in
-    v0.8.25/v0.8.26 — both below the v0.8.27 this repo pins — so the cook is
+    v0.8.25/v0.8.26 -- both below the v0.8.27 this repo pins -- so the cook is
     enabled again everywhere except Windows.
 
     Both forms stay acceptable here because this test guards the Windows
@@ -105,11 +116,7 @@ def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
     conditional = "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
     blanket = "prebuild-deps: none"
 
-    setup_workflows = [
-        path
-        for path in (ROOT / ".github" / "workflows").glob("_*.yml")
-        if "zackees/setup-soldr" in path.read_text(encoding="utf-8")
-    ]
+    setup_workflows = _setup_soldr_sources()
 
     assert setup_workflows
     for path in setup_workflows:

@@ -1,0 +1,170 @@
+name: Setup build toolchain
+description: >
+  Python + uv + venv cache + mold + soldr-managed Rust, plus any cross-compile
+  tooling the requested target needs. Used only by jobs that compile. Exec jobs
+  use ../setup-exec, which deliberately has no Rust toolchain.
+
+inputs:
+  target:
+    description: Rust target triple this job will build.
+    required: true
+  strategy:
+    description: 'native | zigbuild | xwin'
+    required: true
+  soldr-token:
+    description: >
+      GITHUB_TOKEN, forwarded as SOLDR_GITHUB_TOKEN. soldr resolves managed
+      tools through the GitHub releases API across repositories (PyO3/maturin)
+      and refuses to reuse GITHUB_TOKEN for a foreign repo, so unauthenticated
+      lookups hit the 60 req/hr per-IP limit and return 403. This is soldr's
+      documented escape hatch. See zackees/soldr#1879.
+    required: true
+  toolchain:
+    description: Rust toolchain version (must match rust-toolchain.toml).
+    required: false
+    default: "1.94.1"
+  soldr-version:
+    description: >
+      Must satisfy pyproject.toml's `requires = ["soldr>=0.8.27"]` -- the PEP 517
+      backend and these shims share one daemon socket, and mixing protocol
+      versions across it resets the connection (#580).
+    required: false
+    default: "0.8.27"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: false
+
+    # Keyed on OS+arch even though build jobs are normally all on the same Linux
+    # image: the macOS native fallback (no MACOS_SDK_URL) runs this same action
+    # on a macOS runner, and a venv holds platform-specific wheels. A shared key
+    # would hand a Linux venv to a macOS job.
+    - name: Cache venv
+      uses: actions/cache@v4
+      with:
+        path: .venv
+        key: venv-build-${{ runner.os }}-${{ runner.arch }}-py3.11-${{ hashFiles('uv.lock') }}
+        restore-keys: |
+          venv-build-${{ runner.os }}-${{ runner.arch }}-py3.11-
+
+    - name: Install mold linker
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mapfile -t microsoft_sources < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d 2>/dev/null || true)
+        if [ "${#microsoft_sources[@]}" -gt 0 ]; then
+          sudo rm -f "${microsoft_sources[@]}"
+        fi
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends mold
+
+    # setup-soldr owns Rust provisioning plus build/target caching (#68).
+    # Shims keep every cargo entry point -- including maturin-spawned cargo and
+    # cargo-zigbuild/cargo-xwin's inner cargo -- routed through soldr/zccache.
+    # mold is installed first so dependency cooking and the real build see the
+    # same `linker: fast` environment.
+    #
+    # cache-key-suffix is the target triple: the cache is now fragmented only
+    # by what actually changes the artifacts, not by job type.
+    - name: Setup soldr
+      uses: zackees/setup-soldr@v0.9.66
+      env:
+        # Must be exported for THIS step, not just declared as an input:
+        # setup-soldr's managed-tool lookups read it from the environment. A
+        # missing token means unauthenticated GitHub API calls at 60 req/hr per
+        # runner IP, shared by every concurrent job, which returns 403 and fails
+        # the build even when a usable maturin is already cached.
+        SOLDR_GITHUB_TOKEN: ${{ inputs.soldr-token }}
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        version: ${{ inputs.soldr-version }}
+        cache: true
+        build-cache-mode: thin
+        shims: true
+        linker: ${{ runner.os == 'macOS' && 'platform-default' || 'fast' }}
+        preserve-source-mtimes: true
+        solo-toolchain-cache: true
+        cache-key-suffix: build-${{ inputs.target }}
+        # Windows skips the dependency cook; every other platform runs it.
+        #
+        # A blanket 'none' sat here as a workaround for zackees/soldr#1880
+        # (hydrate restored build-script binaries without the executable bit,
+        # so cargo died with "Permission denied (os error 13)" on a rotating,
+        # arbitrary crate). Fixed upstream by soldr#1889 and soldr#1914,
+        # shipped in v0.8.25/v0.8.26 -- both below the version pinned above.
+        # Validated on ubuntu-24.04-arm, the platform in the original report:
+        # an exact-match hydrate of 8854 files now runs cleanly.
+        prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
+
+    - name: Add Rust target
+      if: inputs.strategy != 'native'
+      shell: bash
+      run: rustup target add "${{ inputs.target }}"
+
+    # Prebuilt binaries, NOT `cargo install`. Building cargo-zigbuild or
+    # cargo-xwin from source costs 3-6 minutes on the critical path of every
+    # cross leg, on every run -- more than the tool ever saves.
+    - name: Install cargo-zigbuild
+      if: inputs.strategy == 'zigbuild'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-zigbuild@0.20.1
+
+    - name: Install cargo-xwin
+      if: inputs.strategy == 'xwin'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-xwin@0.18.10
+
+    - name: Install Windows cross C/C++ toolchain
+      if: inputs.strategy == 'xwin'
+      shell: bash
+      # whisper.cpp's CMake needs a Windows-capable C/C++ driver; clang-cl and
+      # lld-link come from the runner image's LLVM.
+      run: sudo apt-get install -y --no-install-recommends clang lld llvm ninja-build
+
+    # The soldr-cook prebuild can dirty the worktree; restore it so the real
+    # build compiles the checked-out source.
+    - name: Restore source checkout
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+          echo "::group::Files changed by dependency prebuild"
+          git diff --name-only
+          git diff --cached --name-only
+          echo "::endgroup::"
+          git restore --staged --worktree -- .
+        fi
+
+    - name: Sync
+      shell: bash
+      run: uv sync --frozen --group dev --no-install-project --python 3.11
+
+    # Export the synced venv's interpreter and use it directly everywhere
+    # instead of `uv run`. `pyproject.toml:1-3` sets `build-backend = "soldr"`,
+    # so `uv run` (without --no-project) syncs the *project*, which triggers a
+    # full PEP 517 maturin build of the Rust binary before your command starts.
+    # The repo's own `lint` script (lint:8-24) already worked around this for
+    # the same reason. `uv run --no-project` is not an alternative: it would
+    # discard the dev dependencies these steps need.
+    - name: Export venv interpreter
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -x .venv/Scripts/python.exe ]; then
+          echo "VENV_PY=$(pwd)/.venv/Scripts/python.exe" >> "$GITHUB_ENV"
+        elif [ -x .venv/bin/python ]; then
+          echo "VENV_PY=$(pwd)/.venv/bin/python" >> "$GITHUB_ENV"
+        else
+          echo "::error::no .venv/{Scripts,bin}/python after uv sync"
+          exit 1
+        fi

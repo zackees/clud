@@ -20,14 +20,19 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = ROOT / "dist"
-WORKFLOWS = {
-    "linux-x86-build.yml": "wheels-linux-x86",
-    "linux-arm-build.yml": "wheels-linux-arm",
-    "windows-x86-build.yml": "wheels-windows-x86",
-    "windows-arm-build.yml": "wheels-windows-arm",
-    "macos-x86-build.yml": "wheels-macos-x86",
-    "macos-arm-build.yml": "wheels-macos-arm",
-}
+# One workflow builds every target. This used to dispatch six per-platform
+# `*-build.yml` workflows and stitch their artifacts together; the CI redesign
+# folded those into a single matrix inside auto-release.yml, which is now the
+# only path that may build --release (see docs/architecture/ci.md).
+RELEASE_WORKFLOW = "auto-release.yml"
+ARTIFACT_NAMES = (
+    "wheels-linux-x86",
+    "wheels-linux-arm",
+    "wheels-windows-x86",
+    "wheels-windows-arm",
+    "wheels-macos-x86",
+    "wheels-macos-arm",
+)
 EXPECTED_ARTIFACT_GLOBS = (
     "{name}-{version}.tar.gz",
     "{name}-{version}-*linux*_x86_64.whl",
@@ -258,16 +263,15 @@ def display_failure_logs(repo: str, run_id: int, workflow_file: str) -> None:
             log(f"  | {line}")
 
 
-def download_artifacts(repo: str, runs: dict[str, int]) -> list[Path]:
+def download_artifacts(repo: str, run_id: int) -> list[Path]:
     if DIST_DIR.exists():
         shutil.rmtree(DIST_DIR)
     DIST_DIR.mkdir(parents=True)
     temp = DIST_DIR / "_tmp"
     temp.mkdir()
 
-    for workflow_file, run_id in runs.items():
-        artifact_name = WORKFLOWS[workflow_file]
-        workflow_temp = temp / workflow_file.removesuffix(".yml")
+    for artifact_name in ARTIFACT_NAMES:
+        workflow_temp = temp / artifact_name
         workflow_temp.mkdir()
         run(
             [
@@ -287,12 +291,12 @@ def download_artifacts(repo: str, runs: dict[str, int]) -> list[Path]:
         artifact_dir = workflow_temp / artifact_name
         if not artifact_dir.is_dir():
             raise SystemExit(
-                f"{workflow_file} did not produce expected artifact directory {artifact_name}"
+                f"{RELEASE_WORKFLOW} did not produce expected artifact {artifact_name}"
             )
 
     built: list[Path] = []
-    for workflow_file, artifact_name in WORKFLOWS.items():
-        artifact_dir = temp / workflow_file.removesuffix(".yml") / artifact_name
+    for artifact_name in ARTIFACT_NAMES:
+        artifact_dir = temp / artifact_name / artifact_name
         for path in artifact_dir.rglob("*"):
             if not path.is_file():
                 continue
@@ -306,8 +310,8 @@ def download_artifacts(repo: str, runs: dict[str, int]) -> list[Path]:
 
     wheels = [path for path in built if path.suffix == ".whl"]
     sdists = [path for path in built if path.name.endswith(".tar.gz")]
-    if len(wheels) < len(WORKFLOWS):
-        raise SystemExit(f"expected at least {len(WORKFLOWS)} wheels, found {len(wheels)}")
+    if len(wheels) < len(ARTIFACT_NAMES):
+        raise SystemExit(f"expected at least {len(ARTIFACT_NAMES)} wheels, found {len(wheels)}")
     if len(sdists) != 1:
         raise SystemExit(f"expected exactly one sdist, found {len(sdists)}")
     return sorted(built)
@@ -362,12 +366,8 @@ def main() -> int:
 
     repo = detect_repo()
     log(f"Publishing {name} {version} via remote GitHub builds")
-    triggered = {workflow_file: trigger(repo, workflow_file) for workflow_file in WORKFLOWS}
-    runs = {
-        workflow_file: wait_for_run(repo, workflow_file, run_id)
-        for workflow_file, run_id in triggered.items()
-    }
-    artifacts = download_artifacts(repo, runs)
+    run_id = wait_for_run(repo, RELEASE_WORKFLOW, trigger(repo, RELEASE_WORKFLOW))
+    artifacts = download_artifacts(repo, run_id)
     expected_artifacts, missing_expected = select_expected_artifacts(
         artifacts, name=name, version=version
     )

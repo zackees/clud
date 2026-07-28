@@ -1,0 +1,198 @@
+name: Build target
+
+# One triple in, one bundle out. This is the ONLY workflow in the repo that
+# compiles Rust, and the only one that may build --release.
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Rust target triple.
+        required: true
+        type: string
+      runs-on:
+        description: Runner label. Normally ubuntu-24.04 -- non-Linux only for the macOS native fallback.
+        required: false
+        type: string
+        default: ubuntu-24.04
+      strategy:
+        description: 'native | zigbuild | xwin'
+        required: false
+        type: string
+        default: native
+      profile:
+        description: 'dev | release. release is gated to the Auto Release workflow.'
+        required: false
+        type: string
+        default: dev
+      clippy:
+        description: Run cargo clippy --workspace --all-targets for this triple.
+        required: false
+        type: boolean
+        default: true
+      bundle:
+        description: Produce and upload a test bundle (bins + test harness binaries + dev wheel).
+        required: false
+        type: boolean
+        default: true
+      wheel-artifact:
+        description: If non-empty, upload dist/* under this artifact name.
+        required: false
+        type: string
+        default: ""
+      include-sdist:
+        description: Also build an sdist (exactly one target in the release matrix should set this).
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: ${{ inputs.target }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
+    env:
+      RUST_BACKTRACE: "1"
+      # Incremental buys nothing on a fresh-checkout CI job -- there is no prior
+      # incremental state to reuse -- while costing compile time and inflating
+      # target/ by gigabytes, which directly worsens cache eviction pressure.
+      CARGO_INCREMENTAL: "0"
+      # See zackees/soldr#1879. Set at job level so every step, including the
+      # composite's setup-soldr and the maturin-spawned cargo, sees it.
+      SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # whisper-rs-sys vendors `std::filesystem::path`, which requires macOS
+      # 10.15+. Rust on stable defaults to 10.12, which fails the vendored C++
+      # build. No-op off darwin. (Issue #13 follow-up.)
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      # Strip DWARF from C/C++ deps to lower per-process RSS during compile.
+      # Rust debuginfo is already trimmed in Cargo.toml [profile.*].
+      CFLAGS: "-g0"
+      CXXFLAGS: "-g0"
+      CLUD_USE_SOLDR_SHIMS: "1"
+      CARGO_TERM_COLOR: always
+    steps:
+      # Requirement (4): release builds belong to the release pipeline only.
+      # `github.workflow` resolves to the *calling* workflow's name inside a
+      # reusable workflow, so this cannot be bypassed by dispatching this
+      # template directly -- it has no workflow_dispatch trigger, and any future
+      # caller that tries to pass release fails here rather than silently
+      # burning runner time on an optimized build nobody ships.
+      - name: Guard release profile
+        if: ${{ inputs.profile == 'release' && github.workflow != 'Auto Release' }}
+        run: |
+          echo "::error::profile=release requested by workflow '${{ github.workflow }}'."
+          echo "Only the Auto Release workflow may build --release. CI builds dev."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build
+        with:
+          target: ${{ inputs.target }}
+          strategy: ${{ inputs.strategy }}
+          soldr-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Provision macOS SDK
+        if: ${{ contains(inputs.target, 'apple') && inputs.strategy == 'zigbuild' }}
+        env:
+          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL }}
+        run: '"$VENV_PY" -m ci.xbuild provision-macos-sdk'
+
+      # Every cargo/maturin invocation goes through ci/xbuild.py so the
+      # per-strategy environment (zig wrappers, xwin CRT paths, the
+      # whisper-rs-sys host-cfg workarounds documented in docs/architecture/ci.md)
+      # lives in one testable place instead of being smeared across YAML.
+      #
+      # `$VENV_PY` rather than `uv run`: pyproject.toml:1-3 sets
+      # build-backend = "soldr", so `uv run` syncs the project and triggers a
+      # full PEP 517 maturin build of a HOST wheel before the TARGET build even
+      # starts. See lint:8-24 for the pre-existing workaround this follows.
+      - name: Clippy
+        if: ${{ inputs.clippy }}
+        run: '"$VENV_PY" -m ci.xbuild clippy --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
+
+      - name: Build binaries and test harnesses
+        run: >
+          "$VENV_PY" -m ci.xbuild compile
+          --target ${{ inputs.target }}
+          --strategy ${{ inputs.strategy }}
+          --profile ${{ inputs.profile }}
+          ${{ inputs.bundle && '--with-tests' || '' }}
+
+      # Doc-tests were covered by the old `cargo test --workspace`
+      # (ci/test.py:137) but produce no harness binary, so they cannot ride
+      # along in the bundle. They are architecture-independent, so running them
+      # once on the native host triple is full coverage, not a reduction.
+      - name: Doc tests
+        if: ${{ inputs.bundle && inputs.strategy == 'native' && runner.os == 'Linux' }}
+        run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
+
+      - name: Build wheel
+        if: ${{ inputs.bundle || inputs.wheel-artifact != '' }}
+        run: >
+          "$VENV_PY" -m ci.xbuild wheel
+          --target ${{ inputs.target }}
+          --strategy ${{ inputs.strategy }}
+          --profile ${{ inputs.profile }}
+
+      - name: Build sdist
+        if: ${{ inputs.include-sdist }}
+        run: '"$VENV_PY" -m maturin sdist --out dist'
+
+      # Guards a real regression class: the shipped Windows exes must not import
+      # the MinGW runtime (ci/check_windows_wheel.py:29-35). Cross-compiling via
+      # cargo-xwin targets MSVC, but the check is cheap and now also catches a
+      # mis-selected -gnu target, which is a new failure mode the native build
+      # could not have had.
+      - name: Verify Windows wheel has no MinGW runtime imports
+        if: ${{ contains(inputs.target, 'windows') }}
+        run: '"$VENV_PY" -m ci.check_windows_wheel --dist-dir dist/'
+
+      - name: Pack bundle
+        if: ${{ inputs.bundle }}
+        run: >
+          "$VENV_PY" -m ci.bundle pack
+          --target ${{ inputs.target }}
+          --profile ${{ inputs.profile }}
+          --dest bundle-archive
+
+      - name: Upload bundle
+        if: ${{ inputs.bundle }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ inputs.target }}
+          path: bundle-archive/*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0 # already zstd-compressed by ci.bundle
+
+      - name: Upload dist artifacts
+        if: ${{ inputs.wheel-artifact != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.wheel-artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Diagnose Linux build failure
+        if: ${{ failure() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set +e
+          echo "::group::OOM / killed-process scan"
+          (sudo dmesg 2>/dev/null || dmesg 2>/dev/null) | grep -iE 'killed|oom|out of memory|signal 9' | tail -50
+          [ $? -ne 0 ] && echo "(no OOM/kill messages found)"
+          echo "::endgroup::"
+          echo "::group::Last 100 dmesg lines"
+          (sudo dmesg 2>/dev/null || dmesg 2>/dev/null) | tail -100
+          echo "::endgroup::"
+          echo "::group::Memory snapshot"; free -h; echo "::endgroup::"
+          echo "::group::Disk snapshot"; df -h; echo "::endgroup::"
+
+      - name: Upload failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-build-${{ inputs.target }}
+          path: logs/*
+          if-no-files-found: warn

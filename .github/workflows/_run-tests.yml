@@ -1,0 +1,81 @@
+name: Run tests
+
+# Executes a prebuilt bundle on a native runner. Compiles nothing -- see
+# .github/actions/setup-exec, which poisons cargo/rustc on PATH so a test that
+# regresses into building from source fails loudly instead of quietly burning
+# ten minutes of scarce macOS/Windows runner time.
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Rust target triple the bundle was built for.
+        required: true
+        type: string
+      runs-on:
+        description: Native runner label that can execute this triple.
+        required: true
+        type: string
+      suite:
+        description: 'unit | integration'
+        required: true
+        type: string
+
+jobs:
+  test:
+    name: ${{ inputs.target }} ${{ inputs.suite }}
+    runs-on: ${{ inputs.runs-on }}
+    # Tighter than the old 45: this job only executes prebuilt binaries, and
+    # pytest's own per-test `timeout = 90` (pyproject.toml:72) should catch a
+    # hang long before this does. A lower ceiling halves what a wedged job
+    # costs in scarce macOS/Windows runner time.
+    timeout-minutes: 20
+    env:
+      RUST_BACKTRACE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-exec
+        with:
+          bundle-name: bundle-${{ inputs.target }}
+
+      # ci/run_bundle.py reconstructs the layout the existing tests already
+      # expect rather than making the tests learn a new one:
+      #   CLUD_TEST_BINARY / _BLOCK_BAD_CMD_BINARY / _MOCK_AGENT_BINARY
+      #     -> honored first by every Python test
+      #        (tests/test_hello.py:58, tests/integration/conftest.py:181-200)
+      #   CARGO_TARGET_DIR -> read at *runtime* by
+      #        crates/clud-bin/tests/common/mod.rs:33, so mock_agent_path()
+      #        resolves for pty_pump/pty_behavior/orphan_reap with no source
+      #        change, and the zombie-scan fixture stops no-oping.
+      #   CLUD_TEST_BIN_DIR -> the runtime override for the CARGO_BIN_EXE_*
+      #        paths baked in at compile time (see docs/architecture/ci.md).
+      #
+      # `$VENV_PY` rather than `uv run`: pyproject.toml:1-3 sets
+      # build-backend = "soldr", so `uv run` would sync the project and trigger
+      # a PEP 517 maturin build -- which on this runner hits the removed
+      # toolchain and fails every job. See lint:8-24.
+      - name: Run ${{ inputs.suite }} suite
+        run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
+
+      - name: Diagnose Linux failure
+        if: ${{ failure() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set +e
+          echo "::group::OOM / killed-process scan"
+          (sudo dmesg 2>/dev/null || dmesg 2>/dev/null) | grep -iE 'killed|oom|out of memory|signal 9' | tail -50
+          [ $? -ne 0 ] && echo "(no OOM/kill messages found)"
+          echo "::endgroup::"
+          echo "::group::Memory snapshot"; free -h; echo "::endgroup::"
+
+      - name: Upload failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-${{ inputs.suite }}-${{ inputs.target }}
+          path: |
+            logs/*
+            bundle/manifest.json
+          if-no-files-found: warn

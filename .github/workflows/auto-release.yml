@@ -91,7 +91,7 @@ jobs:
                   if data.get("published_at"):
                       sys.exit(
                           f"Release {candidate} is already published at "
-                          f"{data['published_at']} — refusing to re-publish."
+                          f"{data['published_at']} -- refusing to re-publish."
                       )
 
           out_path = os.environ["GITHUB_OUTPUT"]
@@ -106,37 +106,48 @@ jobs:
           )
           PY
 
+  # The release matrix comes from ci/ci_matrix.py, the same table CI uses, so
+  # release wheels are produced by the same cross-compile strategy CI exercised.
+  # Shipping natively-built wheels while CI only ever tested cross-built
+  # binaries would mean CI never validated the artifact that ships.
+  release-matrix:
+    name: Resolve release matrix
+    needs: preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.matrix.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: matrix
+        env:
+          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL }}
+        run: python -m ci.ci_matrix --release
+
   build:
     name: Build wheels
-    needs: preflight
+    needs: [preflight, release-matrix]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runs-on: ubuntu-24.04
-            artifact-name: wheels-linux-x86
-            include-sdist: true
-          - runs-on: ubuntu-24.04-arm
-            artifact-name: wheels-linux-arm
-            include-sdist: false
-          - runs-on: windows-2025
-            artifact-name: wheels-windows-x86
-            include-sdist: false
-          - runs-on: windows-11-arm
-            artifact-name: wheels-windows-arm
-            include-sdist: false
-          - runs-on: macos-15
-            artifact-name: wheels-macos-arm
-            include-sdist: false
-          - runs-on: macos-15-intel
-            artifact-name: wheels-macos-x86
-            include-sdist: false
-    uses: ./.github/workflows/_build.yml
+      matrix: ${{ fromJSON(needs.release-matrix.outputs.build) }}
+    # This is the ONLY caller in the repo permitted to pass profile: release.
+    # _build-target.yml enforces that with a guard on github.workflow.
+    uses: ./.github/workflows/_build-target.yml
     with:
+      target: ${{ matrix.target }}
       runs-on: ${{ matrix.runs-on }}
-      artifact-name: ${{ matrix.artifact-name }}
-      build-mode: release
-      include-sdist: ${{ matrix.include-sdist }}
+      strategy: ${{ matrix.strategy }}
+      profile: release
+      # Release builds ship artifacts; they do not need a test bundle, and
+      # clippy already ran on this commit in CI.
+      bundle: false
+      clippy: false
+      wheel-artifact: ${{ matrix.artifact }}
+      include-sdist: ${{ matrix['include-sdist'] }}
 
   publish-pypi:
     name: Publish to PyPI

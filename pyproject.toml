@@ -30,15 +30,23 @@ Repository = "https://github.com/zackees/clud"
 Issues = "https://github.com/zackees/clud/issues"
 
 [dependency-groups]
-dev = [
-    "cmake>=3.26",
-    "maturin[zig]>=1.7,<2",
+# Everything needed to RUN the test suites and nothing needed to BUILD.
+# CI exec jobs (.github/actions/setup-exec) sync only this group: they have no
+# Rust toolchain by construction, so cmake and maturin are dead weight there —
+# ~150 MB of wheels downloaded onto the scarcest runners in the pool.
+# `ziglang` stays because tests/test_wasm.py shells out to `python -m ziglang`.
+test = [
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.0",
     "psutil>=5.9",
-    "ruff>=0.8.0",
     "ziglang>=0.15.2,<0.16",
+]
+dev = [
+    { include-group = "test" },
+    "cmake>=3.26",
+    "maturin[zig]>=1.7,<2",
+    "ruff>=0.8.0",
 ]
 # soldr is intentionally NOT a Python dev dep — install it via ./install
 # (or `./install --global`) which fetches the binary from
