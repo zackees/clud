@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,24 +14,99 @@ use super::types::{
 };
 
 pub(super) const DEFAULT_SAMPLE_INTERVAL_MS: u64 = 2_000;
+
+/// Cadence once the sampler parks (issue #548).
+///
+/// An idle daemon refreshed **every process on the host** every 2 s forever,
+/// whether or not anything consumed the result — cost that scales with the
+/// host's process count rather than with clud activity. The #464 harness
+/// measured that refresh at ~112 ms p50 on a 517-process Windows box, i.e.
+/// ~5.6 % of a core sustained.
+///
+/// 30 s bounds how stale a parked snapshot gets without pinning the CPU. A
+/// consumer arriving mid-sleep does not wait it out — see
+/// [`sleep_until_next_tick`].
+pub(super) const PARKED_SAMPLE_INTERVAL_MS: u64 = 30_000;
+
+/// How long after the last snapshot request the fast cadence is kept.
+///
+/// Spans a human paging through `clud top` without re-parking between
+/// refreshes, and covers the gap between a session registering and its first
+/// snapshot request.
+pub(super) const CONSUMER_IDLE_GRACE_MS: u64 = 30_000;
+
 const ORIGINATOR_SCAN_INTERVAL_MS: u64 = 30_000;
 const DEAD_ROW_RETENTION_MS: u64 = 60_000;
 const MAX_TRACKED_PIDS: usize = 5_000;
 const EWMA_ALPHA: f32 = 0.3;
 
+/// Which cadence the sampler should run at right now.
+///
+/// A named type rather than a bare `u64` so the decision and the duration
+/// stay distinguishable at the call site — "we are parked" is the fact worth
+/// asserting in a test, not the number 30000.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SampleCadence {
+    Active,
+    Parked,
+}
+
+impl SampleCadence {
+    pub(super) fn interval_ms(self, active_ms: u64) -> u64 {
+        match self {
+            // Never park *below* the configured active cadence: an operator
+            // who set 60 s deliberately should not be sped up to 30 s by the
+            // parking logic.
+            Self::Parked => PARKED_SAMPLE_INTERVAL_MS.max(active_ms),
+            Self::Active => active_ms,
+        }
+    }
+}
+
+/// Decide the cadence for the next tick (issue #548).
+///
+/// Parked requires **both** conditions: nobody has asked for a snapshot
+/// recently, *and* there are no live sessions. Either alone is insufficient —
+/// a running session with no dashboard attached still needs its process tree
+/// tracked for the reconciliation the daemon does on its behalf, and a
+/// consumer polling an empty machine still expects fresh numbers.
+pub(super) fn decide_cadence(
+    ms_since_last_request: u64,
+    live_sessions: usize,
+    grace_ms: u64,
+) -> SampleCadence {
+    if live_sessions > 0 || ms_since_last_request < grace_ms {
+        SampleCadence::Active
+    } else {
+        SampleCadence::Parked
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProcSamplerHandle {
     snapshot: Arc<Mutex<ProcTreeSnapshot>>,
+    /// Wall-clock ms of the most recent [`Self::snapshot`] call. Read by the
+    /// sampler thread to decide whether anyone is still watching.
+    last_request_ms: Arc<AtomicU64>,
 }
 
 impl ProcSamplerHandle {
     pub(super) fn empty(interval_ms: u64) -> Self {
         Self {
             snapshot: Arc::new(Mutex::new(ProcTreeSnapshot::empty(interval_ms))),
+            // Start "just requested" so a daemon that comes up because someone
+            // ran `clud top` samples fast immediately rather than parking
+            // through the first grace window.
+            last_request_ms: Arc::new(AtomicU64::new(unix_millis_now())),
         }
     }
 
     pub(super) fn snapshot(&self, include_dead_since_ms: u64) -> ProcTreeSnapshot {
+        // Recording before the read matters: it is what lets a parked sampler
+        // notice the consumer on its next 100 ms wake instead of finishing a
+        // 30 s sleep first.
+        self.last_request_ms
+            .store(unix_millis_now(), Ordering::Relaxed);
         let mut snapshot = self
             .snapshot
             .lock()
@@ -62,6 +137,7 @@ pub(super) fn spawn_proc_sampler(
     let interval_ms = configured_interval_ms();
     let handle = ProcSamplerHandle::empty(interval_ms);
     let snapshot = Arc::clone(&handle.snapshot);
+    let last_request_ms = Arc::clone(&handle.last_request_ms);
     let _ = thread::Builder::new()
         .name("clud-proc-sampler".to_string())
         .spawn(move || {
@@ -71,7 +147,19 @@ pub(super) fn spawn_proc_sampler(
                 *snapshot
                     .lock()
                     .expect("proc sampler snapshot mutex poisoned") = next;
-                sleep_until_next_tick(interval_ms, &shutdown_requested);
+
+                let requested_at = last_request_ms.load(Ordering::Relaxed);
+                let cadence = decide_cadence(
+                    unix_millis_now().saturating_sub(requested_at),
+                    sampler.last_live_sessions,
+                    CONSUMER_IDLE_GRACE_MS,
+                );
+                sleep_until_next_tick(
+                    cadence.interval_ms(interval_ms),
+                    &shutdown_requested,
+                    &last_request_ms,
+                    requested_at,
+                );
             }
         });
     handle
@@ -88,10 +176,27 @@ fn configured_interval_ms() -> u64 {
         .unwrap_or(DEFAULT_SAMPLE_INTERVAL_MS)
 }
 
-fn sleep_until_next_tick(interval_ms: u64, shutdown_requested: &AtomicBool) {
+/// Sleep until the next tick, waking early for shutdown **or** for a new
+/// snapshot request.
+///
+/// The early wake is what makes parking safe to use (issue #548). Without it,
+/// a `clud top` that arrives one second into a 30 s parked sleep would show
+/// stale data for the remaining 29 — the loop already polls every 100 ms for
+/// shutdown, so noticing the consumer on the same poll costs one atomic load.
+fn sleep_until_next_tick(
+    interval_ms: u64,
+    shutdown_requested: &AtomicBool,
+    last_request_ms: &AtomicU64,
+    requested_at_entry: u64,
+) {
     let deadline = Instant::now() + Duration::from_millis(interval_ms);
     while Instant::now() < deadline {
         if shutdown_requested.load(Ordering::SeqCst) {
+            return;
+        }
+        if last_request_ms.load(Ordering::Relaxed) != requested_at_entry {
+            // A consumer showed up: resample now rather than serving them a
+            // snapshot that could be most of a parked interval old.
             return;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -108,6 +213,11 @@ struct ProcSampler {
     originator_cache: HashMap<u32, OriginatorTag>,
     last_originator_scan: Option<Instant>,
     interval_ms: u64,
+    /// Live sessions seen on the last tick, straight from `SessionIndex`
+    /// (issue #548). Counting `rows` instead would be wrong: rows cover the
+    /// whole tracked process tree, including the daemon's own row, so it is
+    /// never zero and the sampler would never park.
+    last_live_sessions: usize,
 }
 
 impl ProcSampler {
@@ -121,6 +231,7 @@ impl ProcSampler {
             originator_cache: HashMap::new(),
             last_originator_scan: None,
             interval_ms,
+            last_live_sessions: 0,
         }
     }
 
@@ -139,6 +250,7 @@ impl ProcSampler {
         let parent_by_pid = parent_map(&self.system);
         let children_by_parent = children_map(&self.system);
         let sessions = SessionIndex::from_state(&self.state_dir, &self.system);
+        self.last_live_sessions = sessions.sessions.len();
         let included = included_pids(
             &self.system,
             &children_by_parent,
@@ -548,6 +660,69 @@ fn tier_for(cpu_pct: f32, cpu_ewma_pct: f32, rss_bytes: u64) -> ProcTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #548: the parking policy. Both conditions must hold to park, and
+    // each alone is a reason to stay fast.
+
+    #[test]
+    fn an_idle_daemon_with_no_sessions_parks() {
+        assert_eq!(
+            decide_cadence(CONSUMER_IDLE_GRACE_MS, 0, CONSUMER_IDLE_GRACE_MS),
+            SampleCadence::Parked
+        );
+    }
+
+    #[test]
+    fn a_live_session_keeps_the_fast_cadence_with_nobody_watching() {
+        // The daemon still reconciles that session's process tree on its
+        // behalf, so parking here would degrade real work, not idle work.
+        assert_eq!(
+            decide_cadence(CONSUMER_IDLE_GRACE_MS * 100, 1, CONSUMER_IDLE_GRACE_MS),
+            SampleCadence::Active
+        );
+    }
+
+    #[test]
+    fn a_recent_consumer_keeps_the_fast_cadence_on_an_empty_machine() {
+        // `clud top` against a machine with no sessions still expects numbers
+        // that move.
+        assert_eq!(
+            decide_cadence(0, 0, CONSUMER_IDLE_GRACE_MS),
+            SampleCadence::Active
+        );
+        // The boundary is exclusive: exactly at the grace window, park.
+        assert_eq!(
+            decide_cadence(CONSUMER_IDLE_GRACE_MS - 1, 0, CONSUMER_IDLE_GRACE_MS),
+            SampleCadence::Active
+        );
+    }
+
+    #[test]
+    fn parking_never_speeds_up_a_deliberately_slow_operator_setting() {
+        // An operator who configured a 60 s cadence must not be sped up to the
+        // 30 s parked interval -- parking may only ever reduce work.
+        let slow = 60_000;
+        assert_eq!(SampleCadence::Parked.interval_ms(slow), slow);
+        assert_eq!(SampleCadence::Active.interval_ms(slow), slow);
+        // And with the default, parking does slow things down as intended.
+        assert_eq!(
+            SampleCadence::Parked.interval_ms(DEFAULT_SAMPLE_INTERVAL_MS),
+            PARKED_SAMPLE_INTERVAL_MS
+        );
+    }
+
+    #[test]
+    fn requesting_a_snapshot_records_the_consumer() {
+        // This is what wakes a parked sampler; without it the handle looks
+        // idle no matter how often `clud top` runs.
+        let handle = ProcSamplerHandle::empty(DEFAULT_SAMPLE_INTERVAL_MS);
+        handle.last_request_ms.store(0, Ordering::Relaxed);
+        let _ = handle.snapshot(0);
+        assert!(
+            handle.last_request_ms.load(Ordering::Relaxed) > 0,
+            "snapshot() must record the request"
+        );
+    }
 
     fn session_index(session: SessionRoot) -> SessionIndex {
         let mut index = SessionIndex::default();
