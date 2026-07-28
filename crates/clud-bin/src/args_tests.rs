@@ -693,6 +693,110 @@ fn test_passthrough_after_separator() {
     assert_eq!(args.passthrough, vec!["--verbose", "--debug"]);
 }
 
+/// Issue #508: the documented `clud tool run <tool> … run -- <cmd…>` shape.
+///
+/// The separator and everything behind it are *data* for the bundled tool,
+/// which does its own `run -- <cmd…>` split. Before the fix the splitter
+/// claimed them for `passthrough` — which nothing on the `tool` path reads —
+/// and the tool reported `run: missing command`.
+#[test]
+fn tool_run_forwards_the_separator_and_everything_after_it() {
+    let args = parse(&[
+        "clud",
+        "tool",
+        "run",
+        "docker/docker-build.py",
+        "soldr",
+        "C:/repo",
+        "run",
+        "--",
+        "soldr",
+        "cargo",
+        "fmt",
+        "-p",
+        "soldr-cli",
+        "--",
+        "--check",
+    ]);
+    assert!(
+        args.passthrough.is_empty(),
+        "nothing may be diverted to passthrough: {:?}",
+        args.passthrough
+    );
+    let Some(Command::Tool {
+        subcommand: ToolSubcommand::Run { rel_path, args },
+    }) = args.command
+    else {
+        panic!("expected `tool run`");
+    };
+    assert_eq!(rel_path, "docker/docker-build.py");
+    // Both separators survive, and so does `-p`, which is a clud value flag
+    // and would otherwise have been eaten along with its value.
+    assert_eq!(
+        args,
+        vec![
+            "soldr",
+            "C:/repo",
+            "run",
+            "--",
+            "soldr",
+            "cargo",
+            "fmt",
+            "-p",
+            "soldr-cli",
+            "--",
+            "--check",
+        ]
+    );
+}
+
+/// The acceptance criterion from the issue, in its smallest form.
+#[test]
+fn tool_run_round_trips_a_trivial_command_after_the_separator() {
+    let args = parse(&[
+        "clud",
+        "tool",
+        "run",
+        "docker/docker-build.py",
+        "soldr",
+        "C:/repo",
+        "run",
+        "--",
+        "echo",
+        "hi",
+    ]);
+    let Some(Command::Tool {
+        subcommand: ToolSubcommand::Run { args, .. },
+    }) = args.command
+    else {
+        panic!("expected `tool run`");
+    };
+    assert_eq!(args, vec!["soldr", "C:/repo", "run", "--", "echo", "hi"]);
+}
+
+/// The behaviour the fix must *not* break, and which a broader fix does break:
+/// every subcommand other than `tool` keeps `--` as clud's end-of-flags marker.
+///
+/// Found the hard way — routing `--` to clap for `loop` makes it reject
+/// `--verbose` as an unknown argument and call `exit(2)`, which takes the whole
+/// process with it.
+#[test]
+fn separator_after_a_non_tool_subcommand_still_feeds_passthrough() {
+    let args = parse(&["clud", "loop", "task", "--", "--verbose", "--debug"]);
+    assert_eq!(args.passthrough, vec!["--verbose", "--debug"]);
+    assert!(matches!(args.command, Some(Command::Loop { .. })));
+}
+
+/// The behaviour the fix must *not* break: before any subcommand, `--` still
+/// ends clud's own flags and hands the rest to the backend agent.
+#[test]
+fn separator_before_a_subcommand_still_feeds_passthrough() {
+    let args = parse(&["clud", "-p", "hello", "--", "--verbose"]);
+    assert_eq!(args.prompt.as_deref(), Some("hello"));
+    assert_eq!(args.passthrough, vec!["--verbose"]);
+    assert!(args.command.is_none());
+}
+
 #[test]
 fn test_verbose_flag() {
     let args = parse(&["clud", "-v"]);
