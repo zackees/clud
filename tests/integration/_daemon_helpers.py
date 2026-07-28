@@ -127,6 +127,71 @@ def session_metadata(
             time.sleep(0.05)
 
 
+def attach_for_report(
+    clud_binary: Path,
+    env: dict[str, str],
+    state_dir: Path,
+    session_id: str,
+    expect: str,
+    timeout: float = 30.0,
+) -> dict:
+    """Attach to `session_id` and return the mock agent's JSON report.
+
+    Issue #595: one attach is not enough. The mock agent writes its report at
+    the *end* of its run, so an attach that lands before then connects fine,
+    exits 0, and replays an empty backlog -- and the caller's `json.loads`
+    fails with `Expecting value: line 1 column 1`, which says nothing about
+    what actually happened. Retry until the report is there.
+
+    The three ways this can end are kept distinct on purpose, because they
+    mean different things:
+
+    * the report arrives -> return it;
+    * `attach` itself fails (non-zero) -> raise immediately, since retrying
+      cannot fix a broken attach and would only bury the exit code;
+    * the deadline passes -> raise with the last stdout/stderr and the
+      session's recorded `exit_code`, which is what distinguishes "the agent
+      is still running" from "it exited and produced nothing".
+    """
+    deadline = time.time() + timeout
+    last_stdout = ""
+    last_stderr = ""
+    attempts = 0
+    while time.time() < deadline:
+        attempts += 1
+        attached = subprocess.run(
+            [str(clud_binary), "attach", session_id],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        last_stdout, last_stderr = attached.stdout, attached.stderr
+        if attached.returncode != 0:
+            raise AssertionError(
+                f"clud attach exited {attached.returncode} on attempt {attempts}\n"
+                f"stdout: {attached.stdout!r}\nstderr: {attached.stderr!r}"
+            )
+        try:
+            report = json.loads(attached.stdout)
+        except json.JSONDecodeError:
+            time.sleep(0.2)
+            continue
+        if expect in report.get("args", []):
+            return report
+        time.sleep(0.2)
+
+    try:
+        exit_code = session_metadata(state_dir, session_id).get("exit_code")
+    except Exception as err:  # diagnostics only — never mask the real failure
+        exit_code = f"<unreadable: {err}>"
+    raise AssertionError(
+        f"no report containing {expect!r} after {attempts} attach attempt(s) "
+        f"in {timeout}s (session exit_code={exit_code})\n"
+        f"last stdout: {last_stdout!r}\nlast stderr: {last_stderr!r}"
+    )
+
+
 def wait_for_session_exit(state_dir: Path, session_id: str, timeout: float = 15.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import signal
 import subprocess
 import sys
@@ -11,6 +10,7 @@ import pytest
 
 from ._daemon_helpers import (
     DETACH_EXIT_TIMEOUT,
+    attach_for_report,
     daemon_env,
     kill_daemon_for_session,
     launch_detached,
@@ -76,15 +76,9 @@ class TestDaemonManagedSessionFlags:
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
 
-            attached = subprocess.run(
-                [str(clud_binary), "attach", session_id],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=env,
+            report = attach_for_report(
+                clud_binary, env, state_dir, session_id, "hello-detach"
             )
-            assert attached.returncode == 0
-            report = json.loads(attached.stdout)
             assert "hello-detach" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)
@@ -241,15 +235,9 @@ class TestDaemonManagedSessionFlags:
         assert session_id in listed.stdout
 
         try:
-            attached = subprocess.run(
-                [str(clud_binary), "attach", session_id],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=env,
+            report = attach_for_report(
+                clud_binary, env, state_dir, session_id, "hello-detachable"
             )
-            assert attached.returncode == 0
-            report = json.loads(attached.stdout)
             assert "hello-detachable" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)
