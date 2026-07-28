@@ -204,11 +204,60 @@ fn wait_for_row_count(
     }
 }
 
+/// Apply exactly `expected` purge completions from `rx`, or fail with the
+/// shortfall.
+///
+/// Prefer this to [`drain_purge_completions`] whenever the dispatch count is
+/// known. Issue #560: a quiet interval is not evidence that a purge finished —
+/// two directory removals dispatched to a two-worker pool can land more than
+/// any fixed gap apart under AV-scanner or `TempDir` contention on Windows,
+/// and the drain would return after the first one with the test none the
+/// wiser. Waiting for a count the *producer* reported turns that from a
+/// timing guess into an assertion.
+///
+/// `timeout` remains a hard bound so a genuinely lost completion fails the
+/// test rather than hanging it.
+fn expect_purge_completions(
+    registry: &Registry,
+    rx: &mpsc::Receiver<RegistryMsg>,
+    expected: usize,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let mut applied = 0usize;
+    let mut other_messages = 0usize;
+    while applied < expected {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "timed out after {timeout:?} waiting for purge completions: \
+                 applied {applied} of {expected} dispatched \
+                 ({other_messages} non-completion message(s) seen). \
+                 A missing completion means a purge worker never reported back."
+            );
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(RegistryMsg::PurgeCompletion(c)) => {
+                apply_purge_completion(registry, c);
+                applied += 1;
+            }
+            Ok(_) => other_messages += 1,
+            Err(err) => panic!(
+                "purge completion channel closed after {applied} of {expected}: {err} \
+                 ({other_messages} non-completion message(s) seen)"
+            ),
+        }
+    }
+}
+
 /// Drain `RegistryMsg::PurgeCompletion(..)` items from `rx` until
 /// either no completion arrives within `quiet_for` or `timeout`
 /// elapses, applying each one against `registry`. Used by tests
 /// that drive the periodic-tick helpers directly — outside the
 /// worker loop the test plays the role of the worker.
+///
+/// Only appropriate where the expected count is zero or genuinely unknown;
+/// see [`expect_purge_completions`].
 fn drain_purge_completions(
     registry: &Registry,
     rx: &mpsc::Receiver<RegistryMsg>,
@@ -578,7 +627,7 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
     let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
     let pool_tx = spawn_purge_pool(2);
     let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
-    run_periodic_purge_tick_with_free_space(
+    let dispatched = run_periodic_purge_tick_with_free_space(
         &registry,
         &pool_tx,
         &completion_tx,
@@ -586,23 +635,24 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
         &config,
         &|_| Ok(4 * BYTES_PER_GB),
     );
+    // The two seeded entries — one worktree, one sibling clone — are both
+    // old enough and both under a low-space root, so the tick must dispatch
+    // exactly two jobs. Asserting this separately keeps the wait below
+    // honest: without it, a tick that dispatched nothing would "satisfy"
+    // zero completions and the teardown assertions would be vacuous.
+    assert_eq!(dispatched, 2, "tick should dispatch both stale entries");
+
     // Outside the worker loop the test plays the role of the
-    // registry-writer thread: drain the pool's completion
-    // callbacks and apply them to redb directly.
-    // #383: the 250ms quiet window was too tight on Windows, where two
-    // parallel directory-purges can finish more than 250ms apart due to
-    // AV-scanner / TempDir contention. Use 1500ms quiet so the second
-    // completion has room to land; the 5s overall deadline still caps
-    // the worst case.
-    let drained = drain_purge_completions(
+    // registry-writer thread: apply the pool's completion callbacks to redb
+    // directly. Issues #383/#560: this used to stop after a quiet gap
+    // (250ms, then 1500ms), which is a guess about scheduler, AV-scanner and
+    // TempDir latency rather than a fact about the purge. Wait for the count
+    // the tick actually reported instead.
+    expect_purge_completions(
         &registry,
         &completion_rx,
-        Duration::from_millis(1500),
-        Duration::from_secs(5),
-    );
-    assert!(
-        drained >= 2,
-        "expected at least 2 completions, got {drained}"
+        dispatched,
+        Duration::from_secs(30),
     );
 
     assert!(registry.list(Some(WORKTREE_KIND)).unwrap().is_empty());
@@ -736,14 +786,18 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
     let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
     let pool_tx = spawn_purge_pool(1);
     let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
-    run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
-    // #383: matches the bump in the periodic-purge test above —
-    // 250ms was too tight on Windows for sequential purge completions.
-    let _drained = drain_purge_completions(
+    let dispatched =
+        run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+    // Same #383/#560 hazard as the periodic-purge test: this one discarded
+    // the drain count entirely, so a completion that never arrived showed up
+    // only as the "dir should be deleted" assertion failing — with no hint
+    // that the purge simply hadn't finished yet.
+    assert_eq!(dispatched, 1, "the stale extern repo should be dispatched");
+    expect_purge_completions(
         &registry,
         &completion_rx,
-        Duration::from_millis(1500),
-        Duration::from_secs(5),
+        dispatched,
+        Duration::from_secs(30),
     );
 
     let rows = registry.list(Some(EXTERN_REPO_KIND)).expect("list");
