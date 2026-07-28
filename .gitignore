@@ -65,3 +65,4 @@ coverage-*.xml
 !.claude/agents/
 !.claude/skills/
 .claude/settings.local.json
+.clud/loop

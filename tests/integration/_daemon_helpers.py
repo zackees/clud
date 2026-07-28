@@ -18,6 +18,66 @@ import sys
 import time
 from pathlib import Path
 
+
+def run_clud(
+    argv: list[str],
+    *,
+    timeout: float,
+    **kwargs,
+) -> subprocess.CompletedProcess[str]:
+    """`subprocess.run` that reports what the process managed to do before it
+    timed out.
+
+    Issue #594: the Windows x86 lane fails ~every run with a rotating single
+    victim, most of them a `clud.exe` launch exceeding its budget. A bare
+    `TimeoutExpired` names only the command and the number of seconds, so
+    every occurrence looks identical and none says *where* the launch stalled
+    — which is precisely that issue's open question ("genuinely slow under
+    load, or intermittently blocking?").
+
+    Re-raising with that output, plus the measured elapsed time, turns each
+    occurrence into evidence: startup chatter that stops mid-daemon-bringup
+    reads very differently from a child that produced nothing at all.
+
+    Note the deliberate avoidance of `subprocess.run(..., timeout=)`. On
+    Windows — the only platform where #594 fires — CPython raises
+    `TimeoutExpired` from the reader-thread path *without* attaching the
+    partial buffers, so `expired.stdout` is empty there while being populated
+    on POSIX. Reading them requires killing the child and draining the pipes
+    ourselves, which is what this does. Verified rather than assumed: the
+    first version of this helper used `subprocess.run` and reported nothing at
+    all on Windows.
+
+    Deliberately changes no timeout value. Whether these budgets are right is
+    the question; widening them would answer it by erasing it.
+    """
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE if kwargs.get("input") is not None else None,
+        text=True,
+        **{k: v for k, v in kwargs.items() if k != "input"},
+    )
+    try:
+        stdout, stderr = proc.communicate(input=kwargs.get("input"), timeout=timeout)
+    except subprocess.TimeoutExpired as expired:
+        elapsed = time.monotonic() - started
+        proc.kill()
+        # Second communicate() drains what the reader threads already buffered.
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "<pipes unreadable after kill>", ""
+        raise AssertionError(
+            f"timed out after {timeout}s (waited {elapsed:.1f}s): {argv}\n"
+            f"--- partial stdout ---\n{stdout}\n"
+            f"--- partial stderr ---\n{stderr}"
+        ) from expired
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
 _ANSI_RE = re.compile(
     # CSI: \x1b[ + params + final letter
     r"\x1b(?:\[[^a-zA-Z]*[a-zA-Z]"
@@ -289,7 +349,32 @@ def launch_detached(
 
 
 def wait_for_exit(proc: subprocess.Popen[str], timeout: float = 10.0) -> int:
-    return proc.wait(timeout=timeout)
+    """Wait for `proc`, reporting what it had emitted if it overruns.
+
+    Issue #594: `Popen.wait` captures nothing, so the two integration victims
+    that time out here (`TimeoutExpired([...clud.exe, --detach, ...], 5)` and
+    the 30 s concurrent-launch one) said only that a launch was too slow —
+    never how far it got. Drain the pipes on overrun instead.
+
+    The process is killed first so `communicate` cannot block behind a child
+    that is still running; a second short timeout guards even that, since a
+    wedged process is one of the outcomes being investigated.
+    """
+    started = time.monotonic()
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as expired:
+        elapsed = time.monotonic() - started
+        proc.kill()
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "<pipes unreadable after kill>", ""
+        raise AssertionError(
+            f"process did not exit within {timeout}s (waited {elapsed:.1f}s)\n"
+            f"--- partial stdout ---\n{stdout}\n"
+            f"--- partial stderr ---\n{stderr}"
+        ) from expired
 
 
 def kill_daemon_for_session(state_dir: Path, session_id: str) -> None:

@@ -15,7 +15,12 @@ from typing import Any
 
 import pytest
 
-from ._daemon_helpers import kill_process, wait_for_pids_to_exit, wait_for_tree_pids
+from ._daemon_helpers import (
+    kill_process,
+    run_clud,
+    wait_for_pids_to_exit,
+    wait_for_tree_pids,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -37,10 +42,10 @@ def _run(
     with tempfile.TemporaryDirectory() as temp_dir:
         launch = Path(temp_dir) / clud.name
         shutil.copy2(clud, launch)
-        return subprocess.run(
+        # Issue #594: `run_clud` re-raises a timeout with the partial output,
+        # so a stalled launch on the Windows lane says how far it got.
+        return run_clud(
             [str(launch), *args],
-            capture_output=True,
-            text=True,
             timeout=_TIMEOUT,
             env=env,
             input=input_data,
