@@ -168,11 +168,43 @@ impl Drop for ScopedEnv {
     }
 }
 
-fn call(tx: &mpsc::Sender<RegistryMsg>, op: GcOp) -> GcReply {
+/// How long a single worker round-trip may take before it is treated as slow.
+/// The registry worker is single-threaded, so while it applies a bulk purge's
+/// completions an unrelated `List` queues behind them.
+const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One request/response round-trip, returning `Err` on timeout rather than
+/// panicking (issue #594).
+///
+/// The difference matters inside a polling loop: [`wait_for_row_count`] owns a
+/// deadline of its own and is built to absorb a slow reply, but the previous
+/// `recv_timeout(..).unwrap()` aborted the whole test on the first slow one, so
+/// the outer deadline never got to do its job. That is how
+/// `bulk_purge_keeps_serving_list_while_pool_grinds_through` failed on a loaded
+/// Windows runner: 50 `remove_dir_all` calls kept the worker busy past five
+/// seconds, and the panic carried no timing information at all.
+fn try_call(
+    tx: &mpsc::Sender<RegistryMsg>,
+    op: GcOp,
+    timeout: Duration,
+) -> Result<GcReply, mpsc::RecvTimeoutError> {
     let (reply_tx, reply_rx) = mpsc::sync_channel::<GcReply>(1);
     tx.send(RegistryMsg::Op(GcRequestMsg { op, reply_tx }))
         .unwrap();
-    reply_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    reply_rx.recv_timeout(timeout)
+}
+
+/// One round-trip that must succeed. Use where a slow worker is itself the
+/// bug; prefer [`try_call`] inside a loop that already has a deadline.
+fn call(tx: &mpsc::Sender<RegistryMsg>, op: GcOp) -> GcReply {
+    let started = Instant::now();
+    match try_call(tx, op, CALL_TIMEOUT) {
+        Ok(reply) => reply,
+        Err(err) => panic!(
+            "registry worker did not reply within {CALL_TIMEOUT:?} (waited {:?}): {err}",
+            started.elapsed()
+        ),
+    }
 }
 
 /// Block (polling `GcOp::List`) until the worker reports
@@ -186,19 +218,62 @@ fn wait_for_row_count(
     target_count: usize,
     timeout: Duration,
 ) -> Vec<ListRow> {
-    let deadline = Instant::now() + timeout;
+    wait_for_row_count_with_budget(tx, kind, target_count, timeout, CALL_TIMEOUT)
+}
+
+/// [`wait_for_row_count`] with the per-round-trip budget exposed.
+///
+/// A round-trip that times out counts as "not yet" and is retried until the
+/// caller's own deadline, which is the point of having one. On expiry the panic
+/// names how long it waited and how many round-trips were slow, so the next
+/// occurrence says whether the worker was merely busy or wedged — the question
+/// #594 is trying to answer, and one the old panic destroyed the evidence for.
+///
+/// Only the tests for this helper pass anything but [`CALL_TIMEOUT`]: proving a
+/// slow reply is absorbed needs a round-trip that actually exceeds its budget,
+/// and stalling a worker for five seconds to arrange that would be five seconds
+/// of dead test time.
+fn wait_for_row_count_with_budget(
+    tx: &mpsc::Sender<RegistryMsg>,
+    kind: Option<&str>,
+    target_count: usize,
+    timeout: Duration,
+    call_budget: Duration,
+) -> Vec<ListRow> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut slow_calls = 0usize;
+    let mut last_rows: Option<Vec<ListRow>> = None;
     loop {
-        let rows = match call(
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // Never wait past the caller's deadline, and always leave the loop a
+        // chance to observe expiry.
+        let budget = call_budget.min(remaining.max(Duration::from_millis(1)));
+        match try_call(
             tx,
             GcOp::List {
                 kind: kind.map(String::from),
             },
+            budget,
         ) {
-            GcReply::ListOk { rows } => rows,
-            other => panic!("unexpected reply: {other:?}"),
-        };
-        if rows.len() == target_count || Instant::now() >= deadline {
-            return rows;
+            Ok(GcReply::ListOk { rows }) => {
+                if rows.len() == target_count {
+                    return rows;
+                }
+                last_rows = Some(rows);
+            }
+            Ok(other) => panic!("unexpected reply: {other:?}"),
+            Err(_) => slow_calls += 1,
+        }
+
+        if Instant::now() >= deadline {
+            return last_rows.unwrap_or_else(|| {
+                panic!(
+                    "worker never answered a List in {:?} ({slow_calls} round-trip(s) \
+                     exceeded {call_budget:?}); expected {target_count} row(s)",
+                    started.elapsed()
+                )
+            });
         }
         thread::sleep(Duration::from_millis(20));
     }
@@ -286,6 +361,63 @@ fn drain_purge_completions(
             Err(_) => return drained,
         }
     }
+}
+
+/// Issue #594: a worker that never answers must produce a panic that says so,
+/// naming the elapsed time and the number of slow round-trips.
+///
+/// The receiver is held but never replied to, which is the wedged case. Before
+/// this change the failure surfaced as a bare `RecvTimeoutError` unwrap inside
+/// `call`, with no indication of which wait had expired or for how long — the
+/// reason characterising the real occurrence needed a log dig.
+#[test]
+#[should_panic(expected = "worker never answered a List")]
+fn a_wedged_worker_produces_a_diagnosable_timeout() {
+    let (tx, _held_receiver) = mpsc::channel::<RegistryMsg>();
+    // Short deadline: the point is the message, not the waiting.
+    let _ = wait_for_row_count(&tx, None, 0, Duration::from_millis(50));
+}
+
+/// The complementary case, and the actual regression guard: a worker that is
+/// merely *slow* must not abort the test. The first round-trip outlives its
+/// per-call budget, the helper retries within its own deadline, and the answer
+/// still arrives.
+///
+/// The budget is passed explicitly and is deliberately shorter than the stall.
+/// With the production 5 s budget a 120 ms stall never expires, so the test
+/// would pass against the old panicking code too and guard nothing — which is
+/// the exact failure mode this change is about. Verified by re-introducing the
+/// panic locally: this test fails, the wedged-worker one still passes.
+#[test]
+fn a_slow_reply_is_absorbed_by_the_callers_deadline() {
+    let (tx, rx) = mpsc::channel::<RegistryMsg>();
+    let worker = thread::spawn(move || {
+        // Stall past the per-call budget, the way a real worker does while
+        // grinding through a bulk purge. The caller abandons this first reply,
+        // exactly as in production.
+        let first = rx.recv().expect("a request");
+        thread::sleep(Duration::from_millis(120));
+        if let RegistryMsg::Op(req) = first {
+            let _ = req.reply_tx.send(GcReply::ListOk { rows: Vec::new() });
+        }
+        // Answer every retry promptly.
+        while let Ok(msg) = rx.recv() {
+            if let RegistryMsg::Op(req) = msg {
+                let _ = req.reply_tx.send(GcReply::ListOk { rows: Vec::new() });
+            }
+        }
+    });
+
+    let rows = wait_for_row_count_with_budget(
+        &tx,
+        None,
+        0,
+        Duration::from_secs(5),
+        Duration::from_millis(30),
+    );
+    assert!(rows.is_empty());
+    drop(tx);
+    let _ = worker.join();
 }
 
 #[test]
