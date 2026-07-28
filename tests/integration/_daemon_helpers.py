@@ -195,23 +195,27 @@ def attach_for_report(
     expect: str,
     timeout: float = 30.0,
 ) -> dict:
-    """Attach to `session_id` and return the mock agent's JSON report.
+    """Return the mock agent's JSON report for `session_id`.
 
-    Issue #595: one attach is not enough. The mock agent writes its report at
-    the *end* of its run, so an attach that lands before then connects fine,
-    exits 0, and replays an empty backlog -- and the caller's `json.loads`
-    fails with `Expecting value: line 1 column 1`, which says nothing about
-    what actually happened. Retry until the report is there.
+    Issue #595, second attempt. The mock agent writes its report at the *end*
+    of its run, so an attach landing before then connects fine, exits 0, and
+    replays an empty backlog.
 
-    The three ways this can end are kept distinct on purpose, because they
-    mean different things:
+    The first fix retried the attach. That is not enough, and was observed
+    failing as `clud attach exited 1 on attempt 2`: retrying only helps while
+    the session is still attachable, and the very thing being waited for --
+    the agent finishing -- is what makes it *un*-attachable. The race has no
+    winning attach schedule, because a fast agent finishes before the first
+    attempt and a slow one after the last.
 
-    * the report arrives -> return it;
-    * `attach` itself fails (non-zero) -> raise immediately, since retrying
-      cannot fix a broken attach and would only bury the exit code;
-    * the deadline passes -> raise with the last stdout/stderr and the
-      session's recorded `exit_code`, which is what distinguishes "the agent
-      is still running" from "it exited and produced nothing".
+    So attach is the fast path and `clud logs` is the fallback. The session log
+    is written to disk and outlives the session, which makes it the only source
+    that answers the question in both orderings.
+
+    Failure still separates the cases that mean different things: a report
+    found nowhere is reported with the session's recorded `exit_code`, which
+    distinguishes "the agent is still running" from "it exited having produced
+    nothing".
     """
     deadline = time.time() + timeout
     last_stdout = ""
@@ -228,8 +232,15 @@ def attach_for_report(
         )
         last_stdout, last_stderr = attached.stdout, attached.stderr
         if attached.returncode != 0:
+            # Almost always "the session already ended", which is a legitimate
+            # ordering rather than an error -- the report is on disk. Only if
+            # the log has nothing either is this a real failure.
+            report = _report_from_session_log(clud_binary, env, session_id, expect)
+            if report is not None:
+                return report
             raise AssertionError(
-                f"clud attach exited {attached.returncode} on attempt {attempts}\n"
+                f"clud attach exited {attached.returncode} on attempt {attempts} "
+                f"and the session log holds no report containing {expect!r}\n"
                 f"stdout: {attached.stdout!r}\nstderr: {attached.stderr!r}"
             )
         try:
@@ -241,15 +252,59 @@ def attach_for_report(
             return report
         time.sleep(0.2)
 
+    # Deadline reached without attach producing it — try the log once more, in
+    # case the agent finished during the final sleep.
+    report = _report_from_session_log(clud_binary, env, session_id, expect)
+    if report is not None:
+        return report
+
     try:
         exit_code = session_metadata(state_dir, session_id).get("exit_code")
     except Exception as err:  # diagnostics only — never mask the real failure
         exit_code = f"<unreadable: {err}>"
     raise AssertionError(
         f"no report containing {expect!r} after {attempts} attach attempt(s) "
-        f"in {timeout}s (session exit_code={exit_code})\n"
+        f"in {timeout}s, and none in the session log "
+        f"(session exit_code={exit_code})\n"
         f"last stdout: {last_stdout!r}\nlast stderr: {last_stderr!r}"
     )
+
+
+def _report_from_session_log(
+    clud_binary: Path,
+    env: dict[str, str],
+    session_id: str,
+    expect: str,
+) -> dict | None:
+    """Recover the agent's JSON report from the persistent session log.
+
+    `clud logs` reads the on-disk log, so unlike attach it still works after
+    the session has ended — exactly the ordering attach cannot cover.
+
+    Scans line by line for the first JSON object carrying `expect`, rather than
+    parsing the whole output: the log also holds ordinary agent chatter, and a
+    PTY session's output can be wrapped in ANSI escapes.
+    """
+    logs = subprocess.run(
+        [str(clud_binary), "logs", session_id],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=env,
+    )
+    if logs.returncode != 0:
+        return None
+    for line in strip_ansi(logs.stdout).splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and expect in candidate.get("args", []):
+            return candidate
+    return None
 
 
 def wait_for_session_exit(state_dir: Path, session_id: str, timeout: float = 15.0) -> dict:
