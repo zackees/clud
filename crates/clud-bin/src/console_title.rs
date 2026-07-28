@@ -44,6 +44,89 @@ const CPU_ALERT_TTL: Duration = Duration::from_millis(2500);
 #[cfg(any(windows, test))]
 const CPU_FLASH_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Keeper cadence while anything is changing — unchanged from before
+/// (issue #547): drift is corrected within a noticeable beat, and the flash
+/// animation needs this resolution to look like a flash.
+#[cfg(any(windows, test))]
+const KEEPER_FAST_INTERVAL: Duration = Duration::from_millis(750);
+
+/// Ceiling the keeper backs off to once nothing has changed for a while.
+///
+/// Chosen against the drift it must correct: a title clobbered by a child
+/// process is a cosmetic fault, and correcting it within 3 s of a quiet
+/// terminal is unnoticeable, while 4× fewer wakeups per open terminal is not.
+#[cfg(any(windows, test))]
+const KEEPER_IDLE_INTERVAL: Duration = Duration::from_millis(3_000);
+
+/// Consecutive unchanged passes before backing off one step.
+///
+/// Four passes ≈ 3 s of genuine quiet, so a terminal being actively typed in
+/// never reaches the slow cadence.
+#[cfg(any(windows, test))]
+const KEEPER_STABLE_PASSES_BEFORE_BACKOFF: u32 = 4;
+
+/// Backoff state for the title keeper (issue #547).
+///
+/// Split out as a pure state machine — like `update_cpu_alert_locked` — so the
+/// cadence policy is testable without a console, a thread, or 3 s of waiting.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeeperCadence {
+    interval: Duration,
+    stable_passes: u32,
+}
+
+#[cfg(any(windows, test))]
+impl KeeperCadence {
+    pub fn new() -> Self {
+        Self {
+            interval: KEEPER_FAST_INTERVAL,
+            stable_passes: 0,
+        }
+    }
+
+    pub fn interval(self) -> Duration {
+        self.interval
+    }
+
+    /// Record one keeper pass and return the cadence for the next sleep.
+    ///
+    /// `changed` means anything the keeper exists to react to moved: the title
+    /// drifted and was re-stamped, or the CPU alert changed state.
+    ///
+    /// A change snaps straight back to the fast cadence rather than stepping
+    /// down gradually. Responsiveness is the feature here; the backoff only
+    /// exists to make *doing nothing* cheap, so it must never be the reason a
+    /// visible change is slow to appear.
+    pub fn record_pass(self, changed: bool) -> Self {
+        if changed {
+            return Self::new();
+        }
+        let stable_passes = self.stable_passes.saturating_add(1);
+        if stable_passes < KEEPER_STABLE_PASSES_BEFORE_BACKOFF {
+            return Self {
+                interval: self.interval,
+                stable_passes,
+            };
+        }
+        // Doubling rather than jumping to the ceiling: a terminal that goes
+        // quiet for a few seconds and then changes again pays only a small
+        // latency penalty, while one quiet for minutes still reaches 3 s.
+        let doubled = self.interval.saturating_mul(2).min(KEEPER_IDLE_INTERVAL);
+        Self {
+            interval: doubled,
+            stable_passes: 0,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Default for KeeperCadence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug)]
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 struct TitleState {
@@ -113,6 +196,8 @@ fn spawn_keeper_thread() {
         .name("clud-title-keeper".into())
         .spawn(|| {
             let mut last_metrics_poll = None::<Instant>;
+            let mut cadence = KeeperCadence::new();
+            let mut last_title = None::<String>;
             loop {
                 let now = Instant::now();
                 if last_metrics_poll
@@ -123,13 +208,24 @@ fn spawn_keeper_thread() {
                     refresh_cpu_alert_from_daemon(now);
                 }
                 let want = current_desired_title(Instant::now());
+                let mut changed = false;
                 if !want.is_empty() {
-                    let now = read_console_title();
-                    if now.as_deref() != Some(want.as_str()) {
+                    let current = read_console_title();
+                    if current.as_deref() != Some(want.as_str()) {
                         set_title(&want);
+                        changed = true;
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(750));
+                // The desired title moving is itself a change even when the
+                // console already agreed — that is how the flash animation
+                // advances, and backing off through it would make the alert
+                // stutter.
+                if last_title.as_deref() != Some(want.as_str()) {
+                    changed = true;
+                    last_title = Some(want);
+                }
+                cadence = cadence.record_pass(changed);
+                std::thread::sleep(cadence.interval());
             }
         });
 }
@@ -427,6 +523,89 @@ impl Default for OscTitleStripper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #547: the keeper backoff state machine. Pure, so the whole policy
+    // is exercised without a console, a thread, or seconds of real waiting.
+
+    #[test]
+    fn a_fresh_keeper_starts_at_the_fast_cadence() {
+        assert_eq!(KeeperCadence::new().interval(), KEEPER_FAST_INTERVAL);
+    }
+
+    #[test]
+    fn the_cadence_holds_until_enough_quiet_passes() {
+        // Backing off on the first quiet pass would slow a terminal that is
+        // merely between keystrokes.
+        let mut cadence = KeeperCadence::new();
+        for _ in 0..(KEEPER_STABLE_PASSES_BEFORE_BACKOFF - 1) {
+            cadence = cadence.record_pass(false);
+            assert_eq!(cadence.interval(), KEEPER_FAST_INTERVAL);
+        }
+        cadence = cadence.record_pass(false);
+        assert_eq!(cadence.interval(), KEEPER_FAST_INTERVAL * 2);
+    }
+
+    #[test]
+    fn sustained_quiet_reaches_the_ceiling_and_stops() {
+        let mut cadence = KeeperCadence::new();
+        for _ in 0..200 {
+            cadence = cadence.record_pass(false);
+        }
+        assert_eq!(
+            cadence.interval(),
+            KEEPER_IDLE_INTERVAL,
+            "backoff must clamp, not grow without bound"
+        );
+    }
+
+    #[test]
+    fn any_change_snaps_straight_back_to_fast() {
+        // The acceptance criterion: an externally-changed title is re-stamped
+        // within one fast beat of the next check, not after a gradual ramp.
+        // Responsiveness is the feature; the backoff only makes idling cheap.
+        let mut cadence = KeeperCadence::new();
+        for _ in 0..200 {
+            cadence = cadence.record_pass(false);
+        }
+        assert_eq!(cadence.interval(), KEEPER_IDLE_INTERVAL);
+
+        let after_change = cadence.record_pass(true);
+        assert_eq!(
+            after_change.interval(),
+            KEEPER_FAST_INTERVAL,
+            "a change must reset to fast in one step"
+        );
+    }
+
+    #[test]
+    fn the_stable_counter_resets_on_change_too() {
+        // Otherwise a terminal alternating change/quiet/change/quiet would
+        // accumulate quiet passes across the changes and eventually back off
+        // while still active.
+        let mut cadence = KeeperCadence::new();
+        for _ in 0..(KEEPER_STABLE_PASSES_BEFORE_BACKOFF - 1) {
+            cadence = cadence.record_pass(false);
+        }
+        cadence = cadence.record_pass(true);
+        for _ in 0..(KEEPER_STABLE_PASSES_BEFORE_BACKOFF - 1) {
+            cadence = cadence.record_pass(false);
+            assert_eq!(
+                cadence.interval(),
+                KEEPER_FAST_INTERVAL,
+                "quiet passes must not carry over a change"
+            );
+        }
+    }
+
+    #[test]
+    fn worst_case_drift_latency_stays_within_the_stated_budget() {
+        // #547 budgets an above-threshold transition reaching the title within
+        // 5 s. The keeper's contribution is bounded by the ceiling.
+        assert!(
+            KEEPER_IDLE_INTERVAL <= Duration::from_secs(5),
+            "ceiling must fit the stated alert-latency budget"
+        );
+    }
 
     #[test]
     fn title_uses_clud_prefix_with_cwd_name() {
