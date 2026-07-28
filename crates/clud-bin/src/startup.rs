@@ -26,9 +26,36 @@ pub fn should_register_drop_target(args: &Args) -> bool {
     cfg!(windows)
 }
 
+/// Whether a failed drop-target registration is worth a line on stderr.
+///
+/// Issue #594: "no console attached" is the *expected* state everywhere clud
+/// runs headless — CI runners, `--detach`, a piped or redirected launch — not
+/// a fault. Reporting it wrote a note to stderr on every such launch, which is
+/// noise for users and an outright failure for integration tests that assert
+/// on clean stderr (one of the rotating victims on the Windows x86 lane).
+///
+/// The other variants describe something that *should* have worked and did
+/// not — OLE refusing to initialize, `RegisterDragDrop` failing, a worker
+/// thread that would not spawn — so those keep their line. The test is on the
+/// typed variant rather than the rendered message, so it cannot drift when the
+/// wording changes.
+pub fn should_report_registration_failure(error: &dnd::console_drop_target::RegisterError) -> bool {
+    use dnd::console_drop_target::RegisterError;
+    !matches!(
+        error,
+        // Headless: there is no console window to attach a drop target to.
+        RegisterError::ConsoleWindowUnavailable
+            // Also not failures: the capability is simply absent from this
+            // build or platform, which no user can act on.
+            | RegisterError::UnsupportedPlatform
+            | RegisterError::NotImplemented
+    )
+}
+
 /// Subprocess-mode IDropTarget registration. Returns `None` on any
-/// failure (logging a one-line warning to stderr), so a registration
-/// hiccup never aborts the launch path.
+/// failure, logging a one-line warning to stderr only when the failure is
+/// actionable (see [`should_report_registration_failure`]), so a
+/// registration hiccup never aborts the launch path.
 pub fn try_register_console_drop_target_subprocess(
 ) -> Option<dnd::console_drop_target::ConsoleDropTargetGuard> {
     #[cfg(not(windows))]
@@ -42,7 +69,9 @@ pub fn try_register_console_drop_target_subprocess(
         match register_console_drop_target(injector, RefreshConfig::default_displacement()) {
             Ok(guard) => Some(guard),
             Err(e) => {
-                eprintln!("[clud] note: console drag-drop unavailable: {}", e);
+                if should_report_registration_failure(&e) {
+                    eprintln!("[clud] note: console drag-drop unavailable: {}", e);
+                }
                 None
             }
         }
@@ -84,7 +113,9 @@ pub fn try_register_console_drop_target_pty() -> (
     match register_console_drop_target(injector, RefreshConfig::default_displacement()) {
         Ok(guard) => (Some(guard), Some(rx)),
         Err(e) => {
-            eprintln!("[clud] note: console drag-drop unavailable: {}", e);
+            if should_report_registration_failure(&e) {
+                eprintln!("[clud] note: console drag-drop unavailable: {}", e);
+            }
             (None, None)
         }
     }
@@ -456,6 +487,67 @@ mod tests {
     fn args_from(argv: &[&str]) -> Args {
         let raw: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
         Args::parse_from_raw(raw)
+    }
+
+    /// Issue #594: running without a console is the normal headless case,
+    /// not a fault, so it must not put anything on stderr. This is the exact
+    /// line that tripped `test_loop_no_markers_exhausts_iterations` on the
+    /// Windows x86 lane.
+    #[test]
+    fn a_missing_console_is_not_worth_reporting() {
+        use dnd::console_drop_target::RegisterError;
+        assert!(!should_report_registration_failure(
+            &RegisterError::ConsoleWindowUnavailable
+        ));
+        assert!(!should_report_registration_failure(
+            &RegisterError::UnsupportedPlatform
+        ));
+        assert!(!should_report_registration_failure(
+            &RegisterError::NotImplemented
+        ));
+    }
+
+    /// The other half of the contract, and the reason this is a predicate
+    /// rather than deleting the `eprintln!`: a capability that was supposed
+    /// to work and did not still has to say so.
+    #[test]
+    fn a_genuine_registration_failure_is_still_reported() {
+        use dnd::console_drop_target::RegisterError;
+        assert!(should_report_registration_failure(
+            &RegisterError::OleInitializeFailed(-2147417850)
+        ));
+        assert!(should_report_registration_failure(
+            &RegisterError::RegisterDragDropFailed(-2147024891)
+        ));
+        assert!(should_report_registration_failure(
+            &RegisterError::WorkerSpawnFailed
+        ));
+    }
+
+    /// Guards the silent-by-default hazard: a variant added later would fall
+    /// into neither test above, and whichever way it defaults would be an
+    /// unreviewed decision. Listing every variant here forces the author to
+    /// come back and choose.
+    #[test]
+    fn every_registration_error_variant_has_a_stated_verdict() {
+        use dnd::console_drop_target::RegisterError;
+        let all = [
+            RegisterError::NotImplemented,
+            RegisterError::UnsupportedPlatform,
+            RegisterError::ConsoleWindowUnavailable,
+            RegisterError::OleInitializeFailed(0),
+            RegisterError::RegisterDragDropFailed(0),
+            RegisterError::WorkerSpawnFailed,
+        ];
+        // If this fails to compile because a variant is missing, add it above
+        // and to whichever of the two tests states the intended behaviour.
+        assert_eq!(all.len(), 6, "add the new variant to the tests above");
+        assert_eq!(
+            all.iter()
+                .filter(|e| should_report_registration_failure(e))
+                .count(),
+            3
+        );
     }
 
     /// Issue #79 B3: a `--dry-run` invocation must NOT trigger any
