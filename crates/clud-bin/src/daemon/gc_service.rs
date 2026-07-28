@@ -427,7 +427,7 @@ fn run_periodic_purge_tick(
     pool_tx: &mpsc::Sender<PurgeJob>,
     completion_tx: &mpsc::Sender<RegistryMsg>,
     live_cwds_provider: &LiveCwdsProvider,
-) {
+) -> usize {
     let config = GcDiskWatchdogConfig::from_env();
     run_periodic_purge_tick_with_free_space(
         registry,
@@ -436,9 +436,18 @@ fn run_periodic_purge_tick(
         live_cwds_provider,
         &config,
         &free_space_bytes_for_path,
-    );
+    )
 }
 
+/// Run one periodic GC tick, returning the number of purge jobs dispatched to
+/// the pool across all three purge paths (disk watchdog, worktree, extern
+/// repo).
+///
+/// The daemon's tick loop ignores the count — completions are applied by the
+/// registry-writer thread whenever they arrive. It exists so a caller that
+/// must know when the purge has finished can wait for exactly that many
+/// completions instead of inferring completion from a quiet interval, which
+/// is timing-dependent and was the source of issue #560's Windows flake.
 fn run_periodic_purge_tick_with_free_space<F>(
     registry: &Registry,
     pool_tx: &mpsc::Sender<PurgeJob>,
@@ -446,10 +455,11 @@ fn run_periodic_purge_tick_with_free_space<F>(
     live_cwds_provider: &LiveCwdsProvider,
     disk_config: &GcDiskWatchdogConfig,
     free_space: &F,
-) where
+) -> usize
+where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
 {
-    run_disk_watchdog_tick(
+    let mut dispatched = run_disk_watchdog_tick(
         registry,
         pool_tx,
         completion_tx,
@@ -469,7 +479,7 @@ fn run_periodic_purge_tick_with_free_space<F>(
         },
         live_cwds_provider(),
     );
-    log_periodic_purge_reply(WORKTREE_KIND, worktree_reply);
+    dispatched += log_periodic_purge_reply(WORKTREE_KIND, worktree_reply);
 
     let extern_reply = process_op(
         registry,
@@ -482,7 +492,7 @@ fn run_periodic_purge_tick_with_free_space<F>(
         },
         live_cwds_provider(),
     );
-    log_periodic_purge_reply(EXTERN_REPO_KIND, extern_reply);
+    dispatched += log_periodic_purge_reply(EXTERN_REPO_KIND, extern_reply);
 
     match reap_trash_entries(registry) {
         Ok((removed, failed)) => {
@@ -505,6 +515,8 @@ fn run_periodic_purge_tick_with_free_space<F>(
     // background thread rather than blocking this tick loop. They prioritize
     // by disk pressure and system load — see `spawn_maintenance_sweeps`.
     spawn_maintenance_sweeps(disk_config);
+
+    dispatched
 }
 
 /// Guards against overlapping background maintenance sweeps. The tick fires
@@ -633,14 +645,15 @@ fn run_disk_watchdog_tick<F>(
     live_cwds_provider: &LiveCwdsProvider,
     config: &GcDiskWatchdogConfig,
     free_space: &F,
-) where
+) -> usize
+where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
 {
     let entries = match registry.list(None) {
         Ok(entries) => entries,
         Err(err) => {
             eprintln!("[clud] gc tick disk: failed to list tracked roots: {err}");
-            return;
+            return 0;
         }
     };
     let roots = collect_tracked_entry_roots(&entries);
@@ -671,7 +684,7 @@ fn run_disk_watchdog_tick<F>(
     }
 
     if purge_roots.is_empty() {
-        return;
+        return 0;
     }
     let purge_reply = purge_old_reclaimable_entries_for_roots(
         registry,
@@ -681,7 +694,7 @@ fn run_disk_watchdog_tick<F>(
         &purge_roots,
         config.min_age,
     );
-    log_disk_watchdog_purge_reply(purge_roots.len(), config, purge_reply);
+    log_disk_watchdog_purge_reply(purge_roots.len(), config, purge_reply)
 }
 
 fn collect_tracked_entry_roots(entries: &[TrackedEntry]) -> Vec<PathBuf> {
@@ -751,11 +764,18 @@ fn duration_secs_i64(duration: Duration) -> i64 {
     duration.as_secs().min(i64::MAX as u64) as i64
 }
 
+/// Log the watchdog's purge reply, and report how many purge jobs it
+/// dispatched to the pool.
+///
+/// The count is what makes an asynchronous purge observable to its caller
+/// (issue #560). Only `PurgeStarted` dispatches: `PurgeOk` already finished
+/// synchronously and will send no completions, and the error arms send none
+/// either — so zero is the honest answer for all of them.
 fn log_disk_watchdog_purge_reply(
     low_root_count: usize,
     config: &GcDiskWatchdogConfig,
     reply: GcReply,
-) {
+) -> usize {
     match reply {
         GcReply::PurgeStarted {
             dispatched,
@@ -765,18 +785,22 @@ fn log_disk_watchdog_purge_reply(
                 "[clud] gc tick disk: auto-purge checked {low_root_count} low root(s), min age {}h, dispatched {dispatched}, skipped {skipped}",
                 config.min_age.as_secs() / (60 * 60)
             );
+            dispatched
         }
         GcReply::PurgeOk { removed, skipped } => {
             eprintln!(
                 "[clud] gc tick disk: auto-purge checked {low_root_count} low root(s), min age {}h, removed {removed}, skipped {skipped}",
                 config.min_age.as_secs() / (60 * 60)
             );
+            0
         }
         GcReply::Error { message } => {
             eprintln!("[clud] gc tick disk: auto-purge error: {message}");
+            0
         }
         other => {
             eprintln!("[clud] gc tick disk: unexpected auto-purge reply: {other:?}");
+            0
         }
     }
 }
@@ -816,22 +840,28 @@ fn disk_probe_path(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn log_periodic_purge_reply(kind: &str, reply: GcReply) {
+/// Log a periodic purge reply and report how many jobs it dispatched. See
+/// [`log_disk_watchdog_purge_reply`] for why the count is returned.
+fn log_periodic_purge_reply(kind: &str, reply: GcReply) -> usize {
     match reply {
         GcReply::PurgeStarted {
             dispatched,
             skipped,
         } => {
             eprintln!("[clud] gc tick {kind}: dispatched {dispatched}, skipped {skipped}");
+            dispatched
         }
         GcReply::PurgeOk { removed, skipped } => {
             eprintln!("[clud] gc tick {kind}: removed {removed}, skipped {skipped}");
+            0
         }
         GcReply::Error { message } => {
             eprintln!("[clud] gc tick {kind}: error: {message}");
+            0
         }
         other => {
             eprintln!("[clud] gc tick {kind}: unexpected reply: {other:?}");
+            0
         }
     }
 }
