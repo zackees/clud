@@ -191,6 +191,17 @@ windows-core = "0.61"
 name = "clud"
 path = "src/main.rs"
 
+# Issue #464: opt-in process-sampler microbench. Behind a feature so it is
+# not compiled by `cargo clippy --all-targets`, which `bash lint` runs on all
+# six CI platforms -- a measurement harness should not tax every lint lane.
+[features]
+bench = []
+
+[[bin]]
+name = "clud-bench-proc-sampler"
+path = "src/bin/clud_bench_proc_sampler.rs"
+required-features = ["bench"]
+
 # Slice 1 of #406 / #409: tiny PATH-resolved relay that lives at
 # `~/.clud/state/shims/python` etc. so any `python` invocation inside a
 # clud session goes through the daemon's ResolveInterpreter RPC.
