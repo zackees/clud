@@ -69,14 +69,14 @@ const KEEPER_STABLE_PASSES_BEFORE_BACKOFF: u32 = 4;
 ///
 /// Split out as a pure state machine — like `update_cpu_alert_locked` — so the
 /// cadence policy is testable without a console, a thread, or 3 s of waiting.
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub struct KeeperCadence {
     interval: Duration,
     stable_passes: u32,
 }
 
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[cfg(any(windows, test))]
 impl KeeperCadence {
     pub fn new() -> Self {
         Self {
@@ -120,6 +120,7 @@ impl KeeperCadence {
     }
 }
 
+#[cfg(any(windows, test))]
 impl Default for KeeperCadence {
     fn default() -> Self {
         Self::new()
