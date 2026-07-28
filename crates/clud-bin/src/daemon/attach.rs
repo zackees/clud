@@ -14,7 +14,7 @@ use super::client::{
     shutdown_worker_connection, write_worker_message,
 };
 use super::keys::translate_key_event;
-use super::process_utils::pid_is_alive;
+use super::process_utils::identity_is_alive;
 use super::sessions::resolve_session_id;
 use super::types::{
     unix_millis_now, BackgroundPromptDecision, CtrlCProfile, DaemonRequest, DaemonResponse,
@@ -144,7 +144,7 @@ pub(super) fn attach_to_session(
         let mut stream = match TcpStream::connect(("127.0.0.1", session.worker_port)) {
             Ok(stream) => stream,
             Err(err) => {
-                if !pid_is_alive(session.worker_pid) {
+                if !identity_is_alive(&session.worker_identity()) {
                     eprintln!(
                         "[clud] session {} worker has died (pid {})",
                         session.id, session.worker_pid

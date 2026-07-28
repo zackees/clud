@@ -16,7 +16,7 @@ use super::io_helpers::read_json_file;
 use super::paths::{
     daemon_info_path, daemon_lock_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
 };
-use super::process_utils::{pid_is_alive, signal_process_tree};
+use super::process_utils::{identity_is_alive, signal_process_tree_as};
 use super::types::{
     CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcOp, GcReply, GcWatchRoot, ListRow,
     ProcTreeSnapshot, RepoVisit, SessionSnapshot, WorkerClientMessage,
@@ -25,6 +25,7 @@ use super::wire_prost::{
     daemon_wire_format_from_env, decode_daemon_response_line, encode_daemon_request_line,
     encode_worker_client_line, DaemonWireFormat, WireError,
 };
+use crate::process_identity::ProcessIdentity;
 
 /// Idempotent best-effort daemon spawn (issue #135). Always called via
 /// `main.rs`; the session daemon is now an always-on background service.
@@ -100,7 +101,7 @@ fn spawn_and_await_daemon(state_dir: &Path) -> io::Result<()> {
 
 pub(super) fn probe_existing(state_dir: &Path) -> Option<DaemonInfo> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir)).ok()?;
-    if !pid_is_alive(info.pid) {
+    if !identity_is_alive(&info.identity()) {
         return None;
     }
     if TcpStream::connect(("127.0.0.1", info.port)).is_ok() {
@@ -130,15 +131,19 @@ fn replace_stale_daemon(state_dir: &Path, info: &DaemonInfo) -> io::Result<()> {
         info.version.as_deref().unwrap_or("<pre-2.0.15>"),
         env!("CARGO_PKG_VERSION"),
     );
-    signal_process_tree(info.pid, Signal::Term);
+    // Identity-guarded throughout (issue #558): between writing daemon.json
+    // and this upgrade attempt the old daemon may have exited and had its PID
+    // reissued, and killing whatever now holds it would be a plain bug.
+    let daemon = info.identity();
+    signal_process_tree_as(&daemon, Signal::Term);
     let deadline = Instant::now() + Duration::from_secs(2);
-    while pid_is_alive(info.pid) && Instant::now() < deadline {
+    while identity_is_alive(&daemon) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
-    if pid_is_alive(info.pid) {
-        signal_process_tree(info.pid, Signal::Kill);
+    if identity_is_alive(&daemon) {
+        signal_process_tree_as(&daemon, Signal::Kill);
         let deadline = Instant::now() + Duration::from_secs(2);
-        while pid_is_alive(info.pid) && Instant::now() < deadline {
+        while identity_is_alive(&daemon) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -347,7 +352,8 @@ pub(super) fn request_session_interrupt(
 pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
     let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
     let recorded_pid = info.pid;
-    if !pid_is_alive(recorded_pid) {
+    let recorded = info.identity();
+    if !identity_is_alive(&recorded) {
         let _ = fs::remove_file(daemon_info_path(state_dir));
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -368,18 +374,26 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
             eprintln!(
                 "[clud] daemon pid {recorded_pid} does not support shutdown IPC; terminating it directly"
             );
-            signal_process_tree(recorded_pid, Signal::Term);
+            signal_process_tree_as(&recorded, Signal::Term);
             thread::sleep(Duration::from_millis(150));
-            if pid_is_alive(recorded_pid) {
-                signal_process_tree(recorded_pid, Signal::Kill);
+            if identity_is_alive(&recorded) {
+                signal_process_tree_as(&recorded, Signal::Kill);
             }
             recorded_pid
         }
         Err(err) => return Err(err),
     };
 
+    // The acking daemon reports its own pid; when that is the pid we already
+    // had on disk we can keep the recorded start time, otherwise fall back to
+    // a pid-only wait (issue #558).
+    let exiting = if pid == recorded_pid {
+        recorded
+    } else {
+        ProcessIdentity::pid_only(pid)
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while pid_is_alive(pid) {
+    while identity_is_alive(&exiting) {
         if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -454,7 +468,11 @@ pub(super) fn cleanup_stale_state(state_dir: &Path) {
             if session.exit_code.is_some() {
                 continue;
             }
-            if !pid_is_alive(session.worker_pid) {
+            // Reconciliation, not cleanup: a worker whose PID has been reused
+            // is just as gone as one whose PID vanished, and the record is
+            // marked stale either way. Nothing here signals a process, so the
+            // replacement is never touched (issue #558).
+            if !identity_is_alive(&session.worker_identity()) {
                 session.exit_code = Some(137);
                 session.background = false;
                 let _ = super::io_helpers::write_json_file(&path, &session);
@@ -493,7 +511,7 @@ pub(super) fn cleanup_stale_state(state_dir: &Path) {
     // Clean stale daemon.json if it refers to a dead process.
     let daemon_path = daemon_info_path(state_dir);
     if let Ok(info) = read_json_file::<DaemonInfo>(&daemon_path) {
-        if !pid_is_alive(info.pid) {
+        if !identity_is_alive(&info.identity()) {
             let _ = fs::remove_file(&daemon_path);
         }
     }
@@ -701,6 +719,7 @@ mod tests {
     fn daemon_version_matches_current_binary() {
         let info = DaemonInfo {
             pid: 1,
+            pid_start: 0,
             port: 0,
             dashboard_port: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -715,6 +734,7 @@ mod tests {
     fn daemon_version_mismatch_when_versions_differ() {
         let info = DaemonInfo {
             pid: 1,
+            pid_start: 0,
             port: 0,
             dashboard_port: None,
             version: Some("0.0.0-not-the-current".to_string()),
@@ -730,6 +750,7 @@ mod tests {
     fn daemon_version_mismatch_when_field_absent() {
         let info = DaemonInfo {
             pid: 1,
+            pid_start: 0,
             port: 0,
             dashboard_port: None,
             version: None,
@@ -741,6 +762,7 @@ mod tests {
         fs::create_dir_all(state_dir).unwrap();
         let info = DaemonInfo {
             pid,
+            pid_start: crate::process_identity::start_time_of(pid),
             port,
             dashboard_port: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -770,6 +792,9 @@ mod tests {
             worker_pid: u32::MAX,
             worker_port: 0,
             root_pid: None,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
             exit_code: None,
             exited_at: None,
             ctrl_c: None,

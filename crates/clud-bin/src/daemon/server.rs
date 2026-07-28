@@ -28,7 +28,7 @@ use super::paths::{
     daemon_events_path, daemon_info_path, session_snapshot_path, sessions_dir, spec_path, specs_dir,
 };
 use super::proc_sampler::{spawn_proc_sampler, ProcSamplerHandle, DEFAULT_SAMPLE_INTERVAL_MS};
-use super::process_utils::{pid_is_alive, signal_process_tree};
+use super::process_utils::{identity_is_alive, signal_process_tree_as};
 use super::sessions::list_live_session_cwds;
 use super::types::{
     unix_millis_now, CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcReply,
@@ -118,6 +118,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
 
     let info = DaemonInfo {
         pid: std::process::id(),
+        pid_start: crate::process_identity::self_start_time(),
         port,
         dashboard_port,
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -868,18 +869,24 @@ fn spawn_adopt_kill_worker(state_dir: std::path::PathBuf, pids: Vec<u32>, reason
         });
 }
 
-fn daemon_terminate_session(
-    state_dir: &Path,
+/// Tear down the processes a session owns: the agent tree first, then the
+/// worker that supervises it.
+///
+/// Every PID here comes off disk, so each is re-checked against the start
+/// time recorded next to it (issue #558) before anything is signalled. On a
+/// busy Windows host the worker of a long-finished session can easily have
+/// had its PID handed to something unrelated, and `clud kill` would otherwise
+/// take that process down instead. A live `NativeProcess` handle, when the
+/// daemon still owns one, is immune to the problem and is preferred.
+fn terminate_session_processes(
+    session: &SessionSnapshot,
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     session_id: &str,
-) -> io::Result<SessionSnapshot> {
-    let path = session_snapshot_path(state_dir, session_id);
-    let mut session = read_json_file::<SessionSnapshot>(&path)?;
-
-    if let Some(root_pid) = session.root_pid {
-        signal_process_tree(root_pid, Signal::Term);
+) {
+    if let Some(root) = session.root_identity() {
+        signal_process_tree_as(&root, Signal::Term);
         thread::sleep(Duration::from_millis(150));
-        signal_process_tree(root_pid, Signal::Kill);
+        signal_process_tree_as(&root, Signal::Kill);
     }
 
     if let Some(worker) = workers
@@ -889,11 +896,25 @@ fn daemon_terminate_session(
     {
         let _ = worker.kill();
         let _ = worker.wait(Some(Duration::from_secs(2)));
-    } else if pid_is_alive(session.worker_pid) {
-        signal_process_tree(session.worker_pid, Signal::Term);
-        thread::sleep(Duration::from_millis(150));
-        signal_process_tree(session.worker_pid, Signal::Kill);
+    } else {
+        let worker = session.worker_identity();
+        if identity_is_alive(&worker) {
+            signal_process_tree_as(&worker, Signal::Term);
+            thread::sleep(Duration::from_millis(150));
+            signal_process_tree_as(&worker, Signal::Kill);
+        }
     }
+}
+
+fn daemon_terminate_session(
+    state_dir: &Path,
+    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    session_id: &str,
+) -> io::Result<SessionSnapshot> {
+    let path = session_snapshot_path(state_dir, session_id);
+    let mut session = read_json_file::<SessionSnapshot>(&path)?;
+
+    terminate_session_processes(&session, workers, session_id);
 
     session.background = false;
     session.exit_code = Some(130);
@@ -945,24 +966,7 @@ fn finish_daemon_interrupt_session(
     }
     let _ = write_json_file(&path, &session);
 
-    if let Some(root_pid) = session.root_pid {
-        signal_process_tree(root_pid, Signal::Term);
-        thread::sleep(Duration::from_millis(150));
-        signal_process_tree(root_pid, Signal::Kill);
-    }
-
-    if let Some(worker) = workers
-        .lock()
-        .expect("workers mutex poisoned")
-        .remove(session_id)
-    {
-        let _ = worker.kill();
-        let _ = worker.wait(Some(Duration::from_secs(2)));
-    } else if pid_is_alive(session.worker_pid) {
-        signal_process_tree(session.worker_pid, Signal::Term);
-        thread::sleep(Duration::from_millis(150));
-        signal_process_tree(session.worker_pid, Signal::Kill);
-    }
+    terminate_session_processes(&session, workers, session_id);
 
     let finished_at_ms = unix_millis_now();
     if let Ok(mut latest) = read_json_file::<SessionSnapshot>(&path) {

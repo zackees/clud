@@ -27,7 +27,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use super::gc_service::{GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::read_json_file;
 use super::paths::{daemon_info_path, sessions_dir};
-use super::process_utils::pid_is_alive;
+use super::process_utils::{identity_is_alive, pid_is_alive};
 use super::types::{
     CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
 };
@@ -965,7 +965,7 @@ fn read_session_views(state_dir: &Path) -> io::Result<Vec<SessionView>> {
         let Ok(snap) = read_json_file::<SessionSnapshot>(&path) else {
             continue;
         };
-        let live = snap.exit_code.is_none() && pid_is_alive(snap.worker_pid);
+        let live = snap.exit_code.is_none() && identity_is_alive(&snap.worker_identity());
         out.push(SessionView {
             id: snap.id,
             kind: match snap.kind {
@@ -1062,6 +1062,11 @@ fn merge_registry_sessions(sessions: &mut Vec<SessionView>, live_sessions: Vec<L
 
 fn merge_launch_records(sessions: &mut Vec<SessionView>, records: Vec<LaunchRecord>) {
     for record in records {
+        // Launch records carry no start time, so this stays a bare-PID probe
+        // (issue #558). It is display-only — the dashboard may briefly show a
+        // finished launch as live if its PID was reused — and nothing acts on
+        // the answer. Recording an identity here would mean widening the
+        // launch-log schema, which is out of scope for this change.
         let live = record.exit_code.is_none() && pid_is_alive(record.clud_pid);
         let duration_ms = record.duration_ms();
         sessions.push(SessionView {

@@ -104,6 +104,12 @@ Loop subsystem (`clud loop`):
 
 Process management and GC:
 
+- `process_identity.rs` - `ProcessIdentity` = PID **plus** OS start time, and the
+  comparison every path that stores a PID and acts on it later must go through
+  (issue #558). A bare PID is not a stable handle: Windows reissues numbers
+  promptly, so "the PID is alive" and "that process is alive" are different
+  questions. Records written before the field existed carry
+  `UNKNOWN_START_TIME` and fall back to a PID-only comparison.
 - `process_tree.rs` - best-effort descendant-tree termination via `sysinfo`;
   fixes the multi-second Ctrl+C hang for `clud --codex` on Windows where
   `cmd.exe -> node.exe` would orphan the real child.

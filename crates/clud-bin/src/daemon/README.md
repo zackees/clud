@@ -29,7 +29,7 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 - `keys.rs` — `crossterm` `KeyEvent` → terminal byte sequence translator used by interactive attach.
 - `io_helpers.rs` — JSON read/write over TCP + atomic file writes, session-id generator, terminal-size probe, `--backlog-size` / `CLUD_BACKLOG_BYTES` parsing.
 - `wire_prost/` - prost v1 foundation for the daemon wire: generated `clud.v1` types, CLUD/CLJS payload protocol discriminators, encode/decode helpers, JSON-compatibility tests, the default prost daemon RPC path, and the `CLUD_DAEMON_WIRE=json` legacy fallback.
-- `process_utils.rs` — `pid_is_alive`, `signal_process_tree`, `descendant_pids` via `sysinfo`.
+- `process_utils.rs` — `pid_is_alive`, `signal_process_tree`, `descendant_pids` via `sysinfo`, plus their identity-guarded twins `identity_is_alive` / `signal_process_tree_as` (issue #558). Anything working from a PID that came off disk uses the guarded pair; `SessionSnapshot::{worker,root,daemon}_identity()` and `DaemonInfo::identity()` build the argument. See `crates/clud-bin/src/process_identity.rs`.
 
 - `proc_sampler.rs` - daemon-owned process sampler for `clud top`: keeps one persistent `sysinfo::System`, refreshes CPU/RSS/parent data on the hot tick, refreshes `RUNNING_PROCESS_ORIGINATOR` tags on a slower cadence, and serves cached `ProcTreeSnapshot` replies over daemon IPC.
 - `top.rs` - `clud top` snapshot filtering, sorting, JSON preparation, and text tree/flat rendering.

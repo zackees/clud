@@ -235,6 +235,12 @@ message SessionSnapshot {
   optional string repo_root = 20;
   repeated string command = 21;
   optional uint64 exited_at = 22;
+  // Issue #558: OS start times pinned to daemon_pid/worker_pid/root_pid, so a
+  // reader can distinguish those processes from whatever later inherits their
+  // PIDs. Absent (0) from peers that predate the field.
+  optional uint64 daemon_pid_start = 23;
+  optional uint64 worker_pid_start = 24;
+  optional uint64 root_pid_start = 25;
 }
 
 enum SessionKind {

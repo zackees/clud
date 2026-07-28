@@ -13,6 +13,7 @@ use sysinfo::Signal;
 
 use crate::command::LaunchPlan;
 pub use crate::gc::RepoVisit;
+use crate::process_identity::ProcessIdentity;
 
 use super::process_utils::signal_process_tree;
 
@@ -53,6 +54,12 @@ pub(super) enum SessionKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct DaemonInfo {
     pub(super) pid: u32,
+    /// Issue #558: start time of `pid`, so a client that later signals the
+    /// recorded daemon cannot hit an unrelated process that inherited the
+    /// PID after the daemon died. `0` in files written by an older clud;
+    /// [`ProcessIdentity`] falls back to a PID-only comparison there.
+    #[serde(default)]
+    pub(super) pid_start: u64,
     pub(super) port: u16,
     /// Issue #183: loopback port for the in-process HTTP dashboard. `None`
     /// when the dashboard listener failed to bind (logged once at daemon
@@ -103,11 +110,47 @@ pub(super) struct SessionSnapshot {
     pub(super) worker_pid: u32,
     pub(super) worker_port: u16,
     pub(super) root_pid: Option<u32>,
+    /// Issue #558: OS start times pinned to the three PIDs above, so a
+    /// consumer of this snapshot can tell "that process is still running"
+    /// from "something else now holds that number". `0` (i.e.
+    /// [`UNKNOWN_START_TIME`]) in snapshots written by an older clud.
+    #[serde(default)]
+    pub(super) daemon_pid_start: u64,
+    #[serde(default)]
+    pub(super) worker_pid_start: u64,
+    #[serde(default)]
+    pub(super) root_pid_start: u64,
     pub(super) exit_code: Option<i32>,
     #[serde(default)]
     pub(super) exited_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) ctrl_c: Option<CtrlCProfile>,
+}
+
+impl DaemonInfo {
+    /// PID plus start time, for callers that will later signal this daemon.
+    pub(super) fn identity(&self) -> ProcessIdentity {
+        ProcessIdentity::new(self.pid, self.pid_start)
+    }
+}
+
+impl SessionSnapshot {
+    /// Identity of the worker that owns this session.
+    pub(super) fn worker_identity(&self) -> ProcessIdentity {
+        ProcessIdentity::new(self.worker_pid, self.worker_pid_start)
+    }
+
+    /// Identity of the agent process this session launched, if one is
+    /// currently recorded.
+    pub(super) fn root_identity(&self) -> Option<ProcessIdentity> {
+        self.root_pid
+            .map(|pid| ProcessIdentity::new(pid, self.root_pid_start))
+    }
+
+    /// Identity of the daemon that supervises this session.
+    pub(super) fn daemon_identity(&self) -> ProcessIdentity {
+        ProcessIdentity::new(self.daemon_pid, self.daemon_pid_start)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
