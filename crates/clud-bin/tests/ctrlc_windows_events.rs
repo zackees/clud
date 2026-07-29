@@ -25,9 +25,13 @@ use windows::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT
 /// its process group id) rather than every process on the console.
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
+#[path = "common/exe.rs"]
+mod exe;
+
 #[test]
 fn ctrl_break_event_is_reported_as_ctrl_break() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clud-ctrlc-probe"))
+    let probe = exe::bin_path("clud-ctrlc-probe", env!("CARGO_BIN_EXE_clud-ctrlc-probe"));
+    let mut child = Command::new(&probe)
         .creation_flags(CREATE_NEW_PROCESS_GROUP)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

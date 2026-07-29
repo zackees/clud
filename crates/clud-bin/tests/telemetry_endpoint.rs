@@ -25,12 +25,17 @@ use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
 };
 
-/// Path to the `clud` binary that this test crate's `cargo test` just
-/// built. Cargo sets `CARGO_BIN_EXE_<bin>` for integration tests in the
-/// same package — see the cargo book "Environment variables Cargo sets
-/// for crates".
+#[path = "common/exe.rs"]
+mod exe;
+
+/// Path to the `clud` binary under test.
+///
+/// Cargo sets `CARGO_BIN_EXE_<bin>` at compile time, which is correct when the
+/// harness runs on the machine that built it. CI compiles harnesses on Linux
+/// and runs them on native macOS/Windows runners, so `CLUD_TEST_BIN_DIR` takes
+/// precedence when set — see `common/exe.rs`.
 fn clud_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_clud"))
+    exe::bin_path("clud", env!("CARGO_BIN_EXE_clud"))
 }
 
 #[test]

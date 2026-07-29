@@ -2,7 +2,7 @@
 
 This doc is the inventory of every place `clud` has Windows-specific code,
 with the symptom each piece solves and the `file:line` where it lives. There
-are eleven such carve-outs today: a self-rename trampoline so `pip install`
+are twelve such carve-outs today: a self-rename trampoline so `pip install`
 can overwrite a running `clud.exe`, the BatBadBat `.cmd`/`.bat` rewrite
 mandated by Rust 1.77+, an RAII guard for `ENABLE_VIRTUAL_TERMINAL_INPUT`, a
 small policy adapter over running-process's native `ReadConsoleInputW`
@@ -439,7 +439,10 @@ the codebase stays portable.
   root; killing a console host destroys the console while its client can remain
   alive but headless (#612, #616).
 
-- **Role model**: `runner.rs` registers the exact spawned backend root with
+- **Role model**: After `main` ensures the persistent daemon, the foreground
+  CLI assigns itself to an otherwise empty Job Object with an I/O completion
+  port and no `KILL_ON_JOB_CLOSE` limit. `runner.rs` registers the exact spawned
+  backend root with
   `ForegroundJobTracker` after `NativeProcess` / `NativePtyProcess` starts.
   Registration stores PID **and process start time**, so PID reuse never
   grants stale backend authority. The pure planner in

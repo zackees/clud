@@ -1,0 +1,112 @@
+name: Setup exec runtime
+description: >
+  Python + uv only. Deliberately installs NO Rust toolchain: an exec job that
+  cannot find `cargo` cannot silently fall back to compiling, which is the
+  structural guarantee that mac/Windows runners stay cheap. If a test ever
+  regresses into shelling out to cargo, it fails loudly here instead of
+  quietly costing ten minutes of scarce runner time.
+
+inputs:
+  bundle-name:
+    description: Artifact name of the build bundle to download.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - uses: astral-sh/setup-uv@v5
+      with:
+        # On by default here (unlike build jobs): when the .venv cache misses,
+        # uv's own wheel cache still avoids re-downloading from PyPI over the
+        # slower macOS/Windows runner network.
+        enable-cache: true
+
+    - name: Cache venv
+      uses: actions/cache@v4
+      with:
+        path: .venv
+        key: venv-exec-${{ runner.os }}-${{ runner.arch }}-py3.11-${{ hashFiles('uv.lock') }}
+        restore-keys: |
+          venv-exec-${{ runner.os }}-${{ runner.arch }}-py3.11-
+
+    # `--no-default-groups --group test`, not `--group dev`: exec jobs cannot
+    # compile, so cmake/maturin/ruff are pure download cost on the scarcest
+    # runners in the pool. `--no-default-groups` is load-bearing -- uv includes
+    # the `dev` group by default, so a bare `--group test` would install both.
+    # `--no-install-project` keeps PEP 517 out of the picture entirely, so no
+    # wheel build is triggered here.
+    - name: Sync
+      shell: bash
+      run: uv sync --frozen --no-default-groups --group test --no-install-project --python 3.11
+
+    # See the identical step in ../setup-build: `uv run` would sync the project
+    # and trigger a PEP 517 maturin build -- which on an exec runner hits the
+    # poisoned soldr shim below and fails every job.
+    - name: Export venv interpreter
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -x .venv/Scripts/python.exe ]; then
+          echo "VENV_PY=$(pwd)/.venv/Scripts/python.exe" >> "$GITHUB_ENV"
+        elif [ -x .venv/bin/python ]; then
+          echo "VENV_PY=$(pwd)/.venv/bin/python" >> "$GITHUB_ENV"
+        else
+          echo "::error::no .venv/{Scripts,bin}/python after uv sync"
+          exit 1
+        fi
+
+    - name: Download bundle
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.bundle-name }}
+        path: bundle-archive
+
+    - name: Unpack bundle
+      shell: bash
+      run: '"$VENV_PY" -m ci.bundle unpack --archive-dir bundle-archive --dest bundle'
+
+    # The hosted images ship Rust preinstalled, so we cannot assert `cargo` is
+    # absent -- we have to actively poison it. Every cargo fallback in the test
+    # suite (tests/test_hello.py:62-91, tests/integration/conftest.py:158-176,
+    # crates/clud-bin/tests/common/mod.rs:78-116) is a silent 10-minute cold
+    # rebuild on the scarcest runners in the pool. Turning that into an
+    # immediate, named failure is the whole point of the exec/build split.
+    # Remove the toolchain rather than shadow it. A shim earlier on PATH is not
+    # enough: Rust's own `Command::new("cargo")` resolves through Windows
+    # `CreateProcess`, which only ever appends `.exe` -- a `cargo.cmd` shim would
+    # be skipped and the real `cargo.exe` found. The test suite spawns cargo
+    # from Rust (crates/clud-bin/tests/common/mod.rs:78-116), so deletion is the
+    # only reliable answer. Runner VMs are ephemeral.
+    #
+    # Why bother: every cargo fallback in the suite (tests/test_hello.py:62-91,
+    # tests/integration/conftest.py:158-176, common/mod.rs:78-116) is a silent
+    # 10-minute cold rebuild on the scarcest runners in the pool. Turning that
+    # into an immediate, named failure is the point of the exec/build split.
+    - name: Remove the Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
+        for tool in cargo rustc rustup soldr; do
+          rm -f "$cargo_bin/$tool" "$cargo_bin/$tool.exe"
+        done
+        shim_dir="${RUNNER_TEMP}/no-cargo"
+        mkdir -p "$shim_dir"
+        for tool in cargo rustc soldr; do
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'echo "::error::$(basename "$0") was invoked in an exec job. Exec jobs run prebuilt' \
+            'bundle binaries and must never compile. A test fell back to building from source --' \
+            'give it its binary via CLUD_TEST_*_BINARY or CARGO_TARGET_DIR instead." >&2' \
+            'exit 127' > "$shim_dir/$tool"
+          chmod +x "$shim_dir/$tool"
+        done
+        echo "$shim_dir" >> "$GITHUB_PATH"
+        if command -v cargo >/dev/null 2>&1 && [ "$(command -v cargo)" != "$shim_dir/cargo" ]; then
+          echo "::error::a real cargo survived at $(command -v cargo)"
+          exit 1
+        fi

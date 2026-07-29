@@ -1,31 +1,44 @@
 name: Dylint
 
+# Dylint is inherently Linux-only here: it needs a nightly toolchain with
+# rustc-dev/llvm-tools and builds a cdylib driver for the host. It never ran on
+# macOS/Windows and `ci/lint.py` never invokes it, so the "no dylint off Linux"
+# requirement is satisfied structurally -- this workflow pins it to ubuntu and
+# nothing else can reach it.
+#
+# Previously dylint.yml fired on BOTH `push` and `pull_request`, so every PR ran
+# it twice. As a workflow_call target it runs exactly once, under ci.yml's
+# concurrency group.
+
 on:
+  workflow_call:
+  # Kept from the old dylint.yml: dylint is off the PR path now (ci.yml runs it
+  # only for non-PR events), so a manual entrypoint is the way to check a
+  # branch's lint state before opening a PR.
   workflow_dispatch: {}
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   ZCCACHE_DISABLE: "1"
-  # Authenticate soldr's cross-repo managed-tool lookups so they are not
-  # rate-limited to 60 req/hr per runner IP. See zackees/soldr#1879.
+  # See zackees/soldr#1879 -- authenticates soldr's cross-repo managed-tool
+  # lookups so they are not rate-limited to 60 req/hr per runner IP.
   SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   dylint:
     name: Dylint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
       - uses: zackees/setup-soldr@v0.9.66
         with:
-          version: 0.8.0
+          version: 0.8.27
           cache: true
           toolchain: 1.94.1
           cache-key-suffix: dylint
