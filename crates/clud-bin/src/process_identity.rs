@@ -21,8 +21,7 @@
 //! epoch, so two processes that both hold PID *N* within the same second are
 //! indistinguishable here. That residual window is orders of magnitude
 //! narrower than the unguarded one (which spans the entire lifetime of the
-//! recorded PID), and it is the same guard
-//! [`crate::daemon::conhost_reaper`] already relies on.
+//! recorded PID).
 //!
 //! ## Fallback for records written before this existed
 //!
@@ -166,8 +165,7 @@ mod tests {
     #[test]
     fn a_start_time_that_moved_backwards_is_also_rejected() {
         // Direction is irrelevant -- any difference means a different
-        // process. Only conhost_reaper cares about ordering, and for a
-        // different question ("did my parent get recycled").
+        // process.
         let recorded = ProcessIdentity::new(4321, 1_700_000_042);
         let other = ProcessIdentity::new(4321, 1_700_000_000);
         assert!(!recorded.matches(&other));
