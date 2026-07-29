@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ci import bundle, xbuild
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_bundle_scratch_does_not_collide_with_the_build_entrypoint() -> None:
@@ -33,6 +37,17 @@ def test_soldr_strategy_keeps_non_build_verbs_on_prepared_cargo_env() -> None:
         "--target",
         target,
     ]
+
+
+def test_soldr_setup_installs_target_for_plain_cargo_verbs() -> None:
+    setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
+    text = setup.read_text(encoding="utf-8")
+    prepare = '"${SOLDR_BINARY:-soldr}" prepare'
+    install = 'rustup target add "${{ inputs.target }}"'
+
+    assert prepare in text
+    assert install in text
+    assert text.index(prepare) < text.index(install)
 
 
 def test_zigbuild_strategy_uses_the_build_subcommand_interface() -> None:

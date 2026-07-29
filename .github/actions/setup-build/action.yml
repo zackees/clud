@@ -139,6 +139,10 @@ runs:
         "${SOLDR_BINARY:-soldr}" prepare \
           --target "${{ inputs.target }}" \
           --github-env "$GITHUB_ENV"
+        # `soldr prepare` can keep target rust-std in its managed sysroot, while
+        # plain Cargo verbs such as clippy and test --no-run use rustup's
+        # sysroot. Install the target there too so those verbs can find `core`.
+        rustup target add "${{ inputs.target }}"
 
     # The soldr-cook prebuild can dirty the worktree; restore it so the real
     # build compiles the checked-out source.
