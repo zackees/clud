@@ -275,7 +275,8 @@ Subsystems that span multiple files have their own topic docs under
 - **GC and registry** (`gc`, `daemon/gc_service`, `session_registry`,
   `worktrees`) -> [docs/architecture/gc-and-registry.md](../../../docs/architecture/gc-and-registry.md)
 - **Windows quirks** (`trampoline`, `subprocess` BatBadBat, `console_*`,
-  `dnd`, `win_creation_flags`, `voice` ARM carveout) -> [docs/architecture/windows-quirks.md](../../../docs/architecture/windows-quirks.md)
+  foreground Job Object shell-orphan reaping, `dnd`, `win_creation_flags`,
+  `voice` ARM carveout) -> [docs/architecture/windows-quirks.md](../../../docs/architecture/windows-quirks.md)
 - **Launch plan** (`command/types::LaunchPlan` + all consumers) -> [docs/architecture/launch-plan.md](../../../docs/architecture/launch-plan.md)
 
 Non-obvious design choices (single `LaunchPlan`, `lib.rs` as the only

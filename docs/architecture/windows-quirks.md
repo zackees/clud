@@ -2,7 +2,7 @@
 
 This doc is the inventory of every place `clud` has Windows-specific code,
 with the symptom each piece solves and the `file:line` where it lives. There
-are eleven such carve-outs today: a self-rename trampoline so `pip install`
+are twelve such carve-outs today: a self-rename trampoline so `pip install`
 can overwrite a running `clud.exe`, the BatBadBat `.cmd`/`.bat` rewrite
 mandated by Rust 1.77+, an RAII guard for `ENABLE_VIRTUAL_TERMINAL_INPUT`, a
 small policy adapter over running-process's native `ReadConsoleInputW`
@@ -428,6 +428,31 @@ the codebase stays portable.
 - **POSIX behavior**: No-op. The diagnostic returns immediately unless
   `cfg!(target_os = "windows")` is true, and POSIX hook subprocesses receive
   normal pipe EOF semantics from Claude Code.
+
+### (l) Foreground Job Object shell-orphan reaper (issue #569)
+
+- **Symptom**: a Windows tool shell may exit while an ordinary child it
+  launched remains alive. The normal originator-tag reaper runs only when the
+  foreground CLI exits, leaving that orphan alive for the rest of an active
+  session.
+
+- **Solution**: after `main` ensures the persistent daemon, the foreground
+  CLI assigns itself to an otherwise empty Job Object and associates an I/O
+  completion port. `job_orphan_reaper` records every
+  `JOB_OBJECT_MSG_NEW_PROCESS` PID with its Toolhelp parent PID and image
+  name. When `cmd.exe`, `powershell.exe`, `pwsh.exe`, `bash.exe`, or
+  `git-bash.exe` emits `JOB_OBJECT_MSG_EXIT_PROCESS`, clud kills every
+  still-live direct child's subtree while sparing processes explicitly
+  declared as daemons. The normal daemon was launched before this point, so
+  it is outside the job. The job intentionally has no `KILL_ON_JOB_CLOSE`
+  limit.
+
+- **File**: `crates/clud-bin/src/job_orphan_reaper.rs`
+  (`ForegroundJobTracker::install`); installation in `main.rs` immediately
+  after daemon startup.
+
+- **POSIX behavior**: no-op; `ForegroundJobTracker::install()` returns
+  `None` outside Windows.
 
 ## Cross-cutting patterns
 
