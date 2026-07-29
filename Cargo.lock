@@ -1585,6 +1585,7 @@ version = "2.5.0"
 dependencies = [
  "libc",
  "serde_json",
+ "sysinfo 0.37.2",
  "terminal_size",
 ]
 

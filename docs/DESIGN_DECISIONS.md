@@ -637,3 +637,57 @@ scheduled dedicated runner, never default CI. Baselines must be refreshed only
 with a documented, intentional idle-cost change. Once #543 and #544 remove the
 current no-op GC event stream, its zero/near-zero event budget becomes a direct
 regression guard for that churn.
+
+---
+
+## DD-020: Automatic Windows tool cleanup requires positive lifecycle roles
+
+**Context:** zackees/clud#616. The #569 Job completion-port listener selected
+tool shells by executable basename at every process depth. That recovered
+genuine leaked `gh`/`git`/build clients, but it also made an ordinary nested
+`cmd.exe` authoritative: when Python's `os.system("start cmd")` wrapper exited,
+the intentionally detached terminal was killed. A related false-positive path
+killed `conhost.exe`, which destroys the console and can leave its client
+running headless. False positives are destructive, while a false negative costs
+only deferred cleanup.
+
+**Decision:** Backend authority starts with an explicit runner registration of
+PID plus OS start time. The captured tree must then reach the exact agent host
+(`codex.exe`, native `claude.exe`, or the npm Claude launcher's first
+`node.exe`) before a direct child shell can receive the `ToolShellRoot` role.
+The agent image is an authority boundary: any direct
+non-shell child begins a `Client` subtree permanently, even when that child or
+its descendants use familiar runtime/shell image names. Git Bash's direct
+Bash-to-Bash re-exec transfers completion ownership. A nested shell beneath a
+non-shell client is treated as an intentional detach boundary. Declared daemons
+(`RUNNING_PROCESS_IS_DAEMON`) remain the positive escape contract for
+long-lived services. `conhost.exe` is an unconditional pruned subtree and is
+never terminated by automatic cleanup.
+
+The complete role and exit decision is a pure function over captured process
+metadata, registered backend identities, and the current declared-daemon set.
+The Win32 completion-port listener only captures events, executes the plan, and
+writes structured `reap` / `spare` / `handoff` records.
+
+**Alternatives rejected:**
+
+- *Keep basename matching and add more exclusions.* Depth remains ambiguous;
+  every new wrapper creates another destructive special case.
+- *Use the inherited CLUD originator tag as the detach signal.* Ordinary
+  detached terminals and Docker helpers inherit it too, so it cannot
+  distinguish intent.
+- *Treat parent death as completion.* Git Bash re-exec makes a dead recorded
+  parent part of healthy execution, and conhost's parent is its creator rather
+  than its client.
+- *Store bare backend PIDs.* Windows reuses PIDs; a stale registration could
+  grant an unrelated process automatic-kill authority. Start time is part of
+  the identity and a missing/mismatched identity fails closed.
+
+**Consequences:** Automatic reaping remains prompt for direct agent tool-shell
+leaks, while ambiguous nested/detached shapes survive. Some unmarked custom
+daemon shapes can now be false negatives; callers that intentionally outlive a
+tool must use the declared-daemon marker. Every decision is diagnosable from
+the structured event log. Job PIDs whose metadata publication lags their
+creation notification are retained and retried; an irrecoverable metadata miss
+is logged and fails closed instead of inferring authority from the PID.
+Non-Windows execution is unchanged.

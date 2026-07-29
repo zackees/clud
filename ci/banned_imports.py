@@ -102,6 +102,10 @@ def main() -> int:
     # subprocess spawning), but the #[cfg(test)] #[ignore]d sampler-cost
     # bench deliberately uses std::process::Command to spawn a 55-process
     # fixture subtree, mirroring the process_tree.rs exemption.
+    #
+    # tool_shell_lifecycle_windows.rs is exempt (#616) — it must build raw
+    # process trees inside the production foreground Job Object. NativeProcess
+    # would add its own containment and mask the completion-port lifecycle.
     exempt = {
         "trampoline.rs",
         "process_tree.rs",
@@ -110,6 +114,7 @@ def main() -> int:
         "ctrlc_signal_kinds.rs",
         "ctrlc_windows_events.rs",
         "cpu_banner.rs",
+        "tool_shell_lifecycle_windows.rs",
     }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0

@@ -19,7 +19,7 @@ struct CachedWriter {
 
 static WRITER: Mutex<Option<CachedWriter>> = Mutex::new(None);
 
-pub(super) fn log_event(
+pub(crate) fn log_event(
     state_dir: &Path,
     op: &str,
     fields: impl IntoIterator<Item = (&'static str, Value)>,
