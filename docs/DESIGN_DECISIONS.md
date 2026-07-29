@@ -640,7 +640,88 @@ regression guard for that churn.
 
 ---
 
-## DD-020: Automatic Windows tool cleanup requires positive lifecycle roles
+## DD-020: The soldr build backend is pinned exactly, and CI's toolchain pin is asserted to match it
+
+**Context:** `pyproject.toml` declared `requires = ["soldr>=0.8.27"]` with
+`build-backend = "soldr"`. That line resolves the *build backend* from PyPI
+independently, at build time — it is a different resolution from
+`setup-soldr`'s `version:` input, which provisions the *toolchain* soldr in
+CI. The two look like the same pin and behave nothing like it.
+
+soldr 0.8.26 shipped a regression (zackees/soldr#1934) that made `cargo
+metadata` fail before any compilation. Within hours every clud lane was red,
+**including branches whose `setup-soldr` version was pinned to the known-good
+0.8.25** — the failing shim path in those logs was `.../v0.8.26/shims/rustc`,
+a version nothing in the repo asked for. The floor pin offered no protection
+because 0.8.26 satisfied it, and neither would `<0.9` have: soldr's *patch*
+releases carry build-system behaviour changes, so a compatible-release bound
+is the wrong shape for this dependency.
+
+The drift was also unobserved. `tests/test_packaging_metadata.py` did assert
+on CI's soldr versions, but by substring (`"0.8.0" in line`), which
+`"0.8.27"` does not contain — so the only line it actually inspected was
+`dylint.yml`'s, and that lane had quietly sat on 0.8.0 while the rest of CI
+moved to 0.8.27.
+
+**Decision:** Pin the backend exactly (`soldr==0.8.28`, the current release)
+and treat the backend pin, every checkable `setup-soldr` version under
+`.github/`, and `./install`'s default as **one decision with three
+spellings**. A composite action may forward an input into `with.version`, but
+that input must have a literal default that can be compared with the pin.
+`test_packaging_metadata.py::test_soldr_versions_move_in_lockstep` parses the
+exact version out of `build-system.requires` and asserts all three declare it.
+Two sites had already drifted unnoticed and are corrected here: `dylint.yml`
+sat on 0.8.0, and `./install` on 0.7.11. Nothing caught either, because the
+previous test compared by substring (`"0.8.0" in line`, which `"0.8.27"` does
+not contain) and never looked outside `.github/workflows/`. The guard now
+checks both workflows and composite actions, including the central
+`setup-build` action's forwarded input default. It also rejects a non-exact
+requirement outright, so reverting to a floor fails loudly rather than
+silently reopening the hole, without asserting the active pin as a separate
+test expectation that would become a fourth edit site.
+
+Raising `./install` required a fix, not just a number: soldr 0.8.x stopped
+publishing `.tar.gz`/`.zip` and ships `.tar.zst`, which needs a `zstd` binary
+the script cannot assume — on git-bash, GNU tar 1.35 accepts `--zstd` and
+then dies with `zstd: Cannot exec`. The script now prefers the release's
+**wheel**, a plain zip carrying the same binary under
+`soldr-<version>.data/scripts/`, extracted by the `unzip`-or-Python path it
+already had; the legacy archive stays as a fallback for 0.7.x, which
+published no wheels.
+`test_install_script_uses_wheel_with_legacy_fallback` guards that asset
+strategy, so the lockstep assertion cannot be satisfied by leaving the
+installer on its legacy archive-only path.
+
+One soldr version stays knowingly **outside** the lockstep set:
+`crates/clud-bin/assets/tools/docker/docker_build_soldr.py`'s `ARG
+SOLDR_VERSION`, which pins the soldr baked into the bundled Docker image and
+is asserted as a literal by `crates/clud-bin/src/tools.rs`. It is bumped to
+0.8.28 here, but folding it into the Python test would couple a Rust
+guardrail to a packaging test for a lane that builds nothing this repo ships.
+CLAUDE.md names it as an explicit exclusion so a bumper knows it exists.
+
+Rejected alternatives: a floor-plus-patch-ceiling (`>=0.8.27,<0.8.28`) is an
+exact pin with extra syntax; leaving it unbounded would only be defensible if
+soldr's release gate built a downstream consumer, which it does not.
+
+**Consequences:** clud no longer picks up soldr fixes automatically — during
+this same incident the *fix* also arrived by publication, so a broken upstream
+release now costs a deliberate bump PR either way. That is the trade being
+bought: `main` cannot go red without a clud-side change first, and yesterday's
+build is reproducible. Bumping soldr is one commit touching `pyproject.toml`,
+every workflow, and `./install`; the test names each drifting site in its
+failure message so none is forgotten. `dylint.yml`'s cache key embeds the
+soldr version, so its first run after this change pays one cold build.
+
+CI exercises both resolution paths. The wheel build invokes maturin directly,
+but `bash test` builds and installs the local project through its PEP 517
+backend after the initial dependency-only sync. The exact backend pin
+therefore protects source installs and the test lanes, while the
+`setup-soldr` pins protect every lane's Rust toolchain. That overlap is
+exactly why the three spellings must not be allowed to drift apart.
+---
+
+## DD-021: Automatic Windows tool cleanup requires positive lifecycle roles
 
 **Context:** zackees/clud#616. The #569 Job completion-port listener selected
 tool shells by executable basename at every process depth. That recovered

@@ -61,13 +61,15 @@ coverage-*.xml
 !.clud/settings.json
 .clud/settings.local.json
 
-# Claude Code: ignore ephemeral session/cache state, keep project config
-# (settings + hooks + commands + agents + skills are checked in).
-.claude/*
+# Claude Code: ignore ephemeral subdirectories by default, but keep files at
+# the .claude root visible. Project config directories are checked in below.
+.claude/*/
 !.claude/settings.json
 !.claude/hooks/
 !.claude/commands/
 !.claude/agents/
 !.claude/skills/
 .claude/settings.local.json
+.claude/*.lock
+.claude/*.patch
 .clud/loop

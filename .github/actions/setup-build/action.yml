@@ -29,10 +29,9 @@ inputs:
     default: "1.94.1"
   soldr-version:
     description: >
-      Must satisfy pyproject.toml's `requires = ["soldr>=0.8.27"]` -- the PEP 517
-      backend and these shims share one daemon socket, and mixing protocol
-      versions across it resets the connection (#580). 0.8.28 is the floor for
-      the `soldr prepare` / `soldr build` cross surface used below.
+      Must exactly match pyproject.toml's soldr build-backend pin and every
+      other setup-soldr version. The backend and these shims share one daemon
+      socket, and mixing protocol versions resets the connection (#580).
     required: false
     default: "0.8.28"
 
