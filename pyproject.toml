@@ -1,5 +1,13 @@
 [build-system]
-requires = ["soldr>=0.8.27"]
+# Exact pin, deliberately. An unbounded `soldr>=X` meant every build on
+# every branch silently adopted the newest soldr on PyPI the moment it was
+# published: zackees/soldr#1934 turned `main` red within hours, on branches
+# whose *toolchain* soldr was pinned to a known-good version, because this
+# line resolves the *build backend* independently at build time. Bump it in
+# the same commit as the `setup-soldr` `version:` inputs in
+# `.github/workflows/` and `./install`'s default —
+# `tests/test_packaging_metadata.py` asserts they agree. See DD-020.
+requires = ["soldr==0.8.28"]
 build-backend = "soldr"
 
 [project]
