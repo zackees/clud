@@ -1,7 +1,6 @@
 mod attach;
 mod client;
 mod commands;
-mod conhost_reaper;
 mod daemon_events;
 mod entry;
 mod gc_service;
