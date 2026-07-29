@@ -358,15 +358,69 @@ def test_verify_recovery_checks_api_then_container(dr, monkeypatch):
     assert any("unreachable" in d for d in details)
 
 
-def test_windows_restart_falls_back_after_cli_false_success(dr, monkeypatch):
-    cli = dr.subprocess.CompletedProcess(
-        ["docker", "desktop", "start"],
-        0,
-        stdout="Docker Desktop is already running\n",
-        stderr="",
+def test_windows_restart_prefers_guarded_cli_launch(dr, monkeypatch):
+    guard_calls = []
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop_guard",
+        lambda: (guard_calls.append(True) is None, "daemon guard started"),
     )
+    monkeypatch.setattr(
+        dr,
+        "_wait_for_windows_server_deadline",
+        lambda: True,
+    )
+
+    details = dr._execute_restart("Windows", hard=False)
+
+    assert guard_calls == [True]
+    assert any("guarded CLI" in detail for detail in details)
+
+
+def test_windows_restart_falls_back_to_cli_when_direct_launch_is_unobserved(
+    dr, monkeypatch
+):
     desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    launched: list[str] = []
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"], 0, stdout="Docker Desktop started\n", stderr=""
+    )
+    cli_calls: list[list[str]] = []
+
+    def run_cli(argv, **_kwargs):
+        cli_calls.append(argv)
+        return cli
+
+    monkeypatch.setattr(dr, "_run", run_cli)
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(dr, "_windows_docker_process_identities", lambda: set())
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop",
+        lambda _path: (True, f"direct launch started {desktop}"),
+    )
+    observations = iter(
+        [None, "new Docker runtime process observed after CLI launch: Docker Desktop"]
+    )
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop_guard",
+        lambda: (False, "daemon guard launch failed"),
+    )
+    monkeypatch.setattr(
+        dr, "_wait_for_windows_desktop_launch", lambda **_kwargs: next(observations)
+    )
+
+    details = dr._execute_restart("Windows", hard=False)
+
+    assert ["docker", "desktop", "start"] in cli_calls
+    assert any("trying CLI fallback" in detail for detail in details)
+    assert any("after CLI launch" in detail for detail in details)
+
+
+def test_windows_restart_falls_back_to_cli_when_executable_missing(dr, monkeypatch):
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"], 0, stdout="Docker Desktop started\n", stderr=""
+    )
     cli_kwargs = {}
 
     def run_cli(*_args, **kwargs):
@@ -374,63 +428,48 @@ def test_windows_restart_falls_back_after_cli_false_success(dr, monkeypatch):
         return cli
 
     monkeypatch.setattr(dr, "_run", run_cli)
-    monkeypatch.setattr(dr, "_wait_for_windows_desktop_launch", lambda **_kwargs: None)
-    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
     monkeypatch.setattr(
         dr,
-        "_launch_windows_docker_desktop",
-        lambda path: (launched.append(path) is None, f"direct launch started {path}"),
+        "_launch_windows_docker_desktop_guard",
+        lambda: (False, "daemon guard launch failed"),
     )
-
-    details = dr._execute_restart("Windows", hard=False)
-
-    assert launched == [desktop]
-    assert cli_kwargs["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
-    assert any("already running" in detail.lower() for detail in details)
-    assert any("direct" in detail.lower() for detail in details)
-
-
-def test_windows_restart_falls_back_after_cli_failure(dr, monkeypatch):
-    cli = dr.subprocess.CompletedProcess(
-        ["docker", "desktop", "start"], 1, stdout="", stderr="backend unavailable"
-    )
-    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    launched: list[str] = []
-
-    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
-    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
-    monkeypatch.setattr(
-        dr,
-        "_launch_windows_docker_desktop",
-        lambda path: (launched.append(path) is None, f"started {path}"),
-    )
-
-    details = dr._execute_restart("Windows", hard=False)
-
-    assert launched == [desktop]
-    assert any("exit 1" in detail.lower() for detail in details)
-
-
-def test_windows_restart_does_not_double_launch_after_cli_start(dr, monkeypatch):
-    cli = dr.subprocess.CompletedProcess(
-        ["docker", "desktop", "start"], 0, stdout="Docker Desktop started\n", stderr=""
-    )
-
-    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: None)
     monkeypatch.setattr(
         dr,
         "_wait_for_windows_desktop_launch",
         lambda **_kwargs: "new Docker runtime process observed after CLI launch: Docker Desktop",
     )
 
-    def unexpected_fallback():
-        raise AssertionError("healthy CLI launch must not resolve or start a fallback")
+    details = dr._execute_restart("Windows", hard=False)
 
-    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", unexpected_fallback)
+    assert cli_kwargs["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert any("direct Docker Desktop launch unavailable" in detail for detail in details)
+    assert any("runtime process observed" in detail.lower() for detail in details)
+
+
+def test_windows_restart_falls_back_to_cli_after_direct_launch_failure(dr, monkeypatch):
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"], 1, stdout="", stderr="backend unavailable"
+    )
+
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop_guard",
+        lambda: (False, "daemon guard launch failed"),
+    )
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop",
+        lambda _path: (False, f"direct Docker Desktop launch failed for {desktop}: denied"),
+    )
+    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
 
     details = dr._execute_restart("Windows", hard=False)
 
-    assert any("runtime process observed" in detail.lower() for detail in details)
+    assert any("direct Docker Desktop launch failed" in detail for detail in details)
+    assert any("docker desktop start: exit 1" in detail.lower() for detail in details)
 
 
 def test_direct_windows_launch_is_detached_and_declared_daemon(dr, monkeypatch):
@@ -456,6 +495,173 @@ def test_direct_windows_launch_is_detached_and_declared_daemon(dr, monkeypatch):
     assert captured["creationflags"] & dr.WINDOWS_DETACHED_PROCESS
     assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
     assert "direct Docker Desktop launch" in detail
+
+
+def test_windows_guard_is_detached_declared_daemon_and_self_invokes(dr, monkeypatch):
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(dr.subprocess, "Popen", fake_popen)
+
+    ok, detail = dr._launch_windows_docker_desktop_guard()
+
+    assert ok is True
+    assert captured["argv"][-1] == dr.WINDOWS_DAEMON_GUARD_ARG
+    assert captured["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert captured["stdin"] is dr.subprocess.DEVNULL
+    assert captured["stdout"] is dr.subprocess.DEVNULL
+    assert captured["stderr"] is dr.subprocess.DEVNULL
+    assert captured["close_fds"] is True
+    assert captured["creationflags"] & dr.WINDOWS_DETACHED_PROCESS
+    assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert "daemon guard" in detail
+
+
+def test_windows_guard_owns_cli_tree_until_docker_exits(dr, monkeypatch):
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"], 0, stdout="started", stderr=""
+    )
+    calls = {}
+    server_states = iter([True, True, False, True, False, False, False])
+    released = []
+
+    def run_cli(*_args, **kwargs):
+        calls.update(kwargs)
+        return cli
+
+    monkeypatch.setattr(dr, "_run", run_cli)
+    monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: object())
+    monkeypatch.setattr(
+        dr, "_release_windows_guard_mutex", lambda handle: released.append(handle)
+    )
+    monkeypatch.setattr(
+        dr, "_windows_docker_process_identities", lambda **_kwargs: set()
+    )
+    monkeypatch.setattr(
+        dr, "_windows_server_ready", lambda **_kwargs: next(server_states)
+    )
+    monkeypatch.setattr(dr.time, "monotonic", lambda: 0.0)
+    sleeps = []
+    monkeypatch.setattr(dr.time, "sleep", sleeps.append)
+
+    assert dr._windows_daemon_guard_main() == dr.EXIT_OK
+    assert calls["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert sleeps == [5.0] * 5
+    assert len(released) == 1
+
+
+def test_windows_guard_singleton_retry_exits_without_starting_cli(dr, monkeypatch):
+    monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: None)
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("a second guard must reuse the live singleton")
+
+    monkeypatch.setattr(dr, "_run", unexpected_run)
+
+    assert dr._windows_daemon_guard_main() == dr.EXIT_OK
+
+
+def test_windows_guard_false_success_uses_direct_fallback(dr, monkeypatch):
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"],
+        0,
+        stdout="Docker Desktop is already running\n",
+        stderr="",
+    )
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    launched = []
+    server_states = iter([False, True, False, False, False])
+
+    monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: object())
+    monkeypatch.setattr(dr, "_release_windows_guard_mutex", lambda _handle: None)
+    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
+    monkeypatch.setattr(
+        dr, "_windows_docker_process_identities", lambda **_kwargs: set()
+    )
+    monkeypatch.setattr(
+        dr, "_windows_server_ready", lambda **_kwargs: next(server_states)
+    )
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop",
+        lambda path: (launched.append(path) is None, f"started {path}"),
+    )
+    monkeypatch.setattr(dr.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(dr.time, "sleep", lambda _seconds: None)
+
+    assert dr._windows_daemon_guard_main() == dr.EXIT_OK
+    assert launched == [desktop]
+
+
+def test_windows_guard_cli_budget_leaves_direct_observation_time(dr, monkeypatch):
+    clock = {"now": 0.0}
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    launched = []
+    server_states = iter([False, True, False, False, False])
+
+    def run_cli(*_args, **kwargs):
+        assert kwargs["timeout"] == dr.WINDOWS_GUARD_CLI_SECONDS
+        clock["now"] += kwargs["timeout"]
+        return None
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: object())
+    monkeypatch.setattr(dr, "_release_windows_guard_mutex", lambda _handle: None)
+    monkeypatch.setattr(dr, "_run", run_cli)
+    monkeypatch.setattr(
+        dr, "_windows_docker_process_identities", lambda **_kwargs: set()
+    )
+    monkeypatch.setattr(
+        dr, "_windows_server_ready", lambda **_kwargs: next(server_states)
+    )
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop",
+        lambda path: (launched.append(path) is None, f"started {path}"),
+    )
+    monkeypatch.setattr(dr.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(dr.time, "sleep", sleep)
+
+    assert dr._windows_daemon_guard_main() == dr.EXIT_OK
+    assert launched == [desktop]
+    assert clock["now"] < dr.WINDOWS_GUARD_PARENT_WAIT_SECONDS
+
+
+def test_windows_guarded_server_wait_honors_wall_clock_deadline(dr):
+    clock = {"now": 0.0}
+    probe_timeouts = []
+
+    def now():
+        return clock["now"]
+
+    def check(*, timeout):
+        probe_timeouts.append(timeout)
+        clock["now"] += timeout
+        return False
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    assert (
+        dr._wait_for_windows_server_deadline(
+            seconds=3.0,
+            interval=1.0,
+            check=check,
+            now=now,
+            sleep=sleep,
+        )
+        is False
+    )
+    assert clock["now"] == 3.0
+    assert max(probe_timeouts) <= 1.0
 
 
 def test_windows_launch_observation_ignores_stale_authoritative_process(dr, monkeypatch):

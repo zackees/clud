@@ -80,6 +80,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import csv
 import json
 import ntpath
@@ -114,6 +115,13 @@ READY_INTERVAL_SECONDS = 2.0
 WINDOWS_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
 WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 DAEMON_ENV_VAR = "RUNNING_PROCESS_IS_DAEMON"
+WINDOWS_DAEMON_GUARD_ARG = "__windows-daemon-guard"
+WINDOWS_DAEMON_GUARD_MUTEX = r"Local\clud-docker-recover-daemon-guard"
+WINDOWS_GUARD_PARENT_WAIT_SECONDS = 60.0
+WINDOWS_GUARD_STARTUP_SECONDS = 300.0
+WINDOWS_GUARD_CLI_SECONDS = 40.0
+WINDOWS_GUARD_EMPTY_SAMPLES = 3
+WINDOWS_GUARD_MONITOR_INTERVAL = 5.0
 AUTHORITATIVE_WINDOWS_DOCKER_PROCESSES = {
     "docker desktop": "Docker Desktop",
     "com.docker.backend": "com.docker.backend",
@@ -921,8 +929,10 @@ def _parse_windows_docker_process_identities(text: str) -> set[tuple[str, int]]:
     return identities
 
 
-def _windows_docker_process_identities() -> set[tuple[str, int]]:
-    result = _run(["tasklist", "/FO", "CSV", "/NH"])
+def _windows_docker_process_identities(
+    *, timeout: float = 20.0
+) -> set[tuple[str, int]]:
+    result = _run(["tasklist", "/FO", "CSV", "/NH"], timeout=timeout)
     if result is None or result.returncode != 0:
         return set()
     return _parse_windows_docker_process_identities(result.stdout)
@@ -1411,16 +1421,139 @@ def _launch_windows_docker_desktop(executable: str) -> tuple[bool, str]:
     return True, f"direct Docker Desktop launch started {executable} (daemon marker set)"
 
 
+def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
+    """Start a declared-daemon parent that owns Docker's CLI launch subtree."""
+    flags = WINDOWS_DETACHED_PROCESS | WINDOWS_CREATE_NEW_PROCESS_GROUP
+    script = os.path.abspath(__file__)
+    try:
+        subprocess.Popen(
+            [sys.executable, script, WINDOWS_DAEMON_GUARD_ARG],
+            cwd=os.path.dirname(script),
+            env=_declared_daemon_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=flags,
+        )
+    except OSError as exc:
+        return False, f"Docker Desktop daemon guard launch failed: {exc}"
+    return True, "Docker Desktop daemon guard started (daemon marker set)"
+
+
+def _acquire_windows_guard_mutex() -> int | object | None:
+    """Acquire the per-session singleton mutex held for the guard's lifetime."""
+    if platform.system() != "Windows":
+        return object()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    handle = kernel32.CreateMutexW(None, False, WINDOWS_DAEMON_GUARD_MUTEX)
+    if not handle:
+        return None
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return None
+    return int(handle)
+
+
+def _release_windows_guard_mutex(handle: int | object) -> None:
+    if platform.system() != "Windows" or not isinstance(handle, int):
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+    kernel32.CloseHandle(handle)
+
+
+def _windows_server_ready(*, timeout: float = 1.0) -> bool:
+    result = _run(
+        ["docker", "version", "--format", "{{.Server.Version}}"],
+        timeout=timeout,
+    )
+    return bool(result is not None and result.returncode == 0 and result.stdout.strip())
+
+
+def _wait_for_windows_server_deadline(
+    *,
+    seconds: float = WINDOWS_GUARD_PARENT_WAIT_SECONDS,
+    interval: float = 2.0,
+    check=_windows_server_ready,
+    now=time.monotonic,
+    sleep=time.sleep,
+) -> bool:
+    """Wait for the engine with a real wall-clock deadline."""
+    deadline = now() + seconds
+    while True:
+        remaining = deadline - now()
+        if remaining <= 0:
+            return False
+        if check(timeout=min(1.0, remaining)):
+            return True
+        remaining = deadline - now()
+        if remaining <= 0:
+            return False
+        sleep(min(interval, remaining))
+
+
 def _windows_desktop_launch_observation(
     baseline: set[tuple[str, int]],
+    *,
+    source: str = "CLI",
 ) -> str | None:
     if docker_server_version() is not None:
-        return "Docker server API observed after CLI launch"
+        return f"Docker server API observed after {source} launch"
     new_processes = sorted(_windows_docker_process_identities() - baseline)
     if new_processes:
         rendered = ", ".join(f"{name} (PID {pid})" for name, pid in new_processes)
-        return "new Docker runtime process observed after CLI launch: " + rendered
+        return f"new Docker runtime process observed after {source} launch: " + rendered
     return None
+
+
+def _windows_daemon_guard_main() -> int:
+    """Own Docker's launch tree until Desktop exits, then retire quietly."""
+    mutex = _acquire_windows_guard_mutex()
+    if mutex is None:
+        return EXIT_OK
+    try:
+        deadline = time.monotonic() + WINDOWS_GUARD_STARTUP_SECONDS
+        baseline = _windows_docker_process_identities(timeout=1.0)
+        _run(
+            ["docker", "desktop", "start"],
+            timeout=WINDOWS_GUARD_CLI_SECONDS,
+            env=_declared_daemon_environment(),
+        )
+        ready = _windows_server_ready(timeout=1.0)
+        new_process = bool(
+            _windows_docker_process_identities(timeout=1.0) - baseline
+        )
+        if not ready and not new_process:
+            executable = _windows_docker_desktop_executable()
+            if executable is not None:
+                _launch_windows_docker_desktop(executable)
+
+        while not ready and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            ready = _windows_server_ready(timeout=min(1.0, max(remaining, 0.01)))
+            if not ready and remaining > 0:
+                time.sleep(min(2.0, remaining))
+        if not ready:
+            return EXIT_UNHEALTHY
+
+        # Require sustained absence before retiring so a transient API/process
+        # handoff cannot remove the positive daemon boundary.
+        empty_samples = 0
+        while empty_samples < WINDOWS_GUARD_EMPTY_SAMPLES:
+            api_ready = _windows_server_ready(timeout=1.0)
+            processes = _windows_docker_process_identities(timeout=1.0)
+            empty_samples = 0 if api_ready or processes else empty_samples + 1
+            if empty_samples < WINDOWS_GUARD_EMPTY_SAMPLES:
+                time.sleep(WINDOWS_GUARD_MONITOR_INTERVAL)
+        return EXIT_OK
+    finally:
+        _release_windows_guard_mutex(mutex)
 
 
 def _wait_for_windows_desktop_launch(
@@ -1447,6 +1580,46 @@ def _execute_restart(system: str, *, hard: bool) -> list[str]:
             wsl = _run(["wsl", "--shutdown"], timeout=60.0)
             details.append(_command_result_detail("wsl --shutdown", wsl))
 
+        guard_ok, guard_detail = _launch_windows_docker_desktop_guard()
+        details.append(guard_detail)
+        if guard_ok:
+            if _wait_for_windows_server_deadline():
+                details.append("Docker server API observed after guarded CLI launch")
+                return details
+            details.append(
+                "daemon guard started but the Docker server API was not observed "
+                "within 60 seconds; the guarded startup attempt remains authoritative"
+            )
+            return details
+
+        # Prefer launching the real executable so Docker Desktop itself
+        # inherits the positive daemon marker. `docker desktop start` may
+        # hand the launch off through an existing CLI/service path that
+        # drops the caller's environment; the engine can briefly become
+        # healthy and then be reaped as soon as this tool exits.
+        executable = _windows_docker_desktop_executable()
+        if executable is not None:
+            baseline = _windows_docker_process_identities()
+            ok, detail = _launch_windows_docker_desktop(executable)
+            details.append(detail)
+            if ok:
+                observation = _wait_for_windows_desktop_launch(
+                    check=lambda: _windows_desktop_launch_observation(
+                        baseline, source="direct"
+                    )
+                )
+                if observation is not None:
+                    details.append(observation)
+                    return details
+                details.append(
+                    "direct launch started but no Docker server API or new runtime "
+                    "process was observed; trying CLI fallback"
+                )
+        else:
+            details.append("direct Docker Desktop launch unavailable: executable not found")
+
+        # Retain the CLI as a compatibility fallback for non-standard
+        # installations or a direct launch failure.
         baseline = _windows_docker_process_identities()
         cli = _run(
             ["docker", "desktop", "start"],
@@ -1456,7 +1629,7 @@ def _execute_restart(system: str, *, hard: bool) -> list[str]:
         details.append(_command_result_detail("docker desktop start", cli))
         if cli is not None and cli.returncode == 0:
             observation = _wait_for_windows_desktop_launch(
-                check=lambda: _windows_desktop_launch_observation(baseline)
+                check=lambda: _windows_desktop_launch_observation(baseline, source="CLI")
             )
             if observation is not None:
                 details.append(observation)
@@ -1464,13 +1637,6 @@ def _execute_restart(system: str, *, hard: bool) -> list[str]:
             details.append(
                 "CLI reported success but no Docker server API or runtime process was observed"
             )
-
-        executable = _windows_docker_desktop_executable()
-        if executable is None:
-            details.append("direct Docker Desktop launch unavailable: executable not found")
-            return details
-        _ok, detail = _launch_windows_docker_desktop(executable)
-        details.append(detail)
     elif system == "Darwin":
         result = _run(["open", "-a", "Docker"], timeout=30.0)
         details.append(_command_result_detail("open -a Docker", result))
@@ -1636,6 +1802,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
+    if argv == [WINDOWS_DAEMON_GUARD_ARG]:
+        return _windows_daemon_guard_main()
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.cmd == "doctor":
