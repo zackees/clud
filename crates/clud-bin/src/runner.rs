@@ -266,6 +266,7 @@ pub fn summarize_loop_outcome(exit_code: i32) -> (&'static str, Option<String>) 
 
 pub fn run_plan_subprocess(
     plan: &command::LaunchPlan,
+    job_tracker: Option<&crate::job_orphan_reaper::ForegroundJobTracker>,
     verbose: bool,
     interrupted: &AtomicBool,
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
@@ -361,6 +362,9 @@ pub fn run_plan_subprocess(
         }
         if verbose {
             verbose_log::log("[clud] subprocess: started");
+        }
+        if let (Some(pid), Some(tracker)) = (process.pid(), job_tracker) {
+            tracker.register_backend(pid, plan.backend.executable_name());
         }
         // Issue #541: wedge watchdog. Fresh per iteration (new pid each
         // time); dropped at the end of this loop body, which joins its
@@ -609,6 +613,7 @@ fn emit_rendered_line(bytes: &[u8], captured_output: &mut String) {
 
 pub fn run_plan_pty(
     plan: &command::LaunchPlan,
+    job_tracker: Option<&crate::job_orphan_reaper::ForegroundJobTracker>,
     verbose: bool,
     interrupted: &AtomicBool,
     dnd_enabled: bool,
@@ -752,6 +757,9 @@ pub fn run_plan_pty(
         }
         if verbose {
             verbose_log::log("[clud] pty: started");
+        }
+        if let (Some(pid), Some(tracker)) = (process.pid().ok().flatten(), job_tracker) {
+            tracker.register_backend(pid, plan.backend.executable_name());
         }
         // Issue #541: wedge watchdog. See the matching comment in
         // `run_plan_subprocess` — same per-iteration lifetime.

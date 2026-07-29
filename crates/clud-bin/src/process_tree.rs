@@ -32,6 +32,29 @@
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
+#[cfg(any(windows, test))]
+use crate::process_identity::{ProcessIdentity, UNKNOWN_START_TIME};
+
+#[cfg(any(windows, test))]
+pub(crate) fn automatic_identity_matches(
+    recorded: ProcessIdentity,
+    observed: ProcessIdentity,
+) -> bool {
+    recorded.start_time != UNKNOWN_START_TIME
+        && observed.start_time != UNKNOWN_START_TIME
+        && recorded == observed
+}
+
+#[cfg(any(windows, test))]
+fn automatic_target_allowed(
+    recorded: ProcessIdentity,
+    observed: ProcessIdentity,
+    image_name: &str,
+) -> bool {
+    automatic_identity_matches(recorded, observed)
+        && !image_name.eq_ignore_ascii_case("conhost.exe")
+}
+
 /// Kill the process tree rooted at `pid`, including the root itself.
 ///
 /// Best-effort and cross-platform. Uses `sysinfo` to enumerate descendants
@@ -110,7 +133,111 @@ pub fn kill_tree_filtered(pid: u32, may_kill: &dyn Fn(u32) -> bool) {
     }
 }
 
-/// BFS the parent→child graph from `root`, pruning any subtree whose root
+/// Kill an automatically selected tree only while every target still has the
+/// identity and image observed by the selection snapshot.
+///
+/// This path is deliberately stricter than [`kill_tree_filtered`]. Automatic
+/// cleanup must never act on a bare PID, and `conhost.exe` is rejected inside
+/// the same last-responsible-moment snapshot used to select each kill target.
+#[cfg(windows)]
+pub fn kill_tree_filtered_automatic(
+    root_identity: ProcessIdentity,
+    may_kill: &dyn Fn(u32) -> bool,
+) {
+    if root_identity.start_time == UNKNOWN_START_TIME || !may_kill(root_identity.pid) {
+        return;
+    }
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let root = Pid::from_u32(root_identity.pid);
+    let Some(root_process) = system.process(root) else {
+        return;
+    };
+    let observed_root = ProcessIdentity::new(root_identity.pid, root_process.start_time());
+    if !automatic_target_allowed(
+        root_identity,
+        observed_root,
+        &root_process.name().to_string_lossy(),
+    ) {
+        return;
+    }
+
+    let mut descendants = descendant_identities_filtered(&system, root, may_kill);
+    descendants.reverse();
+    descendants.push(root_identity);
+
+    for identity in descendants {
+        kill_identity_filtered_automatic(identity, may_kill);
+    }
+}
+
+#[cfg(windows)]
+fn kill_identity_filtered_automatic(identity: ProcessIdentity, may_kill: &dyn Fn(u32) -> bool) {
+    if identity.start_time == UNKNOWN_START_TIME || !may_kill(identity.pid) {
+        return;
+    }
+
+    let pid = Pid::from_u32(identity.pid);
+    let mut current = System::new();
+    current.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let Some(process) = current.process(pid) else {
+        return;
+    };
+    let observed = ProcessIdentity::new(identity.pid, process.start_time());
+    if !automatic_target_allowed(identity, observed, &process.name().to_string_lossy()) {
+        return;
+    }
+
+    let _ = process.kill_with(Signal::Kill);
+    let _ = process.kill();
+}
+
+#[cfg(windows)]
+fn is_console_host(process: &sysinfo::Process) -> bool {
+    process
+        .name()
+        .to_string_lossy()
+        .eq_ignore_ascii_case("conhost.exe")
+}
+
+#[cfg(windows)]
+fn descendant_identities_filtered(
+    system: &System,
+    root: Pid,
+    may_kill: &dyn Fn(u32) -> bool,
+) -> Vec<ProcessIdentity> {
+    let mut children: std::collections::HashMap<Pid, Vec<Pid>> = std::collections::HashMap::new();
+    for (pid, process) in system.processes() {
+        if let Some(parent) = process.parent() {
+            children.entry(parent).or_default().push(*pid);
+        }
+    }
+
+    let mut stack = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(current) = stack.pop() {
+        if let Some(next) = children.get(&current) {
+            for child in next {
+                let Some(process) = system.process(*child) else {
+                    continue;
+                };
+                if !may_kill(child.as_u32()) || is_console_host(process) {
+                    continue;
+                }
+                descendants.push(ProcessIdentity::new(child.as_u32(), process.start_time()));
+                stack.push(*child);
+            }
+        }
+    }
+    descendants
+}
+
+/// BFS the parent-to-child graph from `root`, pruning any subtree whose root
 /// `may_kill` rejects.
 fn descendant_pids_filtered(
     system: &System,
@@ -260,6 +387,41 @@ mod tests {
     #[test]
     fn cooperative_break_sent_for_native_executable() {
         assert!(super::should_cooperative_break(false));
+    }
+
+    #[test]
+    fn automatic_identity_gate_requires_exact_nonzero_start_times() {
+        let recorded = ProcessIdentity::new(41, 100);
+
+        assert!(automatic_identity_matches(
+            recorded,
+            ProcessIdentity::new(41, 100)
+        ));
+        assert!(!automatic_identity_matches(
+            recorded,
+            ProcessIdentity::new(41, 101)
+        ));
+        assert!(!automatic_identity_matches(
+            recorded,
+            ProcessIdentity::new(41, UNKNOWN_START_TIME)
+        ));
+        assert!(!automatic_identity_matches(
+            ProcessIdentity::new(41, UNKNOWN_START_TIME),
+            ProcessIdentity::new(41, 100)
+        ));
+        assert!(!automatic_identity_matches(
+            recorded,
+            ProcessIdentity::new(42, 100)
+        ));
+    }
+
+    #[test]
+    fn automatic_target_gate_never_selects_console_host() {
+        let recorded = ProcessIdentity::new(41, 100);
+        let observed = ProcessIdentity::new(41, 100);
+
+        assert!(automatic_target_allowed(recorded, observed, "git.exe"));
+        assert!(!automatic_target_allowed(recorded, observed, "ConHost.EXE"));
     }
 
     #[test]

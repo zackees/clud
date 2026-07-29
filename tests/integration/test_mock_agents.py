@@ -103,6 +103,28 @@ class TestBackendSelection:
         report = _parse_agent_report(result)
         assert "claude" in report["program"].lower()
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object lifecycle")
+    def test_tool_shell_exit_reaps_leaked_client(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+    ) -> None:
+        report_path = tmp_path / "tool-shell-probe.json"
+        result = _run(
+            clud_binary,
+            "--codex",
+            "--subprocess",
+            "--no-daemon",
+            "--mock-tool-shell-probe",
+            str(report_path),
+            env=mock_env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["tool_shell_probe"]["reaped"] is True
+
     def test_codex_preserves_cwd(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "--codex", "-p", "hello", env=mock_env)
         assert result.returncode == 0

@@ -41,6 +41,10 @@ before exiting with the test-requested code.
     per sample to stdout so the harness can resize between samples.
   - `--mock-ansi-script <path>` — write raw bytes from the file to stdout
     first (used by attach-replay tests).
+  - `--mock-tool-shell-probe <path>` — Windows-only #616 subprocess probe.
+    The mock agent (copied as `codex.exe`) launches a PowerShell tool root
+    which leaves a sleeping client behind, then writes whether clud's
+    foreground Job tracker reaped that client.
   - `--mock-stream-json <path>` with `--mock-stream-delay-ms <ms>` — emit one
     pre-canned `--output-format stream-json` line per file line, flushing
     between each, then exit (no JSON report tail).
