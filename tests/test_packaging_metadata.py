@@ -67,16 +67,58 @@ def _pinned_backend_soldr() -> str:
     return match.group(1)
 
 
-def _workflow_paths() -> list[Path]:
-    """Every workflow file. GitHub accepts `.yml` and `.yaml` equally."""
-    directory = ROOT / ".github" / "workflows"
-    return sorted(set(directory.glob("*.yml")) | set(directory.glob("*.yaml")))
+def _setup_soldr_sources() -> list[Path]:
+    """Every workflow or composite action that can contain setup-soldr."""
+    workflows = ROOT / ".github" / "workflows"
+    actions = ROOT / ".github" / "actions"
+    paths = [
+        *workflows.glob("*.yml"),
+        *workflows.glob("*.yaml"),
+        *actions.glob("*/action.yml"),
+        *actions.glob("*/action.yaml"),
+    ]
+    return sorted(
+        path
+        for path in set(paths)
+        if "zackees/setup-soldr" in path.read_text(encoding="utf-8")
+    )
+
+
+def _action_input_default(source_name: str, text: str, input_name: str) -> str:
+    """Resolve a composite action's literal top-level input default."""
+    lines = text.splitlines()
+    input_header = f"  {input_name}:"
+    input_index = next(
+        (index for index, line in enumerate(lines) if line == input_header),
+        None,
+    )
+    assert input_index is not None, (
+        f"{source_name}: setup-soldr version uses inputs.{input_name}, "
+        "but that input is not declared"
+    )
+
+    for candidate in lines[input_index + 1 :]:
+        if candidate and not candidate.startswith(" "):
+            break
+        if candidate.startswith("  ") and not candidate.startswith("    "):
+            break
+        match = re.fullmatch(
+            r"""    default:\s*(?P<quote>["']?)(?P<version>[\d.]+)(?P=quote)\s*""",
+            candidate,
+        )
+        if match is not None:
+            return match.group("version")
+
+    raise AssertionError(
+        f"{source_name}: inputs.{input_name} needs a literal version default "
+        "so it can be checked against the build-backend pin"
+    )
 
 
 def _setup_soldr_steps_in_text(
-    workflow_name: str, text: str
+    source_name: str, text: str
 ) -> list[tuple[str, str, str]]:
-    """Parse setup-soldr steps while requiring a literal ``with.version``."""
+    """Parse setup-soldr steps and resolve a composite input's default."""
     steps: list[tuple[str, str, str]] = []
     lines = text.splitlines()
     uses_pattern = re.compile(
@@ -91,7 +133,7 @@ def _setup_soldr_steps_in_text(
 
         content_indent = len(uses.group("indent")) + len(uses.group("dash") or "")
         step_indent = content_indent - 2
-        assert step_indent >= 0, f"{workflow_name}: malformed setup-soldr step indentation"
+        assert step_indent >= 0, f"{source_name}: malformed setup-soldr step indentation"
 
         step_end = len(lines)
         for candidate_index in range(index + 1, len(lines)):
@@ -115,7 +157,7 @@ def _setup_soldr_steps_in_text(
             None,
         )
 
-        version: re.Match[str] | None = None
+        version: str | None = None
         if with_index is not None:
             for candidate in lines[with_index + 1 : step_end]:
                 stripped = candidate.lstrip()
@@ -126,34 +168,44 @@ def _setup_soldr_steps_in_text(
                     break
                 if indent != content_indent + 2:
                     continue
-                version = re.fullmatch(
+                literal = re.fullmatch(
                     r"""version:\s*(?P<quote>["']?)(?P<version>[\d.]+)(?P=quote)\s*""",
                     stripped,
                 )
-                if version is not None:
+                if literal is not None:
+                    version = literal.group("version")
+                    break
+                forwarded = re.fullmatch(
+                    r"version:\s*\$\{\{\s*inputs\.(?P<input>[\w-]+)\s*\}\}\s*",
+                    stripped,
+                )
+                if forwarded is not None:
+                    version = _action_input_default(
+                        source_name, text, forwarded.group("input")
+                    )
                     break
 
         assert version, (
-            f"{workflow_name}: setup-soldr step has no literal `with.version` input. "
-            "A missing or computed value (a `${{ }}` expression, a matrix input) "
-            "cannot be checked against the build-backend pin, which is the "
-            "invariant DD-020 exists for."
+            f"{source_name}: setup-soldr step has no checkable `with.version` input. "
+            "Use a literal version or a composite-action input with a literal "
+            "default so it can be checked against the build-backend pin."
         )
-        steps.append((workflow_name, uses.group("ref"), version.group("version")))
+        steps.append((source_name, uses.group("ref"), version))
     return steps
 
 
 def _setup_soldr_steps() -> list[tuple[str, str, str]]:
     """Every `zackees/setup-soldr` step as (workflow name, action ref, version).
 
-    Parsed without a YAML dependency, but indentation still matters: only a
-    literal ``version`` that is a direct child of the action's ``with`` mapping
-    counts. An unrelated ``env.version`` must not satisfy the lockstep guard.
+    Parsed without a YAML dependency, but indentation still matters. A version
+    must either be literal or forwarded from a composite-action input with a
+    literal default. An unrelated ``env.version`` must not satisfy the guard.
     """
     steps: list[tuple[str, str, str]] = []
-    for path in _workflow_paths():
+    for path in _setup_soldr_sources():
         text = path.read_text(encoding="utf-8")
-        steps.extend(_setup_soldr_steps_in_text(path.name, text))
+        source_name = path.relative_to(ROOT).as_posix()
+        steps.extend(_setup_soldr_steps_in_text(source_name, text))
     return steps
 
 
@@ -168,7 +220,7 @@ jobs:
         with:
           cache: true
 """
-    with pytest.raises(AssertionError, match=r"literal `with\.version`"):
+    with pytest.raises(AssertionError, match=r"no checkable `with\.version`"):
         _setup_soldr_steps_in_text("bad.yml", workflow)
 
 
@@ -206,7 +258,7 @@ def test_soldr_versions_move_in_lockstep() -> None:
     Bumping soldr therefore means editing all three in the same commit.
     """
     steps = _setup_soldr_steps()
-    assert steps, "no zackees/setup-soldr steps found in .github/workflows"
+    assert steps, "no zackees/setup-soldr steps found in .github"
 
     expected = _pinned_backend_soldr()
     drift = [(name, version) for name, _, version in steps if version != expected]
@@ -254,42 +306,32 @@ def test_install_script_uses_wheel_with_legacy_fallback() -> None:
     assert "command -v python3" in text
 
 
-def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
-    """Windows must never run the soldr dependency cook.
+def test_ci_setup_soldr_only_cooks_reusable_native_dependencies() -> None:
+    """Cross builds must not pay for a host-profile dependency cook.
 
-    Asserted as an invariant rather than as one exact literal. Two
-    settings satisfy it: the usual `runner.os == 'Windows'` conditional,
-    and a blanket `none` that disables the cook everywhere.
-
-    The conditional form is in force. A blanket `none` was in force for a
-    while as a workaround for zackees/soldr#1880 (hydrate restored
-    `build-script-build` binaries without the executable bit, so cargo died
-    with "Permission denied (os error 13)" on a rotating, arbitrary crate).
-    That was fixed upstream by soldr#1889 and soldr#1914, shipped in
-    v0.8.25/v0.8.26 — both below the v0.8.28 this repo pins — so the cook is
-    enabled again everywhere except Windows.
-
-    Both forms stay acceptable here because this test guards the Windows
-    invariant, not which of the two ways it is currently achieved.
+    setup-soldr runs before `soldr prepare` provisions the foreign SDK. A cook
+    in a zigbuild/soldr lane therefore produces host artifacts that the target
+    build cannot reuse. The first PR validation run spent six minutes doing
+    exactly that and then reported 393 misses with a 0% hit rate.
     """
-    conditional = "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
-    blanket = "prebuild-deps: none"
-
-    setup_workflows = [
-        path
-        for path in _workflow_paths()
-        if path.name.startswith("_") and "zackees/setup-soldr" in path.read_text(encoding="utf-8")
-    ]
-
+    setup_workflows = _setup_soldr_sources()
     assert setup_workflows
+
+    expected = "prebuild-deps: ${{ inputs.strategy == 'native' && 'soldr-cook' || 'none' }}"
+    build_setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
+    assert expected in build_setup.read_text(encoding="utf-8")
     for path in setup_workflows:
         text = path.read_text(encoding="utf-8")
-        assert conditional in text or blanket in text, (
-            f"{path.name}: prebuild-deps must either exempt Windows via the "
-            f"runner.os conditional or disable the cook entirely with 'none'"
-        )
-        # Either way, no workflow may hand Windows an unconditional cook.
-        assert "prebuild-deps: soldr-cook" not in text, (
-            f"{path.name}: unconditional 'soldr-cook' would run the dependency "
-            f"cook on Windows"
-        )
+        assert "prebuild-deps: soldr-cook" not in text
+
+
+def test_ci_setup_soldr_cook_profile_matches_the_real_build() -> None:
+    setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
+    build = ROOT / ".github" / "workflows" / "_build-target.yml"
+
+    setup_text = setup.read_text(encoding="utf-8")
+    build_text = build.read_text(encoding="utf-8")
+    assert "prebuild-deps-flags: ${{ inputs.profile == 'release' && '--release' || '' }}" in (
+        setup_text
+    )
+    assert "profile: ${{ inputs.profile }}" in build_text

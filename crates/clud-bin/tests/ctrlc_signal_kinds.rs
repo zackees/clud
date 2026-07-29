@@ -13,8 +13,12 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
+#[path = "common/exe.rs"]
+mod exe;
+
 fn probe_reports(signal: libc::c_int, expected_kind: &str) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clud-ctrlc-probe"))
+    let probe = exe::bin_path("clud-ctrlc-probe", env!("CARGO_BIN_EXE_clud-ctrlc-probe"));
+    let mut child = Command::new(&probe)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

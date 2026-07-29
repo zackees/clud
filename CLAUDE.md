@@ -109,7 +109,7 @@ Several features have a "single source of truth" registry that must be updated a
 
 - **Test that needs raw `std::process::Command`** → add the test filename to the exempt set in `ci/banned_imports.py`. The lint enforces that production subprocess execution goes through `running_process::NativeProcess`; exemptions exist for tests that deliberately need raw spawning because `NativeProcess` would attach a `Containment::Contained` Job Object that masks what's being tested. If your test errors with `BANNED — use running_process::NativeProcess instead`, decide whether `NativeProcess` would distort the test; if yes, add yourself to the exempt set with a comment explaining why.
 
-- **Bumping soldr** → 3 places, same commit: the exact pin in `pyproject.toml` (`build-system.requires = ["soldr==X.Y.Z"]`, the *build backend*), every `zackees/setup-soldr` step's `version:` input in `.github/workflows/` (CI's *toolchain*), and `VERSION="${SOLDR_VERSION:-X.Y.Z}"` in `./install` (a developer's local toolchain). These resolve independently — pinning only one leaves builds running a soldr that CI never tested, which is how a broken upstream patch release reddened `main` on branches pinned to a known-good version. `tests/test_packaging_metadata.py::test_soldr_versions_move_in_lockstep` asserts all three agree and rejects a non-exact requirement. One soldr version is deliberately *outside* that set and must be bumped by hand: `crates/clud-bin/assets/tools/docker/docker_build_soldr.py`'s `ARG SOLDR_VERSION`, which is guarded by a matching literal in `crates/clud-bin/src/tools.rs` (bump both together). See [DD-020](docs/DESIGN_DECISIONS.md#dd-020-the-soldr-build-backend-is-pinned-exactly-and-cis-toolchain-pin-is-asserted-to-match-it).
+- **Bumping soldr** → 3 places, same commit: the exact pin in `pyproject.toml` (`build-system.requires = ["soldr==X.Y.Z"]`, the *build backend*), every `zackees/setup-soldr` version under `.github/` (CI's *toolchain*, including composite-action input defaults), and `VERSION="${SOLDR_VERSION:-X.Y.Z}"` in `./install` (a developer's local toolchain). These resolve independently — pinning only one leaves builds running a soldr that CI never tested, which is how a broken upstream patch release reddened `main` on branches pinned to a known-good version. `tests/test_packaging_metadata.py::test_soldr_versions_move_in_lockstep` asserts all three agree and rejects a non-exact requirement. One soldr version is deliberately *outside* that set and must be bumped by hand: `crates/clud-bin/assets/tools/docker/docker_build_soldr.py`'s `ARG SOLDR_VERSION`, which is guarded by a matching literal in `crates/clud-bin/src/tools.rs` (bump both together). See [DD-020](docs/DESIGN_DECISIONS.md#dd-020-the-soldr-build-backend-is-pinned-exactly-and-cis-toolchain-pin-is-asserted-to-match-it).
 
 ## Test Coverage
 
@@ -117,17 +117,34 @@ Several features have a "single source of truth" registry that must be updated a
 - ~185 Python tests, mostly `--dry-run` subprocess calls plus a smaller integration set.
 - Python integration tests run end-to-end against [`mock-agent`](testbins/mock-agent/README.md), including the `clud loop` DONE/BLOCKED marker contract.
 
-## CI Matrix
+## CI
 
-6 platforms × 4 job types = 24 GitHub Actions jobs.
+Build once per target triple **on Linux**, then execute the result on native
+runners that have no Rust toolchain at all. Full design and rationale:
+[`docs/architecture/ci.md`](docs/architecture/ci.md).
 
-Job types (reusable workflows under `.github/workflows/_*.yml`):
-- `_lint.yml` — `bash lint`
-- `_unit-test.yml` — `bash test` (no `--integration`)
-- `_integration-test.yml` — `bash test --integration` (mock-agent end-to-end)
-- `_build.yml` — wheel build
+Entrypoint: `.github/workflows/ci.yml` (the only push/PR workflow).
 
-Platforms:
-- Linux x86 (`ubuntu-24.04`) + ARM (`ubuntu-24.04-arm`)
-- Windows x86 (`windows-2025`) + ARM (`windows-11-arm`)
-- macOS ARM (`macos-15`) + x86 (`macos-15-intel`)
+| File | Role |
+| --- | --- |
+| `.github/actions/setup-build/action.yml` | python + uv + mold + soldr + cross tooling. Build side only. |
+| `.github/actions/setup-exec/action.yml` | python + uv, and **removes** the Rust toolchain. Exec side only. |
+| `.github/workflows/_build-target.yml` | one triple → one test bundle (+ optional wheel). The only workflow that compiles Rust. |
+| `.github/workflows/_run-tests.yml` | one triple × one suite → execution, no compilation. |
+| `.github/workflows/_dylint.yml` | Linux-only nightly lint; off the PR path. |
+| `ci/ci_matrix.py` | the triple → {build host, cross strategy, exec runner} table. |
+| `ci/xbuild.py` | every cargo/maturin invocation, plus the per-strategy cross env. |
+| `ci/bundle.py` / `ci/run_bundle.py` | pack the bundle / execute it on the exec runner. |
+
+Things that bite:
+
+- **Only `auto-release.yml` may build `--release`.** `_build-target.yml` fails
+  the job if any other workflow passes `profile: release`.
+- **Never use `uv run` in a workflow step.** `pyproject.toml` sets
+  `build-backend = "soldr"`, so `uv run` syncs the project and triggers a full
+  PEP 517 maturin build. Use `$VENV_PY` (exported by both composite actions),
+  which is what `lint` already does locally.
+- **Adding a target** means editing `ci/ci_matrix.py` *and* adding the
+  build/test job pair in `ci.yml`. They cannot be one matrix (GitHub `needs:`
+  on a matrix is all-or-nothing, which would serialize every lane behind the
+  slowest); `tests/test_ci_matrix.py` fails if the two drift apart.

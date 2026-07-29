@@ -1,0 +1,379 @@
+# CI architecture — build-once / run-everywhere
+
+Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml` /
+`_unit-test.yml` / `_integration-test.yml`).
+
+## The problem
+
+Every push fans out to **12 heavy workflows** (6 platforms x {unit-test,
+integration-test}), each of which is a *from-source native build*:
+
+| Workflow | Full workspace compiles it performs |
+| --- | --- |
+| `_unit-test.yml` | `cargo clippy --workspace --all-targets` (1) + `cargo build -p clud -p mock-agent` + `cargo test --workspace --no-run` (1) |
+| `_integration-test.yml` | `cargo build -p clud -p mock-agent` + `maturin build` dev wheel (1) |
+
+So per push: **~12–18 full workspace compiles**, each including the vendored
+`whisper.cpp` C++ tree (`vendor/whisper-rs-sys/build.rs:194` drives a full CMake
+project), spread across **12 mutually invisible cache namespaces** — every job
+pays its own cold-cache tax and none of them warms another. Four of the six
+platforms are macOS/Windows runners, which are the scarcest and slowest in the
+pool, so the fan-out converts directly into queue depth.
+
+On top of that, three genuinely platform-independent checks run **six times
+each**: `ruff`, `cargo fmt --check`, and `ci/banned_imports.py`
+(`ci/lint.py:37-43`).
+
+## The shape of the fix
+
+Split the two things CI conflates — *producing artifacts* and *executing them* —
+and make the producer side live on Linux.
+
+```
+  ┌──────────┐  ┌──────────┐   per triple, independently:
+  │  static  │  │  dylint  │
+  │  ubuntu  │  │  ubuntu  │   ┌──────────────┐   bundle-<triple>   ┌────────────┐
+  │ ruff/fmt │  │ non-PR   │   │ build-<trip> │ ─────────────────►  │ test-<trip>│
+  │ /banned  │  │  only    │   │  ubuntu-24   │  .tar.gz artifact   │   NATIVE   │
+  └────┬─────┘  └────┬─────┘   │  clippy +    │                     │  unit +    │
+       │             │         │  bins +      │                     │ integration│
+       │             │         │  test bins   │                     │ no cargo,  │
+       │             │         │  + wheel     │                     │ no rustc   │
+       │             │         └──────────────┘                     └─────┬──────┘
+       └─────────────┴────────────────────────────────────────────────────┤
+                                                                          ▼
+                                                                   ┌────────────┐
+                                                                   │   ci-ok    │
+                                                                   └────────────┘
+```
+
+Each triple gets its **own** build job and its **own** test job, rather than one
+build matrix feeding one test matrix. That is not stylistic: `needs:` on a
+matrix job is all-or-nothing in GitHub Actions, so a single `test` matrix
+depending on a single `build` matrix would make the Linux tests — ready first —
+wait for the slowest cross-build in the set. GitHub exposes no per-leg
+dependency edge, so the lanes are written out longhand. `ci/ci_matrix.py`
+remains the source of truth for the triple table and
+`tests/test_ci_matrix.py::test_ci_yml_covers_exactly_the_targets_table` fails if
+the YAML drifts from it.
+
+There is deliberately no `plan` job. Computing the matrix in a preceding job
+would put a checkout + `setup-python` (~40 s of pure latency) at the head of
+every run and add a dependency edge to every lane; the tier gating is instead a
+job-level `if:` on each optional lane.
+
+Three structural claims, in the order they matter:
+
+1. **One build per triple, not three.** `clippy --all-targets`, the workspace
+   binaries, the `cargo test --no-run` harness binaries, and the dev wheel are
+   produced in *one job with one `target/` directory*. They already share
+   ~95% of their compilation graph (every dependency rlib, including the
+   whisper C++ static libs); today that graph is recompiled on three separate
+   machines. This is the single largest win and it requires no
+   cross-compilation at all.
+2. **The build host is always Linux.**
+   Linux runners are the cheapest and least contended, and — critically — all
+   targets then share one runner class, so cache behaviour is uniform.
+3. **macOS/Windows runners never compile.** They download a bundle and execute
+   it. Their job duration collapses from "cold C++ build + test" to "test",
+   which is what makes using them sparingly viable.
+
+## Target tiers — using scarce runners sparingly
+
+`ci/ci_matrix.py` defines the target inventory consumed by the workflow. Not
+every push needs all six targets.
+
+| Tier | Triples | Trigger |
+| --- | --- | --- |
+| `core` | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin` | every PR push |
+| `full` | core + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, `x86_64-apple-darwin` | `push` to `main`, `merge_group`, `ci:full` PR label, `workflow_dispatch` |
+
+Rationale: `core` covers one triple per *operating system*, which is where
+essentially all platform-specific behaviour lives (the platform-gated tests are
+`#![cfg(windows)]` / `#![cfg(unix)]`, not arch-gated). The second architecture
+of each OS is an ABI/codegen check, not a behaviour check, so it belongs on the
+merge queue and `main`, not on every intermediate PR push. `x86_64-apple-darwin`
+(`macos-15-intel`) in particular is the slowest runner in the pool and is
+demoted to `full` only.
+
+macOS ARM is always core. `soldr prepare --target aarch64-apple-darwin`
+provisions the target-shaped Apple SDK on the Linux builder, so the old
+`MACOS_SDK_URL` gate and native macOS fallback no longer exist. The macOS
+runners only execute the resulting bundle.
+
+Two trigger-level notes:
+
+- `pull_request` subscribes to `labeled` on top of the default event types.
+  Without it, adding `ci:full` to an already-pushed PR would not re-trigger
+  anything and the opt-in would silently do nothing.
+- Push coverage narrows from "every branch" to `main`. Branches with no open PR
+  no longer get CI. That was a large share of the duplicated fan-out, but it is
+  a behaviour change worth knowing about.
+
+## Cross-compilation, per triple, honestly
+
+The workspace's cross-compile surface is small but not empty. Only **three**
+crates compile native code (`Cargo.lock`): `ring` and `blake3` (both `cc`,
+routine to cross), and `whisper-rs-sys` (`bindgen` + a full CMake project).
+`crates/clud-bin/build.rs` is pure Rust (`protox` + `prost-build`, no `protoc`
+binary), so it is not a factor.
+
+| Triple | Strategy | Notes |
+| --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | **native** | the build host; also the clippy/dylint host |
+| `aarch64-pc-windows-msvc` | **`soldr build`** | The crate manifest already excludes `whisper-rs` on this target, so there is no C++ and no CMake. `soldr prepare` provisions the catalogued ARM64 MSVC CRT/SDK and the clang shim that `ring` requires. |
+| `x86_64-pc-windows-msvc` | **`soldr build`** + forced whisper config | The blessed soldr path provisions the MSVC CRT/SDK and LLVM toolchain. `clang-cl`/`lld-link` drive whisper's CMake; two host-vs-target `cfg!` bugs in the vendored build script are worked around from the environment, not patched (see below). |
+| `aarch64-apple-darwin`, `x86_64-apple-darwin` | **`soldr build` + target-shaped Apple SDK** | `soldr prepare` fetches the matching SDK and exports `SDKROOT`; there is no repo secret/variable and no native-builder fallback. |
+| `aarch64-unknown-linux-gnu` | **`cargo-zigbuild`** | cleanest cross. `vendor/whisper-rs-sys/build.rs:395-429` already detects a zig C++ toolchain and switches `stdc++`→`c++`, but `:403-405` early-returns on non-Linux targets — this path is Linux→Linux, so it is exactly the case that code was written for. CMake needs `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64`, injectable through the existing `CMAKE_*` env passthrough at `build.rs:298-306`. |
+
+### The two `whisper-rs-sys` host-cfg bugs
+
+`vendor/whisper-rs-sys/build.rs` uses `cfg!(target_os = ...)` inside the build
+script, which evaluates against the **host**, not the target. Two of these bite:
+
+- `build.rs:212-215` — `cfg!(target_os = "windows")` gates `/utf-8` and
+  `cargo:rustc-link-lib=advapi32`. Cross-compiling Linux→windows-msvc silently
+  drops `advapi32` and the link fails on undefined symbols.
+- `build.rs:342` — `cfg!(target_os = "macos")` gates linking `ggml-blas`. On a
+  Linux→darwin cross, CMake still *builds* `ggml-blas` (Apple BLAS defaults ON,
+  `ggml/CMakeLists.txt:92-95`) but the build script never emits the link flag.
+
+Both are fixable without touching vendored source:
+
+- windows: add `-C link-arg=advapi32.lib` via `RUSTFLAGS` for the two
+  windows-msvc targets.
+- darwin: force `GGML_BLAS=OFF` through the `GGML_*`/`CMAKE_*` env passthrough
+  (`build.rs:298-306`), which sidesteps the missing `ggml-blas` link flag.
+
+Also set `WHISPER_DONT_GENERATE_BINDINGS=1` on all cross targets: `build.rs:127-129`
+then uses the checked-in `src/bindings.rs` instead of running bindgen against
+target headers we do not have. (`build.rs:169-182` already falls back to those
+bindings on bindgen failure, so this only makes the existing behaviour
+deterministic.)
+
+### macOS: SDK provisioning
+
+`build.rs:27-28` emits `cargo:rustc-link-lib=framework=Accelerate`
+unconditionally for any `target.contains("apple")`, with **no feature to turn it
+off**. Linking `-framework Accelerate` requires a real macOS SDK. `GGML_BLAS=OFF`
+stops CMake from *building* the BLAS backend, but does not remove that hardcoded
+link directive — the SDK is still required for the framework stub, and for every
+other system framework `cpal`/`rodio`/`arboard` pull in on darwin.
+
+Linux→macOS cross therefore needs a real SDK on the runner. soldr 0.8.28's
+blessed Apple-target path resolves the target-shaped SDK from its toolchain
+catalogue. The setup composite runs `soldr prepare --target <apple-triple>`
+and exports the resulting environment to later workflow steps.
+
+That environment includes `SDKROOT` plus target-scoped compiler/linker
+settings. `ci/xbuild.py` forwards the same path as `CMAKE_OSX_SYSROOT`, then
+routes link-producing builds through `soldr build`. Both Darwin triples now
+build on `ubuntu-24.04`; native macOS runners only download and execute the
+bundles.
+
+## Cache model
+
+The old design's caches were fragmented by *job type*; the new one is fragmented
+only by *target triple*, which is the minimum possible:
+
+- `setup-soldr` with `cache-key-suffix: build-<triple>`. Six namespaces total,
+  down from twelve, and each is now written by exactly one job per run rather
+  than raced by three.
+- The native lane runs `soldr-cook` with flags matching the requested profile.
+  Cross lanes skip the cook because setup happens before their target SDK is
+  prepared; a host cook cannot be reused by a foreign target. Their per-triple
+  build caches still persist the real target artifacts.
+- All six build jobs run the same runner image (`ubuntu-24.04`), so host-side
+  artifacts — proc-macro crates, build scripts, `protox`/`prost-build` — have
+  identical fingerprints across targets. They are still stored per-triple, but
+  they compile against a warm toolchain and identical glibc.
+- The venv cache key drops its `runs-on` component for build jobs (one OS) and
+  keeps it for exec jobs (six OSes).
+- `main` pushes run the `full` tier, so every triple's cache is refreshed on
+  every merge; PR jobs restore from it via `restore-keys`.
+
+## Bundles: what crosses the wire
+
+`build` uploads one artifact per triple, `bundle-<triple>`:
+
+```
+bundle/
+  manifest.json         # triple, profile, git sha, test-binary list
+  bin/                  # clud, clud-shim, clud-block-bad-cmd, clud-cmd-scan,
+                        # clud-ctrlc-probe, mock-agent, probe-*, scan_zombies
+  tests/                # every `cargo test --no-run` harness binary
+  dist/                 # the dev wheel (test_trampoline.py needs it)
+```
+
+`tests/` is populated from `cargo test --workspace --no-run --message-format=json`,
+filtering `reason == "compiler-artifact"` entries that carry an `executable`.
+
+The exec job reconstructs the layout the test code expects rather than requiring
+the test code to learn a new one:
+
+- `CLUD_TEST_BINARY`, `CLUD_TEST_BLOCK_BAD_CMD_BINARY`,
+  `CLUD_TEST_MOCK_AGENT_BINARY` → `bundle/bin/*`. Every Python test honours
+  these first (`tests/test_hello.py:58-60`, `tests/integration/conftest.py:181-200`,
+  `tests/test_hook_stdin.py:36-48`), so no `cargo` fallback fires.
+- `CARGO_TARGET_DIR` → a synthesized `bundle/target/debug/` containing the
+  binaries. `crates/clud-bin/tests/common/mod.rs:33` reads `CARGO_TARGET_DIR` at
+  *runtime*, so `mock_agent_path()` resolves for `pty_pump.rs` (13 tests),
+  `pty_behavior.rs` (6) and `orphan_reap.rs` (1) with **no source change**, and
+  the zombie-scan autouse fixture (`tests/integration/conftest.py:326-355`) stops
+  silently degrading to a no-op.
+
+### The one required source change
+
+`env!("CARGO_BIN_EXE_*")` bakes the **builder's absolute path** into the test
+binary at compile time, with no runtime override. That breaks 13 tests when the
+binary is executed on a different machine:
+
+- `crates/clud-bin/tests/symbols.rs:35` (4 tests)
+- `crates/clud-bin/tests/telemetry_endpoint.rs:33` (4 tests)
+- `crates/clud-bin/tests/ctrlc_signal_kinds.rs:17` (4 tests, unix)
+- `crates/clud-bin/tests/ctrlc_windows_events.rs:30` (1 test, windows)
+
+Fix: a shared `common::bin_path("clud")` helper that prefers a runtime
+`CLUD_TEST_BIN_DIR` env var and falls back to the `env!` constant, so local
+`cargo test` is unchanged. This is the only production/test source edit the
+redesign requires; everything else is CI plumbing.
+
+## Release profile containment
+
+Requirement: nothing builds `--release` except the release pipeline.
+
+- `_build-target.yml` takes `profile` (`dev` | `release`), defaulting to `dev`.
+- `ci.yml` never passes `profile`, and has no input that could set it.
+- `_build-target.yml` opens with a guard step that fails when
+  `profile == 'release'` and `github.workflow != 'Auto Release'`. A reusable
+  workflow sees the *calling* workflow's name, so this is enforceable in YAML
+  and cannot be bypassed by a `workflow_dispatch` on the template.
+- The 24 deleted leaf workflows each carried a `build-mode: [dev, release]`
+  dispatch choice — six user-reachable paths to a release build outside the
+  release pipeline. Deleting them closes that surface.
+- `--zig --compatibility manylinux2014` (`ci/build_wheel.py:48-51`) stays on the
+  release path only; CI dev wheels are plain `--profile dev`.
+
+## Deduplicated checks
+
+| Check | Before | After |
+| --- | --- | --- |
+| `ruff` | 6x | 1x (`static`) |
+| `cargo fmt --check` | 6x | 1x (`static`) |
+| `ci/banned_imports.py` | 6x | 1x (`static`) |
+| `cargo clippy --workspace --all-targets` | 6x native | 2x, both on Linux |
+| dylint | 2x per PR (`push` + `pull_request` both fire) | 0x per PR; 1x on merge/main, Linux only |
+| Rust doc-tests | 6x | 1x (host triple) |
+
+`ci/lint.py` gains `--static-only`, and the checks inside it are reordered
+cheapest-first (ruff → banned imports → `cargo fmt`) so the most common failure
+reds out in seconds instead of behind a cargo subprocess. `bash lint` with no
+flags still runs the whole suite, unchanged.
+
+**Clippy runs on two triples, not six.** It is worth stating why, because the
+obvious intuition is wrong: clippy is *not* nearly free once the dependency
+graph is warm. `cargo clippy` builds a **Check-mode** unit graph, emitting
+`.rmeta` under a different unit hash than the `.rlib` that `cargo build` and
+`cargo test --no-run` need. Cargo's unit mode is part of the fingerprint, so
+there is no reuse in either direction and reordering the steps does not help —
+clippy is a second full pass over all ~429 dependencies. Since the platform
+gating in this workspace is by OS rather than architecture, `x86_64-unknown-linux-gnu`
+plus `x86_64-pc-windows-msvc` type-check every `cfg(windows)` / `cfg(unix)`
+branch. The other four triples would pay a full extra pass for no new coverage.
+
+**dylint is off the PR path.** It is Linux-only by construction — it needs a
+nightly toolchain with `rustc-dev` and `llvm-tools` and builds a cdylib driver
+for the host — so requirement (3) ("no dylint off Linux") is satisfied
+structurally: `_dylint.yml` pins `ubuntu-24.04` and nothing else can reach it.
+But it is also ~25 minutes of cold nightly work, which would make a
+slash-normalization style lint the longest pole in every PR. It now runs on
+`merge_group` / `main` / manual dispatch and gates the merge rather than the PR.
+The old `dylint.yml` also fired on both `push` and `pull_request`, so it ran
+twice per PR.
+
+**Doc-tests run once.** They were covered by the old `cargo test --workspace`
+but produce no harness binary, so they cannot ride along in a bundle. They are
+OS- and architecture-independent, so one run on the host triple is full
+coverage rather than a reduction.
+
+## Template inventory
+
+Deliberately small, to keep the ~60 lines of soldr/uv/mold boilerplate that is
+currently copy-pasted four times in exactly one place.
+
+| File | Role |
+| --- | --- |
+| `.github/actions/setup-build/action.yml` | composite: python + uv + venv cache + mold + `setup-soldr` + `uv sync`. Used only by build-side jobs. |
+| `.github/actions/setup-exec/action.yml` | composite: python + uv + `uv sync --group test`, then **deletes** the Rust toolchain. Used by exec jobs. |
+| `.github/workflows/_build-target.yml` | reusable: one triple → one bundle (+ optional wheel/sdist artifact). Called by `ci.yml` and `auto-release.yml`. |
+| `.github/workflows/_run-tests.yml` | reusable: one triple × one suite → test execution. |
+| `.github/workflows/_dylint.yml` | reusable + dispatchable: the nightly Linux lint. |
+| `.github/workflows/ci.yml` | the only push/PR entrypoint. |
+| `.github/workflows/auto-release.yml` | unchanged triggers; now the sole caller that may pass `profile: release`. |
+| `ci/ci_matrix.py` | the triple table, shared by CI and the release matrix. |
+| `ci/xbuild.py` | every cargo/maturin invocation + the per-strategy cross environment. |
+| `ci/bundle.py`, `ci/run_bundle.py` | pack the bundle / execute it on the exec runner. |
+
+Deleted: 24 `{linux,macos,windows}-{x86,arm}-{build,lint,unit-test,integration-test}.yml`,
+plus `_lint.yml`, `_unit-test.yml`, `_integration-test.yml`, `_build.yml`,
+`dylint.yml`.
+
+### Two traps worth naming
+
+**Never use `uv run` in a workflow step.** `pyproject.toml` sets
+`build-backend = "soldr"`, so `uv run` syncs the *project*, which triggers a
+full PEP 517 maturin build of the Rust binary before your command starts. On a
+build job that is a wasted host-wheel build; on an exec job it hits the removed
+toolchain and fails every test. Both composite actions export `$VENV_PY`
+pointing at the synced interpreter — use that. The repo's `lint` script
+(`lint:8-24`) already worked around this for the same reason.
+
+**Shadowing cargo on PATH is not enough on Windows.** Rust's
+`Command::new("cargo")` goes through `CreateProcess`, which only appends
+`.exe` — a `cargo.cmd` shim is skipped and the real `cargo.exe` found. Since the
+test suite spawns cargo from Rust (`crates/clud-bin/tests/common/mod.rs:78-116`),
+`setup-exec` deletes the toolchain binaries outright and then installs failing
+shims for the error message. Runner VMs are ephemeral, so this is safe.
+
+## Expected effect
+
+Per PR push, `core` tier:
+
+| | Before | After |
+| --- | --- | --- |
+| Workflows triggered | 12 | 1 |
+| Full workspace compiles | ~12–18 | 3 |
+| Clippy passes | 6 | 2 |
+| Cache namespaces | 12 | 3 (of 6) |
+| macOS runner jobs | 4 cold builds | 2 exec only |
+| Windows runner jobs | 4 cold builds | 2 exec only |
+| Platform-independent lint runs | 18 | 3 |
+| dylint runs | 2 | 0 |
+
+Critical path is `build-<triple>` → `test-<triple>` per lane, in parallel across
+lanes, with `static` failing fast alongside. The Linux lane reports red/green
+roughly 15 minutes before the slowest lane finishes, because no lane waits on
+another.
+
+### Known remaining costs
+
+Not fixed here, recorded so they are not rediscovered:
+
+- **Cross-lane cold starts.** The native lane can reuse `soldr-cook`, but cross
+  lanes prepare their SDK after setup-soldr and deliberately skip a host-only
+  cook. A miss in the per-triple target/build cache still means compiling the
+  foreign dependency graph once.
+- **The 10 GB per-repo Actions cache quota.** Six per-triple `target/` caches
+  plus the dylint cache plus the venv caches plausibly exceed it, and eviction
+  is silent — `restore-keys` simply miss and the job rebuilds cold.
+  `CARGO_INCREMENTAL=0` (set in `_build-target.yml`) is the cheap mitigation
+  already applied; splitting deps from workspace crates in the cache key, and
+  sharing the host-side proc-macro/build-script units across all six triples,
+  are the next steps.
+- **The linux-x86 lane still round-trips through an artifact** even though its
+  build and exec runners are the same class. Running its suites inline would
+  save ~3–5 minutes at the cost of the uniform template and the structural
+  "exec cannot compile" guarantee.
+- **Bundle size.** Each harness statically links the whole workspace; per-OS
+  filtering is applied in `ci/bundle.py`, but `split-debuginfo = "packed"` plus
+  excluding the debug files from the bundle would cut substantially more.

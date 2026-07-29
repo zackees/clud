@@ -1,0 +1,331 @@
+name: CI
+
+# The single push/PR entrypoint. Replaces 24 per-platform leaf workflows.
+# Design + rationale: docs/architecture/ci.md
+#
+# Shape: build once per target triple on Linux, then execute the resulting
+# bundle on native runners that have no Rust toolchain at all.
+#
+# ## Why this file is repetitive instead of one build matrix
+#
+# `needs:` on a matrix job is all-or-nothing in GitHub Actions: a single
+# `test` matrix depending on a single `build` matrix would make the Linux
+# tests -- ready first -- wait for the slowest cross-build in the set. GitHub
+# offers no per-leg dependency edge, so each triple gets its own build/test
+# job pair and its own `needs:`. The Linux lane reports red/green ~15 minutes
+# before the slowest lane finishes.
+#
+# The triple -> {build host, cross strategy, exec runner} mapping is still
+# owned by ci/ci_matrix.py; tests/test_ci_matrix.py asserts this file has not
+# drifted from it.
+
+on:
+  pull_request:
+    # `labeled` is required for the `ci:full` opt-in below to take effect --
+    # the default trigger set does not include it, so adding the label to an
+    # already-pushed PR would otherwise do nothing.
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+# Deliberately NO `profile` input anywhere in this file. Release builds are
+# reachable only from auto-release.yml; _build-target.yml enforces that.
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- static --
+  # Everything platform-independent, once, on the cheapest runner. Previously
+  # ruff + cargo fmt + banned_imports each ran six times. Ordered cheapest-first
+  # inside ci/lint.py so a ruff error reds out in well under a minute.
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Sync
+        run: uv sync --frozen --group dev --no-install-project --python 3.11
+      - name: Setup soldr
+        uses: zackees/setup-soldr@v0.9.66
+        env:
+          SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: 0.8.28
+          cache: true
+          build-cache-mode: thin
+          shims: true
+          preserve-source-mtimes: true
+          solo-toolchain-cache: true
+          cache-key-suffix: static
+          prebuild-deps: none
+      # `.venv/bin/python`, not `uv run`: pyproject sets build-backend = "soldr",
+      # so `uv run` would sync the project and kick off a full PEP 517 maturin
+      # build of the Rust binary. See lint:8-24 for the same workaround.
+      - name: Static checks
+        run: .venv/bin/python -m ci.lint --static-only
+
+  # ---------------------------------------------------------------- dylint --
+  # Not on the PR path. dylint installs a nightly toolchain with rustc-dev +
+  # llvm-tools, builds a cdylib driver, and runs a fully cold nightly check
+  # pass -- ~25 minutes, which would make a slash-normalization style lint the
+  # longest pole in every PR. It gates the merge instead, via merge_group and
+  # main. Linux-only by construction: nothing else can reach _dylint.yml.
+  dylint:
+    name: Dylint
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/_dylint.yml
+
+  # ----------------------------------------------------------------- core ---
+  # One triple per operating system. The platform-gated tests are
+  # `#![cfg(windows)]` / `#![cfg(unix)]`, not arch-gated, so this covers the
+  # behavioural surface; the second architecture of each OS is an ABI/codegen
+  # check and lives in the full tier below.
+
+  build-linux-x64:
+    name: Build linux-x64
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      target: x86_64-unknown-linux-gnu
+      runs-on: ubuntu-24.04
+      strategy: native
+      clippy: true
+
+  test-linux-x64:
+    name: Test linux-x64
+    needs: build-linux-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      target: x86_64-unknown-linux-gnu
+      runs-on: ubuntu-24.04
+      suite: ${{ matrix.suite }}
+
+  build-windows-x64:
+    name: Build windows-x64
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      target: x86_64-pc-windows-msvc
+      runs-on: ubuntu-24.04
+      strategy: soldr
+      # The Windows x64 cfg surface.
+      clippy: true
+
+  test-windows-x64:
+    name: Test windows-x64
+    needs: build-windows-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      target: x86_64-pc-windows-msvc
+      runs-on: windows-2025
+      suite: ${{ matrix.suite }}
+
+  # macOS ARM is core because it cross-compiles on Linux like every other
+  # triple. `soldr prepare --target aarch64-apple-darwin` provisions the
+  # target-shaped Apple SDK, which is what supplies the `-framework Accelerate`
+  # that vendor/whisper-rs-sys/build.rs:27-28 emits unconditionally for apple
+  # targets. Before that, darwin needed either a hand-fetched SDK behind a
+  # MACOS_SDK_URL repo variable or a cold C++ build on a native macOS runner --
+  # the scarcest runner class, and a ~20 minute tax on every PR push.
+  build-macos-arm:
+    name: Build macos-arm
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      target: aarch64-apple-darwin
+      runs-on: ubuntu-24.04
+      strategy: soldr
+      # macOS-only modules are not covered by Linux's cfg(unix).
+      clippy: true
+
+  test-macos-arm:
+    name: Test macos-arm
+    needs: build-macos-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      target: aarch64-apple-darwin
+      runs-on: macos-15
+      suite: ${{ matrix.suite }}
+
+  # ----------------------------------------------------------------- full ---
+  # Second architecture of each OS. ABI/codegen coverage, not behavioural
+  # coverage. Runs on main, in the merge queue, on workflow_dispatch, and on
+  # PRs carrying the `ci:full` label. main pushes are what keep every triple's
+  # build cache warm for PRs to restore from.
+
+  build-linux-arm:
+    name: Build linux-arm
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      target: aarch64-unknown-linux-gnu
+      runs-on: ubuntu-24.04
+      strategy: zigbuild
+      clippy: false
+
+  test-linux-arm:
+    name: Test linux-arm
+    needs: build-linux-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      target: aarch64-unknown-linux-gnu
+      runs-on: ubuntu-24.04-arm
+      suite: ${{ matrix.suite }}
+
+  build-windows-arm:
+    name: Build windows-arm
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      target: aarch64-pc-windows-msvc
+      runs-on: ubuntu-24.04
+      # The cheapest cross in the set: whisper-rs is cfg-excluded on this
+      # triple (crates/clud-bin/Cargo.toml:149), so there is no C++ or CMake
+      # at all -- only ring/blake3 need the MSVC CRT that `soldr prepare`
+      # provisions.
+      strategy: soldr
+      # Windows ARM has target-specific voice worker code.
+      clippy: true
+
+  test-windows-arm:
+    name: Test windows-arm
+    needs: build-windows-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      target: aarch64-pc-windows-msvc
+      runs-on: windows-11-arm
+      suite: ${{ matrix.suite }}
+
+  build-macos-x64:
+    name: Build macos-x64
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    uses: ./.github/workflows/_build-target.yml
+    with:
+      target: x86_64-apple-darwin
+      runs-on: ubuntu-24.04
+      strategy: soldr
+      clippy: false
+
+  test-macos-x64:
+    name: Test macos-x64
+    needs: build-macos-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+    uses: ./.github/workflows/_run-tests.yml
+    with:
+      target: x86_64-apple-darwin
+      runs-on: macos-15-intel
+      suite: ${{ matrix.suite }}
+
+  # ---------------------------------------------------------------- gate ----
+  # Single required status check. Branch protection points here, so adding or
+  # removing a triple never requires touching branch-protection settings.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs:
+      - static
+      - dylint
+      - build-linux-x64
+      - test-linux-x64
+      - build-windows-x64
+      - test-windows-x64
+      - build-macos-arm
+      - test-macos-arm
+      - build-linux-arm
+      - test-linux-arm
+      - build-windows-arm
+      - test-windows-arm
+      - build-macos-x64
+      - test-macos-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # `always()` plus explicit result inspection is required: a failing
+      # `needs` would otherwise skip this job and leave the check pending
+      # forever rather than reporting red.
+      #
+      # `skipped` is treated as success on purpose -- tier gating skips the
+      # full-tier legs on ordinary PRs. But the core legs must never be
+      # skipped, so they are asserted individually below: without that, a
+      # malformed `if:` could silently green a run in which nothing was built
+      # and nothing was tested.
+      - name: Check results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          CORE: >-
+            ${{ needs.static.result }}
+            ${{ needs.build-linux-x64.result }}
+            ${{ needs.test-linux-x64.result }}
+            ${{ needs.build-windows-x64.result }}
+            ${{ needs.test-windows-x64.result }}
+            ${{ needs.build-macos-arm.result }}
+            ${{ needs.test-macos-arm.result }}
+          FULL_REQUIRED: >-
+            ${{ github.event_name != 'pull_request'
+                || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          FULL: >-
+            ${{ needs.build-linux-arm.result }}
+            ${{ needs.test-linux-arm.result }}
+            ${{ needs.build-windows-arm.result }}
+            ${{ needs.test-windows-arm.result }}
+            ${{ needs.build-macos-x64.result }}
+            ${{ needs.test-macos-x64.result }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -qE '"result": *"(failure|cancelled)"'; then
+            echo "::error::one or more CI jobs failed or were cancelled"
+            exit 1
+          fi
+          for result in $CORE; do
+            if [ "$result" != "success" ]; then
+              echo "::error::a core lane did not run to success (got '$result')"
+              exit 1
+            fi
+          done
+          if [ "$FULL_REQUIRED" = "true" ]; then
+            for result in $FULL; do
+              if [ "$result" != "success" ]; then
+                echo "::error::a full-tier lane did not run to success (got '$result')"
+                exit 1
+              fi
+            done
+          fi

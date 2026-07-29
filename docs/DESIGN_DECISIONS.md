@@ -662,17 +662,21 @@ on CI's soldr versions, but by substring (`"0.8.0" in line`), which
 moved to 0.8.27.
 
 **Decision:** Pin the backend exactly (`soldr==0.8.28`, the current release)
-and treat the backend pin, every `setup-soldr` `version:` input, and
-`./install`'s default as **one decision with three spellings**.
+and treat the backend pin, every checkable `setup-soldr` version under
+`.github/`, and `./install`'s default as **one decision with three
+spellings**. A composite action may forward an input into `with.version`, but
+that input must have a literal default that can be compared with the pin.
 `test_packaging_metadata.py::test_soldr_versions_move_in_lockstep` parses the
 exact version out of `build-system.requires` and asserts all three declare it.
 Two sites had already drifted unnoticed and are corrected here: `dylint.yml`
 sat on 0.8.0, and `./install` on 0.7.11. Nothing caught either, because the
 previous test compared by substring (`"0.8.0" in line`, which `"0.8.27"` does
-not contain) and never looked outside `.github/workflows/`. The test also
-rejects a non-exact requirement outright, so reverting to a floor fails
-loudly rather than silently reopening the hole, without asserting the active
-pin as a separate test expectation that would become a fourth edit site.
+not contain) and never looked outside `.github/workflows/`. The guard now
+checks both workflows and composite actions, including the central
+`setup-build` action's forwarded input default. It also rejects a non-exact
+requirement outright, so reverting to a floor fails loudly rather than
+silently reopening the hole, without asserting the active pin as a separate
+test expectation that would become a fourth edit site.
 
 Raising `./install` required a fix, not just a number: soldr 0.8.x stopped
 publishing `.tar.gz`/`.zip` and ships `.tar.zst`, which needs a `zstd` binary
