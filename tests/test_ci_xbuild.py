@@ -96,3 +96,22 @@ def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
     assert "CMAKE_RC_COMPILER" not in env
     assert "CMAKE_MT" not in env
     assert env["RUSTFLAGS"] == "-C debuginfo=0 -C link-arg=advapi32.lib"
+
+
+def test_msvc_exceptions_are_enabled_only_for_windows_soldr() -> None:
+    windows = xbuild.whisper_env(
+        "x86_64-pc-windows-msvc",
+        "soldr",
+        {"CXXFLAGS": "-g0"},
+    )
+    assert windows["CXXFLAGS"] == "-g0 /EHsc"
+    assert "CMAKE_CXX_FLAGS" not in windows
+
+    other_strategies = (
+        ("x86_64-pc-windows-msvc", "native"),
+        ("aarch64-apple-darwin", "soldr"),
+        ("aarch64-unknown-linux-gnu", "zigbuild"),
+    )
+    for target, strategy in other_strategies:
+        env = xbuild.whisper_env(target, strategy, {"CXXFLAGS": "-g0"})
+        assert env["CXXFLAGS"] == "-g0"

@@ -116,6 +116,11 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         env["CMAKE_SYSTEM_NAME"] = "Windows"
         env["CC"] = "clang-cl"
         env["CXX"] = "clang-cl"
+        # clang-cl disables C++ exceptions unless an /EH mode is selected,
+        # while ggml's gguf.cpp uses try/catch. Keep this in CXXFLAGS so the
+        # cc/cmake crates merge it with soldr's target-specific SDK includes.
+        cxx_flags = env.get("CXXFLAGS", "")
+        env["CXXFLAGS"] = f"{cxx_flags} /EHsc".strip()
         # CMake's executable compiler probe needs Windows rc/mt tools that are
         # not part of this Linux-hosted toolchain. Whisper builds static libs,
         # so a static-library probe validates the compiler without those tools.
