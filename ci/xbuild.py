@@ -111,10 +111,16 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         if sdk:
             env["CMAKE_OSX_SYSROOT"] = sdk
         env["CMAKE_SYSTEM_NAME"] = "Darwin"
+        env["CMAKE_INSTALL_NAME_TOOL"] = "llvm-install-name-tool"
     elif _is_windows(target) and strategy == "soldr":
         env["CMAKE_SYSTEM_NAME"] = "Windows"
         env["CC"] = "clang-cl"
         env["CXX"] = "clang-cl"
+        # The Linux host has LLVM's MSVC-compatible resource/manifest tools,
+        # not the Windows SDK's rc.exe/mt.exe that CMake otherwise searches for.
+        env["RC"] = "llvm-rc"
+        env["CMAKE_RC_COMPILER"] = "llvm-rc"
+        env["CMAKE_MT"] = "llvm-mt"
     elif strategy == "zigbuild":
         env["CMAKE_SYSTEM_NAME"] = "Linux"
 

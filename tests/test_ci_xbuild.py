@@ -77,6 +77,7 @@ def test_darwin_soldr_env_forwards_the_prepared_sdk_to_cmake() -> None:
     assert env["SDKROOT"] == "/opt/soldr/MacOSX.sdk"
     assert env["CMAKE_OSX_SYSROOT"] == "/opt/soldr/MacOSX.sdk"
     assert env["CMAKE_SYSTEM_NAME"] == "Darwin"
+    assert env["CMAKE_INSTALL_NAME_TOOL"] == "llvm-install-name-tool"
     assert env["GGML_BLAS"] == "OFF"
     assert env["GGML_METAL"] == "OFF"
 
@@ -90,4 +91,7 @@ def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
     assert env["CMAKE_SYSTEM_NAME"] == "Windows"
     assert env["CC"] == "clang-cl"
     assert env["CXX"] == "clang-cl"
+    assert env["RC"] == "llvm-rc"
+    assert env["CMAKE_RC_COMPILER"] == "llvm-rc"
+    assert env["CMAKE_MT"] == "llvm-mt"
     assert env["RUSTFLAGS"] == "-C debuginfo=0 -C link-arg=advapi32.lib"
