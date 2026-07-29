@@ -98,6 +98,36 @@ def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
     assert env["RUSTFLAGS"] == "-C debuginfo=0 -C link-arg=advapi32.lib"
 
 
+def test_windows_soldr_bindgen_uses_target_sdk_headers_when_available() -> None:
+    cflags_key = "CFLAGS_x86_64_pc_windows_msvc"
+    bindgen_key = "BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc"
+    windows = xbuild.whisper_env(
+        "x86_64-pc-windows-msvc",
+        "soldr",
+        {
+            cflags_key: (
+                "/imsvc/opt/xwin/crt/include "
+                "/imsvc/opt/xwin/sdk/include/ucrt "
+                "/imsvc/opt/xwin/sdk/include/cppwinrt"
+            )
+        },
+    )
+    assert "WHISPER_DONT_GENERATE_BINDINGS" not in windows
+    assert windows[bindgen_key] == (
+        "-I/opt/xwin/crt/include "
+        "-I/opt/xwin/sdk/include/ucrt "
+        "-I/opt/xwin/sdk/include/cppwinrt"
+    )
+
+    no_sdk = xbuild.whisper_env("x86_64-pc-windows-msvc", "soldr", {})
+    assert no_sdk["WHISPER_DONT_GENERATE_BINDINGS"] == "1"
+    assert bindgen_key not in no_sdk
+
+    darwin = xbuild.whisper_env("aarch64-apple-darwin", "soldr", {})
+    assert darwin["WHISPER_DONT_GENERATE_BINDINGS"] == "1"
+    assert bindgen_key not in darwin
+
+
 def test_msvc_exceptions_are_enabled_only_for_windows_soldr() -> None:
     windows = xbuild.whisper_env(
         "x86_64-pc-windows-msvc",

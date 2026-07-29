@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -92,9 +93,9 @@ def _limit_address_space() -> None:
 
 def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, str]:
     env = env.copy()
-    # build.rs:127-129 -- use the checked-in src/bindings.rs instead of running
-    # bindgen against target headers we do not have. build.rs:169-182 already
-    # falls back to these on failure; this makes it deterministic.
+    # Cross targets default to the checked-in bindings when their SDK headers
+    # are unavailable. Windows soldr overrides this below once it finds the
+    # target-scoped Xwin header flags exported by `soldr prepare`.
     if strategy != "native":
         env["WHISPER_DONT_GENERATE_BINDINGS"] = "1"
         env["GGML_NATIVE"] = "OFF"  # no -march=native for a foreign CPU
@@ -116,6 +117,21 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         env["CMAKE_SYSTEM_NAME"] = "Windows"
         env["CC"] = "clang-cl"
         env["CXX"] = "clang-cl"
+        target_suffix = target.replace("-", "_")
+        bindgen_key = f"BINDGEN_EXTRA_CLANG_ARGS_{target_suffix}"
+        bindgen_args = env.get(f"BINDGEN_EXTRA_CLANG_ARGS_{target}") or env.get(bindgen_key)
+        if not bindgen_args:
+            target_cflags = env.get(f"CFLAGS_{target_suffix}", "")
+            include_args = [
+                f"-I{arg.removeprefix('/imsvc')}"
+                for arg in shlex.split(target_cflags)
+                if arg.startswith("/imsvc") and arg != "/imsvc"
+            ]
+            if include_args:
+                bindgen_args = shlex.join(include_args)
+                env[bindgen_key] = bindgen_args
+        if bindgen_args:
+            env.pop("WHISPER_DONT_GENERATE_BINDINGS", None)
         # clang-cl disables C++ exceptions unless an /EH mode is selected,
         # while ggml's gguf.cpp uses try/catch. Keep this in CXXFLAGS so the
         # cc/cmake crates merge it with soldr's target-specific SDK includes.
