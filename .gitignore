@@ -15,6 +15,10 @@ dist/
 build/
 .eggs/
 
+# CI staging scratch (ci/bundle.py, ci/xbuild.py). Deliberately not `build/`:
+# `build` is a tracked shell script at the repo root.
+.ci-build/
+
 # Virtual environments
 .venv/
 venv/
