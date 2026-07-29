@@ -116,11 +116,10 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         env["CMAKE_SYSTEM_NAME"] = "Windows"
         env["CC"] = "clang-cl"
         env["CXX"] = "clang-cl"
-        # The Linux host has LLVM's MSVC-compatible resource/manifest tools,
-        # not the Windows SDK's rc.exe/mt.exe that CMake otherwise searches for.
-        env["RC"] = "llvm-rc"
-        env["CMAKE_RC_COMPILER"] = "llvm-rc"
-        env["CMAKE_MT"] = "llvm-mt"
+        # CMake's executable compiler probe needs Windows rc/mt tools that are
+        # not part of this Linux-hosted toolchain. Whisper builds static libs,
+        # so a static-library probe validates the compiler without those tools.
+        env["CMAKE_TRY_COMPILE_TARGET_TYPE"] = "STATIC_LIBRARY"
     elif strategy == "zigbuild":
         env["CMAKE_SYSTEM_NAME"] = "Linux"
 

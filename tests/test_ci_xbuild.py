@@ -91,7 +91,8 @@ def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
     assert env["CMAKE_SYSTEM_NAME"] == "Windows"
     assert env["CC"] == "clang-cl"
     assert env["CXX"] == "clang-cl"
-    assert env["RC"] == "llvm-rc"
-    assert env["CMAKE_RC_COMPILER"] == "llvm-rc"
-    assert env["CMAKE_MT"] == "llvm-mt"
+    assert env["CMAKE_TRY_COMPILE_TARGET_TYPE"] == "STATIC_LIBRARY"
+    assert "RC" not in env
+    assert "CMAKE_RC_COMPILER" not in env
+    assert "CMAKE_MT" not in env
     assert env["RUSTFLAGS"] == "-C debuginfo=0 -C link-arg=advapi32.lib"
