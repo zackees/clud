@@ -80,6 +80,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import ntpath
 import os
@@ -88,6 +89,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -105,6 +107,18 @@ EXIT_NOT_AUTO_EXECUTED = 64
 # FastLED WASM `8cf7f663` Windows Docker/WSL readiness-retry precedent).
 READY_ATTEMPTS = 10
 READY_INTERVAL_SECONDS = 2.0
+
+# Windows process creation flags are only exported by subprocess on Windows.
+# Keep their documented values available so the launcher contract remains
+# unit-testable on Linux and macOS CI.
+WINDOWS_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+DAEMON_ENV_VAR = "RUNNING_PROCESS_IS_DAEMON"
+AUTHORITATIVE_WINDOWS_DOCKER_PROCESSES = {
+    "docker desktop": "Docker Desktop",
+    "com.docker.backend": "com.docker.backend",
+    "com.docker.docker": "com.docker.docker",
+}
 
 # Advisory host-resource thresholds. Crossing them never blocks a healthy
 # daemon — they surface as advisories, not failures.
@@ -755,9 +769,21 @@ def docker_cli_present() -> bool:
     return shutil.which("docker") is not None
 
 
-def _run(cmd: list[str], timeout: float = 20.0) -> subprocess.CompletedProcess | None:
+def _run(
+    cmd: list[str],
+    timeout: float = 20.0,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess | None:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -876,6 +902,30 @@ def list_docker_processes() -> list[str]:
         if name.lower() in haystack:
             found.append(name)
     return found
+
+
+def _parse_windows_docker_process_identities(text: str) -> set[tuple[str, int]]:
+    identities: set[tuple[str, int]] = set()
+    for row in csv.reader(text.splitlines()):
+        if len(row) < 2:
+            continue
+        image = ntpath.splitext(row[0])[0].lower()
+        name = AUTHORITATIVE_WINDOWS_DOCKER_PROCESSES.get(image)
+        if name is None:
+            continue
+        try:
+            pid = int(row[1].replace(",", ""))
+        except ValueError:
+            continue
+        identities.add((name, pid))
+    return identities
+
+
+def _windows_docker_process_identities() -> set[tuple[str, int]]:
+    result = _run(["tasklist", "/FO", "CSV", "/NH"])
+    if result is None or result.returncode != 0:
+        return set()
+    return _parse_windows_docker_process_identities(result.stdout)
 
 
 def wsl_status() -> str | None:
@@ -1288,7 +1338,8 @@ def _run_recovery(args: argparse.Namespace, *, label: str) -> int:
         return EXIT_REFUSED_CONFIRM
 
     out.write(f"\nexecuting {label} (containers will stop; images/volumes preserved)...\n")
-    _execute_restart(system, hard=(label == "reset"))
+    for detail in _execute_restart(system, hard=(label == "reset")):
+        out.write(f"  launch: {detail}\n")
     ready = wait_for_docker()
     if not ready:
         sys.stderr.write(f"{label} FAILED: engine not ready after bounded wait\n")
@@ -1306,17 +1357,130 @@ def _run_recovery(args: argparse.Namespace, *, label: str) -> int:
     return EXIT_UNHEALTHY
 
 
-def _execute_restart(system: str, *, hard: bool) -> None:
+def _command_result_detail(label: str, result: subprocess.CompletedProcess | None) -> str:
+    if result is None:
+        return f"{label}: command could not be executed"
+    output = (result.stderr or result.stdout).strip().replace("\r", " ").replace("\n", " ")
+    suffix = f": {output}" if output else ""
+    return f"{label}: exit {result.returncode}{suffix}"
+
+
+def _windows_docker_desktop_executable(
+    *, env: Mapping[str, str] | None = None, exists=os.path.isfile
+) -> str | None:
+    """Resolve Docker Desktop's executable without depending on PATH."""
+    values = os.environ if env is None else env
+    roots: list[str] = []
+    for key in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        value = values.get(key)
+        if value and ntpath.normcase(value) not in {ntpath.normcase(root) for root in roots}:
+            roots.append(value)
+
+    candidates = [
+        ntpath.join(root, "Docker", "Docker", "Docker Desktop.exe") for root in roots
+    ]
+    localappdata = values.get("LOCALAPPDATA")
+    if localappdata:
+        candidates.append(ntpath.join(localappdata, "Docker", "Docker Desktop.exe"))
+
+    return next((candidate for candidate in candidates if exists(candidate)), None)
+
+
+def _declared_daemon_environment() -> dict[str, str]:
+    child_env = os.environ.copy()
+    child_env[DAEMON_ENV_VAR] = "1"
+    return child_env
+
+
+def _launch_windows_docker_desktop(executable: str) -> tuple[bool, str]:
+    """Launch Desktop independently and positively declare it as a daemon."""
+    flags = WINDOWS_DETACHED_PROCESS | WINDOWS_CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(
+            [executable],
+            cwd=ntpath.dirname(executable),
+            env=_declared_daemon_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=flags,
+        )
+    except OSError as exc:
+        return False, f"direct Docker Desktop launch failed for {executable}: {exc}"
+    return True, f"direct Docker Desktop launch started {executable} (daemon marker set)"
+
+
+def _windows_desktop_launch_observation(
+    baseline: set[tuple[str, int]],
+) -> str | None:
+    if docker_server_version() is not None:
+        return "Docker server API observed after CLI launch"
+    new_processes = sorted(_windows_docker_process_identities() - baseline)
+    if new_processes:
+        rendered = ", ".join(f"{name} (PID {pid})" for name, pid in new_processes)
+        return "new Docker runtime process observed after CLI launch: " + rendered
+    return None
+
+
+def _wait_for_windows_desktop_launch(
+    check,
+    *,
+    attempts: int = 3,
+    interval: float = 1.0,
+    sleep=time.sleep,
+) -> str | None:
+    """Briefly observe an asynchronous CLI launch before using the fallback."""
+    for index in range(attempts):
+        observation = check()
+        if observation is not None:
+            return observation
+        if index < attempts - 1:
+            sleep(interval)
+    return None
+
+
+def _execute_restart(system: str, *, hard: bool) -> list[str]:
+    details: list[str] = []
     if system == "Windows":
         if hard:
-            _run(["wsl", "--shutdown"], timeout=60.0)
-        if _run(["docker", "desktop", "start"], timeout=60.0) is None:
-            _run(["cmd", "/c", "start", "", "Docker Desktop.exe"], timeout=30.0)
+            wsl = _run(["wsl", "--shutdown"], timeout=60.0)
+            details.append(_command_result_detail("wsl --shutdown", wsl))
+
+        baseline = _windows_docker_process_identities()
+        cli = _run(
+            ["docker", "desktop", "start"],
+            timeout=60.0,
+            env=_declared_daemon_environment(),
+        )
+        details.append(_command_result_detail("docker desktop start", cli))
+        if cli is not None and cli.returncode == 0:
+            observation = _wait_for_windows_desktop_launch(
+                check=lambda: _windows_desktop_launch_observation(baseline)
+            )
+            if observation is not None:
+                details.append(observation)
+                return details
+            details.append(
+                "CLI reported success but no Docker server API or runtime process was observed"
+            )
+
+        executable = _windows_docker_desktop_executable()
+        if executable is None:
+            details.append("direct Docker Desktop launch unavailable: executable not found")
+            return details
+        _ok, detail = _launch_windows_docker_desktop(executable)
+        details.append(detail)
     elif system == "Darwin":
-        _run(["open", "-a", "Docker"], timeout=30.0)
+        result = _run(["open", "-a", "Docker"], timeout=30.0)
+        details.append(_command_result_detail("open -a Docker", result))
     else:
-        if _run(["sudo", "systemctl", "restart", "docker"], timeout=60.0) is None:
-            _run(["sudo", "service", "docker", "restart"], timeout=60.0)
+        result = _run(["sudo", "systemctl", "restart", "docker"], timeout=60.0)
+        details.append(_command_result_detail("systemctl restart docker", result))
+        if result is None:
+            fallback = _run(["sudo", "service", "docker", "restart"], timeout=60.0)
+            details.append(_command_result_detail("service docker restart", fallback))
+    return details
 
 
 def cmd_restart(args: argparse.Namespace) -> int:

@@ -358,6 +358,177 @@ def test_verify_recovery_checks_api_then_container(dr, monkeypatch):
     assert any("unreachable" in d for d in details)
 
 
+def test_windows_restart_falls_back_after_cli_false_success(dr, monkeypatch):
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"],
+        0,
+        stdout="Docker Desktop is already running\n",
+        stderr="",
+    )
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    launched: list[str] = []
+    cli_kwargs = {}
+
+    def run_cli(*_args, **kwargs):
+        cli_kwargs.update(kwargs)
+        return cli
+
+    monkeypatch.setattr(dr, "_run", run_cli)
+    monkeypatch.setattr(dr, "_wait_for_windows_desktop_launch", lambda **_kwargs: None)
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop",
+        lambda path: (launched.append(path) is None, f"direct launch started {path}"),
+    )
+
+    details = dr._execute_restart("Windows", hard=False)
+
+    assert launched == [desktop]
+    assert cli_kwargs["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert any("already running" in detail.lower() for detail in details)
+    assert any("direct" in detail.lower() for detail in details)
+
+
+def test_windows_restart_falls_back_after_cli_failure(dr, monkeypatch):
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"], 1, stdout="", stderr="backend unavailable"
+    )
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    launched: list[str] = []
+
+    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", lambda: desktop)
+    monkeypatch.setattr(
+        dr,
+        "_launch_windows_docker_desktop",
+        lambda path: (launched.append(path) is None, f"started {path}"),
+    )
+
+    details = dr._execute_restart("Windows", hard=False)
+
+    assert launched == [desktop]
+    assert any("exit 1" in detail.lower() for detail in details)
+
+
+def test_windows_restart_does_not_double_launch_after_cli_start(dr, monkeypatch):
+    cli = dr.subprocess.CompletedProcess(
+        ["docker", "desktop", "start"], 0, stdout="Docker Desktop started\n", stderr=""
+    )
+
+    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
+    monkeypatch.setattr(
+        dr,
+        "_wait_for_windows_desktop_launch",
+        lambda **_kwargs: "new Docker runtime process observed after CLI launch: Docker Desktop",
+    )
+
+    def unexpected_fallback():
+        raise AssertionError("healthy CLI launch must not resolve or start a fallback")
+
+    monkeypatch.setattr(dr, "_windows_docker_desktop_executable", unexpected_fallback)
+
+    details = dr._execute_restart("Windows", hard=False)
+
+    assert any("runtime process observed" in detail.lower() for detail in details)
+
+
+def test_direct_windows_launch_is_detached_and_declared_daemon(dr, monkeypatch):
+    desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(dr.subprocess, "Popen", fake_popen)
+
+    ok, detail = dr._launch_windows_docker_desktop(desktop)
+
+    assert ok is True
+    assert captured["argv"] == [desktop]
+    assert captured["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert captured["stdin"] is dr.subprocess.DEVNULL
+    assert captured["stdout"] is dr.subprocess.DEVNULL
+    assert captured["stderr"] is dr.subprocess.DEVNULL
+    assert captured["close_fds"] is True
+    assert captured["creationflags"] & dr.WINDOWS_DETACHED_PROCESS
+    assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert "direct Docker Desktop launch" in detail
+
+
+def test_windows_launch_observation_ignores_stale_authoritative_process(dr, monkeypatch):
+    baseline = {("com.docker.backend", 123)}
+    monkeypatch.setattr(dr, "docker_server_version", lambda: None)
+    monkeypatch.setattr(dr, "_windows_docker_process_identities", lambda: baseline)
+    assert dr._windows_desktop_launch_observation(baseline) is None
+
+    monkeypatch.setattr(
+        dr,
+        "_windows_docker_process_identities",
+        lambda: baseline | {("Docker Desktop", 456)},
+    )
+    observation = dr._windows_desktop_launch_observation(baseline)
+    assert observation is not None
+    assert "Docker Desktop (PID 456)" in observation
+
+
+def test_windows_process_identity_parser_filters_helpers(dr):
+    tasklist = "\n".join(
+        [
+            '"Docker Desktop.exe","101","Console","1","123,456 K"',
+            '"com.docker.backend.exe","202","Console","1","50,000 K"',
+            '"com.docker.build.exe","303","Console","1","40,000 K"',
+            '"dockerd.exe","404","Console","1","30,000 K"',
+        ]
+    )
+
+    assert dr._parse_windows_docker_process_identities(tasklist) == {
+        ("Docker Desktop", 101),
+        ("com.docker.backend", 202),
+    }
+
+
+def test_windows_launch_observation_wait_is_bounded(dr):
+    calls = {"count": 0}
+    sleeps: list[float] = []
+
+    def check():
+        calls["count"] += 1
+        return "observed" if calls["count"] == 3 else None
+
+    observation = dr._wait_for_windows_desktop_launch(
+        check=check, attempts=4, interval=0.5, sleep=sleeps.append
+    )
+
+    assert observation == "observed"
+    assert calls["count"] == 3
+    assert sleeps == [0.5, 0.5]
+
+
+def test_windows_desktop_executable_resolves_program_files_without_path(dr):
+    expected = r"D:\Apps\Docker\Docker\Docker Desktop.exe"
+    checked: list[str] = []
+
+    def exists(path):
+        checked.append(path)
+        return path == expected
+
+    actual = dr._windows_docker_desktop_executable(
+        env={
+            "ProgramFiles": r"D:\Apps",
+            "LOCALAPPDATA": r"C:\Users\me\AppData\Local",
+            "PATH": r"C:\not-docker",
+        },
+        exists=exists,
+    )
+
+    assert actual == expected
+    assert checked[0] == expected
+    assert all("not-docker" not in path for path in checked)
+
+
 # --------------------------------------------------------------------------
 # Recovery plans + doctor read-only guarantee.
 # --------------------------------------------------------------------------
