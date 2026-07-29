@@ -312,11 +312,43 @@ pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
 /// [`scan_and_report`], it does NOT restrict to descendants of the current
 /// process — anything CLUD-tagged with a dead originator is fair game.
 pub fn reap_orphans(opts: &ReapOpts) -> ReapOutcome {
+    reap_orphans_filtered(opts, &mut |_| true)
+}
+
+/// How long a freshly observed orphan is left alone by the *periodic* sweep
+/// (issue #465 rule 4, re-homed here in #614 when the unwired `orphan_sweep`
+/// decision module was retired).
+///
+/// A clud that just exited may have its on-exit `Drop` guard mid-reap.
+/// [`scan_and_report`] owns that cleanup; a periodic sweep racing it would
+/// kill processes out from under the guard and confuse both sets of logs.
+/// Waiting costs one tick.
+///
+/// Deliberately *not* applied to the explicit paths (`clud slay`, the on-exit
+/// `ReapOrphans` request): there the caller has asked for a reap now, and the
+/// race this guards against is precisely the caller itself.
+pub const ORPHAN_GRACE_MS: u64 = 10_000;
+
+/// [`reap_orphans`] with a caller-supplied admission test.
+///
+/// `admit` is invoked once per dead-originator candidate, in scan order, and
+/// returning `false` spares that PID for this pass. It exists so the periodic
+/// sweeper can apply [`ORPHAN_GRACE_MS`] without paying for a second
+/// full-process environment scan (the scan reads `environ` for every process
+/// on the host and is the expensive half of this function).
+///
+/// `admit` is called for *every* candidate even after one is rejected, so a
+/// caller may use it to record which PIDs it observed this pass.
+pub fn reap_orphans_filtered(opts: &ReapOpts, admit: &mut dyn FnMut(u32) -> bool) -> ReapOutcome {
     let all = running_process::originator::find_processes_by_originator("CLUD");
     let daemons = declared_daemon_pids();
     let orphans: Vec<Descendant> = all
         .into_iter()
         .filter(|p| !p.parent_alive)
+        // `filter` short-circuits nothing here: `admit` is invoked for each
+        // candidate regardless of earlier results, which is what lets the
+        // sweeper use it as an observation hook as well as a gate.
+        .filter(|p| admit(p.pid))
         .map(|p| Descendant {
             pid: p.pid,
             name: p.name,
