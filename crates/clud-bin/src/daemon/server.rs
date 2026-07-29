@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -12,6 +12,7 @@ use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, Std
 use serde_json::json;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
+use crate::orphan_reaper;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
@@ -714,21 +715,27 @@ const ORPHAN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<AtomicBool>) {
     let _ = thread::Builder::new()
         .name("clud-orphan-sweep".to_string())
-        .spawn(move || loop {
-            // Sleep in 1-second slices so shutdown is observed within ~1s.
-            let mut remaining = ORPHAN_SWEEP_INTERVAL;
-            while remaining > Duration::ZERO {
+        .spawn(move || {
+            // When each still-present orphan candidate was first observed.
+            // Thread-local to the sweeper: the grace window (#614) only
+            // applies to this periodic path, never to an explicit request.
+            let mut first_seen: HashMap<u32, Instant> = HashMap::new();
+            loop {
+                // Sleep in 1-second slices so shutdown is observed within ~1s.
+                let mut remaining = ORPHAN_SWEEP_INTERVAL;
+                while remaining > Duration::ZERO {
+                    if shutdown_requested.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let slice = remaining.min(Duration::from_secs(1));
+                    thread::sleep(slice);
+                    remaining = remaining.saturating_sub(slice);
+                }
                 if shutdown_requested.load(Ordering::SeqCst) {
                     return;
                 }
-                let slice = remaining.min(Duration::from_secs(1));
-                thread::sleep(slice);
-                remaining = remaining.saturating_sub(slice);
+                run_orphan_sweep(&state_dir, "periodic", None, Some(&mut first_seen));
             }
-            if shutdown_requested.load(Ordering::SeqCst) {
-                return;
-            }
-            run_orphan_sweep(&state_dir, "periodic", None);
         });
 }
 
@@ -737,10 +744,26 @@ fn spawn_orphan_reap_once(
     trigger: &'static str,
     request_id: Option<u64>,
 ) {
-    thread::spawn(move || run_orphan_sweep(&state_dir, trigger, request_id));
+    thread::spawn(move || run_orphan_sweep(&state_dir, trigger, request_id, None));
 }
 
-fn run_orphan_sweep(state_dir: &Path, trigger: &'static str, request_id: Option<u64>) {
+/// Decide which candidates clear the grace window, and refresh `first_seen`.
+///
+/// Returns the admission closure's verdict for `pid`. A PID seen for the first
+/// time is recorded and spared; on a later tick, once it has been visible for
+/// [`ORPHAN_GRACE_MS`], it is admitted. Entries for PIDs that stop appearing
+/// are pruned by the caller so the map cannot grow without bound.
+fn grace_admits(first_seen: &mut HashMap<u32, Instant>, pid: u32, now: Instant) -> bool {
+    let first = *first_seen.entry(pid).or_insert(now);
+    now.duration_since(first) >= Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+}
+
+fn run_orphan_sweep(
+    state_dir: &Path,
+    trigger: &'static str,
+    request_id: Option<u64>,
+    grace: Option<&mut HashMap<u32, Instant>>,
+) {
     daemon_events::log_event(
         state_dir,
         "orphan_sweep_started",
@@ -750,13 +773,35 @@ fn run_orphan_sweep(state_dir: &Path, trigger: &'static str, request_id: Option<
         ],
     );
     let started = Instant::now();
-    let outcome = crate::orphan_reaper::reap_orphans(&crate::orphan_reaper::ReapOpts {
+    let opts = orphan_reaper::ReapOpts {
         keep: false,
         // Quiet: the daemon log shouldn't fill stderr with per-tick
         // scan reports; the JSONL stream is the durable diagnostic surface.
         quiet: true,
         explain: false,
-    });
+    };
+    // `deferred` is only meaningful on the periodic path; explicit requests
+    // reap immediately (see `ORPHAN_GRACE_MS`).
+    let mut deferred: Vec<u32> = Vec::new();
+    let outcome = match grace {
+        Some(first_seen) => {
+            let now = Instant::now();
+            let mut observed: HashSet<u32> = HashSet::new();
+            let outcome = orphan_reaper::reap_orphans_filtered(&opts, &mut |pid| {
+                observed.insert(pid);
+                let admitted = grace_admits(first_seen, pid, now);
+                if !admitted {
+                    deferred.push(pid);
+                }
+                admitted
+            });
+            // Drop bookkeeping for PIDs that are gone, so a long-lived daemon
+            // doesn't accumulate an entry per orphan it has ever seen.
+            first_seen.retain(|pid, _| observed.contains(pid));
+            outcome
+        }
+        None => orphan_reaper::reap_orphans(&opts),
+    };
     // Candidates that were selected but never handed to `kill_tree` — today
     // that is the `--keep-orphans` path. Previously hardcoded to `[]`, which
     // reported "nothing was skipped" even when something was (issue #612):
@@ -781,6 +826,9 @@ fn run_orphan_sweep(state_dir: &Path, trigger: &'static str, request_id: Option<
             ("candidate_pids", json!(outcome.candidate_pids)),
             ("reaped_pids", json!(outcome.reaped_pids)),
             ("skipped_pids", json!(skipped_pids)),
+            // Candidates held back by the grace window this pass; they become
+            // eligible on a later tick if they are still around.
+            ("deferred_pids", json!(deferred)),
             ("reason", json!("dead_originator")),
             ("duration_ms", json!(started.elapsed().as_millis())),
         ],
@@ -1568,5 +1616,53 @@ mod tests {
             }
             other => panic!("expected ProcSnapshot, got {other:?}"),
         }
+    }
+
+    /// Issue #614: the periodic sweep must not reap a candidate the first
+    /// time it sees it. The on-exit `Drop` guard of the clud that just died
+    /// may still be working on that subtree.
+    #[test]
+    fn grace_window_spares_a_newly_observed_orphan() {
+        let mut first_seen: HashMap<u32, Instant> = HashMap::new();
+        let now = Instant::now();
+        assert!(!grace_admits(&mut first_seen, 4321, now));
+        assert!(first_seen.contains_key(&4321), "first sighting is recorded");
+    }
+
+    /// Once the candidate has been visible for the whole window it is
+    /// admitted. Uses a synthetic "now" in the future rather than sleeping.
+    #[test]
+    fn grace_window_admits_after_the_window_elapses() {
+        let mut first_seen: HashMap<u32, Instant> = HashMap::new();
+        let now = Instant::now();
+        assert!(!grace_admits(&mut first_seen, 4321, now));
+        let later = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS);
+        assert!(grace_admits(&mut first_seen, 4321, later));
+    }
+
+    /// A candidate still inside the window on a later tick stays spared --
+    /// the clock runs from first sighting, not from the current tick.
+    #[test]
+    fn grace_window_still_spares_just_inside_the_boundary() {
+        let mut first_seen: HashMap<u32, Instant> = HashMap::new();
+        let now = Instant::now();
+        assert!(!grace_admits(&mut first_seen, 4321, now));
+        let nearly = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS - 1);
+        assert!(!grace_admits(&mut first_seen, 4321, nearly));
+    }
+
+    /// Each PID is timed independently: an old candidate being admitted must
+    /// not drag a freshly-seen sibling in with it.
+    #[test]
+    fn grace_window_times_each_pid_independently() {
+        let mut first_seen: HashMap<u32, Instant> = HashMap::new();
+        let now = Instant::now();
+        assert!(!grace_admits(&mut first_seen, 100, now));
+        let later = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS);
+        assert!(grace_admits(&mut first_seen, 100, later));
+        assert!(
+            !grace_admits(&mut first_seen, 200, later),
+            "pid 200 was first seen at `later`, so its own window has not elapsed"
+        );
     }
 }
