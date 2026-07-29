@@ -7,8 +7,19 @@ instead of being smeared across YAML `if:` conditions.
 Three strategies:
 
     native    the build host's own triple (x86_64-unknown-linux-gnu)
-    zigbuild  cargo-zigbuild -- Linux -> aarch64-linux and Linux -> *-apple-darwin
-    xwin      cargo-xwin     -- Linux -> *-pc-windows-msvc
+    zigbuild  cargo-zigbuild -- Linux -> *-unknown-linux-gnu
+    soldr     `soldr build`  -- Linux -> *-pc-windows-msvc and -> *-apple-darwin
+
+`soldr` is the blessed surface (soldr docs/CROSS_COMPILE.md): `soldr prepare`
+provisions the sysroot in .github/actions/setup-build and exports the
+target-scoped Cargo/cc-rs/linker env, then `soldr build --target <triple>`
+links against it. `cargo xwin` / `cargo zigbuild --target *-apple-darwin` are
+documented there as the explicit legacy passthrough, so neither is used here.
+
+Only the link-producing `build` verb goes through `soldr build`. clippy, `cargo
+test --no-run` and maturin stay on the plain cargo front door: `soldr prepare`
+already exported the env they need, and `soldr <verb>` for an unknown verb falls
+into soldr's tool-fetch mode (it would try to resolve "test" on crates.io).
 
 Working around `vendor/whisper-rs-sys/build.rs`
 ----------------------------------------------
@@ -23,8 +34,8 @@ fixed from the environment rather than by patching vendored source:
   build.rs:342      `cfg!(target_os = "macos")` gates linking `ggml-blas`.
                     CMake still *builds* it (Apple BLAS defaults ON,
                     ggml/CMakeLists.txt:92-95) but the flag is never emitted.
-                    Fix: GGML_BLAS=OFF, which also drops the Accelerate
-                    dependency we cannot satisfy without a full SDK.
+                    Fix: GGML_BLAS=OFF. The hardcoded Accelerate link directive
+                    still requires the SDK that `soldr prepare` provisions.
 
 `build.rs:298-306` forwards any `WHISPER_*` / `GGML_*` / `CMAKE_*` env var
 straight into `cmake -D`, which is what makes both fixes possible from CI.
@@ -36,29 +47,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import platform
-import shutil
 import subprocess
 import sys
-import tarfile
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: Rust triple -> zig target triple. Zig pins a glibc version explicitly so the
-#: produced binary does not accidentally require the builder's newer glibc.
-ZIG_TARGETS = {
-    "aarch64-unknown-linux-gnu": "aarch64-linux-gnu.2.28",
-    "x86_64-unknown-linux-gnu": "x86_64-linux-gnu.2.28",
-    "aarch64-apple-darwin": "aarch64-macos",
-    "x86_64-apple-darwin": "x86_64-macos",
-}
-
 CMAKE_PROCESSOR = {"aarch64": "aarch64", "x86_64": "x86_64"}
+PACKAGE_MANAGER = "cargo"
 
-SDK_ROOT = ROOT / "build" / "macos-sdk"
 
 
 def _arch(target: str) -> str:
@@ -106,12 +104,14 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         # See module docstring, build.rs:342.
         env["GGML_BLAS"] = "OFF"
         env["GGML_METAL"] = "OFF"
-        sdk = env.get("SDKROOT") or (str(SDK_ROOT) if SDK_ROOT.is_dir() else "")
+        # SDKROOT is exported by `soldr prepare --target <apple-triple>
+        # --github-env "$GITHUB_ENV"` in .github/actions/setup-build; CMake
+        # needs the same path under its own variable name.
+        sdk = env.get("SDKROOT", "")
         if sdk:
-            env["SDKROOT"] = sdk
             env["CMAKE_OSX_SYSROOT"] = sdk
         env["CMAKE_SYSTEM_NAME"] = "Darwin"
-    elif _is_windows(target) and strategy == "xwin":
+    elif _is_windows(target) and strategy == "soldr":
         env["CMAKE_SYSTEM_NAME"] = "Windows"
         env["CC"] = "clang-cl"
         env["CXX"] = "clang-cl"
@@ -149,10 +149,18 @@ def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
     `cargo clippy --target` already provides.
     """
     verb = subcommand[0]
-    if strategy == "xwin":
-        return ["cargo", "xwin", *subcommand, "--target", target]
-    if strategy == "zigbuild" and verb != "clippy":
-        return ["cargo", "zigbuild", *subcommand, "--target", target]
+    if strategy == "soldr" and verb == "build":
+        # The blessed cross surface. Everything else under this strategy rides
+        # on the env `soldr prepare` exported -- see the module docstring.
+        return ["soldr", "build", *subcommand[1:], "--target", target]
+    if strategy == "zigbuild" and verb == "build":
+        return [PACKAGE_MANAGER, "zigbuild", *subcommand[1:], "--target", target]
+    if strategy == "zigbuild" and verb == "test":
+        # This wrapper is a build subcommand, not a transparent replacement
+        # for the test subcommand. Building `--tests` produces the same harness
+        # executables without trying to run foreign-architecture binaries.
+        options = [arg for arg in subcommand[1:] if arg != "--no-run"]
+        return [PACKAGE_MANAGER, "zigbuild", "--tests", *options, "--target", target]
     return ["cargo", *subcommand, "--target", target]
 
 
@@ -191,14 +199,6 @@ def cmd_compile(args: argparse.Namespace) -> int:
 
     if not args.with_tests:
         return 0
-
-    # The zombie-scan fixture (tests/integration/conftest.py:326-355) silently
-    # no-ops without this example binary, so build it explicitly rather than
-    # letting that coverage vanish.
-    examples = cargo_argv(
-        ["build", "--workspace", "--examples", *profile_args], args.target, args.strategy
-    )
-    run(examples, env)  # best-effort: not every workspace member has examples
 
     # `--message-format=json` is how we learn where cargo put each harness
     # binary; there is no stable path convention (they carry a hash suffix).
@@ -296,49 +296,13 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_provision_macos_sdk(_: argparse.Namespace) -> int:
-    """Fetch the macOS SDK used for Linux -> darwin cross-compilation.
-
-    `vendor/whisper-rs-sys/build.rs:27-28` emits `-framework Accelerate` for any
-    apple target with no feature to disable it, and cpal/rodio/arboard pull in
-    further system frameworks, so an SDK is unavoidable for a darwin cross.
-    Sourcing it is an Apple-licensing decision, which is why the URL is a repo
-    variable rather than something this script hardcodes -- when it is unset,
-    ci/ci_matrix.py falls back to native macOS builders instead.
-    """
-    url = os.environ.get("MACOS_SDK_URL", "").strip()
-    if not url:
-        print("MACOS_SDK_URL is unset; expected a native macOS builder", file=sys.stderr)
-        return 1
-    SDK_ROOT.parent.mkdir(parents=True, exist_ok=True)
-    archive = SDK_ROOT.parent / "macos-sdk.tar.xz"
-    print(f"fetching macOS SDK from {url}", flush=True)
-    # URL comes from the repo-owned `MACOS_SDK_URL` variable, not user input.
-    urllib.request.urlretrieve(url, archive)
-    if SDK_ROOT.exists():
-        shutil.rmtree(SDK_ROOT)
-    SDK_ROOT.mkdir(parents=True)
-    with tarfile.open(archive) as tar:
-        tar.extractall(SDK_ROOT, filter="data")
-    # Collapse a single top-level MacOSX*.sdk directory so SDKROOT is stable.
-    entries = list(SDK_ROOT.iterdir())
-    if len(entries) == 1 and entries[0].is_dir():
-        for child in entries[0].iterdir():
-            shutil.move(str(child), SDK_ROOT / child.name)
-        entries[0].rmdir()
-    print(f"SDKROOT={SDK_ROOT}")
-    with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
-        handle.write(f"SDKROOT={SDK_ROOT}\n")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Cross-compile driver for clud CI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--target", required=True)
-        p.add_argument("--strategy", default="native", choices=("native", "zigbuild", "xwin"))
+        p.add_argument("--strategy", default="native", choices=("native", "zigbuild", "soldr"))
         p.add_argument("--profile", default="dev", choices=("dev", "release"))
 
     clippy = sub.add_parser("clippy")
@@ -357,9 +321,6 @@ def main(argv: list[str] | None = None) -> int:
     wheel = sub.add_parser("wheel")
     add_common(wheel)
     wheel.set_defaults(func=cmd_wheel)
-
-    sdk = sub.add_parser("provision-macos-sdk")
-    sdk.set_defaults(func=cmd_provision_macos_sdk)
 
     args = parser.parse_args(argv)
     return args.func(args)

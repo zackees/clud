@@ -124,8 +124,6 @@ jobs:
         with:
           python-version: "3.11"
       - id: matrix
-        env:
-          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL }}
         run: python -m ci.ci_matrix --release
 
   build:

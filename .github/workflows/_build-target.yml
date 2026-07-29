@@ -11,12 +11,12 @@ on:
         required: true
         type: string
       runs-on:
-        description: Runner label. Normally ubuntu-24.04 -- non-Linux only for the macOS native fallback.
+        description: Runner label. Every triple now cross-builds on ubuntu-24.04.
         required: false
         type: string
         default: ubuntu-24.04
       strategy:
-        description: 'native | zigbuild | xwin'
+        description: 'native | zigbuild | soldr'
         required: false
         type: string
         default: native
@@ -72,15 +72,17 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       # Requirement (4): release builds belong to the release pipeline only.
-      # `github.workflow` resolves to the *calling* workflow's name inside a
-      # reusable workflow, so this cannot be bypassed by dispatching this
-      # template directly -- it has no workflow_dispatch trigger, and any future
-      # caller that tries to pass release fails here rather than silently
-      # burning runner time on an optimized build nobody ships.
+      # `github.workflow_ref` identifies the calling workflow by repository,
+      # path, and ref. Unlike the mutable display name, that makes the
+      # containment rule unambiguous for future callers.
       - name: Guard release profile
-        if: ${{ inputs.profile == 'release' && github.workflow != 'Auto Release' }}
+        if: >-
+          ${{ inputs.profile == 'release'
+              && github.workflow_ref
+                 != format('{0}/.github/workflows/auto-release.yml@{1}',
+                           github.repository, github.ref) }}
         run: |
-          echo "::error::profile=release requested by workflow '${{ github.workflow }}'."
+          echo "::error::profile=release requested by '${{ github.workflow_ref }}'."
           echo "Only the Auto Release workflow may build --release. CI builds dev."
           exit 1
 
@@ -90,18 +92,14 @@ jobs:
         with:
           target: ${{ inputs.target }}
           strategy: ${{ inputs.strategy }}
+          profile: ${{ inputs.profile }}
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Provision macOS SDK
-        if: ${{ contains(inputs.target, 'apple') && inputs.strategy == 'zigbuild' }}
-        env:
-          MACOS_SDK_URL: ${{ vars.MACOS_SDK_URL }}
-        run: '"$VENV_PY" -m ci.xbuild provision-macos-sdk'
-
       # Every cargo/maturin invocation goes through ci/xbuild.py so the
-      # per-strategy environment (zig wrappers, xwin CRT paths, the
-      # whisper-rs-sys host-cfg workarounds documented in docs/architecture/ci.md)
-      # lives in one testable place instead of being smeared across YAML.
+      # per-strategy environment (zig wrappers, the SDKROOT/CMake plumbing on
+      # top of what `soldr prepare` exported, the whisper-rs-sys host-cfg
+      # workarounds documented in docs/architecture/ci.md) lives in one
+      # testable place instead of being smeared across YAML.
       #
       # `$VENV_PY` rather than `uv run`: pyproject.toml:1-3 sets
       # build-backend = "soldr", so `uv run` syncs the project and triggers a
@@ -140,8 +138,8 @@ jobs:
         run: '"$VENV_PY" -m maturin sdist --out dist'
 
       # Guards a real regression class: the shipped Windows exes must not import
-      # the MinGW runtime (ci/check_windows_wheel.py:29-35). Cross-compiling via
-      # cargo-xwin targets MSVC, but the check is cheap and now also catches a
+      # the MinGW runtime (ci/check_windows_wheel.py:29-35). The soldr cross
+      # path targets MSVC, but the check is cheap and now also catches a
       # mis-selected -gnu target, which is a new failure mode the native build
       # could not have had.
       - name: Verify Windows wheel has no MinGW runtime imports

@@ -9,8 +9,12 @@ inputs:
     description: Rust target triple this job will build.
     required: true
   strategy:
-    description: 'native | zigbuild | xwin'
+    description: 'native | zigbuild | soldr'
     required: true
+  profile:
+    description: 'dev | release. Keeps the dependency cook aligned with the real build.'
+    required: false
+    default: dev
   soldr-token:
     description: >
       GITHUB_TOKEN, forwarded as SOLDR_GITHUB_TOKEN. soldr resolves managed
@@ -27,9 +31,10 @@ inputs:
     description: >
       Must satisfy pyproject.toml's `requires = ["soldr>=0.8.27"]` -- the PEP 517
       backend and these shims share one daemon socket, and mixing protocol
-      versions across it resets the connection (#580).
+      versions across it resets the connection (#580). 0.8.28 is the floor for
+      the `soldr prepare` / `soldr build` cross surface used below.
     required: false
-    default: "0.8.27"
+    default: "0.8.28"
 
 runs:
   using: composite
@@ -42,10 +47,9 @@ runs:
       with:
         enable-cache: false
 
-    # Keyed on OS+arch even though build jobs are normally all on the same Linux
-    # image: the macOS native fallback (no MACOS_SDK_URL) runs this same action
-    # on a macOS runner, and a venv holds platform-specific wheels. A shared key
-    # would hand a Linux venv to a macOS job.
+    # Keyed on OS+arch even though every build job now runs on the same Linux
+    # image: a venv holds platform-specific wheels, so a shared key would hand a
+    # Linux venv to any future non-Linux builder.
     - name: Cache venv
       uses: actions/cache@v4
       with:
@@ -68,7 +72,7 @@ runs:
 
     # setup-soldr owns Rust provisioning plus build/target caching (#68).
     # Shims keep every cargo entry point -- including maturin-spawned cargo and
-    # cargo-zigbuild/cargo-xwin's inner cargo -- routed through soldr/zccache.
+    # the inner cargo of any cross wrapper -- routed through soldr/zccache.
     # mold is installed first so dependency cooking and the real build see the
     # same `linker: fast` environment.
     #
@@ -93,7 +97,11 @@ runs:
         preserve-source-mtimes: true
         solo-toolchain-cache: true
         cache-key-suffix: build-${{ inputs.target }}
-        # Windows skips the dependency cook; every other platform runs it.
+        # Cross lanes skip the dependency cook: setup-soldr runs before the
+        # target SDK/toolchain is prepared below, so a cook here would compile
+        # host artifacts that the foreign target cannot reuse. The first
+        # windows-msvc validation run proved the failure mode: six minutes of
+        # release-profile cooking followed by 393 dev-profile misses (0% reuse).
         #
         # A blanket 'none' sat here as a workaround for zackees/soldr#1880
         # (hydrate restored build-script binaries without the executable bit,
@@ -102,34 +110,35 @@ runs:
         # shipped in v0.8.25/v0.8.26 -- both below the version pinned above.
         # Validated on ubuntu-24.04-arm, the platform in the original report:
         # an exact-match hydrate of 8854 files now runs cleanly.
-        prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}
+        prebuild-deps: ${{ inputs.strategy == 'native' && 'soldr-cook' || 'none' }}
+        prebuild-deps-flags: ${{ inputs.profile == 'release' && '--release' || '' }}
 
-    - name: Add Rust target
+    # soldr's blessed cross-compile bootstrap -- one invocation shape for every
+    # triple, dispatching internally on the target (soldr docs/CROSS_COMPILE.md):
+    #
+    #   *-pc-windows-msvc   LLVM toolchain + the vendored xwin MSVC CRT cache
+    #   *-apple-darwin      the target-shaped Apple SDK, exported as SDKROOT
+    #   *-unknown-linux-*   cargo-zigbuild + zig
+    #   all                 rustup target add <triple>
+    #
+    # It then exports the target-scoped Cargo/cc-rs/linker env into $GITHUB_ENV,
+    # which is what lets the later `cargo test --no-run` / maturin steps link a
+    # foreign binary without each one re-deriving the toolchain.
+    #
+    # This replaces hand-rolled `taiki-e/install-action` pins of cargo-xwin and
+    # cargo-zigbuild plus an `apt-get install clang lld llvm`. soldr's own CI
+    # deleted the equivalent steps in zackees/soldr#857 once its auto-bootstrap
+    # (`fetch::ensure_llvm_toolchain` + `prepare_xwin_env`) proved sufficient.
+    # `cargo xwin` / `cargo zigbuild` remain reachable, but soldr documents them
+    # as the explicit legacy passthrough, not the default surface.
+    - name: Prepare cross toolchain
       if: inputs.strategy != 'native'
       shell: bash
-      run: rustup target add "${{ inputs.target }}"
-
-    # Prebuilt binaries, NOT `cargo install`. Building cargo-zigbuild or
-    # cargo-xwin from source costs 3-6 minutes on the critical path of every
-    # cross leg, on every run -- more than the tool ever saves.
-    - name: Install cargo-zigbuild
-      if: inputs.strategy == 'zigbuild'
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-zigbuild@0.20.1
-
-    - name: Install cargo-xwin
-      if: inputs.strategy == 'xwin'
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-xwin@0.18.10
-
-    - name: Install Windows cross C/C++ toolchain
-      if: inputs.strategy == 'xwin'
-      shell: bash
-      # whisper.cpp's CMake needs a Windows-capable C/C++ driver; clang-cl and
-      # lld-link come from the runner image's LLVM.
-      run: sudo apt-get install -y --no-install-recommends clang lld llvm ninja-build
+      run: |
+        set -euo pipefail
+        "${SOLDR_BINARY:-soldr}" prepare \
+          --target "${{ inputs.target }}" \
+          --github-env "$GITHUB_ENV"
 
     # The soldr-cook prebuild can dirty the worktree; restore it so the real
     # build compiles the checked-out source.

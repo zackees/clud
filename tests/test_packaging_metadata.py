@@ -95,38 +95,32 @@ def test_ci_setup_soldr_pins_backend_compatible_soldr() -> None:
     assert all(pin == "v0.9.66" for pin in action_pins)
 
 
-def test_ci_setup_soldr_skips_dependency_cook_on_windows() -> None:
-    """Windows must never run the soldr dependency cook.
+def test_ci_setup_soldr_only_cooks_reusable_native_dependencies() -> None:
+    """Cross builds must not pay for a host-profile dependency cook.
 
-    Asserted as an invariant rather than as one exact literal. Two
-    settings satisfy it: the usual `runner.os == 'Windows'` conditional,
-    and a blanket `none` that disables the cook everywhere.
-
-    The conditional form is in force. A blanket `none` was in force for a
-    while as a workaround for zackees/soldr#1880 (hydrate restored
-    `build-script-build` binaries without the executable bit, so cargo died
-    with "Permission denied (os error 13)" on a rotating, arbitrary crate).
-    That was fixed upstream by soldr#1889 and soldr#1914, shipped in
-    v0.8.25/v0.8.26 -- both below the v0.8.27 this repo pins -- so the cook is
-    enabled again everywhere except Windows.
-
-    Both forms stay acceptable here because this test guards the Windows
-    invariant, not which of the two ways it is currently achieved.
+    setup-soldr runs before `soldr prepare` provisions the foreign SDK. A cook
+    in a zigbuild/soldr lane therefore produces host artifacts that the target
+    build cannot reuse. The first PR validation run spent six minutes doing
+    exactly that and then reported 393 misses with a 0% hit rate.
     """
-    conditional = "prebuild-deps: ${{ runner.os == 'Windows' && 'none' || 'soldr-cook' }}"
-    blanket = "prebuild-deps: none"
-
     setup_workflows = _setup_soldr_sources()
-
     assert setup_workflows
+
+    expected = "prebuild-deps: ${{ inputs.strategy == 'native' && 'soldr-cook' || 'none' }}"
+    build_setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
+    assert expected in build_setup.read_text(encoding="utf-8")
     for path in setup_workflows:
         text = path.read_text(encoding="utf-8")
-        assert conditional in text or blanket in text, (
-            f"{path.name}: prebuild-deps must either exempt Windows via the "
-            f"runner.os conditional or disable the cook entirely with 'none'"
-        )
-        # Either way, no workflow may hand Windows an unconditional cook.
-        assert "prebuild-deps: soldr-cook" not in text, (
-            f"{path.name}: unconditional 'soldr-cook' would run the dependency "
-            f"cook on Windows"
-        )
+        assert "prebuild-deps: soldr-cook" not in text
+
+
+def test_ci_setup_soldr_cook_profile_matches_the_real_build() -> None:
+    setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
+    build = ROOT / ".github" / "workflows" / "_build-target.yml"
+
+    setup_text = setup.read_text(encoding="utf-8")
+    build_text = build.read_text(encoding="utf-8")
+    assert "prebuild-deps-flags: ${{ inputs.profile == 'release' && '--release' || '' }}" in (
+        setup_text
+    )
+    assert "profile: ${{ inputs.profile }}" in build_text

@@ -65,28 +65,6 @@ def bundle_env(bundle: Path, manifest: dict) -> dict[str, str]:
     return env
 
 
-def stage_examples(bundle: Path, manifest: dict) -> None:
-    """Materialize `<repo>/target/<profile>/examples/` from the bundle.
-
-    tests/integration/conftest.py:326-355 resolves `scan_zombies` against the
-    **repo root**, not `CARGO_TARGET_DIR`, and returns `[]` silently when it is
-    missing -- so without this the autouse zombie-leak check degrades to a no-op
-    and reports green. Copying rather than teaching the fixture a new env var
-    keeps the change on the CI side.
-    """
-    src = bundle / "target" / manifest["profile_dir"] / "examples"
-    if not src.is_dir():
-        return
-    dest = ROOT / "target" / manifest["profile_dir"] / "examples"
-    dest.mkdir(parents=True, exist_ok=True)
-    for binary in src.iterdir():
-        if binary.is_file():
-            target = dest / binary.name
-            shutil.copy2(binary, target)
-            if os.name != "nt":
-                target.chmod(target.stat().st_mode | 0o111)
-
-
 def stage_wheel(bundle: Path) -> None:
     """Put the bundled wheel where `ci.build_wheel.latest_wheel()` looks.
 
@@ -164,7 +142,6 @@ def main(argv: list[str] | None = None) -> int:
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     env = bundle_env(bundle, manifest)
     stage_wheel(bundle)
-    stage_examples(bundle, manifest)
 
     if args.suite == "unit":
         if run_harnesses(bundle, manifest, env) != 0:

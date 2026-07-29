@@ -57,9 +57,19 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
-      # rustfmt only. No toolchain provisioning, no soldr, no compilation.
-      - name: Install rustfmt
-        run: rustup component add rustfmt
+      - name: Setup soldr
+        uses: zackees/setup-soldr@v0.9.66
+        env:
+          SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: 0.8.28
+          cache: true
+          build-cache-mode: thin
+          shims: true
+          preserve-source-mtimes: true
+          solo-toolchain-cache: true
+          cache-key-suffix: static
+          prebuild-deps: none
       # `.venv/bin/python`, not `uv run`: pyproject sets build-backend = "soldr",
       # so `uv run` would sync the project and kick off a full PEP 517 maturin
       # build of the Rust binary. See lint:8-24 for the same workaround.
@@ -111,13 +121,8 @@ jobs:
     with:
       target: x86_64-pc-windows-msvc
       runs-on: ubuntu-24.04
-      strategy: xwin
-      # The second of the two clippy triples: between this and linux-x64,
-      # every `cfg(windows)` / `cfg(unix)` branch in the workspace is
-      # type-checked. Clippy is a full Check-mode pass over all 429
-      # dependencies -- its unit fingerprints do not overlap the Build-mode
-      # graph -- so running it on all six triples would cost a second full
-      # compile five times over for no additional coverage.
+      strategy: soldr
+      # The Windows x64 cfg surface.
       clippy: true
 
   test-windows-x64:
@@ -133,26 +138,22 @@ jobs:
       runs-on: windows-2025
       suite: ${{ matrix.suite }}
 
-  # macOS ARM is core ONLY when it can be cross-compiled on Linux. Without a
-  # macOS SDK we cannot link the `-framework Accelerate` that
-  # vendor/whisper-rs-sys/build.rs:27-28 emits unconditionally for apple
-  # targets, so the build falls back to a native macOS runner -- a cold C++
-  # build on the scarcest runner class. That is a ~20 minute tax on every PR
-  # push, so in that configuration darwin is demoted to the full tier and
-  # gates the merge rather than the PR. Setting the MACOS_SDK_URL repo
-  # variable restores per-PR macOS coverage AND makes it fast.
+  # macOS ARM is core because it cross-compiles on Linux like every other
+  # triple. `soldr prepare --target aarch64-apple-darwin` provisions the
+  # target-shaped Apple SDK, which is what supplies the `-framework Accelerate`
+  # that vendor/whisper-rs-sys/build.rs:27-28 emits unconditionally for apple
+  # targets. Before that, darwin needed either a hand-fetched SDK behind a
+  # MACOS_SDK_URL repo variable or a cold C++ build on a native macOS runner --
+  # the scarcest runner class, and a ~20 minute tax on every PR push.
   build-macos-arm:
     name: Build macos-arm
-    if: >-
-      vars.MACOS_SDK_URL != ''
-      || github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ci:full')
     uses: ./.github/workflows/_build-target.yml
     with:
       target: aarch64-apple-darwin
-      runs-on: ${{ vars.MACOS_SDK_URL != '' && 'ubuntu-24.04' || 'macos-15' }}
-      strategy: ${{ vars.MACOS_SDK_URL != '' && 'zigbuild' || 'native' }}
-      clippy: false
+      runs-on: ubuntu-24.04
+      strategy: soldr
+      # macOS-only modules are not covered by Linux's cfg(unix).
+      clippy: true
 
   test-macos-arm:
     name: Test macos-arm
@@ -209,9 +210,11 @@ jobs:
       runs-on: ubuntu-24.04
       # The cheapest cross in the set: whisper-rs is cfg-excluded on this
       # triple (crates/clud-bin/Cargo.toml:149), so there is no C++ or CMake
-      # at all -- only ring/blake3 need the MSVC CRT that cargo-xwin supplies.
-      strategy: xwin
-      clippy: false
+      # at all -- only ring/blake3 need the MSVC CRT that `soldr prepare`
+      # provisions.
+      strategy: soldr
+      # Windows ARM has target-specific voice worker code.
+      clippy: true
 
   test-windows-arm:
     name: Test windows-arm
@@ -234,8 +237,8 @@ jobs:
     uses: ./.github/workflows/_build-target.yml
     with:
       target: x86_64-apple-darwin
-      runs-on: ${{ vars.MACOS_SDK_URL != '' && 'ubuntu-24.04' || 'macos-15-intel' }}
-      strategy: ${{ vars.MACOS_SDK_URL != '' && 'zigbuild' || 'native' }}
+      runs-on: ubuntu-24.04
+      strategy: soldr
       clippy: false
 
   test-macos-x64:
@@ -260,11 +263,17 @@ jobs:
     needs:
       - static
       - dylint
+      - build-linux-x64
       - test-linux-x64
+      - build-windows-x64
       - test-windows-x64
+      - build-macos-arm
       - test-macos-arm
+      - build-linux-arm
       - test-linux-arm
+      - build-windows-arm
       - test-windows-arm
+      - build-macos-x64
       - test-macos-x64
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -281,7 +290,24 @@ jobs:
       - name: Check results
         env:
           RESULTS: ${{ toJSON(needs) }}
-          CORE: ${{ needs.static.result }} ${{ needs.test-linux-x64.result }} ${{ needs.test-windows-x64.result }}
+          CORE: >-
+            ${{ needs.static.result }}
+            ${{ needs.build-linux-x64.result }}
+            ${{ needs.test-linux-x64.result }}
+            ${{ needs.build-windows-x64.result }}
+            ${{ needs.test-windows-x64.result }}
+            ${{ needs.build-macos-arm.result }}
+            ${{ needs.test-macos-arm.result }}
+          FULL_REQUIRED: >-
+            ${{ github.event_name != 'pull_request'
+                || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          FULL: >-
+            ${{ needs.build-linux-arm.result }}
+            ${{ needs.test-linux-arm.result }}
+            ${{ needs.build-windows-arm.result }}
+            ${{ needs.test-windows-arm.result }}
+            ${{ needs.build-macos-x64.result }}
+            ${{ needs.test-macos-x64.result }}
         run: |
           set -euo pipefail
           echo "$RESULTS"
@@ -295,3 +321,11 @@ jobs:
               exit 1
             fi
           done
+          if [ "$FULL_REQUIRED" = "true" ]; then
+            for result in $FULL; do
+              if [ "$result" != "success" ]; then
+                echo "::error::a full-tier lane did not run to success (got '$result')"
+                exit 1
+              fi
+            done
+          fi

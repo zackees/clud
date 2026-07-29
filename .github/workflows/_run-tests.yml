@@ -57,6 +57,7 @@ jobs:
       # a PEP 517 maturin build -- which on this runner hits the removed
       # toolchain and fails every job. See lint:8-24.
       - name: Run ${{ inputs.suite }} suite
+        shell: bash
         run: '"$VENV_PY" -m ci.run_bundle --bundle bundle --suite ${{ inputs.suite }}'
 
       - name: Diagnose Linux failure

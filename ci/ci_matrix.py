@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-Strategy = Literal["native", "zigbuild", "xwin"]
+Strategy = Literal["native", "zigbuild", "soldr"]
 Tier = Literal["core", "full"]
 
 FULL_TIER_LABEL = "ci:full"
@@ -36,20 +36,21 @@ class Target:
     tier: Tier
     #: Artifact name the release pipeline publishes this triple's wheel under.
     artifact: str
-    #: Runner that compiles. Overridden to `exec_runs_on` for darwin when no
-    #: macOS SDK is available to cross-compile against.
+    #: Runner that compiles. Every triple cross-builds on Linux via the soldr
+    #: blessed path, so this is uniform -- it stays a field so a future target
+    #: that genuinely cannot cross has somewhere to say so.
     build_runs_on: str = "ubuntu-24.04"
 
 
 TARGETS: tuple[Target, ...] = (
     Target("x86_64-unknown-linux-gnu", "ubuntu-24.04", "native", "core", "wheels-linux-x86"),
-    Target("x86_64-pc-windows-msvc", "windows-2025", "xwin", "core", "wheels-windows-x86"),
-    Target("aarch64-apple-darwin", "macos-15", "zigbuild", "core", "wheels-macos-arm"),
+    Target("x86_64-pc-windows-msvc", "windows-2025", "soldr", "core", "wheels-windows-x86"),
+    Target("aarch64-apple-darwin", "macos-15", "soldr", "core", "wheels-macos-arm"),
     Target("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm", "zigbuild", "full", "wheels-linux-arm"),
     # whisper-rs is cfg-excluded on this triple (crates/clud-bin/Cargo.toml:149),
     # so there is no C++/CMake to cross at all -- the cheapest cross in the set.
-    Target("aarch64-pc-windows-msvc", "windows-11-arm", "xwin", "full", "wheels-windows-arm"),
-    Target("x86_64-apple-darwin", "macos-15-intel", "zigbuild", "full", "wheels-macos-x86"),
+    Target("aarch64-pc-windows-msvc", "windows-11-arm", "soldr", "full", "wheels-windows-arm"),
+    Target("x86_64-apple-darwin", "macos-15-intel", "soldr", "full", "wheels-macos-x86"),
 )
 
 #: The sdist is source-only, so exactly one target must produce it.
@@ -78,26 +79,26 @@ def selected(tier: Tier) -> list[Target]:
     return [target for target in TARGETS if target.tier == "core"]
 
 
-def build_matrix(targets: list[Target], *, macos_sdk: bool) -> dict[str, list[dict[str, str]]]:
-    """Build-side matrix: one entry per triple.
+def build_matrix(targets: list[Target]) -> dict[str, list[dict[str, str]]]:
+    """Build-side matrix: one entry per triple, all on the same Linux builder.
 
-    Without a macOS SDK on the Linux runner we cannot link `-framework
-    Accelerate`, which `vendor/whisper-rs-sys/build.rs:27-28` emits
-    unconditionally for apple targets with no feature to disable it. Fall back
-    to a native macOS builder rather than failing -- the build-once/run-anywhere
-    split still removes the other three macOS jobs.
+    Darwin used to need a fallback here: `vendor/whisper-rs-sys/build.rs:27-28`
+    emits `-framework Accelerate` unconditionally for apple targets, so without
+    an SDK on the Linux runner the link failed and the job had to be rerouted to
+    a native macOS builder. `soldr prepare --target <apple-triple>` provisions
+    that SDK, so the fallback -- and the MACOS_SDK_URL repo variable it keyed
+    off -- is gone.
     """
-    include: list[dict[str, str]] = []
-    for target in targets:
-        cross_darwin = "apple" in target.triple and not macos_sdk
-        include.append(
+    return {
+        "include": [
             {
                 "target": target.triple,
-                "strategy": "native" if cross_darwin else target.strategy,
-                "runs-on": target.exec_runs_on if cross_darwin else target.build_runs_on,
+                "strategy": target.strategy,
+                "runs-on": target.build_runs_on,
             }
-        )
-    return {"include": include}
+            for target in targets
+        ]
+    }
 
 
 def exec_matrix(targets: list[Target]) -> dict[str, list[dict[str, str]]]:
@@ -115,7 +116,7 @@ def exec_matrix(targets: list[Target]) -> dict[str, list[dict[str, str]]]:
     }
 
 
-def release_matrix(*, macos_sdk: bool) -> dict[str, list[dict[str, object]]]:
+def release_matrix() -> dict[str, list[dict[str, object]]]:
     """Release-side matrix: all six triples, wheel artifacts, no test bundle.
 
     Deliberately derived from the same TARGETS table -- and therefore the same
@@ -123,7 +124,7 @@ def release_matrix(*, macos_sdk: bool) -> dict[str, list[dict[str, object]]]:
     while CI only ever exercised cross-built binaries, CI would not be testing
     the artifact that ships.
     """
-    base = build_matrix(list(TARGETS), macos_sdk=macos_sdk)["include"]
+    base = build_matrix(list(TARGETS))["include"]
     by_triple = {target.triple: target for target in TARGETS}
     return {
         "include": [
@@ -159,10 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    macos_sdk = bool(os.environ.get("MACOS_SDK_URL", "").strip())
-
     if args.release:
-        emit({"build": json.dumps(release_matrix(macos_sdk=macos_sdk), separators=(",", ":"))})
+        emit({"build": json.dumps(release_matrix(), separators=(",", ":"))})
         return 0
 
     tier = resolve_tier(args.event_name, args.dispatch_tier, args.pr_labels)
@@ -170,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     emit(
         {
             "tier": tier,
-            "build": json.dumps(build_matrix(targets, macos_sdk=macos_sdk), separators=(",", ":")),
+            "build": json.dumps(build_matrix(targets), separators=(",", ":")),
             "test": json.dumps(exec_matrix(targets), separators=(",", ":")),
         }
     )

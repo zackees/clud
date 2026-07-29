@@ -19,7 +19,7 @@ Layout produced under `--dest` after `unpack`:
       target/<profile-dir>/             CARGO_TARGET_DIR points here, so
         clud, clud-shim, ...            crates/clud-bin/tests/common/mod.rs:33
         mock-agent                      resolves mock_agent_path() with no
-        examples/scan_zombies           source change
+                                        source change
       tests/                            cargo test harness binaries
       dist/                             the dev wheel (test_trampoline.py)
 
@@ -39,10 +39,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
+#: Scratch root for CI staging. NOT `ROOT / "build"` -- `build` is a tracked
+#: shell script at the repo root (the `bash build` entrypoint), so creating a
+#: directory of that name fails with NotADirectoryError on every platform.
+CI_SCRATCH = ROOT / ".ci-build"
+
 #: Workspace binaries the test suites resolve by name. `mock-agent` and the
-#: probe binaries come from testbins/; `scan_zombies` is an example target used
-#: by the autouse zombie-scan fixture (tests/integration/conftest.py:326-355),
-#: which silently no-ops when it is absent -- shipping it keeps that check real.
+#: probe binaries come from testbins/.
 WORKSPACE_BINARIES = (
     "clud",
     "clud-shim",
@@ -51,8 +54,6 @@ WORKSPACE_BINARIES = (
     "clud-ctrlc-probe",
     "mock-agent",
 )
-EXAMPLE_BINARIES = ("scan_zombies",)
-
 #: Written by `ci.xbuild compile --with-tests`; the parsed `executable` fields
 #: from `cargo test --no-run --message-format=json`.
 HARNESS_MANIFEST = "test-harnesses.json"
@@ -107,7 +108,7 @@ def pack(target: str, profile: str, dest: Path) -> int:
         print(f"no build output at {built}", file=sys.stderr)
         return 1
 
-    staging = ROOT / "build" / f"bundle-{target}"
+    staging = CI_SCRATCH / f"bundle-{target}"
     if staging.exists():
         shutil.rmtree(staging)
     out_bin = staging / "target" / profile_dir(profile)
@@ -126,11 +127,6 @@ def pack(target: str, profile: str, dest: Path) -> int:
         # to reach and confusing to read.
         print(f"missing workspace binaries in {built}: {', '.join(missing)}", file=sys.stderr)
         return 1
-
-    for name in EXAMPLE_BINARIES:
-        src = built / "examples" / _exe(name, target)
-        if src.is_file():
-            _copy(src, out_bin / "examples" / src.name)
 
     harness_list = built.parent / HARNESS_MANIFEST
     harnesses: list[str] = []

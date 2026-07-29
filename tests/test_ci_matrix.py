@@ -70,39 +70,37 @@ def test_resolve_tier(event, dispatch, labels, expected):
     assert resolve_tier(event, dispatch, labels) == expected
 
 
-def test_build_matrix_cross_compiles_on_linux_when_sdk_available():
-    include = build_matrix(selected("full"), macos_sdk=True)["include"]
-    assert all(entry["runs-on"].startswith("ubuntu") for entry in include)
-    darwin = [entry for entry in include if "apple" in entry["target"]]
-    assert darwin
-    assert all(entry["strategy"] == "zigbuild" for entry in darwin)
+def test_every_target_cross_compiles_on_linux():
+    """No native-builder fallback survives: one build host for all six triples.
 
-
-def test_build_matrix_falls_back_to_native_macos_without_sdk():
-    """No SDK => no `-framework Accelerate` => native macOS builder.
-
-    vendor/whisper-rs-sys/build.rs:27-28 emits that link flag for any apple
-    target with no feature to disable it.
+    That is the whole point of build-once/run-everywhere -- a single triple
+    escaping to its own native runner reintroduces the cold C++ build the
+    redesign exists to delete.
     """
-    include = build_matrix(selected("full"), macos_sdk=False)["include"]
-    darwin = [entry for entry in include if "apple" in entry["target"]]
-    assert darwin
-    for entry in darwin:
-        assert entry["strategy"] == "native"
-        assert entry["runs-on"].startswith("macos")
-    # Non-darwin targets are unaffected and still cross-compile on Linux.
-    for entry in include:
-        if "apple" not in entry["target"]:
-            assert entry["runs-on"].startswith("ubuntu")
+    include = build_matrix(selected("full"))["include"]
+    assert len(include) == len(TARGETS)
+    assert all(entry["runs-on"] == "ubuntu-24.04" for entry in include)
 
 
-def test_windows_targets_always_cross_compile():
-    include = build_matrix(selected("full"), macos_sdk=False)["include"]
-    windows = [entry for entry in include if "windows" in entry["target"]]
-    assert len(windows) == 2
-    for entry in windows:
-        assert entry["strategy"] == "xwin"
-        assert entry["runs-on"].startswith("ubuntu")
+def test_darwin_and_windows_use_the_soldr_blessed_cross_path():
+    """`cargo xwin` / `cargo zigbuild --target *-apple-darwin` are the legacy
+    passthrough in soldr's docs/CROSS_COMPILE.md; `soldr build` is the blessed
+    surface. Pinning this here keeps a future edit from silently regressing to
+    a hand-installed cross wrapper."""
+    include = build_matrix(selected("full"))["include"]
+    crossed = [
+        entry
+        for entry in include
+        if "apple" in entry["target"] or "windows" in entry["target"]
+    ]
+    assert len(crossed) == 4
+    assert all(entry["strategy"] == "soldr" for entry in crossed)
+
+
+def test_no_target_uses_a_hand_installed_cross_wrapper_for_msvc_or_darwin():
+    for target in TARGETS:
+        if "windows" in target.triple or "apple" in target.triple:
+            assert target.strategy == "soldr", target.triple
 
 
 def test_test_matrix_always_uses_native_runners():
@@ -115,14 +113,14 @@ def test_test_matrix_always_uses_native_runners():
 
 
 def test_release_matrix_ships_exactly_one_sdist():
-    include = release_matrix(macos_sdk=False)["include"]
+    include = release_matrix()["include"]
     sdists = [entry for entry in include if entry["include-sdist"]]
     assert len(sdists) == 1
     assert sdists[0]["target"] == SDIST_TARGET
 
 
 def test_release_matrix_artifact_names_are_unique_and_complete():
-    include = release_matrix(macos_sdk=False)["include"]
+    include = release_matrix()["include"]
     artifacts = [entry["artifact"] for entry in include]
     assert len(artifacts) == len(TARGETS) == len(set(artifacts))
     assert all(name.startswith("wheels-") for name in artifacts)
@@ -137,9 +135,7 @@ def test_release_matrix_uses_the_same_strategies_as_ci():
     def strategies(matrix):
         return {entry["target"]: entry["strategy"] for entry in matrix["include"]}
 
-    assert strategies(build_matrix(selected("full"), macos_sdk=True)) == strategies(
-        release_matrix(macos_sdk=True)
-    )
+    assert strategies(build_matrix(selected("full"))) == strategies(release_matrix())
 
 
 def test_ci_yml_covers_exactly_the_targets_table():
@@ -163,6 +159,49 @@ def test_ci_yml_covers_exactly_the_targets_table():
     assert len(build_jobs) == len(TARGETS)
 
 
+def test_ci_yml_job_configuration_matches_the_targets_table():
+    """The hand-written jobs must preserve every registry field, not just names."""
+    text = CI_YML.read_text(encoding="utf-8")
+    expected = {target.triple: target for target in TARGETS}
+
+    build_blocks = re.findall(
+        r"^  build-[a-z0-9-]+:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    declared_builds = {}
+    for block in build_blocks:
+        triple = re.search(r"^      target: (\S+)$", block, re.MULTILINE)
+        runner = re.search(r"^      runs-on: (\S+)$", block, re.MULTILINE)
+        strategy = re.search(r"^      strategy: (\S+)$", block, re.MULTILINE)
+        assert triple
+        assert runner
+        assert strategy
+        declared_builds[triple.group(1)] = (runner.group(1), strategy.group(1))
+
+    assert declared_builds == {
+        triple: (target.build_runs_on, target.strategy)
+        for triple, target in expected.items()
+    }
+
+    test_blocks = re.findall(
+        r"^  test-[a-z0-9-]+:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    declared_exec = {}
+    for block in test_blocks:
+        triple = re.search(r"^      target: (\S+)$", block, re.MULTILINE)
+        runner = re.search(r"^      runs-on: (\S+)$", block, re.MULTILINE)
+        assert triple
+        assert runner
+        declared_exec[triple.group(1)] = runner.group(1)
+
+    assert declared_exec == {
+        triple: target.exec_runs_on for triple, target in expected.items()
+    }
+
+
 def test_ci_yml_never_requests_a_release_profile():
     """Requirement: only the release pipeline builds --release.
 
@@ -175,9 +214,9 @@ def test_ci_yml_never_requests_a_release_profile():
 def test_matrices_are_json_serializable_for_github_actions():
     """`fromJSON()` in the workflow needs valid, single-line JSON."""
     for matrix in (
-        build_matrix(selected("full"), macos_sdk=True),
+        build_matrix(selected("full")),
         exec_matrix(selected("core")),
-        release_matrix(macos_sdk=False),
+        release_matrix(),
     ):
         encoded = json.dumps(matrix, separators=(",", ":"))
         assert "\n" not in encoded

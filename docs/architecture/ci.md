@@ -1,6 +1,6 @@
 # CI architecture — build-once / run-everywhere
 
-Status: design (supersedes the 24 per-platform leaf workflows + `_lint.yml` /
+Status: implemented (supersedes the 24 per-platform leaf workflows + `_lint.yml` /
 `_unit-test.yml` / `_integration-test.yml`).
 
 ## The problem
@@ -71,7 +71,7 @@ Three structural claims, in the order they matter:
    whisper C++ static libs); today that graph is recompiled on three separate
    machines. This is the single largest win and it requires no
    cross-compilation at all.
-2. **The build host is always Linux** (except where §"macOS" forces otherwise).
+2. **The build host is always Linux.**
    Linux runners are the cheapest and least contended, and — critically — all
    targets then share one runner class, so cache behaviour is uniform.
 3. **macOS/Windows runners never compile.** They download a bundle and execute
@@ -80,11 +80,12 @@ Three structural claims, in the order they matter:
 
 ## Target tiers — using scarce runners sparingly
 
-`plan` emits the matrix. Not every push needs all six targets.
+`ci/ci_matrix.py` defines the target inventory consumed by the workflow. Not
+every push needs all six targets.
 
 | Tier | Triples | Trigger |
 | --- | --- | --- |
-| `core` | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin` **iff `MACOS_SDK_URL` is set** | every PR push |
+| `core` | `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin` | every PR push |
 | `full` | core + `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc`, `x86_64-apple-darwin` | `push` to `main`, `merge_group`, `ci:full` PR label, `workflow_dispatch` |
 
 Rationale: `core` covers one triple per *operating system*, which is where
@@ -95,12 +96,10 @@ merge queue and `main`, not on every intermediate PR push. `x86_64-apple-darwin`
 (`macos-15-intel`) in particular is the slowest runner in the pool and is
 demoted to `full` only.
 
-macOS ARM is core **only when it can be cross-compiled**. Without an SDK the
-build falls back to a native macOS runner — a cold whisper.cpp C++ build on the
-scarcest runner class, gating every PR push, for roughly a 20-minute tax. In
-that configuration darwin drops to `full` and gates the merge instead. Setting
-`MACOS_SDK_URL` restores per-PR macOS coverage *and* makes it fast, so the two
-properties move together rather than trading off.
+macOS ARM is always core. `soldr prepare --target aarch64-apple-darwin`
+provisions the target-shaped Apple SDK on the Linux builder, so the old
+`MACOS_SDK_URL` gate and native macOS fallback no longer exist. The macOS
+runners only execute the resulting bundle.
 
 Two trigger-level notes:
 
@@ -122,10 +121,10 @@ binary), so it is not a factor.
 | Triple | Strategy | Notes |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | **native** | the build host; also the clippy/dylint host |
+| `aarch64-pc-windows-msvc` | **`soldr build`** | The crate manifest already excludes `whisper-rs` on this target, so there is no C++ and no CMake. `soldr prepare` provisions the catalogued ARM64 MSVC CRT/SDK and the clang shim that `ring` requires. |
+| `x86_64-pc-windows-msvc` | **`soldr build`** + forced whisper config | The blessed soldr path provisions the MSVC CRT/SDK and LLVM toolchain. `clang-cl`/`lld-link` drive whisper's CMake; two host-vs-target `cfg!` bugs in the vendored build script are worked around from the environment, not patched (see below). |
+| `aarch64-apple-darwin`, `x86_64-apple-darwin` | **`soldr build` + target-shaped Apple SDK** | `soldr prepare` fetches the matching SDK and exports `SDKROOT`; there is no repo secret/variable and no native-builder fallback. |
 | `aarch64-unknown-linux-gnu` | **`cargo-zigbuild`** | cleanest cross. `vendor/whisper-rs-sys/build.rs:395-429` already detects a zig C++ toolchain and switches `stdc++`→`c++`, but `:403-405` early-returns on non-Linux targets — this path is Linux→Linux, so it is exactly the case that code was written for. CMake needs `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64`, injectable through the existing `CMAKE_*` env passthrough at `build.rs:298-306`. |
-| `aarch64-pc-windows-msvc` | **`cargo-xwin`** | *the easy one*: `crates/clud-bin/Cargo.toml:149` already `cfg`-excludes `whisper-rs` on this target, so there is no C++ and no CMake at all. Only `ring`/`blake3` need the MSVC CRT + SDK headers, which is precisely what `cargo-xwin` provides. |
-| `x86_64-pc-windows-msvc` | **`cargo-xwin`** + forced whisper config | Needs `clang-cl`/`lld-link` driving whisper's CMake. Two host-vs-target `cfg!` bugs in the vendored build script must be worked around from the environment, not patched (see below). |
-| `aarch64-apple-darwin`, `x86_64-apple-darwin` | **`cargo-zigbuild` + SDK, with native fallback** | Requires a macOS SDK on the Linux runner. Opt-in; see below. |
 
 ### The two `whisper-rs-sys` host-cfg bugs
 
@@ -141,10 +140,10 @@ script, which evaluates against the **host**, not the target. Two of these bite:
 
 Both are fixable without touching vendored source:
 
-- windows: add `-l advapi32` via `RUSTFLAGS` for the two windows-msvc targets.
+- windows: add `-C link-arg=advapi32.lib` via `RUSTFLAGS` for the two
+  windows-msvc targets.
 - darwin: force `GGML_BLAS=OFF` through the `GGML_*`/`CMAKE_*` env passthrough
-  (`build.rs:298-306`), which sidesteps both the missing link flag *and* the
-  Accelerate dependency.
+  (`build.rs:298-306`), which sidesteps the missing `ggml-blas` link flag.
 
 Also set `WHISPER_DONT_GENERATE_BINDINGS=1` on all cross targets: `build.rs:127-129`
 then uses the checked-in `src/bindings.rs` instead of running bindgen against
@@ -152,7 +151,7 @@ target headers we do not have. (`build.rs:169-182` already falls back to those
 bindings on bindgen failure, so this only makes the existing behaviour
 deterministic.)
 
-### macOS: what is actually blocking, and the fallback
+### macOS: SDK provisioning
 
 `build.rs:27-28` emits `cargo:rustc-link-lib=framework=Accelerate`
 unconditionally for any `target.contains("apple")`, with **no feature to turn it
@@ -161,20 +160,16 @@ stops CMake from *building* the BLAS backend, but does not remove that hardcoded
 link directive — the SDK is still required for the framework stub, and for every
 other system framework `cpal`/`rodio`/`arboard` pull in on darwin.
 
-So Linux→macOS cross needs an SDK on the runner, which is an Apple-licensing
-decision, not a technical one. The design therefore makes it **configurable and
-fail-safe**:
+Linux→macOS cross therefore needs a real SDK on the runner. soldr 0.8.28's
+blessed Apple-target path resolves the target-shaped SDK from its toolchain
+catalogue. The setup composite runs `soldr prepare --target <apple-triple>`
+and exports the resulting environment to later workflow steps.
 
-- Repo variable `MACOS_SDK_URL` set → `build` runs `aarch64-apple-darwin` /
-  `x86_64-apple-darwin` on `ubuntu-24.04` with `cargo-zigbuild` + `SDKROOT`.
-- Not set → those two entries fall back to `runs-on: macos-15` /
-  `macos-15-intel` and build natively.
-
-The fallback is not a consolation prize. Even with native macOS *builders*, the
-redesign still cuts macOS usage from **4 jobs/push (2 arm + 2 intel, each a cold
-full build)** to **1 build + 2 short exec jobs on arm, and nothing on intel**
-for a normal PR. The build-once/run-everywhere split delivers most of the win;
-the SDK only removes the last macOS compile.
+That environment includes `SDKROOT` plus target-scoped compiler/linker
+settings. `ci/xbuild.py` forwards the same path as `CMAKE_OSX_SYSROOT`, then
+routes link-producing builds through `soldr build`. Both Darwin triples now
+build on `ubuntu-24.04`; native macOS runners only download and execute the
+bundles.
 
 ## Cache model
 
@@ -184,6 +179,10 @@ only by *target triple*, which is the minimum possible:
 - `setup-soldr` with `cache-key-suffix: build-<triple>`. Six namespaces total,
   down from twelve, and each is now written by exactly one job per run rather
   than raced by three.
+- The native lane runs `soldr-cook` with flags matching the requested profile.
+  Cross lanes skip the cook because setup happens before their target SDK is
+  prepared; a host cook cannot be reused by a foreign target. Their per-triple
+  build caches still persist the real target artifacts.
 - All six build jobs run the same runner image (`ubuntu-24.04`), so host-side
   artifacts — proc-macro crates, build scripts, `protox`/`prost-build` — have
   identical fingerprints across targets. They are still stored per-triple, but
@@ -340,16 +339,16 @@ shims for the error message. Runner VMs are ephemeral, so this is safe.
 
 Per PR push, `core` tier:
 
-| | Before | After (no SDK) | After (with SDK) |
-| --- | --- | --- | --- |
-| Workflows triggered | 12 | 1 | 1 |
-| Full workspace compiles | ~12–18 | 2 | 3 |
-| Clippy passes | 6 | 2 | 2 |
-| Cache namespaces | 12 | 2 (of 6) | 3 (of 6) |
-| macOS runner jobs | 4 cold builds | 0 | 2 exec only |
-| Windows runner jobs | 4 cold builds | 2 exec only | 2 exec only |
-| Platform-independent lint runs | 18 | 3 | 3 |
-| dylint runs | 2 | 0 | 0 |
+| | Before | After |
+| --- | --- | --- |
+| Workflows triggered | 12 | 1 |
+| Full workspace compiles | ~12–18 | 3 |
+| Clippy passes | 6 | 2 |
+| Cache namespaces | 12 | 3 (of 6) |
+| macOS runner jobs | 4 cold builds | 2 exec only |
+| Windows runner jobs | 4 cold builds | 2 exec only |
+| Platform-independent lint runs | 18 | 3 |
+| dylint runs | 2 | 0 |
 
 Critical path is `build-<triple>` → `test-<triple>` per lane, in parallel across
 lanes, with `static` failing fast alongside. The Linux lane reports red/green
@@ -360,11 +359,10 @@ another.
 
 Not fixed here, recorded so they are not rediscovered:
 
-- **`prebuild-deps: none`** (zackees/soldr#1880) means a cold ~429-crate
-  dependency build whenever the `target/` cache misses. This is the single
-  largest remaining term. The underlying symptom is a lost executable bit on
-  restored `build-script-build` binaries; a `chmod -R +x` after cache restore
-  would likely let the prebuild be re-enabled.
+- **Cross-lane cold starts.** The native lane can reuse `soldr-cook`, but cross
+  lanes prepare their SDK after setup-soldr and deliberately skip a host-only
+  cook. A miss in the per-triple target/build cache still means compiling the
+  foreign dependency graph once.
 - **The 10 GB per-repo Actions cache quota.** Six per-triple `target/` caches
   plus the dylint cache plus the venv caches plausibly exceed it, and eviction
   is silent — `restore-keys` simply miss and the job rebuilds cold.
