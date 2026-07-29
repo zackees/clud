@@ -30,7 +30,8 @@ fixed from the environment rather than by patching vendored source:
   build.rs:212-215  `cfg!(target_os = "windows")` gates `/utf-8` and
                     `cargo:rustc-link-lib=advapi32`. Cross to windows-msvc
                     silently drops advapi32 -> undefined symbols at link.
-                    Fix: inject the link flag via RUSTFLAGS.
+                    Fix: inject the link flag via target-scoped RUSTFLAGS,
+                    preserving soldr's Xwin SDK /LIBPATH flags.
   build.rs:342      `cfg!(target_os = "macos")` gates linking `ggml-blas`.
                     CMake still *builds* it (Apple BLAS defaults ON,
                     ggml/CMakeLists.txt:92-95) but the flag is never emitted.
@@ -57,7 +58,6 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CMAKE_PROCESSOR = {"aarch64": "aarch64", "x86_64": "x86_64"}
 PACKAGE_MANAGER = "cargo"
-
 
 
 def _arch(target: str) -> str:
@@ -146,8 +146,27 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
 
     if _is_windows(target):
         # See module docstring, build.rs:212-215.
-        rustflags = env.get("RUSTFLAGS", "")
-        env["RUSTFLAGS"] = f"{rustflags} -C link-arg=advapi32.lib".strip()
+        # Setting generic RUSTFLAGS here would override the target-scoped
+        # /LIBPATH arguments exported by `soldr prepare`, leaving lld-link
+        # unable to find even kernel32.lib. Append our missing library to the
+        # existing target-specific value instead. Migrate any pre-existing
+        # generic flags too: leaving RUSTFLAGS set would make Cargo ignore the
+        # target-specific value we need to preserve.
+        rustflags_key = f"CARGO_TARGET_{target.upper().replace('-', '_')}_RUSTFLAGS"
+        if "CARGO_ENCODED_RUSTFLAGS" in env:
+            raise ValueError(
+                "CARGO_ENCODED_RUSTFLAGS would override "
+                f"{rustflags_key}; cannot preserve the prepared Windows SDK "
+                "link paths"
+            )
+        generic_rustflags = env.pop("RUSTFLAGS", "")
+        target_rustflags = env.get(rustflags_key, "")
+        env[rustflags_key] = " ".join(
+            filter(
+                None,
+                (target_rustflags, generic_rustflags, "-C link-arg=advapi32.lib"),
+            )
+        )
     return env
 
 

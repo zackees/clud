@@ -38,6 +38,7 @@ fn main() {
     let mut pty_size_samples: u32 = 0;
     let mut pty_size_interval_ms: u64 = 100;
     let mut ansi_script: Option<PathBuf> = None;
+    let mut tool_shell_probe_to: Option<PathBuf> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
     // that exercise clud's stream-json renderer without needing a real
@@ -163,6 +164,13 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-tool-shell-probe" {
+            if let Some(path) = args.get(i + 1) {
+                tool_shell_probe_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
         if arg == "--mock-stream-json" {
             if let Some(path) = args.get(i + 1) {
                 stream_json_script = Some(PathBuf::from(path));
@@ -218,6 +226,11 @@ fn main() {
 
     if let Some(role) = helper_role.as_deref() {
         run_helper(&args[0], role, tree_log.as_ref(), sleep_ms);
+        return;
+    }
+
+    if let Some(path) = tool_shell_probe_to.as_ref() {
+        run_tool_shell_probe(&args[0], path);
         return;
     }
 
@@ -469,6 +482,83 @@ fn append_tree_log(path: &PathBuf, role: &str) {
         .expect("open tree log");
     use std::io::Write;
     writeln!(file, "{}", line).expect("write tree log");
+}
+
+#[cfg(windows)]
+fn run_tool_shell_probe(exe: &str, report_path: &Path) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let pid_path = report_path.with_extension("pid");
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let script = format!(
+        "$p = Start-Process -FilePath {} \
+         -ArgumentList '--mock-helper-role','tool-leak','--mock-sleep-ms','30000' -PassThru; \
+         Set-Content -LiteralPath {} -Value $p.Id",
+        quote(exe),
+        quote(&pid_path.to_string_lossy()),
+    );
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn tool PowerShell");
+    assert!(status.success(), "tool PowerShell failed: {status}");
+
+    let pid: u32 = std::fs::read_to_string(&pid_path)
+        .expect("read leaked-client pid")
+        .trim()
+        .parse()
+        .expect("parse leaked-client pid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut system = System::new();
+    let reaped = loop {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        if system.process(Pid::from_u32(pid)).is_none() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            if let Some(process) = system.process(Pid::from_u32(pid)) {
+                let _ = process.kill();
+            }
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let report = serde_json::json!({
+        "tool_shell_probe": {
+            "client_pid": pid,
+            "reaped": reaped,
+        }
+    });
+    if let Some(parent) = report_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(report_path, report.to_string()).expect("write tool-shell probe report");
+    println!("{report}");
+    std::process::exit(if reaped { 0 } else { 1 });
+}
+
+#[cfg(not(windows))]
+fn run_tool_shell_probe(_exe: &str, report_path: &Path) {
+    let report = serde_json::json!({
+        "tool_shell_probe": {
+            "unsupported": true,
+        }
+    });
+    std::fs::write(report_path, report.to_string()).expect("write tool-shell probe report");
+    println!("{report}");
 }
 
 use std::io::IsTerminal;

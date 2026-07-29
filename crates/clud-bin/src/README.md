@@ -113,6 +113,11 @@ Process management and GC:
 - `process_tree.rs` - best-effort descendant-tree termination via `sysinfo`;
   fixes the multi-second Ctrl+C hang for `clud --codex` on Windows where
   `cmd.exe -> node.exe` would orphan the real child.
+- `job_orphan_reaper.rs` - Windows foreground Job completion-port tracker.
+  The runner registers each backend root by PID + start time; a pure role
+  planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
+  handoffs, nested detachments, declared daemons, and the unconditional
+  `conhost.exe` exclusion before any automatic client-tree reap (#616).
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and

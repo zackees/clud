@@ -389,7 +389,7 @@ fn main() {
 
     // #569: the persistent daemon deliberately starts before this foreground
     // process joins the Windows tracking job, so it can outlive the CLI.
-    let _job_orphan_reaper = job_orphan_reaper::ForegroundJobTracker::install();
+    let job_orphan_reaper = job_orphan_reaper::ForegroundJobTracker::install();
 
     // After foreground startup has refreshed bundled tools, fire the
     // hook-config scanner against the cwd. Warns on bare
@@ -676,6 +676,7 @@ fn main() {
         match plan.launch_mode {
             backend::LaunchMode::Subprocess => runner::run_plan_subprocess(
                 &plan,
+                job_orphan_reaper.as_ref(),
                 args.verbose,
                 interrupted.as_ref(),
                 loop_session.as_mut(),
@@ -683,6 +684,7 @@ fn main() {
             ),
             backend::LaunchMode::Pty => runner::run_plan_pty(
                 &plan,
+                job_orphan_reaper.as_ref(),
                 args.verbose,
                 interrupted.as_ref(),
                 startup::should_register_drop_target(&args),

@@ -429,30 +429,66 @@ the codebase stays portable.
   `cfg!(target_os = "windows")` is true, and POSIX hook subprocesses receive
   normal pipe EOF semantics from Claude Code.
 
-### (l) Foreground Job Object shell-orphan reaper (issue #569)
+### (l) Foreground tool-shell lifecycle tracking
 
-- **Symptom**: a Windows tool shell may exit while an ordinary child it
-  launched remains alive. The normal originator-tag reaper runs only when the
-  foreground CLI exits, leaving that orphan alive for the rest of an active
-  session.
+- **Symptom**: The original #569 foreground Job listener treated every
+  `cmd.exe`, PowerShell, or Bash process at every depth as a tool shell. When a
+  nested wrapper exited (`PowerShell -> new.exe -> cmd /c start cmd`), its
+  subtree was killed even though the final terminal was intentionally
+  detached. The same basename rule could target `conhost.exe` below a kill
+  root; killing a console host destroys the console while its client can remain
+  alive but headless (#612, #616).
 
-- **Solution**: after `main` ensures the persistent daemon, the foreground
-  CLI assigns itself to an otherwise empty Job Object and associates an I/O
-  completion port. `job_orphan_reaper` records every
-  `JOB_OBJECT_MSG_NEW_PROCESS` PID with its Toolhelp parent PID and image
-  name. When `cmd.exe`, `powershell.exe`, `pwsh.exe`, `bash.exe`, or
-  `git-bash.exe` emits `JOB_OBJECT_MSG_EXIT_PROCESS`, clud kills every
-  still-live direct child's subtree while sparing processes explicitly
-  declared as daemons. The normal daemon was launched before this point, so
-  it is outside the job. The job intentionally has no `KILL_ON_JOB_CLOSE`
-  limit.
+- **Role model**: After `main` ensures the persistent daemon, the foreground
+  CLI assigns itself to an otherwise empty Job Object with an I/O completion
+  port and no `KILL_ON_JOB_CLOSE` limit. `runner.rs` registers the exact spawned
+  backend root with
+  `ForegroundJobTracker` after `NativeProcess` / `NativePtyProcess` starts.
+  Registration stores PID **and process start time**, so PID reuse never
+  grants stale backend authority. The pure planner in
+  `job_orphan_reaper.rs` walks captured metadata in phases:
+  `backend root -> bootstrap -> exact agent host` (`codex.exe`, native
+  `claude.exe`, or the npm Claude launcher's first `node.exe`).
+  Only a shell that is a **direct child of that exact agent host** is a tool
+  root. Once the walk crosses the agent boundary into any non-shell client,
+  every descendant remains a client even if its image is `node.exe`,
+  `python.exe`, or another shell.
 
-- **File**: `crates/clud-bin/src/job_orphan_reaper.rs`
-  (`ForegroundJobTracker::install`); installation in `main.rs` immediately
-  after daemon startup.
+- **Completion decisions**:
+  - `bash.exe -> bash.exe` is a recognized Git-for-Windows re-exec handoff.
+    The inner shell inherits completion ownership; the outer exit does not reap.
+  - A live client below the completed tool root is reaped.
+  - A nested shell reached through a non-shell client is a detach boundary and
+    its subtree is spared (`!new`).
+  - `RUNNING_PROCESS_IS_DAEMON` is the positive detach contract for services
+    and helpers. The daemon PID and its whole subtree are spared. Ordinary
+    unmarked Docker helpers hosted below `conhost.exe` are also protected by
+    the unconditional console-host boundary.
+  - `conhost.exe` is never an automatic kill target. The runtime takes a fresh
+    process snapshot immediately before each kill and prunes every console-host
+    subtree, even if its Job NEW_PROCESS event raced metadata publication.
+  - A Job `NEW_PROCESS` PID whose Toolhelp metadata is not published yet stays
+    unresolved and is retried during completion-port quiet periods. Empty
+    shells stabilize for one quiet period before finalization. If a process
+    exits before any metadata observation succeeds, cleanup fails closed,
+    records a structured metadata-miss event, and never grants kill authority
+    from the bare PID.
 
-- **POSIX behavior**: no-op; `ForegroundJobTracker::install()` returns
-  `None` outside Windows.
+- **Diagnostics**: Every actual tool-root completion writes one or more
+  `foreground_tool_shell_decision` JSONL events to
+  `~/.clud/state/daemon-events.jsonl`. Fields include foreground PID, trigger
+  shell PID/image/role, candidate root PID/image, `action`
+  (`reap`/`spare`/`handoff`), candidate start time, and a machine-readable
+  reason.
+
+- **Coverage**: Platform-neutral fixtures hard-gate leaked git-client reap,
+  Git Bash handoff, `!new` survival, declared-daemon survival, conhost survival,
+  exact agent-boundary behavior, and stale-PID rejection. The Windows
+  `tool_shell_lifecycle_windows` integration test exercises the real Job
+  completion port with one should-reap and one must-survive tree.
+
+- **POSIX behavior**: Unchanged. `ForegroundJobTracker::install()` returns
+  `None`, and backend registration is a no-op.
 
 ## Cross-cutting patterns
 

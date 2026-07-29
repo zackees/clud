@@ -27,8 +27,8 @@ def test_non_linux_release_keeps_existing_linker(monkeypatch):
     assert env["SOLDR_LINKER"] == "fast"
 
 
-def test_verify_wheel_scripts_accepts_all_required_scripts(monkeypatch, tmp_path):
-    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Windows")
+def test_verify_windows_wheel_scripts_uses_target_not_host(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
     wheel = tmp_path / "clud-2.3.0-py3-none-win_amd64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for script in ["clud.exe", "clud-shim.exe", "clud-block-bad-cmd.exe"]:
@@ -37,8 +37,8 @@ def test_verify_wheel_scripts_accepts_all_required_scripts(monkeypatch, tmp_path
     assert build_wheel.verify_wheel_scripts(wheel) == 0
 
 
-def test_verify_wheel_scripts_rejects_missing_native_helper(monkeypatch, tmp_path):
-    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Windows")
+def test_verify_windows_wheel_scripts_rejects_missing_native_helper(monkeypatch, tmp_path):
+    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
     wheel = tmp_path / "clud-2.3.0-py3-none-win_amd64.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("clud-2.3.0.data/scripts/clud.exe", b"")

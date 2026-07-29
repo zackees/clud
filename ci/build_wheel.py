@@ -65,11 +65,7 @@ def wheel_snapshot() -> dict[str, int]:
 
 
 def wheels_changed_since(snapshot: dict[str, int]) -> list[Path]:
-    return [
-        path
-        for path in built_wheels()
-        if snapshot.get(path.name) != path.stat().st_mtime_ns
-    ]
+    return [path for path in built_wheels() if snapshot.get(path.name) != path.stat().st_mtime_ns]
 
 
 def latest_wheel() -> Path:
@@ -106,6 +102,13 @@ def install_wheel(wheel: Path, *, env: dict[str, str]) -> int:
 
 def _script_name(name: str) -> str:
     return f"{name}.exe" if platform.system() == "Windows" else name
+
+
+def _wheel_script_name(wheel: Path, name: str) -> str:
+    """Return the script filename for the wheel target, not the build host."""
+    platform_tag = wheel.stem.rsplit("-", 1)[-1].lower()
+    is_windows = any(tag.startswith("win") for tag in platform_tag.split("."))
+    return f"{name}.exe" if is_windows else name
 
 
 def _installed_script(name: str) -> Path:
@@ -179,7 +182,7 @@ def verify_wheel_scripts(wheel: Path) -> int:
         members = {name.replace("\\", "/") for name in archive.namelist()}
     missing = []
     for name in REQUIRED_SCRIPTS:
-        script = _script_name(name)
+        script = _wheel_script_name(wheel, name)
         if not any(member.endswith(f".data/scripts/{script}") for member in members):
             missing.append(script)
     if missing:
