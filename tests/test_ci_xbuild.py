@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ci import bundle, xbuild
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -83,10 +85,14 @@ def test_darwin_soldr_env_forwards_the_prepared_sdk_to_cmake() -> None:
 
 
 def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
+    rustflags_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"
     env = xbuild.whisper_env(
         "x86_64-pc-windows-msvc",
         "soldr",
-        {"RUSTFLAGS": "-C debuginfo=0"},
+        {
+            "RUSTFLAGS": "-C debuginfo=0 -C opt-level=3",
+            rustflags_key: ("-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64 -C opt-level=1"),
+        },
     )
     assert env["CMAKE_SYSTEM_NAME"] == "Windows"
     assert env["CC"] == "clang-cl"
@@ -95,7 +101,30 @@ def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
     assert "RC" not in env
     assert "CMAKE_RC_COMPILER" not in env
     assert "CMAKE_MT" not in env
-    assert env["RUSTFLAGS"] == "-C debuginfo=0 -C link-arg=advapi32.lib"
+    assert "RUSTFLAGS" not in env
+    assert env[rustflags_key] == (
+        "-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64 "
+        "-C opt-level=1 "
+        "-C debuginfo=0 "
+        "-C opt-level=3 "
+        "-C link-arg=advapi32.lib"
+    )
+
+
+@pytest.mark.parametrize("encoded", ["", "-C\x1fdebuginfo=0"])
+def test_windows_soldr_env_rejects_encoded_flags_that_override_sdk_paths(
+    encoded: str,
+) -> None:
+    rustflags_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"
+    with pytest.raises(ValueError, match=r"would override.*Windows SDK"):
+        xbuild.whisper_env(
+            "x86_64-pc-windows-msvc",
+            "soldr",
+            {
+                "CARGO_ENCODED_RUSTFLAGS": encoded,
+                rustflags_key: "-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64",
+            },
+        )
 
 
 def test_windows_soldr_bindgen_uses_target_sdk_headers_when_available() -> None:
@@ -114,9 +143,7 @@ def test_windows_soldr_bindgen_uses_target_sdk_headers_when_available() -> None:
     )
     assert "WHISPER_DONT_GENERATE_BINDINGS" not in windows
     assert windows[bindgen_key] == (
-        "-I/opt/xwin/crt/include "
-        "-I/opt/xwin/sdk/include/ucrt "
-        "-I/opt/xwin/sdk/include/cppwinrt"
+        "-I/opt/xwin/crt/include -I/opt/xwin/sdk/include/ucrt -I/opt/xwin/sdk/include/cppwinrt"
     )
 
     no_sdk = xbuild.whisper_env("x86_64-pc-windows-msvc", "soldr", {})
