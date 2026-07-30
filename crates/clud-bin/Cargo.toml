@@ -33,6 +33,16 @@ dirs = "5"
 # Issue #132: gitignore-aware repo walk for the startup large-file guard.
 # Matches the major version ripgrep / fd use; no feature flags needed.
 ignore = "0.4"
+# Issue #556: in-process git-index parse for the large-file guard's fast
+# (tracked-files + cached sizes) pass. Pinned exactly; license MIT OR
+# Apache-2.0 (gitoxide family). Only the index reader is pulled in — no ODB,
+# no network, no hashing on the scan path.
+gix-index = "=0.54.0"
+# gix-index pulls in gix-hash but leaves the hash-backend feature to the
+# top-level crate; without one, gix-hash fails to compile ("set the sha1 or
+# sha256 feature"). We only enable the SHA-1 backend (the index parse itself
+# runs with skip_hash). Transitive dep, pinned to match; MIT OR Apache-2.0.
+gix-hash = { version = "=0.26.0", features = ["sha1"] }
 # Issue #545: daemon-owned, non-recursive filesystem discovery.  The
 # reconciliation fallback in `daemon::watch_service` bounds missed Windows
 # notifications / watcher failure, so `notify` is never the sole source of

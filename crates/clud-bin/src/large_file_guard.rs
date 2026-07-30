@@ -19,6 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Issue #556: pass 1 — the in-process git-index reader (fast path for tracked
+/// files). Wired into [`run`] ahead of the walker for git repos.
+mod index_pass;
+
 /// 40 kB ≈ 1000 LOC at clud's measured ~37 bytes/line (see issue #132).
 ///
 /// Doubles as the yellow tier's floor (issue #557): anything worth listing is
@@ -105,7 +109,7 @@ const VENDOR_DIRS: &[&str] = &[
 ];
 
 /// A single file that crossed the size threshold.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LargeFile {
     pub rel_path: PathBuf,
     pub size: u64,
@@ -120,8 +124,45 @@ pub fn run(project_root: &Path) {
         return;
     }
 
-    let report = collect(project_root, DEADLINE);
+    // Issue #556: prefer the in-process index pass (tracked files + cached
+    // sizes, ~1–5 ms, no tree walk). Fall back to the full parallel walker only
+    // when there is no usable index (missing/corrupt), so behavior never
+    // regresses on non-standard or damaged repos.
+    let report = match index_pass::index_pass(project_root) {
+        Ok(output) => report_from_index_pass(project_root, output),
+        Err(_) => collect(project_root, DEADLINE),
+    };
     emit(&report.files, report.total_qualifying, report.timed_out);
+}
+
+/// Build the startup report from the index pass. Tracked files already over the
+/// threshold come straight from the index's cached sizes; the few entries whose
+/// cached size is untrustworthy (racily-clean, recorded as 0) are re-measured
+/// with a single targeted `stat` each — still no tree walk. Untracked files are
+/// not covered on the launch path; the daemon's background pass 2 (#551) owns
+/// that, consistent with the "crude, fast, not comprehensive" design.
+fn report_from_index_pass(root: &Path, output: index_pass::IndexPassOutput) -> Report {
+    let mut files = output.qualifying;
+    for rel in output.needs_verification {
+        if let Ok(metadata) = std::fs::metadata(root.join(&rel)) {
+            if metadata.len() >= SIZE_THRESHOLD {
+                files.push(LargeFile {
+                    rel_path: rel,
+                    size: metadata.len(),
+                });
+            }
+        }
+    }
+    files.sort_by(|a, b| b.size.cmp(&a.size));
+    let total_qualifying = files.len();
+    files.truncate(REPORT_LIMIT);
+    Report {
+        files,
+        total_qualifying,
+        // The index pass has no wall-clock walk to time out; verification stats
+        // are a bounded, tiny set.
+        timed_out: false,
+    }
 }
 
 struct Report {
