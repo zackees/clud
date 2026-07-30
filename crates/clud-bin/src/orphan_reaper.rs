@@ -21,6 +21,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::process_identity::ProcessIdentity;
+use crate::process_scan;
 use crate::process_tree;
 
 /// Caller-controlled knobs for the reaper. Filled in from the parsed CLI args
@@ -53,8 +55,28 @@ pub struct ReapOutcome {
 /// One descendant's view, pre-classification.
 struct Descendant {
     pid: u32,
+    /// Creation time observed in the *same* snapshot that selected this PID.
+    /// The kill path re-reads it and refuses to act if it moved (#673 Phase 6).
+    start_time: u64,
     name: String,
     command: String,
+}
+
+impl Descendant {
+    fn identity(&self) -> ProcessIdentity {
+        ProcessIdentity::new(self.pid, self.start_time)
+    }
+}
+
+impl From<process_scan::TaggedProcess> for Descendant {
+    fn from(tagged: process_scan::TaggedProcess) -> Self {
+        Self {
+            pid: tagged.pid,
+            start_time: tagged.start_time,
+            name: tagged.name,
+            command: tagged.command,
+        }
+    }
 }
 
 /// Coarse cmdline-shape label. The classifier table is the heart of the
@@ -283,24 +305,23 @@ fn extract_port(command: &str) -> Option<String> {
 /// This is the public entry point called from `main.rs` right before the
 /// foreground process exits. Returns counts for the caller's summary log.
 pub fn scan_and_report(self_pid: u32, opts: &ReapOpts) -> ReapOutcome {
-    let all = running_process::originator::find_processes_by_originator("CLUD");
-    let daemons = declared_daemon_pids();
+    // One host environment pass answers both questions this needs — which
+    // processes are tagged as ours, and which declared themselves daemons.
+    // Asking them separately cost two full-host PEB walks (#673 Phase 7b).
+    let scan = process_scan::scan_env("CLUD");
 
     // Only act on descendants whose originator points at *us*. Anything
     // pointing at a different CLUD:<pid> belongs to a concurrent clud
     // invocation and is not ours to touch.
-    let mine: Vec<Descendant> = all
+    let mine: Vec<Descendant> = scan
+        .tagged
         .into_iter()
         .filter(|p| p.parent_pid == self_pid)
-        .map(|p| Descendant {
-            pid: p.pid,
-            name: p.name,
-            command: p.command,
-        })
+        .map(Descendant::from)
         .collect();
 
     let header = format!("[clud] orphan scan on exit (originator=CLUD:{self_pid}):");
-    report_and_reap(mine, &header, opts, &daemons)
+    report_and_reap(mine, &header, opts, &scan.declared_daemons)
 }
 
 /// Scan for *abandoned* CLUD-tagged descendants whose originator process is
@@ -359,11 +380,11 @@ pub fn reap_orphans_filtered_sparing(
     spared_origins: &std::collections::BTreeSet<u32>,
     admit: &mut dyn FnMut(u32) -> bool,
 ) -> (ReapOutcome, std::collections::BTreeSet<u32>) {
-    let all = running_process::originator::find_processes_by_originator("CLUD");
-    let daemons = declared_daemon_pids();
+    let scan = process_scan::scan_env("CLUD");
     let observed_origins: std::collections::BTreeSet<u32> =
-        all.iter().map(|p| p.parent_pid).collect();
-    let orphans: Vec<Descendant> = all
+        scan.tagged.iter().map(|p| p.parent_pid).collect();
+    let orphans: Vec<Descendant> = scan
+        .tagged
         .into_iter()
         .filter(|p| !p.parent_alive)
         // Handover-registered originators are intentionally-detached sessions;
@@ -373,16 +394,12 @@ pub fn reap_orphans_filtered_sparing(
         // candidate regardless of earlier results, which is what lets the
         // sweeper use it as an observation hook as well as a gate.
         .filter(|p| admit(p.pid))
-        .map(|p| Descendant {
-            pid: p.pid,
-            name: p.name,
-            command: p.command,
-        })
+        .map(Descendant::from)
         .collect();
 
     let header = "[clud] orphan sweep (dead originator):".to_string();
     (
-        report_and_reap(orphans, &header, opts, &daemons),
+        report_and_reap(orphans, &header, opts, &scan.declared_daemons),
         observed_origins,
     )
 }
@@ -409,8 +426,31 @@ pub fn reap_orphans_filtered_sparing(
 /// and "had its environment clobbered" look identical. A positive marker
 /// can, so the predicate now spares only what actually claims daemon-hood
 /// and lets the tree walk reach env-stripped descendants.
+///
+/// Both callers now obtain this set from [`process_scan::scan_env`] in the same
+/// pass that finds the tagged processes (#673 Phase 7b), so this exists only as
+/// the standalone form of the query.
+#[cfg(test)]
 fn declared_daemon_pids() -> HashSet<u32> {
-    running_process::originator::find_declared_daemon_pids()
+    process_scan::scan_env("CLUD").declared_daemons
+}
+
+/// May the kill proceed against the process now holding the recorded PID?
+///
+/// `observed` is what the process table reports for that PID *right now*;
+/// `None` means the PID is gone. Pure so the recycled-PID case is testable
+/// without persuading the OS to actually recycle a PID (#673 Phase 6).
+///
+/// A recorded identity with no creation time degrades to the PID-only
+/// comparison clud used before start times existed. That is deliberate: it is
+/// the same fallback [`ProcessIdentity::matches`] documents, and failing closed
+/// instead would silently disable orphan reaping wholesale on any host whose
+/// OS declines to report creation times, rather than on the one PID in question.
+fn kill_target_is_current(recorded: ProcessIdentity, observed: Option<ProcessIdentity>) -> bool {
+    match observed {
+        Some(observed) => recorded.matches(&observed),
+        None => false,
+    }
 }
 
 /// Shared classify / report / kill body for both entry points. Returns a
@@ -490,7 +530,17 @@ fn report_and_reap(
 
     let mut reaped = 0usize;
     let mut reaped_pids = Vec::with_capacity(descendants.len());
+    let mut skipped_recycled = 0usize;
     for d in &descendants {
+        // #673 Phase 6: the scan that selected this PID and the kill that acts
+        // on it are separated by the rest of the scan, the classification, and
+        // the report. A PID can die and be recycled in that window, and killing
+        // a *tree* means the replacement's children go with it. Re-read the
+        // creation time at the last responsible moment and refuse if it moved.
+        if !kill_target_is_current(d.identity(), ProcessIdentity::observe(d.pid)) {
+            skipped_recycled += 1;
+            continue;
+        }
         process_tree::kill_tree_filtered(d.pid, &|pid| !daemons.contains(&pid));
         reaped += 1;
         reaped_pids.push(d.pid);
@@ -498,6 +548,12 @@ fn report_and_reap(
 
     if !opts.quiet {
         eprintln!("[clud] reaped {reaped} of {found} env-tagged descendant(s)");
+        if skipped_recycled > 0 {
+            eprintln!(
+                "[clud] skipped {skipped_recycled} descendant(s) whose PID was \
+                 recycled or exited between scan and reap"
+            );
+        }
     }
 
     ReapOutcome {
@@ -511,6 +567,7 @@ fn report_and_reap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_identity::UNKNOWN_START_TIME;
 
     /// The shape of the predicate is the whole of #522, so assert it
     /// directly rather than only through the callers.
@@ -558,6 +615,70 @@ mod tests {
     #[test]
     fn declared_daemon_pids_is_callable() {
         let _ = declared_daemon_pids();
+    }
+
+    // ---- #673 Phase 6: the kill path re-verifies identity ----
+
+    /// The bug this closes: between the scan that selected a target and the
+    /// kill that acts, the PID died and was handed to something else. Killing
+    /// it would take out the replacement *and its whole subtree*.
+    #[test]
+    fn a_recycled_pid_is_never_killed() {
+        let recorded = ProcessIdentity::new(4321, 1_700_000_000);
+        let replacement = ProcessIdentity::new(4321, 1_700_000_042);
+        assert!(!kill_target_is_current(recorded, Some(replacement)));
+    }
+
+    /// The ordinary case: same PID, same creation time, kill proceeds.
+    #[test]
+    fn an_unchanged_target_is_still_killed() {
+        let recorded = ProcessIdentity::new(4321, 1_700_000_000);
+        assert!(kill_target_is_current(recorded, Some(recorded)));
+    }
+
+    /// A target that simply exited before the kill is skipped rather than
+    /// having its number acted on.
+    #[test]
+    fn a_target_that_vanished_is_skipped() {
+        assert!(!kill_target_is_current(
+            ProcessIdentity::new(4321, 1_700_000_000),
+            None
+        ));
+    }
+
+    /// Without a recorded creation time there is nothing to compare, and
+    /// refusing would disable reaping wholesale rather than for one PID. This
+    /// is the documented `ProcessIdentity::matches` fallback, asserted here so
+    /// the choice is visible rather than incidental.
+    #[test]
+    fn an_unrecorded_creation_time_falls_back_to_pid_only() {
+        let recorded = ProcessIdentity::new(4321, UNKNOWN_START_TIME);
+        assert!(kill_target_is_current(
+            recorded,
+            Some(ProcessIdentity::new(4321, 1_700_000_000))
+        ));
+        assert!(!kill_target_is_current(
+            recorded,
+            Some(ProcessIdentity::new(9999, 1_700_000_000))
+        ));
+    }
+
+    /// Descendants carry the creation time observed by the selecting scan, so
+    /// the kill path has something to re-verify against.
+    #[test]
+    fn descendant_identity_pairs_pid_with_observed_creation_time() {
+        let tagged = process_scan::TaggedProcess {
+            pid: 4321,
+            start_time: 1_700_000_000,
+            name: "node.exe".into(),
+            command: "node vite.js".into(),
+            originator: "CLUD:1".into(),
+            parent_pid: 1,
+            parent_alive: false,
+        };
+        let descendant = Descendant::from(tagged);
+        assert_eq!(descendant.identity().pid, 4321);
+        assert_eq!(descendant.identity().start_time, 1_700_000_000);
     }
 
     #[test]

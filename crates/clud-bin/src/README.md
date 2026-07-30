@@ -110,6 +110,15 @@ Process management and GC:
   promptly, so "the PID is alive" and "that process is alive" are different
   questions. Records written before the field existed carry
   `UNKNOWN_START_TIME` and fall back to a PID-only comparison.
+- `process_scan.rs` - clud's own host **environment** pass on `sysinfo 0.37`
+  (#673 Phase 7). `scan_env()` answers both env questions — which processes
+  carry `RUNNING_PROCESS_ORIGINATOR=CLUD:<pid>` (additive kill-target set) and
+  which carry `RUNNING_PROCESS_IS_DAEMON` (subtractive spare-list) — from one
+  snapshot; asking `running_process` for them cost two full-host PEB walks
+  back to back. `TaggedProcess` also carries `start_time`, so a kill can
+  re-verify `(pid, creation_time)` at the last responsible moment.
+  `DaemonMarkerCache` answers the daemon question for a *bounded candidate set*
+  and reads env only for identities it has never resolved.
 - `process_tree.rs` - best-effort descendant-tree termination via `sysinfo`;
   fixes the multi-second Ctrl+C hang for `clud --codex` on Windows where
   `cmd.exe -> node.exe` would orphan the real child.

@@ -333,7 +333,8 @@ impl ProcSampler {
             return;
         }
         self.last_originator_scan = Some(Instant::now());
-        self.originator_cache = running_process::originator::find_processes_by_originator("CLUD")
+        self.originator_cache = crate::process_scan::scan_env("CLUD")
+            .tagged
             .into_iter()
             .map(|process| {
                 (
