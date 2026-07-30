@@ -30,8 +30,21 @@ pub(super) fn pid_is_alive(pid: u32) -> bool {
 /// `false` both when the PID is gone and when it has been recycled onto an
 /// unrelated process.
 pub(super) fn identity_is_alive(identity: &ProcessIdentity) -> bool {
-    let system = fresh_minimal_system();
-    ProcessIdentity::observe_in(&system, identity.pid)
+    identity_alive_in(&fresh_minimal_system(), identity)
+}
+
+/// A minimal-refresh `System` snapshot for batched liveness checks.
+///
+/// A caller reconciling many records refreshes once and reuses this across
+/// every [`identity_alive_in`] call, instead of paying [`identity_is_alive`]'s
+/// full-table refresh per record.
+pub(super) fn refreshed_minimal_system() -> System {
+    fresh_minimal_system()
+}
+
+/// Batched form of [`identity_is_alive`] against an already-refreshed `System`.
+pub(super) fn identity_alive_in(system: &System, identity: &ProcessIdentity) -> bool {
+    ProcessIdentity::observe_in(system, identity.pid)
         .is_some_and(|observed| identity.matches(&observed))
 }
 

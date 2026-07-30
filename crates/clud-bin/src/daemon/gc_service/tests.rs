@@ -766,6 +766,7 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
         &live_cwds_provider,
         &config,
         &|_| Ok(4 * BYTES_PER_GB),
+        None,
     );
     // The two seeded entries — one worktree, one sibling clone — are both
     // old enough and both under a low-space root, so the tick must dispatch
@@ -828,6 +829,7 @@ fn periodic_tick_keeps_old_worktree_entry_when_free_space_is_healthy() {
         &live_cwds_provider,
         &config,
         &|_| Ok(20 * BYTES_PER_GB),
+        None,
     );
     // Healthy disk → no dispatches expected, so no completions
     // should land.
@@ -918,8 +920,13 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
     let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
     let pool_tx = spawn_purge_pool(1);
     let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
-    let dispatched =
-        run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+    let dispatched = run_periodic_purge_tick(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        &live_cwds_provider,
+        None,
+    );
     // Same #383/#560 hazard as the periodic-purge test: this one discarded
     // the drain count entirely, so a completion that never arrived showed up
     // only as the "dir should be deleted" assertion failing — with no hint
@@ -963,7 +970,13 @@ fn periodic_tick_keeps_fresh_extern_repo_entry() {
     let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
     let pool_tx = spawn_purge_pool(1);
     let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
-    run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+    run_periodic_purge_tick(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        &live_cwds_provider,
+        None,
+    );
     let drained = drain_purge_completions(
         &registry,
         &completion_rx,
