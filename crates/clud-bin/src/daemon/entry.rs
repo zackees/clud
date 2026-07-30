@@ -170,9 +170,54 @@ fn sweep_is_stale(status: Option<&OrphanSweepStatus>, now_ms: u64, interval_ms: 
     }
 }
 
+/// Event-log files to search for the last sweep, newest-written first: the
+/// active log plus the single rotated backup.
+///
+/// The backup matters in practice. The event log is shared and rotates at 1 MB,
+/// and a burst of unrelated high-volume events (e.g. the foreground
+/// tool-shell tracker's `foreground_tool_shell_*` stream) can push every
+/// `orphan_sweep_finished` record out of the active file within minutes.
+/// Reading only the active log then reports a false "no sweep recorded — STALE"
+/// on a daemon that is sweeping perfectly well — observed on a live daemon
+/// whose two log files held 3.4k tool-shell events and zero sweep events.
+fn orphan_status_log_paths(state_dir: &Path) -> Vec<PathBuf> {
+    let active = daemon_events_path(state_dir);
+    let rotated = match active.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => active.with_extension(format!("{ext}.1")),
+        None => active.with_extension("1"),
+    };
+    vec![active, rotated]
+}
+
+/// Parse the dedicated `orphan-sweep.last` sentinel, which the sweep rewrites
+/// on every completed pass. Preferred over the shared event log because it
+/// cannot be rotated away by unrelated traffic.
+fn sentinel_orphan_sweep(state_dir: &Path) -> Option<OrphanSweepStatus> {
+    let text =
+        std::fs::read_to_string(super::server::orphan_sweep_sentinel_path(state_dir)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    Some(OrphanSweepStatus {
+        ts_ms: value.get("ts_ms").and_then(|v| v.as_u64())?,
+        found: value.get("found").and_then(|v| v.as_u64()).unwrap_or(0),
+        reaped: value.get("reaped").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
 fn run_orphan_status(state_dir: &Path, json: bool) -> i32 {
-    let text = std::fs::read_to_string(daemon_events_path(state_dir)).unwrap_or_default();
-    let status = latest_orphan_sweep(text.lines().map(str::to_string));
+    // Sentinel first; fall back to scanning the event logs so a daemon that
+    // has not yet written one (older build, or no sweep since upgrade) still
+    // reports whatever the logs still hold.
+    let status = sentinel_orphan_sweep(state_dir).or_else(|| {
+        let mut lines: Vec<String> = Vec::new();
+        for path in orphan_status_log_paths(state_dir) {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                lines.extend(text.lines().map(str::to_string));
+            }
+        }
+        // `latest_orphan_sweep` picks the newest by `ts_ms`, so concatenation
+        // order across the two files does not matter.
+        latest_orphan_sweep(lines.into_iter())
+    });
     let interval_ms = super::server::orphan_sweep_interval().as_millis() as u64;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -878,6 +923,45 @@ mod tests {
     fn latest_orphan_sweep_is_none_when_never_swept() {
         let lines = [r#"{"op":"orphan_sweep_started","ts_ms":100}"#];
         assert!(latest_orphan_sweep(lines.iter().map(|s| s.to_string())).is_none());
+    }
+
+    #[test]
+    fn sentinel_is_preferred_over_the_event_log() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No sentinel yet → None, so the caller falls back to the log scan.
+        assert!(sentinel_orphan_sweep(tmp.path()).is_none());
+
+        std::fs::write(
+            super::super::server::orphan_sweep_sentinel_path(tmp.path()),
+            r#"{"ts_ms":1700000000000,"found":7,"reaped":3}"#,
+        )
+        .unwrap();
+        let status = sentinel_orphan_sweep(tmp.path()).expect("sentinel parses");
+        assert_eq!(status.ts_ms, 1_700_000_000_000);
+        assert_eq!((status.found, status.reaped), (7, 3));
+
+        // A corrupt sentinel falls back rather than panicking.
+        std::fs::write(
+            super::super::server::orphan_sweep_sentinel_path(tmp.path()),
+            "{ not json",
+        )
+        .unwrap();
+        assert!(sentinel_orphan_sweep(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn orphan_status_also_searches_the_rotated_log() {
+        // Regression: the shared event log rotates at 1 MB, so a burst of
+        // unrelated events can push every sweep record into `<log>.1`. Reading
+        // only the active file reported a false "no sweep recorded — STALE".
+        let paths = orphan_status_log_paths(Path::new("state"));
+        assert_eq!(paths.len(), 2, "active + one rotated backup");
+        assert!(paths[0].ends_with("daemon-events.jsonl"));
+        assert!(
+            paths[1].ends_with("daemon-events.jsonl.1"),
+            "second path must be the rotated backup, got {:?}",
+            paths[1]
+        );
     }
 
     #[test]
