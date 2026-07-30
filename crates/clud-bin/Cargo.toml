@@ -175,6 +175,13 @@ signal-hook = "0.3"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # #673 Phase 1a: OS-authoritative daemon-sparing signals for the
+    # foreground job reaper — listening-endpoint ownership
+    # (GetExtendedTcpTable) and services-session membership
+    # (ProcessIdToSessionId).
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
