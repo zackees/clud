@@ -529,11 +529,11 @@ def test_windows_guard_owns_cli_tree_until_docker_exits(dr, monkeypatch):
     server_states = iter([True, True, False, True, False, False, False])
     released = []
 
-    def run_cli(*_args, **kwargs):
-        calls.update(kwargs)
+    def run_cli(*, timeout):
+        calls["timeout"] = timeout
         return cli
 
-    monkeypatch.setattr(dr, "_run", run_cli)
+    monkeypatch.setattr(dr, "_run_windows_desktop_cli", run_cli)
     monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: object())
     monkeypatch.setattr(
         dr, "_release_windows_guard_mutex", lambda handle: released.append(handle)
@@ -549,7 +549,7 @@ def test_windows_guard_owns_cli_tree_until_docker_exits(dr, monkeypatch):
     monkeypatch.setattr(dr.time, "sleep", sleeps.append)
 
     assert dr._windows_daemon_guard_main() == dr.EXIT_OK
-    assert calls["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert calls["timeout"] == dr.WINDOWS_GUARD_CLI_SECONDS
     assert sleeps == [5.0] * 5
     assert len(released) == 1
 
@@ -560,7 +560,7 @@ def test_windows_guard_singleton_retry_exits_without_starting_cli(dr, monkeypatc
     def unexpected_run(*_args, **_kwargs):
         raise AssertionError("a second guard must reuse the live singleton")
 
-    monkeypatch.setattr(dr, "_run", unexpected_run)
+    monkeypatch.setattr(dr, "_run_windows_desktop_cli", unexpected_run)
 
     assert dr._windows_daemon_guard_main() == dr.EXIT_OK
 
@@ -578,7 +578,7 @@ def test_windows_guard_false_success_uses_direct_fallback(dr, monkeypatch):
 
     monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: object())
     monkeypatch.setattr(dr, "_release_windows_guard_mutex", lambda _handle: None)
-    monkeypatch.setattr(dr, "_run", lambda *_args, **_kwargs: cli)
+    monkeypatch.setattr(dr, "_run_windows_desktop_cli", lambda **_kwargs: cli)
     monkeypatch.setattr(
         dr, "_windows_docker_process_identities", lambda **_kwargs: set()
     )
@@ -604,9 +604,9 @@ def test_windows_guard_cli_budget_leaves_direct_observation_time(dr, monkeypatch
     launched = []
     server_states = iter([False, True, False, False, False])
 
-    def run_cli(*_args, **kwargs):
-        assert kwargs["timeout"] == dr.WINDOWS_GUARD_CLI_SECONDS
-        clock["now"] += kwargs["timeout"]
+    def run_cli(*, timeout):
+        assert timeout == dr.WINDOWS_GUARD_CLI_SECONDS
+        clock["now"] += timeout
         return None
 
     def sleep(seconds):
@@ -614,7 +614,7 @@ def test_windows_guard_cli_budget_leaves_direct_observation_time(dr, monkeypatch
 
     monkeypatch.setattr(dr, "_acquire_windows_guard_mutex", lambda: object())
     monkeypatch.setattr(dr, "_release_windows_guard_mutex", lambda _handle: None)
-    monkeypatch.setattr(dr, "_run", run_cli)
+    monkeypatch.setattr(dr, "_run_windows_desktop_cli", run_cli)
     monkeypatch.setattr(
         dr, "_windows_docker_process_identities", lambda **_kwargs: set()
     )
@@ -633,6 +633,58 @@ def test_windows_guard_cli_budget_leaves_direct_observation_time(dr, monkeypatch
     assert dr._windows_daemon_guard_main() == dr.EXIT_OK
     assert launched == [desktop]
     assert clock["now"] < dr.WINDOWS_GUARD_PARENT_WAIT_SECONDS
+
+
+def test_windows_desktop_cli_timeout_never_drains_inherited_pipes(dr, monkeypatch):
+    events = []
+
+    class HungCli:
+        waits = 0
+
+        def wait(self, *, timeout):
+            events.append(("wait", timeout))
+            self.waits += 1
+            if self.waits == 1:
+                raise dr.subprocess.TimeoutExpired(
+                    ["docker", "desktop", "start"], timeout
+                )
+            return 1
+
+        def kill(self):
+            events.append(("kill",))
+
+        def communicate(self):
+            raise AssertionError(
+                "communicate can hang on pipe handles inherited by daemon descendants"
+            )
+
+    def popen(command, **kwargs):
+        events.append(("popen", command, kwargs))
+        return HungCli()
+
+    monkeypatch.setattr(dr.subprocess, "Popen", popen)
+
+    assert dr._run_windows_desktop_cli(timeout=7.0) is None
+    assert events[0][1] == ["docker", "desktop", "start"]
+    assert events[0][2]["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert events[0][2]["stdin"] is dr.subprocess.DEVNULL
+    assert events[0][2]["stdout"] is dr.subprocess.DEVNULL
+    assert events[0][2]["stderr"] is dr.subprocess.DEVNULL
+    assert events[1:] == [
+        ("wait", 7.0),
+        ("kill",),
+        ("wait", dr.WINDOWS_GUARD_CLI_TERMINATE_SECONDS),
+    ]
+
+
+def test_windows_desktop_cli_wait_error_returns_unavailable(dr, monkeypatch):
+    class BrokenCli:
+        def wait(self, *, timeout):
+            raise OSError(f"wait failed after {timeout}")
+
+    monkeypatch.setattr(dr.subprocess, "Popen", lambda *_args, **_kwargs: BrokenCli())
+
+    assert dr._run_windows_desktop_cli(timeout=7.0) is None
 
 
 def test_windows_guarded_server_wait_honors_wall_clock_deadline(dr):

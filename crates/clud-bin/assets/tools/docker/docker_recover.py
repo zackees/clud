@@ -120,6 +120,7 @@ WINDOWS_DAEMON_GUARD_MUTEX = r"Local\clud-docker-recover-daemon-guard"
 WINDOWS_GUARD_PARENT_WAIT_SECONDS = 60.0
 WINDOWS_GUARD_STARTUP_SECONDS = 300.0
 WINDOWS_GUARD_CLI_SECONDS = 40.0
+WINDOWS_GUARD_CLI_TERMINATE_SECONDS = 1.0
 WINDOWS_GUARD_EMPTY_SAMPLES = 3
 WINDOWS_GUARD_MONITOR_INTERVAL = 5.0
 AUTHORITATIVE_WINDOWS_DOCKER_PROCESSES = {
@@ -1441,6 +1442,39 @@ def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
     return True, "Docker Desktop daemon guard started (daemon marker set)"
 
 
+def _run_windows_desktop_cli(
+    *, timeout: float
+) -> subprocess.CompletedProcess | None:
+    """Run Desktop's CLI without pipes that daemon descendants can inherit."""
+    command = ["docker", "desktop", "start"]
+    try:
+        process = subprocess.Popen(
+            command,
+            env=_declared_daemon_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=WINDOWS_CREATE_NEW_PROCESS_GROUP,
+        )
+    except OSError:
+        return None
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.wait(timeout=WINDOWS_GUARD_CLI_TERMINATE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        except OSError:
+            pass
+        return None
+    except OSError:
+        return None
+    return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
+
+
 def _acquire_windows_guard_mutex() -> int | object | None:
     """Acquire the per-session singleton mutex held for the guard's lifetime."""
     if platform.system() != "Windows":
@@ -1520,11 +1554,7 @@ def _windows_daemon_guard_main() -> int:
     try:
         deadline = time.monotonic() + WINDOWS_GUARD_STARTUP_SECONDS
         baseline = _windows_docker_process_identities(timeout=1.0)
-        _run(
-            ["docker", "desktop", "start"],
-            timeout=WINDOWS_GUARD_CLI_SECONDS,
-            env=_declared_daemon_environment(),
-        )
+        _run_windows_desktop_cli(timeout=WINDOWS_GUARD_CLI_SECONDS)
         ready = _windows_server_ready(timeout=1.0)
         new_process = bool(
             _windows_docker_process_identities(timeout=1.0) - baseline
