@@ -4,6 +4,7 @@ mod commands;
 mod daemon_events;
 mod entry;
 mod gc_service;
+mod handover_registry;
 mod http;
 mod io_helpers;
 mod keys;
