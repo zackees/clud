@@ -11,6 +11,7 @@ mod paths;
 mod proc_sampler;
 mod process_utils;
 mod rp_broker;
+mod runtime_config;
 mod server;
 mod session_tmp_sweep;
 mod sessions;

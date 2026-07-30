@@ -176,11 +176,16 @@ pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<RegistryMs
 
 pub(super) fn spawn_registry_worker_for_state(
     state_dir: PathBuf,
+    periodic_maintenance_enabled: bool,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
-    spawn_registry_worker_with_live_cwds(
+    let tick_cadence = periodic_maintenance_enabled
+        .then(gc_tick_cadence_from_env)
+        .flatten();
+    spawn_registry_worker_with_live_cwds_and_cadence(
         registry,
         Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
+        tick_cadence,
     )
 }
 
@@ -194,14 +199,26 @@ pub(super) fn spawn_registry_worker_with(
     spawn_registry_worker_with_live_cwds(registry, Arc::new(Vec::<PathBuf>::new))
 }
 
+#[cfg(test)]
 fn spawn_registry_worker_with_live_cwds(
     registry: Registry,
     live_cwds_provider: LiveCwdsProvider,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
+    spawn_registry_worker_with_live_cwds_and_cadence(
+        registry,
+        live_cwds_provider,
+        gc_tick_cadence_from_env(),
+    )
+}
+
+fn spawn_registry_worker_with_live_cwds_and_cadence(
+    registry: Registry,
+    live_cwds_provider: LiveCwdsProvider,
+    tick_cadence: Option<Duration>,
+) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let (tx, rx) = mpsc::channel::<RegistryMsg>();
     let pool_tx = spawn_purge_pool(purge_concurrency_from_env());
     let completion_tx = tx.clone();
-    let tick_cadence = gc_tick_cadence_from_env();
     thread::Builder::new()
         .name("clud-gc-registry-worker".to_string())
         .spawn(move || {
