@@ -164,3 +164,53 @@ def test_tracked_soldr_hooks_read_payload_without_waiting_for_stdin_eof(
             argv=[sys.executable, str(script)],
         )
         assert result.returncode == 0, script
+
+
+def test_bad_command_denial_includes_rule_provenance(tmp_path: Path) -> None:
+    """#525: a config `bad_commands` denial cites the matched token, normalized
+    program, rule id, and `<file>#/bad_commands/<index>` source in
+    `permissionDecisionReason`, and writes a structured `bad_cmd_denied` event
+    to the hook log."""
+    repo = tmp_path / "repo"
+    (repo / ".clud").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / ".clud" / "settings.json").write_text(
+        json.dumps(
+            {
+                "bad_commands": [
+                    {
+                        "id": "manual-check",
+                        "match": "clud-manual-bad-command",
+                        "replacement": "echo use-the-approved-command",
+                        "reason": "manual verification rule triggered",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "clud-manual-bad-command --example"},
+            "cwd": str(repo),
+        }
+    )
+
+    result = _run_hook_with_open_stdin(tmp_path, payload)
+    assert result.returncode == 2, result.stderr
+    out = result.stdout
+    assert "deny" in out
+    # Provenance appended to permissionDecisionReason.
+    assert "Blocked" in out
+    assert "clud-manual-bad-command" in out
+    assert "normalized:" in out
+    assert "by rule `manual-check`" in out
+    assert "#/bad_commands/0`" in out
+
+    # Structured forensic event in the hook log.
+    log = tmp_path / "home" / ".clud" / "tools" / "hooks" / "block-bad-cmd.log"
+    assert log.is_file(), "hook log should exist"
+    log_text = log.read_text(encoding="utf-8")
+    assert "bad_cmd_denied" in log_text
+    assert "manual-check" in log_text
