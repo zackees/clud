@@ -1253,6 +1253,17 @@ fn test_daemon_restart_subcommand_parses() {
 }
 
 #[test]
+fn test_daemon_stop_subcommand_parses() {
+    let args = parse(&["clud", "daemon", "stop"]);
+    match args.command {
+        Some(Command::Daemon {
+            subcommand: DaemonSubcommand::Stop,
+        }) => {}
+        other => panic!("expected Daemon::Stop, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_daemon_running_process_json_subcommand_parses() {
     let args = parse(&["clud", "daemon", "running-process", "--json"]);
     match args.command {

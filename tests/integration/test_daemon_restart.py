@@ -1,4 +1,4 @@
-"""Integration coverage for issue #186: `clud daemon restart`."""
+"""Integration coverage for `clud daemon restart` (#186) and stop (#635)."""
 
 from __future__ import annotations
 
@@ -40,6 +40,31 @@ def _run_restart(clud_binary: Path, env: dict[str, str]) -> subprocess.Completed
         timeout=30,
         env=env,
     )
+
+
+def _run_stop(clud_binary: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(clud_binary), "daemon", "stop"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
+def _assert_daemon_remains_stopped(state_dir: Path, duration: float = 1.0) -> None:
+    info_path = state_dir / "daemon.json"
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        if info_path.exists():
+            try:
+                replacement = json.loads(info_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                replacement = {"raw": info_path.read_text(encoding="utf-8", errors="replace")}
+            raise AssertionError(
+                f"daemon respawned after stop; state_dir={state_dir}, info={replacement!r}"
+            )
+        time.sleep(0.05)
 
 
 def _cleanup_daemon(state_dir: Path) -> None:
@@ -86,5 +111,31 @@ def test_daemon_restart_replaces_pid_and_restores_dashboard_listener(
         assert new_info.get("dashboard_port"), (
             f"replacement daemon must have a dashboard listener; got {new_info!r}"
         )
+    finally:
+        _cleanup_daemon(state_dir)
+
+
+def test_daemon_stop_is_idempotent_and_does_not_respawn(
+    clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = managed_env(mock_env, state_dir)
+
+    try:
+        started = _run_restart(clud_binary, env)
+        assert started.returncode == 0, started.stderr
+        info = _read_daemon_info(state_dir)
+        daemon_pid = int(info["pid"])
+        assert pid_is_alive(daemon_pid)
+
+        stopped = _run_stop(clud_binary, env)
+        assert stopped.returncode == 0, stopped.stderr
+        wait_for_pids_to_exit([daemon_pid], timeout=15)
+        assert not (state_dir / "daemon.json").exists()
+        _assert_daemon_remains_stopped(state_dir)
+
+        stopped_again = _run_stop(clud_binary, env)
+        assert stopped_again.returncode == 0, stopped_again.stderr
+        assert not (state_dir / "daemon.json").exists()
     finally:
         _cleanup_daemon(state_dir)

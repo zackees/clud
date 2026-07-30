@@ -12,7 +12,7 @@ Internal helper subcommands `__daemon` and `__worker` re-enter the same binary i
 ## Files
 
 - `mod.rs` — module root. Re-exports the public surface: `ensure_daemon`, `default_state_dir`, `ENV_NO_DAEMON`, `ListRow`, `gc_client_{list,purge,reconcile,insert}` plus the existing `experimental_enabled` / `handle_special_command` / `run_centralized_session`.
-- `entry.rs` — public dispatch: feature-flag check, routing for `attach`/`kill`/`list`/`logs`/`__daemon`/`__worker`, and the main `Create` request for normal sessions.
+- `entry.rs` — public dispatch: feature-flag check, routing for `attach`/`kill`/`list`/`logs`/`daemon stop`/`daemon restart`/`__daemon`/`__worker`, and the main `Create` request for normal sessions.
 - `types.rs` — shared structs, enums, env-var keys, and constants (`SessionSnapshot`, `WorkerLaunchSpec`, `DaemonRequest`/`Response`, `GcOp`/`GcReply`, `ListRow`, `WorkerClientMessage`/`ServerMessage`, `SessionRuntime`, `RawTerminalGuard`, `ENV_NO_DAEMON`).
 - `paths.rs` — filesystem layout helpers under the daemon state dir (`default_state_dir` → `~/.clud/state`, `daemon.json`, `daemon.lock` bringup serialization, `sessions/`, `specs/`, `logs/`).
 - `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn), `send_daemon_request`, `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
