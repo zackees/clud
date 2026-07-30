@@ -20,7 +20,6 @@ These tests pin two contracts of the lockfile-based fix:
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -28,6 +27,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from ._daemon_helpers import copy_launcher
 
 pytestmark = pytest.mark.integration
 
@@ -46,12 +47,12 @@ def _launch_clud(
     so the session registry row is held in the DB while the test inspects
     a sibling launch.
     """
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         # Copy the binary into a private dir so per-test launches don't
         # collide on Windows file locks (mirrors the helper in
         # `test_mock_agents.py::_run`).
         launch = Path(temp_dir) / clud.name
-        shutil.copy2(clud, launch)
+        copy_launcher(clud, launch)
         args = [str(launch), "-p", "hello"]
         if extra_args:
             args.extend(extra_args)
@@ -65,9 +66,7 @@ def _launch_clud(
         )
 
 
-def _registry_env(
-    base: dict[str, str], tmp_path: Path, max_instances: int = 8
-) -> dict[str, str]:
+def _registry_env(base: dict[str, str], tmp_path: Path, max_instances: int = 8) -> dict[str, str]:
     """Build an env that isolates the test's session registry from the host's.
 
     Pointing both `CLUD_SESSION_DB` and `CLUD_SESSION_LOCK` at the test's
@@ -117,9 +116,7 @@ class TestConcurrentLaunchesNoWarning:
         assert not errors, f"thread errors: {errors}"
         assert len(results) == 3, f"expected 3 results, got {len(results)}"
         for i, r in enumerate(results):
-            assert r.returncode == 0, (
-                f"launch {i} failed: rc={r.returncode}\nstderr={r.stderr}"
-            )
+            assert r.returncode == 0, f"launch {i} failed: rc={r.returncode}\nstderr={r.stderr}"
             assert _WARNING_FRAGMENT not in r.stderr, (
                 f"launch {i} printed the redb warning issue #138 was supposed to fix:\n"
                 f"stderr={r.stderr}"
@@ -191,12 +188,10 @@ class TestCapActuallyRefuses:
         # The second launch must be refused (issue #73 fork-bomb guardrail)
         # rather than slipping through with the redb warning (issue #138).
         assert _WARNING_FRAGMENT not in second.stderr, (
-            f"second launch silently bypassed cap due to redb warning:\n"
-            f"stderr={second.stderr}"
+            f"second launch silently bypassed cap due to redb warning:\nstderr={second.stderr}"
         )
         assert second.returncode != 0, (
-            f"second launch should have been refused but exited 0\n"
-            f"stderr={second.stderr}"
+            f"second launch should have been refused but exited 0\nstderr={second.stderr}"
         )
         assert _REFUSE_FRAGMENT in second.stderr, (
             f"second launch exited non-zero but without the fork-bomb message\n"
