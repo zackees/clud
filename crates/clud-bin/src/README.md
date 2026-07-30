@@ -127,6 +127,14 @@ Process management and GC:
   planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
   handoffs, nested detachments, declared daemons, and the unconditional
   `conhost.exe` exclusion before any automatic client-tree reap (#616).
+  Daemon-sparing goes through the `ProcessFacts` seam (#673 Phase 1a): every
+  OS-authoritative signal — job-object membership, session-0 service context,
+  POSIX session leader, token owner, listening-endpoint ownership — is
+  collected once per pass into a `FactsSnapshot` and then consulted as **pure
+  data**, so the reap/spare table is unit-testable on every platform without
+  spawning anything. The cooperative `RUNNING_PROCESS_IS_DAEMON` marker ranks
+  *below* every OS signal because opting in is optional; the operator
+  spare-list (`CLUD_REAPER_SPARE_IMAGES`) ranks last and ships empty.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and

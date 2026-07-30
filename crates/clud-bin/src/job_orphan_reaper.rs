@@ -15,6 +15,8 @@ pub(crate) struct ProcessMeta {
     pub(crate) parent_pid: u32,
     pub(crate) image_name: String,
     pub(crate) alive: bool,
+    /// Process *creation* time. Pairs with `pid` to form the identity every
+    /// per-process map here is keyed by.
     pub(crate) start_time: u64,
 }
 
@@ -99,8 +101,25 @@ pub(crate) enum ReapDecisionReason {
     LeakedToolClient,
     GitBashReexec,
     NestedShellDetach,
+    /// Declared itself a daemon via `RUNNING_PROCESS_IS_DAEMON`. **Cooperative**
+    /// — see [`ProcessFacts`] for why this is ranked below the OS signals.
     DeclaredDaemon,
     ConsoleHost,
+    /// Broke away from the reaper's Job Object, so it is outside our
+    /// containment and was never ours to kill.
+    OutsideJobObject,
+    /// Runs in session 0 — a Windows service, not a session descendant.
+    ServiceSession,
+    /// Called `setsid()`: it leads its own POSIX session.
+    SessionLeader,
+    /// Runs as a different token owner / euid than we do.
+    ForeignTokenOwner,
+    /// Owns a listening endpoint, so later unrelated invocations discover and
+    /// reuse it. This is what a build-cache or language server *is*.
+    ListeningEndpoint,
+    /// Matched the operator's configured spare-list. Last resort, and data
+    /// rather than code — see [`ProcessFacts::spare_listed`].
+    ConfiguredSpareList,
     #[cfg(windows)]
     CandidateIdentityChanged,
     NoLiveClients,
@@ -114,6 +133,12 @@ impl ReapDecisionReason {
             Self::NestedShellDetach => "nested_shell_detach",
             Self::DeclaredDaemon => "declared_daemon",
             Self::ConsoleHost => "console_host_never_targeted",
+            Self::OutsideJobObject => "outside_job_object",
+            Self::ServiceSession => "service_session",
+            Self::SessionLeader => "session_leader",
+            Self::ForeignTokenOwner => "foreign_token_owner",
+            Self::ListeningEndpoint => "listening_endpoint",
+            Self::ConfiguredSpareList => "configured_spare_list",
             #[cfg(windows)]
             Self::CandidateIdentityChanged => "candidate_identity_changed",
             Self::NoLiveClients => "no_live_clients",
@@ -131,6 +156,220 @@ pub(crate) struct ReapDecision {
     pub(crate) candidate_start_time: Option<u64>,
     pub(crate) action: DecisionAction,
     pub(crate) reason: ReapDecisionReason,
+}
+
+/// Facts about a process that only the OS can answer.
+///
+/// Every OS-authoritative signal behind the spare-list sits here so that reap
+/// decisions are a pure function of injected data and can be unit-tested on
+/// every platform, without spawning anything (#674). No code that decides
+/// *reap or spare* may call Win32 directly.
+///
+/// `None` means **"this signal is unavailable"** — either the platform has no
+/// such concept, or the query failed. A `None` never spares: absence of
+/// evidence is not evidence of daemon-hood, which is the exact inversion #522
+/// fixed.
+pub(crate) trait ProcessFacts {
+    /// Is `pid` inside the reaper's own Job Object?
+    ///
+    /// `Some(false)` means it broke away (`CREATE_BREAKAWAY_FROM_JOB`) and is
+    /// outside our containment. Cheapest and strongest signal we have: we
+    /// already own the job handle, so this is one syscall and no memory read.
+    fn in_reaper_job(&self, pid: u32) -> Option<bool>;
+
+    /// Does `pid` run in the Windows services session (session 0)?
+    fn is_service_session(&self, pid: u32) -> Option<bool>;
+
+    /// Did `pid` call `setsid()` — does it lead its own POSIX session?
+    fn is_session_leader(&self, pid: u32) -> Option<bool>;
+
+    /// Does `pid` run as a different token owner / euid than we do?
+    fn owner_differs(&self, pid: u32) -> Option<bool>;
+
+    /// Did `pid` set `RUNNING_PROCESS_IS_DAEMON`?
+    ///
+    /// **Cooperative**, which is why it is ranked below every OS signal: it is
+    /// set by *other programs* through `running_process` (zccache and soldr do;
+    /// sccache, dockerd and `FBuildWorker` do not). Grepping this repo tells
+    /// you nothing about the runtime set.
+    fn declared_daemon(&self, pid: u32) -> Option<bool>;
+
+    /// Does `pid` own a listening endpoint (TCP listener or named pipe)?
+    ///
+    /// The most expensive signal, and the one that catches the hard case: a
+    /// process discovered and reused by later unrelated invocations is a
+    /// service, whatever it did or did not declare.
+    fn owns_listening_endpoint(&self, pid: u32) -> Option<bool>;
+
+    /// Did the operator name this image in a configured spare-list?
+    ///
+    /// A whitelist is a last resort and must be **data, not code** — nothing in
+    /// clud hard-codes an image name here.
+    fn spare_listed(&self, pid: u32, image_name: &str) -> bool;
+}
+
+/// The signals [`ProcessFacts`] can answer. Named so a snapshot can say
+/// "I cannot answer this at all here" rather than silently answering "no".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Signal {
+    JobMembership,
+    ServiceSession,
+    SessionLeader,
+    TokenOwner,
+    DaemonMarker,
+    ListeningEndpoint,
+}
+
+/// Process facts collected once per pass and then consulted as pure data.
+///
+/// This is the production carrier **and** the test fake. Production fills it
+/// from Win32 once per reconcile pass; a unit test builds one by hand. There is
+/// no second implementation of [`ProcessFacts`] that could drift from the one
+/// under test.
+///
+/// Each set holds only *positive* findings. `unavailable` names the signals
+/// this snapshot could not evaluate at all — on Windows that is
+/// [`Signal::SessionLeader`], which has no meaning there.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FactsSnapshot {
+    /// PIDs proven to be outside the reaper's Job Object.
+    pub(crate) outside_job: HashSet<u32>,
+    pub(crate) service_session: HashSet<u32>,
+    pub(crate) session_leaders: HashSet<u32>,
+    pub(crate) foreign_owner: HashSet<u32>,
+    pub(crate) declared_daemons: HashSet<u32>,
+    pub(crate) listening: HashSet<u32>,
+    /// Operator-configured image names. Data, not code: nothing in clud
+    /// hard-codes an entry here.
+    pub(crate) spare_images: Vec<String>,
+    pub(crate) unavailable: HashSet<Signal>,
+}
+
+impl FactsSnapshot {
+    fn answer(&self, signal: Signal, present: bool) -> Option<bool> {
+        (!self.unavailable.contains(&signal)).then_some(present)
+    }
+}
+
+impl ProcessFacts for FactsSnapshot {
+    fn in_reaper_job(&self, pid: u32) -> Option<bool> {
+        self.answer(Signal::JobMembership, !self.outside_job.contains(&pid))
+    }
+
+    fn is_service_session(&self, pid: u32) -> Option<bool> {
+        self.answer(Signal::ServiceSession, self.service_session.contains(&pid))
+    }
+
+    fn is_session_leader(&self, pid: u32) -> Option<bool> {
+        self.answer(Signal::SessionLeader, self.session_leaders.contains(&pid))
+    }
+
+    fn owner_differs(&self, pid: u32) -> Option<bool> {
+        self.answer(Signal::TokenOwner, self.foreign_owner.contains(&pid))
+    }
+
+    fn declared_daemon(&self, pid: u32) -> Option<bool> {
+        self.answer(Signal::DaemonMarker, self.declared_daemons.contains(&pid))
+    }
+
+    fn owns_listening_endpoint(&self, pid: u32) -> Option<bool> {
+        self.answer(Signal::ListeningEndpoint, self.listening.contains(&pid))
+    }
+
+    fn spare_listed(&self, _pid: u32, image_name: &str) -> bool {
+        let image = normalized_image(image_name);
+        self.spare_images
+            .iter()
+            .any(|configured| normalized_image(configured) == image)
+    }
+}
+
+/// Operator-configured spare-list, read from `CLUD_REAPER_SPARE_IMAGES`.
+///
+/// A whitelist is the **last resort** in the precedence order and must be data
+/// rather than code, so this is the only way an image name enters the reaper's
+/// spare decision — clud ships none. Comma- or semicolon-separated image names,
+/// matched on basename, case-insensitively.
+pub(crate) fn configured_spare_images(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The subtractive spare-list: PID → why it must not be reaped.
+///
+/// Subtractive data may be stale (worst case: it spares too much). Additive
+/// data — anything naming a kill *target* — may not.
+pub(crate) type SpareList = HashMap<u32, ReapDecisionReason>;
+
+/// Why `pid` must not be reaped, or `None` if nothing protects it.
+///
+/// # Precedence
+///
+/// Cheap and authoritative first, expensive last, cooperative in between:
+///
+/// 1. **Job-object membership** — free, and removes most candidates before any
+///    other work. A process outside our job was never ours to kill.
+/// 2. **Service session** — a session-0 process is a Windows service. It is
+///    spared even if it somehow carries a `CLUD:` tag.
+/// 3. **Session leader** — the primary POSIX signal; a double-fork daemon.
+/// 4. **Foreign token owner** — a kill would generally fail anyway.
+/// 5. **Declared daemon** — the cooperative marker, ranked below every OS
+///    signal precisely because opting in is optional.
+/// 6. **Listening endpoint** — evaluated only for PIDs that survived all of the
+///    above, because it is the costly one.
+/// 7. **Configured spare-list** — operator data, last resort.
+///
+/// Console attachment is deliberately **not** ranked. Once the trigger shell
+/// has exited its console goes with it, which makes "no console"
+/// indistinguishable between a detached daemon and an ordinary leaked client —
+/// the signal would over-spare into uselessness exactly when it is consulted.
+pub(crate) fn spare_signal(
+    facts: &dyn ProcessFacts,
+    pid: u32,
+    image_name: &str,
+) -> Option<ReapDecisionReason> {
+    if facts.in_reaper_job(pid) == Some(false) {
+        return Some(ReapDecisionReason::OutsideJobObject);
+    }
+    if facts.is_service_session(pid) == Some(true) {
+        return Some(ReapDecisionReason::ServiceSession);
+    }
+    if facts.is_session_leader(pid) == Some(true) {
+        return Some(ReapDecisionReason::SessionLeader);
+    }
+    if facts.owner_differs(pid) == Some(true) {
+        return Some(ReapDecisionReason::ForeignTokenOwner);
+    }
+    if facts.declared_daemon(pid) == Some(true) {
+        return Some(ReapDecisionReason::DeclaredDaemon);
+    }
+    if facts.owns_listening_endpoint(pid) == Some(true) {
+        return Some(ReapDecisionReason::ListeningEndpoint);
+    }
+    if facts.spare_listed(pid, image_name) {
+        return Some(ReapDecisionReason::ConfiguredSpareList);
+    }
+    None
+}
+
+/// Evaluate [`spare_signal`] over a bounded candidate set.
+///
+/// The candidate set is the reaper's *own* tracked processes, never the host —
+/// that bound is what turned a 442-PEB-read full-host scan per process exit
+/// into single-digit queries over the job's own membership.
+pub(crate) fn build_spare_list(
+    facts: &dyn ProcessFacts,
+    candidates: impl Iterator<Item = (u32, String)>,
+) -> SpareList {
+    candidates
+        .filter_map(|(pid, image_name)| {
+            spare_signal(facts, pid, &image_name).map(|reason| (pid, reason))
+        })
+        .collect()
 }
 
 fn image_basename(image: &str) -> &str {
@@ -159,19 +398,69 @@ fn is_conhost_image(image: &str) -> bool {
     normalized_image(image) == "conhost.exe"
 }
 
-fn classify_roles(
-    processes: &[ProcessMeta],
-    backends: &[RegisteredBackend],
-) -> HashMap<u32, ProcessRole> {
-    let by_pid: HashMap<u32, &ProcessMeta> = processes.iter().map(|p| (p.pid, p)).collect();
-    let mut children = HashMap::<u32, Vec<u32>>::new();
-    for process in processes {
-        children
-            .entry(process.parent_pid)
-            .or_default()
-            .push(process.pid);
+/// The reap graph, indexed once per reconcile pass.
+///
+/// Before #673 Phase 3 every pending exit rebuilt all of this from a full deep
+/// clone of the tracked process map — `known.values().cloned().collect()`, per
+/// pending PID, per 200 ms tick, which is O(N×M) in backlog size × processes
+/// ever spawned. The indices depend only on the process set and the registered
+/// backends, so they are built once and shared across the whole pass.
+pub(crate) struct ProcessGraph<'a> {
+    by_pid: HashMap<u32, &'a ProcessMeta>,
+    children: HashMap<u32, Vec<u32>>,
+    roles: HashMap<u32, ProcessRole>,
+}
+
+impl<'a> ProcessGraph<'a> {
+    pub(crate) fn build<I>(processes: I, backends: &[RegisteredBackend]) -> Self
+    where
+        I: IntoIterator<Item = &'a ProcessMeta>,
+    {
+        let mut by_pid: HashMap<u32, &'a ProcessMeta> = HashMap::new();
+        let mut children = HashMap::<u32, Vec<u32>>::new();
+        for process in processes {
+            by_pid.insert(process.pid, process);
+            children
+                .entry(process.parent_pid)
+                .or_default()
+                .push(process.pid);
+        }
+        // Deterministic traversal: `known` is a HashMap, so without this the
+        // decision order (and therefore the log order) would vary run to run.
+        for siblings in children.values_mut() {
+            siblings.sort_unstable();
+        }
+        let roles = classify_roles(&by_pid, &children, backends);
+        Self {
+            by_pid,
+            children,
+            roles,
+        }
     }
 
+    fn children_of(&self, pid: u32) -> &[u32] {
+        self.children.get(&pid).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(crate) fn meta(&self, pid: u32) -> Option<&'a ProcessMeta> {
+        self.by_pid.get(&pid).copied()
+    }
+
+    /// Every tracked process as `(pid, image_name)` — the bounded candidate set
+    /// the spare-list is evaluated over. Bounded by the reaper's *own* job
+    /// membership, never by the host process table.
+    pub(crate) fn spare_candidates(&self) -> impl Iterator<Item = (u32, String)> + '_ {
+        self.by_pid
+            .values()
+            .map(|process| (process.pid, process.image_name.clone()))
+    }
+}
+
+fn classify_roles(
+    by_pid: &HashMap<u32, &ProcessMeta>,
+    children: &HashMap<u32, Vec<u32>>,
+    backends: &[RegisteredBackend],
+) -> HashMap<u32, ProcessRole> {
     let mut roles = HashMap::new();
     for backend in backends {
         let Some(root) = by_pid.get(&backend.pid) else {
@@ -245,35 +534,25 @@ fn classify_roles(
 }
 
 pub(crate) fn plan_shell_exit(
-    processes: &[ProcessMeta],
-    backends: &[RegisteredBackend],
-    declared_daemons: &HashSet<u32>,
+    graph: &ProcessGraph<'_>,
+    spares: &SpareList,
     exited_pid: u32,
 ) -> Vec<ReapDecision> {
-    let by_pid: HashMap<u32, &ProcessMeta> = processes.iter().map(|p| (p.pid, p)).collect();
+    let by_pid = &graph.by_pid;
+    let roles = &graph.roles;
     let Some(trigger) = by_pid.get(&exited_pid) else {
         return Vec::new();
     };
-    let roles = classify_roles(processes, backends);
     let Some(trigger_role @ (ProcessRole::ToolShellRoot | ProcessRole::ShellHandoff)) =
         roles.get(&exited_pid).copied()
     else {
         return Vec::new();
     };
 
-    let mut children = HashMap::<u32, Vec<u32>>::new();
-    for process in processes {
-        children
-            .entry(process.parent_pid)
-            .or_default()
-            .push(process.pid);
-    }
-
     if is_bash_image(&trigger.image_name) {
-        if let Some(handoff) = children
-            .get(&exited_pid)
-            .into_iter()
-            .flatten()
+        if let Some(handoff) = graph
+            .children_of(exited_pid)
+            .iter()
             .filter_map(|pid| by_pid.get(pid))
             .find(|process| {
                 process.alive
@@ -299,10 +578,9 @@ pub(crate) fn plan_shell_exit(
         inherited_spare: Option<ReapDecisionReason>,
     }
 
-    let mut pending: Vec<Pending> = children
-        .get(&exited_pid)
-        .into_iter()
-        .flatten()
+    let mut pending: Vec<Pending> = graph
+        .children_of(exited_pid)
+        .iter()
         .map(|pid| Pending {
             pid: *pid,
             has_non_shell_client: false,
@@ -317,8 +595,8 @@ pub(crate) fn plan_shell_exit(
             continue;
         };
         let role = roles.get(&item.pid).copied().unwrap_or(ProcessRole::Client);
-        let own_spare = if declared_daemons.contains(&item.pid) {
-            Some(ReapDecisionReason::DeclaredDaemon)
+        let own_spare = if let Some(reason) = spares.get(&item.pid).copied() {
+            Some(reason)
         } else if is_conhost_image(&process.image_name) {
             Some(ReapDecisionReason::ConsoleHost)
         } else if role == ProcessRole::Client
@@ -357,7 +635,7 @@ pub(crate) fn plan_shell_exit(
 
         let non_shell_client = role == ProcessRole::Client && !is_shell_image(&process.image_name);
         let reap_ancestor = item.reap_ancestor || (process.alive && spare.is_none());
-        for child_pid in children.get(&item.pid).into_iter().flatten() {
+        for child_pid in graph.children_of(item.pid) {
             pending.push(Pending {
                 pid: *child_pid,
                 has_non_shell_client: item.has_non_shell_client || non_shell_client,
@@ -500,10 +778,15 @@ pub(super) struct ReplayControl {
     pub(super) metadata_complete: bool,
 }
 
+/// Claim one pending shell exit against an **already-built** graph.
+///
+/// The graph is built once per reconcile pass and shared across every pending
+/// PID in it. It used to be rebuilt here from `known.values().cloned()` — a
+/// full deep clone of every process the session ever spawned, per pending PID,
+/// per 200 ms tick (#673 Phase 3).
 pub(super) fn claim_exit_replay(
-    known: &HashMap<u32, ProcessMeta>,
-    registered: &[RegisteredBackend],
-    declared_daemons: &HashSet<u32>,
+    graph: &ProcessGraph<'_>,
+    spares: &SpareList,
     processed_exits: &mut HashSet<(u32, u64)>,
     provisional_empty_exits: &mut HashSet<(u32, u64)>,
     exited_pid: u32,
@@ -516,14 +799,13 @@ pub(super) fn claim_exit_replay(
         // destructive false positive.
         return None;
     }
-    let trigger = known.get(&exited_pid)?;
+    let trigger = graph.meta(exited_pid)?;
     let exit_identity = (trigger.pid, trigger.start_time);
     if processed_exits.contains(&exit_identity) {
         return None;
     }
 
-    let processes: Vec<ProcessMeta> = known.values().cloned().collect();
-    let decisions = plan_shell_exit(&processes, registered, declared_daemons, exited_pid);
+    let decisions = plan_shell_exit(graph, spares, exited_pid);
     if decisions.is_empty() {
         // Registration or descendant metadata may arrive after the exit
         // notification. Leave this identity pending so either event can
@@ -590,7 +872,9 @@ mod imp {
     use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 
-    use super::{DecisionAction, ProcessMeta, ReapDecision, RegisteredBackend};
+    use super::{
+        DecisionAction, FactsSnapshot, ProcessMeta, ReapDecision, RegisteredBackend, Signal,
+    };
 
     const ACTIVE_PROCESS_ZERO: u32 = 4;
     const NEW_PROCESS: u32 = 6;
@@ -604,12 +888,24 @@ mod imp {
         unresolved_new_pids: HashSet<u32>,
     }
 
+    /// State the facts collector carries across passes.
+    ///
+    /// The daemon-marker cache is the reason this is not rebuilt each tick: it
+    /// reads a process's environment once per identity, ever, instead of once
+    /// per exit for every process on the host.
+    #[derive(Default)]
+    struct FactsCollector {
+        daemon_marker: crate::process_scan::DaemonMarkerCache,
+        spare_images: Vec<String>,
+    }
+
     pub struct ForegroundJobTracker {
         job: HANDLE,
         port: HANDLE,
         stop: Arc<AtomicBool>,
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
+        collector: Arc<Mutex<FactsCollector>>,
         listener: Option<JoinHandle<()>>,
     }
 
@@ -640,17 +936,34 @@ mod imp {
                 let stop = Arc::new(AtomicBool::new(false));
                 let backends = Arc::new(Mutex::new(Vec::new()));
                 let processes = Arc::new(Mutex::new(TrackerProcesses::default()));
+                let collector = Arc::new(Mutex::new(FactsCollector {
+                    daemon_marker: crate::process_scan::DaemonMarkerCache::new(),
+                    spare_images: super::configured_spare_images(
+                        std::env::var("CLUD_REAPER_SPARE_IMAGES").ok().as_deref(),
+                    ),
+                }));
                 // windows::Win32::Foundation::HANDLE intentionally does not
                 // implement Send because it wraps a raw pointer. The kernel
                 // handle value itself is process-wide and remains owned by
                 // ForegroundJobTracker, so pass only its integer value across
                 // the thread boundary and reconstruct the typed wrapper there.
                 let port_value = port.0 as usize;
+                let job_value = job.0 as usize;
                 let listener = thread::spawn({
                     let stop = Arc::clone(&stop);
                     let backends = Arc::clone(&backends);
                     let processes = Arc::clone(&processes);
-                    move || listen(HANDLE(port_value as *mut c_void), stop, backends, processes)
+                    let collector = Arc::clone(&collector);
+                    move || {
+                        listen(
+                            HANDLE(port_value as *mut c_void),
+                            job_value,
+                            stop,
+                            backends,
+                            processes,
+                            collector,
+                        )
+                    }
                 });
                 Some(Self {
                     job,
@@ -658,6 +971,7 @@ mod imp {
                     stop,
                     backends,
                     processes,
+                    collector,
                     listener: Some(listener),
                 })
             }
@@ -688,7 +1002,13 @@ mod imp {
                     }
                 }
             }
-            reconcile_pending(&self.processes, &self.backends, false);
+            reconcile_pending(
+                &self.processes,
+                &self.backends,
+                &self.collector,
+                self.job.0 as usize,
+                false,
+            );
         }
     }
 
@@ -707,9 +1027,11 @@ mod imp {
 
     fn listen(
         port: HANDLE,
+        job_value: usize,
         stop: Arc<AtomicBool>,
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
+        collector: Arc<Mutex<FactsCollector>>,
     ) {
         while !stop.load(Ordering::Acquire) {
             let (mut message, mut key, mut payload) = (0u32, 0usize, null_mut());
@@ -718,7 +1040,18 @@ mod imp {
             {
                 if unsafe { GetLastError().0 } == WAIT_TIMEOUT.0 {
                     let metadata_complete = retry_unresolved_new_processes(&processes);
-                    reconcile_pending(&processes, &backends, metadata_complete);
+                    // The completion-port timeout *is* the quiet-period
+                    // detector: it fires only when no job notification arrived,
+                    // which is exactly the condition provisional-empty
+                    // finalization requires. Moving this onto an independent
+                    // timer would let it fire while notifications stream.
+                    reconcile_pending(
+                        &processes,
+                        &backends,
+                        &collector,
+                        job_value,
+                        metadata_complete,
+                    );
                     continue;
                 }
                 break;
@@ -743,7 +1076,7 @@ mod imp {
                             observed,
                         );
                     }
-                    reconcile_pending(&processes, &backends, false);
+                    reconcile_pending(&processes, &backends, &collector, job_value, false);
                 }
                 EXIT_PROCESS => {
                     let needs_final_observation = processes
@@ -774,8 +1107,14 @@ mod imp {
                     if metadata_failed {
                         log_metadata_miss(pid);
                     }
-                    let daemons = running_process::originator::find_declared_daemon_pids();
-                    reconcile_exit(&processes, &backends, &daemons, pid, false);
+                    // #673 Phase 1b: this path used to run an unguarded
+                    // full-host environment scan — 442 `ReadProcessMemory` PEB
+                    // reads — on *every* descendant exit, including the
+                    // `git.exe`/`rg.exe`/`conhost.exe` churn that can never
+                    // become a reap trigger. Route through the same backlog
+                    // guard as every other caller: with nothing pending, the
+                    // pass returns before evaluating a single signal.
+                    reconcile_pending(&processes, &backends, &collector, job_value, false);
                 }
                 ACTIVE_PROCESS_ZERO => {
                     if let Ok(mut processes) = processes.lock() {
@@ -832,93 +1171,256 @@ mod imp {
         processes.unresolved_new_pids.is_empty()
     }
 
+    /// One reconcile pass over the whole pending backlog.
+    ///
+    /// Everything expensive happens **once per pass**, behind the empty-backlog
+    /// guard, and over the reaper's own job membership rather than the host
+    /// (#673 Phases 1–3):
+    ///
+    /// - the process graph and its role classification are built once and
+    ///   shared across every pending PID, instead of being rebuilt from a full
+    ///   deep clone of the process map per pending PID;
+    /// - the spare-list is evaluated once, over the tracked candidate set, with
+    ///   the cheap OS gates short-circuiting before any environment read.
     fn reconcile_pending(
         processes: &Mutex<TrackerProcesses>,
         backends: &Mutex<Vec<RegisteredBackend>>,
-        finalize_provisional_empty: bool,
-    ) {
-        let pending = processes
-            .lock()
-            .map(|processes| super::pending_exit_pids(&processes.known, &processes.processed_exits))
-            .unwrap_or_default();
-        if pending.is_empty() {
-            return;
-        }
-        // Scan the OS process table for declared daemons once per reconcile
-        // pass, not once per pending PID. `find_declared_daemon_pids` walks
-        // every process on the host; doing it inside the per-PID loop turned a
-        // backlog of N unfinalized shell exits into N full-process scans every
-        // 200 ms tick — the dominant cost behind the idle-CPU spin (#651).
-        let daemons = running_process::originator::find_declared_daemon_pids();
-        for pid in pending {
-            reconcile_exit(
-                processes,
-                backends,
-                &daemons,
-                pid,
-                finalize_provisional_empty,
-            );
-        }
-    }
-
-    fn reconcile_exit(
-        processes: &Mutex<TrackerProcesses>,
-        backends: &Mutex<Vec<RegisteredBackend>>,
-        daemons: &HashSet<u32>,
-        exited_pid: u32,
+        collector: &Mutex<FactsCollector>,
+        job_value: usize,
         finalize_provisional_empty: bool,
     ) {
         let registered = backends
             .lock()
             .map(|backends| backends.clone())
             .unwrap_or_default();
-        let decisions = {
-            let Ok(mut tracker) = processes.lock() else {
-                return;
-            };
-            let TrackerProcesses {
-                known,
-                processed_exits,
-                provisional_empty_exits,
-                unresolved_new_pids,
-                ..
-            } = &mut *tracker;
-            // Only *live* unresolved PIDs gate finalization: a retry can still
-            // resolve them into a real nested-shell / conhost / daemon boundary.
-            // PIDs that exited unresolved are gone from `known` and can never
-            // reappear, so they no longer participate in the reap graph (see
-            // `record_process_exit`).
-            let metadata_complete = unresolved_new_pids.is_empty();
-            let Some(decisions) = super::claim_exit_replay(
-                known,
-                &registered,
-                daemons,
-                processed_exits,
-                provisional_empty_exits,
-                exited_pid,
-                super::ReplayControl {
-                    finalize_provisional_empty,
-                    metadata_complete,
-                },
-            ) else {
-                return;
-            };
-            decisions
+
+        let Ok(mut tracker) = processes.lock() else {
+            return;
+        };
+        let TrackerProcesses {
+            known,
+            processed_exits,
+            provisional_empty_exits,
+            unresolved_new_pids,
+        } = &mut *tracker;
+
+        let pending = super::pending_exit_pids(known, processed_exits);
+        if pending.is_empty() {
+            return;
+        }
+        // Only *live* unresolved PIDs gate finalization: a retry can still
+        // resolve them into a real nested-shell / conhost / daemon boundary.
+        // PIDs that exited unresolved are gone from `known` and can never
+        // reappear, so they no longer participate in the reap graph (see
+        // `record_process_exit`).
+        let control = super::ReplayControl {
+            finalize_provisional_empty,
+            metadata_complete: unresolved_new_pids.is_empty(),
         };
 
-        execute_decisions(decisions, daemons);
+        let graph = super::ProcessGraph::build(known.values(), &registered);
+        let facts = {
+            let Ok(mut collector) = collector.lock() else {
+                return;
+            };
+            collect_facts(job_value, &graph, &mut collector)
+        };
+        let spares = super::build_spare_list(&facts, graph.spare_candidates());
+
+        let mut claimed = Vec::new();
+        for pid in pending {
+            if let Some(decisions) = super::claim_exit_replay(
+                &graph,
+                &spares,
+                processed_exits,
+                provisional_empty_exits,
+                pid,
+                control,
+            ) {
+                claimed.push(decisions);
+            }
+        }
+        drop(tracker);
+
+        for decisions in claimed {
+            execute_decisions(decisions, &spares);
+        }
     }
 
-    fn execute_decisions(decisions: Vec<ReapDecision>, daemons: &HashSet<u32>) {
+    /// Fill a [`FactsSnapshot`] for the tracked candidate set.
+    ///
+    /// Ordered cheapest-first so the expensive queries run over the smallest
+    /// possible set: job membership and session id are one syscall each and no
+    /// memory read, and every PID they rule out is a PID whose environment is
+    /// never touched.
+    fn collect_facts(
+        job_value: usize,
+        graph: &super::ProcessGraph<'_>,
+        collector: &mut FactsCollector,
+    ) -> FactsSnapshot {
+        let mut snapshot = FactsSnapshot {
+            spare_images: collector.spare_images.clone(),
+            // Windows has no POSIX session leader; say so rather than
+            // answering "no".
+            unavailable: HashSet::from([Signal::SessionLeader]),
+            ..FactsSnapshot::default()
+        };
+
+        let candidates: Vec<(u32, u64)> = graph
+            .spare_candidates()
+            .map(|(pid, _)| pid)
+            .filter_map(|pid| graph.meta(pid).map(|meta| (pid, meta.start_time)))
+            .collect();
+
+        let job = HANDLE(job_value as *mut c_void);
+        for &(pid, _) in &candidates {
+            match win32::process_in_job(job, pid) {
+                Some(false) => {
+                    snapshot.outside_job.insert(pid);
+                    continue;
+                }
+                None => {
+                    // The handle could not be opened at all, which on Windows
+                    // is overwhelmingly an access-denied on a higher-privilege
+                    // process. A kill would fail anyway.
+                    snapshot.foreign_owner.insert(pid);
+                    continue;
+                }
+                Some(true) => {}
+            }
+            if win32::session_id(pid) == Some(0) {
+                snapshot.service_session.insert(pid);
+            }
+        }
+
+        // Only PIDs that survived the free gates are worth an environment read
+        // or a table lookup.
+        let survivors: Vec<(u32, u64)> = candidates
+            .iter()
+            .copied()
+            .filter(|(pid, _)| {
+                !snapshot.outside_job.contains(pid)
+                    && !snapshot.foreign_owner.contains(pid)
+                    && !snapshot.service_session.contains(pid)
+            })
+            .collect();
+        if survivors.is_empty() {
+            return snapshot;
+        }
+
+        snapshot.declared_daemons = collector.daemon_marker.declared_daemons_among(&survivors);
+
+        let listening = win32::listening_pids();
+        snapshot.listening = survivors
+            .iter()
+            .map(|(pid, _)| *pid)
+            .filter(|pid| listening.contains(pid))
+            .collect();
+
+        snapshot
+    }
+
+    /// The Win32 half of the [`super::ProcessFacts`] signals.
+    ///
+    /// Deliberately the *only* place these syscalls appear: every reap decision
+    /// consumes the resulting [`FactsSnapshot`] as data, which is what makes
+    /// the decision table unit-testable on every platform (#674).
+    mod win32 {
+        use std::collections::HashSet;
+
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+        };
+        use windows::Win32::Networking::WinSock::AF_INET;
+        use windows::Win32::System::JobObjects::IsProcessInJob;
+        use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+
+        /// `Some(false)` = broke away from our job. `None` = the process could
+        /// not be opened for the query at all.
+        pub(super) fn process_in_job(job: HANDLE, pid: u32) -> Option<bool> {
+            unsafe {
+                let handle = OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                    false,
+                    pid,
+                )
+                .ok()?;
+                let mut in_job = windows_core::BOOL(0);
+                let queried = IsProcessInJob(handle, Some(job), &mut in_job).is_ok();
+                let _ = CloseHandle(handle);
+                queried.then(|| in_job.as_bool())
+            }
+        }
+
+        /// Windows terminal-services session id. `0` is the services session.
+        pub(super) fn session_id(pid: u32) -> Option<u32> {
+            unsafe {
+                let mut session = 0u32;
+                ProcessIdToSessionId(pid, &mut session)
+                    .is_ok()
+                    .then_some(session)
+            }
+        }
+
+        /// PIDs owning an IPv4 TCP listener.
+        ///
+        /// One syscall for the whole table, not one per PID — this is the
+        /// signal that catches a build-cache or language server that neither
+        /// requested job breakaway nor set the cooperative daemon marker.
+        pub(super) fn listening_pids() -> HashSet<u32> {
+            unsafe {
+                let mut size = 0u32;
+                // First call sizes the buffer; ERROR_INSUFFICIENT_BUFFER is the
+                // documented success path here.
+                let _ = GetExtendedTcpTable(
+                    None,
+                    &mut size,
+                    false,
+                    AF_INET.0 as u32,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                );
+                if size == 0 {
+                    return HashSet::new();
+                }
+                let mut buffer = vec![0u8; size as usize];
+                if GetExtendedTcpTable(
+                    Some(buffer.as_mut_ptr().cast()),
+                    &mut size,
+                    false,
+                    AF_INET.0 as u32,
+                    TCP_TABLE_OWNER_PID_LISTENER,
+                    0,
+                ) != 0
+                {
+                    return HashSet::new();
+                }
+                let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                let rows =
+                    std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
+                rows.iter().map(|row| row.dwOwningPid).collect()
+            }
+        }
+    }
+
+    fn execute_decisions(decisions: Vec<ReapDecision>, spares: &super::SpareList) {
         if decisions.is_empty() {
             return;
         }
 
+        // The tree walk prunes at every spared PID, so both the plan's own
+        // spare decisions and the whole OS-derived spare-list must be visible
+        // to it — sparing a daemon while killing its children would leave it
+        // wedged mid-work.
         let spared: HashSet<u32> = decisions
             .iter()
             .filter(|decision| decision.action == DecisionAction::Spare)
             .filter_map(|decision| decision.candidate_pid)
-            .chain(daemons.iter().copied())
+            .chain(spares.keys().copied())
             .collect();
 
         for mut decision in decisions {
@@ -1012,11 +1514,10 @@ pub use imp::ForegroundJobTracker;
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::{
-        plan_shell_exit, DecisionAction, ProcessMeta, ProcessRole, ReapDecisionReason,
-        RegisteredBackend,
+        DecisionAction, ProcessMeta, ProcessRole, ReapDecisionReason, RegisteredBackend, SpareList,
     };
 
     fn process(pid: u32, parent_pid: u32, image_name: &str, alive: bool) -> ProcessMeta {
@@ -1027,6 +1528,50 @@ mod lifecycle_tests {
             alive,
             start_time: pid as u64,
         }
+    }
+
+    /// The declared-daemon set these cases were written against, expressed in
+    /// the spare-list the planner now takes. The reason is asserted by the
+    /// cases themselves, so this must map to the same one the marker produces.
+    fn declared(daemons: &HashSet<u32>) -> SpareList {
+        daemons
+            .iter()
+            .map(|pid| (*pid, ReapDecisionReason::DeclaredDaemon))
+            .collect()
+    }
+
+    /// Adapter preserving the pre-#673 call shape. Production builds the graph
+    /// once per reconcile pass and shares it across the whole backlog; a unit
+    /// case is a single exit over a synthetic process list, so building it per
+    /// call keeps each case a one-liner.
+    fn plan_shell_exit(
+        processes: &[ProcessMeta],
+        backends: &[RegisteredBackend],
+        daemons: &HashSet<u32>,
+        exited_pid: u32,
+    ) -> Vec<super::ReapDecision> {
+        let graph = super::ProcessGraph::build(processes.iter(), backends);
+        super::plan_shell_exit(&graph, &declared(daemons), exited_pid)
+    }
+
+    fn claim_exit_replay(
+        known: &HashMap<u32, ProcessMeta>,
+        backends: &[RegisteredBackend],
+        daemons: &HashSet<u32>,
+        processed_exits: &mut HashSet<(u32, u64)>,
+        provisional_empty_exits: &mut HashSet<(u32, u64)>,
+        exited_pid: u32,
+        control: super::ReplayControl,
+    ) -> Option<Vec<super::ReapDecision>> {
+        let graph = super::ProcessGraph::build(known.values(), backends);
+        super::claim_exit_replay(
+            &graph,
+            &declared(daemons),
+            processed_exits,
+            provisional_empty_exits,
+            exited_pid,
+            control,
+        )
     }
 
     fn fixture(processes: Vec<ProcessMeta>, exited_pid: u32) -> Vec<super::ReapDecision> {
@@ -1045,6 +1590,230 @@ mod lifecycle_tests {
         super::ReplayControl {
             finalize_provisional_empty,
             metadata_complete,
+        }
+    }
+
+    // ---- #673 Phase 1a: the OS-signal spare-list, as pure data ----
+
+    fn facts_with(f: impl FnOnce(&mut super::FactsSnapshot)) -> super::FactsSnapshot {
+        let mut facts = super::FactsSnapshot {
+            unavailable: HashSet::from([super::Signal::SessionLeader]),
+            ..super::FactsSnapshot::default()
+        };
+        f(&mut facts);
+        facts
+    }
+
+    fn signal_for(
+        facts: &super::FactsSnapshot,
+        pid: u32,
+        image: &str,
+    ) -> Option<ReapDecisionReason> {
+        super::spare_signal(facts, pid, image)
+    }
+
+    /// Nothing protects an ordinary leaked client. Guard against the fix
+    /// over-sparing into uselessness.
+    #[test]
+    fn a_process_with_no_signal_is_not_spared() {
+        let facts = facts_with(|_| {});
+        assert_eq!(signal_for(&facts, 21, "node.exe"), None);
+    }
+
+    /// A process that broke away from our Job Object was never ours to kill,
+    /// and that is the cheapest and strongest thing we can know.
+    #[test]
+    fn job_breakaway_is_spared_before_anything_else_is_consulted() {
+        let facts = facts_with(|facts| {
+            facts.outside_job.insert(21);
+            // Deliberately *also* declared: the assertion is about which
+            // reason wins, not merely that it is spared.
+            facts.declared_daemons.insert(21);
+        });
+        assert_eq!(
+            signal_for(&facts, 21, "zccache.exe"),
+            Some(ReapDecisionReason::OutsideJobObject)
+        );
+    }
+
+    /// dockerd runs as a Windows service in session 0. It is spared for that
+    /// reason even if it somehow carries our tag.
+    #[test]
+    fn a_session_zero_service_is_spared_as_a_service() {
+        let facts = facts_with(|facts| {
+            facts.service_session.insert(30);
+        });
+        assert_eq!(
+            signal_for(&facts, 30, "dockerd.exe"),
+            Some(ReapDecisionReason::ServiceSession)
+        );
+    }
+
+    /// The sccache-shaped case: no marker, no breakaway, but it owns a
+    /// listening endpoint, which is what makes it discoverable and reusable by
+    /// later unrelated invocations. This is the row that had no protection at
+    /// all before #673.
+    #[test]
+    fn marker_absence_is_not_permission_to_kill_a_listening_server() {
+        let facts = facts_with(|facts| {
+            facts.listening.insert(40);
+        });
+        assert!(facts.declared_daemons.is_empty());
+        assert_eq!(
+            signal_for(&facts, 40, "sccache.exe"),
+            Some(ReapDecisionReason::ListeningEndpoint)
+        );
+    }
+
+    /// The cooperative marker still protects the daemons that do opt in, and
+    /// it ranks below every OS signal precisely because opting in is optional.
+    #[test]
+    fn the_cooperative_marker_ranks_below_every_os_signal() {
+        let marked = facts_with(|facts| {
+            facts.declared_daemons.insert(50);
+        });
+        assert_eq!(
+            signal_for(&marked, 50, "zccache.exe"),
+            Some(ReapDecisionReason::DeclaredDaemon)
+        );
+
+        for (build, expected) in [
+            (
+                Box::new(|f: &mut super::FactsSnapshot| {
+                    f.service_session.insert(50);
+                }) as Box<dyn FnOnce(&mut super::FactsSnapshot)>,
+                ReapDecisionReason::ServiceSession,
+            ),
+            (
+                Box::new(|f: &mut super::FactsSnapshot| {
+                    f.foreign_owner.insert(50);
+                }),
+                ReapDecisionReason::ForeignTokenOwner,
+            ),
+        ] {
+            let facts = facts_with(|f| {
+                f.declared_daemons.insert(50);
+                build(f);
+            });
+            assert_eq!(signal_for(&facts, 50, "zccache.exe"), Some(expected));
+        }
+    }
+
+    /// A signal the platform cannot answer must never spare. Absence of
+    /// evidence is not evidence of daemon-hood — the inversion #522 fixed.
+    #[test]
+    fn an_unavailable_signal_never_spares() {
+        let mut facts = facts_with(|facts| {
+            facts.session_leaders.insert(60);
+        });
+        assert!(facts.unavailable.contains(&super::Signal::SessionLeader));
+        assert_eq!(signal_for(&facts, 60, "sccache"), None);
+
+        // ...and when the platform *can* answer it, it does spare.
+        facts.unavailable.remove(&super::Signal::SessionLeader);
+        assert_eq!(
+            signal_for(&facts, 60, "sccache"),
+            Some(ReapDecisionReason::SessionLeader)
+        );
+    }
+
+    /// The whitelist is the last resort, is matched on basename
+    /// case-insensitively, and is empty unless an operator supplies it.
+    #[test]
+    fn the_configured_spare_list_is_data_and_ranks_last() {
+        assert!(super::configured_spare_images(None).is_empty());
+        assert!(super::configured_spare_images(Some("  ,; ")).is_empty());
+        assert_eq!(
+            super::configured_spare_images(Some("FBuildWorker.exe, my-daemon.exe")),
+            vec!["FBuildWorker.exe", "my-daemon.exe"]
+        );
+
+        let facts = facts_with(|facts| {
+            facts.spare_images = super::configured_spare_images(Some("FBuildWorker.exe"));
+        });
+        assert_eq!(
+            signal_for(&facts, 70, "C:\\tools\\FBUILDWORKER.EXE"),
+            Some(ReapDecisionReason::ConfiguredSpareList)
+        );
+        assert_eq!(signal_for(&facts, 70, "node.exe"), None);
+    }
+
+    /// The spare-list is built over a *bounded* candidate set and carries the
+    /// reason with it, so a later log says why a process survived.
+    #[test]
+    fn the_spare_list_carries_the_reason_for_each_candidate() {
+        let facts = facts_with(|facts| {
+            facts.outside_job.insert(21);
+            facts.listening.insert(22);
+        });
+        let spares = super::build_spare_list(
+            &facts,
+            [
+                (21u32, "zccache.exe".to_string()),
+                (22, "sccache.exe".to_string()),
+                (23, "node.exe".to_string()),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(spares.len(), 2);
+        assert_eq!(spares[&21], ReapDecisionReason::OutsideJobObject);
+        assert_eq!(spares[&22], ReapDecisionReason::ListeningEndpoint);
+        assert!(!spares.contains_key(&23));
+    }
+
+    /// The whole point of the seam: a spare-list built from OS signals prunes
+    /// the daemon's subtree in the planner exactly as the marker set did, and
+    /// the *reason* survives into the decision. Sparing zccache via
+    /// "outside our job" is correct; sparing it via "no decisions produced"
+    /// would be an accident that regresses silently.
+    #[test]
+    fn an_os_derived_spare_prunes_the_daemon_subtree_with_its_reason() {
+        let processes = [
+            process(10, 1, "cmd.exe", true),
+            process(11, 10, "node.exe", true),
+            process(12, 11, "codex.exe", true),
+            process(20, 12, "powershell.exe", false),
+            process(40, 20, "sccache.exe", true),
+            process(41, 40, "cl.exe", true),
+        ];
+        let facts = facts_with(|facts| {
+            facts.listening.insert(40);
+        });
+        let graph = super::ProcessGraph::build(
+            processes.iter(),
+            &[RegisteredBackend::new(10, "codex.exe", 10)],
+        );
+        let spares = super::build_spare_list(&facts, graph.spare_candidates());
+        let decisions = super::plan_shell_exit(&graph, &spares, 20);
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].action, DecisionAction::Spare);
+        assert_eq!(decisions[0].reason, ReapDecisionReason::ListeningEndpoint);
+        assert_eq!(decisions[0].candidate_pid, Some(40));
+    }
+
+    /// #673 Phase 3: the graph is an input, not something each pending exit
+    /// rebuilds. One graph must serve the whole backlog with identical results.
+    #[test]
+    fn one_graph_serves_every_pending_exit_in_the_backlog() {
+        let processes = vec![
+            process(10, 1, "codex.exe", true),
+            process(20, 10, "powershell.exe", false),
+            process(21, 20, "git.exe", true),
+            process(30, 10, "cmd.exe", false),
+            process(31, 30, "rg.exe", true),
+        ];
+        let backends = [RegisteredBackend::new(10, "codex.exe", 10)];
+        let graph = super::ProcessGraph::build(processes.iter(), &backends);
+        let spares = SpareList::new();
+
+        for (trigger, expected_candidate) in [(20u32, 21u32), (30, 31)] {
+            let shared = super::plan_shell_exit(&graph, &spares, trigger);
+            let standalone = plan_shell_exit(&processes, &backends, &HashSet::new(), trigger);
+            assert_eq!(shared, standalone);
+            assert_eq!(shared.len(), 1);
+            assert_eq!(shared[0].action, DecisionAction::Reap);
+            assert_eq!(shared[0].candidate_pid, Some(expected_candidate));
         }
     }
 
@@ -1266,7 +2035,7 @@ mod lifecycle_tests {
         let mut provisional = HashSet::new();
 
         assert_eq!(super::pending_exit_pids(&known, &processed), vec![20]);
-        assert!(super::claim_exit_replay(
+        assert!(claim_exit_replay(
             &known,
             &[],
             &HashSet::new(),
@@ -1279,7 +2048,7 @@ mod lifecycle_tests {
         assert_eq!(super::pending_exit_pids(&known, &processed), vec![20]);
 
         let registered = [RegisteredBackend::new(10, "codex.exe", 10)];
-        assert!(super::claim_exit_replay(
+        assert!(claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1293,7 +2062,7 @@ mod lifecycle_tests {
 
         let late_client = process(21, 20, "git.exe", true);
         known.insert(late_client.pid, late_client);
-        let replayed = super::claim_exit_replay(
+        let replayed = claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1307,7 +2076,7 @@ mod lifecycle_tests {
         assert_eq!(replayed[0].action, DecisionAction::Reap);
         assert_eq!(replayed[0].candidate_pid, Some(21));
         assert!(super::pending_exit_pids(&known, &processed).is_empty());
-        assert!(super::claim_exit_replay(
+        assert!(claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1332,7 +2101,7 @@ mod lifecycle_tests {
         let mut processed = HashSet::new();
         let mut provisional = HashSet::new();
 
-        assert!(super::claim_exit_replay(
+        assert!(claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1342,7 +2111,7 @@ mod lifecycle_tests {
             replay_control(false, true),
         )
         .is_none());
-        let finalized = super::claim_exit_replay(
+        let finalized = claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1444,7 +2213,7 @@ mod lifecycle_tests {
         let mut processed = HashSet::new();
         let mut provisional = HashSet::new();
         let metadata_complete = unresolved.is_empty();
-        let decisions = super::claim_exit_replay(
+        let decisions = claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1478,7 +2247,7 @@ mod lifecycle_tests {
         let mut processed = HashSet::new();
         let mut provisional = HashSet::new();
 
-        assert!(super::claim_exit_replay(
+        assert!(claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
@@ -1492,7 +2261,7 @@ mod lifecycle_tests {
 
         let nested_shell = process(22, 21, "cmd.exe", true);
         known.insert(nested_shell.pid, nested_shell);
-        let decisions = super::claim_exit_replay(
+        let decisions = claim_exit_replay(
             &known,
             &registered,
             &HashSet::new(),
