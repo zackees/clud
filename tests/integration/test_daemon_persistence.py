@@ -16,6 +16,7 @@ from ._daemon_helpers import (
     launch_detached,
     managed_env,
     session_metadata,
+    stop_daemon,
     strip_ansi,
     wait_for_exit,
     wait_for_pids_to_exit,
@@ -54,7 +55,8 @@ class TestDaemonCentralizedPersistence:
     def test_subprocess_session_persists_and_reattaches(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
-        env = daemon_env(mock_env, tmp_path / "daemon-state")
+        state_dir = tmp_path / "daemon-state"
+        env = daemon_env(mock_env, state_dir)
         proc, session_id = launch_daemonized(
             clud_binary,
             env,
@@ -65,20 +67,25 @@ class TestDaemonCentralizedPersistence:
             "--mock-sleep-ms",
             "3000",
         )
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
 
-        proc.kill()
-        proc.wait(timeout=10)
-
-        result = subprocess.run(
-            [str(clud_binary), "attach", session_id],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=env,
-        )
-        assert result.returncode == 0
-        report = json.loads(result.stdout)
-        assert "hello" in report["args"]
+            result = subprocess.run(
+                [str(clud_binary), "attach", session_id],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert result.returncode == 0
+            report = json.loads(result.stdout)
+            assert "hello" in report["args"]
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            stop_daemon(clud_binary, state_dir, env)
 
     @pytest.mark.xfail(
         sys.platform == "win32",
@@ -94,7 +101,8 @@ class TestDaemonCentralizedPersistence:
     def test_pty_session_persists_and_reattaches(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:
-        env = daemon_env(mock_env, tmp_path / "daemon-state")
+        state_dir = tmp_path / "daemon-state"
+        env = daemon_env(mock_env, state_dir)
         proc, session_id = launch_daemonized(
             clud_binary,
             env,
@@ -105,22 +113,27 @@ class TestDaemonCentralizedPersistence:
             "--mock-sleep-ms",
             "3000",
         )
+        try:
+            proc.kill()
+            proc.wait(timeout=10)
 
-        proc.kill()
-        proc.wait(timeout=10)
-
-        result = subprocess.run(
-            [str(clud_binary), "attach", session_id],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=env,
-        )
-        assert result.returncode == 0
-        cleaned = strip_ansi(result.stdout).strip()
-        report = json.loads(cleaned.splitlines()[-1])
-        assert "hello-pty" in report["args"]
+            result = subprocess.run(
+                [str(clud_binary), "attach", session_id],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert result.returncode == 0
+            cleaned = strip_ansi(result.stdout).strip()
+            report = json.loads(cleaned.splitlines()[-1])
+            assert "hello-pty" in report["args"]
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            stop_daemon(clud_binary, state_dir, env)
 
     @pytest.mark.xfail(
         sys.platform == "win32",
@@ -139,7 +152,8 @@ class TestDaemonCentralizedPersistence:
         paint_path.write_bytes(
             b"\x1b[2J\x1b[1;1H__HEADER__\x1b[5;1H__FOOTER__"
         )
-        env = daemon_env(mock_env, tmp_path / "daemon-state")
+        state_dir = tmp_path / "daemon-state"
+        env = daemon_env(mock_env, state_dir)
         proc, session_id = launch_daemonized(
             clud_binary,
             env,
@@ -152,29 +166,35 @@ class TestDaemonCentralizedPersistence:
             "--mock-sleep-ms",
             "3000",
         )
-        # Give the PTY worker time to ingest the paint bytes into its
-        # TerminalCapture before we disconnect. Without this, the reattach
-        # might win the race and see an empty grid.
-        time.sleep(0.5)
-        proc.kill()
-        proc.wait(timeout=10)
+        try:
+            # Give the PTY worker time to ingest the paint bytes into its
+            # TerminalCapture before we disconnect. Without this, the reattach
+            # might win the race and see an empty grid.
+            time.sleep(0.5)
+            proc.kill()
+            proc.wait(timeout=10)
 
-        result = subprocess.run(
-            [str(clud_binary), "attach", session_id],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=env,
-        )
-        assert result.returncode == 0
-        cleaned = strip_ansi(result.stdout)
-        assert "__HEADER__" in cleaned, (
-            f"HEADER missing from attach replay: {cleaned!r}"
-        )
-        assert "__FOOTER__" in cleaned, (
-            f"FOOTER missing from attach replay: {cleaned!r}"
-        )
+            result = subprocess.run(
+                [str(clud_binary), "attach", session_id],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
+            assert result.returncode == 0
+            cleaned = strip_ansi(result.stdout)
+            assert "__HEADER__" in cleaned, (
+                f"HEADER missing from attach replay: {cleaned!r}"
+            )
+            assert "__FOOTER__" in cleaned, (
+                f"FOOTER missing from attach replay: {cleaned!r}"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            stop_daemon(clud_binary, state_dir, env)
 
     def test_clud_logs_dumps_session_log(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path

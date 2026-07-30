@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from ._daemon_helpers import stop_daemon
+
 # Ensure the env-isolation helper from the registry-concurrency suite is
 # importable — its `_registry_env` does the right CLUD_SESSION_DB pinning.
 sys.path.insert(0, str(Path(__file__).parent))
@@ -206,3 +208,4 @@ class TestUiDashboardShowsLiveSessions:
                 clud_proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
+            stop_daemon(launch, state_dir, env)
