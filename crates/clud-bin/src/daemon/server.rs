@@ -799,13 +799,35 @@ fn reap_worker_when_done(
 /// nobody is on the other end to receive a reply. The kill walk uses
 /// `process_tree::kill_tree` for parity with the synchronous path it
 /// replaces (see `runner::teardown_interrupted_child`).
-/// Period between dead-originator orphan sweeps in the daemon. 30s is a
-/// compromise: long enough that the scan (sysinfo + env-var read for every
-/// process on the host) isn't a noticeable background load, short enough
-/// that SIGKILL'd-clud orphans don't linger for minutes.
-const ORPHAN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// Env override for the orphan-sweep period, in milliseconds (#465 AC 1).
+const ENV_ORPHAN_SWEEP_INTERVAL_MS: &str = "CLUD_ORPHAN_SWEEP_INTERVAL_MS";
+/// Default period between dead-originator orphan sweeps. 60s keeps the
+/// full-host env scan (sysinfo + `environ` read for every process) off the
+/// idle-CPU budget (#542) while still clearing SIGKILL'd-clud orphans within a
+/// minute; the on-exit `Drop` guard and `clud slay` own the fast path.
+const DEFAULT_ORPHAN_SWEEP_INTERVAL_MS: u64 = 60_000;
+/// Floor so a misconfigured tiny value can't spin the sweep into a hot loop
+/// (each sweep reads `environ` for every process on the host).
+const MIN_ORPHAN_SWEEP_INTERVAL_MS: u64 = 5_000;
+
+fn orphan_sweep_interval() -> Duration {
+    orphan_sweep_interval_from_raw(std::env::var(ENV_ORPHAN_SWEEP_INTERVAL_MS).ok().as_deref())
+}
+
+/// Resolve the sweep interval from a raw env value: parse, ignore
+/// zero/garbage, clamp to the floor, else the 60s default. Pure so the
+/// clamping and default are unit-tested without touching the environment.
+fn orphan_sweep_interval_from_raw(raw: Option<&str>) -> Duration {
+    let ms = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
+        .max(MIN_ORPHAN_SWEEP_INTERVAL_MS);
+    Duration::from_millis(ms)
+}
 
 fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<AtomicBool>) {
+    let interval = orphan_sweep_interval();
     let _ = thread::Builder::new()
         .name("clud-orphan-sweep".to_string())
         .spawn(move || {
@@ -815,7 +837,7 @@ fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<A
             let mut first_seen: HashMap<u32, Instant> = HashMap::new();
             loop {
                 // Sleep in 1-second slices so shutdown is observed within ~1s.
-                let mut remaining = ORPHAN_SWEEP_INTERVAL;
+                let mut remaining = interval;
                 while remaining > Duration::ZERO {
                     if shutdown_requested.load(Ordering::SeqCst) {
                         return;
@@ -1110,6 +1132,33 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn orphan_sweep_interval_defaults_and_clamps() {
+        // Unset / garbage / zero → the 60s default (#465 AC 1).
+        assert_eq!(
+            orphan_sweep_interval_from_raw(None),
+            Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
+        );
+        assert_eq!(
+            orphan_sweep_interval_from_raw(Some("not-a-number")),
+            Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
+        );
+        assert_eq!(
+            orphan_sweep_interval_from_raw(Some("0")),
+            Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
+        );
+        // A valid override is honored (with surrounding whitespace trimmed).
+        assert_eq!(
+            orphan_sweep_interval_from_raw(Some("  120000 ")),
+            Duration::from_millis(120_000)
+        );
+        // A too-small value is clamped to the floor, never a hot loop.
+        assert_eq!(
+            orphan_sweep_interval_from_raw(Some("10")),
+            Duration::from_millis(MIN_ORPHAN_SWEEP_INTERVAL_MS)
+        );
+    }
 
     // #380 + #387: even after the N=2->8 / N=9->25 sample bump, 1.2× was
     // still below the median's noise floor on macOS x86 (σ ≈ 40-50ms over
