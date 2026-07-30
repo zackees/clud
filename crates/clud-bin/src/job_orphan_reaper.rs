@@ -473,21 +473,21 @@ pub(super) fn record_new_process_observation(
 pub(super) fn record_process_exit(
     known: &mut HashMap<u32, ProcessMeta>,
     unresolved_new_pids: &mut HashSet<u32>,
-    metadata_failed_pids: &mut HashSet<u32>,
     pid: u32,
     final_observation: Option<ProcessMeta>,
 ) -> bool {
     if unresolved_new_pids.contains(&pid) {
         record_new_process_observation(known, unresolved_new_pids, pid, final_observation);
     }
+    // A PID still unresolved at exit exited before either Toolhelp observation
+    // succeeded and can never be resolved (retry has nothing live to read). It
+    // is therefore absent from `known`, so `plan_shell_exit`'s tree walk — which
+    // only reaches processes linked through `known` — can never reach anything
+    // beneath it: its absence can only *disconnect* (spare) a subtree, never
+    // expand the reap set. Report the miss for telemetry, but do NOT let a dead,
+    // un-retryable PID gate finalization; only live `unresolved_new_pids` (which
+    // a retry can still resolve into a real boundary) are allowed to block.
     let metadata_failed = unresolved_new_pids.remove(&pid);
-    if metadata_failed {
-        // The process exited before either Toolhelp observation succeeded.
-        // Its role cannot be reconstructed safely from a bare PID, so record
-        // a fail-closed metadata gap and never finalize an empty-shell
-        // decision from this incomplete graph.
-        metadata_failed_pids.insert(pid);
-    }
     if let Some(process) = known.get_mut(&pid) {
         process.alive = false;
     }
@@ -602,7 +602,6 @@ mod imp {
         processed_exits: HashSet<(u32, u64)>,
         provisional_empty_exits: HashSet<(u32, u64)>,
         unresolved_new_pids: HashSet<u32>,
-        metadata_failed_pids: HashSet<u32>,
     }
 
     pub struct ForegroundJobTracker {
@@ -761,13 +760,11 @@ mod imp {
                         let TrackerProcesses {
                             known,
                             unresolved_new_pids,
-                            metadata_failed_pids,
                             ..
                         } = &mut *processes;
                         super::record_process_exit(
                             known,
                             unresolved_new_pids,
-                            metadata_failed_pids,
                             pid,
                             final_observation,
                         )
@@ -777,7 +774,8 @@ mod imp {
                     if metadata_failed {
                         log_metadata_miss(pid);
                     }
-                    reconcile_exit(&processes, &backends, pid, false);
+                    let daemons = running_process::originator::find_declared_daemon_pids();
+                    reconcile_exit(&processes, &backends, &daemons, pid, false);
                 }
                 ACTIVE_PROCESS_ZERO => {
                     if let Ok(mut processes) = processes.lock() {
@@ -785,7 +783,6 @@ mod imp {
                         processes.processed_exits.clear();
                         processes.provisional_empty_exits.clear();
                         processes.unresolved_new_pids.clear();
-                        processes.metadata_failed_pids.clear();
                     }
                 }
                 _ => {}
@@ -806,10 +803,7 @@ mod imp {
             })
             .unwrap_or_default();
         if unresolved.is_empty() {
-            return processes
-                .lock()
-                .map(|processes| processes.metadata_failed_pids.is_empty())
-                .unwrap_or(false);
+            return true;
         }
 
         let mut current = snapshot();
@@ -835,7 +829,7 @@ mod imp {
             } = &mut *processes;
             super::record_new_process_observation(known, unresolved_new_pids, pid, observed);
         }
-        processes.unresolved_new_pids.is_empty() && processes.metadata_failed_pids.is_empty()
+        processes.unresolved_new_pids.is_empty()
     }
 
     fn reconcile_pending(
@@ -847,14 +841,30 @@ mod imp {
             .lock()
             .map(|processes| super::pending_exit_pids(&processes.known, &processes.processed_exits))
             .unwrap_or_default();
+        if pending.is_empty() {
+            return;
+        }
+        // Scan the OS process table for declared daemons once per reconcile
+        // pass, not once per pending PID. `find_declared_daemon_pids` walks
+        // every process on the host; doing it inside the per-PID loop turned a
+        // backlog of N unfinalized shell exits into N full-process scans every
+        // 200 ms tick — the dominant cost behind the idle-CPU spin (#651).
+        let daemons = running_process::originator::find_declared_daemon_pids();
         for pid in pending {
-            reconcile_exit(processes, backends, pid, finalize_provisional_empty);
+            reconcile_exit(
+                processes,
+                backends,
+                &daemons,
+                pid,
+                finalize_provisional_empty,
+            );
         }
     }
 
     fn reconcile_exit(
         processes: &Mutex<TrackerProcesses>,
         backends: &Mutex<Vec<RegisteredBackend>>,
+        daemons: &HashSet<u32>,
         exited_pid: u32,
         finalize_provisional_empty: bool,
     ) {
@@ -862,7 +872,6 @@ mod imp {
             .lock()
             .map(|backends| backends.clone())
             .unwrap_or_default();
-        let daemons: HashSet<u32> = running_process::originator::find_declared_daemon_pids();
         let decisions = {
             let Ok(mut tracker) = processes.lock() else {
                 return;
@@ -872,15 +881,18 @@ mod imp {
                 processed_exits,
                 provisional_empty_exits,
                 unresolved_new_pids,
-                metadata_failed_pids,
                 ..
             } = &mut *tracker;
-            let metadata_complete =
-                unresolved_new_pids.is_empty() && metadata_failed_pids.is_empty();
+            // Only *live* unresolved PIDs gate finalization: a retry can still
+            // resolve them into a real nested-shell / conhost / daemon boundary.
+            // PIDs that exited unresolved are gone from `known` and can never
+            // reappear, so they no longer participate in the reap graph (see
+            // `record_process_exit`).
+            let metadata_complete = unresolved_new_pids.is_empty();
             let Some(decisions) = super::claim_exit_replay(
                 known,
                 &registered,
-                &daemons,
+                daemons,
                 processed_exits,
                 provisional_empty_exits,
                 exited_pid,
@@ -894,7 +906,7 @@ mod imp {
             decisions
         };
 
-        execute_decisions(decisions, &daemons);
+        execute_decisions(decisions, daemons);
     }
 
     fn execute_decisions(decisions: Vec<ReapDecision>, daemons: &HashSet<u32>) {
@@ -1367,34 +1379,89 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn unresolved_process_exit_takes_final_observation_or_fails_closed() {
+    fn unresolved_process_exit_takes_final_observation_or_reports_miss() {
         let mut known = std::collections::HashMap::new();
         let mut unresolved = HashSet::new();
-        let mut failed = HashSet::new();
         super::record_new_process_observation(&mut known, &mut unresolved, 21, None);
 
+        // A final observation resolves the PID: no miss reported, and it lands
+        // in `known` as a dead node.
         assert!(!super::record_process_exit(
             &mut known,
             &mut unresolved,
-            &mut failed,
             21,
             Some(process(21, 20, "git.exe", true)),
         ));
         assert!(!known[&21].alive);
         assert!(unresolved.is_empty());
-        assert!(failed.is_empty());
 
+        // A PID that exits still unresolved reports a miss (for telemetry) and
+        // is dropped from the live unresolved set. It is absent from `known`,
+        // so it can never gate finalization or appear in the reap graph.
         super::record_new_process_observation(&mut known, &mut unresolved, 22, None);
         assert!(super::record_process_exit(
             &mut known,
             &mut unresolved,
-            &mut failed,
             22,
-            None,
+            None
         ));
         assert!(unresolved.is_empty());
-        assert_eq!(failed, HashSet::from([22]));
         assert!(!known.contains_key(&22));
+    }
+
+    #[test]
+    fn dead_unresolved_pid_does_not_wedge_finalization() {
+        // Regression for #651: a short-lived process that exits before its
+        // metadata resolves must not permanently block reaping. It is dropped
+        // from `unresolved_new_pids` on exit and never enters `known`, so the
+        // finalization gate (`unresolved_new_pids.is_empty()`) stays satisfied
+        // and a well-understood shell exit can still be reaped.
+        let mut known: std::collections::HashMap<_, _> = vec![
+            process(10, 1, "codex.exe", true),        // backend, alive
+            process(20, 10, "powershell.exe", false), // tool shell root, exited
+            process(21, 20, "git.exe", true),         // leaked live client
+        ]
+        .into_iter()
+        .map(|process| (process.pid, process))
+        .collect();
+        let mut unresolved = HashSet::new();
+
+        // A ghost PID appears and exits before Toolhelp can resolve it.
+        super::record_new_process_observation(&mut known, &mut unresolved, 99, None);
+        assert_eq!(unresolved, HashSet::from([99]));
+        assert!(super::record_process_exit(
+            &mut known,
+            &mut unresolved,
+            99,
+            None
+        ));
+        // The ghost is gone from the live gate and never entered the graph.
+        assert!(unresolved.is_empty());
+        assert!(!known.contains_key(&99));
+
+        // Finalization proceeds: the leaked client under the exited shell is reaped.
+        let registered = [RegisteredBackend::new(10, "codex.exe", 10)];
+        let mut processed = HashSet::new();
+        let mut provisional = HashSet::new();
+        let metadata_complete = unresolved.is_empty();
+        let decisions = super::claim_exit_replay(
+            &known,
+            &registered,
+            &HashSet::new(),
+            &mut processed,
+            &mut provisional,
+            20,
+            super::ReplayControl {
+                finalize_provisional_empty: true,
+                metadata_complete,
+            },
+        )
+        .expect("dead ghost PID must not block finalization");
+        assert!(decisions.iter().any(|decision| {
+            decision.action == DecisionAction::Reap
+                && decision.candidate_pid == Some(21)
+                && decision.reason == ReapDecisionReason::LeakedToolClient
+        }));
     }
 
     #[test]
