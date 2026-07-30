@@ -32,6 +32,10 @@ pub const STDIN_READ_MAX_BYTES: usize = 1024 * 1024;
 const DEFAULT_STDIN_READ_IDLE_TIMEOUT_SEC: f64 = 0.25;
 const DEFAULT_STDIN_READ_DEADLINE_SEC: f64 = 2.0;
 const LOG_REL_PATH: &str = ".clud/tools/hooks/block-bad-cmd.log";
+/// Rotate the hook log to a single `.1` backup once it reaches this size.
+/// The hook runs as a short-lived process per tool call, so an unbounded
+/// append grows without limit (observed at 117 MB) until rotation was added.
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const SENTINEL_PHRASE: &str = concat!("bad", " cmd");
 
 const TOOL_RS_BUILD: &str = concat!("car", "go");
@@ -2490,6 +2494,7 @@ fn append_log(message: &str) {
             return;
         }
     }
+    rotate_log_if_needed(&path);
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) else {
         return;
     };
@@ -2498,6 +2503,22 @@ fn append_log(message: &str) {
         .map(|duration| duration.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_string());
     let _ = writeln!(file, "[{timestamp}] pid={} {message}", std::process::id());
+}
+
+/// Roll the hook log over to a single `.1` backup once it reaches
+/// [`MAX_LOG_BYTES`], mirroring the daemon event log's single-backup scheme
+/// (`daemon::daemon_events`). Best-effort: any error leaves the current log in
+/// place and appends continue, so a rotation failure never blocks a tool call.
+fn rotate_log_if_needed(path: &Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() < MAX_LOG_BYTES {
+        return;
+    }
+    let backup = path.with_extension("log.1");
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(path, &backup);
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -2820,6 +2841,55 @@ mod tests {
         ] {
             assert!(denies(&command), "{command} should be denied");
         }
+    }
+
+    #[test]
+    fn rotate_log_rolls_over_at_threshold_and_keeps_single_backup() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("block-bad-cmd.log");
+        let backup = dir.path().join("block-bad-cmd.log.1");
+
+        // Below threshold: no rotation.
+        std::fs::write(&log, vec![b'x'; 16]).unwrap();
+        rotate_log_if_needed(&log);
+        assert!(log.exists(), "under-threshold log must stay in place");
+        assert!(
+            !backup.exists(),
+            "no backup should be created under threshold"
+        );
+
+        // At/over threshold: primary moves to `.1`.
+        std::fs::write(&log, vec![b'y'; (MAX_LOG_BYTES + 1) as usize]).unwrap();
+        rotate_log_if_needed(&log);
+        assert!(!log.exists(), "oversized log must be rotated away");
+        assert!(backup.exists(), "rotated backup must exist");
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().len(),
+            MAX_LOG_BYTES + 1,
+            "backup must hold the rotated-out contents"
+        );
+
+        // A second rotation overwrites the single backup rather than piling up.
+        std::fs::write(&log, vec![b'z'; (MAX_LOG_BYTES + 2) as usize]).unwrap();
+        rotate_log_if_needed(&log);
+        assert!(backup.exists());
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().len(),
+            MAX_LOG_BYTES + 2,
+            "second rotation must replace the prior backup"
+        );
+        assert!(
+            !dir.path().join("block-bad-cmd.log.2").exists(),
+            "rotation keeps only a single `.1` backup"
+        );
+    }
+
+    #[test]
+    fn rotate_log_is_noop_for_missing_file() {
+        let dir = tempdir().unwrap();
+        // Must not panic or create anything when the log does not yet exist.
+        rotate_log_if_needed(&dir.path().join("block-bad-cmd.log"));
+        assert!(!dir.path().join("block-bad-cmd.log.1").exists());
     }
 
     #[test]
