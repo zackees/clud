@@ -172,8 +172,17 @@ Platform glue:
 - `win_creation_flags.rs` - `invisible_helper_creationflags()` returns
   `CREATE_NO_WINDOW` on Windows for daemon-helper spawns; `0` elsewhere so call
   sites stay portable.
-- `large_file_guard.rs` - startup-time `ignore`-crate walker that warns about
-  source files large enough to choke agents (issue #132); hard 1 s deadline.
+- `large_file_guard.rs` - startup-time guard that warns about source files
+  large enough to choke agents (issue #132). On a git repo the primary path is
+  now the in-process **index pass** (`large_file_guard/index_pass.rs`, issue
+  #556): `gix-index` mmap-parses `.git/index` (resolving the `.git`-file
+  `gitdir:` indirection so a linked worktree reports against its own index) and
+  reports tracked source files straight from the index's cached stat sizes —
+  no tree walk, ~ms instead of ~240-400 ms. Entries whose cached size is
+  untrustworthy (racily-clean, recorded as 0) get one targeted `stat` each. The
+  original `ignore`-crate parallel walker (hard 1 s deadline) remains the
+  fallback when there is no usable index; untracked-file coverage on the launch
+  path is deferred to the daemon-side pass 2 (#551).
 - `path_norm.rs` - fbuild/zccache-style `NormalizedPath` and separator-safe
   path-string helpers for cross-platform path keys, serialization, and
   executable names received from another OS.
