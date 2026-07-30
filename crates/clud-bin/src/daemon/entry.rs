@@ -105,6 +105,20 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
                 1
             }
         },
+        DaemonSubcommand::Stop => match request_daemon_shutdown(state_dir) {
+            Ok(pid) => {
+                eprintln!("[clud] daemon pid {pid} stopped");
+                0
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                eprintln!("[clud] no running daemon");
+                0
+            }
+            Err(err) => {
+                eprintln!("[clud] daemon stop failed: {err}");
+                1
+            }
+        },
         DaemonSubcommand::RunningProcess { json } => {
             run_running_process_diagnostics(state_dir, *json)
         }

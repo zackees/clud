@@ -472,6 +472,8 @@ pub enum SymbolsSubcommand {
 pub enum DaemonSubcommand {
     /// Restart the daemon process so the next CLI call uses the current binary.
     Restart,
+    /// Stop the daemon if it is running without starting a replacement.
+    Stop,
     /// Print the current running-process adoption preview.
     #[command(name = "running-process", alias = "servicedef")]
     RunningProcess {
