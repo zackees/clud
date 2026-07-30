@@ -21,7 +21,9 @@ clud tool run docker/docker-build.py soldr  <repo-root> init    # write Dockerfi
 clud tool run docker/docker-build.py soldr  <repo-root> up      # build image + start container
 clud tool run docker/docker-build.py soldr  <repo-root> run -- soldr cargo check
 clud tool run docker/docker-build.py soldr  <repo-root> shell
-clud tool run docker/docker-build.py soldr  <repo-root> clean   # wipe volumes; force cold next time
+clud tool run docker/docker-build.py soldr  <repo-root> clean   # wipe THIS project's volumes; force cold next time
+clud tool run docker/docker-build.py soldr  <repo-root> gc      # dry-run: list reclaimable stale groups
+clud tool run docker/docker-build.py soldr  <repo-root> gc --force   # actually delete them
 
 clud tool run docker/docker-build.py python <repo-root> init    # python stack (v0: init only)
 clud tool run docker/docker-build.py cpp    <repo-root> init    # cpp stack (v0: init only)
@@ -30,6 +32,25 @@ clud tool run docker/docker-build.py doctor                     # cross-stack he
 ```
 
 The trampoline dispatches in-process to the right per-stack tool — invoking directly (`clud tool run docker/docker_build_soldr.py <repo> init`) is exactly equivalent, just less ergonomic.
+
+## Reclaiming disk: `clean` vs `gc` (issue #518)
+
+Two different jobs — reach for the right one:
+
+| | scope | when |
+|---|---|---|
+| `clean` | **this project only**: removes its container + its five named volumes | you want a deliberate cold rebuild here |
+| `gc` | **across projects**: retires whole stale clud-managed resource groups | disk is filling up with abandoned caches |
+
+`gc` is **dry-run by default** — it prints the KEEP/REMOVE plan and changes nothing until you add `--force`. Its policy:
+
+- the **currently-selected** group (the one this repo would reuse) is never removed, at any age;
+- a group whose **source worktree is gone** is eligible immediately;
+- otherwise a group is eligible once it is **≥ 48 h old** (these builds are ephemeral — the layer cache makes a later rebuild cheap, so bounded disk wins over preserving old state).
+
+Discovery is by **label**, not by name: every managed image/container/volume carries `com.clud.docker-build.*` labels (stack, project-key, project-root, role), so a container someone renamed by hand still resolves to its group and an unrelated volume never gets swept.
+
+**Named-volume cache ≠ BuildKit cache.** `clean` / `gc` only touch the *named volumes* (`target/`, `CARGO_HOME`, `RUSTUP_HOME`, `cargo-chef`, `/root/.soldr`) plus their containers/images. Docker's **BuildKit layer cache** is a separate store that neither command prunes — it is what makes a post-`clean` rebuild still fast, and it is reclaimed only by Docker's own `docker builder prune`. So "I ran `clean` and the rebuild was still quick" is expected, not a bug.
 
 ## The one rule that makes this work
 
@@ -70,7 +91,7 @@ Incremental builders (cargo, ccache, make, ninja) compare **source mtime vs buil
 
 ## v0 scope (this PR — zackees/clud#421)
 
-- **soldr stack:** init + up + run + shell + clean + doctor — full implementation. The helper image bakes in soldr and mounts `/root/.soldr` as a named volume so soldr daemon/cache state stays warm without touching the host singleton.
+- **soldr stack:** init + up + run + shell + clean + gc + doctor — full implementation. The helper image bakes in soldr and mounts `/root/.soldr` as a named volume so soldr daemon/cache state stays warm without touching the host singleton.
 - **python stack:** init only (Dockerfile + entry.sh + stack.toml writeout). Other subcommands return exit 64 with a clear notice.
 - **cpp stack:** same as python.
 - **verify:** stub on every stack (exit 64). The cold + warm-no-op + single-edit benchmark is the next slice.
