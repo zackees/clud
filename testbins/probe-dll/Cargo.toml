@@ -1,0 +1,10 @@
+[package]
+name = "probe-dll"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "probe_dll"
+crate-type = ["cdylib"]
+path = "src/lib.rs"

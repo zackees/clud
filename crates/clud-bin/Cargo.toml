@@ -103,6 +103,20 @@ tempfile = "3"
 # the upstream rule ("never compiled into production consumers").
 running-process = { version = "4.3.0", default-features = false, features = ["telemetry", "client", "originator-scan", "test-seams"] }
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# #468: ignored Win32 feasibility probe for user-land process/file
+# observation. Kept test-only so no production dependency graph changes.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
 [build-dependencies]
 prost-build = "0.14"
 protox = "0.9"

@@ -1,0 +1,9 @@
+[package]
+name = "probe-target"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "probe-target"
+path = "src/main.rs"
