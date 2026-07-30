@@ -105,6 +105,27 @@ def _events(state_dir: Path) -> list[dict[str, object]]:
     ]
 
 
+def _wait_for_events(
+    state_dir: Path,
+    expected_ops: set[str],
+    timeout: float = 10.0,
+) -> set[str]:
+    deadline = time.monotonic() + timeout
+    ops: set[str] = set()
+    while time.monotonic() < deadline:
+        try:
+            ops = {str(event["op"]) for event in _events(state_dir)}
+        except (json.JSONDecodeError, OSError):
+            time.sleep(0.05)
+            continue
+        if expected_ops <= ops:
+            return ops
+        time.sleep(0.05)
+    raise AssertionError(
+        f"daemon events did not include {sorted(expected_ops)}: {sorted(ops)}"
+    )
+
+
 def test_test_daemon_exits_at_hard_max_without_another_request(
     clud_binary: Path,
     mock_env: dict[str, str],
@@ -226,7 +247,10 @@ def test_test_host_scan_opt_in_starts_scanners(
     env = managed_env(mock_env, state_dir)
     env["CLUD_DAEMON_TEST_HOST_SCANS"] = "1"
     _start_daemon(clud_binary, env, state_dir)
-    ops = {event["op"] for event in _events(state_dir)}
+    ops = _wait_for_events(
+        state_dir,
+        {"proc_sampler_started", "orphan_sweeper_started"},
+    )
 
     assert "proc_sampler_started" in ops
     assert "orphan_sweeper_started" in ops
