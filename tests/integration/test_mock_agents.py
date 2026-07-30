@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -16,6 +15,7 @@ from typing import Any
 import pytest
 
 from ._daemon_helpers import (
+    copy_launcher,
     kill_process,
     run_clud,
     wait_for_pids_to_exit,
@@ -39,9 +39,12 @@ def _run(
     input_data: str | None = None,
     cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    with tempfile.TemporaryDirectory() as temp_dir:
+    # Issue #594: `ignore_cleanup_errors` so teardown never raises when Windows
+    # still holds the just-executed clud.exe (Defender scan / lingering handle);
+    # the temp dir is reclaimed later. `copy_launcher` covers the copy side.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         launch = Path(temp_dir) / clud.name
-        shutil.copy2(clud, launch)
+        copy_launcher(clud, launch)
         # Issue #594: `run_clud` re-raises a timeout with the partial output,
         # so a stalled launch on the Windows lane says how far it got.
         return run_clud(
@@ -166,9 +169,7 @@ class TestBackendSelection:
 class TestYoloMode:
     """Verify YOLO mode (--dangerously-skip-permissions) injection."""
 
-    def test_yolo_injected_by_default(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_yolo_injected_by_default(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "-p", "hello", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
@@ -231,9 +232,7 @@ class TestLaunchMode:
         report = json.loads(result.stdout)
         assert report["launch_mode"] == "subprocess"
 
-    def test_dry_run_pty_override(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_dry_run_pty_override(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "--dry-run", "--pty", "-p", "hello", env=mock_env)
         assert result.returncode == 0
         report = json.loads(result.stdout)
@@ -283,9 +282,7 @@ class TestCommandPrompts:
         assert "codeup" in prompt
         assert "-p" in prompt.split("codeup")[1]
 
-    def test_up_with_message_and_publish(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_up_with_message_and_publish(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(clud_binary, "up", "-m", "release v2", "--publish", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
@@ -311,9 +308,7 @@ class TestCommandPrompts:
         assert "linting" in prompt.lower()
         assert "unit tests" in prompt.lower()
 
-    def test_fix_with_github_url(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_fix_with_github_url(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         url = "https://github.com/user/repo/actions/runs/123"
         result = _run(clud_binary, "fix", url, env=mock_env)
         assert result.returncode == 0
@@ -354,12 +349,8 @@ class TestFlagForwarding:
         report = _parse_agent_report(result)
         assert "--some-unknown-flag" in report["args"]
 
-    def test_passthrough_after_separator(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
-        result = _run(
-            clud_binary, "-p", "hello", "--", "--verbose", "--debug", env=mock_env
-        )
+    def test_passthrough_after_separator(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
+        result = _run(clud_binary, "-p", "hello", "--", "--verbose", "--debug", env=mock_env)
         assert result.returncode == 0
         report = _parse_agent_report(result)
         assert "--verbose" in report["args"]
@@ -417,9 +408,7 @@ class TestLoopMode:
         assert "[clud] iteration 2/3" in cleaned_stderr
         assert "[clud] iteration 3/3" in cleaned_stderr
 
-    def test_loop_stops_on_failure(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_loop_stops_on_failure(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         result = _run(
             clud_binary,
             "loop",
@@ -451,9 +440,7 @@ class TestLoopMode:
 
     # ---- Issue #48: `clud --codex loop "..."` must work against codex ----
 
-    def test_codex_loop_iterations(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_codex_loop_iterations(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         """`clud --codex loop ...` drives the codex backend for N iterations."""
         result = _run(
             clud_binary,
@@ -467,9 +454,7 @@ class TestLoopMode:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         cleaned = _strip_ansi(result.stdout)
-        json_lines = [
-            line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")
-        ]
+        json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
         assert len(json_lines) == 3
         for line in json_lines:
             report = json.loads(line)
@@ -482,9 +467,7 @@ class TestLoopMode:
             # The prompt appears as a positional arg somewhere in the args.
             assert any("do stuff" in a for a in report["args"])
 
-    def test_codex_loop_dry_run(
-        self, clud_binary: Path, mock_env: dict[str, str]
-    ) -> None:
+    def test_codex_loop_dry_run(self, clud_binary: Path, mock_env: dict[str, str]) -> None:
         """`clud --codex --dry-run loop ...` emits the codex command."""
         result = _run(
             clud_binary,
@@ -525,9 +508,7 @@ class TestLoopMode:
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
         cleaned = _strip_ansi(result.stdout)
-        json_lines = [
-            line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")
-        ]
+        json_lines = [line.strip() for line in cleaned.splitlines() if line.strip().startswith("{")]
         assert len(json_lines) == 2
         for line in json_lines:
             report = json.loads(line)
@@ -673,9 +654,7 @@ class TestStdinForwarding:
         if report_file.exists():
             return json.loads(report_file.read_text())
         return _parse_agent_report(
-            subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=stdout, stderr=stderr
-            )
+            subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr=stderr)
         )
 
     def test_subprocess_stdin_forwarding(
@@ -813,9 +792,7 @@ class TestLargeFileWarningStartup:
     ) -> None:
         repo, name = self._repo_with_big_file(tmp_path)
         normal = _run(clud_binary, "--codex", "-p", "hello", env=mock_env, cwd=repo)
-        dry = _run(
-            clud_binary, "--codex", "--dry-run", "-p", "hello", env=mock_env, cwd=repo
-        )
+        dry = _run(clud_binary, "--codex", "--dry-run", "-p", "hello", env=mock_env, cwd=repo)
         # Both paths surface the same file entry — parity is the acceptance
         # criterion: normal startup must not silently drop what dry-run shows.
         assert name in dry.stderr, f"dry-run missing entry:\n{dry.stderr}"

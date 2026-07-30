@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,6 +20,30 @@ import time
 from pathlib import Path
 
 import psutil
+
+
+def copy_launcher(src: Path, dest: Path, *, attempts: int = 12, delay: float = 0.25) -> Path:
+    """Copy a clud/mock binary to ``dest``, retrying a transient Windows
+    Access-denied.
+
+    Issue #594: on the Windows lanes, ``shutil.copy2`` of a freshly-written
+    ``.exe`` intermittently fails with ``PermissionError: [WinError 5]`` when
+    Defender (or the search indexer) opens the just-created file for scanning
+    and briefly holds an exclusive handle. The lock clears within a fraction of
+    a second, so a short bounded retry turns the rotating single-victim copy
+    failure into a non-event. On POSIX the first copy succeeds, so this is a
+    no-op there.
+    """
+    last_err: OSError | None = None
+    for _ in range(attempts):
+        try:
+            shutil.copy2(src, dest)
+            return dest
+        except PermissionError as err:  # WinError 5 on Windows
+            last_err = err
+            time.sleep(delay)
+    assert last_err is not None
+    raise last_err
 
 
 def run_clud(
@@ -180,9 +205,7 @@ def wait_for_tree_pids(path: Path, minimum: int, timeout: float = 10.0) -> list[
     raise AssertionError(f"timed out waiting for {minimum} tree pids in {path}")
 
 
-def session_metadata(
-    state_dir: Path, session_id: str, timeout: float = 5.0
-) -> dict:
+def session_metadata(state_dir: Path, session_id: str, timeout: float = 5.0) -> dict:
     path = state_dir / "sessions" / f"{session_id}.json"
     wait_for_file(path)
     deadline = time.time() + timeout
@@ -401,11 +424,7 @@ def _daemon_cleanup_diagnostics(
     details = [f"state_dir: {state_dir}"]
     if pid is not None:
         details.append(f"recorded identity: pid={pid}, start_time={start_time}")
-        if (
-            start_time is not None
-            and start_time > 0
-            and process_identity_is_alive(pid, start_time)
-        ):
+        if start_time is not None and start_time > 0 and process_identity_is_alive(pid, start_time):
             try:
                 command_line = " ".join(psutil.Process(pid).cmdline())
             except (psutil.Error, OSError):
@@ -488,9 +507,7 @@ def stop_daemon(
         ) from error
 
     identity_alive = (
-        pid is not None
-        and start_time is not None
-        and process_identity_is_alive(pid, start_time)
+        pid is not None and start_time is not None and process_identity_is_alive(pid, start_time)
     )
     if result.returncode != 0 or identity_alive or info_path.exists():
         raise AssertionError(
@@ -517,9 +534,7 @@ def stop_daemons_below(root: Path, clud_binary: Path) -> list[Path]:
         except AssertionError as error:
             failures.append(f"{state_dir}:\n{error}")
     if failures:
-        raise AssertionError(
-            "one or more daemon cleanups failed:\n\n" + "\n\n".join(failures)
-        )
+        raise AssertionError("one or more daemon cleanups failed:\n\n" + "\n\n".join(failures))
     return state_dirs
 
 

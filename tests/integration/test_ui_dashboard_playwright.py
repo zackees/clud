@@ -24,7 +24,6 @@ for unrelated reasons.
 from __future__ import annotations
 
 import json
-import shutil
 import socket
 import subprocess
 import sys
@@ -33,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from ._daemon_helpers import stop_daemon
+from ._daemon_helpers import copy_launcher, stop_daemon
 
 # Ensure the env-isolation helper from the registry-concurrency suite is
 # importable — its `_registry_env` does the right CLUD_SESSION_DB pinning.
@@ -55,9 +54,7 @@ def _playwright_or_skip():
         )
 
 
-def _dashboard_env(
-    base: dict[str, str], state_dir: Path, registry_dir: Path
-) -> dict[str, str]:
+def _dashboard_env(base: dict[str, str], state_dir: Path, registry_dir: Path) -> dict[str, str]:
     """Build an env that isolates the dashboard's state and registry from the host.
 
     The daemon writes to CLUD_DAEMON_STATE_DIR; the redb registry honors
@@ -72,9 +69,7 @@ def _dashboard_env(
     return env
 
 
-def _wait_for_dashboard_port(
-    state_dir: Path, timeout: float = 30.0
-) -> int:
+def _wait_for_dashboard_port(state_dir: Path, timeout: float = 30.0) -> int:
     """Poll daemon.json until it advertises a dashboard port."""
     deadline = time.time() + timeout
     info_path = state_dir / "daemon.json"
@@ -89,9 +84,7 @@ def _wait_for_dashboard_port(
             if port:
                 return int(port)
         time.sleep(0.2)
-    raise AssertionError(
-        f"daemon.json never advertised a dashboard port within {timeout}s"
-    )
+    raise AssertionError(f"daemon.json never advertised a dashboard port within {timeout}s")
 
 
 def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
@@ -132,7 +125,7 @@ class TestUiDashboardShowsLiveSessions:
         # clud.exe lock — see test_session_registry_concurrency for the
         # rationale.
         launch = tmp_path / clud_binary.name
-        shutil.copy2(clud_binary, launch)
+        copy_launcher(clud_binary, launch)
 
         # Long sleep so the session row stays in the registry while we
         # navigate the dashboard.

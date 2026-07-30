@@ -24,13 +24,14 @@ observer → VoiceMode → PTY write is intact.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from ._daemon_helpers import copy_launcher
 
 pytestmark = pytest.mark.integration
 
@@ -47,9 +48,9 @@ def _run(
     """Run clud with bytes-mode stdin. Voice events are raw escape
     sequences, so we need byte-fidelity over the pipe — `text=True` would
     re-encode and could mangle the kitty CSI bytes."""
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         launch = Path(temp_dir) / clud.name
-        shutil.copy2(clud, launch)
+        copy_launcher(clud, launch)
         return subprocess.run(
             [str(launch), *args],
             capture_output=True,
@@ -105,12 +106,8 @@ def test_voice_mode_transcript_injects_into_pty(
         input_data=payload + b"\n",
     )
 
-    assert result.returncode == 0, (
-        f"clud exited {result.returncode}; stderr:\n{result.stderr!r}"
-    )
-    assert raw_stdin.is_file(), (
-        f"mock-agent stdin capture file missing; stderr:\n{result.stderr!r}"
-    )
+    assert result.returncode == 0, f"clud exited {result.returncode}; stderr:\n{result.stderr!r}"
+    assert raw_stdin.is_file(), f"mock-agent stdin capture file missing; stderr:\n{result.stderr!r}"
     captured = raw_stdin.read_bytes()
     assert b"hello voice mode" in captured, (
         "transcript bytes did not reach the PTY; "
