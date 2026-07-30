@@ -28,6 +28,7 @@ use super::gc_service::{GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::read_json_file;
 use super::paths::{daemon_info_path, sessions_dir};
 use super::process_utils::{identity_is_alive, pid_is_alive};
+use super::runtime_config::TestRuntimeActivity;
 use super::types::{
     CtrlCProfile, DaemonInfo, GcOp, GcReply, ListRow, RepoVisit, SessionKind, SessionSnapshot,
 };
@@ -504,6 +505,29 @@ pub(super) fn spawn_dashboard(
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
 ) -> Option<u16> {
+    spawn_dashboard_with_activity(
+        state_dir,
+        gc_tx,
+        ipc_port,
+        started_at_unix,
+        live_sessions_provider,
+        telemetry,
+        tool_telemetry,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_dashboard_with_activity(
+    state_dir: PathBuf,
+    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
+    ipc_port: u16,
+    started_at_unix: i64,
+    live_sessions_provider: LiveSessionsProvider,
+    telemetry: TelemetryStore,
+    tool_telemetry: ToolTelemetryStore,
+    test_activity: Option<TestRuntimeActivity>,
+) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
         Err(err) => {
@@ -532,6 +556,7 @@ pub(super) fn spawn_dashboard(
                     telemetry,
                     tool_telemetry,
                 },
+                test_activity,
             )
         });
     match res {
@@ -543,6 +568,7 @@ pub(super) fn spawn_dashboard(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_dashboard_loop(
     server: Server,
     state_dir: PathBuf,
@@ -551,8 +577,12 @@ fn run_dashboard_loop(
     started_at_unix: i64,
     live_sessions_provider: LiveSessionsProvider,
     stores: DashboardTelemetryStores,
+    test_activity: Option<TestRuntimeActivity>,
 ) {
     for request in server.incoming_requests() {
+        let _activity_guard = test_activity
+            .as_ref()
+            .map(TestRuntimeActivity::start_request);
         let method = request.method().clone();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or(&url).to_string();

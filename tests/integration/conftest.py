@@ -252,6 +252,21 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     # hot-reload safety net anyway; the repo isn't pip-installing over a
     # running clud during tests.
     env["CLUD_NO_UNLOCK"] = "1"
+    for name in (
+        "CLUD_DAEMON_TEST_MAX_LIFETIME_SECS",
+        "CLUD_DAEMON_TEST_IDLE_TIMEOUT_SECS",
+        "CLUD_DAEMON_TEST_HOST_SCANS",
+    ):
+        env.pop(name, None)
+    # Every daemon started by the integration suite is explicitly disposable.
+    # The runtime profile disables host-wide scanners and provides a hard
+    # lifetime if pytest is killed before fixture teardown can run.
+    env["CLUD_DAEMON_TEST_MODE"] = "1"
+    env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "daemon-state")
+    registry_dir = tmp_path / "registry"
+    registry_dir.mkdir()
+    env["CLUD_SESSION_DB"] = str(registry_dir / "sessions.redb")
+    env["CLUD_SESSION_LOCK"] = str(registry_dir / "sessions.lock")
 
     return env
 

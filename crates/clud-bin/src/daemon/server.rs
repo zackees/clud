@@ -21,7 +21,8 @@ use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
 };
 use super::http::{
-    default_live_sessions_provider, spawn_dashboard, TelemetryStore, ToolTelemetryStore,
+    default_live_sessions_provider, spawn_dashboard_with_activity, TelemetryStore,
+    ToolTelemetryStore,
 };
 use super::io_helpers::{new_session_id, read_json_file, write_json_file};
 use super::paths::{
@@ -29,6 +30,7 @@ use super::paths::{
 };
 use super::proc_sampler::{spawn_proc_sampler, ProcSamplerHandle, DEFAULT_SAMPLE_INTERVAL_MS};
 use super::process_utils::{identity_is_alive, signal_process_tree_as};
+use super::runtime_config::{DaemonRuntimeConfig, TestExpiryReason, TestRuntimeActivity};
 use super::sessions::list_live_session_cwds;
 use super::types::{
     unix_millis_now, CtrlCProfile, DaemonInfo, DaemonRequest, DaemonResponse, GcReply,
@@ -58,11 +60,43 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // Windows-SEH handler is in place — both panic and native crashes go
     // to `~/.clud/state/crashes/`.
     crate::crash_report::install_native("daemon");
+    let runtime_config = DaemonRuntimeConfig::from_env();
+    let daemon_started_at = Instant::now();
+    let test_activity = runtime_config
+        .test_mode
+        .then(|| TestRuntimeActivity::new(daemon_started_at));
     if let Err(err) = fs::create_dir_all(state_dir) {
         eprintln!("[clud] failed to create daemon state dir: {}", err);
         return 1;
     }
     daemon_events::log_event(state_dir, "daemon_starting", []);
+    daemon_events::log_event(
+        state_dir,
+        "daemon_runtime_profile",
+        [
+            ("test_mode", json!(runtime_config.test_mode)),
+            (
+                "test_max_lifetime_secs",
+                json!(runtime_config
+                    .test_max_lifetime
+                    .map(|value| value.as_secs())),
+            ),
+            (
+                "test_idle_timeout_secs",
+                json!(runtime_config
+                    .test_idle_timeout
+                    .map(|value| value.as_secs())),
+            ),
+            (
+                "host_scans_enabled",
+                json!(runtime_config.host_scans_enabled),
+            ),
+            (
+                "periodic_maintenance_enabled",
+                json!(runtime_config.periodic_maintenance_enabled),
+            ),
+        ],
+    );
 
     cleanup_stale_state(state_dir);
 
@@ -83,7 +117,10 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // Issue #135: GC registry worker is in-process now. Failing to open
     // the registry is non-fatal — session ops still work; only GC ops
     // will error back to the CLI. Log once and continue.
-    let gc_tx = match spawn_registry_worker_for_state(state_dir.to_path_buf()) {
+    let gc_tx = match spawn_registry_worker_for_state(
+        state_dir.to_path_buf(),
+        runtime_config.periodic_maintenance_enabled,
+    ) {
         Ok(tx) => Some(tx),
         Err(err) => {
             eprintln!("[clud] note: gc registry unavailable: {}", err);
@@ -102,7 +139,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // is a follow-up once the prototype contract stabilizes.
     let telemetry = TelemetryStore::new();
     let tool_telemetry = ToolTelemetryStore::new();
-    let dashboard_port = spawn_dashboard(
+    let dashboard_port = spawn_dashboard_with_activity(
         state_dir.to_path_buf(),
         gc_tx.clone(),
         port,
@@ -110,6 +147,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         default_live_sessions_provider(),
         telemetry,
         tool_telemetry,
+        test_activity.clone(),
     );
 
     // Tool installation is deferred until after readiness. `clud tool` self-heals
@@ -141,7 +179,12 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
     let shutdown_requested = Arc::new(AtomicBool::new(false));
-    let proc_sampler = spawn_proc_sampler(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
+    let proc_sampler = if runtime_config.host_scans_enabled {
+        daemon_events::log_event(state_dir, "proc_sampler_started", []);
+        spawn_proc_sampler(state_dir.to_path_buf(), Arc::clone(&shutdown_requested))
+    } else {
+        ProcSamplerHandle::empty(DEFAULT_SAMPLE_INTERVAL_MS)
+    };
     if let Err(err) = listener.set_nonblocking(true) {
         eprintln!("[clud] failed to configure daemon listener: {}", err);
         return 1;
@@ -165,17 +208,24 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // the on-exit `ReapOrphans` IPC never fired). Pure background work —
     // never blocks the accept loop. Sleeps in 1s slices so shutdown is
     // promptly observed.
-    spawn_orphan_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
+    if runtime_config.host_scans_enabled {
+        daemon_events::log_event(state_dir, "orphan_sweeper_started", []);
+        spawn_orphan_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
+    }
 
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
+                let activity_guard = test_activity
+                    .as_ref()
+                    .map(TestRuntimeActivity::start_request);
                 let workers = Arc::clone(&workers);
                 let state_dir = state_dir.to_path_buf();
                 let gc_tx = gc_tx.clone();
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 let proc_sampler = proc_sampler.clone();
                 thread::spawn(move || {
+                    let _activity_guard = activity_guard;
                     let _ = handle_daemon_connection(
                         stream,
                         &state_dir,
@@ -188,6 +238,49 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 if shutdown_requested.load(Ordering::SeqCst) {
+                    break;
+                }
+                let now = Instant::now();
+                let worker_count = workers.lock().expect("workers mutex poisoned").len();
+                if worker_count > 0 {
+                    if let Some(activity) = &test_activity {
+                        activity.note_activity(now);
+                    }
+                }
+                let (idle_for, active_requests) = test_activity
+                    .as_ref()
+                    .map(|activity| activity.snapshot(now))
+                    .unwrap_or((Duration::ZERO, 0));
+                if let Some(reason) = runtime_config.test_expiry_reason(
+                    now.duration_since(daemon_started_at),
+                    idle_for,
+                    worker_count,
+                    active_requests,
+                ) {
+                    let (op, timeout) = match reason {
+                        TestExpiryReason::Idle => {
+                            ("daemon_test_idle_expired", runtime_config.test_idle_timeout)
+                        }
+                        TestExpiryReason::MaxLifetime => (
+                            "daemon_test_max_lifetime_expired",
+                            runtime_config.test_max_lifetime,
+                        ),
+                    };
+                    daemon_events::log_event(
+                        state_dir,
+                        op,
+                        [
+                            ("timeout_secs", json!(timeout.map(|value| value.as_secs()))),
+                            (
+                                "uptime_ms",
+                                json!(now.duration_since(daemon_started_at).as_millis()),
+                            ),
+                            ("idle_ms", json!(idle_for.as_millis())),
+                            ("worker_count", json!(worker_count)),
+                            ("active_requests", json!(active_requests)),
+                        ],
+                    );
+                    shutdown_requested.store(true, Ordering::SeqCst);
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));

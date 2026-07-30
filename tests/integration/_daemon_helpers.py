@@ -96,15 +96,21 @@ DETACH_EXIT_TIMEOUT = 10.0
 
 
 def daemon_env(mock_env: dict[str, str], state_dir: Path) -> dict[str, str]:
-    env = mock_env.copy()
+    env = managed_env(mock_env, state_dir)
     env["CLUD_EXPERIMENTAL_DAEMON"] = "1"
-    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
     return env
 
 
 def managed_env(mock_env: dict[str, str], state_dir: Path) -> dict[str, str]:
     env = mock_env.copy()
+    for name in (
+        "CLUD_DAEMON_TEST_MAX_LIFETIME_SECS",
+        "CLUD_DAEMON_TEST_IDLE_TIMEOUT_SECS",
+        "CLUD_DAEMON_TEST_HOST_SCANS",
+    ):
+        env.pop(name, None)
     env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    env["CLUD_DAEMON_TEST_MODE"] = "1"
     return env
 
 
