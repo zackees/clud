@@ -340,11 +340,35 @@ pub const ORPHAN_GRACE_MS: u64 = 10_000;
 /// `admit` is called for *every* candidate even after one is rejected, so a
 /// caller may use it to record which PIDs it observed this pass.
 pub fn reap_orphans_filtered(opts: &ReapOpts, admit: &mut dyn FnMut(u32) -> bool) -> ReapOutcome {
+    reap_orphans_filtered_sparing(opts, &std::collections::BTreeSet::new(), admit).0
+}
+
+/// [`reap_orphans_filtered`] that additionally **spares** any candidate whose
+/// originator PID is in `spared_origins` (issue #465 handover registry: the
+/// daemon passes the persisted set of prior-daemon PIDs that launched detached
+/// sessions, so a successor daemon doesn't reap a live detached session across
+/// a restart). This is **purely subtractive** — it can only remove candidates
+/// from the reap set, never add — so a stale/over-broad set can at worst leave
+/// an orphan un-reaped, never cause a wrong kill.
+///
+/// Also returns the set of originator PIDs observed on live CLUD-tagged
+/// processes this pass, so the caller can prune stale registry entries without
+/// paying for a second full-host environment scan.
+pub fn reap_orphans_filtered_sparing(
+    opts: &ReapOpts,
+    spared_origins: &std::collections::BTreeSet<u32>,
+    admit: &mut dyn FnMut(u32) -> bool,
+) -> (ReapOutcome, std::collections::BTreeSet<u32>) {
     let all = running_process::originator::find_processes_by_originator("CLUD");
     let daemons = declared_daemon_pids();
+    let observed_origins: std::collections::BTreeSet<u32> =
+        all.iter().map(|p| p.parent_pid).collect();
     let orphans: Vec<Descendant> = all
         .into_iter()
         .filter(|p| !p.parent_alive)
+        // Handover-registered originators are intentionally-detached sessions;
+        // spare their whole cohort.
+        .filter(|p| !spared_origins.contains(&p.parent_pid))
         // `filter` short-circuits nothing here: `admit` is invoked for each
         // candidate regardless of earlier results, which is what lets the
         // sweeper use it as an observation hook as well as a gate.
@@ -357,7 +381,10 @@ pub fn reap_orphans_filtered(opts: &ReapOpts, admit: &mut dyn FnMut(u32) -> bool
         .collect();
 
     let header = "[clud] orphan sweep (dead originator):".to_string();
-    report_and_reap(orphans, &header, opts, &daemons)
+    (
+        report_and_reap(orphans, &header, opts, &daemons),
+        observed_origins,
+    )
 }
 
 /// PIDs of every process that has **declared itself a daemon** by setting

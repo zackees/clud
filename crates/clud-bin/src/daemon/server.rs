@@ -654,6 +654,14 @@ fn daemon_create_session(
     let spec_path = spec_path(state_dir, &session_id);
     write_json_file(&spec_path, &spec)?;
 
+    // #465 handover registry: a daemon-launched detached/background session's
+    // descendants are tagged with this daemon's PID as originator. Persist that
+    // PID so a *successor* daemon (after a restart) spares the still-live
+    // session instead of reaping it as a dead-originator orphan.
+    if spec.detachable || spec.background_on_launch {
+        super::handover_registry::register(state_dir, std::process::id());
+    }
+
     let exe = std::env::current_exe()?;
     let worker = Arc::new(NativeProcess::new(ProcessConfig {
         command: CommandSpec::Argv(vec![
@@ -900,19 +908,29 @@ fn run_orphan_sweep(
     let mut deferred: Vec<u32> = Vec::new();
     let outcome = match grace {
         Some(first_seen) => {
+            // #465 handover registry: spare intentionally-detached cohorts
+            // (registered under the launching daemon's PID) so a successor
+            // daemon doesn't reap a live detached session across a restart.
+            // Applied only on the periodic path — an explicit `clud slay` /
+            // `ReapOrphans` request means "reap now", registry or not.
+            let spared = super::handover_registry::load(state_dir);
             let now = Instant::now();
             let mut observed: HashSet<u32> = HashSet::new();
-            let outcome = orphan_reaper::reap_orphans_filtered(&opts, &mut |pid| {
-                observed.insert(pid);
-                let admitted = grace_admits(first_seen, pid, now);
-                if !admitted {
-                    deferred.push(pid);
-                }
-                admitted
-            });
+            let (outcome, observed_origins) =
+                orphan_reaper::reap_orphans_filtered_sparing(&opts, &spared, &mut |pid| {
+                    observed.insert(pid);
+                    let admitted = grace_admits(first_seen, pid, now);
+                    if !admitted {
+                        deferred.push(pid);
+                    }
+                    admitted
+                });
             // Drop bookkeeping for PIDs that are gone, so a long-lived daemon
             // doesn't accumulate an entry per orphan it has ever seen.
             first_seen.retain(|pid, _| observed.contains(pid));
+            // Drop handover entries whose originator no longer tags any live
+            // process, bounding the registry's growth.
+            super::handover_registry::prune(state_dir, &observed_origins);
             outcome
         }
         None => orphan_reaper::reap_orphans(&opts),
