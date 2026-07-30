@@ -211,4 +211,36 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         assert_eq!(index_pass(tmp.path()), Err(IndexPassError::NoIndex));
     }
+
+    #[test]
+    fn index_pass_reads_a_large_tracked_file_from_a_real_index() {
+        // End-to-end: a real `git add` writes the index with cached stat sizes;
+        // the gix parse must surface the large tracked source file (either as
+        // qualifying, or — if git recorded it racily-clean with size 0 — on the
+        // verification list, which `run()` then re-stats). The small file must
+        // never qualify.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        if crate::worktrees::run_git(root, &["init"]).is_err() {
+            return; // no git in this environment — skip rather than fail.
+        }
+        let _ = crate::worktrees::run_git(root, &["config", "user.email", "t@example.com"]);
+        let _ = crate::worktrees::run_git(root, &["config", "user.name", "t"]);
+        let big = "x".repeat(SIZE_THRESHOLD as usize + 500);
+        std::fs::write(root.join("big.rs"), &big).unwrap();
+        std::fs::write(root.join("small.rs"), "fn main() {}").unwrap();
+        crate::worktrees::run_git(root, &["add", "-A"]).expect("git add");
+
+        let out = index_pass(root).expect("real index parses");
+        let big_reported = out.qualifying.iter().any(|f| f.rel_path == p("big.rs"))
+            || out.needs_verification.contains(&p("big.rs"));
+        assert!(
+            big_reported,
+            "large tracked file must be reported or queued for verification: {out:?}"
+        );
+        assert!(
+            !out.qualifying.iter().any(|f| f.rel_path == p("small.rs")),
+            "a sub-threshold file must never qualify"
+        );
+    }
 }
