@@ -182,10 +182,12 @@ pub(super) fn spawn_registry_worker_for_state(
     let tick_cadence = periodic_maintenance_enabled
         .then(gc_tick_cadence_from_env)
         .flatten();
+    let reconcile_dir = state_dir.clone();
     spawn_registry_worker_with_live_cwds_and_cadence(
         registry,
         Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
         tick_cadence,
+        Some(reconcile_dir),
     )
 }
 
@@ -208,6 +210,7 @@ fn spawn_registry_worker_with_live_cwds(
         registry,
         live_cwds_provider,
         gc_tick_cadence_from_env(),
+        None,
     )
 }
 
@@ -215,6 +218,7 @@ fn spawn_registry_worker_with_live_cwds_and_cadence(
     registry: Registry,
     live_cwds_provider: LiveCwdsProvider,
     tick_cadence: Option<Duration>,
+    session_state_dir: Option<PathBuf>,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let (tx, rx) = mpsc::channel::<RegistryMsg>();
     let pool_tx = spawn_purge_pool(purge_concurrency_from_env());
@@ -229,6 +233,7 @@ fn spawn_registry_worker_with_live_cwds_and_cadence(
                 pool_tx,
                 tick_cadence,
                 live_cwds_provider,
+                session_state_dir,
             )
         })?;
     Ok(tx)
@@ -325,7 +330,9 @@ fn run_worker_loop(
     pool_tx: mpsc::Sender<PurgeJob>,
     tick_cadence: Option<Duration>,
     live_cwds_provider: LiveCwdsProvider,
+    session_state_dir: Option<PathBuf>,
 ) {
+    let session_state_dir = session_state_dir.as_deref();
     let mut watch_service = None;
     let Some(tick_cadence) = tick_cadence else {
         while let Ok(msg) = rx.recv() {
@@ -360,12 +367,19 @@ fn run_worker_loop(
                         &pool_tx,
                         &completion_tx,
                         &live_cwds_provider,
+                        session_state_dir,
                     );
                     next_tick = Instant::now() + tick_cadence;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                run_periodic_purge_tick(&registry, &pool_tx, &completion_tx, &live_cwds_provider);
+                run_periodic_purge_tick(
+                    &registry,
+                    &pool_tx,
+                    &completion_tx,
+                    &live_cwds_provider,
+                    session_state_dir,
+                );
                 next_tick = Instant::now() + tick_cadence;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -444,6 +458,7 @@ fn run_periodic_purge_tick(
     pool_tx: &mpsc::Sender<PurgeJob>,
     completion_tx: &mpsc::Sender<RegistryMsg>,
     live_cwds_provider: &LiveCwdsProvider,
+    session_state_dir: Option<&Path>,
 ) -> usize {
     let config = GcDiskWatchdogConfig::from_env();
     run_periodic_purge_tick_with_free_space(
@@ -453,6 +468,7 @@ fn run_periodic_purge_tick(
         live_cwds_provider,
         &config,
         &free_space_bytes_for_path,
+        session_state_dir,
     )
 }
 
@@ -472,6 +488,7 @@ fn run_periodic_purge_tick_with_free_space<F>(
     live_cwds_provider: &LiveCwdsProvider,
     disk_config: &GcDiskWatchdogConfig,
     free_space: &F,
+    session_state_dir: Option<&Path>,
 ) -> usize
 where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
@@ -519,6 +536,25 @@ where
         }
         Err(message) => {
             eprintln!("[clud] gc tick: trash error: {message}");
+        }
+    }
+
+    // Issue #549: retire session records whose worker and root are both dead
+    // (crash leftovers) so the 2 s proc sampler and per-list liveness probes
+    // stop paying for them forever. Synchronous rename/delete only — never
+    // routed through the purge pool, and never terminates a process.
+    if let Some(dir) = session_state_dir {
+        match super::sessions::reconcile_session_records(dir) {
+            Ok((tombstoned, deleted)) => {
+                if tombstoned > 0 || deleted > 0 {
+                    eprintln!(
+                        "[clud] gc tick: sessions tombstoned {tombstoned}, deleted {deleted}"
+                    );
+                }
+            }
+            Err(message) => {
+                eprintln!("[clud] gc tick: sessions error: {message}");
+            }
         }
     }
 

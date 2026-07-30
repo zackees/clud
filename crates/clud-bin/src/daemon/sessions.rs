@@ -1,10 +1,19 @@
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::io_helpers::read_json_file;
 use super::paths::{session_snapshot_path, sessions_dir};
-use super::process_utils::identity_is_alive;
+use super::process_utils::{identity_alive_in, identity_is_alive, refreshed_minimal_system};
 use super::types::SessionSnapshot;
+
+/// A crash-leftover session record is retired only once it is at least this old,
+/// so a session that is merely still starting up is never touched (#549).
+const RECONCILE_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// A retired record is kept as a `.json.tombstone` for this long — cheap
+/// insurance for `clud logs`-style post-mortem debugging — before deletion.
+const TOMBSTONE_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Resolve a user-provided session identifier to the canonical session ID.
 /// Tries exact match, then name match, then prefix match.
@@ -167,6 +176,138 @@ fn session_is_live(session: &SessionSnapshot) -> bool {
         }
     }
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordAction {
+    Keep,
+    Tombstone,
+    DeleteTombstone,
+}
+
+/// Decide what to do with a live `<id>.json` session record.
+///
+/// A record is retired **only** when it is a crash leftover: no clean exit was
+/// ever recorded (`exit_code` is `None`), its worker is not alive, its root (if
+/// one is recorded) is not alive, and it has aged past the grace period. A
+/// cleanly-exited record (`exit_code: Some`) is history owned by other
+/// mechanisms and is never touched here; a record with any live process, or one
+/// still inside the grace window, is kept. No process is ever terminated and no
+/// executable name is ever consulted — the decision is liveness + age only.
+fn session_record_action(
+    exit_code_none: bool,
+    worker_alive: bool,
+    root_alive: Option<bool>,
+    age: Duration,
+    grace: Duration,
+) -> RecordAction {
+    let both_dead = !worker_alive && root_alive != Some(true);
+    if exit_code_none && both_dead && age >= grace {
+        RecordAction::Tombstone
+    } else {
+        RecordAction::Keep
+    }
+}
+
+/// Decide whether a `.json.tombstone` file has outlived the retention window.
+fn tombstone_action(tombstone_age: Duration, retention: Duration) -> RecordAction {
+    if tombstone_age >= retention {
+        RecordAction::DeleteTombstone
+    } else {
+        RecordAction::Keep
+    }
+}
+
+/// Age of a record from its `created_at` (unix-ms), falling back to the file's
+/// mtime when the field is absent (records written by an older clud). A missing
+/// or unreadable timestamp yields age `0`, which keeps the record (fail-safe).
+fn record_age(path: &Path, created_at: Option<u64>, now: SystemTime) -> Duration {
+    if let Some(created_ms) = created_at {
+        let now_ms = now
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        return Duration::from_millis(now_ms.saturating_sub(created_ms));
+    }
+    file_age(path, now).unwrap_or(Duration::ZERO)
+}
+
+/// Age of a file from its mtime, or `None` if the metadata is unreadable.
+fn file_age(path: &Path, now: SystemTime) -> Option<Duration> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    now.duration_since(modified).ok()
+}
+
+/// Retire crash-leftover session records and delete long-expired tombstones.
+///
+/// Rides the daemon's hourly GC tick (#549). It **never terminates a process**
+/// and never matches on executable name: a record is retired purely on recorded
+/// liveness plus age. Retiring is a rename `<id>.json` → `<id>.json.tombstone`;
+/// every session reader filters on the `.json` extension, so a tombstone is
+/// invisible to listings while remaining on disk for post-mortem debugging.
+/// Returns `(tombstoned, deleted)` counts. One batched process-table refresh
+/// covers all records.
+pub(super) fn reconcile_session_records(state_dir: &Path) -> Result<(usize, usize), String> {
+    let dir = sessions_dir(state_dir);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(err) => return Err(format!("read {}: {err}", dir.display())),
+    };
+    let system = refreshed_minimal_system();
+    let now = SystemTime::now();
+
+    let mut tombstoned = 0usize;
+    let mut deleted = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some("json") => {
+                let Ok(session) = read_json_file::<SessionSnapshot>(&path) else {
+                    continue;
+                };
+                let worker_alive = identity_alive_in(&system, &session.worker_identity());
+                let root_alive = session
+                    .root_identity()
+                    .map(|root| identity_alive_in(&system, &root));
+                let age = record_age(&path, session.created_at, now);
+                if session_record_action(
+                    session.exit_code.is_none(),
+                    worker_alive,
+                    root_alive,
+                    age,
+                    RECONCILE_GRACE,
+                ) == RecordAction::Tombstone
+                {
+                    let target = path.with_extension("json.tombstone");
+                    // Windows cannot rename onto an existing path; clear a stale
+                    // tombstone from a prior retire of the same id first.
+                    let _ = fs::remove_file(&target);
+                    match fs::rename(&path, &target) {
+                        Ok(()) => tombstoned += 1,
+                        Err(err) => eprintln!(
+                            "[clud] gc tick: sessions: retire {} failed: {err}",
+                            path.display()
+                        ),
+                    }
+                }
+            }
+            Some("tombstone") => {
+                let age = file_age(&path, now).unwrap_or(Duration::ZERO);
+                if tombstone_action(age, TOMBSTONE_RETENTION) == RecordAction::DeleteTombstone {
+                    match fs::remove_file(&path) {
+                        Ok(()) => deleted += 1,
+                        Err(err) => eprintln!(
+                            "[clud] gc tick: sessions: delete tombstone {} failed: {err}",
+                            path.display()
+                        ),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((tombstoned, deleted))
 }
 
 #[cfg(test)]
@@ -353,5 +494,320 @@ mod tests {
 
         let paths = list_live_session_cwds(tmp.path());
         assert_eq!(paths, vec![std::fs::canonicalize(live_cwd).unwrap()]);
+    }
+
+    // ---- #549: session-record reconciliation -----------------------------
+
+    const DEAD_PID: u32 = u32::MAX;
+    const GRACE: Duration = Duration::from_secs(600);
+
+    fn alive_pid() -> u32 {
+        std::process::id()
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_record(
+        state_dir: &Path,
+        id: &str,
+        created_at: Option<u64>,
+        exit_code: Option<i32>,
+        worker_pid: u32,
+        root_pid: Option<u32>,
+    ) {
+        let snap = SessionSnapshot {
+            id: id.into(),
+            kind: SessionKind::Subprocess,
+            backend: None,
+            launch_mode: None,
+            repo_root: None,
+            command: Vec::new(),
+            cwd: None,
+            name: None,
+            created_at,
+            detachable: false,
+            background: true,
+            attachable: true,
+            repeat_interval_secs: None,
+            repeat_next_run_at: None,
+            repeat_running: false,
+            daemon_pid: 0,
+            worker_pid,
+            worker_port: 0,
+            root_pid,
+            daemon_pid_start: 0,
+            worker_pid_start: 0,
+            root_pid_start: 0,
+            exit_code,
+            exited_at: exit_code.map(|_| 0),
+            ctrl_c: None,
+        };
+        write_json_file(&session_snapshot_path(state_dir, id), &snap).unwrap();
+    }
+
+    fn json_path(state_dir: &Path, id: &str) -> std::path::PathBuf {
+        session_snapshot_path(state_dir, id)
+    }
+
+    fn tombstone_path(state_dir: &Path, id: &str) -> std::path::PathBuf {
+        json_path(state_dir, id).with_extension("json.tombstone")
+    }
+
+    #[test]
+    fn session_record_action_matrix() {
+        let old = GRACE; // exactly at grace counts as past it (>=)
+        let young = Duration::from_secs(0);
+        use RecordAction::*;
+        // (exit_code_none, worker_alive, root_alive, age) -> action
+        let cases: &[(bool, bool, Option<bool>, Duration, RecordAction)] = &[
+            // The one retirable shape: crash leftover, both dead, past grace.
+            (true, false, None, old, Tombstone),
+            (true, false, Some(false), old, Tombstone),
+            // Any live process keeps it.
+            (true, true, None, old, Keep),
+            (true, true, Some(false), old, Keep),
+            (true, false, Some(true), old, Keep),
+            (true, true, Some(true), old, Keep),
+            // Cleanly exited is never touched, regardless of liveness/age.
+            (false, false, None, old, Keep),
+            (false, false, Some(false), old, Keep),
+            (false, false, Some(true), old, Keep),
+            // Inside the grace window is always kept, even when both are dead.
+            (true, false, None, young, Keep),
+            (true, false, Some(false), young, Keep),
+            // Cleanly exited + young + live: still kept.
+            (false, true, Some(true), young, Keep),
+        ];
+        for (i, &(ec_none, worker, root, age, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                session_record_action(ec_none, worker, root, age, GRACE),
+                expected,
+                "row {i}: ec_none={ec_none} worker={worker} root={root:?} age={age:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tombstone_action_deletes_only_past_retention() {
+        let retention = Duration::from_secs(7 * 24 * 60 * 60);
+        assert_eq!(
+            tombstone_action(Duration::from_secs(0), retention),
+            RecordAction::Keep
+        );
+        assert_eq!(
+            tombstone_action(retention - Duration::from_secs(1), retention),
+            RecordAction::Keep
+        );
+        assert_eq!(
+            tombstone_action(retention, retention),
+            RecordAction::DeleteTombstone
+        );
+        assert_eq!(
+            tombstone_action(retention + Duration::from_secs(1), retention),
+            RecordAction::DeleteTombstone
+        );
+    }
+
+    #[test]
+    fn record_with_both_pids_dead_past_grace_is_tombstoned() {
+        let tmp = TempDir::new().unwrap();
+        let created = now_ms() - 20 * 60 * 1000; // 20 min ago
+        write_record(
+            tmp.path(),
+            "crashed",
+            Some(created),
+            None,
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+
+        let (tombstoned, deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!((tombstoned, deleted), (1, 0));
+        assert!(!json_path(tmp.path(), "crashed").exists());
+        assert!(tombstone_path(tmp.path(), "crashed").exists());
+    }
+
+    #[test]
+    fn record_with_live_worker_is_kept() {
+        let tmp = TempDir::new().unwrap();
+        let created = now_ms() - 20 * 60 * 1000;
+        write_record(
+            tmp.path(),
+            "live",
+            Some(created),
+            None,
+            alive_pid(),
+            Some(DEAD_PID),
+        );
+
+        let (tombstoned, deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!((tombstoned, deleted), (0, 0));
+        assert!(json_path(tmp.path(), "live").exists());
+    }
+
+    #[test]
+    fn record_with_dead_worker_but_live_root_is_kept() {
+        let tmp = TempDir::new().unwrap();
+        let created = now_ms() - 20 * 60 * 1000;
+        write_record(
+            tmp.path(),
+            "root-live",
+            Some(created),
+            None,
+            DEAD_PID,
+            Some(alive_pid()),
+        );
+
+        let (tombstoned, _deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!(tombstoned, 0);
+        assert!(json_path(tmp.path(), "root-live").exists());
+    }
+
+    #[test]
+    fn record_younger_than_grace_is_kept() {
+        let tmp = TempDir::new().unwrap();
+        write_record(
+            tmp.path(),
+            "starting",
+            Some(now_ms()),
+            None,
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+
+        let (tombstoned, _deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!(tombstoned, 0);
+        assert!(json_path(tmp.path(), "starting").exists());
+    }
+
+    #[test]
+    fn cleanly_exited_record_is_never_touched() {
+        let tmp = TempDir::new().unwrap();
+        let created = now_ms() - 20 * 60 * 1000;
+        write_record(
+            tmp.path(),
+            "exited",
+            Some(created),
+            Some(0),
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+
+        let (tombstoned, _deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!(tombstoned, 0);
+        assert!(json_path(tmp.path(), "exited").exists());
+    }
+
+    #[test]
+    fn missing_created_at_falls_back_to_file_mtime() {
+        // No created_at, freshly written → mtime is now → inside grace → kept.
+        let tmp = TempDir::new().unwrap();
+        write_record(
+            tmp.path(),
+            "no-created-at",
+            None,
+            None,
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+
+        let (tombstoned, _deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!(tombstoned, 0);
+        assert!(json_path(tmp.path(), "no-created-at").exists());
+    }
+
+    #[test]
+    fn fresh_tombstone_is_kept() {
+        // A tombstone younger than the 7-day retention survives the tick.
+        let tmp = TempDir::new().unwrap();
+        let created = now_ms() - 20 * 60 * 1000;
+        write_record(
+            tmp.path(),
+            "recent",
+            Some(created),
+            None,
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+        // First tick tombstones it; a second tick must not delete the fresh tombstone.
+        assert_eq!(reconcile_session_records(tmp.path()).unwrap(), (1, 0));
+        assert_eq!(reconcile_session_records(tmp.path()).unwrap(), (0, 0));
+        assert!(tombstone_path(tmp.path(), "recent").exists());
+    }
+
+    #[test]
+    fn listing_ignores_tombstones() {
+        // A tombstoned record is invisible to every session lister.
+        let tmp = TempDir::new().unwrap();
+        let created = now_ms() - 20 * 60 * 1000;
+        write_record(
+            tmp.path(),
+            "dead",
+            Some(created),
+            None,
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+        write_record(tmp.path(), "alive", Some(created), None, alive_pid(), None);
+
+        reconcile_session_records(tmp.path()).unwrap();
+
+        let live_ids: Vec<String> = list_background_sessions(tmp.path())
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(live_ids, vec!["alive".to_string()]);
+        assert_eq!(
+            most_recent_session_any(tmp.path()).map(|s| s.id),
+            Some("alive".to_string()),
+            "the tombstone must not surface as the most recent session"
+        );
+    }
+
+    #[test]
+    fn reconcile_returns_counts_and_ignores_non_session_files() {
+        let tmp = TempDir::new().unwrap();
+        let old = now_ms() - 20 * 60 * 1000;
+        write_record(
+            tmp.path(),
+            "dead-1",
+            Some(old),
+            None,
+            DEAD_PID,
+            Some(DEAD_PID),
+        );
+        write_record(tmp.path(), "dead-2", Some(old), None, DEAD_PID, None);
+        write_record(tmp.path(), "keep-live", Some(old), None, alive_pid(), None);
+        write_record(
+            tmp.path(),
+            "keep-young",
+            Some(now_ms()),
+            None,
+            DEAD_PID,
+            None,
+        );
+        // A stray non-session file in the dir must be left alone.
+        std::fs::write(sessions_dir(tmp.path()).join("notes.txt"), b"hi").unwrap();
+
+        let (tombstoned, deleted) = reconcile_session_records(tmp.path()).unwrap();
+        assert_eq!((tombstoned, deleted), (2, 0));
+        assert!(tombstone_path(tmp.path(), "dead-1").exists());
+        assert!(tombstone_path(tmp.path(), "dead-2").exists());
+        assert!(json_path(tmp.path(), "keep-live").exists());
+        assert!(json_path(tmp.path(), "keep-young").exists());
+        assert!(sessions_dir(tmp.path()).join("notes.txt").exists());
+    }
+
+    #[test]
+    fn reconcile_missing_dir_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("no-such-state");
+        assert_eq!(reconcile_session_records(&missing).unwrap(), (0, 0));
     }
 }
