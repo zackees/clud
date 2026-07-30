@@ -30,6 +30,9 @@ Subcommands:
     shell   Interactive bash in the container.
     verify  Cold + warm-no-op + single-file-edit benchmark (NOT YET IMPLEMENTED — exits 64).
     clean   Remove volumes for this stack+path; force cold rebuild next time.
+    gc      Reclaim stale clud-managed groups (dry-run; `gc --force` deletes).
+            Removes groups >=48h old or whose source worktree is gone; never
+            the currently-selected group. Discovered by label, not by name.
     doctor  Diagnose docker daemon up, clock skew, MSYS path mangling.
 
 Exit codes:
@@ -155,6 +158,28 @@ def _image_tag(path: Path) -> str:
     return f"clud-docker-build-soldr:{_project_key(path)}"
 
 
+# Issue #518: every managed resource carries labels so `gc` can discover and
+# scope cleanup by label rather than by fragile name parsing — an externally
+# named container reusing a clud volume set must still be discoverable.
+LABEL_NS = "com.clud.docker-build"
+
+
+def _label_args(path: Path, role: str) -> list[str]:
+    """`--label` flags identifying this resource as clud-managed, plus its
+    stack, project key, canonical source root, and role."""
+    labels = [
+        f"{LABEL_NS}.managed=true",
+        f"{LABEL_NS}.stack={STACK}",
+        f"{LABEL_NS}.project-key={_project_key(path)}",
+        f"{LABEL_NS}.project-root={path.resolve()}",
+        f"{LABEL_NS}.role={role}",
+    ]
+    args: list[str] = []
+    for label in labels:
+        args += ["--label", label]
+    return args
+
+
 def _docker(*args: str, check: bool = True,
             capture: bool = False) -> subprocess.CompletedProcess:
     """Wrap docker so we can swap shells later if needed. On Windows we
@@ -191,28 +216,42 @@ def cmd_up(path: Path) -> int:
         sys.stderr.write(f"missing {dockerfile} — run `init` first\n")
         return 2
 
-    image = _image_tag(path)
-    sys.stdout.write(f"building image {image} (cached layers reused)...\n")
-    _docker("build", "-t", image, "-f", str(dockerfile), str(stack_dir))
-
     name = _container_name(path)
+    image = _image_tag(path)
+
+    # Issue #518: reuse an existing container before rebuilding. Building first
+    # (as v0 did) replaces the image tag on every `up`, orphaning the older
+    # image config that the running container still pins — the exact duplicate
+    # buildup the issue reported. If the container already exists, just start it;
+    # `clean` forces a rebuild after a Dockerfile change.
     existing = _docker("ps", "-aq", "-f", f"name=^{name}$",
                        capture=True, check=False).stdout.strip()
     if existing:
         sys.stdout.write(f"container {name} already exists ({existing[:12]}) "
-                         f"— start if needed\n")
+                         f"— starting (run `clean` first to rebuild)\n")
         _docker("start", name, check=False)
         return 0
+
+    sys.stdout.write(f"building image {image} (cached layers reused)...\n")
+    _docker("build", *_label_args(path, "image"),
+            "-t", image, "-f", str(dockerfile), str(stack_dir))
 
     vol_args = []
     for role, mount in (("target", "/target"), ("cargo-home", "/cargo-home"),
                         ("rustup-home", "/rustup-home"),
                         ("cargo-chef", "/cargo-chef"),
                         ("soldr-home", "/root/.soldr")):
-        vol_args += ["-v", f"{_volume_name(path, role)}:{mount}"]
+        vol = _volume_name(path, role)
+        # Pre-create the volume with labels; `docker run -v name:...` would
+        # otherwise auto-create it unlabeled, invisible to label-scoped gc.
+        _docker("volume", "create", *_label_args(path, "volume"),
+                "--label", f"{LABEL_NS}.cache-role={role}", vol,
+                check=False, capture=True)
+        vol_args += ["-v", f"{vol}:{mount}"]
 
     sys.stdout.write(f"starting container {name}...\n")
     _docker("run", "-d", "--init", "--name", name,
+            *_label_args(path, "container"),
             "-v", f"{path.resolve()}:/src:ro",
             *vol_args,
             image, "tail", "-f", "/dev/null")
@@ -256,6 +295,167 @@ def cmd_clean(path: Path) -> int:
         _docker("volume", "rm", _volume_name(path, role), check=False)
     sys.stdout.write(f"removed container + {STACK} volumes for {path}\n")
     return 0
+
+
+def gc_plan(groups: list[dict], *, threshold_hours: float = 48.0) -> tuple[list, list]:
+    """Pure garbage-collection decision over managed resource groups (#518).
+
+    Each group is a dict with keys: ``project_key`` (str), ``age_hours``
+    (float), ``root_exists`` (bool — does the canonical source worktree still
+    exist), ``is_selected`` (bool — is this the group the *current* invocation
+    would reuse). Returns ``(to_remove, kept)`` as lists of
+    ``(project_key, reason)`` tuples.
+
+    Policy (per the issue's superseding clarification — these builds are
+    ephemeral, so bounded disk usage wins over preserving old state):
+
+    - The currently-selected group is always kept, even past the threshold and
+      even under a crowded tag prefix (the density heuristic must never evict
+      the active group).
+    - A group whose source worktree is gone is eligible immediately, any age.
+    - Otherwise a group at least ``threshold_hours`` old is removed (gc may
+      force-stop the containers pinning it); younger groups are kept.
+
+    Pure and dependency-free so the safety boundaries are exhaustively
+    unit-tested without a live Docker daemon.
+    """
+    to_remove: list = []
+    kept: list = []
+    for group in groups:
+        key = group["project_key"]
+        if group.get("is_selected"):
+            kept.append((key, "currently-selected"))
+        elif not group.get("root_exists", True):
+            to_remove.append((key, "worktree-gone"))
+        elif group.get("age_hours", 0.0) >= threshold_hours:
+            to_remove.append((key, "stale-past-threshold"))
+        else:
+            kept.append((key, "within-grace"))
+    return to_remove, kept
+
+
+def cmd_gc(path: Path, *, force: bool, threshold_hours: float = 48.0) -> int:
+    """Discover clud-managed docker resource groups by label and print (or,
+    with ``force``, execute) the removal plan. Dry-run by default."""
+    selected_key = _project_key(path)
+    groups = _discover_managed_groups(selected_key)
+    to_remove, kept = gc_plan(groups, threshold_hours=threshold_hours)
+
+    sys.stdout.write(f"managed groups: {len(groups)} "
+                     f"(threshold {threshold_hours:g}h)\n")
+    for key, reason in kept:
+        sys.stdout.write(f"  KEEP   {key}  ({reason})\n")
+    for key, reason in to_remove:
+        sys.stdout.write(f"  REMOVE {key}  ({reason})\n")
+
+    if not to_remove:
+        sys.stdout.write("nothing to reclaim.\n")
+        return 0
+    if not force:
+        sys.stdout.write("\ndry-run — pass `--force` to delete the REMOVE groups.\n")
+        return 0
+    for key, _reason in to_remove:
+        _remove_managed_group(key)
+    sys.stdout.write(f"removed {len(to_remove)} stale group(s).\n")
+    return 0
+
+
+def _discover_managed_groups(selected_key: str) -> list[dict]:
+    """Enumerate clud-managed containers/volumes via the managed label and fold
+    them into per-project groups. Best-effort: docker errors yield no groups
+    rather than raising, so `gc` never blocks on a flaky daemon."""
+    import time
+
+    keys: set[str] = set()
+    created: dict[str, float] = {}
+    roots: dict[str, str] = {}
+    now = time.time()
+    label = f"{LABEL_NS}.managed=true"
+    # Containers first (their CreatedAt is the freshest signal of activity),
+    # then volumes for groups that have no live container.
+    for kind, args in (
+        ("container", ["ps", "-a", "--filter", f"label={label}",
+                       "--format", "{{.Labels}}\t{{.CreatedAt}}"]),
+        ("volume", ["volume", "ls", "--filter", f"label={label}",
+                    "--format", "{{.Name}}"]),
+    ):
+        out = _docker(*args, capture=True, check=False).stdout
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            key, root, age = _parse_managed_line(kind, line)
+            if key is None:
+                continue
+            keys.add(key)
+            if root is not None:
+                roots.setdefault(key, root)
+            if age is not None:
+                created[key] = min(created.get(key, age), age)
+
+    groups: list[dict] = []
+    for key in sorted(keys):
+        root = roots.get(key)
+        age_hours = ((now - created[key]) / 3600.0) if key in created else 0.0
+        groups.append({
+            "project_key": key,
+            "age_hours": age_hours,
+            "root_exists": (root is not None and Path(root).exists())
+            if root is not None else True,
+            "is_selected": key == selected_key,
+        })
+    return groups
+
+
+def _parse_managed_line(kind: str, line: str):
+    """Extract (project_key, project_root|None, created_epoch|None) from one
+    `docker` list line. Volume lines carry only the name (key in the suffix)."""
+    if kind == "volume":
+        # clud-docker-build-soldr-<key>-<cache-role>
+        parts = line.split("-")
+        if len(parts) >= 6 and parts[:4] == ["clud", "docker", "build", "soldr"]:
+            return parts[4], None, None
+        return None, None, None
+    # container: "<labels>\t<created-at>"; labels are k=v,k=v.
+    labels_str, _, created_str = line.partition("\t")
+    labels = dict(
+        kv.split("=", 1) for kv in labels_str.split(",") if "=" in kv
+    )
+    key = labels.get(f"{LABEL_NS}.project-key")
+    root = labels.get(f"{LABEL_NS}.project-root")
+    created = _parse_docker_created_at(created_str.strip())
+    return key, root, created
+
+
+def _parse_docker_created_at(text: str):
+    """Best-effort parse of docker's `CreatedAt` into a unix epoch; None if the
+    format is unrecognized (gc then treats the group as age 0 = kept)."""
+    if not text:
+        return None
+    import datetime
+    # Docker emits e.g. "2026-07-28 11:04:46 -0700 PDT"; drop the trailing tz
+    # name which %z cannot parse.
+    trimmed = text.rsplit(" ", 1)[0] if text.count(" ") >= 3 else text
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.datetime.strptime(trimmed, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _remove_managed_group(key: str) -> None:
+    """Force-remove one managed group: its containers, then its volumes."""
+    containers = _docker(
+        "ps", "-aq", "--filter", f"label={LABEL_NS}.project-key={key}",
+        capture=True, check=False).stdout.split()
+    for cid in containers:
+        _docker("rm", "-f", cid, check=False, capture=True)
+    volumes = _docker(
+        "volume", "ls", "-q", "--filter", f"label={LABEL_NS}.project-key={key}",
+        capture=True, check=False).stdout.split()
+    for vol in volumes:
+        _docker("volume", "rm", "-f", vol, check=False, capture=True)
 
 
 def cmd_doctor(_path: Path | None = None) -> int:
@@ -342,6 +542,8 @@ def main(argv: list[str]) -> int:
         return cmd_verify(path)
     if sub == "clean":
         return cmd_clean(path)
+    if sub == "gc":
+        return cmd_gc(path, force="--force" in ns.rest)
     if sub == "doctor":
         return cmd_doctor(path)
 
