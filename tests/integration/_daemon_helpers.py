@@ -18,6 +18,8 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
+
 
 def run_clud(
     argv: list[str],
@@ -358,6 +360,161 @@ def pid_is_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def process_identity_is_alive(pid: int, start_time: int) -> bool:
+    """Return whether the exact recorded process identity is still alive.
+
+    DaemonInfo.pid_start uses sysinfo's seconds-since-epoch start time.  Pairing
+    it with the PID prevents a recycled PID from making teardown target an
+    unrelated process.
+    """
+    try:
+        process = psutil.Process(pid)
+        if not process.is_running():
+            return False
+        if start_time <= 0:
+            raise ValueError("process identity requires a positive start time")
+        return int(process.create_time()) == start_time
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except psutil.AccessDenied:
+        # Be conservative: if the OS will not let us verify the recorded
+        # identity, teardown must report a failure instead of guessing.
+        return True
+
+
+def _daemon_cleanup_diagnostics(
+    state_dir: Path,
+    *,
+    pid: int | None,
+    start_time: int | None,
+    result: subprocess.CompletedProcess[str] | None = None,
+    error: BaseException | None = None,
+) -> str:
+    details = [f"state_dir: {state_dir}"]
+    if pid is not None:
+        details.append(f"recorded identity: pid={pid}, start_time={start_time}")
+        if (
+            start_time is not None
+            and start_time > 0
+            and process_identity_is_alive(pid, start_time)
+        ):
+            try:
+                command_line = " ".join(psutil.Process(pid).cmdline())
+            except (psutil.Error, OSError):
+                command_line = "<unavailable>"
+            details.append(f"live command line: {command_line}")
+    if result is not None:
+        details.extend(
+            [
+                f"stop return code: {result.returncode}",
+                f"stop stdout: {result.stdout!r}",
+                f"stop stderr: {result.stderr!r}",
+            ]
+        )
+    if error is not None:
+        details.append(f"stop error: {error!r}")
+
+    events_path = state_dir / "daemon-events.jsonl"
+    if events_path.is_file():
+        try:
+            events = events_path.read_text(encoding="utf-8").splitlines()[-20:]
+            details.append("daemon event tail:\n" + "\n".join(events))
+        except (OSError, UnicodeError) as event_error:
+            details.append(f"daemon event tail unreadable: {event_error!r}")
+    else:
+        details.append("daemon event tail: <missing>")
+    return "\n".join(details)
+
+
+def stop_daemon(
+    clud_binary: Path,
+    state_dir: Path,
+    base_env: dict[str, str] | None = None,
+) -> None:
+    """Stop and verify the daemon recorded in ``state_dir``.
+
+    The public command owns shutdown identity validation.  This helper only
+    snapshots the identity first so teardown can prove that exact process is
+    gone, without a PID-only kill fallback.
+    """
+    info_path = state_dir / "daemon.json"
+    pid: int | None = None
+    start_time: int | None = None
+    if info_path.is_file():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            pid = int(info["pid"])
+            start_time = int(info["pid_start"])
+            if start_time <= 0:
+                raise ValueError("pid_start must be positive")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise AssertionError(
+                "cannot read daemon identity before cleanup\n"
+                + _daemon_cleanup_diagnostics(
+                    state_dir,
+                    pid=pid,
+                    start_time=start_time,
+                    error=error,
+                )
+            ) from error
+
+    env = dict(base_env or os.environ)
+    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    try:
+        result = subprocess.run(
+            [str(clud_binary), "daemon", "stop"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AssertionError(
+            "daemon cleanup command failed\n"
+            + _daemon_cleanup_diagnostics(
+                state_dir,
+                pid=pid,
+                start_time=start_time,
+                error=error,
+            )
+        ) from error
+
+    identity_alive = (
+        pid is not None
+        and start_time is not None
+        and process_identity_is_alive(pid, start_time)
+    )
+    if result.returncode != 0 or identity_alive or info_path.exists():
+        raise AssertionError(
+            "daemon cleanup did not complete safely\n"
+            + _daemon_cleanup_diagnostics(
+                state_dir,
+                pid=pid,
+                start_time=start_time,
+                result=result,
+            )
+        )
+
+
+def stop_daemons_below(root: Path, clud_binary: Path) -> list[Path]:
+    """Stop every daemon whose state file exists strictly below ``root``."""
+    state_dirs = sorted(
+        {info_path.parent for info_path in root.rglob("daemon.json")},
+        key=lambda path: str(path),
+    )
+    failures = []
+    for state_dir in state_dirs:
+        try:
+            stop_daemon(clud_binary, state_dir)
+        except AssertionError as error:
+            failures.append(f"{state_dir}:\n{error}")
+    if failures:
+        raise AssertionError(
+            "one or more daemon cleanups failed:\n\n" + "\n\n".join(failures)
+        )
+    return state_dirs
 
 
 def wait_for_pids_to_exit(pids: list[int], timeout: float = 15.0) -> None:

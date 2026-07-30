@@ -89,6 +89,10 @@ from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E40
     windows_no_window_flags,
 )
 
+from integration._daemon_helpers import (  # type: ignore[import-not-found]  # noqa: E402
+    stop_daemons_below,
+)
+
 __all__ = ["windows_no_window_flags"]
 
 
@@ -355,16 +359,48 @@ def _scan_for_clud_zombies() -> list[dict]:
         return []
 
 
+@pytest.fixture(scope="session")
+def _daemon_cleanup_roots(clud_binary: Path):
+    """Remember exact pytest roots for a final defense-in-depth sweep."""
+    roots: list[Path] = []
+    yield roots
+
+    failures = []
+    for root in roots:
+        try:
+            stop_daemons_below(root, clud_binary)
+        except AssertionError as error:
+            failures.append(f"{root}:\n{error}")
+    if failures:
+        pytest.fail(
+            "daemon cleanup failed during the session-final sweep:\n"
+            + "\n\n".join(failures)
+        )
+
+
 @pytest.fixture(autouse=True)
-def _check_no_zombies_after_test():
-    """After each test, verify no orphaned CLUD processes were leaked."""
+def _clean_daemons_and_check_no_zombies_after_test(
+    tmp_path: Path,
+    clud_binary: Path,
+    _daemon_cleanup_roots: list[Path],
+):
+    """Stop daemons below this test's temp root, even when its body fails."""
+    if tmp_path not in _daemon_cleanup_roots:
+        _daemon_cleanup_roots.append(tmp_path)
     yield
+
+    failures = []
+    try:
+        stop_daemons_below(tmp_path, clud_binary)
+    except AssertionError as error:
+        failures.append(f"daemon teardown failed:\n{error}")
+
     import time
 
     time.sleep(0.2)  # brief settle time for process cleanup
     orphans = _scan_for_clud_zombies()
     if orphans:
-        msg = "CLUD zombie processes detected after test:\n"
-        for o in orphans:
-            msg += f"  {o['line']}\n"
-        pytest.fail(msg)
+        details = "\n".join(f"  {orphan['line']}" for orphan in orphans)
+        failures.append(f"CLUD zombie processes detected after test:\n{details}")
+    if failures:
+        pytest.fail("\n\n".join(failures))
