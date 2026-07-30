@@ -1,9 +1,35 @@
 use super::*;
+use clap::Parser;
 use tempfile::tempdir;
 
 fn write(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, body).unwrap();
+}
+
+#[test]
+fn launch_hook_gate_follows_effective_harness_not_provider_flag() {
+    let cross_route_args = Args::parse_from(["clud", "--codex", "--harness", "claude"]);
+    let claude_harness = crate::backend::resolve_launch_target(
+        false,
+        true,
+        Some(crate::backend::HarnessSelection::Claude),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!should_check_launch(&cross_route_args, claude_harness));
+
+    let bare_args = Args::parse_from(["clud"]);
+    let saved_codex = crate::backend::resolve_launch_target(
+        false,
+        false,
+        None,
+        Some(crate::backend::ModelProvider::Codex),
+        Some(crate::backend::HarnessSelection::Default),
+    )
+    .unwrap();
+    assert!(should_check_launch(&bare_args, saved_codex));
 }
 
 fn trusted_state_for(path: &Path, group: usize, handler: usize) -> String {

@@ -1,6 +1,135 @@
 use std::path::PathBuf;
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+
+/// Model API/provider selected by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProvider {
+    Claude,
+    Codex,
+}
+
+impl ModelProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn from_settings_str(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub fn native_harness(self) -> Backend {
+        match self {
+            Self::Claude => Backend::Claude,
+            Self::Codex => Backend::Codex,
+        }
+    }
+}
+
+impl std::fmt::Display for ModelProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// User-requested harness preference. `Default` resolves to the provider's
+/// native executable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "lower")]
+pub enum HarnessSelection {
+    #[default]
+    Default,
+    Claude,
+    Codex,
+}
+
+impl HarnessSelection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn from_settings_str(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub fn resolve(self, provider: ModelProvider) -> Backend {
+        match self {
+            Self::Default => provider.native_harness(),
+            Self::Claude => Backend::Claude,
+            Self::Codex => Backend::Codex,
+        }
+    }
+}
+
+impl std::fmt::Display for HarnessSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferenceSource {
+    Cli,
+    GlobalSetting,
+    BuiltInDefault,
+}
+
+impl PreferenceSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::GlobalSetting => "global_setting",
+            Self::BuiltInDefault => "built_in_default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedLaunchTarget {
+    pub model_provider: ModelProvider,
+    pub requested_harness: HarnessSelection,
+    pub effective_harness: Backend,
+    pub provider_source: PreferenceSource,
+    pub harness_source: PreferenceSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchTargetError {
+    ClaudeViaCodexUnsupported,
+}
+
+impl std::fmt::Display for LaunchTargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClaudeViaCodexUnsupported => write!(
+                f,
+                "unsupported launch target: Claude provider cannot use the Codex harness"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LaunchTargetError {}
 
 /// Supported backend agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +154,13 @@ impl Backend {
             Some(Backend::Codex)
         } else {
             None
+        }
+    }
+
+    pub fn as_model_provider(self) -> ModelProvider {
+        match self {
+            Self::Claude => ModelProvider::Claude,
+            Self::Codex => ModelProvider::Codex,
         }
     }
 }
@@ -85,6 +221,70 @@ pub fn resolve_backend_with_default(
     } else {
         default_backend.unwrap_or(Backend::Claude)
     }
+}
+
+/// Resolve model provider and harness independently.
+///
+/// Each dimension follows the same precedence: CLI > global setting >
+/// built-in default. The concrete harness is validated after resolution so an
+/// unsupported route never silently falls back.
+pub fn resolve_launch_target(
+    claude: bool,
+    codex: bool,
+    cli_harness: Option<HarnessSelection>,
+    global_provider: Option<ModelProvider>,
+    global_harness: Option<HarnessSelection>,
+) -> Result<ResolvedLaunchTarget, LaunchTargetError> {
+    let (model_provider, provider_source) = if codex {
+        (ModelProvider::Codex, PreferenceSource::Cli)
+    } else if claude {
+        (ModelProvider::Claude, PreferenceSource::Cli)
+    } else if let Some(provider) = global_provider {
+        (provider, PreferenceSource::GlobalSetting)
+    } else {
+        (ModelProvider::Claude, PreferenceSource::BuiltInDefault)
+    };
+
+    let (requested_harness, harness_source) = if let Some(harness) = cli_harness {
+        (harness, PreferenceSource::Cli)
+    } else if let Some(harness) = global_harness {
+        (harness, PreferenceSource::GlobalSetting)
+    } else {
+        (HarnessSelection::Default, PreferenceSource::BuiltInDefault)
+    };
+    let effective_harness = requested_harness.resolve(model_provider);
+    if model_provider == ModelProvider::Claude && effective_harness == Backend::Codex {
+        return Err(LaunchTargetError::ClaudeViaCodexUnsupported);
+    }
+
+    Ok(ResolvedLaunchTarget {
+        model_provider,
+        requested_harness,
+        effective_harness,
+        provider_source,
+        harness_source,
+    })
+}
+
+pub fn saved_harness_override_notice(
+    target: ResolvedLaunchTarget,
+    stderr_is_terminal: bool,
+    structured_output: bool,
+) -> Option<String> {
+    if structured_output
+        || !stderr_is_terminal
+        || target.harness_source != PreferenceSource::GlobalSetting
+        || target.requested_harness == HarnessSelection::Default
+    {
+        return None;
+    }
+    let name = match target.effective_harness {
+        Backend::Claude => "Claude",
+        Backend::Codex => "Codex",
+    };
+    Some(format!(
+        "\x1b[32m[clud] Harness override: {name} (global setting)\x1b[0m"
+    ))
 }
 
 /// Resolve how the backend should be launched.
@@ -196,6 +396,141 @@ mod tests {
     #[test]
     fn test_codex_flag() {
         assert_eq!(resolve_backend(false, true), Backend::Codex);
+    }
+
+    #[test]
+    fn launch_target_precedence_is_independent_per_dimension() {
+        let cli_providers = [
+            (false, false, None),
+            (true, false, Some(ModelProvider::Claude)),
+            (false, true, Some(ModelProvider::Codex)),
+        ];
+        let global_providers = [
+            None,
+            Some(ModelProvider::Claude),
+            Some(ModelProvider::Codex),
+        ];
+        let harnesses = [
+            None,
+            Some(HarnessSelection::Default),
+            Some(HarnessSelection::Claude),
+            Some(HarnessSelection::Codex),
+        ];
+
+        for (claude, codex, cli_provider) in cli_providers {
+            for global_provider in global_providers {
+                for cli_harness in harnesses {
+                    for global_harness in harnesses {
+                        let provider = cli_provider
+                            .or(global_provider)
+                            .unwrap_or(ModelProvider::Claude);
+                        let provider_source = if cli_provider.is_some() {
+                            PreferenceSource::Cli
+                        } else if global_provider.is_some() {
+                            PreferenceSource::GlobalSetting
+                        } else {
+                            PreferenceSource::BuiltInDefault
+                        };
+                        let requested = cli_harness
+                            .or(global_harness)
+                            .unwrap_or(HarnessSelection::Default);
+                        let harness_source = if cli_harness.is_some() {
+                            PreferenceSource::Cli
+                        } else if global_harness.is_some() {
+                            PreferenceSource::GlobalSetting
+                        } else {
+                            PreferenceSource::BuiltInDefault
+                        };
+                        let result = resolve_launch_target(
+                            claude,
+                            codex,
+                            cli_harness,
+                            global_provider,
+                            global_harness,
+                        );
+                        let effective = requested.resolve(provider);
+
+                        if provider == ModelProvider::Claude && effective == Backend::Codex {
+                            assert_eq!(
+                                result,
+                                Err(LaunchTargetError::ClaudeViaCodexUnsupported),
+                                "cli_provider={cli_provider:?}, global_provider={global_provider:?}, \
+                                 cli_harness={cli_harness:?}, global_harness={global_harness:?}"
+                            );
+                            continue;
+                        }
+
+                        let target = result.unwrap();
+                        assert_eq!(target.model_provider, provider);
+                        assert_eq!(target.requested_harness, requested);
+                        assert_eq!(target.effective_harness, effective);
+                        assert_eq!(target.provider_source, provider_source);
+                        assert_eq!(target.harness_source, harness_source);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_harness_maps_to_provider_native_executable() {
+        assert_eq!(
+            HarnessSelection::Default.resolve(ModelProvider::Claude),
+            Backend::Claude
+        );
+        assert_eq!(
+            HarnessSelection::Default.resolve(ModelProvider::Codex),
+            Backend::Codex
+        );
+    }
+
+    #[test]
+    fn unsupported_cross_route_is_an_error() {
+        let error = resolve_launch_target(true, false, Some(HarnessSelection::Codex), None, None)
+            .unwrap_err();
+        assert_eq!(error, LaunchTargetError::ClaudeViaCodexUnsupported);
+        assert_eq!(
+            error.to_string(),
+            "unsupported launch target: Claude provider cannot use the Codex harness"
+        );
+    }
+
+    #[test]
+    fn saved_non_default_harness_notice_is_green_and_tty_only() {
+        let target = resolve_launch_target(
+            false,
+            false,
+            None,
+            Some(ModelProvider::Codex),
+            Some(HarnessSelection::Claude),
+        )
+        .unwrap();
+        let notice = saved_harness_override_notice(target, true, false).unwrap();
+        assert!(notice.starts_with("\x1b[32m"));
+        assert!(notice.contains("Harness override: Claude (global setting)"));
+        assert!(notice.ends_with("\x1b[0m"));
+        assert_eq!(saved_harness_override_notice(target, false, false), None);
+        assert_eq!(saved_harness_override_notice(target, true, true), None);
+
+        let saved_default = resolve_launch_target(
+            false,
+            false,
+            None,
+            Some(ModelProvider::Codex),
+            Some(HarnessSelection::Default),
+        )
+        .unwrap();
+        assert_eq!(
+            saved_harness_override_notice(saved_default, true, false),
+            None
+        );
+
+        let cli_override =
+            resolve_launch_target(false, true, Some(HarnessSelection::Claude), None, None).unwrap();
+        assert_eq!(
+            saved_harness_override_notice(cli_override, true, false),
+            None
+        );
     }
 
     #[test]

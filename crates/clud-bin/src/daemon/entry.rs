@@ -742,7 +742,7 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         .clone()
         .or_else(|| repeat_enabled.then(|| plan.task_summary.clone()).flatten());
     let repeat_run_command = if repeat_enabled {
-        match build_repeat_once_command(args) {
+        match build_repeat_once_command(args, plan) {
             Ok(command) => Some(command),
             Err(err) => {
                 eprintln!("[clud] failed to build repeat command: {}", err);
@@ -846,14 +846,20 @@ fn prepare_transcript_path(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
-fn build_repeat_once_command(args: &Args) -> io::Result<Vec<String>> {
+fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<String>> {
     let exe = std::env::current_exe()?;
     let mut command = vec![exe.to_string_lossy().to_string()];
-    if args.codex {
-        command.push("--codex".to_string());
-    } else if args.claude {
-        command.push("--claude".to_string());
+    match plan.model_provider() {
+        crate::backend::ModelProvider::Claude => command.push("--claude".to_string()),
+        crate::backend::ModelProvider::Codex => command.push("--codex".to_string()),
     }
+    command.push("--harness".to_string());
+    command.push(
+        plan.requested_harness
+            .unwrap_or_default()
+            .as_str()
+            .to_string(),
+    );
     if args.safe {
         command.push("--safe".to_string());
     }
@@ -1058,6 +1064,7 @@ mod tests {
             resume: None,
             claude: false,
             codex: false,
+            harness: None,
             subprocess: false,
             pty: false,
             graphics: crate::graphics::GraphicsMode::Auto,
@@ -1092,5 +1099,38 @@ mod tests {
             codex_config_overrides: Vec::new(),
         };
         assert!(experimental_enabled(&args));
+    }
+
+    #[test]
+    fn repeat_command_pins_resolved_provider_and_requested_harness() {
+        let args = Args::parse_from_raw(
+            [
+                "clud",
+                "--codex",
+                "--harness",
+                "claude",
+                "loop",
+                "--repeat",
+                "1h",
+                "task",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+        let target = crate::backend::resolve_launch_target(
+            args.claude,
+            args.codex,
+            args.harness,
+            None,
+            None,
+        )
+        .unwrap();
+        let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+        let command = build_repeat_once_command(&args, &plan).unwrap();
+        assert!(command.windows(1).any(|part| part == ["--codex"]));
+        assert!(command
+            .windows(2)
+            .any(|part| part == ["--harness", "claude"]));
     }
 }

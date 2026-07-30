@@ -13,7 +13,7 @@ mod utils;
 mod warnings;
 
 use crate::args::{Args, Command as CliCommand};
-use crate::backend::Backend;
+use crate::backend::{Backend, ResolvedLaunchTarget};
 
 pub use codex_trust::codex_project_key;
 pub use inspect::{inspect_current, inspect_paths};
@@ -44,11 +44,11 @@ pub(in crate::hook_health) const FIX_HINT: &str = "Run `clud --fix-hooks`.";
 pub(in crate::hook_health) const LEGACY_CODEX_HOOKS_FEATURE: &str = "codex_hooks";
 pub(in crate::hook_health) const CURRENT_CODEX_HOOKS_FEATURE: &str = "hooks";
 
-pub fn should_check_launch(args: &Args) -> bool {
+pub fn should_check_launch(args: &Args, launch_target: ResolvedLaunchTarget) -> bool {
     if args.fix_hooks || args.clean_worktrees {
         return false;
     }
-    if !args.codex {
+    if launch_target.effective_harness != Backend::Codex {
         return false;
     }
     matches!(
@@ -72,7 +72,7 @@ pub fn apply_default_repairs() -> Result<usize, DeterministicRepairError> {
     apply_deterministic_repairs(deterministic_repair_actions(&report))
 }
 
-pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
+pub fn run_fix_hooks(args: &Args, launch_target: ResolvedLaunchTarget) -> i32 {
     let mut report = inspect_current_impl();
     print_report_warnings(&report);
 
@@ -104,7 +104,7 @@ pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
             idx + 1,
             prompt_actions.len()
         );
-        let exit_code = match run_backend_prompt(args, selected_backend, prompt.clone()) {
+        let exit_code = match run_backend_prompt(args, launch_target, prompt.clone()) {
             Ok(code) => code,
             Err(error) => {
                 eprintln!("[clud] error: {error}");
@@ -116,7 +116,7 @@ pub fn run_fix_hooks(args: &Args, selected_backend: Backend) -> i32 {
             return exit_code;
         }
         report = inspect_current_impl();
-        let validation_exit = run_validation_followups(args, selected_backend, &report);
+        let validation_exit = run_validation_followups(args, launch_target, &report);
         if validation_exit != 0 {
             return validation_exit;
         }

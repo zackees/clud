@@ -1,0 +1,111 @@
+# Launch Targets and Sticky Preferences
+
+clud resolves two independent launch dimensions before harness bootstrap,
+setup, or launch-plan construction:
+
+- `ModelProvider` is the API/model family selected by `--claude` or `--codex`.
+- `HarnessSelection` is `default`, `claude`, or `codex`, selected by
+  `--harness`.
+
+`default` maps the provider to its native harness: Claude to Claude and Codex
+to Codex. The resolved `Backend` remains the concrete executable compatibility
+type used by bootstrap, setup, argv construction, and runners. New code must
+not infer the provider from that legacy field; use `ResolvedLaunchTarget` or
+`LaunchPlan::model_provider()`.
+
+## Resolution
+
+`backend::resolve_launch_target` is the single precedence and validation
+function. Each dimension independently uses:
+
+```text
+explicit CLI > ~/.clud/settings.json > built-in default
+```
+
+The built-in provider is Claude and the built-in requested harness is
+`default`. Each resolved value carries a `PreferenceSource`: `cli`,
+`global_setting`, or `built_in_default`.
+
+The supported cross-route in phase 1 is Codex provider through Claude:
+
+```text
+clud --codex --harness claude
+```
+
+Claude provider through Codex is rejected before bootstrap with:
+
+```text
+unsupported launch target: Claude provider cannot use the Codex harness
+```
+
+There is no fallback. HTTP translation and credentials are later phases under
+issue #622.
+
+## Persistence
+
+Global launch preferences use the existing settings document and `fs4` lock:
+
+```json
+{
+  "backend": { "default": "codex" },
+  "harness": { "default": "claude" }
+}
+```
+
+`GlobalSettingsPatch` applies model, harness, and settings-TUI changes inside
+one locked read/modify/write. The settings TUI uses one typed choice state
+machine for the provider and harness rows. The same generic `ChoiceSelector`
+drives the inline session/global launch-scope selector.
+
+An interactive explicit provider or harness selection offers:
+
+- **Session only**: use it for this invocation without writing settings.
+- **Globally**: atomically persist the explicitly selected dimensions and the
+  effective harness's global setup scope.
+
+When a saved non-`default` harness affects a real TTY launch, clud prints one
+green stderr line before spawning:
+
+```text
+[clud] Harness override: Claude (global setting)
+```
+
+It is suppressed for non-TTY stderr and structured output. `--dry-run` reports
+the effective values and their sources instead.
+
+## LaunchPlan and compatibility
+
+Every newly built `LaunchPlan` carries `model_provider`, `requested_harness`,
+`effective_harness`, `provider_source`, and `harness_source`. These are
+`serde(default)` options because old daemon/worker payloads contain only
+`backend`. Accessors fall back to that legacy field, preserving old native
+behavior.
+
+The daemon worker receives the same plan. Repeat jobs also pin the resolved
+provider and requested harness in their one-shot argv so a settings edit cannot
+silently change an existing job.
+
+`backend` remains in dry-run JSON for compatibility and names the effective
+executable. The additive fields make both dimensions explicit:
+
+```json
+{
+  "backend": "claude",
+  "model_provider": "codex",
+  "requested_harness": "claude",
+  "effective_harness": "claude",
+  "provider_source": "cli",
+  "harness_source": "cli"
+}
+```
+
+## Ownership
+
+- `backend.rs`: typed dimensions, precedence, validation, notice policy.
+- `args.rs`: `--harness` parsing and passthrough ownership.
+- `clud_settings.rs`: locked reads and atomic typed patches.
+- `preference.rs`: shared choice state machine.
+- `launch_setup.rs` / `settings_tui.rs`: session/global and settings UI.
+- `command/types.rs` / `command/builder.rs`: plan metadata and harness argv.
+- `main.rs`: bootstrap/setup the effective harness and emit dry-run metadata.
+- `daemon/entry.rs`: pin repeat-job provider/harness choices.

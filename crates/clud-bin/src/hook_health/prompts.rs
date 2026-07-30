@@ -8,7 +8,7 @@ use super::types::{HookConfigError, HookFrontend, HookHealthReport, NormalizedHo
 use super::utils::{display_path, join_matchers};
 use super::CATCH_ALL_MATCHER;
 use crate::args::Args;
-use crate::backend::{self, Backend};
+use crate::backend::{self, ModelProvider, ResolvedLaunchTarget};
 use crate::command;
 use crate::subprocess;
 
@@ -118,7 +118,7 @@ Fix only this hook config file. The expected PreToolUse shape is a JSON object w
 
 pub(in crate::hook_health) fn run_validation_followups(
     args: &Args,
-    selected_backend: Backend,
+    launch_target: ResolvedLaunchTarget,
     report: &HookHealthReport,
 ) -> i32 {
     let mut current = report.clone();
@@ -138,7 +138,7 @@ pub(in crate::hook_health) fn run_validation_followups(
                 "[clud] running hook validation follow-up prompt {}/3",
                 attempt + 1
             );
-            match run_backend_prompt(args, selected_backend, prompt) {
+            match run_backend_prompt(args, launch_target, prompt) {
                 Ok(0) => {}
                 Ok(code) => return code,
                 Err(error) => {
@@ -155,9 +155,10 @@ pub(in crate::hook_health) fn run_validation_followups(
 
 pub(in crate::hook_health) fn run_backend_prompt(
     args: &Args,
-    selected_backend: Backend,
+    launch_target: ResolvedLaunchTarget,
     prompt: String,
 ) -> Result<i32, String> {
+    let selected_backend = launch_target.effective_harness;
     let backend_path = backend::find_backend(selected_backend)
         .map(|path| path.to_string_lossy().to_string())
         .ok_or_else(|| {
@@ -166,13 +167,41 @@ pub(in crate::hook_health) fn run_backend_prompt(
                 selected_backend.executable_name()
             )
         })?;
+    let plan = backend_prompt_launch_plan(args, launch_target, prompt, &backend_path);
+    let config = ProcessConfig {
+        command: subprocess::command_spec_for_subprocess(plan.command),
+        cwd: plan.cwd.map(PathBuf::from),
+        env: None,
+        capture: false,
+        stderr_mode: StderrMode::Stdout,
+        creationflags: None,
+        create_process_group: false,
+        stdin_mode: StdinMode::Inherit,
+        nice: None,
+    };
+    let process = NativeProcess::new(config);
+    process
+        .start()
+        .map_err(|error| format!("failed to start backend prompt: {error}"))?;
+    process
+        .wait(None)
+        .map_err(|error| format!("waiting for backend prompt: {error}"))
+}
+
+fn backend_prompt_launch_plan(
+    args: &Args,
+    launch_target: ResolvedLaunchTarget,
+    prompt: String,
+    backend_path: &str,
+) -> command::LaunchPlan {
     let launch_args = Args {
         prompt: Some(prompt),
         message: None,
         continue_session: false,
         resume: None,
-        claude: matches!(selected_backend, Backend::Claude),
-        codex: matches!(selected_backend, Backend::Codex),
+        claude: launch_target.model_provider == ModelProvider::Claude,
+        codex: launch_target.model_provider == ModelProvider::Codex,
+        harness: Some(launch_target.requested_harness),
         subprocess: true,
         pty: false,
         graphics: crate::graphics::GraphicsMode::Off,
@@ -206,23 +235,64 @@ pub(in crate::hook_health) fn run_backend_prompt(
         passthrough: args.passthrough.clone(),
         codex_config_overrides: args.codex_config_overrides.clone(),
     };
-    let plan = command::build_launch_plan(&launch_args, selected_backend, &backend_path);
-    let config = ProcessConfig {
-        command: subprocess::command_spec_for_subprocess(plan.command),
-        cwd: plan.cwd.map(PathBuf::from),
-        env: None,
-        capture: false,
-        stderr_mode: StderrMode::Stdout,
-        creationflags: None,
-        create_process_group: false,
-        stdin_mode: StdinMode::Inherit,
-        nice: None,
+    command::build_launch_plan_for_target(&launch_args, launch_target, backend_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::{
+        resolve_launch_target, Backend, HarnessSelection, LaunchTargetError, ModelProvider,
+        PreferenceSource,
     };
-    let process = NativeProcess::new(config);
-    process
-        .start()
-        .map_err(|error| format!("failed to start backend prompt: {error}"))?;
-    process
-        .wait(None)
-        .map_err(|error| format!("waiting for backend prompt: {error}"))
+
+    fn args(argv: &[&str]) -> Args {
+        Args::parse_from_raw(argv.iter().map(|value| (*value).to_string()).collect())
+    }
+
+    #[test]
+    fn fix_hooks_prompt_uses_the_resolved_cross_route_harness() {
+        let args = args(&["clud", "--codex", "--harness", "claude", "--fix-hooks"]);
+        let target =
+            resolve_launch_target(args.claude, args.codex, args.harness, None, None).unwrap();
+
+        let plan = backend_prompt_launch_plan(&args, target, "repair hooks".to_string(), "claude");
+
+        assert_eq!(plan.command[0], "claude");
+        assert_eq!(plan.model_provider(), ModelProvider::Codex);
+        assert_eq!(plan.requested_harness, Some(HarnessSelection::Claude));
+        assert_eq!(plan.effective_harness(), Backend::Claude);
+        assert_eq!(plan.provider_source, Some(PreferenceSource::Cli));
+        assert_eq!(plan.harness_source, Some(PreferenceSource::Cli));
+    }
+
+    #[test]
+    fn fix_hooks_prompt_honors_saved_provider_and_harness_preferences() {
+        let args = args(&["clud", "--fix-hooks"]);
+        let target = resolve_launch_target(
+            args.claude,
+            args.codex,
+            args.harness,
+            Some(ModelProvider::Codex),
+            Some(HarnessSelection::Claude),
+        )
+        .unwrap();
+
+        let plan = backend_prompt_launch_plan(&args, target, "repair hooks".to_string(), "claude");
+
+        assert_eq!(plan.command[0], "claude");
+        assert_eq!(plan.model_provider(), ModelProvider::Codex);
+        assert_eq!(plan.requested_harness, Some(HarnessSelection::Claude));
+        assert_eq!(plan.provider_source, Some(PreferenceSource::GlobalSetting));
+        assert_eq!(plan.harness_source, Some(PreferenceSource::GlobalSetting));
+    }
+
+    #[test]
+    fn fix_hooks_rejects_the_unsupported_reverse_cross_route() {
+        let args = args(&["clud", "--claude", "--harness", "codex", "--fix-hooks"]);
+        assert_eq!(
+            resolve_launch_target(args.claude, args.codex, args.harness, None, None),
+            Err(LaunchTargetError::ClaudeViaCodexUnsupported)
+        );
+    }
 }

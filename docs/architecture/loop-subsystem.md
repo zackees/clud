@@ -24,8 +24,10 @@ only as explicit legacy external automation.
 
 ## Component map
 
-- `command/builder.rs` — `build_launch_plan` (line 24) builds the prompt,
-  injects the marker contract, parses `--repeat`, decides launch mode.
+- `command/builder.rs` — `build_launch_plan_for_target` builds the production
+  plan from the resolved provider/harness target; `build_launch_plan` is its
+  native compatibility/test wrapper. The builder injects the marker contract,
+  parses `--repeat`, and decides launch mode.
 - `command/loop_task.rs` — `resolve_loop_task` (line 29) classifies the
   positional, fetches/caches GH issues, returns prompt text.
 - `command/types.rs` — `LaunchPlan` (line 6) with `loop_markers`,
@@ -49,9 +51,10 @@ only as explicit legacy external automation.
 
 1. User runs `clud loop <task>` (optional `--loop-count N`, `--done <path>`,
    `--no-done`, `--refresh`, `--repeat <dur>`).
-2. `args.rs` parses the subcommand; `main.rs` calls
-   `command::build_launch_plan`.
-3. `build_launch_plan` resolves git root (`loop_spec::git_root_from`),
+2. `args.rs` parses the subcommand; `main.rs` resolves the provider/harness and
+   calls `command::build_launch_plan_for_target`.
+3. `build_launch_plan_for_target` resolves git root
+   (`loop_spec::git_root_from`),
    resolves marker paths (`resolve_marker_paths`), calls
    `resolve_loop_task` to materialize the prompt body, appends
    `done_marker_contract(done_abs, blocked_abs)` (skipped if `--no-done`
@@ -197,7 +200,10 @@ is captured into a TCP-broadcast log, not the user's terminal.
 - `TaskInfo` + `IterationInfo` — `loop_artifacts.rs:50`,
   `loop_artifacts.rs:80`
 - `LoopSession` (iteration-boundary driver) — `loop_artifacts.rs:168`
-- `build_launch_plan` — `command/builder.rs:24`
+- `build_launch_plan_for_target` — production builder in
+  `command/builder.rs`
+- `build_launch_plan` — native compatibility/test wrapper in
+  `command/builder.rs`
 - `next_run_at_millis` (no-overlap scheduler) —
   `command/builder.rs:316`
 - `scan_completion_token` (token fallback) — `loop_spec.rs:557`
@@ -213,7 +219,7 @@ is captured into a TCP-broadcast log, not the user's terminal.
 
 - **GH fetch failure** — `fetch_and_cache_or_die`
   (`command/loop_task.rs:59`) prints `error: failed to fetch GH ...`
-  and `std::process::exit(1)` from inside `build_launch_plan`. No loop
+  and `std::process::exit(1)` from inside the launch-plan builder. No loop
   artifacts are created.
 - **Short-form without `gh` repo context** — `resolve_current_repo`
   fails; same `exit(1)` path.
@@ -245,7 +251,7 @@ is captured into a TCP-broadcast log, not the user's terminal.
 ## See also
 
 - [`../../crates/clud-bin/src/command/README.md`](../../crates/clud-bin/src/command/README.md)
-  — `build_launch_plan`, prompt assembly, `--repeat` parsing.
+  — resolved-target plan construction, prompt assembly, `--repeat` parsing.
 - [`../../crates/clud-bin/src/daemon/README.md`](../../crates/clud-bin/src/daemon/README.md)
   — daemon IPC, worker re-entry, repeat scheduling host.
 - [`launch-plan.md`](launch-plan.md) — `LaunchPlan` as the single

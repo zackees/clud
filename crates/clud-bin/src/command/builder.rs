@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::args::{Args, Command};
-use crate::backend::{Backend, LaunchMode};
+use crate::backend::{
+    Backend, HarnessSelection, LaunchMode, PreferenceSource, ResolvedLaunchTarget,
+};
 use crate::graphics::GraphicsConfig;
 use crate::loop_spec::{done_marker_contract, git_root_from};
 
@@ -28,16 +30,49 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
 }
 
 pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    build_launch_plan_at(args, backend, backend_path, &cwd)
+    let target = ResolvedLaunchTarget {
+        model_provider: backend.as_model_provider(),
+        requested_harness: HarnessSelection::Default,
+        effective_harness: backend,
+        provider_source: PreferenceSource::BuiltInDefault,
+        harness_source: PreferenceSource::BuiltInDefault,
+    };
+    build_launch_plan_for_target(args, target, backend_path)
 }
 
+pub fn build_launch_plan_for_target(
+    args: &Args,
+    target: ResolvedLaunchTarget,
+    backend_path: &str,
+) -> LaunchPlan {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    build_launch_plan_for_target_at(args, target, backend_path, &cwd)
+}
+
+#[cfg(test)]
 pub(crate) fn build_launch_plan_at(
     args: &Args,
     backend: Backend,
     backend_path: &str,
     cwd: &Path,
 ) -> LaunchPlan {
+    let target = ResolvedLaunchTarget {
+        model_provider: backend.as_model_provider(),
+        requested_harness: HarnessSelection::Default,
+        effective_harness: backend,
+        provider_source: PreferenceSource::BuiltInDefault,
+        harness_source: PreferenceSource::BuiltInDefault,
+    };
+    build_launch_plan_for_target_at(args, target, backend_path, cwd)
+}
+
+fn build_launch_plan_for_target_at(
+    args: &Args,
+    target: ResolvedLaunchTarget,
+    backend_path: &str,
+    cwd: &Path,
+) -> LaunchPlan {
+    let backend = target.effective_harness;
     let mut cmd = vec![backend_path.to_string()];
     let mut iterations = 1u32;
     let mut repeat_schedule: Option<RepeatSchedule> = None;
@@ -259,6 +294,11 @@ pub(crate) fn build_launch_plan_at(
         command: cmd,
         iterations,
         backend,
+        model_provider: Some(target.model_provider),
+        requested_harness: Some(target.requested_harness),
+        effective_harness: Some(target.effective_harness),
+        provider_source: Some(target.provider_source),
+        harness_source: Some(target.harness_source),
         launch_mode,
         cwd: Some(cwd.to_string_lossy().to_string()),
         graphics: GraphicsConfig {

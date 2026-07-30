@@ -1,13 +1,13 @@
 //! `clud settings` — a small, cross-platform TUI checkbox menu over the
-//! boolean settings in `~/.clud/settings.json`.
+//! typed settings in `~/.clud/settings.json`.
 //!
 //! Split the same way `launch_setup.rs`'s `ScopeSelector` is: a pure,
 //! unit-tested state machine (`Menu`) plus a thin impure terminal-I/O shell
 //! (`run_interactive`/`run_interactive_inner`) built on the same crossterm
 //! primitives (raw-mode RAII guard, raw-ANSI cursor hide/show, redraw via
 //! cursor-up + clear-to-end) already proven cross-platform in this repo.
-//! Only boolean settings exist today; `SettingItem` is a `Vec` so adding a
-//! second one later is additive, not a rewrite.
+//! Provider and harness choice rows share `preference::ChoiceSelector` with
+//! the inline launch-scope selector; all rows save in one atomic patch.
 
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
@@ -15,27 +15,120 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
+use crate::backend::{HarnessSelection, ModelProvider};
 use crate::clud_settings;
+use crate::preference::{ChoiceOption, ChoiceSelector};
+
+const MODEL_OPTIONS: [ChoiceOption<ModelProvider>; 2] = [
+    ChoiceOption {
+        value: ModelProvider::Claude,
+        label: "claude",
+        note: "",
+    },
+    ChoiceOption {
+        value: ModelProvider::Codex,
+        label: "codex",
+        note: "",
+    },
+];
+
+const HARNESS_OPTIONS: [ChoiceOption<HarnessSelection>; 3] = [
+    ChoiceOption {
+        value: HarnessSelection::Default,
+        label: "default",
+        note: "",
+    },
+    ChoiceOption {
+        value: HarnessSelection::Claude,
+        label: "claude",
+        note: "",
+    },
+    ChoiceOption {
+        value: HarnessSelection::Codex,
+        label: "codex",
+        note: "",
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SettingValue {
+    Bool(bool),
+    ModelProvider(ModelProvider),
+    Harness(HarnessSelection),
+}
+
+impl SettingValue {
+    fn cycle(&mut self) {
+        match self {
+            Self::Bool(value) => *value = !*value,
+            Self::ModelProvider(value) => {
+                let mut selector = ChoiceSelector::new(&MODEL_OPTIONS, *value, *value);
+                selector.cycle();
+                *value = selector.selected();
+            }
+            Self::Harness(value) => {
+                let mut selector = ChoiceSelector::new(&HARNESS_OPTIONS, *value, *value);
+                selector.cycle();
+                *value = selector.selected();
+            }
+        }
+    }
+
+    fn marker(&self) -> String {
+        match self {
+            Self::Bool(true) => "[x]".to_string(),
+            Self::Bool(false) => "[ ]".to_string(),
+            Self::ModelProvider(value) => format!("[{}]", value.as_str()),
+            Self::Harness(value) => format!("[{}]", value.as_str()),
+        }
+    }
+
+    fn list_value(&self) -> &'static str {
+        match self {
+            Self::Bool(true) => "true",
+            Self::Bool(false) => "false",
+            Self::ModelProvider(value) => value.as_str(),
+            Self::Harness(value) => value.as_str(),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct SettingItem {
     key: &'static str,
     label: &'static str,
     note: &'static str,
-    value: bool,
-    save: fn(bool) -> Result<(), clud_settings::SettingsError>,
+    value: SettingValue,
 }
 
 fn setting_items() -> Vec<SettingItem> {
-    vec![SettingItem {
-        key: "git.pr_wait_fail_fast",
-        label: "PR-wait fail-fast git commands",
-        note: "Blocks raw `gh pr checks --watch`-style commands in favor of \
+    let launch = clud_settings::load_global_launch_preferences().unwrap_or_default();
+    vec![
+        SettingItem {
+            key: "backend.default",
+            label: "Default model provider",
+            note: "Used when neither --claude nor --codex is supplied.",
+            value: SettingValue::ModelProvider(
+                launch.model_provider.unwrap_or(ModelProvider::Claude),
+            ),
+        },
+        SettingItem {
+            key: "harness.default",
+            label: "Agent harness",
+            note: "default follows the model provider; explicit overrides are announced.",
+            value: SettingValue::Harness(launch.harness.unwrap_or_default()),
+        },
+        SettingItem {
+            key: "git.pr_wait_fail_fast",
+            label: "PR-wait fail-fast git commands",
+            note: "Blocks raw `gh pr checks --watch`-style commands in favor of \
                a bundled fail-fast waiter script. Off by default; may \
                become the default later.",
-        value: clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false),
-        save: clud_settings::save_pr_wait_fail_fast_enabled,
-    }]
+            value: SettingValue::Bool(
+                clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false),
+            ),
+        },
+    ]
 }
 
 pub fn run(list_only: bool) -> i32 {
@@ -43,7 +136,12 @@ pub fn run(list_only: bool) -> i32 {
 
     if list_only {
         for item in &items {
-            println!("{} = {}  # {}", item.key, item.value, item.note);
+            println!(
+                "{} = {}  # {}",
+                item.key,
+                item.value.list_value(),
+                item.note
+            );
         }
         return 0;
     }
@@ -81,13 +179,13 @@ enum MenuAction {
 
 struct Menu {
     items: Vec<SettingItem>,
-    original: Vec<bool>,
+    original: Vec<SettingValue>,
     cursor: usize,
 }
 
 impl Menu {
     fn new(items: Vec<SettingItem>) -> Self {
-        let original = items.iter().map(|item| item.value).collect();
+        let original = items.iter().map(|item| item.value.clone()).collect();
         Self {
             items,
             original,
@@ -98,8 +196,8 @@ impl Menu {
     fn is_dirty(&self) -> bool {
         self.items
             .iter()
-            .map(|item| item.value)
-            .ne(self.original.iter().copied())
+            .map(|item| &item.value)
+            .ne(self.original.iter())
     }
 
     fn handle(&mut self, event: MenuEvent) -> MenuAction {
@@ -116,7 +214,7 @@ impl Menu {
             }
             MenuEvent::Toggle => {
                 if let Some(item) = self.items.get_mut(self.cursor) {
-                    item.value = !item.value;
+                    item.value.cycle();
                 }
                 MenuAction::Redraw
             }
@@ -147,7 +245,7 @@ impl Menu {
                 out,
                 "{} {} {}",
                 cursor_marker(index == self.cursor),
-                checkbox(item.value),
+                item.value.marker(),
                 item.label
             )?;
             writeln!(out, "      {}", item.note)?;
@@ -161,14 +259,6 @@ fn cursor_marker(selected: bool) -> &'static str {
         ">"
     } else {
         " "
-    }
-}
-
-fn checkbox(value: bool) -> &'static str {
-    if value {
-        "[x]"
-    } else {
-        "[ ]"
     }
 }
 
@@ -261,11 +351,9 @@ fn run_interactive_inner<W: Write>(out: &mut W, items: Vec<SettingItem>) -> io::
             }
             MenuAction::RequestSaveDecision => match prompt_save_decision(out)? {
                 SaveDecision::Save => {
-                    for item in &menu.items {
-                        (item.save)(item.value).map_err(|error| {
-                            io::Error::other(format!("saving {}: {error}", item.key))
-                        })?;
-                    }
+                    let patch = patch_from_menu(&menu);
+                    clud_settings::save_settings_patch(patch)
+                        .map_err(|error| io::Error::other(format!("saving settings: {error}")))?;
                     writeln!(out)?;
                     return Ok(());
                 }
@@ -280,6 +368,28 @@ fn run_interactive_inner<W: Write>(out: &mut W, items: Vec<SettingItem>) -> io::
             },
         }
     }
+}
+
+fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
+    let mut patch = clud_settings::GlobalSettingsPatch::default();
+    for (item, original) in menu.items.iter().zip(&menu.original) {
+        if &item.value == original {
+            continue;
+        }
+        match (item.key, &item.value) {
+            ("backend.default", SettingValue::ModelProvider(value)) => {
+                patch.model_provider = Some(*value);
+            }
+            ("harness.default", SettingValue::Harness(value)) => {
+                patch.harness = Some(*value);
+            }
+            ("git.pr_wait_fail_fast", SettingValue::Bool(value)) => {
+                patch.pr_wait_fail_fast = Some(*value);
+            }
+            _ => {}
+        }
+    }
+    patch
 }
 
 fn redraw<W: Write>(out: &mut W, menu: &Menu) -> io::Result<()> {
@@ -327,8 +437,7 @@ mod tests {
             key: "test.key",
             label: "Test setting",
             note: "note",
-            value,
-            save: |_| Ok(()),
+            value: SettingValue::Bool(value),
         }
     }
 
@@ -337,7 +446,7 @@ mod tests {
         let mut menu = Menu::new(vec![item(false)]);
         assert!(!menu.is_dirty());
         assert_eq!(menu.handle(MenuEvent::Toggle), MenuAction::Redraw);
-        assert!(menu.items[0].value);
+        assert_eq!(menu.items[0].value, SettingValue::Bool(true));
         assert!(menu.is_dirty());
     }
 
@@ -346,7 +455,7 @@ mod tests {
         let mut menu = Menu::new(vec![item(false)]);
         menu.handle(MenuEvent::Toggle);
         menu.handle(MenuEvent::Toggle);
-        assert!(!menu.items[0].value);
+        assert_eq!(menu.items[0].value, SettingValue::Bool(false));
         assert!(!menu.is_dirty());
     }
 
@@ -383,8 +492,93 @@ mod tests {
         let mut menu = Menu::new(vec![item(false), item(false)]);
         menu.handle(MenuEvent::Down);
         menu.handle(MenuEvent::Toggle);
-        assert!(!menu.items[0].value);
-        assert!(menu.items[1].value);
+        assert_eq!(menu.items[0].value, SettingValue::Bool(false));
+        assert_eq!(menu.items[1].value, SettingValue::Bool(true));
+    }
+
+    #[test]
+    fn typed_model_and_harness_choices_share_cycle_behavior() {
+        let mut model = SettingValue::ModelProvider(ModelProvider::Claude);
+        model.cycle();
+        assert_eq!(model, SettingValue::ModelProvider(ModelProvider::Codex));
+        model.cycle();
+        assert_eq!(model, SettingValue::ModelProvider(ModelProvider::Claude));
+
+        let mut harness = SettingValue::Harness(HarnessSelection::Default);
+        harness.cycle();
+        assert_eq!(harness, SettingValue::Harness(HarnessSelection::Claude));
+        harness.cycle();
+        assert_eq!(harness, SettingValue::Harness(HarnessSelection::Codex));
+        harness.cycle();
+        assert_eq!(harness, SettingValue::Harness(HarnessSelection::Default));
+    }
+
+    #[test]
+    fn typed_items_build_one_atomic_settings_patch() {
+        let mut menu = Menu::new(vec![
+            SettingItem {
+                key: "backend.default",
+                label: "",
+                note: "",
+                value: SettingValue::ModelProvider(ModelProvider::Claude),
+            },
+            SettingItem {
+                key: "harness.default",
+                label: "",
+                note: "",
+                value: SettingValue::Harness(HarnessSelection::Default),
+            },
+            SettingItem {
+                key: "git.pr_wait_fail_fast",
+                label: "",
+                note: "",
+                value: SettingValue::Bool(false),
+            },
+        ]);
+        menu.items[0].value = SettingValue::ModelProvider(ModelProvider::Codex);
+        menu.items[1].value = SettingValue::Harness(HarnessSelection::Claude);
+        menu.items[2].value = SettingValue::Bool(true);
+        assert_eq!(
+            patch_from_menu(&menu),
+            clud_settings::GlobalSettingsPatch {
+                model_provider: Some(ModelProvider::Codex),
+                harness: Some(HarnessSelection::Claude),
+                pr_wait_fail_fast: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn unrelated_edit_does_not_materialize_launch_preferences() {
+        let mut menu = Menu::new(vec![
+            SettingItem {
+                key: "backend.default",
+                label: "",
+                note: "",
+                value: SettingValue::ModelProvider(ModelProvider::Claude),
+            },
+            SettingItem {
+                key: "harness.default",
+                label: "",
+                note: "",
+                value: SettingValue::Harness(HarnessSelection::Default),
+            },
+            SettingItem {
+                key: "git.pr_wait_fail_fast",
+                label: "",
+                note: "",
+                value: SettingValue::Bool(false),
+            },
+        ]);
+        menu.items[2].value = SettingValue::Bool(true);
+        assert_eq!(
+            patch_from_menu(&menu),
+            clud_settings::GlobalSettingsPatch {
+                model_provider: None,
+                harness: None,
+                pr_wait_fail_fast: Some(true),
+            }
+        );
     }
 
     #[test]

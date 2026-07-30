@@ -60,8 +60,11 @@ CLI surface and backend resolution:
 
 - `args.rs` - `clap` `Args` and `Command` definitions; passthrough for unknown
   flags; subcommand definitions for `loop`, `up`, `rebase`, `fix`, `gc`, etc.
-- `backend.rs` - `Backend` enum (`Claude` / `Codex`), `LaunchMode`
-  (`Subprocess` / `Pty`), PATH lookup, and backend-path resolution.
+- `backend.rs` - concrete `Backend`, independent `ModelProvider` /
+  `HarnessSelection` resolution, `LaunchMode`, PATH lookup, and backend-path
+  resolution. See `docs/architecture/launch-targets.md`.
+- `preference.rs` - shared pure typed-choice state machine used by launch
+  scope and global settings selectors.
 - `subprocess.rs` - single decision point for the Windows `.cmd`/`.bat`
   rewrite (BatBadBat / CVE-2024-24576) via `running-process-core`'s
   `CommandSpec::Shell`.
@@ -301,7 +304,8 @@ Diagnostics and misc:
 
 Quick lookup, which file owns a given subcommand:
 
-- `clud loop ...` -> `command::build_launch_plan` (prompt + markers) +
+- `clud loop ...` -> `command::build_launch_plan_for_target` (resolved
+  provider/harness, prompt, and markers) +
   `loop_spec` (task resolution) + `loop_artifacts` (artifact files) +
   `runner.rs` (iteration loop) + `loop_check` (DONE/BLOCKED scan).
 - `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs` -> all
@@ -331,6 +335,7 @@ Subsystems that span multiple files have their own topic docs under
   foreground Job Object shell-orphan reaping, `dnd`, `win_creation_flags`,
   `voice` ARM carveout) -> [docs/architecture/windows-quirks.md](../../../docs/architecture/windows-quirks.md)
 - **Launch plan** (`command/types::LaunchPlan` + all consumers) -> [docs/architecture/launch-plan.md](../../../docs/architecture/launch-plan.md)
+- **Launch targets** (provider/harness resolution + sticky settings) -> [docs/architecture/launch-targets.md](../../../docs/architecture/launch-targets.md)
 
 Non-obvious design choices (single `LaunchPlan`, `lib.rs` as the only
 `mod ...` site, cooperative Ctrl+C, redb single-owner) have ADRs in

@@ -38,12 +38,12 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Context:** clud's primary value is reducing friction when running Claude Code and Codex in agent mode. The upstream agents prompt for permission on every tool call by default, which makes long-running automation impossible.
 
-**Decision:** clud always injects `--dangerously-skip-permissions` into the backend argv unless the user explicitly passes `--safe`. This applies to every backend invocation (interactive, loop, daemon).
+**Decision:** Unless the user explicitly passes `--safe`, clud injects the effective harness's non-interactive permission flag: `--dangerously-skip-permissions` for Claude or `--dangerously-bypass-approvals-and-sandbox` for Codex. This applies to every harness invocation (interactive, loop, daemon).
 
 **Rationale:**
 - Users reach for clud specifically to skip per-call prompting. Defaulting to "prompt for everything" would defeat the purpose.
 - The opt-out (`--safe`) is one word, easy to remember, and preserves the safe path for users who want it.
-- Single decision point in `command::build_launch_plan` means there is no path that forgets to apply the policy.
+- A single decision point in `command::build_launch_plan_for_target` means there is no path that forgets to apply the policy.
 
 **Alternatives Considered:**
 
@@ -55,7 +55,7 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Consequences:**
 - New users must be told about `--safe` (covered in `README.md`).
-- Any code path that bypasses `build_launch_plan` would silently lose YOLO injection; see [DD-005](#dd-005-single-launchplan-as-source-of-truth-for-everything-clud-runs).
+- Any production code path that bypasses `build_launch_plan_for_target` would silently lose YOLO injection; see [DD-005](#dd-005-single-launchplan-as-source-of-truth-for-everything-clud-runs).
 
 ---
 
@@ -113,12 +113,12 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Context:** clud has many code paths that need to know "what argv will clud actually run with these flags?" — the runner itself, the daemon worker, `--dry-run` JSON output for tests, the loop iteration loop, hook health remediation, and so on. Each path independently reconstructing argv is a recipe for divergence (one path forgets YOLO injection, another places `--model` in the wrong slot).
 
-**Decision:** Every code path goes through `command::build_launch_plan` and consumes the resulting `LaunchPlan` struct (`crates/clud-bin/src/command/types.rs`). The struct carries argv, env, prompt, optional loop markers, and optional repeat schedule. `--dry-run` serializes this struct to JSON. The runner, daemon worker, and remediator each consume the same struct.
+**Decision:** Every production code path goes through `command::build_launch_plan_for_target` and consumes the resulting `LaunchPlan` struct (`crates/clud-bin/src/command/types.rs`). The older `command::build_launch_plan` function remains only as a native-harness compatibility wrapper for tests and callers that have not yet adopted resolved launch targets. The struct carries the executable argv (including prompt arguments), working directory, optional loop markers, optional repeat schedule, and resolved provider/harness metadata. The daemon serializes the complete plan; `--dry-run` emits a stable JSON projection of the same plan. The runner, daemon worker, and remediator each consume the plan.
 
 **Rationale:**
 - One implementation of "what runs" means no drift between dry-run output and actual execution.
 - Tests that exercise plan construction (via `--dry-run`) automatically exercise the same path runtime uses.
-- Adding a new code path that needs argv is mechanical: call `build_launch_plan`, consume the struct.
+- Adding a new code path that needs argv is mechanical: resolve a launch target, call `build_launch_plan_for_target`, and consume the struct.
 
 **Alternatives Considered:**
 
@@ -944,3 +944,28 @@ or wire failure — falls through to it silently.
   silent edit.
 - See [daemon-ipc.md](architecture/daemon-ipc.md) for the lane table and the
   full eleven-variant request surface.
+
+## DD-026: Model provider and executable harness are independent launch dimensions
+
+**Context:** zackees/clud#625. The historical `Backend` enum simultaneously
+meant model API, executable, command syntax, setup target, and persisted
+default. That identity fails for Codex models driven through the Claude agent
+harness and makes a future protocol bridge impossible to represent honestly.
+
+**Decision:** Resolve `ModelProvider` and requested `HarnessSelection`
+independently with CLI-over-global-over-built-in precedence. `default` maps to
+the provider-native harness. One `ResolvedLaunchTarget` carries both effective
+values and their `PreferenceSource`; unsupported Claude-through-Codex is an
+error, never a fallback. The concrete `Backend` remains temporarily as the
+effective executable compatibility type at existing bootstrap, setup, runner,
+and daemon call sites.
+
+Global changes are one locked settings-document patch. A shared generic choice
+state machine serves provider, harness, and session/global selectors. New
+`LaunchPlan` metadata is optional under serde so old daemon payloads fall back
+to their legacy `backend`; repeat jobs pin their choices in argv.
+
+**Consequences:** Existing invocations remain native and unchanged, while
+`clud --codex --harness claude` is represented without lying about either
+dimension. Later bridge phases can attach transport/auth behavior to the
+resolved route rather than adding more backend booleans.
