@@ -772,3 +772,32 @@ the structured event log. Job PIDs whose metadata publication lags their
 creation notification are retained and retried; an irrecoverable metadata miss
 is logged and fails closed instead of inferring authority from the PID.
 Non-Windows execution is unchanged.
+
+## DD-022: The large-file guard reads the git index in-process, not the worktree
+
+**Context:** zackees/clud#132's startup guard walked the whole worktree with the
+`ignore` crate's parallel walker on **every** launch — ~240-400 ms locally and
+~3.3 s over loopback SMB, paid synchronously before the backend starts, to
+answer a question whose answer changes maybe weekly (issue #556, parent #551).
+Four cheaper routes were benchmarked. Subprocess `git ls-files -z` plus a stat
+per candidate lost at scale: two ~50-70 ms Windows spawns before any file work,
+`--others --exclude-standard` is itself a single-threaded worktree traversal, and
+`ls-files` output carries no sizes, so the git path tied or lost against the
+walker on a 4416-file repo. ODB routes (`ls-files --format='%(objectsize)'`,
+`ls-tree -l`) were 3-12x slower and can trigger remote fetches on partial clones.
+`git ls-files --debug` was fast (52 ms) but spends ~30-50 ms on spawn+config,
+emits ~6 text lines per file, and its format is documented unstable.
+
+**Decision:** Parse `.git/index` in-process with `gix-index` (pinned exactly;
+MIT OR Apache-2.0). The index already stores each tracked file's cached stat
+size, so the tracked-file report needs no worktree I/O, no ODB, no hashing and
+no subprocess — ~1-5 ms. `gix-index` is chosen over the `--debug` subprocess for
+large-monorepo format support (index v2/v3/v4 path compression, split, sparse),
+which the unstable text output cannot promise. Index discovery resolves the
+`.git`-file `gitdir:` indirection so a linked worktree reports against its own
+index. Entries whose cached size is untrustworthy (racily-clean, recorded as 0)
+are re-measured with one targeted `stat` each rather than dropped or flagged.
+The `ignore` walker is retained as the fallback for a missing or corrupt index,
+so behavior never regresses; untracked-file coverage moves off the launch path
+to the daemon-side pass 2 (#551), consistent with the guard being a crude fast
+nudge rather than a comprehensive audit.

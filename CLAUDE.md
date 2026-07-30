@@ -43,7 +43,7 @@ testbins/                  → see testbins/README.md
     src/                   → see testbins/mock-agent/src/README.md
 docs/                      → see docs/README.md
   ARCHITECTURE.md          # index of subsystem topic docs
-  DESIGN_DECISIONS.md      # ADR-style records (DD-001 … DD-010)
+  DESIGN_DECISIONS.md      # ADR-style records (DD-001 … DD-022)
   architecture/            # one file per cross-cutting subsystem
 src/clud/__init__.py       # Minimal Python package (version shim only)
 ci/                        # CI scripts (env, build, lint, test)
