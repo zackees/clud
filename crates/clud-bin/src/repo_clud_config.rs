@@ -115,6 +115,44 @@ pub struct BadCommandRule {
     pub allow_override: bool,
     pub through_wrappers: Vec<String>,
     pub arguments: Option<ArgumentMatcher>,
+    /// Where this rule came from (#525). `None` for rules parsed from a bare
+    /// string (tests) or constructed programmatically; `Some` once a rule has
+    /// been read from a settings file, so a denial can name its exact origin.
+    pub source: Option<RuleSource>,
+}
+
+/// Non-serialized provenance for a [`BadCommandRule`]: which settings file,
+/// layer, and array slot defined it. Survives merging so a denial can cite an
+/// unambiguous `<file>#/bad_commands/<index>` reference even after rules from
+/// three layers are concatenated (#525).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSource {
+    /// 0-based index of this rule in its file's `/bad_commands` array, counting
+    /// malformed-and-skipped entries so the JSON pointer stays accurate.
+    pub index: usize,
+    /// Canonical settings file path. `None` when the rule was parsed from a
+    /// string with no backing file (tests, programmatic rules).
+    pub file: Option<PathBuf>,
+    /// Source layer: `"user"`, `"repo"`, or `"repo-local"`. `None` when `file`
+    /// is `None`.
+    pub layer: Option<String>,
+}
+
+impl RuleSource {
+    /// A compact, unambiguous reference like
+    /// `C:\repo\.clud\settings.local.json#/bad_commands/0`, or just
+    /// `#/bad_commands/0` when no backing file is known.
+    pub fn reference(&self) -> String {
+        match &self.file {
+            Some(file) => format!("{}#/bad_commands/{}", file.display(), self.index),
+            None => format!("#/bad_commands/{}", self.index),
+        }
+    }
+
+    /// The JSON pointer to this rule within its file (`/bad_commands/<index>`).
+    pub fn pointer(&self) -> String {
+        format!("/bad_commands/{}", self.index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +241,10 @@ fn glob_to_regex_source(glob: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn parse_bad_command_rule(value: &serde_json::Value) -> Result<BadCommandRule, String> {
+fn parse_bad_command_rule(
+    value: &serde_json::Value,
+    index: usize,
+) -> Result<BadCommandRule, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "bad_commands entry is not a JSON object".to_string())?;
@@ -272,6 +313,13 @@ fn parse_bad_command_rule(value: &serde_json::Value) -> Result<BadCommandRule, S
         allow_override,
         through_wrappers,
         arguments,
+        // Index is captured now; the file + layer are stamped later by
+        // `read_and_parse_raw`, which is the only caller that knows them.
+        source: Some(RuleSource {
+            index,
+            file: None,
+            layer: None,
+        }),
     })
 }
 
@@ -522,8 +570,11 @@ where
 {
     let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
     let mut rules = Vec::with_capacity(raw.len());
-    for entry in raw {
-        match parse_bad_command_rule(&entry) {
+    // Enumerate over the original array so a rule's recorded index counts
+    // malformed-and-skipped entries — the JSON pointer must address the real
+    // slot in the file, not the rule's position after filtering.
+    for (index, entry) in raw.iter().enumerate() {
+        match parse_bad_command_rule(entry, index) {
             Ok(rule) => rules.push(rule),
             Err(err) => {
                 eprintln!("clud: skipping malformed bad_commands rule: {err}; ignoring");
@@ -531,6 +582,32 @@ where
         }
     }
     Ok(rules)
+}
+
+/// Stamp each `bad_commands` rule with the file + layer it was read from
+/// (#525). Called once per settings file after parsing; the array index was
+/// already captured at parse time. The layer name is the compact form used in
+/// denials (`user` / `repo` / `repo-local`), mapped from the internal scope
+/// label.
+fn stamp_bad_command_sources(raw: &mut RawRepoCludConfig, path: &Path, scope: &str) {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let layer = layer_name_for_scope(scope);
+    for rule in &mut raw.bad_commands {
+        if let Some(source) = rule.source.as_mut() {
+            source.file = Some(canonical.clone());
+            source.layer = Some(layer.to_string());
+        }
+    }
+}
+
+/// Map the internal scope label used by discovery to the compact provenance
+/// layer name surfaced in denials.
+fn layer_name_for_scope(scope: &str) -> &'static str {
+    match scope {
+        "repo-local" => "repo-local",
+        "repo-level" => "repo",
+        _ => "user",
+    }
 }
 
 fn deserialize_bad_pipelines<'de, D>(deserializer: D) -> Result<Vec<BadPipelineRule>, D::Error>
@@ -753,7 +830,10 @@ fn read_and_parse_raw(path: &Path, scope: &str) -> Option<RawRepoCludConfig> {
         }
     };
     match parse_raw_repo_clud_config(&text) {
-        Ok(raw) => Some(raw),
+        Ok(mut raw) => {
+            stamp_bad_command_sources(&mut raw, path, scope);
+            Some(raw)
+        }
         Err(err) => {
             eprintln!(
                 "clud: {scope} settings file at {} is malformed: {err}; ignoring",
@@ -985,6 +1065,94 @@ mod tests {
         let cfg = discover_repo_clud_config(tmp.path()).expect("shared config must survive");
         assert_eq!(cfg.bad_commands.len(), 1);
         assert_eq!(cfg.bad_commands[0].id.as_deref(), Some("shared"));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #525 part 2: rule provenance through parse + merge.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parsed_rule_records_its_array_index() {
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_commands":[{"match":"a","replacement":"x"},{"match":"b","replacement":"y"}]}"#,
+        )
+        .expect("parses");
+        let indices: Vec<usize> = cfg
+            .bad_commands
+            .iter()
+            .map(|r| r.source.as_ref().expect("source").index)
+            .collect();
+        assert_eq!(indices, vec![0, 1]);
+        // No backing file for a string parse.
+        assert!(cfg.bad_commands[0].source.as_ref().unwrap().file.is_none());
+    }
+
+    #[test]
+    fn a_skipped_malformed_rule_does_not_shift_later_indices() {
+        // Rule 0 is malformed (missing replacement) and dropped; the surviving
+        // rule must still report its real slot, index 1, so the JSON pointer is
+        // accurate against the on-disk array.
+        let cfg = parse_repo_clud_config(
+            r#"{"bad_commands":[{"match":"broken"},{"id":"ok","match":"b","replacement":"y"}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(cfg.bad_commands.len(), 1);
+        assert_eq!(cfg.bad_commands[0].source.as_ref().unwrap().index, 1);
+    }
+
+    #[test]
+    fn reading_from_a_file_stamps_canonical_file_and_layer() {
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_local_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"r","match":"playwright","replacement":"npm test"}]}"#,
+        );
+        let cfg = discover_repo_clud_config(tmp.path()).expect("config");
+        let source = cfg.bad_commands[0].source.as_ref().expect("source");
+        assert_eq!(source.layer.as_deref(), Some("repo-local"));
+        let file = source.file.as_ref().expect("file stamped");
+        assert!(
+            file.ends_with("settings.local.json"),
+            "unexpected file {file:?}"
+        );
+        assert_eq!(source.pointer(), "/bad_commands/0");
+        assert!(source.reference().ends_with("settings.local.json#/bad_commands/0"));
+    }
+
+    #[test]
+    fn winning_dedupe_rule_keeps_its_own_provenance() {
+        // A repo-local rule shadows the repo rule with the same id; the
+        // surviving rule must carry the *local* layer, not the shared one.
+        let tmp = TempDir::new().unwrap();
+        mark_repo_root(tmp.path());
+        write_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"dupe","match":"curl","replacement":"shared"}]}"#,
+        );
+        write_local_settings(
+            tmp.path(),
+            r#"{"bad_commands":[{"id":"dupe","match":"curl","replacement":"local"}]}"#,
+        );
+        let cfg = discover_repo_clud_config(tmp.path()).expect("config");
+        assert_eq!(cfg.bad_commands.len(), 1);
+        assert_eq!(cfg.bad_commands[0].replacement, "local");
+        assert_eq!(
+            cfg.bad_commands[0].source.as_ref().unwrap().layer.as_deref(),
+            Some("repo-local"),
+            "the winning (local) definition's provenance must be retained"
+        );
+    }
+
+    #[test]
+    fn rule_source_reference_without_a_file_is_pointer_only() {
+        let source = RuleSource {
+            index: 3,
+            file: None,
+            layer: None,
+        };
+        assert_eq!(source.reference(), "#/bad_commands/3");
+        assert_eq!(source.pointer(), "/bad_commands/3");
     }
 
     // -----------------------------------------------------------------

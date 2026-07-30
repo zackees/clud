@@ -2614,6 +2614,7 @@ mod tests {
             allow_override: false,
             through_wrappers: Vec::new(),
             arguments: None,
+            source: None,
         }
     }
 
