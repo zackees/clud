@@ -90,6 +90,7 @@ from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E40
 )
 
 from integration._daemon_helpers import (  # type: ignore[import-not-found]  # noqa: E402
+    copy_launcher,
     stop_daemons_below,
 )
 
@@ -228,8 +229,8 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     # Copy mock-agent as both claude and codex
     claude_path = tmp_path / f"claude{ext}"
     codex_path = tmp_path / f"codex{ext}"
-    shutil.copy2(mock_agent_binary, claude_path)
-    shutil.copy2(mock_agent_binary, codex_path)
+    copy_launcher(mock_agent_binary, claude_path)
+    copy_launcher(mock_agent_binary, codex_path)
 
     if platform.system() != "Windows":
         claude_path.chmod(0o755)
@@ -283,7 +284,7 @@ def mock_env_codex_cmd(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str
 
     mock_agent_name = f"mock-agent{'.exe' if sys.platform == 'win32' else ''}"
     mock_agent_path = tmp_path / mock_agent_name
-    shutil.copy2(mock_agent_binary, mock_agent_path)
+    copy_launcher(mock_agent_binary, mock_agent_path)
 
     codex_wrapper = tmp_path / "codex.cmd"
     codex_wrapper.write_text(
@@ -308,7 +309,7 @@ def mock_env_cmd_wrappers(mock_agent_binary: Path, tmp_path: Path) -> dict[str, 
         pytest.skip("Windows-only .cmd wrapper fixture")
 
     mock_agent_path = tmp_path / "mock-agent.exe"
-    shutil.copy2(mock_agent_binary, mock_agent_path)
+    copy_launcher(mock_agent_binary, mock_agent_path)
 
     for backend in ("claude", "codex"):
         wrapper = tmp_path / f"{backend}.cmd"
