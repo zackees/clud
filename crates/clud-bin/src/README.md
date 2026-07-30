@@ -182,7 +182,8 @@ Platform glue:
   untrustworthy (racily-clean, recorded as 0) get one targeted `stat` each. The
   original `ignore`-crate parallel walker (hard 1 s deadline) remains the
   fallback when there is no usable index; untracked-file coverage on the launch
-  path is deferred to the daemon-side pass 2 (#551).
+  path is deferred to the daemon-side pass 2 (#551). Why the index rather than
+  `git ls-files` / the ODB: [DD-022](../../../docs/DESIGN_DECISIONS.md#dd-022-the-large-file-guard-reads-the-git-index-in-process-not-the-worktree).
 - `path_norm.rs` - fbuild/zccache-style `NormalizedPath` and separator-safe
   path-string helpers for cross-platform path keys, serialization, and
   executable names received from another OS.
