@@ -481,6 +481,14 @@ pub enum DaemonSubcommand {
         #[arg(long = "json")]
         json: bool,
     },
+    /// Report the last orphan-sweep result and freshness (#465). Exits
+    /// non-zero if no sweep has run within 2× the sweep interval.
+    #[command(name = "orphan-status")]
+    OrphanStatus {
+        /// Emit machine-readable JSON.
+        #[arg(long = "json")]
+        json: bool,
+    },
 }
 
 /// Subcommands under `clud tool`. See `crates/clud-bin/src/tool_run.rs`.
