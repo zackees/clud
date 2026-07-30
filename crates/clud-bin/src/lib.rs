@@ -38,6 +38,7 @@ pub mod orphan_reaper;
 pub mod paste_image;
 pub mod path_norm;
 pub mod process_identity;
+pub mod process_scan;
 pub mod process_tree;
 pub mod repo_clud_config;
 pub mod runner;
