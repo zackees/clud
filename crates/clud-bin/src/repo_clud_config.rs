@@ -1117,7 +1117,9 @@ mod tests {
             "unexpected file {file:?}"
         );
         assert_eq!(source.pointer(), "/bad_commands/0");
-        assert!(source.reference().ends_with("settings.local.json#/bad_commands/0"));
+        assert!(source
+            .reference()
+            .ends_with("settings.local.json#/bad_commands/0"));
     }
 
     #[test]
@@ -1138,7 +1140,12 @@ mod tests {
         assert_eq!(cfg.bad_commands.len(), 1);
         assert_eq!(cfg.bad_commands[0].replacement, "local");
         assert_eq!(
-            cfg.bad_commands[0].source.as_ref().unwrap().layer.as_deref(),
+            cfg.bad_commands[0]
+                .source
+                .as_ref()
+                .unwrap()
+                .layer
+                .as_deref(),
             Some("repo-local"),
             "the winning (local) definition's provenance must be retained"
         );

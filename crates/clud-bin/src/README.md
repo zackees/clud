@@ -136,7 +136,10 @@ Process management and GC:
   `playwright` in favor of a project's `npm run test:integration`); see
   DD-016 for the full field reference and a copy-pasteable example.
   `bad_commands` concatenates across repo/user levels instead of
-  overriding, unlike the scalar `rust.*` fields.
+  overriding, unlike the scalar `rust.*` fields. Each parsed rule carries a
+  non-serialized `RuleSource` (file, layer, `/bad_commands/<index>` slot) so a
+  denial can cite exactly which rule fired and where it came from (#525);
+  provenance survives merge/dedupe, so a shadowing rule keeps its own origin.
 - `block_bad_cmd.rs` - native `cmd-scan` PreToolUse hook binary (formerly
   `block-bad-cmd`; `clud-block-bad-cmd` still ships as a compat binary, see
   `block_bad_cmd_rollout.rs`): hardcoded Rust-toolchain enforcement
@@ -148,7 +151,11 @@ Process management and GC:
   `.extern-repos/` clone guard (zackees/clud#532), and the generic
   `bad_commands` rule engine from `repo_clud_config.rs` (DD-016) — shell-segment
   scanning, nested-shell/`eval`/command-substitution recursion,
-  `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE` escape hatch.
+  `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE` escape hatch. When a
+  config `bad_commands` rule fires, the denial appends concise provenance to
+  `permissionDecisionReason`/stderr (matched token, normalized program, rule
+  id, and `<file>#/bad_commands/<index>` source) and writes a structured
+  `bad_cmd_denied` event to `~/.clud/tools/hooks/block-bad-cmd.log` (#525).
   DD-017 extends these rules with structured argument predicates, known-wrapper
   unwrapping, and a sibling `bad_pipelines` array. Both rule arrays concatenate
   across repo/user settings and dedupe by `id`.

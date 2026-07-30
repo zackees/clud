@@ -5,7 +5,7 @@
 
 use crate::repo_clud_config::{
     compile_match_pattern, ArgumentMatcher, BadCommandRule, BadPipelineRule, CommandMatcher,
-    MatchMode, MatchPattern,
+    MatchMode, MatchPattern, RuleSource,
 };
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
@@ -159,6 +159,27 @@ pub struct CommandEvaluation {
     pub warnings: Vec<String>,
     pub log_messages: Vec<String>,
     pub git_path_captures: Vec<GitPathCapture>,
+    /// Set when the denial came from a config-driven `bad_commands` rule, so
+    /// the caller can cite the rule's origin in `permissionDecisionReason` and
+    /// the forensic log (#525). `None` for built-in denials (rust tools,
+    /// find-at-root, extern-repos, pipelines), which have no settings-file
+    /// provenance.
+    pub denial_provenance: Option<DenialProvenance>,
+}
+
+/// Everything needed to identify *why* a `bad_commands` rule fired: the token
+/// as invoked, the normalized program the matcher compared, and the rule's own
+/// provenance (#525). Deliberately reports the token exactly as supplied — no
+/// PATH resolution, which could name a different executable than the shell
+/// ultimately selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenialProvenance {
+    pub matched_token: String,
+    pub normalized_program: String,
+    pub rule_id: Option<String>,
+    pub match_pattern: String,
+    pub match_mode: MatchMode,
+    pub source: Option<RuleSource>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,12 +271,22 @@ pub fn run() -> i32 {
         eprintln!("{warning}");
     }
 
-    if let Some(reason) = evaluation.reason {
+    if let Some(base_reason) = evaluation.reason {
+        // #525: when a config `bad_commands` rule fired, append concise,
+        // human-readable provenance to the reason (mirrored to stderr) and
+        // emit a structured forensic event to the hook log.
+        let reason = match &evaluation.denial_provenance {
+            Some(provenance) => format!("{base_reason}{}", provenance_reason_suffix(provenance)),
+            None => base_reason,
+        };
         let msg = format!(
             "[block-bad-cmd hook] refusing to run {:?}: {reason}",
             payload.tool_name
         );
         append_log(&format!("BLOCKED: {msg}"));
+        if let Some(provenance) = &evaluation.denial_provenance {
+            log_bad_cmd_denied(provenance, &payload);
+        }
         println!("{}", deny_json(&reason));
         eprintln!("{msg}");
         return 2;
@@ -930,6 +961,16 @@ fn evaluate_structured_rules(
         } else {
             rule.reason.clone()
         };
+        // #525: record which rule fired and the exact token it matched so the
+        // caller can cite provenance in the denial and the forensic log.
+        evaluation.denial_provenance = Some(DenialProvenance {
+            matched_token: candidate[0].clone(),
+            normalized_program: head.clone(),
+            rule_id: rule.id.clone(),
+            match_pattern: rule.pattern.clone(),
+            match_mode: rule.match_mode,
+            source: rule.source.clone(),
+        });
         return Some(deny_message(
             &reason,
             &rule.replacement,
@@ -948,6 +989,77 @@ fn deny_message(reason: &str, replacement: &str, id: Option<&str>, allow_overrid
         ));
     }
     message
+}
+
+fn match_mode_str(mode: MatchMode) -> &'static str {
+    match mode {
+        MatchMode::Glob => "glob",
+        MatchMode::Regex => "regex",
+    }
+}
+
+/// The concise, human-readable provenance line appended to a config-rule
+/// denial (#525): which token matched, the normalized program the matcher
+/// compared it against, the rule that fired, and — when known — the exact
+/// `<file>#/bad_commands/<index>` slot that defined it.
+fn provenance_reason_suffix(provenance: &DenialProvenance) -> String {
+    let by_rule = match &provenance.rule_id {
+        Some(id) => format!("by rule `{id}`"),
+        None => "by an unnamed rule".to_string(),
+    };
+    let from = provenance
+        .source
+        .as_ref()
+        .map(|source| format!(" from `{}`", source.reference()))
+        .unwrap_or_default();
+    format!(
+        "\nBlocked `{}` (normalized: `{}`) {by_rule}{from}.",
+        provenance.matched_token, provenance.normalized_program
+    )
+}
+
+/// Build the structured `bad_cmd_denied` forensic event (#525). Pure — no IO —
+/// so its shape is unit-testable. Reports the hook executable and the token
+/// exactly as supplied; deliberately does not resolve a bare command against
+/// `PATH` (that could name a different executable than the shell selects).
+fn bad_cmd_denied_event(
+    provenance: &DenialProvenance,
+    payload: &HookPayloadView,
+    hook_executable: &str,
+) -> Value {
+    let (source_file, source_pointer, source_layer) = match &provenance.source {
+        Some(source) => (
+            source.file.as_ref().map(|file| file.display().to_string()),
+            Some(source.pointer()),
+            source.layer.clone(),
+        ),
+        None => (None, None, None),
+    };
+    json!({
+        "event": "bad_cmd_denied",
+        "rule_id": provenance.rule_id,
+        "rule_match": provenance.match_pattern,
+        "match_mode": match_mode_str(provenance.match_mode),
+        "source_file": source_file,
+        "source_pointer": source_pointer,
+        "source_layer": source_layer,
+        "matched_token": provenance.matched_token,
+        "normalized_program": provenance.normalized_program,
+        "hook_executable": hook_executable,
+        "cwd": payload.cwd.display().to_string(),
+        "command": payload.command,
+    })
+}
+
+/// Write the structured `bad_cmd_denied` event to the hook log (#525). The
+/// `[timestamp] pid=` envelope `append_log` adds preserves the existing log
+/// shape.
+fn log_bad_cmd_denied(provenance: &DenialProvenance, payload: &HookPayloadView) {
+    let hook_executable = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let event = bad_cmd_denied_event(provenance, payload, &hook_executable);
+    append_log(&event.to_string());
 }
 
 /// Detect a `git clone <repo> [<dir>]` or `git worktree add <path>`
@@ -2623,6 +2735,155 @@ mod tests {
             allow_override: true,
             ..playwright_rule()
         }
+    }
+
+    // ---- #525 parts 3-5: match provenance, reason line, forensic log ----
+
+    #[test]
+    fn structured_rule_denial_records_matched_token_and_normalized_program() {
+        // The token is reported exactly as invoked (full path, real casing);
+        // the normalized program is what the matcher actually compared.
+        let eval = evaluation_with_policy(
+            r#"C:\tools\Playwright.EXE --headed"#,
+            r#"{"bad_commands":[{"id":"no-raw-playwright","match":"playwright","replacement":"npm test"}]}"#,
+        );
+        assert!(eval.reason.is_some(), "command should be denied");
+        let provenance = eval.denial_provenance.expect("provenance recorded");
+        assert_eq!(provenance.matched_token, r#"C:\tools\Playwright.EXE"#);
+        assert_eq!(provenance.normalized_program, "playwright");
+        assert_eq!(provenance.rule_id.as_deref(), Some("no-raw-playwright"));
+        assert_eq!(provenance.match_pattern, "playwright");
+        // Parsed from a string: index is known, but there is no backing file.
+        let source = provenance.source.expect("source");
+        assert_eq!(source.index, 0);
+        assert!(source.file.is_none());
+    }
+
+    #[test]
+    fn bare_command_is_reported_as_supplied_without_path_resolution() {
+        let eval = evaluation_with_policy(
+            "playwright test",
+            r#"{"bad_commands":[{"match":"playwright","replacement":"npm test"}]}"#,
+        );
+        let provenance = eval.denial_provenance.expect("provenance");
+        assert_eq!(
+            provenance.matched_token, "playwright",
+            "a bare command must be reported verbatim, never PATH-resolved"
+        );
+    }
+
+    #[test]
+    fn a_builtin_denial_carries_no_provenance() {
+        // Sentinel / rust-tool denials are not config rules, so they must not
+        // fabricate a source reference.
+        let eval = evaluate_command(concat!("echo ", "bad", " cmd"), None, false, &[]);
+        assert!(eval.reason.is_some());
+        assert!(eval.denial_provenance.is_none());
+    }
+
+    #[test]
+    fn provenance_reason_suffix_cites_rule_and_source() {
+        let provenance = DenialProvenance {
+            matched_token: r#"C:\tools\clud-manual-bad-command.exe"#.to_string(),
+            normalized_program: "clud-manual-bad-command".to_string(),
+            rule_id: Some("manual-bad-command-check".to_string()),
+            match_pattern: "clud-manual-bad-command".to_string(),
+            match_mode: MatchMode::Glob,
+            source: Some(RuleSource {
+                index: 0,
+                file: Some(std::path::PathBuf::from(
+                    r#"C:\repo\.clud\settings.local.json"#,
+                )),
+                layer: Some("repo-local".to_string()),
+            }),
+        };
+        let suffix = provenance_reason_suffix(&provenance);
+        assert!(suffix.contains("Blocked `C:\\tools\\clud-manual-bad-command.exe`"));
+        assert!(suffix.contains("(normalized: `clud-manual-bad-command`)"));
+        assert!(suffix.contains("by rule `manual-bad-command-check`"));
+        assert!(suffix.contains("from `C:\\repo\\.clud\\settings.local.json#/bad_commands/0`"));
+    }
+
+    #[test]
+    fn bad_cmd_denied_event_carries_full_provenance() {
+        let provenance = DenialProvenance {
+            matched_token: r#"C:\tools\clud-manual-bad-command.exe"#.to_string(),
+            normalized_program: "clud-manual-bad-command".to_string(),
+            rule_id: Some("manual-bad-command-check".to_string()),
+            match_pattern: "clud-manual-bad-command".to_string(),
+            match_mode: MatchMode::Glob,
+            source: Some(RuleSource {
+                index: 2,
+                file: Some(std::path::PathBuf::from(
+                    r#"C:\repo\.clud\settings.local.json"#,
+                )),
+                layer: Some("repo-local".to_string()),
+            }),
+        };
+        let payload = HookPayloadView {
+            tool_name: "Bash".to_string(),
+            command: r#"C:\tools\clud-manual-bad-command.exe --example"#.to_string(),
+            cwd: std::path::PathBuf::from(r#"C:\repo"#),
+        };
+        let event = bad_cmd_denied_event(&provenance, &payload, r#"C:\py\clud-block-bad-cmd.exe"#);
+        assert_eq!(event["event"], "bad_cmd_denied");
+        assert_eq!(event["rule_id"], "manual-bad-command-check");
+        assert_eq!(event["rule_match"], "clud-manual-bad-command");
+        assert_eq!(event["match_mode"], "glob");
+        assert_eq!(event["source_pointer"], "/bad_commands/2");
+        assert_eq!(event["source_layer"], "repo-local");
+        assert_eq!(
+            event["matched_token"],
+            r#"C:\tools\clud-manual-bad-command.exe"#
+        );
+        assert_eq!(event["normalized_program"], "clud-manual-bad-command");
+        assert_eq!(event["hook_executable"], r#"C:\py\clud-block-bad-cmd.exe"#);
+        assert_eq!(
+            event["command"],
+            r#"C:\tools\clud-manual-bad-command.exe --example"#
+        );
+        assert!(event["source_file"]
+            .as_str()
+            .unwrap()
+            .ends_with("settings.local.json"));
+    }
+
+    #[test]
+    fn bad_cmd_denied_event_omits_absent_source_fields() {
+        let provenance = DenialProvenance {
+            matched_token: "wget".to_string(),
+            normalized_program: "wget".to_string(),
+            rule_id: None,
+            match_pattern: "wget".to_string(),
+            match_mode: MatchMode::Regex,
+            source: None,
+        };
+        let payload = HookPayloadView {
+            tool_name: "Bash".to_string(),
+            command: "wget http://x".to_string(),
+            cwd: std::path::PathBuf::from("/tmp"),
+        };
+        let event = bad_cmd_denied_event(&provenance, &payload, "");
+        assert_eq!(event["match_mode"], "regex");
+        assert!(event["rule_id"].is_null());
+        assert!(event["source_file"].is_null());
+        assert!(event["source_pointer"].is_null());
+        assert!(event["source_layer"].is_null());
+    }
+
+    #[test]
+    fn provenance_reason_suffix_handles_missing_id_and_source() {
+        let provenance = DenialProvenance {
+            matched_token: "wget".to_string(),
+            normalized_program: "wget".to_string(),
+            rule_id: None,
+            match_pattern: "wget".to_string(),
+            match_mode: MatchMode::Glob,
+            source: None,
+        };
+        let suffix = provenance_reason_suffix(&provenance);
+        assert!(suffix.contains("by an unnamed rule"));
+        assert!(!suffix.contains(" from `"), "no source → no from-clause");
     }
 
     #[test]
