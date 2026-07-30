@@ -707,6 +707,22 @@ fn main() {
     // sessions — those descendants are intentionally outliving us and are
     // owned by the daemon now.
     if !args.detach && !args.detachable {
+        // #673 Phase 2d: exits the job tracker gave up on at runtime get one
+        // last replan against a fresh process table. Runs before the
+        // originator scan because it can reach descendants whose environment
+        // was rebuilt and therefore carry no `CLUD:` tag for that scan to
+        // find. Skipped with the rest of the exit cleanup on the detached
+        // paths, where those descendants are outliving us on purpose.
+        if let Some(tracker) = job_orphan_reaper.as_ref() {
+            if !args.keep_orphans {
+                let swept = tracker.sweep_abandoned_at_exit();
+                if args.verbose && swept > 0 {
+                    verbose_log::log(format_args!(
+                        "[clud] reaper: re-planned {swept} abandoned tool-shell exit(s)"
+                    ));
+                }
+            }
+        }
         let opts = orphan_reaper::ReapOpts {
             keep: args.keep_orphans,
             quiet: args.quiet_orphans,
