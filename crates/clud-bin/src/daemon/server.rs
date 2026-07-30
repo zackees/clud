@@ -818,7 +818,7 @@ const DEFAULT_ORPHAN_SWEEP_INTERVAL_MS: u64 = 60_000;
 /// (each sweep reads `environ` for every process on the host).
 const MIN_ORPHAN_SWEEP_INTERVAL_MS: u64 = 5_000;
 
-fn orphan_sweep_interval() -> Duration {
+pub(super) fn orphan_sweep_interval() -> Duration {
     orphan_sweep_interval_from_raw(std::env::var(ENV_ORPHAN_SWEEP_INTERVAL_MS).ok().as_deref())
 }
 

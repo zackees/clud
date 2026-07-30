@@ -17,7 +17,7 @@ use super::client::{
 };
 use super::commands::{run_kill, run_list, run_logs};
 use super::io_helpers::{read_json_file, resolve_backlog_bytes, terminal_dimensions};
-use super::paths::{daemon_info_path, state_dir};
+use super::paths::{daemon_events_path, daemon_info_path, state_dir};
 use super::server::run_daemon;
 use super::sessions::{most_recent_session, most_recent_session_any};
 use super::types::{
@@ -122,7 +122,89 @@ fn run_daemon_subcommand(state_dir: &Path, subcommand: &DaemonSubcommand) -> i32
         DaemonSubcommand::RunningProcess { json } => {
             run_running_process_diagnostics(state_dir, *json)
         }
+        DaemonSubcommand::OrphanStatus { json } => run_orphan_status(state_dir, *json),
     }
+}
+
+/// The freshness-relevant fields of the most recent `orphan_sweep_finished`
+/// event (#465).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanSweepStatus {
+    ts_ms: u64,
+    found: u64,
+    reaped: u64,
+}
+
+/// Most recent `orphan_sweep_finished` event from the daemon event-log lines,
+/// by `ts_ms` (newest wins). Pure, for testability.
+fn latest_orphan_sweep(lines: impl Iterator<Item = String>) -> Option<OrphanSweepStatus> {
+    let mut latest: Option<OrphanSweepStatus> = None;
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("op").and_then(|op| op.as_str()) != Some("orphan_sweep_finished") {
+            continue;
+        }
+        let status = OrphanSweepStatus {
+            ts_ms: value.get("ts_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+            found: value.get("found").and_then(|v| v.as_u64()).unwrap_or(0),
+            reaped: value.get("reaped").and_then(|v| v.as_u64()).unwrap_or(0),
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|prev| status.ts_ms >= prev.ts_ms)
+        {
+            latest = Some(status);
+        }
+    }
+    latest
+}
+
+/// Stale when no sweep has ever run, or the last one is older than 2× the sweep
+/// interval — evidence the sweep thread has stalled or died (#465 AC).
+fn sweep_is_stale(status: Option<&OrphanSweepStatus>, now_ms: u64, interval_ms: u64) -> bool {
+    match status {
+        None => true,
+        Some(status) => now_ms.saturating_sub(status.ts_ms) > interval_ms.saturating_mul(2),
+    }
+}
+
+fn run_orphan_status(state_dir: &Path, json: bool) -> i32 {
+    let text = std::fs::read_to_string(daemon_events_path(state_dir)).unwrap_or_default();
+    let status = latest_orphan_sweep(text.lines().map(str::to_string));
+    let interval_ms = super::server::orphan_sweep_interval().as_millis() as u64;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let stale = sweep_is_stale(status.as_ref(), now_ms, interval_ms);
+    let age_ms = status.as_ref().map(|s| now_ms.saturating_sub(s.ts_ms));
+
+    if json {
+        let payload = serde_json::json!({
+            "last_sweep_ms": status.as_ref().map(|s| s.ts_ms),
+            "found": status.as_ref().map(|s| s.found),
+            "reaped": status.as_ref().map(|s| s.reaped),
+            "age_ms": age_ms,
+            "interval_ms": interval_ms,
+            "stale": stale,
+        });
+        println!("{payload}");
+    } else {
+        match &status {
+            Some(s) => println!(
+                "orphan sweep: last {}s ago, found {} reaped {} (interval {}s) — {}",
+                age_ms.unwrap_or(0) / 1000,
+                s.found,
+                s.reaped,
+                interval_ms / 1000,
+                if stale { "STALE" } else { "ok" }
+            ),
+            None => println!("orphan sweep: no sweep recorded yet — STALE"),
+        }
+    }
+    i32::from(stale)
 }
 
 struct TopRunOptions<'a> {
@@ -777,6 +859,45 @@ fn build_repeat_once_command(args: &Args) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_orphan_sweep_picks_the_newest_finished_event() {
+        let lines = [
+            r#"{"op":"orphan_sweep_started","ts_ms":100}"#,
+            r#"{"op":"orphan_sweep_finished","ts_ms":200,"found":5,"reaped":3}"#,
+            r#"{"op":"some_other_event","ts_ms":300}"#,
+            r#"{"op":"orphan_sweep_finished","ts_ms":250,"found":1,"reaped":0}"#,
+            r#"not json"#,
+        ];
+        let latest = latest_orphan_sweep(lines.iter().map(|s| s.to_string())).unwrap();
+        assert_eq!(latest.ts_ms, 250);
+        assert_eq!((latest.found, latest.reaped), (1, 0));
+    }
+
+    #[test]
+    fn latest_orphan_sweep_is_none_when_never_swept() {
+        let lines = [r#"{"op":"orphan_sweep_started","ts_ms":100}"#];
+        assert!(latest_orphan_sweep(lines.iter().map(|s| s.to_string())).is_none());
+    }
+
+    #[test]
+    fn sweep_is_stale_past_two_intervals_or_never() {
+        let interval = 60_000;
+        assert!(
+            sweep_is_stale(None, 1_000_000, interval),
+            "never swept → stale"
+        );
+        let fresh = OrphanSweepStatus {
+            ts_ms: 1_000_000,
+            found: 0,
+            reaped: 0,
+        };
+        // 1× interval later: fresh.
+        assert!(!sweep_is_stale(Some(&fresh), 1_060_000, interval));
+        // Exactly 2× is the boundary (not yet stale); just past it is stale.
+        assert!(!sweep_is_stale(Some(&fresh), 1_120_000, interval));
+        assert!(sweep_is_stale(Some(&fresh), 1_120_001, interval));
+    }
 
     // Regression for the symptom reported after PR #151:
     //   clud  (no args, interactive terminal)
