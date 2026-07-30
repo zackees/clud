@@ -881,6 +881,26 @@ fn grace_admits(first_seen: &mut HashMap<u32, Instant>, pid: u32, now: Instant) 
     now.duration_since(first) >= Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
 }
 
+/// Single-line record of the last completed orphan sweep, alongside the
+/// existing `session-tmp-sweep.last` / `uv-cache-sweep.last` sentinels (#465).
+pub(super) const ORPHAN_SWEEP_SENTINEL: &str = "orphan-sweep.last";
+
+pub(super) fn orphan_sweep_sentinel_path(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join(ORPHAN_SWEEP_SENTINEL)
+}
+
+/// Best-effort: a sweep must never fail because its bookkeeping file could not
+/// be written.
+fn write_orphan_sweep_sentinel(state_dir: &Path, found: usize, reaped: usize) {
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let line = json!({ "ts_ms": ts_ms, "found": found, "reaped": reaped }).to_string();
+    let _ = std::fs::create_dir_all(state_dir);
+    let _ = std::fs::write(orphan_sweep_sentinel_path(state_dir), line);
+}
+
 fn run_orphan_sweep(
     state_dir: &Path,
     trigger: &'static str,
@@ -948,6 +968,13 @@ fn run_orphan_sweep(
         .filter(|pid| !outcome.reaped_pids.contains(pid))
         .copied()
         .collect();
+    // #465: also record the result in a dedicated single-line sentinel, the
+    // same pattern `session-tmp-sweep.last` / `uv-cache-sweep.last` already use
+    // in this directory. `clud daemon orphan-status` reads this rather than
+    // scanning the shared event log, which rotates at 1 MB — a burst of
+    // unrelated high-volume events can otherwise push every sweep record out of
+    // both log files and make a healthy daemon report "no sweep recorded".
+    write_orphan_sweep_sentinel(state_dir, outcome.found, outcome.reaped);
     daemon_events::log_event(
         state_dir,
         "orphan_sweep_finished",
