@@ -2540,6 +2540,11 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // Every test that mutates the process-global override env var must serialize
+    // on this single lock. Two independent locks (one here, one in `temp_env`)
+    // previously let an "unset" test race a concurrent "set" test, flaking CI.
+    static OVERRIDE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn denies(command: &str) -> bool {
         evaluate_command(command, None, false, &[]).reason.is_some()
     }
@@ -4172,8 +4177,7 @@ mod tests {
         // Must stay distinct from a rejection: logging every guarded command
         // that nobody tried to bypass would bury the real attempts.
         let key = BAD_CMD_OVERRIDE_ENV;
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = OVERRIDE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
         assert_eq!(classify_override("any-rule"), OverrideOutcome::NotAttempted);
@@ -4266,8 +4270,7 @@ mod tests {
     }
 
     fn temp_env(key: &str, value: &str, f: impl FnOnce()) {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = OVERRIDE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(key).ok();
         std::env::set_var(key, value);
         f();
