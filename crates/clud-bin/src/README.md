@@ -119,7 +119,9 @@ which test tier a change belongs in — lives in
   bounded candidate set.
 - `process_tree.rs` - best-effort descendant-tree termination via `sysinfo`;
   fixes the multi-second Ctrl+C hang for `clud --codex` on Windows where
-  `cmd.exe -> node.exe` would orphan the real child.
+  `cmd.exe -> node.exe` would orphan the real child. `TopologySnapshot` is one
+  host walk reused across a whole sweep, and re-verifies `(pid, start_time)`
+  for **every** target it kills, descendants included (#688).
 - `job_orphan_reaper.rs` - Windows foreground Job completion-port tracker.
   The runner registers each backend root by PID + start time; a pure role
   planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
@@ -127,7 +129,15 @@ which test tier a change belongs in — lives in
   `conhost.exe` exclusion before any automatic client-tree reap (#616).
   Daemon-sparing goes through the `ProcessFacts` seam and its precedence
   ordering (#673 Phase 1a); the tracked keyspace is bounded by one purge sweep
-  (Phase 2).
+  (Phase 2). The seam itself now lives in `reaper_facts.rs` — this module adds
+  only the Job Object signal and its own tool-shell reap reasons.
+- `reaper_facts.rs` - the OS-authoritative daemon-sparing signals, shared by
+  **both** reapers (#688). `ProcessFacts` / `FactsSnapshot` / `spare_signal`
+  are pure data plus one fenced per-platform producer, which is what keeps the
+  precedence table unit-testable everywhere. `collect_host_facts` is the
+  producer `orphan_reaper` uses; it reports job membership as *unavailable*,
+  because there is no Job Object on the `clud slay` / on-exit / daemon-sweep
+  path.
 - `reap_log.rs` - reaper accounting (`ReapCounters`) and its buffered,
   mutations-only per-session JSONL log at
   `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl` (#673 Phases 0 and 5).

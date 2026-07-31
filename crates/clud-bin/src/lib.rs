@@ -41,6 +41,7 @@ pub mod process_identity;
 pub mod process_scan;
 pub mod process_tree;
 pub mod reap_log;
+pub mod reaper_facts;
 pub mod repo_clud_config;
 pub mod runner;
 pub mod runtime_cache;

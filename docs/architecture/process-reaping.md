@@ -59,9 +59,13 @@ deferral timestamps and the unkeyable pen. Two invariants govern it:
   while a dead `known[pid]` survives makes `pending_exit_pids` resurrect the
   identity and re-finalize it forever.
 
-Every kill re-verifies the identity immediately before acting. Between the scan
-that selects a target and the kill that acts, a PID can die and be recycled —
-and killing a *tree* takes the replacement's children with it.
+Every kill re-verifies the identity immediately before acting — **every**
+target, root and descendant alike. Between the scan that selects a target and
+the kill that acts, a PID can die and be recycled, and killing a *tree* takes
+the replacement's children with it. `TopologySnapshot::kill_tree_filtered` used
+to re-check only the root and then kill descendants straight from the snapshot
+on a bare PID; #688 closed that, generalizing what Windows'
+`kill_tree_filtered_automatic` already did.
 
 ---
 
@@ -72,7 +76,30 @@ does not matter; **how it detached** does.
 
 Every signal sits behind the `ProcessFacts` trait, is collected once per pass
 into a `FactsSnapshot`, and is then consulted as pure data. No reap-decision
-code calls Win32 — see [DD-024].
+code calls Win32 — see [DD-024]. The trait, the precedence order and the
+per-platform producers live in `reaper_facts.rs`.
+
+### Which reaper consults the table
+
+**Both of them, and that is new.** #673 Phase 1a landed the table inside
+`job_orphan_reaper`, so for a while only the Windows tool-shell reaper had it.
+`orphan_reaper` — the cross-platform one, with the wider blast radius — still
+spared by the cooperative marker alone. Net effect: an sccache-shaped daemon
+survived the tool shell that started it and was then killed at clud's own exit,
+by `clud slay`, or by the daemon's periodic sweep. #688 moved the table into
+`reaper_facts.rs` and wired the second consumer.
+
+| Consumer | Entry points | Signals it can answer |
+|---|---|---|
+| `job_orphan_reaper` (Windows) | tool-shell exit, runtime reconcile, exit sweep | all seven — it owns the Job Object handle, so row 1 is available |
+| `orphan_reaper` (cross-platform) | foreground `clud` exit, `clud slay`, daemon `ReapOrphans` + periodic sweep | rows 2–7; **row 1 is reported unavailable**, because there is no job on this path |
+
+Row 1 being *unavailable* rather than answered "inside the job" is load-bearing:
+answering it would read as a positive finding of containment for every candidate.
+
+The spare decision carries a **reason**, and `ReapOutcome::spared` surfaces it
+to the caller. "The daemon survived" is not the property worth asserting — a
+reaper that never saw the process at all also leaves it running.
 
 ### Precedence
 
@@ -83,12 +110,22 @@ code calls Win32 — see [DD-024].
 | 3 | **Session leader** | — | `getsid(pid) != getsid(0)` ⇒ `setsid()` | double-fork daemons, language servers |
 | 4 | **Token owner** | process cannot be opened for termination | `euid` differs | services; also cases where the kill would fail anyway |
 | 5 | **Declared daemon** | `RUNNING_PROCESS_IS_DAEMON` | same | **zccache**, **soldr** — everything that opted in |
-| 6 | **Listening endpoint** | `GetExtendedTcpTable` | `/proc/net/*` | **sccache**, **FBuildWorker**, language servers |
+| 6 | **Listening endpoint** | `GetExtendedTcpTable` over `AF_INET` **and** `AF_INET6` | `/proc/net/tcp{,6}` + `/proc/net/unix`, matched to `/proc/<pid>/fd` | **sccache**, **FBuildWorker**, language servers |
 | 7 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
 
 Cheap and authoritative first, expensive last. 1–4 are one syscall each and no
 memory read, and every PID they rule out is a PID whose environment is never
 touched. 6 is evaluated only for what survives them.
+
+Known gap: **Windows named pipes**. Windows exposes no documented
+pipe-name-to-owning-PID mapping, so a daemon whose only endpoint is a named pipe
+still needs the marker or the operator spare-list. The POSIX analogue is
+covered — `/proc/net/unix` is read alongside the TCP tables.
+
+Coverage is not uniform across platforms, and the table says so rather than
+guessing: on macOS only rows 3 and 5 are answerable without linking a
+platform-specific process-inspection library, so rows 2, 4 and 6 are reported
+unavailable there.
 
 A signal the platform cannot answer is recorded as **unavailable** and never
 spares. Absence of evidence is not evidence of daemon-hood — that inversion is
@@ -190,14 +227,22 @@ This is only possible because reap decisions take OS facts as **data**
 ([DD-024]). A change that calls Win32 inline silently forces itself into the
 slow lane and out of cross-platform coverage.
 
-- **Tier 1 — unit** (`job_orphan_reaper`'s `lifecycle_tests`): the decision
-  table. Synthetic process graphs plus a `FactsSnapshot` fixture. Assert
-  **spare + reason**, never just the outcome. Every new daemon shape, precedence
-  rule, negative case and state-bounding rule goes here.
-- **Tier 2 — integration** (`crates/clud-bin/tests/reaper_daemon_survival_windows.rs`,
-  `tool_shell_lifecycle_windows.rs`): a real Job Object, a real breakaway, a real
-  detached listener. **Budget: ≤5 tests.** Anything expressible in Tier 1 must be
+- **Tier 1 — unit** (`job_orphan_reaper`'s `lifecycle_tests`, `orphan_reaper`'s
+  and `reaper_facts`' test modules): the decision table. Synthetic process graphs
+  plus a `FactsSnapshot` fixture. Assert **spare + reason**, never just the
+  outcome. Every new daemon shape, precedence rule, negative case and
+  state-bounding rule goes here.
+- **Tier 2 — integration**: a real Job Object, a real breakaway, a real detached
+  listener. **Budget: ≤5 tests per file.** Anything expressible in Tier 1 must be
   in Tier 1. Uses `testbins/daemon-stub`, never a real sccache/docker install.
+  - `reaper_daemon_survival_windows.rs`, `tool_shell_lifecycle_windows.rs` — the
+    job reaper's tool-shell-exit path.
+  - `reaper_orphan_sweep_survival.rs` — the cross-platform reaper's `clud slay` /
+    daemon-sweep path and its on-exit scan (#688). It drives
+    `reap_orphans_filtered` with an admission closure narrowed to its own stub
+    PIDs, so a full-host sweep on a developer's machine cannot reap somebody
+    else's work; the hook runs before `report_and_reap`, so the code under test
+    is exactly what `clud slay` executes.
 - **Tier 3 — opt-in** (`bench/README.md` runbook): checking the stub's signal
   shapes against genuinely installed daemons on a developer box. Never gating.
 

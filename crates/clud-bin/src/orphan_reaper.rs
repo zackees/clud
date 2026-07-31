@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::process_identity::ProcessIdentity;
 use crate::process_scan;
 use crate::process_tree;
+use crate::reaper_facts::{self, SpareList, SpareReason};
 
 /// Caller-controlled knobs for the reaper. Filled in from the parsed CLI args
 /// at the exit-hook site in `main.rs`.
@@ -50,6 +51,14 @@ pub struct ReapOutcome {
     pub candidate_pids: Vec<u32>,
     /// PIDs passed to `kill_tree`.
     pub reaped_pids: Vec<u32>,
+    /// Candidates an OS-authoritative signal protected, and **why** (#688).
+    ///
+    /// The reason is part of the outcome rather than a log-only detail because
+    /// "the daemon survived" is not the property worth asserting — a reaper
+    /// that spared it for the wrong reason (or by accident, having failed to
+    /// see it at all) passes that test and still regresses. Sorted by PID so
+    /// the report and any assertion over it are deterministic.
+    pub spared: Vec<(u32, SpareReason)>,
 }
 
 /// One descendant's view, pre-classification.
@@ -453,14 +462,52 @@ fn kill_target_is_current(recorded: ProcessIdentity, observed: Option<ProcessIde
     }
 }
 
+/// Build the OS-authoritative spare-list for one sweep's candidate set.
+///
+/// #688: this reaper used to spare by `RUNNING_PROCESS_IS_DAEMON` alone. That
+/// marker is **cooperative**, and the daemons whose loss actually hurts —
+/// sccache, `FBuildWorker`, dockerd, language servers — never call
+/// `running-process` at all, so they never set it. They do keep the inherited
+/// `CLUD:<pid>` originator tag, which put them squarely in the candidate set
+/// with nothing protecting them. The Windows tool-shell reaper got OS signals
+/// in #673 Phase 1a; this one, with the wider blast radius, did not.
+///
+/// The candidate set is the already-selected tagged orphans, so the cost is
+/// proportional to the sweep, not to the host.
+fn spare_list_for(descendants: &[Descendant], daemons: &HashSet<u32>) -> SpareList {
+    let pids: Vec<u32> = descendants.iter().map(|d| d.pid).collect();
+    let facts = reaper_facts::collect_host_facts(
+        &pids,
+        daemons,
+        reaper_facts::configured_spare_images_from_env(),
+    );
+    reaper_facts::build_spare_list(&facts, descendants.iter().map(|d| (d.pid, d.name.clone())))
+}
+
+/// May the tree walk terminate `pid`?
+///
+/// Consults *both* sets, for two different jobs. `spares` is the OS verdict
+/// over this sweep's candidates. `daemons` covers the whole host, so it also
+/// protects a declared daemon that is merely a *descendant* of a candidate and
+/// was never a candidate itself — nothing collected facts about it.
+///
+/// A `false` **prunes** rather than skips (see
+/// [`crate::process_tree::kill_tree_filtered`]): sparing a daemon while killing
+/// its children would leave it wedged mid-work.
+fn may_kill(spares: &SpareList, daemons: &HashSet<u32>, pid: u32) -> bool {
+    !spares.contains_key(&pid) && !daemons.contains(&pid)
+}
+
 /// Shared classify / report / kill body for both entry points. Returns a
 /// default outcome when `descendants` is empty so callers can skip noise.
 ///
-/// `daemons` is the set of PIDs that declared themselves daemons; the tree
-/// walk is pruned at those (and therefore at their subtrees) so a daemon
-/// survives even when it is a PPID-descendant of something being reaped.
-/// Everything else in the tree is reachable, including descendants whose
-/// environment was rebuilt and no longer carries the originator tag (#522).
+/// `daemons` is the set of PIDs that declared themselves daemons. It is used
+/// twice, for two different jobs: as one input to the candidate spare-list
+/// (see [`spare_list_for`]), and — over the *whole host*, not just candidates —
+/// to prune the tree walk, so a daemon survives even when it is a
+/// PPID-descendant of something being reaped. Everything else in the tree is
+/// reachable, including descendants whose environment was rebuilt and no
+/// longer carries the originator tag (#522).
 fn report_and_reap(
     descendants: Vec<Descendant>,
     header: &str,
@@ -472,6 +519,9 @@ fn report_and_reap(
         return ReapOutcome::default();
     }
     let candidate_pids: Vec<u32> = descendants.iter().map(|d| d.pid).collect();
+    let spares = spare_list_for(&descendants, daemons);
+    let mut spared: Vec<(u32, SpareReason)> = spares.iter().map(|(pid, r)| (*pid, *r)).collect();
+    spared.sort_unstable_by_key(|(pid, _)| *pid);
 
     // Group by shape label so the report collapses N identical leaks into
     // a single row with a list of PIDs/ports.
@@ -517,6 +567,12 @@ fn report_and_reap(
                 }
             }
         }
+        for (pid, reason) in &spared {
+            eprintln!(
+                "         sparing pid={pid} ({reason}) — OS signal says this is a daemon",
+                reason = reason.as_str(),
+            );
+        }
     }
 
     if opts.keep {
@@ -525,6 +581,7 @@ fn report_and_reap(
             reaped: 0,
             candidate_pids,
             reaped_pids: Vec::new(),
+            spared,
         };
     }
 
@@ -536,7 +593,11 @@ fn report_and_reap(
     let mut reaped = 0usize;
     let mut reaped_pids = Vec::with_capacity(descendants.len());
     let mut skipped_recycled = 0usize;
+    let admit = |pid: u32| may_kill(&spares, daemons, pid);
     for d in &descendants {
+        if spares.contains_key(&d.pid) {
+            continue;
+        }
         // #673 Phase 6: the scan that selected this PID and the kill that acts
         // on it are separated by the rest of the scan, the classification, and
         // the report. A PID can die and be recycled in that window, and killing
@@ -548,13 +609,19 @@ fn report_and_reap(
             skipped_recycled += 1;
             continue;
         }
-        topology.kill_tree_filtered(d.pid, &|pid| !daemons.contains(&pid));
+        topology.kill_tree_filtered(d.pid, &admit);
         reaped += 1;
         reaped_pids.push(d.pid);
     }
 
     if !opts.quiet {
         eprintln!("[clud] reaped {reaped} of {found} env-tagged descendant(s)");
+        if !spared.is_empty() {
+            eprintln!(
+                "[clud] spared {} descendant(s) protected by an OS daemon signal",
+                spared.len()
+            );
+        }
         if skipped_recycled > 0 {
             eprintln!(
                 "[clud] skipped {skipped_recycled} descendant(s) whose PID was \
@@ -568,6 +635,7 @@ fn report_and_reap(
         reaped,
         candidate_pids,
         reaped_pids,
+        spared,
     }
 }
 
@@ -576,13 +644,10 @@ mod tests {
     use super::*;
     use crate::process_identity::UNKNOWN_START_TIME;
 
-    /// The shape of the predicate is the whole of #522, so assert it
-    /// directly rather than only through the callers.
-    ///
-    /// Old rule: kill only tagged PIDs. New rule: kill unless the PID
-    /// declared itself a daemon.
-    fn may_kill(daemons: &HashSet<u32>, pid: u32) -> bool {
-        !daemons.contains(&pid)
+    /// The production predicate, with an empty OS spare-list — the #522 half
+    /// of the rule on its own.
+    fn marker_only(daemons: &HashSet<u32>, pid: u32) -> bool {
+        may_kill(&SpareList::new(), daemons, pid)
     }
 
     /// A declared daemon is spared. This is what keeps zccache/soldr/fbuild
@@ -590,7 +655,7 @@ mod tests {
     #[test]
     fn declared_daemon_is_spared() {
         let daemons: HashSet<u32> = [4242].into_iter().collect();
-        assert!(!may_kill(&daemons, 4242));
+        assert!(!marker_only(&daemons, 4242));
     }
 
     /// The regression #522 actually reports: a descendant whose environment
@@ -601,7 +666,7 @@ mod tests {
     fn untagged_non_daemon_is_reapable() {
         let daemons: HashSet<u32> = [4242].into_iter().collect();
         assert!(
-            may_kill(&daemons, 9001),
+            marker_only(&daemons, 9001),
             "an env-stripped descendant that never declared itself a daemon \
              must stay reachable (regression of #522)"
         );
@@ -613,8 +678,106 @@ mod tests {
     #[test]
     fn empty_daemon_set_spares_nothing() {
         let daemons: HashSet<u32> = HashSet::new();
-        assert!(may_kill(&daemons, 1));
-        assert!(may_kill(&daemons, u32::MAX));
+        assert!(marker_only(&daemons, 1));
+        assert!(marker_only(&daemons, u32::MAX));
+    }
+
+    // ---- #688: the OS-signal spare-list reaches *this* reaper too ----
+
+    /// Build the spare-list the way `report_and_reap` does, but from injected
+    /// facts. Tier 1 (#674): a reap decision must be a pure function of
+    /// `ProcessFacts`, assertable on every platform without spawning anything.
+    fn spares_from(facts: &reaper_facts::FactsSnapshot, candidates: &[(u32, &str)]) -> SpareList {
+        reaper_facts::build_spare_list(
+            facts,
+            candidates
+                .iter()
+                .map(|(pid, image)| (*pid, (*image).to_string())),
+        )
+    }
+
+    /// The exact shape #688 reports: sccache-class daemons never call
+    /// `running-process`, so they keep the inherited `CLUD:<pid>` tag and never
+    /// set the marker. Before this fix nothing in *this* reaper protected them,
+    /// and `clud slay` / the on-exit scan / the daemon sweep all killed them.
+    ///
+    /// Asserted on the **reason**, not merely on survival: a reaper that spared
+    /// it by accident — or that never saw it at all — passes a survival-only
+    /// test and still regresses.
+    #[test]
+    fn a_listening_undeclared_orphan_is_spared_with_a_reason() {
+        let mut facts = reaper_facts::FactsSnapshot::default();
+        facts.listening.insert(5150);
+        let spares = spares_from(&facts, &[(5150, "sccache.exe")]);
+
+        assert_eq!(spares.get(&5150), Some(&SpareReason::ListeningEndpoint));
+        assert!(!may_kill(&spares, &HashSet::new(), 5150));
+    }
+
+    /// The counterweight, and the reason the signal table is ranked rather than
+    /// permissive: a genuinely leaked orphan with no daemon signal at all is
+    /// still reaped. Over-sparing would silently turn the reaper off.
+    #[test]
+    fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
+        let facts = reaper_facts::FactsSnapshot::default();
+        let spares = spares_from(&facts, &[(9001, "node.exe")]);
+
+        assert!(spares.is_empty(), "nothing here deserves protection");
+        assert!(may_kill(&spares, &HashSet::new(), 9001));
+    }
+
+    /// Sparing prunes. A spared daemon's children are its in-flight work, not
+    /// leaked garbage, so the walk must stop at it rather than step over it.
+    #[test]
+    fn a_spared_daemon_prunes_its_subtree() {
+        let mut facts = reaper_facts::FactsSnapshot::default();
+        facts.session_leaders.insert(13);
+        let spares = spares_from(&facts, &[(13, "sccache"), (14, "cc1plus")]);
+
+        assert_eq!(spares.get(&13), Some(&SpareReason::SessionLeader));
+        // The compiler child is not itself protected...
+        assert!(may_kill(&spares, &HashSet::new(), 14));
+        // ...but the walk never reaches it, because it prunes at 13. That is
+        // `process_tree`'s contract, covered by its own `filter_tests`.
+    }
+
+    /// A declared daemon that is only a *descendant* of a candidate was never
+    /// in the candidate set, so no facts were collected about it. The host-wide
+    /// marker set is what keeps it alive.
+    #[test]
+    fn a_host_declared_daemon_is_spared_even_when_it_is_not_a_candidate() {
+        let spares = SpareList::new();
+        let daemons: HashSet<u32> = [777].into_iter().collect();
+        assert!(!may_kill(&spares, &daemons, 777));
+    }
+
+    /// An unavailable signal must not spare. Absence of evidence is not
+    /// evidence of daemon-hood — the exact inversion #522 fixed, re-asserted
+    /// here because the fix added a second, platform-varying source of `None`.
+    #[test]
+    fn a_signal_this_platform_cannot_evaluate_never_spares() {
+        let mut facts = reaper_facts::FactsSnapshot::default();
+        facts.listening.insert(31);
+        facts
+            .unavailable
+            .insert(reaper_facts::Signal::ListeningEndpoint);
+        let spares = spares_from(&facts, &[(31, "sccache")]);
+
+        assert!(spares.is_empty());
+        assert!(may_kill(&spares, &HashSet::new(), 31));
+    }
+
+    /// The producer this reaper actually calls must never claim job membership
+    /// it cannot observe: there is no Job Object on the `clud slay` / on-exit /
+    /// daemon-sweep path, and answering "inside the job" would read as a
+    /// positive finding of containment.
+    #[test]
+    fn the_cross_platform_producer_reports_no_job_object() {
+        let facts =
+            reaper_facts::collect_host_facts(&[std::process::id()], &HashSet::new(), Vec::new());
+        assert!(facts
+            .unavailable
+            .contains(&reaper_facts::Signal::JobMembership));
     }
 
     /// The query must not blow up when nothing has declared itself; a scan
