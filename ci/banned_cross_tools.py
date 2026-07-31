@@ -114,9 +114,12 @@ BANNED_ALWAYS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"""(?:^|[|&;(]|\bRUN\s|\brun:\s*)\s*"""
             # Wrappers that take a command as their argument: `sudo cross
             # build`, `env RUSTFLAGS=-C cross build`, `xargs cross build`,
-            # `timeout 60 cross build`. Each may carry its own arguments.
-            r"""(?:(?:sudo|env|xargs|timeout|nice|exec|command|time)\s+"""
-            r"""(?:[-\w=./]+\s+)*)?"""
+            # `timeout 60 cross build`. Their own arguments are bounded at
+            # three, and `time`/`nice`/`command` are deliberately absent:
+            # unbounded filler after an ordinary English word matches prose
+            # such as `time cross build numbers tracked here`.
+            r"""(?:(?:sudo|env|xargs|timeout|exec)\s+"""
+            r"""(?:[-\w=./]+\s+){0,3})?"""
             r"""["']?cross["',\s]+"""
             r"""(?:\+\S+["',\s]+)?(?:build|test|run|check|rustc|bench|clippy)\b"""
         ),
@@ -165,13 +168,21 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "cargo install cargo-zigbuild",
         re.compile(r"cargo\s+(?:install|binstall)\s+[^\n]*\bcargo-zigbuild\b"),
     ),
+    # The window stops at the next YAML sequence item (`- `), not just after
+    # four lines: without that, an install-action step for an unrelated tool
+    # reaches forward into the *following* step to find a `cargo-xwin`, which
+    # both misattributes the install and — since an install suppresses the
+    # invocation rules across its span — silences every genuine violation in
+    # between.
     (
         "taiki-e/install-action: cargo-xwin",
-        re.compile(r"taiki-e/install-action[^\n]*(?:\n[^\n]*){0,4}?\bcargo-xwin\b"),
+        re.compile(r"taiki-e/install-action[^\n]*(?:\n(?!\s*-\s)[^\n]*){0,4}?\bcargo-xwin\b"),
     ),
     (
         "taiki-e/install-action: cargo-zigbuild",
-        re.compile(r"taiki-e/install-action[^\n]*(?:\n[^\n]*){0,4}?\bcargo-zigbuild\b"),
+        re.compile(
+            r"taiki-e/install-action[^\n]*(?:\n(?!\s*-\s)[^\n]*){0,4}?\bcargo-zigbuild\b"
+        ),
     ),
     ("pip install ziglang", re.compile(r"pip3?\s+install\s+[^\n]*\bziglang\b")),
     ("brew install zig", re.compile(r"brew\s+install\s+[^\n]*\bzig(?:lang)?\b")),
@@ -309,6 +320,12 @@ HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".py", ".sh", ".ps1", ".toml
 ALLOW_MARKER = "cross-lint: allow"
 
 
+#: A Rust char literal: one character, or one escape, between single quotes.
+#: A lifetime (`&'a str`, `'static`) does not match, which is the point — the
+#: closing quote is what distinguishes them.
+RUST_CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\\n])'")
+
+
 def _strip_rust_comments(text: str) -> str:
     """Blank out Rust comments, character for character.
 
@@ -330,11 +347,15 @@ def _strip_rust_comments(text: str) -> str:
     install patterns map a match offset back to a line number, so that
     property is load-bearing rather than incidental.
 
-    Known limit: `'` is not treated as a delimiter, because Rust lifetimes
-    (`&'a str`) would open a string that never closes. A char literal holding
-    a quote (`'"'`) therefore desynchronises the scanner — always in the
-    direction of stripping *less*, which costs a false positive, never a
-    missed violation.
+    Char literals are consumed as a unit, matched by shape rather than by a
+    bare `'`: a lifetime (`&'a str`) opens a quote that never closes, so
+    treating every `'` as a delimiter would desynchronise the scanner on
+    ordinary Rust. The shape test is what makes `let q = '"';` safe — without
+    it that lone quote flips the scanner's phase, and a following
+    `"https://…/cargo-xwin"` is read as code whose `//` starts a comment,
+    blanking the rest of the line. That is a *missed violation*, not the
+    harmless over-reporting an earlier version of this docstring claimed, and
+    four files in this repo were already desynced by it.
     """
     out = list(text)
     length = len(text)
@@ -371,6 +392,10 @@ def _strip_rust_comments(text: str) -> str:
             if char == '"':
                 in_string = False
             index += 1
+        elif char == "'" and (literal := RUST_CHAR_LITERAL.match(text, index)):
+            # A char literal, not a lifetime. Consumed whole so that `'"'`
+            # cannot open a string that was never opened.
+            index = literal.end()
         elif char == '"':
             in_string = True
             index += 1
@@ -416,16 +441,24 @@ def scan_text(text: str, suffix: str = ".py") -> list[tuple[int, str, str]]:
     # The marker is read from the *original* line. Blanking Rust comments
     # first would erase a marker written as a trailing `// cross-lint: allow`,
     # which is where anyone would naturally put one.
-    original = text.splitlines()
+    # `split("\n")`, never `splitlines()`. `splitlines()` also breaks on form
+    # feed, vertical tab, lone CR, U+0085 and U+2028 — and the scanner blanks
+    # every non-newline character inside a comment, so those split points
+    # survive in the original and vanish from the stripped text. The two lists
+    # then differ in length and the linter dies with a ValueError traceback
+    # instead of a lint message. A form feed in a comment is an Emacs page
+    # break, not an exotic input.
+    original = text.split("\n")
     if suffix == ".rs":
         text = _strip_rust_comments(text)
     stripped = [
         "" if ALLOW_MARKER in raw else _strip_comment(line, suffix)
-        # strict: `_strip_rust_comments` blanks characters in place rather
-        # than removing them, so the two line lists are the same length by
-        # construction. If that ever stops being true, failing here is far
-        # better than silently misaligning every marker with the wrong line.
-        for raw, line in zip(original, text.splitlines(), strict=True)
+        # strict: the scanner blanks characters in place rather than removing
+        # them, and `split("\n")` keys off the one character it preserves
+        # exactly, so the two lists are the same length by construction. If
+        # that ever stops being true, failing here is far better than
+        # silently misaligning every marker with the wrong line.
+        for raw, line in zip(original, text.split("\n"), strict=True)
     ]
 
     # Installs run first because they are the more specific finding: a line

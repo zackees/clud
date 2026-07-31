@@ -196,8 +196,20 @@ invocation rules — a mention of `cargo xwin`; reporting both counts one mistak
 twice and makes the fix look bigger than it is. Spanning matters: the
 `taiki-e/install-action` shape puts `uses:` and `tool: cargo-xwin` on different
 lines, so suppressing only the line the match *starts* on would leave the
-`tool:` line to be reported a second time. The suppression is scoped to those
-lines, so a genuine invocation elsewhere in the file is still reported.
+`tool:` line to be reported a second time. For spanning to be safe the install
+match must not reach past the end of its own YAML step, so the window stops at
+the next `- ` sequence item: otherwise an install-action for an unrelated tool
+searches forward into the *following* step for its `cargo-xwin`, and every
+genuine violation in between is silenced on the way. With that bound, a
+violation elsewhere in the file is still reported.
+
+One further trap, since it took down the whole linter rather than one rule:
+line splitting must use `split("\n")`, never `splitlines()`. `splitlines()`
+also breaks on form feed, vertical tab, a lone CR and U+0085/U+2028, none of
+which the comment scanner preserves — so a form feed inside a Rust comment (an
+Emacs page break) made the original and stripped line lists differ in length,
+and `bash lint` died with a `ValueError` traceback instead of printing a
+finding.
 
 **Scope.** `.github/`, `ci/`, `bench/`, `crates/`, `dylints/`, `skills/`,
 `testbins/`, `tests/`, `.claude/hooks/`, plus the root entrypoints `build lint

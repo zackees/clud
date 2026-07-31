@@ -90,6 +90,20 @@ REJECTED: list[tuple[str, str, str]] = [
         'let s = "a//b"; let c = "cargo xwin build";',
         ".rs",
     ),
+    # A char literal holding a quote must not flip the scanner's phase. If it
+    # does, the string on the next line is read as code, its `//` starts a
+    # comment, and the URL naming the banned tool is blanked away — a missed
+    # violation, and four files in this repo were already desynced this way.
+    (
+        "a cargo-xwin URL after a quote char literal",
+        "let q = '\"';\nlet u = \"https://github.com/rust-cross/cargo-xwin\";",
+        ".rs",
+    ),
+    (
+        "a cargo-xwin string after an escaped-quote char literal",
+        "let q = '\\'';\nlet u = \"cargo xwin build\";",
+        ".rs",
+    ),
     (
         "osxcross for darwin",
         "osxcross-clang --target aarch64-apple-darwin",
@@ -331,6 +345,13 @@ ACCEPTED: list[tuple[str, str, str]] = [
         ".rs",
     ),
     ("a Rust doc comment", "/// never run cargo xwin build here", ".rs"),
+    # A lifetime is not a char literal; treating every `'` as a delimiter
+    # would desynchronise the scanner on ordinary Rust.
+    ("a lifetime followed by a comment", "fn f<'a>(x: &'a str) {} // cargo xwin", ".rs"),
+    # Ordinary English words that happen to precede `cross build`. Unbounded
+    # filler after a wrapper word matched all of these.
+    ("time-prefixed prose", "time cross build numbers tracked here.", ".py"),
+    ("nice-prefixed prose", "        nice cross build docs", ".yml"),
     ("a Rust inner doc comment", "//! cargo xwin build is banned", ".rs"),
     # The marker is read from the original line, so a trailing `//` marker is
     # not itself blanked by the comment scanner before it can be seen.
@@ -445,6 +466,46 @@ def test_the_rust_stripper_preserves_the_line_count(text: str):
     hold by construction — this test is what keeps it that way."""
     assert len(_strip_rust_comments(text).splitlines()) == len(text.splitlines())
     assert len(_strip_rust_comments(text)) == len(text), "offsets must line up too"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "// page break\x0cfn main() {}\n",
+        "// vertical tab\x0bhere\n",
+        "// lone carriage return\rhere\n",
+        "// next line\x85here\n",
+        "// line separator\u2028here\n",
+        "",
+    ],
+    ids=["form-feed", "vertical-tab", "lone-cr", "next-line", "line-separator", "empty"],
+)
+def test_exotic_line_breaks_do_not_crash_the_linter(text: str):
+    """`str.splitlines()` breaks on eight characters, only one of which the
+    comment scanner preserves — so a form feed inside a comment (an Emacs page
+    break) made the two line lists differ and killed the run with a ValueError
+    traceback instead of a lint message. `bash lint` and CI's static job both
+    hard-failed on it."""
+    scan_text(text, ".rs")
+
+
+def test_an_install_step_does_not_silence_the_step_after_it():
+    """An install match suppresses the invocation rules across its span, so
+    the match must not reach past the end of its own YAML step. Here the
+    install-action installs an unrelated tool, and the `cargo-xwin` that ends
+    the match belongs to a later step — everything in between was silently
+    dropped, including a genuine `xwin splat`."""
+    text = "\n".join(
+        [
+            "      - uses: taiki-e/install-action@v2",
+            "        with:",
+            "          tool: cargo-nextest",
+            "      - run: xwin splat --output /opt/xwin",
+            "      - run: cargo-xwin build --target x86_64-pc-windows-msvc",
+        ]
+    )
+    lines = {number for number, _, _ in scan_text(text, ".yml")}
+    assert lines == {4, 5}, "both later steps are violations and must be reported"
 
 
 def test_the_allow_marker_is_strictly_line_scoped():
