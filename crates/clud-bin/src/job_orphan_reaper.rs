@@ -914,6 +914,44 @@ impl TrackerProcesses {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #706 — completion-port message kinds, and the batch-folding rule.
+//
+// The constants live here rather than in the Win32 listener so the folding
+// rule below is unit-testable on every platform, the same way #674 moved the
+// decision table out of `imp`.
+// ---------------------------------------------------------------------------
+
+/// `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO`.
+pub(crate) const ACTIVE_PROCESS_ZERO: u32 = 4;
+/// `JOB_OBJECT_MSG_NEW_PROCESS`.
+pub(crate) const NEW_PROCESS: u32 = 6;
+/// `JOB_OBJECT_MSG_EXIT_PROCESS`.
+pub(crate) const EXIT_PROCESS: u32 = 7;
+
+/// Does a drained completion-port batch leave anything to reconcile?
+///
+/// One reconcile pass per *batch* replaces one per *message* (#706). The pass
+/// re-plans the entire pending set, so folding is safe: N passes over a
+/// backlog that only grew produce the same end state as one pass after the
+/// last message.
+///
+/// `ACTIVE_PROCESS_ZERO` is the exception that makes this worth a function.
+/// It empties the tracker outright, so everything queued before it in the same
+/// batch has nothing left to reconcile — but a message *after* it re-arms the
+/// pass against the fresh state.
+pub(crate) fn batch_needs_reconcile(messages: &[u32]) -> bool {
+    let mut needs = false;
+    for &message in messages {
+        match message {
+            NEW_PROCESS | EXIT_PROCESS => needs = true,
+            ACTIVE_PROCESS_ZERO => needs = false,
+            _ => {}
+        }
+    }
+    needs
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ReplayControl {
     pub(super) finalize_provisional_empty: bool,
@@ -1065,9 +1103,16 @@ mod imp {
         DecisionAction, FactsSnapshot, ProcessMeta, ReapDecision, RegisteredBackend, Signal,
     };
 
-    const ACTIVE_PROCESS_ZERO: u32 = 4;
-    const NEW_PROCESS: u32 = 6;
-    const EXIT_PROCESS: u32 = 7;
+    use super::{batch_needs_reconcile, ACTIVE_PROCESS_ZERO, EXIT_PROCESS, NEW_PROCESS};
+
+    /// Upper bound on completion-port messages folded into one batch (#706).
+    ///
+    /// The drain is non-blocking, so this is not a latency knob — it only
+    /// bounds the work done between two `stop` checks, so a session that is
+    /// spawning processes faster than the reaper can classify them still
+    /// shuts down promptly. Anything left in the queue is picked up by the
+    /// next iteration.
+    const MAX_DRAIN_BATCH: usize = 256;
 
     use super::TrackerProcesses;
 
@@ -1188,24 +1233,31 @@ mod imp {
                 // the thread boundary and reconstruct the typed wrapper there.
                 let port_value = port.0 as usize;
                 let job_value = job.0 as usize;
-                let listener = thread::spawn({
-                    let stop = Arc::clone(&stop);
-                    let backends = Arc::clone(&backends);
-                    let processes = Arc::clone(&processes);
-                    let collector = Arc::clone(&collector);
-                    let telemetry = Arc::clone(&telemetry);
-                    move || {
-                        listen(
-                            HANDLE(port_value as *mut c_void),
-                            job_value,
-                            stop,
-                            backends,
-                            processes,
-                            collector,
-                            telemetry,
-                        )
-                    }
-                });
+                // Named so live diagnosis can attribute its CPU without a
+                // debugger: #706 was diagnosed off a native stack precisely
+                // because this thread showed up unnamed in per-thread
+                // sampling, next to named peers like `clud-cpu-banner`.
+                let listener = thread::Builder::new()
+                    .name("clud-reap-listener".into())
+                    .spawn({
+                        let stop = Arc::clone(&stop);
+                        let backends = Arc::clone(&backends);
+                        let processes = Arc::clone(&processes);
+                        let collector = Arc::clone(&collector);
+                        let telemetry = Arc::clone(&telemetry);
+                        move || {
+                            listen(
+                                HANDLE(port_value as *mut c_void),
+                                job_value,
+                                stop,
+                                backends,
+                                processes,
+                                collector,
+                                telemetry,
+                            )
+                        }
+                    })
+                    .expect("spawn clud-reap-listener");
                 Some(Self {
                     job,
                     port,
@@ -1407,13 +1459,67 @@ mod imp {
                 }
                 break;
             }
-            let pid = payload as usize as u32;
+            let _ = key;
+
+            // #706: fold every message already sitting in the queue into this
+            // pass. The follow-up drain uses a **zero** timeout, so it only
+            // collects what is already queued and adds no latency — but it
+            // lets the whole batch share one host process-table read and one
+            // reconcile pass.
+            //
+            // Before this, both were per *message*. At a measured ~178
+            // process spawns/second (`bash.exe` churn from agent tool calls)
+            // and ~20 ms per full `CreateToolhelp32Snapshot` enumeration, the
+            // per-message scan alone was ~3.6 cores of kernel time per
+            // session — and it multiplies by concurrent sessions, since every
+            // scan is `O(all processes on the host)` and each session's own
+            // processes inflate that count for everyone else.
+            let mut batch = Vec::with_capacity(16);
+            batch.push((message, payload as usize as u32));
+            while batch.len() < MAX_DRAIN_BATCH {
+                let (mut m, mut k, mut p) = (0u32, 0usize, null_mut());
+                if unsafe { GetQueuedCompletionStatus(port, &mut m, &mut k, &mut p, 0) }.is_err() {
+                    // Either the queue is empty (WAIT_TIMEOUT) or the port is
+                    // closing. Both mean "stop draining"; a closing port is
+                    // caught by the blocking wait at the top of the loop.
+                    break;
+                }
+                let _ = k;
+                batch.push((m, p as usize as u32));
+            }
+            let batch_len = batch.len() as u64;
+            with_telemetry(&telemetry, |t| {
+                t.epoch.peak_batch = t.epoch.peak_batch.max(batch_len);
+            });
+
+            apply_batch(
+                &batch, &processes, &backends, &collector, &telemetry, job_value,
+            );
+        }
+    }
+
+    /// Apply one drained batch of completion-port messages.
+    ///
+    /// Two costs that used to be paid per message are paid per batch here:
+    /// the host process-table enumeration (taken lazily, at most once, by
+    /// [`BatchTable`]) and the trailing [`reconcile_pending`] pass. Messages
+    /// are still applied strictly in arrival order, so an
+    /// `ACTIVE_PROCESS_ZERO` in the middle of a batch still resets the tracker
+    /// exactly where it fell.
+    fn apply_batch(
+        batch: &[(u32, u32)],
+        processes: &Arc<Mutex<TrackerProcesses>>,
+        backends: &Arc<Mutex<Vec<RegisteredBackend>>>,
+        collector: &Arc<Mutex<FactsCollector>>,
+        telemetry: &Arc<Mutex<Telemetry>>,
+        job_value: usize,
+    ) {
+        let mut table = BatchTable::new(telemetry);
+
+        for &(message, pid) in batch {
             match message {
                 NEW_PROCESS => {
-                    let mut observed = snapshot().remove(&pid);
-                    if let Some(process) = observed.as_mut() {
-                        process.start_time = crate::process_identity::start_time_of(pid);
-                    }
+                    let observed = table.observe(pid);
                     if let Ok(mut processes) = processes.lock() {
                         let TrackerProcesses {
                             known,
@@ -1427,22 +1533,16 @@ mod imp {
                             observed,
                         );
                     }
-                    with_telemetry(&telemetry, |t| t.epoch.tracked += 1);
-                    reconcile_pending(
-                        &processes, &backends, &collector, &telemetry, job_value, false,
-                    );
+                    with_telemetry(telemetry, |t| t.epoch.tracked += 1);
                 }
                 EXIT_PROCESS => {
                     let needs_final_observation = processes
                         .lock()
                         .map(|processes| processes.unresolved_new_pids.contains(&pid))
                         .unwrap_or(false);
-                    let mut final_observation = needs_final_observation
-                        .then(|| snapshot().remove(&pid))
+                    let final_observation = needs_final_observation
+                        .then(|| table.observe(pid))
                         .flatten();
-                    if let Some(process) = final_observation.as_mut() {
-                        process.start_time = crate::process_identity::start_time_of(pid);
-                    }
                     let metadata_failed = if let Ok(mut processes) = processes.lock() {
                         let TrackerProcesses {
                             known,
@@ -1460,7 +1560,7 @@ mod imp {
                         false
                     };
                     if metadata_failed {
-                        record_metadata_miss(&telemetry, pid);
+                        record_metadata_miss(telemetry, pid);
                     }
                     // Only shell images become reap triggers, so only they
                     // enter the `shell_exits_observed` denominator.
@@ -1472,18 +1572,8 @@ mod imp {
                         })
                         .unwrap_or(false);
                     if entered_backlog {
-                        with_telemetry(&telemetry, |t| t.epoch.shell_exits_observed += 1);
+                        with_telemetry(telemetry, |t| t.epoch.shell_exits_observed += 1);
                     }
-                    // #673 Phase 1b: this path used to run an unguarded
-                    // full-host environment scan — 442 `ReadProcessMemory` PEB
-                    // reads — on *every* descendant exit, including the
-                    // `git.exe`/`rg.exe`/`conhost.exe` churn that can never
-                    // become a reap trigger. Route through the same backlog
-                    // guard as every other caller: with nothing pending, the
-                    // pass returns before evaluating a single signal.
-                    reconcile_pending(
-                        &processes, &backends, &collector, &telemetry, job_value, false,
-                    );
                 }
                 ACTIVE_PROCESS_ZERO => {
                     // The job emptied: nothing tracked can still be relevant.
@@ -1495,11 +1585,62 @@ mod imp {
                     }
                     // Accounting is per-epoch; fold it into the session totals
                     // before the reset so the exit summary still adds up.
-                    with_telemetry(&telemetry, |t| t.roll_epoch());
+                    with_telemetry(telemetry, |t| t.roll_epoch());
                 }
                 _ => {}
             }
-            let _ = key;
+        }
+
+        // Folding rule lives in `model` so it is asserted on every platform.
+        let messages = batch
+            .iter()
+            .map(|&(message, _)| message)
+            .collect::<Vec<_>>();
+        if batch_needs_reconcile(&messages) {
+            // #673 Phase 1b: this path used to run an unguarded full-host
+            // environment scan — 442 `ReadProcessMemory` PEB reads — on
+            // *every* descendant exit, including the `git.exe`/`rg.exe`/
+            // `conhost.exe` churn that can never become a reap trigger. Route
+            // through the same backlog guard as every other caller: with
+            // nothing pending, the pass returns before evaluating a single
+            // signal.
+            reconcile_pending(processes, backends, collector, telemetry, job_value, false);
+        }
+    }
+
+    /// The host process table for one batch, read at most once and only if
+    /// some message in the batch actually needs it.
+    ///
+    /// A batch made entirely of exits for already-resolved PIDs never touches
+    /// Toolhelp at all.
+    struct BatchTable<'a> {
+        table: Option<HashMap<u32, ProcessMeta>>,
+        telemetry: &'a Arc<Mutex<Telemetry>>,
+    }
+
+    impl<'a> BatchTable<'a> {
+        fn new(telemetry: &'a Arc<Mutex<Telemetry>>) -> Self {
+            Self {
+                table: None,
+                telemetry,
+            }
+        }
+
+        /// Observe `pid` against this batch's table, stamping the authoritative
+        /// creation time from the process handle.
+        ///
+        /// `start_time_of` is a per-PID `OpenProcess` + `GetProcessTimes` —
+        /// microseconds, and unlike the table it cannot be stale — so it stays
+        /// per-call rather than being folded into the shared read.
+        fn observe(&mut self, pid: u32) -> Option<ProcessMeta> {
+            let telemetry = self.telemetry;
+            let table = self.table.get_or_insert_with(|| {
+                with_telemetry(telemetry, |t| t.epoch.host_scans += 1);
+                snapshot()
+            });
+            let mut process = table.get(&pid).cloned()?;
+            process.start_time = crate::process_identity::start_time_of(pid);
+            Some(process)
         }
     }
 
@@ -2007,6 +2148,70 @@ mod imp {
 }
 #[cfg(windows)]
 pub use imp::ForegroundJobTracker;
+
+/// #706 — the completion-port batch-folding rule.
+///
+/// Tier 1 (per `agents/docs`): pure, platform-free, no Job Object required.
+/// The listener that consumes this is Windows-only, but the rule that decides
+/// how many reconcile passes a drained batch costs is asserted everywhere.
+#[cfg(test)]
+mod batch_tests {
+    use super::{batch_needs_reconcile, ACTIVE_PROCESS_ZERO, EXIT_PROCESS, NEW_PROCESS};
+
+    #[test]
+    fn an_empty_batch_reconciles_nothing() {
+        assert!(!batch_needs_reconcile(&[]));
+    }
+
+    #[test]
+    fn a_spawn_or_exit_arms_one_pass() {
+        assert!(batch_needs_reconcile(&[NEW_PROCESS]));
+        assert!(batch_needs_reconcile(&[EXIT_PROCESS]));
+    }
+
+    #[test]
+    fn many_messages_still_cost_exactly_one_pass() {
+        // The whole point of #706: this batch used to be 200 reconcile
+        // passes and 200 full host process-table enumerations.
+        let batch = [NEW_PROCESS; 200];
+        assert!(batch_needs_reconcile(&batch));
+    }
+
+    #[test]
+    fn active_process_zero_alone_reconciles_nothing() {
+        // The reset empties the tracker; there is no backlog left to plan.
+        assert!(!batch_needs_reconcile(&[ACTIVE_PROCESS_ZERO]));
+    }
+
+    #[test]
+    fn active_process_zero_cancels_only_what_preceded_it() {
+        assert!(!batch_needs_reconcile(&[
+            NEW_PROCESS,
+            EXIT_PROCESS,
+            ACTIVE_PROCESS_ZERO,
+        ]));
+    }
+
+    #[test]
+    fn a_message_after_active_process_zero_rearms_the_pass() {
+        // Ordering matters: the job emptied, then something new spawned into
+        // it. That spawn must still be reconciled against the fresh state.
+        assert!(batch_needs_reconcile(&[
+            NEW_PROCESS,
+            ACTIVE_PROCESS_ZERO,
+            NEW_PROCESS,
+        ]));
+    }
+
+    #[test]
+    fn unknown_message_kinds_are_inert() {
+        // The listener ignores kinds it does not model; they must not arm a
+        // pass on their own, nor cancel one.
+        assert!(!batch_needs_reconcile(&[0, 1, 2, 3, 5, 8, 9]));
+        assert!(batch_needs_reconcile(&[NEW_PROCESS, 9]));
+        assert!(!batch_needs_reconcile(&[ACTIVE_PROCESS_ZERO, 9]));
+    }
+}
 
 #[cfg(test)]
 mod lifecycle_tests {

@@ -160,6 +160,52 @@ reversal this records.
 
 ---
 
+## One host scan per drain, not per notification
+
+The environment pass below is the *most* expensive enumeration, but it is not
+the only one. Classifying a `NEW_PROCESS` notification needs the notifying
+PID's parent and image name, and the only source for those is
+`CreateToolhelp32Snapshot` — a **full enumeration of every process on the
+host**, ~20 ms on a 500-process box.
+
+The listener used to take one such enumeration *per completion-port message*,
+to look up exactly one PID. Under agent tool-call churn — measured at **~178
+process spawns/second**, overwhelmingly short-lived `bash.exe` — that is ~3.6
+cores of kernel time in a single session. Worse, the cost is
+`O(all processes on the host)` while each concurrent session *adds* to that
+count, so N sessions cost more than N times one session (#706).
+
+The rule now:
+
+- **Drain first, then classify.** After the blocking wait returns one message,
+  the listener drains everything already queued with a **zero** timeout. The
+  drain adds no latency — it collects only what is already there — and it is
+  bounded by `MAX_DRAIN_BATCH` so a runaway spawner cannot starve the `stop`
+  check.
+- **One host enumeration per batch, taken lazily.** `BatchTable` reads the
+  process table at most once per drain, and only if some message in the batch
+  actually needs it. A batch of exits for already-resolved PIDs never touches
+  Toolhelp at all.
+- **One reconcile pass per batch.** `batch_needs_reconcile` lives in `model`,
+  not in the Win32 listener, so the folding rule is unit-tested on every
+  platform. Folding is safe because a pass re-plans the *entire* pending set;
+  `ACTIVE_PROCESS_ZERO` is the one message that cancels it, because the reset
+  empties the backlog — and a later message in the same batch re-arms it.
+
+Measured on a 48-process burst: **5 host scans instead of ~48**, with 36
+messages folded into the largest drain. The win grows with churn, because
+heavier load means deeper queues and therefore bigger batches.
+
+`ReapCounters::host_scans` and `peak_batch` make this readable at exit; compare
+`host_scans` against `ticks`. **`host_scans` must never exceed `ticks`** — a
+batch is never empty, so it can never cost more than one enumeration per drain.
+
+*Per-PID creation time is deliberately not folded into the batch read.*
+`process_identity::start_time_of` is an `OpenProcess` + `GetProcessTimes` —
+microseconds, and unlike the shared table it cannot be stale.
+
+---
+
 ## One environment pass
 
 Reading a process's environment block means a `ReadProcessMemory` walk of its
@@ -189,8 +235,9 @@ Reaping is destructive and used to be silent, which is how #651 could be closed
 as fixed while the same symptom kept growing. `reap_log.rs` provides:
 
 - `ReapCounters` — ticks, reconcile passes, environment blocks actually read,
-  peak `known` and peak backlog, plus the decision census. Printed at exit;
-  `--verbose` adds the measurement line.
+  host process-table enumerations and peak drain batch (#706), peak `known` and
+  peak backlog, plus the decision census. Printed at exit; `--verbose` adds the
+  measurement line.
 - `ReapLog` — one JSONL line per **mutation** at
   `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl`. Buffered, never flushed
   per event (#544 found per-op synchronous JSONL flushes to be an idle-CPU cost

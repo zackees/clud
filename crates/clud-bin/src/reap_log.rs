@@ -130,6 +130,20 @@ pub struct ReapCounters {
     pub reconcile_passes: u64,
     /// Completion-port iterations, including the quiet-period timeouts.
     pub ticks: u64,
+    /// Full host process-table enumerations (`CreateToolhelp32Snapshot` over
+    /// every process on the machine).
+    ///
+    /// The number #706 exists to drive down. It used to be **one per
+    /// completion-port message** — at a measured ~178 process spawns/second
+    /// and ~20 ms per enumeration, that is ~3.6 cores of pure kernel time per
+    /// session, and it multiplies by concurrent sessions because each scan is
+    /// `O(all processes on the host)`. Messages are now folded into one batch
+    /// per drain and the batch shares a single enumeration, so this should
+    /// track *drains*, not *events*: compare it against `ticks`.
+    pub host_scans: u64,
+    /// Largest completion-port batch folded into a single drain. A value
+    /// well above 1 is the fix in #706 doing its job under churn.
+    pub peak_batch: u64,
     /// Process environment blocks actually read. The number #673 exists to
     /// drive to ~zero in steady state — it used to be 442 per process exit.
     pub env_reads: u64,
@@ -171,6 +185,8 @@ impl ReapCounters {
         self.spared += other.spared;
         self.reconcile_passes += other.reconcile_passes;
         self.ticks += other.ticks;
+        self.host_scans += other.host_scans;
+        self.peak_batch = self.peak_batch.max(other.peak_batch);
         self.env_reads += other.env_reads;
         self.peak_known = self.peak_known.max(other.peak_known);
         self.peak_backlog = self.peak_backlog.max(other.peak_backlog);
@@ -240,13 +256,15 @@ impl ReapCounters {
     /// The Phase 0 measurement line, for `--verbose`.
     pub fn measurement_line(&self) -> String {
         format!(
-            "[clud] reaper: ticks={} passes={} env_reads={} peak_known={} peak_backlog={}              metadata_misses={}",
+            "[clud] reaper: ticks={} passes={} env_reads={} peak_known={} peak_backlog={}              metadata_misses={} host_scans={} peak_batch={}",
             self.ticks,
             self.reconcile_passes,
             self.env_reads,
             self.peak_known,
             self.peak_backlog,
             self.metadata_misses,
+            self.host_scans,
+            self.peak_batch,
         )
     }
 }
@@ -482,6 +500,44 @@ mod tests {
             session.peak_known, 50,
             "a high-water mark is a max, not a sum"
         );
+    }
+
+    /// #706: `host_scans` is a rate to be driven down, so it sums; the batch
+    /// size is a high-water mark, so it maxes.
+    #[test]
+    fn host_scans_sum_and_peak_batch_is_a_high_water_mark() {
+        let mut session = ReapCounters {
+            host_scans: 12,
+            peak_batch: 37,
+            ..ReapCounters::default()
+        };
+        session.absorb(&ReapCounters {
+            host_scans: 5,
+            peak_batch: 9,
+            ..ReapCounters::default()
+        });
+
+        assert_eq!(session.host_scans, 17);
+        assert_eq!(
+            session.peak_batch, 37,
+            "a high-water mark is a max, not a sum"
+        );
+    }
+
+    /// The whole point of #706 is being able to read the ratio back out: a
+    /// healthy session does far fewer host enumerations than it handles
+    /// completion-port messages.
+    #[test]
+    fn the_measurement_line_exposes_host_scans_and_peak_batch() {
+        let counters = ReapCounters {
+            ticks: 900,
+            host_scans: 120,
+            peak_batch: 214,
+            ..ReapCounters::default()
+        };
+        let line = counters.measurement_line();
+        assert!(line.contains("host_scans=120"), "{line}");
+        assert!(line.contains("peak_batch=214"), "{line}");
     }
 
     /// A session that tracked nothing prints nothing.
