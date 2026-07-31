@@ -255,6 +255,12 @@ Diagnostics and misc:
   thread. Suppressed by `--no-cpu-banner`, `--dry-run`, `--detach`,
   `--detachable`, `--repeat`, and `[foreground.cpu_banner] enabled = false`
   in `~/.clud/settings.json`. Slice of #463 (`clud top`).
+  Issue #709: the full-system subtree rebuild (the dominant cost — #553
+  measured 225 ms loaded, 2.09 s saturated) backs off 30 s → 120 s via
+  `RebuildCadence` while the subtree stays under `REBUILD_QUIET_PCT`. Any
+  activity resets the cadence *and* forces an immediate rebuild on the next
+  tick, so a busy session is never sampled against a stale pid list — the
+  backoff is only ever paid for by an idle one.
 - `wedge_watchdog.rs` - issue #541: detects a wedged backend TUI (one thread
   pinned ≥ 90% of one core in user-mode with near-zero process IO-write bytes,
   sustained for `DEFAULT_REQUIRED_STREAK` × `DEFAULT_TICK` ≈ 90 s). Pure
@@ -268,6 +274,17 @@ Diagnostics and misc:
   `runner::run_plan_subprocess` and `runner::run_plan_pty`. No-op on
   non-Windows. E2E probes against real spinning threads live in
   `tests/wedge_watchdog_e2e.rs` (ignored; run manually).
+  Issue #709: a healthy tick no longer pays for the host-wide thread
+  enumeration. `subtree_could_hide_a_hot_thread` compares each process's
+  *user-mode* delta against `GATE_USER_PCT_THRESHOLD` first — a thread's user
+  time can never exceed its process's, so a cool subtree provably has no hot
+  thread and the `TH32CS_SNAPTHREAD` walk (which enumerates **every thread on
+  the host** before filtering) is skipped. The gate fails open on any
+  unanswerable input, and a gated tick still reports an explicitly *healthy*
+  sample rather than `None` — returning `None` would leave a partial wedge
+  streak standing across an idle stretch, since the loop treats it as "no
+  observation". `descendants_of` also carries a visited set: a PID-reuse cycle
+  in the Toolhelp parent graph previously made the walk non-terminating.
 - `verbose_log.rs` - launch-clock + opt-in file logging
   (`CLUD_VERBOSE_LOG_DIR`); `log()` writes timestamped lines to the per-launch
   log file.

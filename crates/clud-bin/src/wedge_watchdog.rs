@@ -74,6 +74,84 @@ pub const DEFAULT_USER_PCT_THRESHOLD: f64 = 0.90;
 /// generous slack in the other direction.
 pub const DEFAULT_IO_EPSILON_BYTES: u64 = 4096;
 
+/// Process-level user-time fraction that arms the expensive per-thread walk
+/// (#709).
+///
+/// Deliberately *below* [`DEFAULT_USER_PCT_THRESHOLD`]: a thread's user time
+/// can never exceed its process's, so any value at or above the detector's own
+/// threshold would already be sound — the slack exists so the gate can never be
+/// the component that decides a borderline case. It only ever answers "is the
+/// expensive measurement worth taking".
+pub(crate) const GATE_USER_PCT_THRESHOLD: f64 = 0.80;
+
+// ─── Pure cores for the two #709 changes ───────────────────────────────
+//
+// Both live here rather than in the Windows sampler so they are asserted on
+// every platform CI builds for, the same discipline `WedgeDetector` follows.
+
+/// Could any single thread in the subtree be at the wedge threshold?
+///
+/// Compares each process's *user-mode* delta against `gate_pct * wall`. A
+/// thread's user time can never exceed its process's, so a `false` here proves
+/// no thread qualifies and the caller may skip the host-wide thread walk.
+///
+/// **Fails open.** Returns `true` whenever the question cannot be answered —
+/// no wall delta, no baseline, an empty reading, or a pid with no previous
+/// sample. This gate exists to save work on healthy sessions, never to decide
+/// that a session is healthy.
+pub(crate) fn subtree_could_hide_a_hot_thread(
+    prev_process_user_100ns: &std::collections::HashMap<u32, u64>,
+    cur_process_user_100ns: &std::collections::HashMap<u32, u64>,
+    wall_delta: Option<Duration>,
+    gate_pct: f64,
+) -> bool {
+    let Some(wall) = wall_delta else {
+        return true;
+    };
+    if prev_process_user_100ns.is_empty() || cur_process_user_100ns.is_empty() {
+        return true;
+    }
+    let wall_100ns = (wall.as_nanos() / 100) as u64;
+    if wall_100ns == 0 {
+        return true;
+    }
+    let need = ((wall_100ns as f64) * gate_pct) as u64;
+    cur_process_user_100ns.iter().any(|(pid, user)| {
+        prev_process_user_100ns
+            .get(pid)
+            // A pid with no baseline is new this tick; we cannot rule it out.
+            .is_none_or(|prev| user.saturating_sub(*prev) >= need)
+    })
+}
+
+/// Every descendant of `root` in a parent→children adjacency map, including
+/// `root` itself.
+///
+/// **The visited set is load-bearing, not tidiness.** Windows recycles PIDs, so
+/// a Toolhelp parent-pid graph can contain a cycle — a recycled number becoming
+/// its own ancestor. Without it this walk never terminates and the output grows
+/// without bound (#709).
+pub(crate) fn descendants_of(
+    children: &std::collections::HashMap<u32, Vec<u32>>,
+    root: u32,
+) -> Vec<u32> {
+    let mut seen = std::collections::HashSet::from([root]);
+    let mut stack = vec![root];
+    let mut out = vec![root];
+    while let Some(cur) = stack.pop() {
+        let Some(kids) = children.get(&cur) else {
+            continue;
+        };
+        for &kid in kids {
+            if seen.insert(kid) {
+                out.push(kid);
+                stack.push(kid);
+            }
+        }
+    }
+    out
+}
+
 // ─── Pure decision core ────────────────────────────────────────────────
 
 /// One observation window's measurement, fed into [`WedgeDetector::observe`].
@@ -385,7 +463,7 @@ fn emit_wedge_warning(cfg: &WedgeWatchdogCfg, tick: &win::SampledTick, streak_wa
 
 #[cfg(windows)]
 mod win {
-    use super::{Duration, Sample};
+    use super::{Duration, Sample, GATE_USER_PCT_THRESHOLD};
     use std::collections::{HashMap, HashSet};
     use std::time::Instant;
 
@@ -395,8 +473,8 @@ mod win {
         PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows::Win32::System::Threading::{
-        GetProcessIoCounters, GetThreadTimes, OpenProcess, OpenThread, IO_COUNTERS,
-        PROCESS_QUERY_LIMITED_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
+        GetProcessIoCounters, GetProcessTimes, GetThreadTimes, OpenProcess, OpenThread,
+        IO_COUNTERS, PROCESS_QUERY_LIMITED_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION,
     };
 
     /// One tick's worth of raw measurement, carrying enough identity (which
@@ -415,6 +493,10 @@ mod win {
     pub(super) struct ThreadIoSampler {
         prev_thread_user_100ns: HashMap<(u32, u32), u64>,
         prev_io_write_bytes: HashMap<u32, u64>,
+        /// Per-process user time, for the #709 gate. Cheap to maintain — one
+        /// `GetProcessTimes` per subtree pid — and it is what lets a healthy
+        /// tick skip the host-wide thread enumeration entirely.
+        prev_process_user_100ns: HashMap<u32, u64>,
         prev_at: Option<Instant>,
     }
 
@@ -423,6 +505,7 @@ mod win {
             Self {
                 prev_thread_user_100ns: HashMap::new(),
                 prev_io_write_bytes: HashMap::new(),
+                prev_process_user_100ns: HashMap::new(),
                 prev_at: None,
             }
         }
@@ -431,10 +514,46 @@ mod win {
         /// first call (no baseline for deltas yet) or when no thread in the
         /// subtree has a computable delta this tick (e.g. the subtree
         /// vanished, or every thread present is new since the last tick).
+        ///
+        /// Since #709 a tick whose subtree is provably cool at the *process*
+        /// level short-circuits before the host-wide thread enumeration and
+        /// reports an explicitly healthy sample. It reports rather than
+        /// returns `None` because the caller treats `None` as "no
+        /// observation", which would leave a partial wedge streak standing
+        /// across an idle stretch.
         pub(super) fn tick(&mut self, root_pid: u32) -> Option<SampledTick> {
             let now = Instant::now();
             let subtree = subtree_pids(root_pid);
-            let thread_ids = threads_for_pids(&subtree);
+
+            // #709 gate: the detection signature is "one *thread* at >=90% of a
+            // core". A thread's user time can never exceed its process's, so if
+            // no process in the subtree burned that much user time this window,
+            // no thread in it did either — and the expensive per-thread walk
+            // cannot change the answer.
+            //
+            // That walk is the costliest thing the watchdog does: a
+            // `TH32CS_SNAPTHREAD` snapshot enumerates **every thread on the
+            // host** before being filtered down to the subtree, then opens each
+            // surviving thread. Skipping it on a healthy session drops the
+            // steady-state cost to a handful of `GetProcessTimes` calls.
+            //
+            // Safe by construction: the gate can only skip work when the
+            // process-level total already rules out a wedge, so it cannot
+            // produce a false negative.
+            let wall_delta = self.prev_at.map(|prev| now.saturating_duration_since(prev));
+            let cur_process_user = process_user_times(&subtree);
+            let hot_enough = super::subtree_could_hide_a_hot_thread(
+                &self.prev_process_user_100ns,
+                &cur_process_user,
+                wall_delta,
+                GATE_USER_PCT_THRESHOLD,
+            );
+
+            let thread_ids = if hot_enough {
+                threads_for_pids(&subtree)
+            } else {
+                Vec::new()
+            };
 
             let mut cur_thread_user: HashMap<(u32, u32), u64> = HashMap::new();
             // (pid, tid, delta_100ns) of the single hottest thread this tick.
@@ -459,6 +578,37 @@ mod win {
                 if let Some(bytes) = process_io_write_bytes(*pid) {
                     cur_io_write.insert(*pid, bytes);
                 }
+            }
+
+            // A gated-out tick must still be *reported* as healthy, not
+            // swallowed. `run_watchdog_loop` does `let Some(tick) = … else
+            // { continue }`, so returning `None` here would leave the
+            // detector's streak untouched — eight hot windows followed by an
+            // idle stretch and one more hot window would reach `Wedged`
+            // without nine consecutive qualifying windows. The gate proved
+            // no thread is hot, so say exactly that.
+            if !hot_enough {
+                // `None` on the very first tick, as before — there is no
+                // baseline to measure a window against.
+                let result = self.prev_at.map(|prev_at| SampledTick {
+                    sample: Sample {
+                        hottest_thread_user_delta: Duration::ZERO,
+                        wall_delta: now.saturating_duration_since(prev_at),
+                        io_write_delta: 0,
+                    },
+                    hot_pid: root_pid,
+                    hot_tid: 0,
+                });
+                // The per-thread map goes stale while gated, so drop it. The
+                // first armed tick after a quiet stretch re-establishes a
+                // baseline and reports nothing, costing one extra window of
+                // detection latency (90 s -> 100 s, still inside the issue's
+                // 60-120 s acceptance band).
+                self.prev_thread_user_100ns.clear();
+                self.prev_io_write_bytes = cur_io_write;
+                self.prev_process_user_100ns = cur_process_user;
+                self.prev_at = Some(now);
+                return result;
             }
 
             let result = match (self.prev_at, hottest) {
@@ -491,6 +641,7 @@ mod win {
 
             self.prev_thread_user_100ns = cur_thread_user;
             self.prev_io_write_bytes = cur_io_write;
+            self.prev_process_user_100ns = cur_process_user;
             self.prev_at = Some(now);
             result
         }
@@ -537,17 +688,7 @@ mod win {
             return vec![root_pid];
         }
 
-        let mut stack = vec![root_pid];
-        let mut out = vec![root_pid];
-        while let Some(cur) = stack.pop() {
-            if let Some(kids) = children.get(&cur) {
-                for &k in kids {
-                    out.push(k);
-                    stack.push(k);
-                }
-            }
-        }
-        out
+        super::descendants_of(&children, root_pid)
     }
 
     /// Every `(pid, tid)` in `pids` via a single system-wide
@@ -601,6 +742,40 @@ mod win {
         let _ = unsafe { CloseHandle(handle) };
         result.ok()?;
         Some(filetime_to_u64(user))
+    }
+
+    /// User-mode CPU time for each pid, in 100 ns ticks (#709).
+    ///
+    /// One `OpenProcess` + `GetProcessTimes` per pid — microseconds each, and
+    /// bounded by the subtree rather than by the host. This is the cheap
+    /// measurement that lets a healthy tick skip `threads_for_pids`, whose
+    /// `TH32CS_SNAPTHREAD` snapshot enumerates every thread on the machine.
+    /// Pids that cannot be opened are simply absent; the caller fails open.
+    fn process_user_times(pids: &[u32]) -> HashMap<u32, u64> {
+        let mut out = HashMap::with_capacity(pids.len());
+        for &pid in pids {
+            // SAFETY: `OpenProcess` with a valid access mask and pid; failure
+            // returns `Err` and the pid is skipped.
+            let Ok(handle) =
+                (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+            else {
+                continue;
+            };
+            let mut creation = FILETIME::default();
+            let mut exit = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            // SAFETY: all four out-pointers are stack-allocated `FILETIME`
+            // values valid for the duration of the call.
+            let result = unsafe {
+                GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user)
+            };
+            let _ = unsafe { CloseHandle(handle) };
+            if result.is_ok() {
+                out.insert(pid, filetime_to_u64(user));
+            }
+        }
+        out
     }
 
     /// IO write-transfer byte count for one process — `None` if it has
@@ -661,6 +836,203 @@ mod win {
             let second = sampler.tick(self_pid);
             assert!(second.is_some(), "second tick should find a baseline");
         }
+    }
+}
+
+/// #709 — the two pure cores: the cheap gate, and the cycle-safe walk.
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    const WINDOW: Duration = Duration::from_secs(10);
+
+    /// 10 s window in 100 ns ticks — one full core for the whole window.
+    const ONE_CORE: u64 = 100_000_000;
+
+    fn map(pairs: &[(u32, u64)]) -> HashMap<u32, u64> {
+        pairs.iter().copied().collect()
+    }
+
+    #[test]
+    fn an_idle_subtree_does_not_arm_the_thread_walk() {
+        // Every process used ~1% of a core. No thread inside them can be at
+        // 90%, so the host-wide enumeration is pure waste.
+        let prev = map(&[(10, 0), (11, 0), (12, 0)]);
+        let cur = map(&[
+            (10, ONE_CORE / 100),
+            (11, ONE_CORE / 100),
+            (12, ONE_CORE / 100),
+        ]);
+        assert!(!subtree_could_hide_a_hot_thread(
+            &prev,
+            &cur,
+            Some(WINDOW),
+            GATE_USER_PCT_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn a_pinned_process_arms_the_thread_walk() {
+        let prev = map(&[(10, 0), (11, 0)]);
+        let cur = map(&[(10, ONE_CORE / 100), (11, ONE_CORE)]);
+        assert!(subtree_could_hide_a_hot_thread(
+            &prev,
+            &cur,
+            Some(WINDOW),
+            GATE_USER_PCT_THRESHOLD
+        ));
+    }
+
+    /// The gate must never be the reason a real wedge goes unseen. The
+    /// detector's own threshold is 90% of a core; the gate arms below that, so
+    /// a process sitting exactly at the detection threshold always gets
+    /// measured.
+    #[test]
+    fn the_gate_arms_below_the_detectors_own_threshold() {
+        assert!(
+            GATE_USER_PCT_THRESHOLD < DEFAULT_USER_PCT_THRESHOLD,
+            "gate {GATE_USER_PCT_THRESHOLD} must sit below detector \
+             {DEFAULT_USER_PCT_THRESHOLD} or it could mask a wedge"
+        );
+        let prev = map(&[(10, 0)]);
+        let at_detector_threshold =
+            map(&[(10, (ONE_CORE as f64 * DEFAULT_USER_PCT_THRESHOLD) as u64)]);
+        assert!(subtree_could_hide_a_hot_thread(
+            &prev,
+            &at_detector_threshold,
+            Some(WINDOW),
+            GATE_USER_PCT_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn the_gate_fails_open_when_it_cannot_answer() {
+        let populated = map(&[(10, ONE_CORE)]);
+        // No wall delta yet (first tick).
+        assert!(subtree_could_hide_a_hot_thread(
+            &populated,
+            &populated,
+            None,
+            GATE_USER_PCT_THRESHOLD
+        ));
+        // No baseline.
+        assert!(subtree_could_hide_a_hot_thread(
+            &HashMap::new(),
+            &populated,
+            Some(WINDOW),
+            GATE_USER_PCT_THRESHOLD
+        ));
+        // Nothing readable this tick.
+        assert!(subtree_could_hide_a_hot_thread(
+            &populated,
+            &HashMap::new(),
+            Some(WINDOW),
+            GATE_USER_PCT_THRESHOLD
+        ));
+        // Zero-width window — a division that would otherwise be meaningless.
+        assert!(subtree_could_hide_a_hot_thread(
+            &populated,
+            &populated,
+            Some(Duration::ZERO),
+            GATE_USER_PCT_THRESHOLD
+        ));
+    }
+
+    /// A pid seen for the first time this tick has no baseline, so its delta
+    /// is unknowable — it must arm the walk rather than be treated as quiet.
+    #[test]
+    fn a_process_new_this_tick_arms_the_walk() {
+        let prev = map(&[(10, 0)]);
+        let cur = map(&[(10, 0), (99, 0)]);
+        assert!(subtree_could_hide_a_hot_thread(
+            &prev,
+            &cur,
+            Some(WINDOW),
+            GATE_USER_PCT_THRESHOLD
+        ));
+    }
+
+    /// A gated-out window must reach the detector as an explicit *healthy*
+    /// observation, not as "no observation".
+    ///
+    /// This pins the regression the gate nearly introduced. The loop does
+    /// `let Some(tick) = sampler.tick(..) else { continue }`, so if a cool
+    /// window returned `None` the streak would simply not advance — and would
+    /// not reset either. Eight hot windows, an idle stretch of any length,
+    /// then one more hot window would reach `Wedged` on nine *non-consecutive*
+    /// windows, which is exactly what the streak exists to prevent.
+    #[test]
+    fn an_idle_stretch_between_hot_windows_must_break_the_streak() {
+        let window = Duration::from_secs(10);
+        let hot = Sample {
+            hottest_thread_user_delta: Duration::from_millis(9_500),
+            wall_delta: window,
+            io_write_delta: 0,
+        };
+        // What the gated path now emits.
+        let gated_cool = Sample {
+            hottest_thread_user_delta: Duration::ZERO,
+            wall_delta: window,
+            io_write_delta: 0,
+        };
+
+        let mut detector = WedgeDetector::new(WedgeDetectorCfg::default());
+        for _ in 0..(DEFAULT_REQUIRED_STREAK - 1) {
+            detector.observe(hot);
+        }
+        assert!(matches!(detector.observe(gated_cool), WedgeState::Healthy));
+        assert!(
+            matches!(detector.observe(hot), WedgeState::Suspect { streak: 1 }),
+            "a cool window must restart the streak from scratch"
+        );
+    }
+
+    // ─── descendants_of ────────────────────────────────────────────────
+
+    fn tree(pairs: &[(u32, &[u32])]) -> HashMap<u32, Vec<u32>> {
+        pairs.iter().map(|(p, k)| (*p, k.to_vec())).collect()
+    }
+
+    #[test]
+    fn a_plain_tree_yields_every_descendant_once() {
+        let children = tree(&[(1, &[2, 3]), (2, &[4]), (3, &[5])]);
+        let mut got = descendants_of(&children, 1);
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_root_with_no_children_is_just_itself() {
+        assert_eq!(descendants_of(&HashMap::new(), 42), vec![42]);
+    }
+
+    /// The regression this walk's visited set exists for. Windows recycles
+    /// PIDs, so a Toolhelp parent-pid graph can name a descendant as its own
+    /// ancestor. Before #709 this looped forever, growing the output vector
+    /// until the process died — a hang, not a wrong answer.
+    #[test]
+    fn a_pid_reuse_cycle_terminates_instead_of_hanging() {
+        let children = tree(&[(1, &[2]), (2, &[3]), (3, &[1])]);
+        let mut got = descendants_of(&children, 1);
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 3], "each pid must appear exactly once");
+    }
+
+    #[test]
+    fn a_self_parented_pid_terminates() {
+        let children = tree(&[(7, &[7])]);
+        assert_eq!(descendants_of(&children, 7), vec![7]);
+    }
+
+    /// A diamond cannot occur in a real parent-pid graph (each pid has one
+    /// parent), but the walk must not double-count if the snapshot is torn.
+    #[test]
+    fn a_diamond_does_not_double_count() {
+        let children = tree(&[(1, &[2, 3]), (2, &[4]), (3, &[4])]);
+        let mut got = descendants_of(&children, 1);
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2, 3, 4]);
     }
 }
 
