@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::io_helpers::read_json_file;
 use super::paths::sessions_dir;
@@ -242,6 +242,13 @@ impl ProcSampler {
             ProcessRefreshKind::nothing()
                 .with_cpu()
                 .with_memory()
+                // #673 Appendix A: `command_from_process` reads `cmd()`, which
+                // this refresh never populated. The originator cache masked it,
+                // so only a `clud.exe` root with no originator tag showed the
+                // bug — its `command` silently degraded to `name()`.
+                // `OnlyIfNotSet` fetches each process's command line once and
+                // then leaves it alone, so the 2 s tick does not re-read it.
+                .with_cmd(UpdateKind::OnlyIfNotSet)
                 .without_tasks(),
         );
         self.refresh_originator_cache_if_due();
