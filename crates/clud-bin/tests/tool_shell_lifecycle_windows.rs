@@ -138,6 +138,45 @@ fn live_tracker_reaps_direct_client_and_spares_nested_shell() {
 
     clud::process_tree::kill_tree(nested_pid);
     wait_for_exit(nested_pid);
+
+    // #673 Phase 5: reaping used to leave no session-level trace at all, which
+    // is how #651 could be closed as fixed while the same symptom kept growing.
+    // A session that reaped and spared real processes must be able to say so.
+    let summary = tracker.finish_and_report(true);
+    assert!(
+        !summary.is_empty(),
+        "a session that reaped a real process must report it"
+    );
+    let census = summary.join("\n");
+    assert!(
+        census.contains("shell exits") && census.contains("reaped"),
+        "both reconciliation identities must appear in the summary: {census}"
+    );
+    assert!(
+        summary.iter().any(|line| line.contains("peak_known=")),
+        "--verbose must add the Phase 0 measurement series: {census}"
+    );
+
+    // The log path is reported, and if the host has a state dir the file is
+    // there with one JSON object per mutation.
+    if let Some(path) = summary
+        .iter()
+        .find_map(|line| line.strip_prefix("[clud] reaper log: "))
+    {
+        let body = std::fs::read_to_string(path).expect("flushed reap log");
+        let mut actions = Vec::new();
+        for line in body.lines() {
+            let event: serde_json::Value =
+                serde_json::from_str(line).expect("each line is one JSON object");
+            assert!(event["ts_ms"].is_number());
+            assert!(event["reason"].is_string());
+            actions.push(event["action"].as_str().unwrap_or_default().to_string());
+        }
+        assert!(
+            actions.iter().any(|action| action == "reaped"),
+            "the leaked client's kill must appear in the log: {body}"
+        );
+    }
 }
 
 #[test]

@@ -722,6 +722,16 @@ fn main() {
                     ));
                 }
             }
+            // #673 Phase 5: reaping is destructive and was silent, which is
+            // how #651 could be closed while the same symptom kept growing.
+            // Suppressed entirely when nothing was tracked.
+            for line in tracker.finish_and_report(args.verbose) {
+                if args.quiet_orphans {
+                    verbose_log::log(format_args!("{line}"));
+                } else {
+                    eprintln!("{line}");
+                }
+            }
         }
         let opts = orphan_reaper::ReapOpts {
             keep: args.keep_orphans,
