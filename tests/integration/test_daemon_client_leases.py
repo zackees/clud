@@ -10,7 +10,7 @@ from pathlib import Path
 import psutil
 import pytest
 
-from ._daemon_helpers import kill_process, managed_env
+from ._daemon_helpers import kill_process_only, managed_env
 
 pytestmark = pytest.mark.integration
 
@@ -71,15 +71,28 @@ def _launch_direct_client(
     )
 
 
-def _kill_client_tree(proc: subprocess.Popen[str]) -> None:
+def _kill_client_tree(proc: subprocess.Popen[str], daemon_pid: int) -> None:
+    """Forcibly kill the client and its backend children — but never the daemon.
+
+    The daemon is spawned *by* the client, so on Windows it sits inside the
+    client's process tree. `taskkill /T` therefore takes it down too, and this
+    test then waits forever for a prune event from a daemon that no longer
+    exists. That is what the tree-killing version of this helper did: the daemon
+    log simply stopped after `client_lease_acquired`, with no shutdown event and
+    no prune tick, which reads exactly like a product bug in the sweep.
+
+    So: kill each process individually (`/F` without `/T`) and skip the daemon.
+    Pruning the abandoned lease is precisely what we are here to observe.
+    """
     try:
         descendants = [
             child.pid
             for child in psutil.Process(proc.pid).children(recursive=True)
+            if child.pid != daemon_pid
         ]
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         descendants = []
-    kill_process(proc.pid)
+    kill_process_only(proc.pid)
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
@@ -87,7 +100,7 @@ def _kill_client_tree(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=5)
     for pid in reversed(descendants):
         if psutil.pid_exists(pid):
-            kill_process(pid)
+            kill_process_only(pid)
 
 
 def test_direct_client_holds_one_lease_and_releases_on_normal_exit(
@@ -124,9 +137,10 @@ def test_forcibly_killed_client_is_pruned_without_release_rpc(
     state_dir = tmp_path / "daemon-state"
     env = managed_env(mock_env, state_dir)
     proc = _launch_direct_client(clud_binary, env, sleep_ms=30_000)
-    _wait_for_lease_event(state_dir, "client_lease_acquired", proc.pid)
+    acquired = _wait_for_lease_event(state_dir, "client_lease_acquired", proc.pid)
 
-    _kill_client_tree(proc)
+    daemon_pid = acquired["daemon_pid"]
+    _kill_client_tree(proc, daemon_pid)
     pruned = _wait_for_lease_event(
         state_dir,
         "client_lease_pruned",
