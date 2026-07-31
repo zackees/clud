@@ -47,10 +47,16 @@ Two different jobs — reach for the right one:
 - the **currently-selected** group (the one this repo would reuse) is never removed, at any age;
 - a group whose **source worktree is gone** is eligible immediately;
 - otherwise a group is eligible once it is **≥ 48 h old** (these builds are ephemeral — the layer cache makes a later rebuild cheap, so bounded disk wins over preserving old state).
+- **crowded prefix accelerates staleness**: once ≥ 3 managed groups exist, unreferenced ones become eligible at **12 h** instead of 48. Many generations under one clud tag prefix is evidence of active development churning caches. This never evicts the currently-selected group, and a group a container is still pinning keeps the full 48 h — killing a container you are using to save disk is the right trade at 48 h, not at 12.
 
 Discovery is by **label**, not by name: every managed image/container/volume carries `com.clud.docker-build.*` labels (stack, project-key, project-root, role), so a container someone renamed by hand still resolves to its group and an unrelated volume never gets swept.
 
-**Named-volume cache ≠ BuildKit cache.** `clean` / `gc` only touch the *named volumes* (`target/`, `CARGO_HOME`, `RUSTUP_HOME`, `cargo-chef`, `/root/.soldr`) plus their containers/images. Docker's **BuildKit layer cache** is a separate store that neither command prunes — it is what makes a post-`clean` rebuild still fast, and it is reclaimed only by Docker's own `docker builder prune`. So "I ran `clean` and the rebuild was still quick" is expected, not a bug.
+**Named-volume cache ≠ BuildKit cache.** They are separate stores with separate lifecycles, and `gc` sweeps both — reporting them separately so you can tell which reclaimed what.
+
+- **Named volumes** (`target/`, `CARGO_HOME`, `RUSTUP_HOME`, `cargo-chef`, `/root/.soldr`) plus their containers/images: removed per the group policy above. `clean` touches only *this project's*.
+- **BuildKit layer cache**: pruned by `gc` at the same ≥ 48 h threshold, but **only inside clud's own builder** (`clud-docker-build-soldr`). Builds run through that builder precisely so the cache lands in a namespace we can prune without deleting the build cache of anything else on your machine — which is what a bare `docker builder prune` would do. A Docker without buildx falls back to plain `docker build` and simply has no prunable namespace.
+
+So "I ran `clean` and the rebuild was still quick" is expected, not a bug: `clean` never touches BuildKit.
 
 ## The one rule that makes this work
 
