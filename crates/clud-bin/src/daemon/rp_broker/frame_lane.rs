@@ -18,6 +18,7 @@ use running_process::broker::protocol::{encode_framed, Frame};
 use running_process::broker::server::local_socket_name;
 use running_process::NativeProcess;
 
+use super::super::client_leases::ClientLeaseRegistry;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
 use super::endpoint::{daemon_identity_path, endpoint_for_state_dir};
@@ -62,6 +63,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: Arc<AtomicBool>,
     proc_sampler: ProcSamplerHandle,
+    client_leases: ClientLeaseRegistry,
 ) -> Option<FrameLane> {
     if running_process_disabled() {
         return None;
@@ -87,7 +89,14 @@ pub(in crate::daemon) fn spawn_frame_lane(
             eprintln!("[clud] note: running-process cache manifest publish skipped: {err}");
         }
     }
-    match start_frame_lane(state_dir, workers, gc_tx, shutdown_requested, proc_sampler) {
+    match start_frame_lane(
+        state_dir,
+        workers,
+        gc_tx,
+        shutdown_requested,
+        proc_sampler,
+        client_leases,
+    ) {
         Ok(lane) => Some(lane),
         Err(err) => {
             eprintln!("[clud] note: running-process frame lane unavailable: {err}");
@@ -156,6 +165,7 @@ pub(super) fn start_frame_lane(
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: Arc<AtomicBool>,
     proc_sampler: ProcSamplerHandle,
+    client_leases: ClientLeaseRegistry,
 ) -> io::Result<FrameLane> {
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
@@ -198,15 +208,19 @@ pub(super) fn start_frame_lane(
                     let gc_tx = gc_tx.clone();
                     let shutdown_requested = Arc::clone(&shutdown_requested);
                     let proc_sampler = proc_sampler.clone();
+                    let client_leases = client_leases.clone();
                     thread::spawn(move || {
                         let mut stream = stream;
                         let _ = serve_connection(
                             &mut stream,
                             &mux,
-                            &state_dir,
-                            &workers,
-                            gc_tx.as_ref(),
-                            Some(&proc_sampler),
+                            &ConnectionServices {
+                                state_dir: &state_dir,
+                                workers: &workers,
+                                gc_tx: gc_tx.as_ref(),
+                                proc_sampler: Some(&proc_sampler),
+                                client_leases: &client_leases,
+                            },
                             &shutdown_requested,
                         );
                     });
@@ -233,13 +247,24 @@ pub(super) fn start_frame_lane(
 ///
 /// Canonical accept-loop shape from running-process
 /// `tests/broker/backend_sdk.rs::serve_connection` / `docs/INTEGRATE.md`.
+/// The daemon-owned services one connection may dispatch against.
+///
+/// Bundled rather than passed as loose parameters: adding the lease registry
+/// (#643) took `serve_connection` to eight arguments, and these five travel
+/// together to every request handler anyway. A struct also means the next
+/// service to land does not re-open this question.
+struct ConnectionServices<'a> {
+    state_dir: &'a Path,
+    workers: &'a Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<&'a mpsc::Sender<RegistryMsg>>,
+    proc_sampler: Option<&'a ProcSamplerHandle>,
+    client_leases: &'a ClientLeaseRegistry,
+}
+
 fn serve_connection<S, F>(
     stream: &mut S,
     mux: &BackendEndpointMux<F>,
-    state_dir: &Path,
-    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
-    gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
-    proc_sampler: Option<&ProcSamplerHandle>,
+    services: &ConnectionServices<'_>,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> io::Result<()>
 where
@@ -270,8 +295,14 @@ where
             }
             MuxPoll::Payload { frame, consumed } => {
                 buf.drain(..consumed);
-                let response =
-                    answer_payload_frame(&frame, state_dir, workers, gc_tx, proc_sampler);
+                let response = answer_payload_frame(
+                    &frame,
+                    services.state_dir,
+                    services.workers,
+                    services.gc_tx,
+                    services.proc_sampler,
+                    services.client_leases,
+                );
                 let is_shutdown = response.is_shutdown;
                 let wire = encode_framed(&Frame::response_to(&frame, response.payload))
                     .map_err(io::Error::other)?;

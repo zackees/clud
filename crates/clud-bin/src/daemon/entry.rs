@@ -823,7 +823,9 @@ pub fn run_centralized_session(args: &Args, plan: &LaunchPlan, interrupted: &Ato
         | DaemonResponse::ShutdownAck { .. }
         | DaemonResponse::ReapOrphansAck { .. }
         | DaemonResponse::Metrics { .. }
-        | DaemonResponse::ProcSnapshot { .. } => 1,
+        | DaemonResponse::ProcSnapshot { .. }
+        | DaemonResponse::ClientLeaseAcquired { .. }
+        | DaemonResponse::ClientLeaseReleased { .. } => 1,
     }
 }
 

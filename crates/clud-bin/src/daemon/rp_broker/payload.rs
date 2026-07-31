@@ -5,6 +5,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use running_process::broker::protocol::Frame;
 use running_process::NativeProcess;
 
+use super::super::client_leases::ClientLeaseRegistry;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
 use super::super::server::dispatch_daemon_request_with_sampler;
@@ -28,6 +29,7 @@ pub(super) fn answer_payload_frame(
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     proc_sampler: Option<&ProcSamplerHandle>,
+    client_leases: &ClientLeaseRegistry,
 ) -> PayloadAnswer {
     let envelope_request_id = format!("rp-{}", frame.request_id);
     let request = decode_daemon_request(&WireFrame {
@@ -35,9 +37,14 @@ pub(super) fn answer_payload_frame(
         payload: frame.payload.clone(),
     });
     let response = match request {
-        Ok(request) => {
-            dispatch_daemon_request_with_sampler(state_dir, workers, gc_tx, proc_sampler, request)
-        }
+        Ok(request) => dispatch_daemon_request_with_sampler(
+            state_dir,
+            workers,
+            gc_tx,
+            proc_sampler,
+            client_leases,
+            request,
+        ),
         Err(err) => DaemonResponse::Error {
             message: format!("malformed clud frame payload: {err}"),
         },

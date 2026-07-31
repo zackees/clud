@@ -20,6 +20,8 @@ message ClientToDaemon {
     ReapOrphansRequest reap_orphans = 9;
     MetricsRequest metrics = 10;
     ProcSnapshotRequest proc_snapshot = 11;
+    AcquireClientLeaseRequest acquire_client_lease = 12;
+    ReleaseClientLeaseRequest release_client_lease = 13;
   }
   string request_id = 100;
 }
@@ -38,6 +40,8 @@ message DaemonToClient {
     ReapOrphansAckResponse reap_orphans_ack = 10;
     MetricsResponse metrics = 11;
     ProcSnapshotResponse proc_snapshot = 12;
+    ClientLeaseAcquiredResponse client_lease_acquired = 13;
+    ClientLeaseReleasedResponse client_lease_released = 14;
   }
   string request_id = 100;
 }
@@ -105,6 +109,27 @@ message MetricsRequest {}
 
 message ProcSnapshotRequest {
   uint64 include_dead_since_ms = 1;
+}
+
+message ProcessIdentity {
+  uint32 pid = 1;
+  uint64 start_time = 2;
+}
+
+message AcquireClientLeaseRequest {
+  ProcessIdentity identity = 1;
+}
+
+message ReleaseClientLeaseRequest {
+  ProcessIdentity identity = 1;
+}
+
+message ClientLeaseAcquiredResponse {
+  uint32 lease_count = 1;
+}
+
+message ClientLeaseReleasedResponse {
+  uint32 lease_count = 1;
 }
 
 message MetricsResponse {

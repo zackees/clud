@@ -12,6 +12,7 @@ use super::{WireError, WireFrame, CLUD_JSON_PAYLOAD_PROTOCOL, CLUD_PROST_PAYLOAD
 use crate::daemon::types::{
     DaemonRequest, DaemonResponse, GcOp, GcReply, ProcTreeSnapshot, WorkerLaunchSpec,
 };
+use crate::process_identity::ProcessIdentity;
 
 pub(in crate::daemon) fn encode_daemon_request_prost(
     request: &DaemonRequest,
@@ -93,6 +94,16 @@ fn daemon_request_to_proto(
         } => Request::ProcSnapshot(proto::ProcSnapshotRequest {
             include_dead_since_ms: *include_dead_since_ms,
         }),
+        DaemonRequest::AcquireClientLease { identity } => {
+            Request::AcquireClientLease(proto::AcquireClientLeaseRequest {
+                identity: Some(process_identity_to_proto(*identity)),
+            })
+        }
+        DaemonRequest::ReleaseClientLease { identity } => {
+            Request::ReleaseClientLease(proto::ReleaseClientLeaseRequest {
+                identity: Some(process_identity_to_proto(*identity)),
+            })
+        }
     };
     Ok(proto::ClientToDaemon {
         request: Some(request),
@@ -136,6 +147,20 @@ fn daemon_request_from_proto(proto: proto::ClientToDaemon) -> Result<DaemonReque
         Request::Metrics(_) => Ok(DaemonRequest::Metrics),
         Request::ProcSnapshot(request) => Ok(DaemonRequest::ProcSnapshot {
             include_dead_since_ms: request.include_dead_since_ms,
+        }),
+        Request::AcquireClientLease(request) => Ok(DaemonRequest::AcquireClientLease {
+            identity: process_identity_from_proto(
+                request
+                    .identity
+                    .ok_or(WireError::MissingPayload("client process identity"))?,
+            ),
+        }),
+        Request::ReleaseClientLease(request) => Ok(DaemonRequest::ReleaseClientLease {
+            identity: process_identity_from_proto(
+                request
+                    .identity
+                    .ok_or(WireError::MissingPayload("client process identity"))?,
+            ),
         }),
     }
 }
@@ -203,6 +228,16 @@ fn daemon_response_to_proto(
                 snapshot_json: to_json_vec(snapshot)?,
             })
         }
+        DaemonResponse::ClientLeaseAcquired { lease_count } => {
+            Response::ClientLeaseAcquired(proto::ClientLeaseAcquiredResponse {
+                lease_count: *lease_count as u32,
+            })
+        }
+        DaemonResponse::ClientLeaseReleased { lease_count } => {
+            Response::ClientLeaseReleased(proto::ClientLeaseReleasedResponse {
+                lease_count: *lease_count as u32,
+            })
+        }
         DaemonResponse::Error { message } => Response::Error(proto::ErrorResponse {
             message: message.clone(),
         }),
@@ -252,8 +287,25 @@ fn daemon_response_from_proto(proto: proto::DaemonToClient) -> Result<DaemonResp
         Response::ProcSnapshot(snapshot) => Ok(DaemonResponse::ProcSnapshot {
             snapshot: from_json_slice::<ProcTreeSnapshot>(&snapshot.snapshot_json)?,
         }),
+        Response::ClientLeaseAcquired(ack) => Ok(DaemonResponse::ClientLeaseAcquired {
+            lease_count: ack.lease_count as usize,
+        }),
+        Response::ClientLeaseReleased(ack) => Ok(DaemonResponse::ClientLeaseReleased {
+            lease_count: ack.lease_count as usize,
+        }),
         Response::Error(error) => Ok(DaemonResponse::Error {
             message: error.message,
         }),
     }
+}
+
+fn process_identity_to_proto(identity: ProcessIdentity) -> proto::ProcessIdentity {
+    proto::ProcessIdentity {
+        pid: identity.pid,
+        start_time: identity.start_time,
+    }
+}
+
+fn process_identity_from_proto(identity: proto::ProcessIdentity) -> ProcessIdentity {
+    ProcessIdentity::new(identity.pid, identity.start_time)
 }

@@ -1,5 +1,6 @@
 mod attach;
 mod client;
+mod client_leases;
 mod commands;
 mod cpu_alert_publish;
 mod daemon_events;
@@ -28,9 +29,10 @@ mod worker_shared;
 
 pub use client::try_register_gc_watch;
 pub use client::{
-    daemon_client_metrics, ensure_daemon, gc_client_insert, gc_client_list,
-    gc_client_list_repo_visits, gc_client_purge, gc_client_reconcile, gc_client_record_repo_visit,
-    try_handoff_kill_to_daemon, try_request_orphan_reap, GcPurgeOutcome,
+    acquire_foreground_client_lease, daemon_client_metrics, ensure_daemon, gc_client_insert,
+    gc_client_list, gc_client_list_repo_visits, gc_client_purge, gc_client_reconcile,
+    gc_client_record_repo_visit, try_handoff_kill_to_daemon, try_request_orphan_reap,
+    ForegroundClientLease, GcPurgeOutcome,
 };
 pub use entry::{experimental_enabled, handle_special_command, run_centralized_session};
 pub use http::{

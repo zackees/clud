@@ -16,6 +16,7 @@ use crate::orphan_reaper;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
 use super::client::cleanup_stale_state;
+use super::client_leases::ClientLeaseRegistry;
 use super::daemon_events;
 use super::gc_service::{
     spawn_registry_worker_for_state, GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT,
@@ -178,6 +179,8 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     spawn_tool_installer();
 
     let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+    let client_leases = ClientLeaseRegistry::default();
+    let mut last_client_lease_prune = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let proc_sampler = if runtime_config.host_scans_enabled {
         daemon_events::log_event(state_dir, "proc_sampler_started", []);
@@ -201,6 +204,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         gc_tx.clone(),
         Arc::clone(&shutdown_requested),
         proc_sampler.clone(),
+        client_leases.clone(),
     );
 
     // Periodic orphan sweep. Catches CLUD-tagged descendants whose
@@ -234,6 +238,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let gc_tx = gc_tx.clone();
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 let proc_sampler = proc_sampler.clone();
+                let client_leases = client_leases.clone();
                 thread::spawn(move || {
                     let _activity_guard = activity_guard;
                     let _ = handle_daemon_connection(
@@ -243,6 +248,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                         gc_tx,
                         &shutdown_requested,
                         &proc_sampler,
+                        &client_leases,
                     );
                 });
             }
@@ -251,6 +257,20 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                     break;
                 }
                 let now = Instant::now();
+                if now.duration_since(last_client_lease_prune) >= Duration::from_secs(1) {
+                    for identity in client_leases.prune_dead() {
+                        daemon_events::log_event(
+                            state_dir,
+                            "client_lease_pruned",
+                            [
+                                ("client_pid", json!(identity.pid)),
+                                ("client_pid_start", json!(identity.start_time)),
+                                ("lease_count", json!(client_leases.len())),
+                            ],
+                        );
+                    }
+                    last_client_lease_prune = now;
+                }
                 let worker_count = workers.lock().expect("workers mutex poisoned").len();
                 if worker_count > 0 {
                     if let Some(activity) = &test_activity {
@@ -321,6 +341,7 @@ fn handle_daemon_connection(
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     shutdown_requested: &Arc<AtomicBool>,
     proc_sampler: &ProcSamplerHandle,
+    client_leases: &ClientLeaseRegistry,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -344,6 +365,7 @@ fn handle_daemon_connection(
         workers,
         gc_tx.as_ref(),
         Some(proc_sampler),
+        client_leases,
         request_id,
         request,
     );
@@ -382,7 +404,8 @@ pub(super) fn dispatch_daemon_request(
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     request: DaemonRequest,
 ) -> DaemonResponse {
-    dispatch_daemon_request_with_sampler(state_dir, workers, gc_tx, None, request)
+    let client_leases = ClientLeaseRegistry::default();
+    dispatch_daemon_request_with_sampler(state_dir, workers, gc_tx, None, &client_leases, request)
 }
 
 pub(super) fn dispatch_daemon_request_with_sampler(
@@ -390,10 +413,19 @@ pub(super) fn dispatch_daemon_request_with_sampler(
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     proc_sampler: Option<&ProcSamplerHandle>,
+    client_leases: &ClientLeaseRegistry,
     request: DaemonRequest,
 ) -> DaemonResponse {
     let request_id = daemon_events::request_id();
-    dispatch_daemon_request_with_id(state_dir, workers, gc_tx, proc_sampler, request_id, request)
+    dispatch_daemon_request_with_id(
+        state_dir,
+        workers,
+        gc_tx,
+        proc_sampler,
+        client_leases,
+        request_id,
+        request,
+    )
 }
 
 fn dispatch_daemon_request_with_id(
@@ -401,6 +433,7 @@ fn dispatch_daemon_request_with_id(
     workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
     gc_tx: Option<&mpsc::Sender<RegistryMsg>>,
     proc_sampler: Option<&ProcSamplerHandle>,
+    client_leases: &ClientLeaseRegistry,
     request_id: u64,
     request: DaemonRequest,
 ) -> DaemonResponse {
@@ -483,6 +516,36 @@ fn dispatch_daemon_request_with_id(
                 .snapshot(include_dead_since_ms);
             DaemonResponse::ProcSnapshot { snapshot }
         }
+        DaemonRequest::AcquireClientLease { identity } => match client_leases.acquire(identity) {
+            Ok(lease_count) => {
+                daemon_events::log_event(
+                    state_dir,
+                    "client_lease_acquired",
+                    [
+                        ("client_pid", json!(identity.pid)),
+                        ("client_pid_start", json!(identity.start_time)),
+                        ("lease_count", json!(lease_count)),
+                    ],
+                );
+                DaemonResponse::ClientLeaseAcquired { lease_count }
+            }
+            Err(message) => DaemonResponse::Error {
+                message: message.to_string(),
+            },
+        },
+        DaemonRequest::ReleaseClientLease { identity } => {
+            let lease_count = client_leases.release(identity);
+            daemon_events::log_event(
+                state_dir,
+                "client_lease_released",
+                [
+                    ("client_pid", json!(identity.pid)),
+                    ("client_pid_start", json!(identity.start_time)),
+                    ("lease_count", json!(lease_count)),
+                ],
+            );
+            DaemonResponse::ClientLeaseReleased { lease_count }
+        }
         DaemonRequest::Gc { payload } => {
             let reply = dispatch_gc_op(state_dir, gc_tx, request_id, payload);
             DaemonResponse::Gc { reply }
@@ -527,6 +590,8 @@ fn request_op(request: &DaemonRequest) -> &'static str {
         DaemonRequest::ReapOrphans => "reap_orphans",
         DaemonRequest::Metrics => "metrics",
         DaemonRequest::ProcSnapshot { .. } => "proc_snapshot",
+        DaemonRequest::AcquireClientLease { .. } => "acquire_client_lease",
+        DaemonRequest::ReleaseClientLease { .. } => "release_client_lease",
     }
 }
 
@@ -543,6 +608,8 @@ fn response_op(response: &DaemonResponse) -> &'static str {
         DaemonResponse::ReapOrphansAck { .. } => "reap_orphans_ack",
         DaemonResponse::Metrics { .. } => "metrics",
         DaemonResponse::ProcSnapshot { .. } => "proc_snapshot",
+        DaemonResponse::ClientLeaseAcquired { .. } => "client_lease_acquired",
+        DaemonResponse::ClientLeaseReleased { .. } => "client_lease_released",
         DaemonResponse::Error { .. } => "error",
     }
 }
@@ -1943,6 +2010,48 @@ mod tests {
                 assert_eq!(snapshot.sampler_pid, std::process::id());
             }
             other => panic!("expected ProcSnapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_lease_rpc_is_idempotent_for_one_process_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workers = Arc::new(Mutex::new(HashMap::<String, Arc<NativeProcess>>::new()));
+        let leases = ClientLeaseRegistry::default();
+        let identity = crate::process_identity::ProcessIdentity::new(
+            std::process::id(),
+            crate::process_identity::self_start_time(),
+        );
+
+        for expected_count in [1, 1] {
+            let response = dispatch_daemon_request_with_sampler(
+                tmp.path(),
+                &workers,
+                None,
+                None,
+                &leases,
+                DaemonRequest::AcquireClientLease { identity },
+            );
+            assert!(matches!(
+                response,
+                DaemonResponse::ClientLeaseAcquired { lease_count }
+                    if lease_count == expected_count
+            ));
+        }
+        for expected_count in [0, 0] {
+            let response = dispatch_daemon_request_with_sampler(
+                tmp.path(),
+                &workers,
+                None,
+                None,
+                &leases,
+                DaemonRequest::ReleaseClientLease { identity },
+            );
+            assert!(matches!(
+                response,
+                DaemonResponse::ClientLeaseReleased { lease_count }
+                    if lease_count == expected_count
+            ));
         }
     }
 

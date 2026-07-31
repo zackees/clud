@@ -269,6 +269,12 @@ pub(super) enum DaemonRequest {
         #[serde(default)]
         include_dead_since_ms: u64,
     },
+    AcquireClientLease {
+        identity: ProcessIdentity,
+    },
+    ReleaseClientLease {
+        identity: ProcessIdentity,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -315,6 +321,12 @@ pub(super) enum DaemonResponse {
     },
     ProcSnapshot {
         snapshot: ProcTreeSnapshot,
+    },
+    ClientLeaseAcquired {
+        lease_count: usize,
+    },
+    ClientLeaseReleased {
+        lease_count: usize,
     },
     Error {
         message: String,

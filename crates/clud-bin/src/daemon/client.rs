@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,6 +26,61 @@ use super::wire_prost::{
     encode_worker_client_line, DaemonWireFormat, WireError,
 };
 use crate::process_identity::ProcessIdentity;
+
+pub struct ForegroundClientLease {
+    state_dir: PathBuf,
+    identity: ProcessIdentity,
+    active: bool,
+}
+
+impl ForegroundClientLease {
+    pub fn release(mut self) {
+        self.release_best_effort();
+    }
+
+    fn release_best_effort(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _ = send_daemon_request(
+            &self.state_dir,
+            &DaemonRequest::ReleaseClientLease {
+                identity: self.identity,
+            },
+        );
+        self.active = false;
+    }
+}
+
+impl Drop for ForegroundClientLease {
+    fn drop(&mut self) {
+        self.release_best_effort();
+    }
+}
+
+pub fn acquire_foreground_client_lease(state_dir: &Path) -> io::Result<ForegroundClientLease> {
+    let identity = ProcessIdentity::new(
+        std::process::id(),
+        crate::process_identity::self_start_time(),
+    );
+    if !identity.has_start_time() {
+        return Err(io::Error::other(
+            "cannot acquire client lease without a PID start time",
+        ));
+    }
+    match send_daemon_request(state_dir, &DaemonRequest::AcquireClientLease { identity })? {
+        DaemonResponse::ClientLeaseAcquired { .. } => Ok(ForegroundClientLease {
+            state_dir: state_dir.to_path_buf(),
+            identity,
+            active: true,
+        }),
+        DaemonResponse::Error { message } => Err(io::Error::other(message)),
+        response => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected daemon response: {response:?}"),
+        )),
+    }
+}
 
 /// Idempotent best-effort daemon spawn (issue #135). Always called via
 /// `main.rs`; the session daemon is now an always-on background service.

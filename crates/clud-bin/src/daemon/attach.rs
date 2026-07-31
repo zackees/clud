@@ -122,7 +122,9 @@ pub(super) fn run_attach(session_id: &str, state_dir: &Path, interrupted: &Atomi
         | DaemonResponse::ShutdownAck { .. }
         | DaemonResponse::ReapOrphansAck { .. }
         | DaemonResponse::Metrics { .. }
-        | DaemonResponse::ProcSnapshot { .. } => 1,
+        | DaemonResponse::ProcSnapshot { .. }
+        | DaemonResponse::ClientLeaseAcquired { .. }
+        | DaemonResponse::ClientLeaseReleased { .. } => 1,
     }
 }
 

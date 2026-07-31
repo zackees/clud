@@ -379,6 +379,7 @@ fn main() {
     // the binary into a tempdir don't leave the daemon's `.old` exe
     // locked when tempdir cleanup runs. Never blocks a launch on
     // spawn failure.
+    let mut foreground_client_lease = None;
     if !args.no_daemon && !args.dry_run {
         if args.verbose {
             verbose_log::log("[clud] daemon: ensure running");
@@ -391,6 +392,14 @@ fn main() {
                         verbose_log::log(format_args!("[clud] daemon: unavailable: {e}"));
                     }
                 } else {
+                    if !daemon::experimental_enabled(&args) {
+                        match daemon::acquire_foreground_client_lease(&state_dir) {
+                            Ok(lease) => foreground_client_lease = Some(lease),
+                            Err(error) => {
+                                eprintln!("[clud] note: foreground lease unavailable: {error}");
+                            }
+                        }
+                    }
                     // Issue #183: record one row in the `repo_visits` table
                     // per (repo_root, current launch). Errors are non-fatal:
                     // failing to record a visit must never block a launch.
@@ -786,6 +795,9 @@ fn main() {
         ctrl_c_track::InvocationKind::Direct
     };
     flush_ctrl_c_exit_event(kind, exit_code);
+    if let Some(lease) = foreground_client_lease {
+        lease.release();
+    }
     std::process::exit(exit_code);
 }
 
