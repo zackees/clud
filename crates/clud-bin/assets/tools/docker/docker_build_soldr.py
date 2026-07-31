@@ -494,11 +494,19 @@ def _discover_managed_groups(selected_key: str) -> list[dict]:
     label = f"{LABEL_NS}.managed=true"
     # Containers first (their CreatedAt is the freshest signal of activity),
     # then volumes for groups that have no live container.
+    #
+    # Volumes are listed WITHOUT the label filter on purpose. Volumes created
+    # before labelling existed carry no labels at all, so a label-only query
+    # reports "0 managed groups" while the abandoned cache sets that motivated
+    # this feature sit on disk forever (observed: 20 legacy volumes / 4 groups,
+    # none labelled). `_parse_managed_line` requires the exact
+    # `clud-docker-build-soldr-` name prefix, which is itself an unambiguous
+    # clud marker, so this cannot pick up a third-party volume (e.g. the
+    # unrelated `soldr-perf-target` volume is not matched).
     for kind, args in (
         ("container", ["ps", "-a", "--filter", f"label={label}",
                        "--format", "{{.Labels}}\t{{.CreatedAt}}"]),
-        ("volume", ["volume", "ls", "--filter", f"label={label}",
-                    "--format", "{{.Name}}"]),
+        ("volume", ["volume", "ls", "--format", "{{.Name}}"]),
     ):
         out = _docker(*args, capture=True, check=False).stdout
         for line in out.splitlines():
@@ -514,6 +522,14 @@ def _discover_managed_groups(selected_key: str) -> list[dict]:
             if age is not None:
                 created[key] = min(created.get(key, age), age)
 
+    # A group discovered only through its volumes has no container timestamp.
+    # Without an age it would read as brand new and be kept forever — the exact
+    # failure mode for legacy, containerless cache sets. Fall back to the
+    # volumes' own CreatedAt (one batched inspect, not one call per volume).
+    missing_age = [key for key in keys if key not in created]
+    if missing_age:
+        created.update(_volume_created_epochs(missing_age))
+
     groups: list[dict] = []
     for key in sorted(keys):
         root = roots.get(key)
@@ -526,6 +542,36 @@ def _discover_managed_groups(selected_key: str) -> list[dict]:
             "is_selected": key == selected_key,
         })
     return groups
+
+
+def _volume_created_epochs(keys: list[str]) -> dict[str, float]:
+    """Oldest volume CreatedAt per project key, as a unix epoch.
+
+    One batched `docker volume inspect` (it accepts many names) rather than a
+    call per volume. Volumes whose timestamp cannot be parsed are skipped,
+    which leaves their group ageless and therefore kept — the safe direction.
+    """
+    wanted = set(keys)
+    names = [
+        name.strip()
+        for name in _docker("volume", "ls", "--format", "{{.Name}}",
+                            capture=True, check=False).stdout.splitlines()
+        if name.strip() and _parse_managed_line("volume", name.strip())[0] in wanted
+    ]
+    if not names:
+        return {}
+    out = _docker("volume", "inspect", *names,
+                  "--format", "{{.Name}}\t{{.CreatedAt}}",
+                  capture=True, check=False).stdout
+    oldest: dict[str, float] = {}
+    for line in out.splitlines():
+        name, _, created_at = line.strip().partition("\t")
+        key = _parse_managed_line("volume", name.strip())[0]
+        epoch = _parse_docker_created_at(created_at.strip())
+        if key is None or epoch is None:
+            continue
+        oldest[key] = min(oldest.get(key, epoch), epoch)
+    return oldest
 
 
 def _parse_managed_line(kind: str, line: str):
@@ -557,7 +603,9 @@ def _parse_docker_created_at(text: str):
     # Docker emits e.g. "2026-07-28 11:04:46 -0700 PDT"; drop the trailing tz
     # name which %z cannot parse.
     trimmed = text.rsplit(" ", 1)[0] if text.count(" ") >= 3 else text
-    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%dT%H:%M:%SZ"):
+    # `docker ps` emits "2026-07-28 11:04:46 -0700 PDT"; `docker volume
+    # inspect` emits RFC3339 ("...T11:04:46-07:00" or "...Z").
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"):
         try:
             return datetime.datetime.strptime(trimmed, fmt).timestamp()
         except ValueError:
@@ -572,10 +620,21 @@ def _remove_managed_group(key: str) -> None:
         capture=True, check=False).stdout.split()
     for cid in containers:
         _docker("rm", "-f", cid, check=False, capture=True)
-    volumes = _docker(
-        "volume", "ls", "-q", "--filter", f"label={LABEL_NS}.project-key={key}",
-        capture=True, check=False).stdout.split()
-    for vol in volumes:
+    # Union of labelled volumes and same-key volumes matched by name prefix:
+    # a legacy group predates labelling entirely, so a label-only removal would
+    # discover the group in `gc` and then silently delete nothing.
+    volumes = set(
+        _docker("volume", "ls", "-q", "--filter",
+                f"label={LABEL_NS}.project-key={key}",
+                capture=True, check=False).stdout.split()
+    )
+    volumes.update(
+        name.strip()
+        for name in _docker("volume", "ls", "--format", "{{.Name}}",
+                            capture=True, check=False).stdout.splitlines()
+        if name.strip() and _parse_managed_line("volume", name.strip())[0] == key
+    )
+    for vol in sorted(volumes):
         _docker("volume", "rm", "-f", vol, check=False, capture=True)
 
 

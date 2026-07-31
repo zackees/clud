@@ -139,3 +139,37 @@ def test_label_args_identify_managed_resource(mod, tmp_path):
     assert "com.clud.docker-build.managed=true" in joined
     assert "com.clud.docker-build.role=container" in joined
     assert "com.clud.docker-build.stack=soldr" in joined
+
+
+def test_legacy_unlabelled_volume_names_still_resolve_to_a_group(mod):
+    """#518: volumes created before labelling carry no labels at all. Discovery
+    must still recognise them by their `clud-docker-build-soldr-<key>-<role>`
+    name, or the abandoned cache sets that motivated the issue stay invisible
+    to gc forever."""
+    key, root, created = mod._parse_managed_line(
+        "volume", "clud-docker-build-soldr-0c1f4b2c0e0a-target"
+    )
+    assert key == "0c1f4b2c0e0a"
+    assert (root, created) == (None, None)
+
+
+def test_unrelated_volumes_are_never_matched(mod):
+    """The name-prefix fallback must not widen the blast radius: the issue
+    calls out an unrelated 89GB `soldr-perf-target` volume that clud must never
+    sweep."""
+    for name in (
+        "soldr-perf-target",
+        "soldr-perf-target-soldr2-e27990ba",
+        "some-other-vol",
+        "clud-docker-build-python-abc123-target",  # different stack
+    ):
+        assert mod._parse_managed_line("volume", name)[0] is None, name
+
+
+def test_rfc3339_volume_timestamps_parse(mod):
+    """`docker volume inspect` emits RFC3339, unlike `docker ps`. Without this
+    a legacy (containerless) group has no age, reads as brand new, and is kept
+    forever — the exact failure this fix targets."""
+    assert mod._parse_docker_created_at("2026-07-28T11:04:46-07:00") is not None
+    assert mod._parse_docker_created_at("2026-07-28T11:04:46Z") is not None
+    assert mod._parse_docker_created_at("2026-07-28 11:04:46 -0700 PDT") is not None
