@@ -220,6 +220,7 @@ fn classify_scan(system: &System, tool: &str) -> EnvScan {
 #[derive(Debug, Default)]
 pub struct DaemonMarkerCache {
     declared: HashMap<(u32, u64), bool>,
+    env_reads: u64,
 }
 
 impl DaemonMarkerCache {
@@ -235,6 +236,14 @@ impl DaemonMarkerCache {
 
     pub fn is_empty(&self) -> bool {
         self.declared.is_empty()
+    }
+
+    /// Environment blocks this cache has actually read, cumulatively.
+    ///
+    /// The measurement #673 exists to drive toward zero in steady state: the
+    /// full-host scan it replaced read 442 of them on *every* process exit.
+    pub fn env_reads(&self) -> u64 {
+        self.env_reads
     }
 
     /// Resolve every candidate, reading the environment only for identities
@@ -281,6 +290,7 @@ impl DaemonMarkerCache {
             let Some(process) = system.process(Pid::from_u32(pid)) else {
                 continue;
             };
+            self.env_reads += 1;
             let is_daemon = env_value(process.environ(), key).is_some_and(is_truthy_marker);
             if is_daemon {
                 declared.insert(pid);
@@ -432,11 +442,17 @@ mod tests {
             .declared_daemons_among(&[(pid, start_time)])
             .contains(&pid));
         assert_eq!(cache.len(), 1, "self identity is now cached");
+        assert_eq!(cache.env_reads(), 1);
 
         assert!(!cache
             .declared_daemons_among(&[(pid, start_time)])
             .contains(&pid));
         assert_eq!(cache.len(), 1);
+        assert_eq!(
+            cache.env_reads(),
+            1,
+            "a repeated ask must not read any environment block"
+        );
     }
 
     /// A candidate set that never contained a daemon yields an empty answer,

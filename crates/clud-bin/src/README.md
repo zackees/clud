@@ -135,6 +135,16 @@ Process management and GC:
   spawning anything. The cooperative `RUNNING_PROCESS_IS_DAEMON` marker ranks
   *below* every OS signal because opting in is optional; the operator
   spare-list (`CLUD_REAPER_SPARE_IMAGES`) ranks last and ships empty.
+- `reap_log.rs` - reaper accounting and its per-session log (#673 Phases 0
+  and 5). `ReapCounters` is the measurement series (ticks, reconcile passes,
+  environment reads, peak `known`/backlog) plus the decision census;
+  `ReapLog` appends one JSONL line per **mutation** to
+  `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl`, buffered rather than
+  flushed per event (#544 found per-op synchronous JSONL flushes to be an
+  idle-CPU cost of their own). Two reconciliation identities are checkable
+  from the exit summary: `shell_exits == finalized + abandoned + still_pending`
+  and `decisions == reaped + spared`. They stay separate because the
+  populations are disjoint, and `tracked` belongs to neither.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and

@@ -686,6 +686,14 @@ fn decision(
     }
 }
 
+impl ReapDecision {
+    /// The reason string, shared verbatim with the daemon event stream so the
+    /// reap log and that stream name the same thing the same way.
+    pub(crate) fn reason_str(&self) -> &'static str {
+        self.reason.as_str()
+    }
+}
+
 pub(super) fn decision_log_fields(
     decision: &ReapDecision,
 ) -> Vec<(&'static str, serde_json::Value)> {
@@ -1070,6 +1078,7 @@ pub(crate) enum ExitClaim {
 }
 
 impl ExitClaim {
+    #[cfg(test)]
     pub(crate) fn into_decisions(self) -> Option<Vec<ReapDecision>> {
         match self {
             Self::Execute(decisions) => Some(decisions),
@@ -1164,6 +1173,10 @@ impl ForegroundJobTracker {
     pub fn sweep_abandoned_at_exit(&self) -> usize {
         0
     }
+
+    pub fn finish_and_report(&self, _measure: bool) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(windows)]
@@ -1215,6 +1228,45 @@ mod imp {
         ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
     }
 
+    use crate::reap_log::{ReapAction, ReapCounters, ReapEvent, ReapLog, ReapPhase};
+
+    /// Session accounting and its log (#673 Phases 0 and 5).
+    ///
+    /// `epoch` is folded into `session` at `ACTIVE_PROCESS_ZERO`, which clears
+    /// the tracked maps mid-session: per-epoch counts are accumulated rather
+    /// than lost.
+    #[derive(Default)]
+    struct Telemetry {
+        session: ReapCounters,
+        epoch: ReapCounters,
+        log: Option<ReapLog>,
+    }
+
+    impl Telemetry {
+        fn totals(&self) -> ReapCounters {
+            let mut totals = self.session.clone();
+            totals.absorb(&self.epoch);
+            totals
+        }
+
+        fn roll_epoch(&mut self) {
+            let epoch = std::mem::take(&mut self.epoch);
+            self.session.absorb(&epoch);
+        }
+
+        fn record(&mut self, event: ReapEvent) {
+            if let Some(log) = self.log.as_mut() {
+                log.record(&event);
+            }
+        }
+    }
+
+    fn with_telemetry(telemetry: &Mutex<Telemetry>, f: impl FnOnce(&mut Telemetry)) {
+        if let Ok(mut telemetry) = telemetry.lock() {
+            f(&mut telemetry);
+        }
+    }
+
     /// State the facts collector carries across passes.
     ///
     /// The daemon-marker cache is the reason this is not rebuilt each tick: it
@@ -1233,6 +1285,7 @@ mod imp {
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
         collector: Arc<Mutex<FactsCollector>>,
+        telemetry: Arc<Mutex<Telemetry>>,
         listener: Option<JoinHandle<()>>,
     }
 
@@ -1269,6 +1322,10 @@ mod imp {
                         std::env::var("CLUD_REAPER_SPARE_IMAGES").ok().as_deref(),
                     ),
                 }));
+                let telemetry = Arc::new(Mutex::new(Telemetry {
+                    log: session_reap_log(),
+                    ..Telemetry::default()
+                }));
                 // windows::Win32::Foundation::HANDLE intentionally does not
                 // implement Send because it wraps a raw pointer. The kernel
                 // handle value itself is process-wide and remains owned by
@@ -1281,6 +1338,7 @@ mod imp {
                     let backends = Arc::clone(&backends);
                     let processes = Arc::clone(&processes);
                     let collector = Arc::clone(&collector);
+                    let telemetry = Arc::clone(&telemetry);
                     move || {
                         listen(
                             HANDLE(port_value as *mut c_void),
@@ -1289,6 +1347,7 @@ mod imp {
                             backends,
                             processes,
                             collector,
+                            telemetry,
                         )
                     }
                 });
@@ -1299,6 +1358,7 @@ mod imp {
                     backends,
                     processes,
                     collector,
+                    telemetry,
                     listener: Some(listener),
                 })
             }
@@ -1333,6 +1393,7 @@ mod imp {
                 &self.processes,
                 &self.backends,
                 &self.collector,
+                &self.telemetry,
                 self.job.0 as usize,
                 false,
             );
@@ -1416,9 +1477,31 @@ mod imp {
             drop(tracker);
 
             for decisions in claimed {
-                execute_decisions(decisions, &spares);
+                execute_decisions(decisions, &spares, &self.telemetry, ReapPhase::Exit);
             }
             swept
+        }
+
+        /// Flush the reap log and return the session's exit summary.
+        ///
+        /// Empty when nothing was tracked — an idle session must not print a
+        /// row of zeroes. `measure` adds the Phase 0 series, which is what
+        /// `--verbose` asks for.
+        pub fn finish_and_report(&self, measure: bool) -> Vec<String> {
+            let Ok(mut telemetry) = self.telemetry.lock() else {
+                return Vec::new();
+            };
+            telemetry.roll_epoch();
+            if let Some(log) = telemetry.log.as_mut() {
+                log.flush();
+            }
+            let totals = telemetry.totals();
+            let path = telemetry.log.as_ref().map(|log| log.path().to_path_buf());
+            let mut lines = totals.summary_lines(path.as_deref()).unwrap_or_default();
+            if measure && !lines.is_empty() {
+                lines.push(totals.measurement_line());
+            }
+            lines
         }
     }
 
@@ -1442,8 +1525,10 @@ mod imp {
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
         collector: Arc<Mutex<FactsCollector>>,
+        telemetry: Arc<Mutex<Telemetry>>,
     ) {
         while !stop.load(Ordering::Acquire) {
+            with_telemetry(&telemetry, |t| t.epoch.ticks += 1);
             let (mut message, mut key, mut payload) = (0u32, 0usize, null_mut());
             if unsafe { GetQueuedCompletionStatus(port, &mut message, &mut key, &mut payload, 200) }
                 .is_err()
@@ -1459,6 +1544,7 @@ mod imp {
                         &processes,
                         &backends,
                         &collector,
+                        &telemetry,
                         job_value,
                         metadata_complete,
                     );
@@ -1486,7 +1572,10 @@ mod imp {
                             observed,
                         );
                     }
-                    reconcile_pending(&processes, &backends, &collector, job_value, false);
+                    with_telemetry(&telemetry, |t| t.epoch.tracked += 1);
+                    reconcile_pending(
+                        &processes, &backends, &collector, &telemetry, job_value, false,
+                    );
                 }
                 EXIT_PROCESS => {
                     let needs_final_observation = processes
@@ -1518,6 +1607,18 @@ mod imp {
                     if metadata_failed {
                         log_metadata_miss(pid);
                     }
+                    // Only shell images become reap triggers, so only they
+                    // enter the `shell_exits_observed` denominator.
+                    let entered_backlog = processes
+                        .lock()
+                        .map(|processes| {
+                            super::pending_exit_pids(&processes.known, &processes.processed_exits)
+                                .contains(&pid)
+                        })
+                        .unwrap_or(false);
+                    if entered_backlog {
+                        with_telemetry(&telemetry, |t| t.epoch.shell_exits_observed += 1);
+                    }
                     // #673 Phase 1b: this path used to run an unguarded
                     // full-host environment scan — 442 `ReadProcessMemory` PEB
                     // reads — on *every* descendant exit, including the
@@ -1525,7 +1626,9 @@ mod imp {
                     // become a reap trigger. Route through the same backlog
                     // guard as every other caller: with nothing pending, the
                     // pass returns before evaluating a single signal.
-                    reconcile_pending(&processes, &backends, &collector, job_value, false);
+                    reconcile_pending(
+                        &processes, &backends, &collector, &telemetry, job_value, false,
+                    );
                 }
                 ACTIVE_PROCESS_ZERO => {
                     // The job emptied: nothing tracked can still be relevant.
@@ -1535,6 +1638,9 @@ mod imp {
                     if let Ok(mut processes) = processes.lock() {
                         *processes = TrackerProcesses::default();
                     }
+                    // Accounting is per-epoch; fold it into the session totals
+                    // before the reset so the exit summary still adds up.
+                    with_telemetry(&telemetry, |t| t.roll_epoch());
                 }
                 _ => {}
             }
@@ -1605,6 +1711,7 @@ mod imp {
         processes: &Mutex<TrackerProcesses>,
         backends: &Mutex<Vec<RegisteredBackend>>,
         collector: &Mutex<FactsCollector>,
+        telemetry: &Mutex<Telemetry>,
         job_value: usize,
         finalize_provisional_empty: bool,
     ) {
@@ -1635,33 +1742,70 @@ mod imp {
 
         let (known, mut ledger) = tracker.split();
         let pending = super::pending_exit_pids(known, ledger.processed_exits);
+        let known_len = known.len();
         if pending.is_empty() {
+            // Never log a no-op pass. The size series is still worth having,
+            // because a *shrinking* `known` on an idle session is the whole
+            // point of Phase 2.
+            with_telemetry(telemetry, |t| t.epoch.observe_sizes(known_len, 0));
             return;
         }
+        with_telemetry(telemetry, |t| {
+            t.epoch.reconcile_passes += 1;
+            t.epoch.observe_sizes(known_len, pending.len());
+        });
 
         let graph = super::ProcessGraph::build(known.values(), &registered);
         let facts = {
             let Ok(mut collector) = collector.lock() else {
                 return;
             };
-            collect_facts(job_value, &graph, &mut collector)
+            let facts = collect_facts(job_value, &graph, &mut collector);
+            let env_reads = collector.daemon_marker.env_reads();
+            with_telemetry(telemetry, |t| {
+                t.epoch.env_reads = t.epoch.env_reads.max(env_reads);
+            });
+            facts
         };
         let spares = super::build_spare_list(&facts, graph.spare_candidates());
 
         let mut claimed = Vec::new();
+        let mut abandoned = Vec::new();
         for pid in pending {
-            if let Some(decisions) =
-                super::claim_exit_replay(&graph, &spares, &mut ledger, pid, control)
-                    .into_decisions()
-            {
-                claimed.push(decisions);
+            match super::claim_exit_replay(&graph, &spares, &mut ledger, pid, control) {
+                super::ExitClaim::Execute(decisions) => claimed.push(decisions),
+                super::ExitClaim::Abandoned => abandoned.push((
+                    pid,
+                    graph.meta(pid).map(|meta| meta.start_time),
+                    graph
+                        .meta(pid)
+                        .map(|meta| meta.image_name.clone())
+                        .unwrap_or_default(),
+                )),
+                super::ExitClaim::Deferred => {}
             }
         }
         drop(graph);
         drop(tracker);
 
+        with_telemetry(telemetry, |t| {
+            t.epoch.finalized += claimed.len() as u64;
+            t.epoch.abandoned += abandoned.len() as u64;
+            for (pid, start_time, image_name) in &abandoned {
+                t.record(ReapEvent {
+                    ts_ms: now,
+                    pid: Some(*pid),
+                    start_time: *start_time,
+                    image_name: Some(image_name.clone()),
+                    action: ReapAction::Abandoned,
+                    reason: "deferral_ttl_expired",
+                    phase: ReapPhase::Runtime,
+                });
+            }
+        });
+
         for decisions in claimed {
-            execute_decisions(decisions, &spares);
+            execute_decisions(decisions, &spares, telemetry, ReapPhase::Runtime);
         }
     }
 
@@ -1825,7 +1969,12 @@ mod imp {
         }
     }
 
-    fn execute_decisions(decisions: Vec<ReapDecision>, spares: &super::SpareList) {
+    fn execute_decisions(
+        decisions: Vec<ReapDecision>,
+        spares: &super::SpareList,
+        telemetry: &Mutex<Telemetry>,
+        phase: ReapPhase,
+    ) {
         if decisions.is_empty() {
             return;
         }
@@ -1841,17 +1990,22 @@ mod imp {
             .chain(spares.keys().copied())
             .collect();
 
+        let ts_ms = now_ms();
         for mut decision in decisions {
             if decision.action == DecisionAction::Reap
                 && !super::candidate_identity_is_live(&decision)
             {
+                // A downgrade is still a decision, and it counts as a spare in
+                // the `decisions_emitted == reaped + spared` identity.
                 decision.action = DecisionAction::Spare;
                 decision.reason = super::ReapDecisionReason::CandidateIdentityChanged;
                 log_decision(&decision);
+                census(telemetry, &decision, phase, ts_ms);
                 continue;
             }
 
             log_decision(&decision);
+            census(telemetry, &decision, phase, ts_ms);
             if decision.action != DecisionAction::Reap {
                 continue;
             }
@@ -1861,6 +2015,48 @@ mod imp {
                 !spared.contains(&pid)
             });
         }
+    }
+
+    /// Count one decision and write its line.
+    ///
+    /// `Handoff` is neither a kill nor a protection, so it is logged but does
+    /// not enter the `decisions_emitted == reaped + spared` identity — the
+    /// inner shell is still running and will produce its own decision when it
+    /// exits.
+    fn census(telemetry: &Mutex<Telemetry>, decision: &ReapDecision, phase: ReapPhase, ts_ms: u64) {
+        let action = match decision.action {
+            DecisionAction::Reap => ReapAction::Reaped,
+            DecisionAction::Spare => ReapAction::Spared,
+            DecisionAction::Handoff => return,
+        };
+        with_telemetry(telemetry, |t| {
+            t.epoch.decisions_emitted += 1;
+            match (action, phase) {
+                (ReapAction::Reaped, ReapPhase::Runtime) => t.epoch.reaped_runtime += 1,
+                (ReapAction::Reaped, ReapPhase::Exit) => t.epoch.reaped_at_exit += 1,
+                _ => t.epoch.spared += 1,
+            }
+            t.record(ReapEvent {
+                ts_ms,
+                pid: decision.candidate_pid,
+                start_time: decision.candidate_start_time,
+                image_name: decision.candidate_image.clone(),
+                action,
+                reason: decision.reason_str(),
+                phase,
+            });
+        });
+    }
+
+    /// This session's reap log, or `None` when there is no state dir to write
+    /// into (CI / minimal containers). Reaping still happens; it is just quiet.
+    fn session_reap_log() -> Option<ReapLog> {
+        let state_dir = crate::daemon::default_state_dir().ok()?;
+        Some(ReapLog::new(crate::reap_log::session_reap_log_path(
+            &state_dir,
+            std::process::id(),
+            crate::process_identity::self_start_time(),
+        )))
     }
 
     fn log_decision(decision: &ReapDecision) {
