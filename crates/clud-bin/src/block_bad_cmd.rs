@@ -595,6 +595,19 @@ fn evaluate_command_into(
         if segment.is_empty() {
             continue;
         }
+        // #519: bare `(...)` subshell grouping in command position. This was
+        // assumed to fall out of tokenization — it does not. `(playwright run)`
+        // tokenizes with `words[0] == "(playwright"`, which matches no rule,
+        // so the segment sailed through.
+        //
+        // Only stripped at the *start of a segment*, which is the only place a
+        // `(` opens a subshell. Treating every `(` as one would deny
+        // `echo "(playwright run)"`, where the parens are literal text — the
+        // same class of false positive that keeps `rg playwright` allowed.
+        let segment = segment.strip_prefix('(').map_or(segment, str::trim_start);
+        if segment.is_empty() {
+            continue;
+        }
         let words = command_words(segment);
         if words.is_empty() {
             continue;
@@ -1896,10 +1909,14 @@ fn find_heredoc_delimiter(line: &str) -> Option<String> {
 /// Extract the inner text of every command-substitution / subshell /
 /// process-substitution span in `text` — backticks, `$(...)`
 /// (excluding `$((...))` arithmetic expansion), and `<(...)`/`>(...)`
-/// process substitution — for recursive evaluation. Bare `(...)`
-/// subshell grouping in command position is already handled by the
-/// per-segment scan treating `(` as an ordinary token boundary once
-/// tokenized, so it is not duplicated here.
+/// process substitution — for recursive evaluation.
+///
+/// Bare `(...)` subshell grouping is deliberately *not* handled here: an
+/// unqualified `(` is only a subshell in command position, and treating every
+/// one as a substitution span would deny `echo "(playwright run)"`. The
+/// per-segment scan in `evaluate_command_into` strips a leading `(` instead,
+/// which is precise about position. (An earlier comment here claimed
+/// tokenization already covered it — it did not; see #519.)
 fn scan_command_substitutions(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut spans = Vec::new();
@@ -3632,6 +3649,35 @@ mod tests {
             &rules
         ));
         assert!(denies_with_rules("tee >(playwright run)", &rules));
+    }
+
+    /// #519 listed bare `(...)` subshell grouping alongside the other
+    /// substitution shapes. `scan_command_substitutions` deliberately does not
+    /// handle it — the comment there says tokenization already does, because
+    /// `(` becomes an ordinary token boundary. That reasoning is load-bearing
+    /// and untested, so pin it: if a future tokenizer change stops splitting on
+    /// `(`, this is the only thing that would notice.
+    #[test]
+    fn generic_rule_denied_inside_bare_subshell() {
+        let rules = [playwright_rule()];
+        assert!(denies_with_rules("(playwright run)", &rules));
+        assert!(denies_with_rules("(cd web && playwright run)", &rules));
+        assert!(denies_with_rules("echo hi; (playwright run)", &rules));
+    }
+
+    /// The counterweight to stripping `(`. Parens that are *literal text*
+    /// rather than a subshell must stay allowed — this is the same false
+    /// positive that keeps `rg playwright` allowed, and the reason the strip
+    /// is anchored to the start of a segment instead of applying to every `(`.
+    #[test]
+    fn generic_rule_allows_parenthesized_text_that_is_not_a_subshell() {
+        let rules = [playwright_rule()];
+        assert!(allows_with_rules(r#"echo "(playwright run)""#, &rules));
+        assert!(allows_with_rules(r#"echo '(playwright run)'"#, &rules));
+        assert!(allows_with_rules(
+            r#"git commit -m "fix (playwright run) flake""#,
+            &rules
+        ));
     }
 
     #[test]
