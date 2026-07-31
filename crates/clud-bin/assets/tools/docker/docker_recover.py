@@ -90,6 +90,7 @@ import shutil
 import subprocess
 import sys
 import time
+import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1603,12 +1604,294 @@ def _wait_for_windows_desktop_launch(
     return None
 
 
+# ---- WslService STOP_PENDING recovery (issue #632) -----------------------
+#
+# `reset --yes` cannot recover Docker when WSL itself is wedged: `WslService`
+# sits in STOP_PENDING indefinitely (WAIT_HINT=0, CHECKPOINT=0), and both
+# `wsl --shutdown` and `wsl -l -v` hang until their timeouts. Recovery needs one
+# UAC-elevated, tightly scoped operation — force-terminate the exact
+# SCM-reported wslservice.exe PID, then start the service.
+#
+# That is a privileged kill, so every check here is **fail-closed**: anything
+# unexpected refuses rather than guesses. The decision is a pure function over
+# an injected snapshot so all six states in the acceptance list are unit-tested
+# without a wedged WSL, which is not something CI can produce on demand.
+
+#: The only service state this recovery is allowed to act on.
+WSL_SERVICE = "WslService"
+WSL_SERVICE_IMAGE = "wslservice.exe"
+
+
+class ServiceStatus(typing.NamedTuple):
+    """One SCM observation of a service."""
+
+    state: str | None
+    pid: int | None
+
+
+def parse_sc_queryex(text: str) -> ServiceStatus:
+    """Extract STATE and PID from `sc queryex <service>` output.
+
+    Fail-closed: anything unrecognized yields `None` fields, which the gate
+    then refuses on. `sc`'s output is localized on non-English Windows, so the
+    *numeric* state code is preferred over the English name when present —
+    `STATE : 3 STOP_PENDING` parses from the 3, not from the word.
+    """
+    state: str | None = None
+    pid: int | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip().upper()
+        value = value.strip()
+        if key == "STATE":
+            parts = value.split()
+            if parts and parts[0].isdigit():
+                state = _SC_STATE_CODES.get(int(parts[0]))
+                if state is None and len(parts) > 1:
+                    state = parts[1].upper()
+            elif parts:
+                state = parts[0].upper()
+        elif key == "PID":
+            try:
+                pid = int(value.split()[0])
+            except (ValueError, IndexError):
+                pid = None
+    return ServiceStatus(state=state, pid=pid)
+
+
+#: SCM numeric state codes. Numeric so a localized Windows still parses.
+_SC_STATE_CODES = {
+    1: "STOPPED",
+    2: "START_PENDING",
+    3: "STOP_PENDING",
+    4: "RUNNING",
+    5: "CONTINUE_PENDING",
+    6: "PAUSE_PENDING",
+    7: "PAUSED",
+}
+
+
+def parse_sc_qc_binary_path(text: str) -> str | None:
+    """Extract BINARY_PATH_NAME from `sc qc <service>` output."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        if key.strip().upper().replace(" ", "_") == "BINARY_PATH_NAME":
+            value = value.strip().strip('"')
+            return value or None
+    return None
+
+
+def service_image_name(binary_path: str) -> str:
+    r"""Lowercased executable name from an SCM `BINARY_PATH_NAME`.
+
+    Splitting on whitespace to drop trailing service arguments is the obvious
+    approach and it is wrong: the real path is
+    `C:\Program Files\WSL\wslservice.exe`, so the first token is
+    `C:\Program` and every genuine install would be refused forever.
+
+    Handle the two shapes SCM actually emits:
+
+    - quoted (`"C:\Program Files\WSL\wslservice.exe" -k netsvcs`) — take
+      the quoted span;
+    - unquoted, possibly with arguments — cut at the first `.exe`, which is the
+      only reliable boundary when the path itself may contain spaces.
+    """
+    text = binary_path.strip()
+    if text.startswith('"'):
+        end = text.find('"', 1)
+        if end > 0:
+            return ntpath.basename(text[1:end]).lower()
+        text = text[1:]
+    lowered = text.lower()
+    cut = lowered.find(".exe")
+    if cut != -1:
+        text = text[: cut + 4]
+    return ntpath.basename(text).lower()
+
+
+def wsl_service_recovery_gate(
+    status: ServiceStatus,
+    binary_path: str | None,
+) -> tuple[bool, str]:
+    """May we force-terminate this service PID? Returns `(allowed, reason)`.
+
+    Fail-closed by construction — this authorizes a privileged kill, so every
+    branch that is not positively "the wedged state we diagnosed" refuses. The
+    reason string is returned rather than logged so the caller can print each
+    guarded decision, which the issue asks for.
+
+    Checks, in order:
+
+    1. **State is exactly STOP_PENDING.** A running service is healthy and a
+       stopped one needs a plain `sc start`; neither warrants a kill.
+    2. **PID is present and nonzero.** SCM reports 0 for a service with no
+       process, and killing PID 0 is meaningless at best.
+    3. **The image is `wslservice.exe`.** The SCM-reported binary must be the
+       executable we expect, so a mis-registered or hijacked service name
+       cannot direct the kill at something else.
+    """
+    state = (status.state or "").upper()
+    if state != "STOP_PENDING":
+        return (
+            False,
+            f"{WSL_SERVICE} state is {status.state or 'unknown'}, not STOP_PENDING "
+            "— no forced recovery (fail-closed)",
+        )
+    if not status.pid:
+        return (
+            False,
+            f"{WSL_SERVICE} reports no service PID — nothing safe to terminate",
+        )
+    if not binary_path:
+        return (
+            False,
+            f"{WSL_SERVICE} binary path is unknown — refusing to terminate an "
+            "unverified image",
+        )
+    image = service_image_name(binary_path)
+    if image != WSL_SERVICE_IMAGE:
+        return (
+            False,
+            f"{WSL_SERVICE} resolves to {image!r}, not {WSL_SERVICE_IMAGE!r} — "
+            "refusing to terminate an unexpected image",
+        )
+    return (
+        True,
+        f"{WSL_SERVICE} is STOP_PENDING with pid={status.pid} and image "
+        f"{WSL_SERVICE_IMAGE}; forced recovery is authorized",
+    )
+
+
+def query_wsl_service() -> tuple[ServiceStatus, str | None]:
+    """Ask SCM for the service's state/PID and its registered binary."""
+    queryex = _run(["sc", "queryex", WSL_SERVICE], timeout=15.0)
+    status = parse_sc_queryex(queryex.stdout) if queryex else ServiceStatus(None, None)
+    qc = _run(["sc", "qc", WSL_SERVICE], timeout=15.0)
+    binary = parse_sc_qc_binary_path(qc.stdout) if qc else None
+    return status, binary
+
+
+def recover_wsl_service() -> tuple[bool, list[str]]:
+    """Diagnose and, if every gate passes, force-recover a wedged `WslService`.
+
+    Returns `(recovered, details)`; `details` carries the original diagnosis and
+    each guarded decision so the command output explains itself.
+
+    Storage safety is unconditional: this terminates a process and starts a
+    service. It never unregisters a distro, deletes a VHD, or touches Docker
+    images/volumes.
+    """
+    details: list[str] = []
+    status, binary = query_wsl_service()
+    details.append(
+        f"SCM: {WSL_SERVICE} state={status.state or 'unknown'} "
+        f"pid={status.pid or 0} binary={binary or 'unknown'}"
+    )
+
+    allowed, reason = wsl_service_recovery_gate(status, binary)
+    details.append(reason)
+    if not allowed:
+        return False, details
+
+    # Re-check immediately before terminating: the diagnosis above and the kill
+    # below are separated by an elevation prompt the user may sit on for a
+    # while, and a PID can be recycled in that window.
+    recheck, recheck_binary = query_wsl_service()
+    allowed_now, recheck_reason = wsl_service_recovery_gate(recheck, recheck_binary)
+    if not allowed_now or recheck.pid != status.pid:
+        details.append(
+            "service identity changed between diagnosis and termination "
+            f"(was pid={status.pid}, now pid={recheck.pid or 0}: {recheck_reason}) "
+            "— aborting rather than killing a recycled PID"
+        )
+        return False, details
+
+    ok, elevate_detail = _elevated_wsl_service_restart(recheck.pid)
+    details.append(elevate_detail)
+    if not ok:
+        return False, details
+
+    running = _wait_for_wsl_service_running()
+    details.append(
+        f"{WSL_SERVICE} reached RUNNING" if running
+        else f"{WSL_SERVICE} did not reach RUNNING within the wait budget"
+    )
+    return running, details
+
+
+def elevated_restart_command(pid: int) -> list[str]:
+    """PowerShell argv for the scoped elevated operation.
+
+    Pure so the *shape* of the privileged command is asserted in tests: exactly
+    one `taskkill` against the validated PID and one `sc start`, with a visible
+    UAC prompt (`-Verb RunAs`). Nothing here may grow a `wsl --unregister`, a
+    `Remove-Item`, or a diskpart call — that is what the test guards.
+    """
+    inner = f"taskkill /F /PID {int(pid)}; sc.exe start {WSL_SERVICE}"
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        f"Start-Process -FilePath cmd.exe -ArgumentList '/c {inner}' "
+        "-Verb RunAs -Wait -WindowStyle Hidden",
+    ]
+
+
+def _elevated_wsl_service_restart(pid: int) -> tuple[bool, str]:
+    """Run the scoped terminate-and-start under a visible UAC prompt."""
+    result = _run(elevated_restart_command(pid), timeout=120.0)
+    if result is None:
+        return False, "elevated recovery could not be launched (or timed out)"
+    if result.returncode != 0:
+        # A declined UAC prompt surfaces here; say so plainly rather than
+        # reporting a generic failure the operator cannot act on.
+        return False, (
+            "elevation was denied or the elevated command failed "
+            f"(exit {result.returncode}) — WSL was left untouched"
+        )
+    return True, f"elevated recovery ran: terminated pid={pid}, started {WSL_SERVICE}"
+
+
+def _wait_for_wsl_service_running(
+    *, attempts: int = 20, interval: float = 1.0
+) -> bool:
+    for index in range(attempts):
+        status, _binary = query_wsl_service()
+        if (status.state or "").upper() == "RUNNING":
+            return True
+        if index < attempts - 1:
+            time.sleep(interval)
+    return False
+
+
 def _execute_restart(system: str, *, hard: bool) -> list[str]:
     details: list[str] = []
     if system == "Windows":
         if hard:
             wsl = _run(["wsl", "--shutdown"], timeout=60.0)
             details.append(_command_result_detail("wsl --shutdown", wsl))
+            # #632: `wsl --shutdown` returning nothing means it timed out or
+            # could not run -- the signature of WslService wedged in
+            # STOP_PENDING, where every `wsl` invocation hangs. Only the
+            # explicitly-confirmed `reset --yes` path (hard) reaches here;
+            # `restart --yes` stays the light path and never force-recovers.
+            if wsl is None or wsl.returncode != 0:
+                recovered, wsl_details = recover_wsl_service()
+                details.extend(wsl_details)
+                if recovered:
+                    details.append(
+                        "WSL service recovered; continuing to the Docker "
+                        "relaunch and readiness checks"
+                    )
 
         guard_ok, guard_detail = _launch_windows_docker_desktop_guard()
         details.append(guard_detail)

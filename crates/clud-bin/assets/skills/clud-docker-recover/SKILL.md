@@ -83,6 +83,28 @@ fn ensure_docker_running(attempts = 10, interval = 2s) -> Result<()> {
 Restart and reset **stop running containers** but preserve images and volumes.
 The tool states this plainly before acting and refuses without `--yes`.
 
+### When WSL itself is wedged (`reset --yes` only, issue #632)
+
+If `wsl --shutdown` times out — the signature of `WslService` stuck in
+`STOP_PENDING`, where every `wsl` invocation hangs — `reset --yes` escalates to
+one UAC-elevated, tightly scoped recovery. `restart --yes` stays the light path
+and never does this.
+
+Every check is **fail-closed**; anything unexpected refuses and says why:
+
+| Check | Refuses when |
+| --- | --- |
+| state | not exactly `STOP_PENDING` (a running service is fine, a stopped one needs a plain `sc start`) |
+| PID | absent or 0 — nothing safe to terminate |
+| image | the SCM-registered binary is not `wslservice.exe` |
+| re-check | the PID moved between diagnosis and termination (the UAC prompt is exactly the window in which a PID can be recycled) |
+
+The elevated step is one `taskkill /F /PID <validated>` plus
+`sc.exe start WslService`, then a bounded wait for `RUNNING` before relaunching
+Docker Desktop. It never unregisters a distro, deletes a VHD, or touches Docker
+images/volumes — a test asserts the elevated command contains no such token.
+Elevation being declined is reported plainly and leaves WSL untouched.
+
 ## Windows storage resolver — do NOT assume the default path
 
 `%LOCALAPPDATA%\Docker\wsl\data\docker_data.vhdx` is only the *fallback
