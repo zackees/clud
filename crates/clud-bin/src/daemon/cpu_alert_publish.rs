@@ -51,6 +51,15 @@ pub(super) const CPU_ALERT_HYSTERESIS_PCT: f32 = 10.0;
 /// but paid **once**, by one process, instead of once per open terminal.
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// The value published once at daemon startup so the snapshot file exists
+/// before the first alert-worthy reading (#706).
+///
+/// Zero rather than a real first sample: CPU percentage needs two samples to
+/// mean anything, and a below-threshold value displays identically whatever it
+/// is. If the daemon really is busy at startup, the first genuine sample two
+/// seconds later crosses the threshold and republishes.
+pub(super) const BASELINE_CPU_PCT: f32 = 0.0;
+
 /// Snapshot file, beside the other state-dir sentinels.
 pub(super) const METRICS_SNAPSHOT: &str = "metrics.json";
 
@@ -105,7 +114,27 @@ pub(super) fn spawn_cpu_alert_publisher(
     let _ = thread::Builder::new()
         .name("clud-cpu-publish".to_string())
         .spawn(move || {
+            // #706: publish one baseline immediately, so the file always
+            // exists from the moment the daemon is up.
+            //
+            // `should_publish(None, x)` is deliberately false for any `x`
+            // below the threshold — writing "no alert" is pure cost. But
+            // nothing else in the tree ever creates this file, so on a healthy
+            // box that never spikes above 70% it was *never* created at all.
+            // `classify_snapshot` then returned `Absent` on every client pass,
+            // and every Windows client fell through to the 15 s
+            // `DaemonRequest::Metrics` compatibility RPC — forever. The
+            // "older daemon" path was the steady state on the current daemon,
+            // which made #547 a 7.5× improvement rather than the elimination
+            // it was meant to be.
+            //
+            // With the file present and unchanged, `classify_snapshot` returns
+            // `Unchanged` and the idle cost is one `stat` per keeper pass and
+            // zero connections, which is what #547 specified.
             let mut published: Option<f32> = None;
+            if write_snapshot(&state_dir, BASELINE_CPU_PCT).is_ok() {
+                published = Some(BASELINE_CPU_PCT);
+            }
             loop {
                 // Sleep in slices so shutdown is observed within ~250 ms
                 // rather than at the end of a full interval.
@@ -148,13 +177,61 @@ fn write_snapshot(state_dir: &Path, cpu_pct: f32) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The whole point of #547: an idle daemon writes nothing at all, so an
-    /// idle client has nothing to read and pays one `stat`.
+    /// The whole point of #547: an idle daemon *re-writes* nothing, so an idle
+    /// client pays one `stat` per pass and reads nothing.
+    ///
+    /// Note this is about the sampling loop only. Since #706 the publisher
+    /// writes one baseline before the loop starts — see
+    /// [`the_baseline_keeps_an_idle_daemon_from_forcing_clients_onto_the_rpc`]
+    /// for why the file must exist even when there is no alert.
     #[test]
     fn an_idle_daemon_publishes_nothing() {
         assert!(!should_publish(None, 0.0));
         assert!(!should_publish(None, 12.5));
         assert!(!should_publish(None, CPU_ALERT_THRESHOLD_PCT));
+    }
+
+    /// #706: the baseline exists so `metrics.json` is present on a healthy
+    /// box, and it must not turn into a write on every tick.
+    ///
+    /// Before the baseline, `should_publish(None, low)` being false meant the
+    /// file was never created at all, `classify_snapshot` returned `Absent`
+    /// forever, and every client fell back to the 15 s RPC — the compatibility
+    /// path became the steady state.
+    #[test]
+    fn the_baseline_keeps_an_idle_daemon_from_forcing_clients_onto_the_rpc() {
+        // Having published the baseline, an idle daemon stays silent: every
+        // below-threshold reading compares against a below-threshold previous.
+        assert!(!should_publish(Some(BASELINE_CPU_PCT), 0.0));
+        assert!(!should_publish(Some(BASELINE_CPU_PCT), 12.5));
+        assert!(!should_publish(
+            Some(BASELINE_CPU_PCT),
+            CPU_ALERT_THRESHOLD_PCT
+        ));
+
+        // ...but a real spike still publishes, so seeding the baseline cannot
+        // swallow the first alert.
+        assert!(should_publish(Some(BASELINE_CPU_PCT), 85.0));
+    }
+
+    /// The baseline must read back as "no alert", not as a missing field or a
+    /// value the client would render as a spike.
+    #[test]
+    fn the_baseline_round_trips_as_a_below_threshold_reading() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_snapshot(dir.path(), BASELINE_CPU_PCT).expect("write baseline");
+
+        let text = std::fs::read_to_string(metrics_snapshot_path(dir.path()))
+            .expect("baseline snapshot is readable");
+        let snapshot: MetricsSnapshot =
+            serde_json::from_str(&text).expect("baseline snapshot parses");
+
+        assert_eq!(snapshot.cpu_pct, BASELINE_CPU_PCT);
+        assert_eq!(snapshot.pid, std::process::id());
+        assert!(
+            snapshot.cpu_pct <= CPU_ALERT_THRESHOLD_PCT,
+            "the baseline must never render as an alert"
+        );
     }
 
     #[test]
