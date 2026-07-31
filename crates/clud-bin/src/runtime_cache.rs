@@ -34,9 +34,15 @@ const RUNTIME_SUBDIR: &str = "runtime";
 /// re-exec path has soaked in real PTY / backend workflows.
 const CLUD_USE_RUNTIME_CACHE: &str = "CLUD_USE_RUNTIME_CACHE";
 
-/// Existing escape hatch. During the opt-in phase it disables both the legacy
-/// unlock trampoline and the new runtime-cache hop.
-const CLUD_NO_UNLOCK: &str = "CLUD_NO_UNLOCK";
+// NOTE: the runtime-cache hop is deliberately **not** gated on
+// `CLUD_NO_UNLOCK`. That variable is the escape hatch for the Windows-only
+// unlock trampoline (`trampoline.rs`), which is a no-op on POSIX — so on
+// Linux and macOS its only effect was silently disabling this cross-platform
+// hop. Every test harness sets it unconditionally (`ci/test.py`,
+// `ci/run_bundle.py`, `tests/integration/conftest.py`), which meant the hop
+// could never be exercised off Windows. The hop is already opt-in via
+// `CLUD_USE_RUNTIME_CACHE` and off in debug builds; a second gate named after
+// a Windows-specific trick bought nothing and cost a footgun.
 
 /// Compile-time version stamp consumed by [`runtime_cache_dir`].
 const CLUD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -74,17 +80,12 @@ pub fn cached_clud_path() -> Option<PathBuf> {
 pub fn runtime_cache_hop_enabled() -> bool {
     runtime_cache_hop_enabled_from_vars(
         std::env::var_os(CLUD_USE_RUNTIME_CACHE).is_some(),
-        std::env::var_os(CLUD_NO_UNLOCK).is_some(),
         cfg!(debug_assertions),
     )
 }
 
-fn runtime_cache_hop_enabled_from_vars(
-    use_runtime_cache: bool,
-    no_unlock: bool,
-    debug_assertions: bool,
-) -> bool {
-    use_runtime_cache && !no_unlock && !debug_assertions
+fn runtime_cache_hop_enabled_from_vars(use_runtime_cache: bool, debug_assertions: bool) -> bool {
+    use_runtime_cache && !debug_assertions
 }
 
 /// If `CLUD_USE_RUNTIME_CACHE=1` is set, ensure this clud binary is
@@ -315,22 +316,43 @@ mod tests {
 
     #[test]
     fn runtime_cache_hop_enabled_requires_opt_in() {
-        assert!(!runtime_cache_hop_enabled_from_vars(false, false, false));
-    }
-
-    #[test]
-    fn runtime_cache_hop_enabled_respects_existing_unlock_escape_hatch() {
-        assert!(!runtime_cache_hop_enabled_from_vars(true, true, false));
+        assert!(!runtime_cache_hop_enabled_from_vars(false, false));
     }
 
     #[test]
     fn runtime_cache_hop_enabled_stays_off_for_debug_builds() {
-        assert!(!runtime_cache_hop_enabled_from_vars(true, false, true));
+        assert!(!runtime_cache_hop_enabled_from_vars(true, true));
     }
 
     #[test]
-    fn runtime_cache_hop_enabled_when_opted_in_without_escape_hatch() {
-        assert!(runtime_cache_hop_enabled_from_vars(true, false, false));
+    fn runtime_cache_hop_enabled_when_opted_in() {
+        assert!(runtime_cache_hop_enabled_from_vars(true, false));
+    }
+
+    /// The opt-in is the *only* enabling input, so nothing else can silently
+    /// veto the hop.
+    ///
+    /// This is the regression guard for the `CLUD_NO_UNLOCK` coupling: that
+    /// variable is `trampoline.rs`'s escape hatch, a no-op off Windows, and
+    /// gating this cross-platform hop on it meant that on Linux and macOS its
+    /// only effect was disabling the hop — which every harness did
+    /// unconditionally. An end-to-end test cannot express this (the hop is
+    /// off in debug builds, which is every `cargo test` run), so the guard is
+    /// the arity: a second veto input cannot be threaded back through
+    /// without changing this call.
+    #[test]
+    fn the_opt_in_is_the_only_enabling_input() {
+        for debug_assertions in [true, false] {
+            assert_eq!(
+                runtime_cache_hop_enabled_from_vars(true, debug_assertions),
+                !debug_assertions,
+                "opt-in plus debug={debug_assertions} must fully determine the answer"
+            );
+            assert!(
+                !runtime_cache_hop_enabled_from_vars(false, debug_assertions),
+                "without the opt-in the hop is off regardless of build profile"
+            );
+        }
     }
 
     #[test]
