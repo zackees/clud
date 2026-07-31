@@ -196,6 +196,16 @@ as fixed while the same symptom kept growing. `reap_log.rs` provides:
   per event (#544 found per-op synchronous JSONL flushes to be an idle-CPU cost
   of their own), and nothing at all is written for a pass that changed nothing.
 
+**Metadata misses go to the session log, never the shared one.** A job
+notification for a PID Toolhelp could not resolve before it exited is *expected*
+under process churn — the path fails closed and spares it. Enumerating each one
+into `daemon-events.jsonl` synchronously ran at ~300 writes/min, made them 98.8%
+of that log, and rotated every other producer's events (including the daemon's
+own orphan-sweep status) out before anyone could read them (#689). Per-PID lines
+now go to this session's buffered `reap.jsonl`; `ReapCounters::metadata_misses`
+carries the total to the exit summary. The diagnostic is relocated and
+summarized, not deleted.
+
 Two reconciliation identities, checkable from the summary:
 
 ```
@@ -206,7 +216,9 @@ decisions_emitted    == reaped + spared
 They stay separate, and `tracked` belongs to neither, because the populations
 are disjoint: most spawned processes never become reap candidates; abandoned
 identities are *triggers* while kill targets are their *descendants*; and a kill
-takes a whole subtree without emitting a decision per descendant.
+takes a whole subtree without emitting a decision per descendant. `metadata_misses`
+is outside both for the same reason: an unresolvable process never became a
+candidate, so it emitted no decision.
 
 When reading the log, check the **reason**, not only the outcome. A daemon
 spared as `outside_job_object` or `listening_endpoint` was spared by a signal

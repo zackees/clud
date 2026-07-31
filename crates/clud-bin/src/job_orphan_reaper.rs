@@ -1389,7 +1389,7 @@ mod imp {
                 .is_err()
             {
                 if unsafe { GetLastError().0 } == WAIT_TIMEOUT.0 {
-                    let metadata_complete = retry_unresolved_new_processes(&processes);
+                    let metadata_complete = retry_unresolved_new_processes(&processes, &telemetry);
                     // The completion-port timeout *is* the quiet-period
                     // detector: it fires only when no job notification arrived,
                     // which is exactly the condition provisional-empty
@@ -1460,7 +1460,7 @@ mod imp {
                         false
                     };
                     if metadata_failed {
-                        log_metadata_miss(pid);
+                        record_metadata_miss(&telemetry, pid);
                     }
                     // Only shell images become reap triggers, so only they
                     // enter the `shell_exits_observed` denominator.
@@ -1503,7 +1503,10 @@ mod imp {
         }
     }
 
-    fn retry_unresolved_new_processes(processes: &Mutex<TrackerProcesses>) -> bool {
+    fn retry_unresolved_new_processes(
+        processes: &Mutex<TrackerProcesses>,
+        telemetry: &Mutex<Telemetry>,
+    ) -> bool {
         let unresolved = processes
             .lock()
             .map(|processes| {
@@ -1545,10 +1548,17 @@ mod imp {
         // metadata never resolves used to block every unrelated pending exit
         // for the session's life. Charge this quiet period against the
         // stragglers and retire the ones that have run out of retries.
-        for pid in processes.bump_unresolved_retries(now_ms()) {
-            log_metadata_miss(pid);
+        let retired = processes.bump_unresolved_retries(now_ms());
+        let complete = processes.metadata_complete();
+        // Release the tracker before touching telemetry: the two locks are
+        // never held together anywhere else, and taking them in one order here
+        // and the other order on the completion-port path is how a deadlock
+        // gets introduced.
+        drop(processes);
+        for pid in retired {
+            record_metadata_miss(telemetry, pid);
         }
-        processes.metadata_complete()
+        complete
     }
 
     /// One reconcile pass over the whole pending backlog.
@@ -1925,22 +1935,38 @@ mod imp {
         );
     }
 
-    fn log_metadata_miss(pid: u32) {
-        use serde_json::json;
-
-        let Ok(state_dir) = crate::daemon::default_state_dir() else {
-            return;
-        };
-        crate::daemon::log_structured_event(
-            &state_dir,
-            "foreground_tool_shell_metadata_miss",
-            vec![
-                ("foreground_pid", json!(std::process::id())),
-                ("process_pid", json!(pid)),
-                ("action", json!("spare")),
-                ("reason", json!("process_metadata_unavailable")),
-            ],
-        );
+    /// A job notification arrived for a PID Toolhelp could not resolve before
+    /// it exited. The path fails closed and spares it; this is the record.
+    ///
+    /// #689: this used to be one **synchronous** `log_structured_event` per
+    /// miss into the shared, rotating `daemon-events.jsonl`. Under the
+    /// process-churn workloads that make the reaper interesting that ran at
+    /// ~300 writes/min — 98.8% of the log — and evicted every other producer's
+    /// events, including the daemon's own orphan-sweep status, before anyone
+    /// could read them. It also reintroduced exactly the per-op synchronous
+    /// JSONL flush that #544 measured as an idle-CPU cost and that #673
+    /// principle 7 forbids; Phase 5 honoured that for `reap.jsonl` and this
+    /// path predates it.
+    ///
+    /// Per-PID fidelity now goes to *this session's* buffered log, and the
+    /// aggregate reaches the exit summary through
+    /// [`ReapCounters::metadata_misses`] — the diagnostic is relocated and
+    /// summarized, not deleted.
+    fn record_metadata_miss(telemetry: &Mutex<Telemetry>, pid: u32) {
+        let ts_ms = now_ms();
+        with_telemetry(telemetry, |t| {
+            t.epoch.metadata_misses += 1;
+            t.record(ReapEvent {
+                ts_ms,
+                pid: Some(pid),
+                start_time: None,
+                image_name: None,
+                // Fails closed: an unresolvable process is never a kill target.
+                action: ReapAction::Spared,
+                reason: "process_metadata_unavailable",
+                phase: ReapPhase::Runtime,
+            });
+        });
     }
 
     fn snapshot() -> HashMap<u32, ProcessMeta> {
