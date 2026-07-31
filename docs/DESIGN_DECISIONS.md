@@ -153,7 +153,7 @@ The separate session-cap registry (`sessions.redb`) keeps file-lock-based serial
 | Approach | Why not |
 |---|---|
 | Continue with direct file access + advisory locks | Failed under concurrent invocations on Windows. |
-| Use named pipes / Unix sockets directly | Platform-specific code; TCP loopback is portable and equally fast for this workload. |
+| Use named pipes / Unix sockets directly | Platform-specific code; TCP loopback is portable and equally fast for this workload. **Superseded by [DD-025](#dd-025-the-broker-frame-lane-is-the-default-daemon-transport-superseding-dd-006s-tcp-only-rationale) — this is now the default path.** |
 | Move everything to a single redb file with file locks | Doesn't solve the original concurrency problem. |
 | Use sqlite or a daemon-less embedded DB with better locking | redb is already used elsewhere; introducing another store fragments storage. |
 
@@ -898,3 +898,49 @@ not merely that it was. Integration coverage shrinks to what genuinely cannot be
 faked, with a stated budget of ≤5 tests. The cost is one indirection on a path
 that runs at most a few times per second, and the discipline that a new signal
 must be added to the trait rather than called where it is needed.
+
+---
+
+## DD-025: The broker frame lane is the default daemon transport, superseding DD-006's TCP-only rationale
+
+**Context:** [DD-006](#dd-006-cluddatardb-is-owned-exclusively-by-a-single-gc-daemon-process-clients-access-it-over-loopback-tcp)
+chose loopback TCP for daemon IPC and explicitly rejected "named pipes / Unix
+sockets directly" as platform-specific. `running-process` adoption later added a
+broker v1 frame lane, and `send_daemon_request` now tries it **first** — which
+means clud's default daemon transport is a named pipe on Windows and a Unix
+socket everywhere else. The rejected mechanism became the primary one, and
+nothing recorded the reversal.
+
+That is not a documentation nicety. `docs/architecture/daemon-ipc.md` cited
+DD-006 as the rationale for TCP *over* named pipes while the named pipe was
+carrying the traffic, and an agent reading it as authoritative reached a wrong
+conclusion about what the daemon could do (#692).
+
+**Decision:** The broker frame lane (`daemon/rp_broker/`) is the default
+transport for every `DaemonRequest`. Loopback TCP remains as the fallback and is
+still authoritative in the sense that it always works: any miss —
+`RUNNING_PROCESS_DISABLE=1`, a missing `daemon-identity.json` sidecar, a connect
+or wire failure — falls through to it silently.
+
+**Rationale:**
+- DD-006's objection was *platform-specific code we would have to write*.
+  `running-process` writes it, and clud consumes one `Endpoint` abstraction, so
+  the cost the original decision was avoiding is no longer clud's to pay.
+- The frame lane multiplexes many frames over one connection, which loopback TCP
+  as wired here does not (one request per connection). That capability is a
+  precondition for any future streaming or subscription surface.
+- Keeping TCP as an always-available fallback means the reversal adds a fast
+  path without adding a failure mode: no sidecar, no broker, no problem.
+
+**Consequences:**
+- "The loopback TCP listener" is no longer a complete description of daemon IPC.
+  There are three listeners — frame lane, TCP, and the dashboard's HTTP port.
+- Connection lifetime is a **client** policy, not a protocol limit. The daemon's
+  `serve_connection` already loops; the client sends one request and drops the
+  session. A caller wanting a long-lived channel does not need the daemon
+  rewritten.
+- DD-006's alternatives table is annotated rather than rewritten: the decision
+  was correct when made, and the record of why it changed is more useful than a
+  silent edit.
+- See [daemon-ipc.md](architecture/daemon-ipc.md) for the lane table and the
+  full eleven-variant request surface.
