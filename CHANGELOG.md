@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- The cross-toolchain linter (`ci/banned_cross_tools.py`) now actually enforces
+  what it documents. `cargo xwin`, the bare `xwin` CLI, `XWIN_*` env vars,
+  `osxcross` and `cross` are banned **unconditionally** — they are MSVC- or
+  Apple-only by construction, so the old "only if a literal triple is on this
+  line" rule let `cargo xwin build --target $TARGET` through, and `cargo xwin`
+  re-splats the MSVC CRT on every cold cache. `cargo zigbuild` / `maturin --zig`
+  / `zig cc` stay target-conditional, so the Linux and manylinux lanes are
+  untouched. Install patterns now match across lines (the `taiki-e/install-action`
+  + `tool: cargo-xwin` shape could never fire before), and cover `cargo binstall`,
+  `brew`, `apt`/`dnf`/`apk`/`choco`, `houseabsolute/actions-rust-cross`,
+  `cross-rs/cross`, `tpoechtrager/osxcross` and hand-rolled `[target.*] linker =`
+  overrides. Scope widens from `.github/` + `ci/` to `bench/`, `dylints/`,
+  `skills/`, `.claude/hooks/`, `crates/clud-bin/assets/tools/`, Rust sources,
+  Dockerfiles and the root entrypoints the old list missed (`install.sh`,
+  `install.ps1`, `publish`). Prose that a comment-stripper cannot see can opt out
+  with a `cross-lint: allow` marker. See zackees/clud#714.
+
 ## 2.4.1 - 2026-07-25
 
 - Windows PTY input now uses running-process's native terminal translator

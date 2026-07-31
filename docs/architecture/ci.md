@@ -149,13 +149,46 @@ Three things enforce it, because no one of them is sufficient:
 
 | Guard | Catches | Blind to |
 | --- | --- | --- |
-| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command with a literal target, in YAML, Python or shell — including the argv-list form `["cargo", "xwin", ...]` | a target held in a variable |
+| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command in YAML, Python, shell, PowerShell, TOML, Rust or a Dockerfile — including the argv-list form `["cargo", "xwin", ...]` and multi-line install steps | a *conditional* tool at a target held in a variable |
 | `ci/xbuild.py::cargo_argv` raises on `zigbuild` + an Apple/MSVC triple | the dispatch itself, whatever the target's provenance | a caller that bypasses `cargo_argv` |
 | `tests/test_ci_matrix.py` | every matrix triple's `strategy`, and the argv `cargo_argv` actually returns for it | a command path outside the matrix |
 
 The linter's failure names the file, line, rejected tool, the target family, and
 the `soldr build --target ...` replacement — a reader who has never seen this
 rule should not have to go looking.
+
+##### Two rule classes (#714)
+
+The linter's original form required a **literal** Apple/MSVC triple on the same
+line as the tool. That is right for Zig and wrong for everything else, so the
+table is split:
+
+- **Unconditional** — `cargo xwin`, the bare `xwin` CLI, `XWIN_*` env vars,
+  `osxcross`, `cross build`, `Cross.toml`. These name an MSVC- or Apple-only
+  toolchain by construction, so there is no target that makes them legal here.
+  `cargo xwin build --target $TARGET` and `cargo xwin build --release` both
+  fail, where before neither did. This is also the throughput fix: `cargo xwin`
+  re-downloads and splats the MSVC CRT/SDK on every cold cache.
+- **Conditional on a soldr-owned target** — `cargo zigbuild`, `maturin --zig`,
+  `zig cc`. Correct for `*-unknown-linux-*`, rejected at Apple/MSVC.
+- **Installs**, at any target, matched against the whole file rather than line
+  by line so the GitHub Actions shape (`taiki-e/install-action` with
+  `tool: cargo-xwin` two lines below) is caught. Also `cargo binstall`, `brew`,
+  `apt`/`dnf`/`apk`/`choco`, `pip install ziglang`, `houseabsolute/actions-rust-cross`,
+  `cross-rs/cross`, `tpoechtrager/osxcross`, and a `linker =` override under a
+  `[target.<apple-or-msvc-triple>]` section of a Cargo config.
+
+**Scope.** `.github/`, `ci/`, `bench/`, `dylints/`, `skills/`, `.claude/hooks/`,
+`crates/clud-bin/assets/tools/` (the Docker build helpers, which emit
+Dockerfiles as heredocs), plus the root entrypoints `build lint test install
+install.sh install.ps1 publish` and `.cargo/config.toml`. `.claude/hooks` rather
+than `.claude` because the latter also holds `worktrees/`, an ignored second
+checkout.
+
+**Escape hatch.** Line comments are stripped so prose explaining the ban stays
+legal, but a module docstring is prose no stripper sees. A line carrying
+`cross-lint: allow` is skipped. It is verbose on purpose:
+`rg 'cross-lint: allow'` lists every escape in the tree.
 
 #### Timing evidence
 
