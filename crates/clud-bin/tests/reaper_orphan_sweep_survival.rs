@@ -251,10 +251,22 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
         outcome.spared
     );
 
+    // `try_wait`, not a process-table lookup: this one is our *direct* child,
+    // so once it is SIGKILLed it becomes a zombie until we reap it — and a
+    // zombie is still a row in the process table. `pid_is_alive` would spin
+    // here until the deadline and report a reaper failure that did not happen.
+    // The two survival tests above look up the PID instead because their stub
+    // is a *grand*child whose launcher has exited, so init reaps it for us.
     let deadline = Instant::now() + Duration::from_secs(10);
-    while pid_is_alive(pid) {
+    loop {
+        match leaked.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(err) => panic!("try_wait on the leaked client failed: {err}"),
+        }
         if Instant::now() >= deadline {
             let _ = leaked.kill();
+            let _ = leaked.wait();
             panic!(
                 "a leaked orphan with no daemon signal must still be reaped; \
                  over-sparing has disabled the reaper"
@@ -262,7 +274,6 @@ fn a_leaked_orphan_with_no_daemon_signal_is_still_reaped() {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let _ = leaked.wait();
 }
 
 fn sleeper() -> Command {
