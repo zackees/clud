@@ -528,6 +528,11 @@ fn report_and_reap(
         };
     }
 
+    // #673 Phase 8: one host topology walk for the whole sweep. This used to be
+    // a fresh full-host walk *per orphan* — a 20-orphan sweep walked the host
+    // process table 20 times to answer 20 questions it could answer from one —
+    // plus one targeted refresh per orphan for the identity check.
+    let topology = process_tree::TopologySnapshot::capture();
     let mut reaped = 0usize;
     let mut reaped_pids = Vec::with_capacity(descendants.len());
     let mut skipped_recycled = 0usize;
@@ -536,12 +541,14 @@ fn report_and_reap(
         // on it are separated by the rest of the scan, the classification, and
         // the report. A PID can die and be recycled in that window, and killing
         // a *tree* means the replacement's children go with it. Re-read the
-        // creation time at the last responsible moment and refuse if it moved.
-        if !kill_target_is_current(d.identity(), ProcessIdentity::observe(d.pid)) {
+        // creation time and refuse if it moved. The check reads from the same
+        // snapshot the kill acts on, so selection and termination cannot
+        // disagree about which process holds the number.
+        if !kill_target_is_current(d.identity(), topology.identity(d.pid)) {
             skipped_recycled += 1;
             continue;
         }
-        process_tree::kill_tree_filtered(d.pid, &|pid| !daemons.contains(&pid));
+        topology.kill_tree_filtered(d.pid, &|pid| !daemons.contains(&pid));
         reaped += 1;
         reaped_pids.push(d.pid);
     }

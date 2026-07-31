@@ -32,8 +32,9 @@
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
+use crate::process_identity::ProcessIdentity;
 #[cfg(any(windows, test))]
-use crate::process_identity::{ProcessIdentity, UNKNOWN_START_TIME};
+use crate::process_identity::UNKNOWN_START_TIME;
 
 #[cfg(any(windows, test))]
 pub(crate) fn automatic_identity_matches(
@@ -101,34 +102,73 @@ pub fn kill_tree(pid: u32) {
 /// transitively, and a process that spawned itself as a daemon has stripped
 /// it. Matching on image names would misfire on every unrelated build.
 pub fn kill_tree_filtered(pid: u32, may_kill: &dyn Fn(u32) -> bool) {
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    let root = Pid::from_u32(pid);
-    if system.process(root).is_none() {
-        // Already dead, or never existed. Nothing to do.
-        return;
-    }
-    if !may_kill(pid) {
-        // Root is exempt — the whole tree is pruned.
-        return;
+    TopologySnapshot::capture().kill_tree_filtered(pid, may_kill);
+}
+
+/// One host process-topology walk, reusable across many kills.
+///
+/// This is the `ProcessRefreshKind::nothing()` tier — pid, parent pid, image
+/// name and creation time — which is everything a kill path needs and nothing
+/// it does not. It exists because the orphan sweep used to pay for a **fresh
+/// host walk per orphan**: a 20-orphan sweep walked the host process table 20
+/// times to answer 20 questions it could have answered from one (#673 Phase 8).
+///
+/// Capture once per sweep, not once per target.
+pub struct TopologySnapshot {
+    system: System,
+}
+
+impl TopologySnapshot {
+    pub fn capture() -> Self {
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        Self { system }
     }
 
-    // Kill leaves first, root last. `descendants` is BFS order
-    // (root's children, then grandchildren, ...); reversing gets us
-    // deepest-first.
-    let mut descendants = descendant_pids_filtered(&system, root, may_kill);
-    descendants.reverse();
-    descendants.push(root);
+    /// The identity of `pid` as this snapshot saw it, or `None` if the PID was
+    /// already gone when the snapshot was taken.
+    pub fn identity(&self, pid: u32) -> Option<ProcessIdentity> {
+        ProcessIdentity::observe_in(&self.system, pid)
+    }
 
-    for descendant in descendants {
-        if let Some(process) = system.process(descendant) {
-            // `kill_with(Signal::Kill)` is SIGKILL on Unix. On Windows it
-            // returns `None` (signals aren't a Windows concept), so we
-            // always follow up with `process.kill()` which is
-            // `TerminateProcess` on Windows and a no-op redundant SIGKILL
-            // on Unix.
-            let _ = process.kill_with(Signal::Kill);
-            let _ = process.kill();
+    /// [`kill_tree_filtered`] against this snapshot rather than a fresh walk.
+    ///
+    /// Selection and termination therefore share one view of the process
+    /// table: a target is chosen and killed from the same observation, which
+    /// is a narrower window than choosing from one walk and killing from
+    /// another.
+    pub fn kill_tree_filtered(&self, pid: u32, may_kill: &dyn Fn(u32) -> bool) {
+        let root = Pid::from_u32(pid);
+        if self.system.process(root).is_none() {
+            // Already dead, or never existed. Nothing to do.
+            return;
+        }
+        if !may_kill(pid) {
+            // Root is exempt — the whole tree is pruned.
+            return;
+        }
+
+        // Kill leaves first, root last. `descendants` is BFS order
+        // (root's children, then grandchildren, ...); reversing gets us
+        // deepest-first.
+        let mut descendants = descendant_pids_filtered(&self.system, root, may_kill);
+        descendants.reverse();
+        descendants.push(root);
+
+        for descendant in descendants {
+            if let Some(process) = self.system.process(descendant) {
+                // `kill_with(Signal::Kill)` is SIGKILL on Unix. On Windows it
+                // returns `None` (signals aren't a Windows concept), so we
+                // always follow up with `process.kill()` which is
+                // `TerminateProcess` on Windows and a no-op redundant SIGKILL
+                // on Unix.
+                let _ = process.kill_with(Signal::Kill);
+                let _ = process.kill();
+            }
         }
     }
 }
