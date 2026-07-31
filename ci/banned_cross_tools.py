@@ -86,9 +86,16 @@ BANNED_ALWAYS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # sit between the binary and its subcommand in every real invocation
     # (`xwin --accept-license splat --output ...`, which is the form xwin's own
     # README uses), so requiring adjacency would miss the shape that matters.
+    # Only flag-shaped tokens may sit between the binary and its subcommand,
+    # and the binary may not be the tail of a path. `[^\n]*?` instead would
+    # flag `PATHS = ["/opt/xwin", "list"]` and `"the xwin cache does not
+    # download automatically"` — `list` and `download` are ordinary words.
     (
         "xwin CLI",
-        re.compile(r"""\bxwin\b[^\n]*?["',\s](?:splat|download|unpack|list)\b"""),
+        re.compile(
+            r"""(?<![/\\\w-])xwin\b(?:["',\s]+-{1,2}[\w-]+(?:[=\s]+[^\s"',]+)?)*"""
+            r"""["',\s]+(?:splat|download|unpack|list)\b"""
+        ),
     ),
     # `CARGO_XWIN_*` is cargo-xwin's own env prefix and is the half a real user
     # sets. `\b` does not match between `CARGO_` and `XWIN_` — `_` is a word
@@ -104,13 +111,29 @@ BANNED_ALWAYS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "cross",
         re.compile(
-            r"""(?:^|[|&;(]|\bRUN\s|\brun:\s*)\s*["']?cross["',\s]+"""
+            r"""(?:^|[|&;(]|\bRUN\s|\brun:\s*)\s*"""
+            # Wrappers that take a command as their argument: `sudo cross
+            # build`, `env RUSTFLAGS=-C cross build`, `xargs cross build`,
+            # `timeout 60 cross build`. Each may carry its own arguments.
+            r"""(?:(?:sudo|env|xargs|timeout|nice|exec|command|time)\s+"""
+            r"""(?:[-\w=./]+\s+)*)?"""
+            r"""["']?cross["',\s]+"""
             r"""(?:\+\S+["',\s]+)?(?:build|test|run|check|rustc|bench|clippy)\b"""
         ),
     ),
+    # The quoted argv form, where the quotes are the anchor. Flags and a
+    # toolchain override may precede the verb, so the same verb list as the
+    # shell rule stays reachable: `["cross", "+nightly", "build"]`.
     (
         "cross (argv list)",
-        re.compile(r"""["']cross["']\s*,\s*["'](?:build|test|run|check|rustc)["']"""),
+        # Intervening arguments may be unquoted variables, not just string
+        # literals — `["cross", "--target", target, "build"]` is the shape a
+        # real script builds. Bounded and `]`-stopped so the scan cannot run
+        # past the end of the list it started in.
+        re.compile(
+            r"""["']cross["']\s*,\s*(?:[^,\n\]]*,\s*){0,6}?"""
+            r"""["'](?:build|test|run|check|rustc|bench|clippy)["']"""
+        ),
     ),
     ("Cross.toml", re.compile(r"\bCross\.toml\b")),
 )
@@ -163,6 +186,12 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("mlugg/setup-zig", re.compile(r"mlugg/setup-zig")),
     ("houseabsolute/actions-rust-cross", re.compile(r"houseabsolute/actions-rust-cross")),
     ("cross-rs/cross", re.compile(r"\bcross-rs/cross\b")),
+    # The plain crates.io install. `(?!-)` so `cargo install cross-something`
+    # — an unrelated crate that merely starts with the word — stays legal.
+    (
+        "cargo install cross",
+        re.compile(r"cargo\s+(?:install|binstall)\s+[^\n]*\bcross\b(?!-)"),
+    ),
     ("osxcross checkout", re.compile(r"tpoechtrager/osxcross")),
     (
         "hand-rolled linker for a soldr-owned target",
@@ -280,33 +309,92 @@ HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".py", ".sh", ".ps1", ".toml
 ALLOW_MARKER = "cross-lint: allow"
 
 
-#: A `//` that is not the `//` in a URL. `"https://github.com/rust-cross/
-#: cargo-xwin"` is a string, not a comment, and truncating it there would hide
-#: a real reference to the banned tool.
-RUST_LINE_COMMENT = re.compile(r"(?<!:)//")
+def _strip_rust_comments(text: str) -> str:
+    """Blank out Rust comments, character for character.
 
-#: A Rust block comment, replaced by blank lines rather than deleted: the
-#: install patterns map a match offset back to a line number, so the stripper
-#: must never change how many lines the text has.
-RUST_BLOCK_COMMENT = re.compile(r"/\*[\s\S]*?\*/")
+    A scanner rather than a regex, because all three of the cheap regex
+    approaches are wrong in a way that matters:
 
+    * `/\\*.*?\\*/` stops at the first `*/`, but **Rust block comments nest**,
+      so `/* /* */ cargo xwin build */` would leave live-looking text behind.
+    * Splitting a line at `//` cuts strings containing `//` — a URL such as
+      `"https://github.com/rust-cross/cargo-xwin"` is a real reference to the
+      banned tool and must survive to be reported, and truncating there also
+      hides whatever follows on the line.
+    * Neither knows about string literals, so `let open = "/*";` … `let close
+      = "*/";` would swallow every line between them. That is a one-line
+      bypass for anyone who notices.
 
-def _strip_rust_block_comments(text: str) -> str:
-    return RUST_BLOCK_COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    Comment characters become spaces and newlines are preserved, so every
+    offset and line number in the result matches the input exactly. The
+    install patterns map a match offset back to a line number, so that
+    property is load-bearing rather than incidental.
+
+    Known limit: `'` is not treated as a delimiter, because Rust lifetimes
+    (`&'a str`) would open a string that never closes. A char literal holding
+    a quote (`'"'`) therefore desynchronises the scanner — always in the
+    direction of stripping *less*, which costs a false positive, never a
+    missed violation.
+    """
+    out = list(text)
+    length = len(text)
+    index = 0
+    depth = 0
+    in_string = False
+    in_line_comment = False
+    while index < length:
+        char = text[index]
+        following = text[index + 1] if index + 1 < length else ""
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            else:
+                out[index] = " "
+            index += 1
+        elif depth:
+            if char == "/" and following == "*":
+                depth += 1
+                out[index] = out[index + 1] = " "
+                index += 2
+            elif char == "*" and following == "/":
+                depth -= 1
+                out[index] = out[index + 1] = " "
+                index += 2
+            else:
+                if char != "\n":
+                    out[index] = " "
+                index += 1
+        elif in_string:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+        elif char == '"':
+            in_string = True
+            index += 1
+        elif char == "/" and following == "/":
+            in_line_comment = True
+            out[index] = " "
+            index += 1
+        elif char == "/" and following == "*":
+            depth = 1
+            out[index] = out[index + 1] = " "
+            index += 2
+        else:
+            index += 1
+    return "".join(out)
 
 
 def _strip_comment(line: str, suffix: str) -> str:
     """Drop a trailing comment so prose about the ban is not a violation.
 
     Comments in these files routinely *explain* why `cargo xwin` is forbidden;
-    treating that as a violation would make the rule undocumentable. Block
-    comments are handled before the split, in `scan_text`, because they span
-    lines.
+    treating that as a violation would make the rule undocumentable. Rust is
+    absent here because `_strip_rust_comments` has already blanked its
+    comments, line and block alike, before the text was split.
     """
-    if ALLOW_MARKER in line:
-        return ""
-    if suffix == ".rs":
-        return RUST_LINE_COMMENT.split(line, maxsplit=1)[0]
     if suffix in HASH_COMMENT_SUFFIXES:
         return line.split("#", 1)[0]
     return line
@@ -325,26 +413,42 @@ def scan_text(text: str, suffix: str = ".py") -> list[tuple[int, str, str]]:
     Pure so the fixtures can exercise it directly, without writing files.
     """
     violations: list[tuple[int, str, str]] = []
+    # The marker is read from the *original* line. Blanking Rust comments
+    # first would erase a marker written as a trailing `// cross-lint: allow`,
+    # which is where anyone would naturally put one.
+    original = text.splitlines()
     if suffix == ".rs":
-        text = _strip_rust_block_comments(text)
-    stripped = [_strip_comment(raw, suffix) for raw in text.splitlines()]
+        text = _strip_rust_comments(text)
+    stripped = [
+        "" if ALLOW_MARKER in raw else _strip_comment(line, suffix)
+        # strict: `_strip_rust_comments` blanks characters in place rather
+        # than removing them, so the two line lists are the same length by
+        # construction. If that ever stops being true, failing here is far
+        # better than silently misaligning every marker with the wrong line.
+        for raw, line in zip(original, text.splitlines(), strict=True)
+    ]
 
     # Installs run first because they are the more specific finding: a line
     # reading `cargo install cargo-xwin` is an install, and also — to the
     # invocation rules — a mention of `cargo xwin`. Reporting both would count
     # one mistake twice in the summary total and make the fix look bigger than
-    # it is, so an install suppresses the invocation rules on its own line.
+    # it is, so an install suppresses the invocation rules across every line it
+    # spans — not just the line it starts on. The canonical GitHub Actions
+    # shape puts `uses: taiki-e/install-action` and `tool: cargo-xwin` on
+    # different lines, so suppressing only the start line would leave the
+    # `tool:` line to be reported a second time by the `cargo xwin` rule,
+    # which is the exact double-count this is here to prevent.
     #
-    # Matched against the whole file, not line by line: the shape that matters
-    # in GitHub Actions puts the tool name on a line after the action
-    # reference. Offsets map back to a line number by counting the newlines
-    # that precede them.
+    # Matched against the whole file, not line by line, for the same reason.
+    # Offsets map back to a line number by counting the newlines that precede
+    # them.
     joined = "\n".join(stripped)
     install_lines: set[int] = set()
     for tool, pattern in BANNED_INSTALLS:
         for match in pattern.finditer(joined):
             number = joined.count("\n", 0, match.start()) + 1
-            install_lines.add(number)
+            last = joined.count("\n", 0, match.end()) + 1
+            install_lines.update(range(number, last + 1))
             violations.append((number, tool, _install_reason(tool)))
 
     for number, line in enumerate(stripped, start=1):

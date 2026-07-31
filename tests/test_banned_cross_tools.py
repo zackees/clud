@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from ci.banned_cross_tools import main, scan_text
+from ci.banned_cross_tools import _strip_rust_comments, main, scan_text
 
 # --------------------------------------------------------------- rejected --
 
@@ -66,6 +66,30 @@ REJECTED: list[tuple[str, str, str]] = [
         ".sh",
     ),
     ("cross as an argv list", 'ARGS = ["cross", "build"]', ".py"),
+    # Wrappers that take a command as their argument still put `cross` at a
+    # command position, just not at the start of the line.
+    ("sudo cross", "sudo cross build --target x86_64-pc-windows-msvc", ".sh"),
+    ("env-prefixed cross", "env RUSTFLAGS=-C cross build", ".sh"),
+    ("xargs cross", "xargs cross build", ".sh"),
+    ("timeout-wrapped cross", "timeout 60 cross build", ".sh"),
+    # The argv form must reach the same verbs as the shell form, with flags or
+    # a toolchain override in between.
+    ("cross argv with a toolchain", '["cross", "+nightly", "build"]', ".py"),
+    ("cross argv with bench", '["cross", "bench"]', ".py"),
+    ("cross argv with flags before the verb", '["cross", "--target", t, "build"]', ".py"),
+    ("cargo install cross", "cargo install cross", ".sh"),
+    # A string literal is not a comment: `let open = "/*"` must not blank out
+    # every line until a later `"*/"`, or the tool is hidden by two strings.
+    (
+        "a command hidden between two block-comment string literals",
+        'let open = "/*";\nlet cmd = "cargo xwin build";\nlet close = "*/";',
+        ".rs",
+    ),
+    (
+        "a // inside a string does not truncate the rest of the line",
+        'let s = "a//b"; let c = "cargo xwin build";',
+        ".rs",
+    ),
     (
         "osxcross for darwin",
         "osxcross-clang --target aarch64-apple-darwin",
@@ -291,6 +315,26 @@ ACCEPTED: list[tuple[str, str, str]] = [
     # Unrelated packages whose names merely start with the banned token.
     ("apt-get installing zlib", "apt-get install -y zlib1g-dev", ".sh"),
     ("brew installing zigbee2mqtt", "brew install zigbee2mqtt", ".sh"),
+    ("an unrelated crate starting with cross", "cargo install cross-utility", ".sh"),
+    # `list` and `download` are ordinary words, and a path may end in `xwin`.
+    ("a path ending in xwin next to the word list", 'PATHS = ["/opt/xwin", "list"]', ".py"),
+    (
+        "prose mentioning xwin and download",
+        'msg = "the xwin cache does not download automatically"',
+        ".py",
+    ),
+    # Rust block comments nest, so a non-greedy `/*…*/` would leave the inner
+    # text live and report something that is entirely commented out.
+    (
+        "text inside a nested Rust block comment",
+        "/* outer\n/* inner */\ncargo xwin build\n*/\nfn main() {}",
+        ".rs",
+    ),
+    ("a Rust doc comment", "/// never run cargo xwin build here", ".rs"),
+    ("a Rust inner doc comment", "//! cargo xwin build is banned", ".rs"),
+    # The marker is read from the original line, so a trailing `//` marker is
+    # not itself blanked by the comment scanner before it can be seen.
+    ("a Rust trailing-comment marker", 'let t = "cargo xwin"; // cross-lint: allow', ".rs"),
     ("the ziglang test dependency pin", '    "ziglang>=0.15.2,<0.16",', ".toml"),
     (
         "an install-action for an unrelated tool",
@@ -337,7 +381,12 @@ def test_the_install_action_violation_points_at_the_action_line():
             "          tool: cargo-xwin",
         ]
     )
-    (number, tool, reason) = scan_text(text, ".yml")[0]
+    findings = scan_text(text, ".yml")
+    # Exactly one: the suppression must span every line the install match
+    # covers, or the `tool: cargo-xwin` line gets reported a second time by
+    # the unconditional invocation rule — one mistake, counted twice.
+    assert len(findings) == 1, f"expected exactly one finding, got {findings}"
+    (number, tool, reason) = findings[0]
     assert number == 4, "must point at the install-action step, not the file head"
     assert tool == "taiki-e/install-action: cargo-xwin"
     assert "soldr prepare" in reason
@@ -375,6 +424,27 @@ def test_an_install_line_reports_the_install_not_also_the_invocation():
     findings = scan_text("cargo install cargo-xwin --locked", ".sh")
     assert len(findings) == 1, f"expected exactly one finding, got {findings}"
     assert findings[0][1] == "cargo install cargo-xwin"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a\n/* x\ny */",  # block closing on the last line, no trailing newline
+        "a\n/* x",  # never closed
+        "a\r\n/* x */\r\nb",  # CRLF
+        "/* /* */ */\nx",  # nested
+        'let s = "/*";\nlet t = "*/";',  # delimiters inside strings
+        "fn main() {} // trailing\n",
+    ],
+    ids=["eof-block", "unterminated", "crlf", "nested", "in-string", "line-comment"],
+)
+def test_the_rust_stripper_preserves_the_line_count(text: str):
+    """Line numbers are computed from offsets into the stripped text, so a
+    stripper that drops a line would misreport every finding after it. The
+    scanner blanks characters rather than removing them, which makes this
+    hold by construction — this test is what keeps it that way."""
+    assert len(_strip_rust_comments(text).splitlines()) == len(text.splitlines())
+    assert len(_strip_rust_comments(text)) == len(text), "offsets must line up too"
 
 
 def test_the_allow_marker_is_strictly_line_scoped():

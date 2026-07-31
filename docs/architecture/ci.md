@@ -190,11 +190,14 @@ table is split:
   `[target.<apple-or-msvc-triple>]` section of a Cargo config (quoted or
   unquoted key; `linker` need not be the section's first entry).
 
-An install **suppresses the invocation rules on its own line**. `cargo install
-cargo-xwin` is an install, and is also — to the invocation rules — a mention of
-`cargo xwin`; reporting both counts one mistake twice and makes the fix look
-bigger than it is. The suppression is scoped to that line, so a genuine
-invocation elsewhere in the file is still reported.
+An install **suppresses the invocation rules across every line its match
+spans**. `cargo install cargo-xwin` is an install, and is also — to the
+invocation rules — a mention of `cargo xwin`; reporting both counts one mistake
+twice and makes the fix look bigger than it is. Spanning matters: the
+`taiki-e/install-action` shape puts `uses:` and `tool: cargo-xwin` on different
+lines, so suppressing only the line the match *starts* on would leave the
+`tool:` line to be reported a second time. The suppression is scoped to those
+lines, so a genuine invocation elsewhere in the file is still reported.
 
 **Scope.** `.github/`, `ci/`, `bench/`, `crates/`, `dylints/`, `skills/`,
 `testbins/`, `tests/`, `.claude/hooks/`, plus the root entrypoints `build lint
@@ -206,10 +209,17 @@ author, where `whisper-rs-sys/build.rs` legitimately reasons about zig's C++
 runtime for the Linux lanes. `.claude/hooks` rather than `.claude` because the
 latter also holds `worktrees/`, an ignored second checkout.
 
-**Escape hatch.** Line comments are stripped so prose explaining the ban stays
-legal — `#`, and `//` plus `/* */` in Rust, with `//` inside a URL left alone so
-a link to the tool is not silently truncated. A module docstring is prose no
-stripper sees, so a line carrying `cross-lint: allow` is skipped outright. It is
+**Escape hatch.** Comments are stripped so prose explaining the ban stays legal.
+For `#` languages that is a split; Rust gets a real character scanner, because
+every cheap regex is wrong somewhere that matters: Rust block comments **nest**,
+a `//` inside a URL must survive (a link to `cargo-xwin` is a real reference and
+should be reported), and a stripper with no string awareness turns `let open =
+"/*";` … `let close = "*/";` into a one-line bypass for everything between them.
+The scanner blanks comment characters in place, so offsets and line numbers are
+unchanged by construction. A module docstring is prose no stripper sees, so a
+line carrying `cross-lint: allow` is skipped outright — read from the *original*
+line, so a trailing `// cross-lint: allow` in Rust is not itself blanked before
+it can be seen. It is
 verbose on purpose: `rg 'cross-lint: allow'` lists every escape in the tree
 (there are two, both in `tests/test_ci_matrix.py`, where the tool names *are*
 the assertion's data). The marker is **strictly line-scoped**, including inside
