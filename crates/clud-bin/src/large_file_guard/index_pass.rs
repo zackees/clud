@@ -25,8 +25,14 @@ pub(super) struct IndexPassOutput {
     pub(super) needs_verification: Vec<PathBuf>,
 }
 
-/// Why the index pass could not produce a report; the caller falls back to the
-/// walker (or, per #556, a killable `git ls-files --debug` subprocess).
+/// Why the index pass could not produce a report.
+///
+/// The two variants route to **different** fallbacks and must not be collapsed
+/// (#556): `NoIndex` means there is nothing to read, so the caller walks the
+/// tree; `Parse` means the data is there but we could not read it, so the
+/// caller takes one killable `git ls-files --debug` first — see
+/// [`super::ls_files_pass`]. Falling straight to the walker on `Parse` would
+/// surrender the whole win on exactly the repos most likely to be large.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum IndexPassError {
     /// No resolvable git index (not a git repo, or `.git` indirection broke).

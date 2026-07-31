@@ -203,10 +203,18 @@ Platform glue:
   reports tracked source files straight from the index's cached stat sizes —
   no tree walk, ~ms instead of ~240-400 ms. Entries whose cached size is
   untrustworthy (racily-clean, recorded as 0) get one targeted `stat` each. The
-  original `ignore`-crate parallel walker (hard 1 s deadline) remains the
-  fallback when there is no usable index; untracked-file coverage on the launch
-  path is deferred to the daemon-side pass 2 (#551). Why the index rather than
-  `git ls-files` / the ODB: [DD-022](../../../docs/DESIGN_DECISIONS.md#dd-022-the-large-file-guard-reads-the-git-index-in-process-not-the-worktree).
+  two failure modes route differently, and the distinction is load-bearing:
+  **no index** (not a git repo, broken `gitdir:` indirection) falls to the
+  original `ignore`-crate parallel walker under its hard 1 s deadline, while a
+  **corrupt/unparseable index** first takes one killable
+  `git ls-files --debug` (`large_file_guard/ls_files_pass.rs`), which still
+  reads cached sizes and still never touches the object database. Collapsing
+  the two would give up the whole win on precisely the repos most likely to be
+  large. Untracked-file coverage on the launch path is deferred to the
+  daemon-side pass 2 (#551). Why the index — and why never
+  `--format='%(objectsize)'` / `ls-tree`, which are 3-12x slower and can
+  trigger a network fetch on a partial clone:
+  [DD-022](../../../docs/DESIGN_DECISIONS.md#dd-022-the-large-file-guard-reads-the-git-index-in-process-not-the-worktree).
 - `path_norm.rs` - fbuild/zccache-style `NormalizedPath` and separator-safe
   path-string helpers for cross-platform path keys, serialization, and
   executable names received from another OS.
