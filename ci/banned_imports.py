@@ -106,8 +106,15 @@ def main() -> int:
     # tool_shell_lifecycle_windows.rs is exempt (#616) — it must build raw
     # process trees inside the production foreground Job Object. NativeProcess
     # would add its own containment and mask the completion-port lifecycle.
+    #
+    # reaper_daemon_survival_windows.rs is exempt (#674) — the daemon-survival
+    # suite must build raw process trees inside the production foreground Job
+    # Object, and its sccache-shaped case turns on the *absence* of the
+    # RUNNING_PROCESS_IS_DAEMON marker. NativeProcess would attach its own
+    # containment and set that marker, erasing the signal under test.
     exempt = {
         "trampoline.rs",
+        "reaper_daemon_survival_windows.rs",
         "process_tree.rs",
         "win32_hooking_probe.rs",
         "clud_shim.rs",
