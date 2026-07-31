@@ -116,6 +116,12 @@ def main() -> int:
     # half of the same suite. Its sccache-shaped stub must detach on its own
     # and carry an inherited CLUD: originator tag *without* the daemon marker;
     # NativeProcess would set that marker and erase the signal under test.
+    # reaper_batch_drain_windows.rs is exempt (#706) — the completion-port
+    # drain test needs a burst of children to land in the *tracker's* job so
+    # their notifications queue on its port. NativeProcess would attach its own
+    # Job Object to each child, moving the notifications off the port under
+    # test and leaving nothing to batch.
+    #
     # process_identity.rs is exempt (#643) — one test
     # (`an_exited_process_is_dead_even_while_its_handle_remains_open`) must hold
     # the raw `std::process::Child` handle open *across* the liveness check.
@@ -126,6 +132,7 @@ def main() -> int:
     exempt = {
         "trampoline.rs",
         "process_identity.rs",
+        "reaper_batch_drain_windows.rs",
         "reaper_daemon_survival_windows.rs",
         "reaper_orphan_sweep_survival.rs",
         "process_tree.rs",
