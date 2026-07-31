@@ -55,6 +55,17 @@ REJECTED: list[tuple[str, str, str]] = [
         "cross build --target x86_64-apple-darwin",
         ".sh",
     ),
+    # `build` is not the only verb that compiles for a foreign target.
+    ("cross test", "cross test --target x86_64-pc-windows-msvc", ".sh"),
+    ("cross run", "cross run --target x86_64-apple-darwin", ".sh"),
+    ("cross check", "RUN cross check --target x86_64-pc-windows-msvc", ""),
+    ("cross rustc", "cross rustc --target x86_64-pc-windows-msvc -- -C x", ".sh"),
+    (
+        "cross with a toolchain override",
+        "cross +nightly build --target x86_64-pc-windows-msvc",
+        ".sh",
+    ),
+    ("cross as an argv list", 'ARGS = ["cross", "build"]', ".py"),
     (
         "osxcross for darwin",
         "osxcross-clang --target aarch64-apple-darwin",
@@ -87,7 +98,30 @@ REJECTED: list[tuple[str, str, str]] = [
     ("xwin at a variable target", "cargo xwin build --target $TARGET", ".sh"),
     ("xwin with no target on the line", "cargo xwin build --release", ".sh"),
     ("the bare xwin CLI splatting the CRT", "xwin splat --output /opt/xwin", ".sh"),
+    # Flags sit between the binary and the subcommand in every real invocation,
+    # including the one in xwin's own README. A rule that only matched the
+    # adjacent form would be green here and blind in production.
+    (
+        "xwin with flags before the subcommand",
+        "xwin --accept-license splat --output /opt/xwin",
+        ".sh",
+    ),
+    (
+        "xwin in a Dockerfile RUN with flags",
+        "RUN xwin --arch x86_64 --sdk-version 10 splat --output /xwin",
+        "",
+    ),
+    ("xwin as an argv list", '["xwin", "--accept-license", "splat"]', ".py"),
     ("XWIN_* environment", "XWIN_ACCEPT_LICENSE=1 cargo build", ".sh"),
+    # `_` is a word character, so `\bXWIN_` never matches inside `CARGO_XWIN_`
+    # — and `CARGO_XWIN_*` is cargo-xwin's own prefix, i.e. the half a real
+    # user actually sets.
+    ("CARGO_XWIN_* environment", "CARGO_XWIN_CROSS_COMPILER=clang-cl", ".sh"),
+    (
+        "CARGO_XWIN_* in a YAML env block",
+        "      CARGO_XWIN_CROSS_COMPILER: clang-cl",
+        ".yml",
+    ),
     ("cargo binstall cargo-xwin", "cargo binstall cargo-xwin", ".sh"),
     ("cargo install the bare xwin CLI", "cargo install xwin --locked", ".sh"),
     ("brew install zig", "brew install zig", ".sh"),
@@ -117,6 +151,31 @@ REJECTED: list[tuple[str, str, str]] = [
         "a hand-rolled linker for a soldr-owned target",
         '[target.x86_64-pc-windows-msvc]\nlinker = "lld-link"',
         ".toml",
+    ),
+    # A quoted table key is equally idiomatic TOML, and `linker` need not come
+    # first — an array value before it must not end the search window, or
+    # reordering two lines defeats the rule.
+    (
+        "a quoted table key",
+        '[target."x86_64-pc-windows-msvc"]\nlinker = "lld-link"',
+        ".toml",
+    ),
+    (
+        "linker after an array-valued key",
+        '[target.x86_64-apple-darwin]\nrustflags = ["-C", "x"]\nlinker = "clang"',
+        ".toml",
+    ),
+    # A URL is a string, not a comment. Truncating the line at `//` would hide
+    # a real reference to the tool.
+    (
+        "a cargo-xwin URL in Rust source",
+        'let u = "https://github.com/rust-cross/cargo-xwin";',
+        ".rs",
+    ),
+    (
+        "an osxcross URL in Rust source",
+        'const O: &str = "https://github.com/tpoechtrager/osxcross";',
+        ".rs",
     ),
 ]
 
@@ -219,6 +278,19 @@ ACCEPTED: list[tuple[str, str, str]] = [
     # Words that merely contain a banned token are not invocations.
     ("crossbeam is not the cross wrapper", "use crossbeam::channel;", ".rs"),
     ("a variable named cross_build", "let cross_build_id = 3;", ".rs"),
+    # `cross` is an ordinary English word, so its rule is anchored at a command
+    # position. Without that, every one of these fails `bash lint` — which is
+    # how a rule earns a revert rather than a fix.
+    ("cross build in a YAML description", '      description: "run a cross build"', ".yml"),
+    ("cross build in a job name", "    name: cross build matrix", ".yml"),
+    ("cross build inside a Rust string", '    let msg = "cross build failed";', ".rs"),
+    # A Rust block comment is prose too. `.rs` is scanned now, so a doc block
+    # explaining the ban must not be a violation.
+    ("a Rust block comment", "/* never run cargo xwin build here */", ".rs"),
+    ("a multi-line Rust block comment", "/*\n * cargo xwin build\n */", ".rs"),
+    # Unrelated packages whose names merely start with the banned token.
+    ("apt-get installing zlib", "apt-get install -y zlib1g-dev", ".sh"),
+    ("brew installing zigbee2mqtt", "brew install zigbee2mqtt", ".sh"),
     ("the ziglang test dependency pin", '    "ziglang>=0.15.2,<0.16",', ".toml"),
     (
         "an install-action for an unrelated tool",
@@ -273,22 +345,64 @@ def test_the_install_action_violation_points_at_the_action_line():
 
 def test_the_install_window_does_not_pair_distant_lines():
     """An unbounded match would pair an install-action step at the top of a
-    workflow with an unrelated `cargo-xwin` mention hundreds of lines below,
-    which reads as a false accusation against whoever wrote the step."""
+    workflow with an unrelated mention hundreds of lines below, which reads as
+    a false accusation against whoever wrote the step.
+
+    Spelled with `cargo-zigbuild` deliberately: `cargo-xwin` is *also* caught
+    by the unconditional invocation rule, so a cargo-xwin fixture here would
+    pass whether or not the window bound existed.
+    """
     text = "\n".join(
-        ["      - uses: taiki-e/install-action@v2", *["        # filler"] * 10, "tool: cargo-xwin"]
+        [
+            "      - uses: taiki-e/install-action@v2",
+            *["        # unrelated filler"] * 10,
+            "          tool: cargo-zigbuild",
+        ]
     )
-    tools = {tool for _, tool, _ in scan_text(text, ".yml")}
-    assert "taiki-e/install-action: cargo-xwin" not in tools
+    assert not scan_text(text, ".yml")
 
 
-def test_overlapping_rules_report_one_finding_per_line():
-    """`cargo install cargo-xwin` matches both the install rule and the
-    always-banned invocation rule. Reporting it twice would make the summary
-    count lie about how much work a fix is."""
+def test_an_install_line_reports_the_install_not_also_the_invocation():
+    """`cargo install cargo-xwin` is an install, and is also — to the
+    invocation rules — a mention of `cargo xwin`. Reporting both counts one
+    mistake twice in the summary total and makes the fix look bigger than it
+    is, so the install must suppress the invocation rule on its own line.
+
+    Asserting the exact count rather than `len(set(...))`: the implementation
+    de-duplicates, so a set-based assertion would hold for any implementation
+    and prove nothing.
+    """
     findings = scan_text("cargo install cargo-xwin --locked", ".sh")
-    assert findings, "must still be rejected"
-    assert len(findings) == len(set(findings)), f"duplicate findings: {findings}"
+    assert len(findings) == 1, f"expected exactly one finding, got {findings}"
+    assert findings[0][1] == "cargo install cargo-xwin"
+
+
+def test_the_allow_marker_is_strictly_line_scoped():
+    """A marker on a docstring's closing line does not cover a tool named three
+    lines above it. Encoded because it is the mistake the marker invites — and
+    the one made while adding the two markers in `tests/test_ci_matrix.py`."""
+    text = "\n".join(
+        [
+            '    """`cargo xwin` is the legacy passthrough in soldr\'s docs;',
+            "    `soldr build` is the blessed surface. Pinning this here keeps",
+            '    a future edit honest. (cross-lint: allow)"""',
+        ]
+    )
+    assert scan_text(text, ".py"), "a marker on a later line must not suppress line 1"
+    assert scan_text(text, ".py")[0][0] == 1
+
+
+def test_suppression_is_scoped_to_the_install_line():
+    """The suppression above must not blank out a genuine invocation elsewhere
+    in the same file."""
+    text = "\n".join(
+        [
+            "cargo install cargo-xwin --locked",
+            "xwin --accept-license splat --output /opt/xwin",
+        ]
+    )
+    lines = {number for number, _, _ in scan_text(text, ".sh")}
+    assert lines == {1, 2}, "both lines are mistakes and both must be reported"
 
 
 def test_a_violation_reports_file_line_tool_and_the_soldr_replacement():

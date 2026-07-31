@@ -13,11 +13,12 @@
   + `tool: cargo-xwin` shape could never fire before), and cover `cargo binstall`,
   `brew`, `apt`/`dnf`/`apk`/`choco`, `houseabsolute/actions-rust-cross`,
   `cross-rs/cross`, `tpoechtrager/osxcross` and hand-rolled `[target.*] linker =`
-  overrides. Scope widens from `.github/` + `ci/` to `bench/`, `dylints/`,
-  `skills/`, `.claude/hooks/`, `crates/clud-bin/assets/tools/`, Rust sources,
-  Dockerfiles and the root entrypoints the old list missed (`install.sh`,
-  `install.ps1`, `publish`). Prose that a comment-stripper cannot see can opt out
-  with a `cross-lint: allow` marker. See zackees/clud#714.
+  overrides. Scope widens from `.github/` + `ci/` (48 files) to `bench/`,
+  `crates/`, `dylints/`, `skills/`, `testbins/`, `tests/`, `.claude/hooks/`,
+  Rust sources, Dockerfiles and the root entrypoints the old list missed
+  (`install.sh`, `install.ps1`, `publish`) — 302 files. Prose that a
+  comment-stripper cannot see can opt out with a line-scoped
+  `cross-lint: allow` marker. See zackees/clud#714.
 
 ## 2.4.1 - 2026-07-25
 

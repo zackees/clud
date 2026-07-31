@@ -82,11 +82,36 @@ SOLDR_OWNED_TARGET = re.compile(
 #: be a way around the rule.
 BANNED_ALWAYS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("cargo xwin", re.compile(r"""\bcargo["',\s-]+xwin\b""")),
-    # The standalone splatter, which is what actually downloads the CRT.
-    ("xwin CLI", re.compile(r"""\bxwin["',\s]+(?:splat|download|unpack|list)\b""")),
-    ("XWIN_* environment", re.compile(r"\bXWIN_[A-Z0-9_]+")),
+    # The standalone splatter, which is what actually downloads the CRT. Flags
+    # sit between the binary and its subcommand in every real invocation
+    # (`xwin --accept-license splat --output ...`, which is the form xwin's own
+    # README uses), so requiring adjacency would miss the shape that matters.
+    (
+        "xwin CLI",
+        re.compile(r"""\bxwin\b[^\n]*?["',\s](?:splat|download|unpack|list)\b"""),
+    ),
+    # `CARGO_XWIN_*` is cargo-xwin's own env prefix and is the half a real user
+    # sets. `\b` does not match between `CARGO_` and `XWIN_` — `_` is a word
+    # character — so the prefix has to be spelled out rather than assumed.
+    ("XWIN_* environment", re.compile(r"\b(?:CARGO_)?XWIN_[A-Z0-9_]+")),
     ("osxcross", re.compile(r"\bosxcross\b")),
-    ("cross", re.compile(r"""\bcross["',\s]+build\b""")),
+    # `cross` is an ordinary English word, so unlike the others this one is
+    # anchored at a command position: start of line, a shell/Dockerfile
+    # continuation, or a YAML `run:`. Without that anchor `name: cross build
+    # matrix` and `let msg = "cross build failed";` both fail the lint, which
+    # is how a rule earns a revert. The argv-list form needs its own pattern
+    # because there the quotes *are* the anchor.
+    (
+        "cross",
+        re.compile(
+            r"""(?:^|[|&;(]|\bRUN\s|\brun:\s*)\s*["']?cross["',\s]+"""
+            r"""(?:\+\S+["',\s]+)?(?:build|test|run|check|rustc|bench|clippy)\b"""
+        ),
+    ),
+    (
+        "cross (argv list)",
+        re.compile(r"""["']cross["']\s*,\s*["'](?:build|test|run|check|rustc)["']"""),
+    ),
     ("Cross.toml", re.compile(r"\bCross\.toml\b")),
 )
 
@@ -141,9 +166,16 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("osxcross checkout", re.compile(r"tpoechtrager/osxcross")),
     (
         "hand-rolled linker for a soldr-owned target",
+        # The key may be quoted (`[target."x86_64-pc-windows-msvc"]` is equally
+        # idiomatic TOML) and `linker` need not be the section's first key. The
+        # window therefore runs to the next section *header* — a `[` at the
+        # start of a line — rather than to the next `[` of any kind, which an
+        # ordinary array value like `rustflags = ["-C", ...]` would otherwise
+        # terminate.
         re.compile(
-            r"\[target\.(?:x86_64|aarch64|arm64|i686|armv7)-"
-            r"(?:apple-darwin|pc-windows-msvc)\][^\[]*?\blinker\s*="
+            r"""\[target\.["']?(?:x86_64|aarch64|arm64|i686|armv7)-"""
+            r"""(?:apple-darwin|pc-windows-msvc)["']?\]"""
+            r"(?:(?!\n\s*\[)[\s\S])*?\blinker\s*="
         ),
     ),
 )
@@ -153,14 +185,21 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: `.claude/hooks` rather than `.claude`: the latter also holds `worktrees/`,
 #: an ignored full checkout of the repo, which would be walked twice and would
 #: report violations at paths that do not exist on `main`.
+#: `crates` covers the product source, not just the asset scripts under it:
+#: clud shells out to build commands, so a `cargo xwin` in Rust is a real
+#: vector and "everywhere" would be a lie without it. `vendor/` stays out —
+#: it is third-party source we do not author, and `whisper-rs-sys/build.rs`
+#: legitimately reasons about zig's C++ runtime for the Linux lanes.
 SCAN_DIRS: tuple[str, ...] = (
     ".github",
     "ci",
     "bench",
+    "crates",
     "dylints",
     "skills",
+    "testbins",
+    "tests",
     ".claude/hooks",
-    "crates/clud-bin/assets/tools",
 )
 
 #: Build / release / install entrypoints that are not under a scanned
@@ -233,19 +272,41 @@ HASH_COMMENT_SUFFIXES = frozenset({".yml", ".yaml", ".py", ".sh", ".ps1", ".toml
 #: theoretical. A line carrying this marker is skipped entirely. It is
 #: deliberately verbose and greppable: `rg 'cross-lint: allow'` lists every
 #: escape in the tree, so review can see them all at once.
+#:
+#: **Strictly line-scoped**, including inside a multi-line docstring: the
+#: marker must sit on the same line as the tool name, not on the docstring's
+#: closing line. A block-scoped marker would need to guess where the block
+#: ends, and guessing wrong silences more than the author asked for.
 ALLOW_MARKER = "cross-lint: allow"
+
+
+#: A `//` that is not the `//` in a URL. `"https://github.com/rust-cross/
+#: cargo-xwin"` is a string, not a comment, and truncating it there would hide
+#: a real reference to the banned tool.
+RUST_LINE_COMMENT = re.compile(r"(?<!:)//")
+
+#: A Rust block comment, replaced by blank lines rather than deleted: the
+#: install patterns map a match offset back to a line number, so the stripper
+#: must never change how many lines the text has.
+RUST_BLOCK_COMMENT = re.compile(r"/\*[\s\S]*?\*/")
+
+
+def _strip_rust_block_comments(text: str) -> str:
+    return RUST_BLOCK_COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), text)
 
 
 def _strip_comment(line: str, suffix: str) -> str:
     """Drop a trailing comment so prose about the ban is not a violation.
 
     Comments in these files routinely *explain* why `cargo xwin` is forbidden;
-    treating that as a violation would make the rule undocumentable.
+    treating that as a violation would make the rule undocumentable. Block
+    comments are handled before the split, in `scan_text`, because they span
+    lines.
     """
     if ALLOW_MARKER in line:
         return ""
     if suffix == ".rs":
-        return line.split("//", 1)[0]
+        return RUST_LINE_COMMENT.split(line, maxsplit=1)[0]
     if suffix in HASH_COMMENT_SUFFIXES:
         return line.split("#", 1)[0]
     return line
@@ -264,9 +325,31 @@ def scan_text(text: str, suffix: str = ".py") -> list[tuple[int, str, str]]:
     Pure so the fixtures can exercise it directly, without writing files.
     """
     violations: list[tuple[int, str, str]] = []
+    if suffix == ".rs":
+        text = _strip_rust_block_comments(text)
     stripped = [_strip_comment(raw, suffix) for raw in text.splitlines()]
 
+    # Installs run first because they are the more specific finding: a line
+    # reading `cargo install cargo-xwin` is an install, and also — to the
+    # invocation rules — a mention of `cargo xwin`. Reporting both would count
+    # one mistake twice in the summary total and make the fix look bigger than
+    # it is, so an install suppresses the invocation rules on its own line.
+    #
+    # Matched against the whole file, not line by line: the shape that matters
+    # in GitHub Actions puts the tool name on a line after the action
+    # reference. Offsets map back to a line number by counting the newlines
+    # that precede them.
+    joined = "\n".join(stripped)
+    install_lines: set[int] = set()
+    for tool, pattern in BANNED_INSTALLS:
+        for match in pattern.finditer(joined):
+            number = joined.count("\n", 0, match.start()) + 1
+            install_lines.add(number)
+            violations.append((number, tool, _install_reason(tool)))
+
     for number, line in enumerate(stripped, start=1):
+        if number in install_lines:
+            continue
         if not line.strip():
             continue
 
@@ -300,17 +383,8 @@ def scan_text(text: str, suffix: str = ".py") -> list[tuple[int, str, str]]:
                         )
                     )
 
-    # Installs run against the whole file: the shape that matters in GitHub
-    # Actions puts the tool name on a line after the action reference. Offsets
-    # map back to a line number by counting the newlines that precede them.
-    joined = "\n".join(stripped)
-    for tool, pattern in BANNED_INSTALLS:
-        for match in pattern.finditer(joined):
-            number = joined.count("\n", 0, match.start()) + 1
-            violations.append((number, tool, _install_reason(tool)))
-
-    # Sorted and de-duplicated: overlapping patterns (`cargo install
-    # cargo-xwin` also matching the bare-CLI rule) should read as one finding.
+    # Sorted and de-duplicated: two spellings of the same rule matching the
+    # same line should read as one finding.
     return sorted(set(violations))
 
 

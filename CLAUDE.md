@@ -174,14 +174,17 @@ Things that bite:
   **conditional on a soldr-owned triple** (`cargo zigbuild`, `maturin --zig`,
   `zig cc` — correct for Linux). Installs are matched against the whole file, so
   a `taiki-e/install-action` step with `tool: cargo-xwin` two lines below is
-  caught. Scope: `.github/`, `ci/`, `bench/`, `dylints/`, `skills/`,
-  `.claude/hooks/`, `crates/clud-bin/assets/tools/`, the root entrypoints and
-  `.cargo/config.toml`. *Gotcha*: prose that explains the ban must not trip it —
-  the scanner strips `#` (and `//` in Rust) comments, and conditional rules
-  still require a concrete triple (`x86_64-apple-darwin`, not `*-apple-darwin`).
-  For prose a comment-stripper cannot see, such as a module docstring naming
-  `cargo xwin`, put `cross-lint: allow` on the line; `rg` for that marker lists
-  every escape in the tree. See
+  caught, and an install suppresses the invocation rules on its own line so one
+  mistake is not counted twice. Scope: `.github/`, `ci/`, `bench/`, `crates/`,
+  `dylints/`, `skills/`, `testbins/`, `tests/`, `.claude/hooks/`, the root
+  entrypoints and `.cargo/config.toml` (`vendor/` is deliberately out).
+  *Gotcha*: prose that explains the ban must not trip it — the scanner strips
+  `#`, and `//` + `/* */` in Rust, and conditional rules still require a
+  concrete triple (`x86_64-apple-darwin`, not `*-apple-darwin`). For prose a
+  comment-stripper cannot see, such as a module docstring naming `cargo xwin`,
+  put `cross-lint: allow` **on that same line** — the marker is line-scoped, so
+  putting it on a docstring's closing line suppresses nothing. `rg` for the
+  marker lists every escape in the tree. See
   [`docs/architecture/ci.md`](docs/architecture/ci.md).
 
 - **Adding a target** means editing `ci/ci_matrix.py` *and* adding the
