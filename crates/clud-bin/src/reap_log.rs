@@ -136,6 +136,18 @@ pub struct ReapCounters {
     /// High-water marks for the two maps whose growth tracked session age.
     pub peak_known: u64,
     pub peak_backlog: u64,
+    /// Job notifications for a PID Toolhelp could not resolve before it
+    /// exited (#689).
+    ///
+    /// These are **expected** under process churn — the path handles them and
+    /// fails closed — so they are diagnostics, not incidents. They used to be
+    /// enumerated one synchronous `log_structured_event` at a time into the
+    /// shared `daemon-events.jsonl`, where at ~300 writes/min they were 98.8%
+    /// of the log and rotated every other producer's events out before anyone
+    /// could read them. The per-PID lines now go to this session's buffered
+    /// `reap.jsonl`; this counter is what makes the total recoverable without
+    /// reading any of them.
+    pub metadata_misses: u64,
 }
 
 impl ReapCounters {
@@ -162,6 +174,7 @@ impl ReapCounters {
         self.env_reads += other.env_reads;
         self.peak_known = self.peak_known.max(other.peak_known);
         self.peak_backlog = self.peak_backlog.max(other.peak_backlog);
+        self.metadata_misses += other.metadata_misses;
     }
 
     pub fn observe_sizes(&mut self, known: usize, backlog: usize) {
@@ -183,7 +196,10 @@ impl ReapCounters {
 
     /// Nothing was tracked, so there is nothing worth printing.
     pub fn is_silent(&self) -> bool {
-        self.tracked == 0 && self.shell_exits_observed == 0 && self.decisions_emitted == 0
+        self.tracked == 0
+            && self.shell_exits_observed == 0
+            && self.decisions_emitted == 0
+            && self.metadata_misses == 0
     }
 
     /// The human-readable exit summary, or `None` when nothing was tracked.
@@ -208,6 +224,13 @@ impl ReapCounters {
                 self.spared,
             ),
         ];
+        if self.metadata_misses > 0 {
+            // One line per session, replacing one shared-log write per miss.
+            lines.push(format!(
+                "[clud] reaper: {} process(es) exited before their metadata                  resolved (spared; see reaper log)",
+                self.metadata_misses,
+            ));
+        }
         if let Some(path) = log_path {
             lines.push(format!("[clud] reaper log: {}", path.display()));
         }
@@ -217,8 +240,13 @@ impl ReapCounters {
     /// The Phase 0 measurement line, for `--verbose`.
     pub fn measurement_line(&self) -> String {
         format!(
-            "[clud] reaper: ticks={} passes={} env_reads={} peak_known={} peak_backlog={}",
-            self.ticks, self.reconcile_passes, self.env_reads, self.peak_known, self.peak_backlog,
+            "[clud] reaper: ticks={} passes={} env_reads={} peak_known={} peak_backlog={}              metadata_misses={}",
+            self.ticks,
+            self.reconcile_passes,
+            self.env_reads,
+            self.peak_known,
+            self.peak_backlog,
+            self.metadata_misses,
         )
     }
 }
@@ -387,6 +415,47 @@ mod tests {
         assert_eq!(counters.reaped(), 40);
     }
 
+    // ---- #689: metadata misses are summarized, not enumerated ----
+
+    /// The diagnostic must survive being moved off the shared daemon log. A
+    /// session that saw nothing *but* misses still prints, and prints the
+    /// count — otherwise #689 deletes the signal instead of relocating it.
+    #[test]
+    fn a_session_of_only_metadata_misses_still_reports_them() {
+        let counters = ReapCounters {
+            metadata_misses: 11_441,
+            ..ReapCounters::default()
+        };
+        assert!(
+            !counters.is_silent(),
+            "misses alone must not be mistaken for an idle session"
+        );
+        let lines = counters.summary_lines(None).expect("summary");
+        assert!(
+            lines.iter().any(|line| line.contains("11441")),
+            "the per-session count is the whole point of the aggregate: {lines:?}"
+        );
+        assert!(counters
+            .measurement_line()
+            .contains("metadata_misses=11441"));
+    }
+
+    /// Misses do not belong to either reconciliation identity: an unresolvable
+    /// process never became a reap candidate, so it emitted no decision.
+    #[test]
+    fn metadata_misses_are_outside_both_reconciliation_identities() {
+        let counters = ReapCounters {
+            shell_exits_observed: 10,
+            finalized: 10,
+            decisions_emitted: 4,
+            reaped_runtime: 1,
+            spared: 3,
+            metadata_misses: 900,
+            ..ReapCounters::default()
+        };
+        assert!(counters.identities_hold());
+    }
+
     /// `ACTIVE_PROCESS_ZERO` clears the tracker's accounting mid-session, so
     /// per-epoch counts must be folded into session totals rather than lost.
     #[test]
@@ -395,17 +464,20 @@ mod tests {
             tracked: 10,
             reaped_runtime: 1,
             peak_known: 50,
+            metadata_misses: 7,
             ..ReapCounters::default()
         };
         session.absorb(&ReapCounters {
             tracked: 5,
             reaped_runtime: 2,
             peak_known: 30,
+            metadata_misses: 4,
             ..ReapCounters::default()
         });
 
         assert_eq!(session.tracked, 15);
         assert_eq!(session.reaped_runtime, 3);
+        assert_eq!(session.metadata_misses, 11);
         assert_eq!(
             session.peak_known, 50,
             "a high-water mark is a max, not a sum"
