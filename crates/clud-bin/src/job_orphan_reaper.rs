@@ -168,226 +168,66 @@ pub(crate) struct ReapDecision {
     pub(crate) reason: ReapDecisionReason,
 }
 
-/// Facts about a process that only the OS can answer.
+/// The OS-authoritative spare machinery, owned by [`crate::reaper_facts`].
 ///
-/// Every OS-authoritative signal behind the spare-list sits here so that reap
-/// decisions are a pure function of injected data and can be unit-tested on
-/// every platform, without spawning anything (#674). No code that decides
-/// *reap or spare* may call Win32 directly.
-///
-/// `None` means **"this signal is unavailable"** — either the platform has no
-/// such concept, or the query failed. A `None` never spares: absence of
-/// evidence is not evidence of daemon-hood, which is the exact inversion #522
-/// fixed.
-pub(crate) trait ProcessFacts {
-    /// Is `pid` inside the reaper's own Job Object?
-    ///
-    /// `Some(false)` means it broke away (`CREATE_BREAKAWAY_FROM_JOB`) and is
-    /// outside our containment. Cheapest and strongest signal we have: we
-    /// already own the job handle, so this is one syscall and no memory read.
-    fn in_reaper_job(&self, pid: u32) -> Option<bool>;
+/// It used to live here, which is exactly why #688 happened: the
+/// cross-platform reaper could not reach it and kept sparing by the
+/// cooperative marker alone. One table now serves both reapers; this module
+/// contributes the Job Object signal, which only it can answer.
+pub(crate) use crate::reaper_facts::{
+    build_spare_list as build_os_spare_list, configured_spare_images, image_basename,
+    normalized_image, FactsSnapshot, ProcessFacts, Signal, SpareReason,
+};
+#[cfg(test)]
+pub(crate) use crate::reaper_facts::spare_signal as os_spare_signal;
 
-    /// Does `pid` run in the Windows services session (session 0)?
-    fn is_service_session(&self, pid: u32) -> Option<bool>;
-
-    /// Did `pid` call `setsid()` — does it lead its own POSIX session?
-    fn is_session_leader(&self, pid: u32) -> Option<bool>;
-
-    /// Does `pid` run as a different token owner / euid than we do?
-    fn owner_differs(&self, pid: u32) -> Option<bool>;
-
-    /// Did `pid` set `RUNNING_PROCESS_IS_DAEMON`?
-    ///
-    /// **Cooperative**, which is why it is ranked below every OS signal: it is
-    /// set by *other programs* through `running_process` (zccache and soldr do;
-    /// sccache, dockerd and `FBuildWorker` do not). Grepping this repo tells
-    /// you nothing about the runtime set.
-    fn declared_daemon(&self, pid: u32) -> Option<bool>;
-
-    /// Does `pid` own a listening endpoint (TCP listener or named pipe)?
-    ///
-    /// The most expensive signal, and the one that catches the hard case: a
-    /// process discovered and reused by later unrelated invocations is a
-    /// service, whatever it did or did not declare.
-    fn owns_listening_endpoint(&self, pid: u32) -> Option<bool>;
-
-    /// Did the operator name this image in a configured spare-list?
-    ///
-    /// A whitelist is a last resort and must be **data, not code** — nothing in
-    /// clud hard-codes an image name here.
-    fn spare_listed(&self, pid: u32, image_name: &str) -> bool;
-}
-
-/// The signals [`ProcessFacts`] can answer. Named so a snapshot can say
-/// "I cannot answer this at all here" rather than silently answering "no".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Signal {
-    JobMembership,
-    ServiceSession,
-    SessionLeader,
-    TokenOwner,
-    DaemonMarker,
-    ListeningEndpoint,
-}
-
-/// Process facts collected once per pass and then consulted as pure data.
-///
-/// This is the production carrier **and** the test fake. Production fills it
-/// from Win32 once per reconcile pass; a unit test builds one by hand. There is
-/// no second implementation of [`ProcessFacts`] that could drift from the one
-/// under test.
-///
-/// Each set holds only *positive* findings. `unavailable` names the signals
-/// this snapshot could not evaluate at all — on Windows that is
-/// [`Signal::SessionLeader`], which has no meaning there.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct FactsSnapshot {
-    /// PIDs proven to be outside the reaper's Job Object.
-    pub(crate) outside_job: HashSet<u32>,
-    pub(crate) service_session: HashSet<u32>,
-    pub(crate) session_leaders: HashSet<u32>,
-    pub(crate) foreign_owner: HashSet<u32>,
-    pub(crate) declared_daemons: HashSet<u32>,
-    pub(crate) listening: HashSet<u32>,
-    /// Operator-configured image names. Data, not code: nothing in clud
-    /// hard-codes an entry here.
-    pub(crate) spare_images: Vec<String>,
-    pub(crate) unavailable: HashSet<Signal>,
-}
-
-impl FactsSnapshot {
-    fn answer(&self, signal: Signal, present: bool) -> Option<bool> {
-        (!self.unavailable.contains(&signal)).then_some(present)
+impl From<SpareReason> for ReapDecisionReason {
+    fn from(reason: SpareReason) -> Self {
+        match reason {
+            SpareReason::OutsideJobObject => Self::OutsideJobObject,
+            SpareReason::ServiceSession => Self::ServiceSession,
+            SpareReason::SessionLeader => Self::SessionLeader,
+            SpareReason::ForeignTokenOwner => Self::ForeignTokenOwner,
+            SpareReason::DeclaredDaemon => Self::DeclaredDaemon,
+            SpareReason::ListeningEndpoint => Self::ListeningEndpoint,
+            SpareReason::ConfiguredSpareList => Self::ConfiguredSpareList,
+        }
     }
 }
 
-impl ProcessFacts for FactsSnapshot {
-    fn in_reaper_job(&self, pid: u32) -> Option<bool> {
-        self.answer(Signal::JobMembership, !self.outside_job.contains(&pid))
-    }
-
-    fn is_service_session(&self, pid: u32) -> Option<bool> {
-        self.answer(Signal::ServiceSession, self.service_session.contains(&pid))
-    }
-
-    fn is_session_leader(&self, pid: u32) -> Option<bool> {
-        self.answer(Signal::SessionLeader, self.session_leaders.contains(&pid))
-    }
-
-    fn owner_differs(&self, pid: u32) -> Option<bool> {
-        self.answer(Signal::TokenOwner, self.foreign_owner.contains(&pid))
-    }
-
-    fn declared_daemon(&self, pid: u32) -> Option<bool> {
-        self.answer(Signal::DaemonMarker, self.declared_daemons.contains(&pid))
-    }
-
-    fn owns_listening_endpoint(&self, pid: u32) -> Option<bool> {
-        self.answer(Signal::ListeningEndpoint, self.listening.contains(&pid))
-    }
-
-    fn spare_listed(&self, _pid: u32, image_name: &str) -> bool {
-        let image = normalized_image(image_name);
-        self.spare_images
-            .iter()
-            .any(|configured| normalized_image(configured) == image)
-    }
-}
-
-/// Operator-configured spare-list, read from `CLUD_REAPER_SPARE_IMAGES`.
-///
-/// A whitelist is the **last resort** in the precedence order and must be data
-/// rather than code, so this is the only way an image name enters the reaper's
-/// spare decision — clud ships none. Comma- or semicolon-separated image names,
-/// matched on basename, case-insensitively.
-pub(crate) fn configured_spare_images(raw: Option<&str>) -> Vec<String> {
-    raw.unwrap_or_default()
-        .split([',', ';'])
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// The subtractive spare-list: PID → why it must not be reaped.
+/// The subtractive spare-list: PID -> why it must not be reaped.
 ///
 /// Subtractive data may be stale (worst case: it spares too much). Additive
-/// data — anything naming a kill *target* — may not.
+/// data - anything naming a kill *target* - may not.
 pub(crate) type SpareList = HashMap<u32, ReapDecisionReason>;
 
-/// Why `pid` must not be reaped, or `None` if nothing protects it.
+/// [`crate::reaper_facts::spare_signal`] in this reaper's richer reason space.
 ///
-/// # Precedence
-///
-/// Cheap and authoritative first, expensive last, cooperative in between:
-///
-/// 1. **Job-object membership** — free, and removes most candidates before any
-///    other work. A process outside our job was never ours to kill.
-/// 2. **Service session** — a session-0 process is a Windows service. It is
-///    spared even if it somehow carries a `CLUD:` tag.
-/// 3. **Session leader** — the primary POSIX signal; a double-fork daemon.
-/// 4. **Foreign token owner** — a kill would generally fail anyway.
-/// 5. **Declared daemon** — the cooperative marker, ranked below every OS
-///    signal precisely because opting in is optional.
-/// 6. **Listening endpoint** — evaluated only for PIDs that survived all of the
-///    above, because it is the costly one.
-/// 7. **Configured spare-list** — operator data, last resort.
-///
-/// Console attachment is deliberately **not** ranked. Once the trigger shell
-/// has exited its console goes with it, which makes "no console"
-/// indistinguishable between a detached daemon and an ordinary leaked client —
-/// the signal would over-spare into uselessness exactly when it is consulted.
+/// Only the batched [`build_spare_list`] form is used in production; this
+/// exists so the Tier 1 decision table can assert one PID's reason directly.
+#[cfg(test)]
 pub(crate) fn spare_signal(
     facts: &dyn ProcessFacts,
     pid: u32,
     image_name: &str,
 ) -> Option<ReapDecisionReason> {
-    if facts.in_reaper_job(pid) == Some(false) {
-        return Some(ReapDecisionReason::OutsideJobObject);
-    }
-    if facts.is_service_session(pid) == Some(true) {
-        return Some(ReapDecisionReason::ServiceSession);
-    }
-    if facts.is_session_leader(pid) == Some(true) {
-        return Some(ReapDecisionReason::SessionLeader);
-    }
-    if facts.owner_differs(pid) == Some(true) {
-        return Some(ReapDecisionReason::ForeignTokenOwner);
-    }
-    if facts.declared_daemon(pid) == Some(true) {
-        return Some(ReapDecisionReason::DeclaredDaemon);
-    }
-    if facts.owns_listening_endpoint(pid) == Some(true) {
-        return Some(ReapDecisionReason::ListeningEndpoint);
-    }
-    if facts.spare_listed(pid, image_name) {
-        return Some(ReapDecisionReason::ConfiguredSpareList);
-    }
-    None
+    os_spare_signal(facts, pid, image_name).map(Into::into)
 }
 
-/// Evaluate [`spare_signal`] over a bounded candidate set.
+/// [`crate::reaper_facts::build_spare_list`] in this reaper's richer reason
+/// space.
 ///
-/// The candidate set is the reaper's *own* tracked processes, never the host —
+/// The candidate set is the reaper's *own* tracked processes, never the host -
 /// that bound is what turned a 442-PEB-read full-host scan per process exit
 /// into single-digit queries over the job's own membership.
 pub(crate) fn build_spare_list(
     facts: &dyn ProcessFacts,
     candidates: impl Iterator<Item = (u32, String)>,
 ) -> SpareList {
-    candidates
-        .filter_map(|(pid, image_name)| {
-            spare_signal(facts, pid, &image_name).map(|reason| (pid, reason))
-        })
+    build_os_spare_list(facts, candidates)
+        .into_iter()
+        .map(|(pid, reason)| (pid, reason.into()))
         .collect()
-}
-
-fn image_basename(image: &str) -> &str {
-    image.rsplit(['\\', '/']).next().unwrap_or(image)
-}
-
-fn normalized_image(image: &str) -> String {
-    image_basename(image).to_ascii_lowercase()
 }
 
 fn is_shell_image(image: &str) -> bool {

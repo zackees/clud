@@ -112,9 +112,14 @@ def main() -> int:
     # Object, and its sccache-shaped case turns on the *absence* of the
     # RUNNING_PROCESS_IS_DAEMON marker. NativeProcess would attach its own
     # containment and set that marker, erasing the signal under test.
+    # reaper_orphan_sweep_survival.rs is exempt (#688) — the cross-platform
+    # half of the same suite. Its sccache-shaped stub must detach on its own
+    # and carry an inherited CLUD: originator tag *without* the daemon marker;
+    # NativeProcess would set that marker and erase the signal under test.
     exempt = {
         "trampoline.rs",
         "reaper_daemon_survival_windows.rs",
+        "reaper_orphan_sweep_survival.rs",
         "process_tree.rs",
         "win32_hooking_probe.rs",
         "clud_shim.rs",

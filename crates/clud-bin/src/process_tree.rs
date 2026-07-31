@@ -160,15 +160,34 @@ impl TopologySnapshot {
         descendants.push(root);
 
         for descendant in descendants {
-            if let Some(process) = self.system.process(descendant) {
-                // `kill_with(Signal::Kill)` is SIGKILL on Unix. On Windows it
-                // returns `None` (signals aren't a Windows concept), so we
-                // always follow up with `process.kill()` which is
-                // `TerminateProcess` on Windows and a no-op redundant SIGKILL
-                // on Unix.
-                let _ = process.kill_with(Signal::Kill);
-                let _ = process.kill();
+            let Some(process) = self.system.process(descendant) else {
+                continue;
+            };
+            // #688: re-verify *every* target, not only the root. The caller
+            // checks the root's `(pid, creation_time)` before entering here,
+            // but descendants were previously killed straight from this
+            // snapshot on a bare PID — and this snapshot can be seconds old by
+            // the time the sweep reaches its last orphan. A PID that exits and
+            // is recycled in that window would be killed as somebody else, and
+            // because this is a *tree* kill, so would its children.
+            //
+            // `matches` (rather than the stricter automatic gate) is
+            // deliberate: on a host whose OS declines to report creation times
+            // this degrades to the PID-only comparison clud used before start
+            // times existed, instead of silently disabling tree kills
+            // wholesale.
+            let recorded = ProcessIdentity::new(descendant.as_u32(), process.start_time());
+            match ProcessIdentity::observe(descendant.as_u32()) {
+                Some(observed) if recorded.matches(&observed) => {}
+                _ => continue,
             }
+            // `kill_with(Signal::Kill)` is SIGKILL on Unix. On Windows it
+            // returns `None` (signals aren't a Windows concept), so we
+            // always follow up with `process.kill()` which is
+            // `TerminateProcess` on Windows and a no-op redundant SIGKILL
+            // on Unix.
+            let _ = process.kill_with(Signal::Kill);
+            let _ = process.kill();
         }
     }
 }
