@@ -107,6 +107,19 @@ Several features have a "single source of truth" registry that must be updated a
 
 - **New bundled tool / hook** (`crates/clud-bin/assets/tools/<group>/*.py`) → `BUNDLED_TOOLS` array in `crates/clud-bin/src/tools.rs` with `include_str!` of the asset. Add a `bundled_includes_<tool>` guardrail test mirroring the existing ones (e.g. `bundled_includes_pr_merge_watch`, `bundled_includes_telemetry_hook`) so a future rename or removal doesn't silently break consumers. When retiring a managed bundled tool after users may have installed it, remove the bundle entry and add its old relative path to `PURGED_TOOLS` in `crates/clud-bin/src/tool_install.rs`; the purge only deletes files that still carry the `managed-by: clud` marker.
 
+- **Changing reap/spare logic** → decisions must be expressible against injected
+  `ProcessFacts` (unit-testable, cross-platform). Add the case to the Tier 1
+  decision table in `job_orphan_reaper`'s `lifecycle_tests` first, asserting
+  **spare + reason** rather than just the outcome; reach for an integration test
+  only if a real Job Object or real detachment is the thing under test (budget:
+  ≤5). *Gotcha*: never conclude a daemon marker is unused by grepping this repo —
+  `RUNNING_PROCESS_IS_DAEMON` is set by **other programs** (zccache, soldr) via
+  `running-process`, and a draft of #673 nearly deleted the spare-list on exactly
+  that reasoning. Daemon-stub tests need raw `std::process::Command` and must be
+  added to `ci/banned_imports.py`'s exempt set per the bullet below, because
+  `NativeProcess` would set the very marker whose absence is under test. See
+  [`docs/architecture/process-reaping.md`](docs/architecture/process-reaping.md).
+
 - **Test that needs raw `std::process::Command`** → add the test filename to the exempt set in `ci/banned_imports.py`. The lint enforces that production subprocess execution goes through `running_process::NativeProcess`; exemptions exist for tests that deliberately need raw spawning because `NativeProcess` would attach a `Containment::Contained` Job Object that masks what's being tested. If your test errors with `BANNED — use running_process::NativeProcess instead`, decide whether `NativeProcess` would distort the test; if yes, add yourself to the exempt set with a comment explaining why.
 
 - **Bumping soldr** → 3 places, same commit: the exact pin in `pyproject.toml` (`build-system.requires = ["soldr==X.Y.Z"]`, the *build backend*), every `zackees/setup-soldr` version under `.github/` (CI's *toolchain*, including composite-action input defaults), and `VERSION="${SOLDR_VERSION:-X.Y.Z}"` in `./install` (a developer's local toolchain). These resolve independently — pinning only one leaves builds running a soldr that CI never tested, which is how a broken upstream patch release reddened `main` on branches pinned to a known-good version. `tests/test_packaging_metadata.py::test_soldr_versions_move_in_lockstep` asserts all three agree and rejects a non-exact requirement. One soldr version is deliberately *outside* that set and must be bumped by hand: `crates/clud-bin/assets/tools/docker/docker_build_soldr.py`'s `ARG SOLDR_VERSION`, which is guarded by a matching literal in `crates/clud-bin/src/tools.rs` (bump both together). See [DD-020](docs/DESIGN_DECISIONS.md#dd-020-the-soldr-build-backend-is-pinned-exactly-and-cis-toolchain-pin-is-asserted-to-match-it).

@@ -801,3 +801,100 @@ The `ignore` walker is retained as the fallback for a missing or corrupt index,
 so behavior never regresses; untracked-file coverage moves off the launch path
 to the daemon-side pass 2 (#551), consistent with the guard being a crude fast
 nudge rather than a comprehensive audit.
+
+## DD-023: The daemon spare-list is not deleted, even though clud never sets the marker itself
+
+**Context:** zackees/clud#673 rev 3.0, recorded so it is not re-proposed.
+
+An earlier draft of the reaper's burn fix concluded that
+`find_declared_daemon_pids()` computes an always-empty set and should simply be
+deleted. The reasoning was one command:
+`grep -rn "RUNNING_PROCESS_IS_DAEMON" crates/` returns zero hits, therefore
+nothing in this repository ever sets the marker, therefore the set is empty and
+the per-exit full-host environment scan that computes it is pure waste.
+
+That was wrong. The marker is set by **other programs**, not by clud.
+`running_process::spawn::spawn_daemon_inner` applies it to every daemon-spawn
+variant, and its own comment names the consumers: *"including the free functions
+consumers like **zccache** call directly."*
+`spawn_daemon_breaking_away_from_job` is documented for *"a build cache server,
+a language server, anything discovered and reused by later, unrelated
+invocations."* On a soldr/zccache machine the set is non-empty, and its members
+are exactly the processes that must never be reaped. Shipping the deletion would
+have made clud kill the user's build cache.
+
+**Decision:** The daemon spare-list stays. Its *cost* is fixed by evaluating it
+over the reaper's own Job Object membership instead of the host process table,
+and by caching each identity's answer — not by removing the protection. The
+marker is ranked **below** every OS-authoritative signal (job-object membership,
+service session, session leader, token owner) precisely because opting in is
+optional: sccache, dockerd and `FBuildWorker` never call it, so a design that
+treated the marker as the only line of defence would leave them unprotected.
+Listening-endpoint ownership covers that population. A name-based whitelist is
+the last resort and must be data, not code.
+
+**Alternatives rejected:**
+
+- *Delete the spare-list.* Kills the user's build cache. This is the decision
+  being recorded.
+- *Keep the marker as the sole signal and just make it cheaper.* Leaves sccache,
+  dockerd and `FBuildWorker` with no protection at all, which is the gap
+  zackees/clud#674 exists to close.
+- *Ship a built-in image-name allowlist.* Misfires on every unrelated build, and
+  cannot be corrected by an operator without a release.
+
+**Consequences:** The reaper spares more than it strictly must, which is the
+correct direction — a false negative costs deferred cleanup, a false positive
+destroys a user's warm cache. The transferable lesson is the reason this is a
+recorded decision rather than a code comment: **a runtime set populated by other
+programs cannot be characterized by grepping this repository.** The caveat is
+stated where an agent will meet it, in
+[`architecture/process-reaping.md`](architecture/process-reaping.md).
+
+## DD-024: Reap decisions take injected process facts rather than calling Win32 inline
+
+**Context:** zackees/clud#673 / #674. The reaper's spare-list needs signals only
+the OS can answer — Job Object membership, terminal-services session id, POSIX
+session leadership, token ownership, listening-endpoint ownership. The obvious
+implementation calls those APIs at the point of decision. The obvious
+implementation is also untestable: the decision would then require a real Job
+Object, a real detached process and a real listening socket, so every case would
+be a Windows-only integration test that spawns processes and races timing.
+
+That is not a theoretical cost. The defect zackees/clud#674 exists to fix is a
+*missing test* — no coverage asserted that a long-lived daemon started inside a
+clud session survives it — and the reason none existed is that writing one
+required exactly that machinery.
+
+**Decision:** Every OS-authoritative signal sits behind a `ProcessFacts` trait.
+Signals are collected once per reconcile pass into a `FactsSnapshot` and then
+consulted as **pure data**; no code that decides reap-or-spare calls Win32. The
+Win32 collection lives in one submodule of the listener. `FactsSnapshot` is both
+the production carrier and the test fixture, so there is no second implementation
+that could drift from the one under test. A signal the platform cannot answer is
+recorded as *unavailable* and never spares.
+
+The rule this encodes, stated as an architectural constraint rather than a style
+preference: **prefer unit tests; an integration test is justified only when the
+behaviour cannot be expressed against injected facts** — in practice only when a
+real Job Object or real detachment is the thing under test.
+
+**Alternatives rejected:**
+
+- *Call the APIs inline and cover the behaviour with integration tests.* Windows
+  exec lane only, seconds per case instead of microseconds, and it forces every
+  future refinement into the slow lane. This is the status quo the decision
+  replaces.
+- *A `#[cfg(test)]` seam or a mock crate.* Two implementations means the tested
+  one can drift from the shipped one; the snapshot is one type used by both.
+- *Pass individual booleans into the planner.* Loses the precedence ordering,
+  which is itself behaviour worth asserting, and makes adding a signal a
+  signature change at every call site.
+
+**Consequences:** The daemon decision table — zccache, soldr, sccache,
+`FBuildWorker`, dockerd, language servers — is a table-driven unit test that runs
+on every platform CI builds for, asserting the *reason* a process was spared and
+not merely that it was. Integration coverage shrinks to what genuinely cannot be
+faked, with a stated budget of ≤5 tests. The cost is one indirection on a path
+that runs at most a few times per second, and the discipline that a new signal
+must be added to the trait rather than called where it is needed.

@@ -102,7 +102,10 @@ Loop subsystem (`clud loop`):
   events; turns one JSON event per line into one human-readable progress line
   for subprocess-mode loops.
 
-Process management and GC:
+Process management and GC. The cross-directory story — the two disjoint
+reapers, the `(pid, creation_time)` keyspace, daemon-sparing precedence, and
+which test tier a change belongs in — lives in
+[`docs/architecture/process-reaping.md`](../../../docs/architecture/process-reaping.md).
 
 - `process_identity.rs` - `ProcessIdentity` = PID **plus** OS start time, and the
   comparison every path that stores a PID and acts on it later must go through
@@ -111,14 +114,9 @@ Process management and GC:
   questions. Records written before the field existed carry
   `UNKNOWN_START_TIME` and fall back to a PID-only comparison.
 - `process_scan.rs` - clud's own host **environment** pass on `sysinfo 0.37`
-  (#673 Phase 7). `scan_env()` answers both env questions — which processes
-  carry `RUNNING_PROCESS_ORIGINATOR=CLUD:<pid>` (additive kill-target set) and
-  which carry `RUNNING_PROCESS_IS_DAEMON` (subtractive spare-list) — from one
-  snapshot; asking `running_process` for them cost two full-host PEB walks
-  back to back. `TaggedProcess` also carries `start_time`, so a kill can
-  re-verify `(pid, creation_time)` at the last responsible moment.
-  `DaemonMarkerCache` answers the daemon question for a *bounded candidate set*
-  and reads env only for identities it has never resolved.
+  (#673 Phase 7): `scan_env()` answers both env questions from one snapshot,
+  and `DaemonMarkerCache` reads each identity's environment once, ever, over a
+  bounded candidate set.
 - `process_tree.rs` - best-effort descendant-tree termination via `sysinfo`;
   fixes the multi-second Ctrl+C hang for `clud --codex` on Windows where
   `cmd.exe -> node.exe` would orphan the real child.
@@ -127,24 +125,12 @@ Process management and GC:
   planner recognizes the exact Claude/Codex host, direct tool shells, Git Bash
   handoffs, nested detachments, declared daemons, and the unconditional
   `conhost.exe` exclusion before any automatic client-tree reap (#616).
-  Daemon-sparing goes through the `ProcessFacts` seam (#673 Phase 1a): every
-  OS-authoritative signal — job-object membership, session-0 service context,
-  POSIX session leader, token owner, listening-endpoint ownership — is
-  collected once per pass into a `FactsSnapshot` and then consulted as **pure
-  data**, so the reap/spare table is unit-testable on every platform without
-  spawning anything. The cooperative `RUNNING_PROCESS_IS_DAEMON` marker ranks
-  *below* every OS signal because opting in is optional; the operator
-  spare-list (`CLUD_REAPER_SPARE_IMAGES`) ranks last and ships empty.
-- `reap_log.rs` - reaper accounting and its per-session log (#673 Phases 0
-  and 5). `ReapCounters` is the measurement series (ticks, reconcile passes,
-  environment reads, peak `known`/backlog) plus the decision census;
-  `ReapLog` appends one JSONL line per **mutation** to
-  `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl`, buffered rather than
-  flushed per event (#544 found per-op synchronous JSONL flushes to be an
-  idle-CPU cost of their own). Two reconciliation identities are checkable
-  from the exit summary: `shell_exits == finalized + abandoned + still_pending`
-  and `decisions == reaped + spared`. They stay separate because the
-  populations are disjoint, and `tracked` belongs to neither.
+  Daemon-sparing goes through the `ProcessFacts` seam and its precedence
+  ordering (#673 Phase 1a); the tracked keyspace is bounded by one purge sweep
+  (Phase 2).
+- `reap_log.rs` - reaper accounting (`ReapCounters`) and its buffered,
+  mutations-only per-session JSONL log at
+  `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl` (#673 Phases 0 and 5).
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and

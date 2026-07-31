@@ -1,0 +1,210 @@
+# Process reaping
+
+How clud cleans up processes it left behind, and — more importantly — how it
+decides what it must **not** touch.
+
+Reaping spans `job_orphan_reaper.rs`, `orphan_reaper.rs`, `process_scan.rs`,
+`process_tree.rs`, `process_identity.rs`, `reap_log.rs`, `daemon/proc_sampler.rs`
+and the `running-process` boundary, so the cross-directory story lives here and
+the per-directory READMEs link in.
+
+Rationale for the non-obvious choices: [DD-021], [DD-023], [DD-024].
+
+---
+
+## The two reapers are disjoint
+
+They look like duplicates. They are not, and misreading them produces a false
+safety argument — one was made during #673's own review.
+
+| | `job_orphan_reaper` (Windows) | `orphan_reaper` (cross-platform) |
+|---|---|---|
+| **Selects by** | Job Object membership + a role classification of the process tree | inherited `RUNNING_PROCESS_ORIGINATOR=CLUD:<pid>` tag |
+| **Catches** | leaks of a **live** clud — a tool shell exited and left a client running | orphans of a **dead** clud — the session that spawned them is gone |
+| **Runs** | continuously, off a completion port, at up to 5 Hz | at foreground exit, on `clud slay`, and on the daemon's periodic sweep |
+| **Key filter** | the trigger shell's exit | `!parent_alive` (`orphan_reaper.rs`) |
+
+The daemon's periodic sweep filters `!p.parent_alive`, so it sees **only**
+orphans whose originating clud is dead. The job reaper exists precisely for
+leaks of a clud that is still running. **The two sets are disjoint by
+construction**, which is why neither can serve as the other's backstop — and why
+the job reaper needs its own retry-at-exit list for exits it abandons
+(#673 Phase 2d).
+
+---
+
+## The `(pid, creation_time)` keyspace
+
+A bare PID is not a stable handle. Windows reissues numbers promptly, so "the
+PID is alive" and "that process is alive" are different questions
+(`process_identity.rs`). Every per-process cache, set and log in the reaping
+subsystem is therefore keyed by `ProcessIdentity { pid, start_time }`.
+
+Two populations, because a key can be born incomplete:
+
+- **Keyed entries** — a full `(pid, creation_time)`. Purged by the single sweep
+  once the process is confirmed gone and its grace window has elapsed.
+- **Unkeyable entries** — the process died before a creation time could be read.
+  No amount of retrying will produce a key, so they get a **hard TTL and a hard
+  cap** rather than an eviction rule tied to liveness.
+
+**One purge sweep** (`TrackerProcesses::purge`) evicts everything together:
+`known`, `processed_exits`, `provisional_empty_exits`, the retry counters, the
+deferral timestamps and the unkeyable pen. Two invariants govern it:
+
+- *Never evict an interior dead node that still has a live descendant.* The
+  planner walks `parent_pid` links **through** `known`, so removing an interior
+  node disconnects — and silently stops reaping — its whole subtree.
+- *Never evict a companion before `known`.* Dropping `processed_exits[(pid, st)]`
+  while a dead `known[pid]` survives makes `pending_exit_pids` resurrect the
+  identity and re-finalize it forever.
+
+Every kill re-verifies the identity immediately before acting. Between the scan
+that selects a target and the kill that acts, a PID can die and be recycled —
+and killing a *tree* takes the replacement's children with it.
+
+---
+
+## Daemon-sparing: OS signals first, marker second, whitelist last
+
+A clud session must never kill a daemon started inside it. Which daemon it is
+does not matter; **how it detached** does.
+
+Every signal sits behind the `ProcessFacts` trait, is collected once per pass
+into a `FactsSnapshot`, and is then consulted as pure data. No reap-decision
+code calls Win32 — see [DD-024].
+
+### Precedence
+
+| # | Signal | Windows | POSIX | Catches |
+|---|---|---|---|---|
+| 1 | **Job-object membership** | `IsProcessInJob` — false ⇒ broke away | — | anything using `spawn_daemon_breaking_away_from_job`; cheapest and strongest, we already own the job handle |
+| 2 | **Session / service context** | `ProcessIdToSessionId` == 0 ⇒ service | — | **dockerd** / Docker Desktop |
+| 3 | **Session leader** | — | `getsid(pid) != getsid(0)` ⇒ `setsid()` | double-fork daemons, language servers |
+| 4 | **Token owner** | process cannot be opened for termination | `euid` differs | services; also cases where the kill would fail anyway |
+| 5 | **Declared daemon** | `RUNNING_PROCESS_IS_DAEMON` | same | **zccache**, **soldr** — everything that opted in |
+| 6 | **Listening endpoint** | `GetExtendedTcpTable` | `/proc/net/*` | **sccache**, **FBuildWorker**, language servers |
+| 7 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
+
+Cheap and authoritative first, expensive last. 1–4 are one syscall each and no
+memory read, and every PID they rule out is a PID whose environment is never
+touched. 6 is evaluated only for what survives them.
+
+A signal the platform cannot answer is recorded as **unavailable** and never
+spares. Absence of evidence is not evidence of daemon-hood — that inversion is
+exactly what #522 fixed.
+
+**Console attachment is deliberately unranked.** Once the trigger shell exits
+its console goes with it, which makes "no console" indistinguishable between a
+detached daemon and an ordinary leaked client. It would over-spare precisely
+when it is consulted.
+
+A whitelist is a **last resort and must be data, not code**. Nothing in clud
+hard-codes an image name.
+
+### The cooperative-marker caveat
+
+> **`RUNNING_PROCESS_IS_DAEMON` is set by *other programs*, not by clud.
+> Grepping this repo tells you nothing about the runtime set.**
+
+`running_process::spawn::spawn_daemon_inner` applies the marker to every
+daemon-spawn variant, and its own comment names the consumers: *"including the
+free functions consumers like **zccache** call directly"*. On a soldr/zccache
+machine the set is non-empty, and its members are exactly the processes that
+must never be reaped.
+
+Known setters: **zccache**, **soldr / `soldr-daemon`**.
+Known non-setters: **sccache**, **dockerd**, **`FBuildWorker`**, language
+servers.
+
+This is why the marker ranks *below* every OS signal: opting in is optional, so
+the marker is a bonus, never the only line of defence. See [DD-023] for the
+reversal this records.
+
+---
+
+## One environment pass
+
+Reading a process's environment block means a `ReadProcessMemory` walk of its
+PEB — the most expensive enumeration on the machine. Two rules keep it bounded:
+
+- **`process_scan::scan_env` answers both env questions from one snapshot** —
+  the originator-tagged set (additive: kill targets) and the declared-daemon set
+  (subtractive: spares). Asking `running-process` for them cost two full-host
+  passes back to back.
+- **`process_scan::DaemonMarkerCache` reads each identity's environment once,
+  ever**, over a *bounded candidate set* — the reaper's own job membership,
+  never the host.
+
+**Subtractive data may be stale; additive data may not.** A stale spare-list
+spares too much, which is harmless. A stale *kill-target enrollment* names a
+process that must not be killed. Never build the analogous cache for the
+additive side.
+
+**Every map needs an eviction rule at the time it is introduced.** The marker
+cache's is `retain_identities`, called every pass against the live candidate set.
+
+---
+
+## Observability
+
+Reaping is destructive and used to be silent, which is how #651 could be closed
+as fixed while the same symptom kept growing. `reap_log.rs` provides:
+
+- `ReapCounters` — ticks, reconcile passes, environment blocks actually read,
+  peak `known` and peak backlog, plus the decision census. Printed at exit;
+  `--verbose` adds the measurement line.
+- `ReapLog` — one JSONL line per **mutation** at
+  `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl`. Buffered, never flushed
+  per event (#544 found per-op synchronous JSONL flushes to be an idle-CPU cost
+  of their own), and nothing at all is written for a pass that changed nothing.
+
+Two reconciliation identities, checkable from the summary:
+
+```
+shell_exits_observed == finalized + abandoned + still_pending_at_exit
+decisions_emitted    == reaped + spared
+```
+
+They stay separate, and `tracked` belongs to neither, because the populations
+are disjoint: most spawned processes never become reap candidates; abandoned
+identities are *triggers* while kill targets are their *descendants*; and a kill
+takes a whole subtree without emitting a decision per descendant.
+
+When reading the log, check the **reason**, not only the outcome. A daemon
+spared as `outside_job_object` or `listening_endpoint` was spared by a signal
+the code evaluated. A daemon that never appears at all was spared by accident —
+most likely because the plan produced nothing — and that will regress the next
+time the planner changes.
+
+---
+
+## Where a reaper change gets tested
+
+> **Prefer unit tests. They are faster and they run on every platform.** An
+> integration test is justified only when the behaviour cannot be expressed
+> against injected process facts — in practice, only when a real Job Object or
+> real process detachment is the thing under test.
+
+This is only possible because reap decisions take OS facts as **data**
+([DD-024]). A change that calls Win32 inline silently forces itself into the
+slow lane and out of cross-platform coverage.
+
+- **Tier 1 — unit** (`job_orphan_reaper`'s `lifecycle_tests`): the decision
+  table. Synthetic process graphs plus a `FactsSnapshot` fixture. Assert
+  **spare + reason**, never just the outcome. Every new daemon shape, precedence
+  rule, negative case and state-bounding rule goes here.
+- **Tier 2 — integration** (`crates/clud-bin/tests/reaper_daemon_survival_windows.rs`,
+  `tool_shell_lifecycle_windows.rs`): a real Job Object, a real breakaway, a real
+  detached listener. **Budget: ≤5 tests.** Anything expressible in Tier 1 must be
+  in Tier 1. Uses `testbins/daemon-stub`, never a real sccache/docker install.
+- **Tier 3 — opt-in** (`bench/README.md` runbook): checking the stub's signal
+  shapes against genuinely installed daemons on a developer box. Never gating.
+
+Daemon-stub tests need raw `std::process::Command` and must be added to
+`ci/banned_imports.py`'s exempt set with a rationale: `NativeProcess` would
+attach its own containment *and set the very marker whose absence is under test*.
+
+[DD-021]: ../DESIGN_DECISIONS.md#dd-021-automatic-windows-tool-cleanup-requires-positive-lifecycle-roles
+[DD-023]: ../DESIGN_DECISIONS.md#dd-023-the-daemon-spare-list-is-not-deleted-even-though-clud-never-sets-the-marker-itself
+[DD-024]: ../DESIGN_DECISIONS.md#dd-024-reap-decisions-take-injected-process-facts-rather-than-calling-win32-inline
