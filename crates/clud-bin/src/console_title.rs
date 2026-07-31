@@ -196,8 +196,43 @@ pub fn keep_setting_in_background() {
     STARTED.get_or_init(spawn_keeper_thread);
 }
 
+/// Does this process have a console whose title it could keep?
+///
+/// `GetConsoleCP` returns the console input code page, or **0** with
+/// `ERROR_INVALID_HANDLE` when the process has no console at all. That is the
+/// daemon and every worker: `main` starts the keeper before subcommand
+/// dispatch, so console-less processes get one too.
+///
+/// **Not `GetConsoleWindow`.** That returns the console's *window handle*, and
+/// it is documented to return null for a console that has no window — which
+/// includes a pseudoconsole. A ConPTY client (clud's own `--pty` mode, and
+/// Windows Terminal) genuinely *has* a console and can set its title, so
+/// gating on a window handle would disable the keeper in exactly the
+/// environment it exists for. Verified on Windows 10 19045: with a console
+/// `GetConsoleCP` is 65001 and after `FreeConsole` it is 0 / `ERROR_INVALID_HANDLE`.
+#[cfg(windows)]
+fn console_is_attached() -> bool {
+    extern "system" {
+        fn GetConsoleCP() -> u32;
+    }
+    // SAFETY: no arguments, no out-params, no handles retained.
+    let code_page = unsafe { GetConsoleCP() };
+    code_page != 0
+}
+
 #[cfg(windows)]
 fn spawn_keeper_thread() {
+    // #706: without a console there is nothing to stamp *and* nothing to read
+    // back, so `read_console_title()` returns `None` on every pass, the
+    // `current != want` comparison is always true, `changed` is pinned true,
+    // and `KeeperCadence` never backs off. The result was a 750 ms wake loop —
+    // `SetConsoleTitleW` into the void plus a `stat` of the metrics snapshot —
+    // running forever in exactly the processes that are supposed to be idle:
+    // the long-lived daemon and every worker. #547's backoff was correct; it
+    // just could never engage here.
+    if !console_is_attached() {
+        return;
+    }
     let _ = std::thread::Builder::new()
         .name("clud-title-keeper".into())
         .spawn(|| {
@@ -659,6 +694,29 @@ mod tests {
             KEEPER_FAST_INTERVAL,
             "a change must reset to fast in one step"
         );
+    }
+
+    /// #706: the regression the console gate exists to prevent.
+    ///
+    /// A console-less process (the daemon, every worker) can neither stamp a
+    /// title nor read one back, so `read_console_title()` returns `None` on
+    /// every pass and the keeper's `changed` flag is pinned true. This asserts
+    /// the *consequence* — that such a keeper never backs off — which is why
+    /// `spawn_keeper_thread` must not start one at all rather than relying on
+    /// the cadence to make it cheap.
+    #[test]
+    fn a_keeper_that_always_reports_change_never_backs_off() {
+        let mut cadence = KeeperCadence::new();
+        for _ in 0..200 {
+            // What the console-less loop did on every single pass.
+            cadence = cadence.record_pass(true);
+            assert_eq!(
+                cadence.interval(),
+                KEEPER_FAST_INTERVAL,
+                "a pinned-change keeper stays at the fast cadence forever — \
+                 the backoff cannot rescue it, so it must not be spawned"
+            );
+        }
     }
 
     #[test]

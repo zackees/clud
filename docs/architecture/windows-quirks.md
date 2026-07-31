@@ -171,11 +171,34 @@ the codebase stays portable.
   1. `set_for_current_cwd()` calls `SetConsoleTitleW` once at launch with
      `clud <cwd-basename>` and records the desired title in a process-wide
      `OnceLock<Arc<Mutex<String>>>` cell.
-  2. A daemon thread (`clud-title-keeper`) polls every ~750 ms; whenever
+  2. A daemon thread (`clud-title-keeper`) polls every ~750 ms, backing off
+     to 3 s once nothing has changed for four passes (#547); whenever
      `GetConsoleTitleW` reports drift from the desired value, it
      re-stamps via `SetConsoleTitleW`. `OnceLock` guarantees at most one
      keeper thread per process even if `keep_setting_in_background` is
      called multiple times.
+
+  **The keeper is not started at all without a console** (`#706`). `main`
+  calls `keep_setting_in_background` *before* subcommand dispatch, so the
+  daemon and every worker used to get one too — and there the backoff could
+  never engage: `GetConsoleTitleW` returns 0 with no console, so
+  `read_console_title()` is `None`, the `current != want` comparison is
+  always true, `changed` is pinned true, and `KeeperCadence` resets to
+  750 ms on every pass. The result was a permanent 750 ms wake loop — a
+  `SetConsoleTitleW` into the void plus a `stat` of the metrics snapshot —
+  in exactly the processes that are supposed to be idlest.
+  `spawn_keeper_thread` now gates on `GetConsoleCP() != 0` and returns without
+  spawning. The cadence state machine is unchanged; it was correct, it simply
+  cannot rescue a keeper whose `changed` flag is pinned, which
+  `a_keeper_that_always_reports_change_never_backs_off` asserts directly.
+
+  The check is deliberately **not** `GetConsoleWindow`: that returns the
+  console's *window* handle and is documented to be null for a console with no
+  window, which includes a pseudoconsole. A ConPTY client — clud's own `--pty`
+  mode, and Windows Terminal — has a real console and can set its title, so
+  gating on a window handle would disable the keeper in exactly the
+  environment it exists for. `GetConsoleCP` answers "is a console attached"
+  directly: 65001 with one, 0 / `ERROR_INVALID_HANDLE` after `FreeConsole`.
 
   For PTY-mode launches (`--pty` / POSIX `clud loop`) the `OscTitleStripper`
   stream filter in the same file eats OSC 0/2 sequences from the child's

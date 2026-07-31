@@ -39,11 +39,16 @@ and why it matters.
   writes `<state_dir>/metrics.json` **only when the alert-relevant state
   changes** (crosses 70%, or moves ≥10 pts while above it). Replaces one
   `DaemonRequest::Metrics` round-trip per open terminal every 2 s with one
-  sampler and a client-side `stat`. An idle daemon writes nothing at all;
+  sampler and a client-side `stat`. An idle daemon *re-writes* nothing;
   `should_publish` is a pure function so that property is unit-tested rather
   than benchmarked. Clients read it in `console_title.rs::classify_snapshot`,
   falling back to the `Metrics` RPC at 15 s when the file is absent (an older
-  daemon).
+  daemon). **One `BASELINE_CPU_PCT` snapshot is written at publisher startup
+  (#706)** so the file always exists: `should_publish(None, x)` is false below
+  the threshold, and nothing else creates the file, so on a healthy box that
+  never spikes it was never created — `classify_snapshot` returned `Absent`
+  forever and the 15 s "older daemon" fallback was the *steady state* on the
+  current daemon.
 - `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn), foreground-client lease acquisition/release, `send_daemon_request`, `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
 - `client_leases.rs` — daemon-owned foreground-client lease registry keyed by PID plus process start time. Acquires and releases are idempotent, and one batched PID refresh prunes clients that exit without releasing.
 - `runtime_config.rs` — typed, startup-only daemon policy. `CLUD_DAEMON_TEST_MODE=1` enables the scanner-free self-expiring integration profile; production ignores test lifetime overrides.
