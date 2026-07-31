@@ -82,7 +82,18 @@ pub const DEFAULT_IO_EPSILON_BYTES: u64 = 4096;
 /// threshold would already be sound — the slack exists so the gate can never be
 /// the component that decides a borderline case. It only ever answers "is the
 /// expensive measurement worth taking".
+///
+/// Gated like [`crate::console_title::KeeperCadence`]: consumed by the
+/// Windows-only sampler, and by the Tier-1 tests on every platform.
+#[cfg(any(windows, test))]
 pub(crate) const GATE_USER_PCT_THRESHOLD: f64 = 0.80;
+
+/// The gate must arm *below* the detector's threshold, or it could skip the
+/// measurement for a subtree that is about to qualify as wedged. Enforced at
+/// compile time rather than by a test: it is a relationship between two
+/// constants, so a build failure is the honest signal.
+#[cfg(any(windows, test))]
+const _: () = assert!(GATE_USER_PCT_THRESHOLD < DEFAULT_USER_PCT_THRESHOLD);
 
 // ─── Pure cores for the two #709 changes ───────────────────────────────
 //
@@ -99,6 +110,10 @@ pub(crate) const GATE_USER_PCT_THRESHOLD: f64 = 0.80;
 /// no wall delta, no baseline, an empty reading, or a pid with no previous
 /// sample. This gate exists to save work on healthy sessions, never to decide
 /// that a session is healthy.
+///
+/// Only the Windows sampler calls this in production, but the decision is
+/// platform-free so the tests exercise it everywhere.
+#[cfg(any(windows, test))]
 pub(crate) fn subtree_could_hide_a_hot_thread(
     prev_process_user_100ns: &std::collections::HashMap<u32, u64>,
     cur_process_user_100ns: &std::collections::HashMap<u32, u64>,
@@ -131,6 +146,10 @@ pub(crate) fn subtree_could_hide_a_hot_thread(
 /// a Toolhelp parent-pid graph can contain a cycle — a recycled number becoming
 /// its own ancestor. Without it this walk never terminates and the output grows
 /// without bound (#709).
+///
+/// Only the Windows sampler calls this in production; the walk itself is
+/// platform-free so the cycle cases are asserted everywhere.
+#[cfg(any(windows, test))]
 pub(crate) fn descendants_of(
     children: &std::collections::HashMap<u32, Vec<u32>>,
     root: u32,
@@ -890,11 +909,6 @@ mod gate_tests {
     /// measured.
     #[test]
     fn the_gate_arms_below_the_detectors_own_threshold() {
-        assert!(
-            GATE_USER_PCT_THRESHOLD < DEFAULT_USER_PCT_THRESHOLD,
-            "gate {GATE_USER_PCT_THRESHOLD} must sit below detector \
-             {DEFAULT_USER_PCT_THRESHOLD} or it could mask a wedge"
-        );
         let prev = map(&[(10, 0)]);
         let at_detector_threshold =
             map(&[(10, (ONE_CORE as f64 * DEFAULT_USER_PCT_THRESHOLD) as u64)]);

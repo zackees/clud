@@ -122,6 +122,11 @@ const TREE_REBUILD_IDLE_INTERVAL: Duration = Duration::from_secs(120);
 /// is "is anything happening at all", not "is this worth warning about".
 const REBUILD_QUIET_PCT: f32 = 5.0;
 
+/// "Quiet enough to back off" must never be confused with "quiet enough not to
+/// warn". Enforced at compile time rather than by a test: it is a relationship
+/// between two constants, so a build failure is the honest signal.
+const _: () = assert!(REBUILD_QUIET_PCT < RELATIVE_HOST_FRACTION * 100.0);
+
 /// Consecutive quiet rebuilds before backing off one step.
 const REBUILD_QUIET_WALKS_BEFORE_BACKOFF: u32 = 2;
 
@@ -1200,17 +1205,6 @@ mod tests {
             cadence.record_walk(false).interval(),
             TREE_REBUILD_INTERVAL,
             "a busy walk must reset in one step"
-        );
-    }
-
-    /// The quiet threshold must be far below the banner's own trigger, so
-    /// "quiet enough to back off" can never be confused with "quiet enough
-    /// not to warn".
-    #[test]
-    fn the_quiet_threshold_is_well_below_the_banner_threshold() {
-        assert!(
-            REBUILD_QUIET_PCT < RELATIVE_HOST_FRACTION * 100.0,
-            "quiet={REBUILD_QUIET_PCT} must sit well below the banner trigger"
         );
     }
 
