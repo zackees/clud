@@ -3,6 +3,7 @@ use crate::backend::{Backend, LaunchMode};
 use crate::command::LaunchPlan;
 use crate::daemon::types::SessionKind;
 use crate::graphics::GraphicsConfig;
+use crate::process_identity::ProcessIdentity;
 use serde::Serialize;
 
 use super::session::to_json_vec;
@@ -207,6 +208,12 @@ fn daemon_request_prost_roundtrips_json_shapes() {
         DaemonRequest::ProcSnapshot {
             include_dead_since_ms: 5_000,
         },
+        DaemonRequest::AcquireClientLease {
+            identity: ProcessIdentity::new(1234, 1_700_000_000),
+        },
+        DaemonRequest::ReleaseClientLease {
+            identity: ProcessIdentity::new(1234, 1_700_000_000),
+        },
     ];
 
     for request in cases {
@@ -250,6 +257,8 @@ fn daemon_response_prost_roundtrips_json_shapes() {
         DaemonResponse::ProcSnapshot {
             snapshot: sample_proc_snapshot(),
         },
+        DaemonResponse::ClientLeaseAcquired { lease_count: 1 },
+        DaemonResponse::ClientLeaseReleased { lease_count: 0 },
         DaemonResponse::Error {
             message: "failed".to_string(),
         },

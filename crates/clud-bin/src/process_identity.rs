@@ -31,7 +31,11 @@
 //! cleaning up the sessions already on disk. [`UNKNOWN_START_TIME`] marks that
 //! case explicitly so a reader can tell "not recorded" from "recorded as 0".
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, System};
+
+#[cfg(not(windows))]
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
 
 /// Sentinel for "no start time was recorded / none could be read".
 ///
@@ -41,7 +45,7 @@ pub const UNKNOWN_START_TIME: u64 = 0;
 
 /// A PID paired with the start time of the process that held it when the PID
 /// was recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
     /// Seconds since the UNIX epoch, or [`UNKNOWN_START_TIME`].
@@ -91,17 +95,11 @@ impl ProcessIdentity {
 
     /// Read the identity of `pid` from the live process table.
     ///
-    /// Refreshes only the requested PID, not the whole table — a full
-    /// `System::new_all()` takes tens of seconds on Windows, a trap
-    /// [`crate::daemon::process_utils`] already documents.
+    /// Windows opens one read-only process handle and reads its creation
+    /// time directly; other platforms refresh only the requested PID.
+    /// Neither path enumerates the host process table.
     pub fn observe(pid: u32) -> Option<Self> {
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        Self::observe_in(&system, pid)
+        observe_process(pid)
     }
 
     /// Is the process this identity names still running?
@@ -115,6 +113,59 @@ impl ProcessIdentity {
             None => false,
         }
     }
+}
+
+#[cfg(windows)]
+fn observe_process(pid: u32) -> Option<ProcessIdentity> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return None;
+    }
+
+    // FILETIME is measured in 100ns ticks since 1601-01-01. sysinfo exposes
+    // process start times as whole seconds since the Unix epoch, so preserve
+    // that contract for identities already persisted on disk.
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+    const WINDOWS_TO_UNIX_EPOCH_SECS: u64 = 11_644_473_600;
+    const STILL_ACTIVE: u32 = 259;
+
+    // SAFETY: the handle is opened read-only for one exact PID, all four
+    // FILETIME out-pointers remain valid for the call, and the handle is
+    // closed before returning.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let mut exit_code = 0;
+    let exit_result = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    let times_result =
+        unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    let _ = unsafe { CloseHandle(handle) };
+    exit_result.ok()?;
+    times_result.ok()?;
+    if exit_code != STILL_ACTIVE {
+        return None;
+    }
+
+    let creation_ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+    let start_time = (creation_ticks / TICKS_PER_SECOND).checked_sub(WINDOWS_TO_UNIX_EPOCH_SECS)?;
+    Some(ProcessIdentity::new(pid, start_time))
+}
+
+#[cfg(not(windows))]
+fn observe_process(pid: u32) -> Option<ProcessIdentity> {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    ProcessIdentity::observe_in(&system, pid)
 }
 
 /// Start time of the calling process, or [`UNKNOWN_START_TIME`] if the OS
@@ -209,5 +260,27 @@ mod tests {
         let real = ProcessIdentity::observe(pid).expect("this process is running");
         let impostor = ProcessIdentity::new(pid, real.start_time.wrapping_add(1));
         assert!(!impostor.is_live());
+    }
+
+    #[test]
+    fn an_exited_process_is_dead_even_while_its_handle_remains_open() {
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn short-lived Windows child");
+        #[cfg(not(windows))]
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn short-lived Unix child");
+
+        let identity =
+            ProcessIdentity::observe(child.id()).expect("child identity before waiting for exit");
+        assert!(child.wait().expect("wait for child").success());
+        assert!(
+            !identity.is_live(),
+            "a terminated process must be dead before its process handle is dropped"
+        );
     }
 }

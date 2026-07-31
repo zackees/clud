@@ -116,8 +116,16 @@ def main() -> int:
     # half of the same suite. Its sccache-shaped stub must detach on its own
     # and carry an inherited CLUD: originator tag *without* the daemon marker;
     # NativeProcess would set that marker and erase the signal under test.
+    # process_identity.rs is exempt (#643) — one test
+    # (`an_exited_process_is_dead_even_while_its_handle_remains_open`) must hold
+    # the raw `std::process::Child` handle open *across* the liveness check.
+    # On Windows an open handle keeps the PID reserved, which is precisely the
+    # condition under test; NativeProcess manages its handle internally and does
+    # not guarantee it survives `wait()`, so wrapping this would delete the
+    # scenario rather than exercise it.
     exempt = {
         "trampoline.rs",
+        "process_identity.rs",
         "reaper_daemon_survival_windows.rs",
         "reaper_orphan_sweep_survival.rs",
         "process_tree.rs",
