@@ -1,6 +1,7 @@
 mod attach;
 mod client;
 mod commands;
+mod cpu_alert_publish;
 mod daemon_events;
 mod entry;
 mod gc_service;
@@ -39,6 +40,9 @@ pub use http::{
 // Issue #469: re-exports for the telemetry integration test under
 // `tests/telemetry_endpoint.rs` which spawns the dashboard server
 // directly and asserts the full HTTP round-trip.
+#[cfg(test)]
+pub use cpu_alert_publish::SAMPLE_INTERVAL as CPU_SAMPLE_INTERVAL_FOR_TEST;
+pub use cpu_alert_publish::{metrics_snapshot_path, MetricsSnapshot};
 #[cfg(windows)]
 pub(crate) use daemon_events::log_event as log_structured_event;
 pub use http::{

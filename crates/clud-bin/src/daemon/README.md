@@ -35,6 +35,15 @@ and why it matters.
 - `paths.rs` — filesystem layout helpers under the daemon state dir (`default_state_dir` → `~/.clud/state`, `daemon.json`, `daemon.lock` bringup serialization, `sessions/`, `specs/`, `logs/`).
 - `rp_broker/` — the **default** RPC lane, over `running-process`'s broker v1 frame protocol. `endpoint.rs` resolves the named pipe / Unix socket and owns the `daemon-identity.json` sidecar (which lets a client skip the Hello handshake); `frame_lane.rs` is the daemon half and multiplexes frames over one connection; `mod.rs` is the client half and sends exactly one request per adopted session. `RUNNING_PROCESS_DISABLE=1` turns the whole lane off.
 - `http.rs` — the dashboard's loopback HTTP listener, on its own `dashboard_port`.
+- `cpu_alert_publish.rs` — #547: samples the daemon's own CPU every 2 s and
+  writes `<state_dir>/metrics.json` **only when the alert-relevant state
+  changes** (crosses 70%, or moves ≥10 pts while above it). Replaces one
+  `DaemonRequest::Metrics` round-trip per open terminal every 2 s with one
+  sampler and a client-side `stat`. An idle daemon writes nothing at all;
+  `should_publish` is a pure function so that property is unit-tested rather
+  than benchmarked. Clients read it in `console_title.rs::classify_snapshot`,
+  falling back to the `Metrics` RPC at 15 s when the file is absent (an older
+  daemon).
 - `client.rs` — client-side daemon RPC: `ensure_daemon` (idempotent fs4-locked auto-spawn), `send_daemon_request` (frame lane first, TCP fallback), `request_session_termination`, `gc_client_*` IPC wrappers for the four `clud gc` ops, stale-state cleanup.
 - `runtime_config.rs` — typed, startup-only daemon policy. `CLUD_DAEMON_TEST_MODE=1` enables the scanner-free self-expiring integration profile; production ignores test lifetime overrides.
 - `server.rs` — daemon-process entry: binds the frame lane, the loopback TCP listener and the dashboard listener, applies `DaemonRuntimeConfig`, spawns the GC registry worker, serves all eleven `DaemonRequest` variants, spawns worker subprocesses, reaps them. Also owns the periodic **dead-originator orphan sweep** (`spawn_orphan_sweeper` → `run_orphan_sweep` → `orphan_reaper::reap_orphans_filtered_sparing`, issue #465): a `clud-orphan-sweep` thread that reaps `RUNNING_PROCESS_ORIGINATOR=CLUD:<dead-pid>` subtrees past a first-seen grace window, sparing any originator in the handover registry, and logs `orphan_sweep_{started,finished}` events. Both knobs live in `~/.clud/settings.json` and are read once at bringup:

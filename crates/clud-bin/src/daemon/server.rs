@@ -213,6 +213,16 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         spawn_orphan_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
     }
 
+    // #547: publish the CPU-alert state instead of answering one poll per open
+    // terminal for it. One sampler here replaces M clients each opening a
+    // connection every 2 s, and it writes only when the alert-relevant state
+    // actually changes -- so an idle daemon writes nothing at all.
+    super::cpu_alert_publish::spawn_cpu_alert_publisher(
+        state_dir.to_path_buf(),
+        Arc::clone(&shutdown_requested),
+        sample_daemon_cpu_pct,
+    );
+
     loop {
         match listener.accept() {
             Ok((stream, _addr)) => {
