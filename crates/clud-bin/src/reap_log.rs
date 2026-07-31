@@ -131,15 +131,25 @@ pub struct ReapCounters {
     /// Completion-port iterations, including the quiet-period timeouts.
     pub ticks: u64,
     /// Full host process-table enumerations (`CreateToolhelp32Snapshot` over
-    /// every process on the machine).
+    /// every process on the machine), counted from **every** call site.
     ///
     /// The number #706 exists to drive down. It used to be **one per
     /// completion-port message** — at a measured ~178 process spawns/second
     /// and ~20 ms per enumeration, that is ~3.6 cores of pure kernel time per
     /// session, and it multiplies by concurrent sessions because each scan is
     /// `O(all processes on the host)`. Messages are now folded into one batch
-    /// per drain and the batch shares a single enumeration, so this should
-    /// track *drains*, not *events*: compare it against `ticks`.
+    /// per drain and the batch shares a single enumeration, so the dominant
+    /// term should track *drains*, not *events*.
+    ///
+    /// Incremented inside `snapshot()` itself rather than at the call sites,
+    /// so the batch path, `register_backend`, the exit sweep and the
+    /// quiet-period retry are all visible. Counting only the batch path (as
+    /// #707 first did) hid the retry, which fires on the 200 ms timeout
+    /// whenever a PID is still unresolved.
+    ///
+    /// **`host_scans` may exceed `ticks`**: a single tick can drive both a
+    /// retry scan and a batch scan. What must hold is that the *batch* path
+    /// contributes at most one per drain, which is what `peak_batch` shows.
     pub host_scans: u64,
     /// Largest completion-port batch folded into a single drain. A value
     /// well above 1 is the fix in #706 doing its job under churn.
@@ -527,6 +537,10 @@ mod tests {
     /// The whole point of #706 is being able to read the ratio back out: a
     /// healthy session does far fewer host enumerations than it handles
     /// completion-port messages.
+    ///
+    /// Note `host_scans` is *not* bounded by `ticks` — it counts every
+    /// `snapshot()` call site, and one quiet-period tick can drive both a
+    /// retry scan and a batch scan.
     #[test]
     fn the_measurement_line_exposes_host_scans_and_peak_batch() {
         let counters = ReapCounters {

@@ -1287,7 +1287,7 @@ mod imp {
             // lived backend can still post exit notifications first. Seed the
             // root synchronously and replay every unprocessed exit so that
             // listener ordering cannot make cleanup disappear.
-            if let Some(mut process) = snapshot().remove(&pid) {
+            if let Some(mut process) = snapshot(&self.telemetry).remove(&pid) {
                 process.start_time = start_time;
                 if let Ok(mut processes) = self.processes.lock() {
                     processes.known.entry(pid).or_insert(process);
@@ -1337,7 +1337,7 @@ mod imp {
                 .lock()
                 .map(|backends| backends.clone())
                 .unwrap_or_default();
-            let live = snapshot();
+            let live = snapshot(&self.telemetry);
 
             let Ok(mut tracker) = self.processes.lock() else {
                 return 0;
@@ -1634,10 +1634,7 @@ mod imp {
         /// per-call rather than being folded into the shared read.
         fn observe(&mut self, pid: u32) -> Option<ProcessMeta> {
             let telemetry = self.telemetry;
-            let table = self.table.get_or_insert_with(|| {
-                with_telemetry(telemetry, |t| t.epoch.host_scans += 1);
-                snapshot()
-            });
+            let table = self.table.get_or_insert_with(|| snapshot(telemetry));
             let mut process = table.get(&pid).cloned()?;
             process.start_time = crate::process_identity::start_time_of(pid);
             Some(process)
@@ -1662,7 +1659,7 @@ mod imp {
             return true;
         }
 
-        let mut current = snapshot();
+        let mut current = snapshot(telemetry);
         let observations = unresolved
             .into_iter()
             .map(|pid| {
@@ -2110,7 +2107,18 @@ mod imp {
         });
     }
 
-    fn snapshot() -> HashMap<u32, ProcessMeta> {
+    /// One full host process-table enumeration.
+    ///
+    /// **Every** call is counted into [`ReapCounters::host_scans`], from here
+    /// rather than from the call sites. #707 instrumented only the batch path,
+    /// which left three other callers — `register_backend`,
+    /// `sweep_abandoned_at_exit` and `retry_unresolved_new_processes` —
+    /// invisible. The last of those runs on the 200 ms quiet-period timeout
+    /// whenever any PID is still unresolved, so the counter that #706 exists
+    /// to drive down was under-reporting exactly the recurring caller a reader
+    /// would want to see.
+    fn snapshot(telemetry: &Mutex<Telemetry>) -> HashMap<u32, ProcessMeta> {
+        with_telemetry(telemetry, |t| t.epoch.host_scans += 1);
         let mut out = HashMap::new();
         unsafe {
             let Ok(handle) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
