@@ -7,7 +7,7 @@
 #[cfg(any(windows, test))]
 #[rustfmt::skip]
 mod model {
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessMeta {
@@ -18,6 +18,16 @@ pub(crate) struct ProcessMeta {
     /// Process *creation* time. Pairs with `pid` to form the identity every
     /// per-process map here is keyed by.
     pub(crate) start_time: u64,
+    /// When this process was observed to exit, in tracker-clock milliseconds;
+    /// `None` while alive. `start_time` cannot serve here — it is creation, not
+    /// exit — and the eviction sweep needs a grace window measured from exit.
+    pub(crate) exited_at_ms: Option<u64>,
+}
+
+impl ProcessMeta {
+    pub(crate) fn identity(&self) -> (u32, u64) {
+        (self.pid, self.start_time)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -753,6 +763,7 @@ pub(super) fn record_process_exit(
     unresolved_new_pids: &mut HashSet<u32>,
     pid: u32,
     final_observation: Option<ProcessMeta>,
+    now_ms: u64,
 ) -> bool {
     if unresolved_new_pids.contains(&pid) {
         record_new_process_observation(known, unresolved_new_pids, pid, final_observation);
@@ -768,14 +779,303 @@ pub(super) fn record_process_exit(
     let metadata_failed = unresolved_new_pids.remove(&pid);
     if let Some(process) = known.get_mut(&pid) {
         process.alive = false;
+        // Creation time cannot serve as the eviction clock, so record when the
+        // exit was *observed*. Only the first observation counts: a replayed
+        // notification must not restart the grace window.
+        process.exited_at_ms.get_or_insert(now_ms);
     }
     metadata_failed
+}
+
+// ---------------------------------------------------------------------------
+// #673 Phase 2 — the tracked keyspace, and the one sweep that bounds it.
+//
+// Every per-process map here is keyed by `(pid, creation_time)` and evicted by
+// a single sweep. Before this, `known` was cleared only at
+// `ACTIVE_PROCESS_ZERO`, which never fires while the backend lives, so all four
+// maps grew monotonically for the session's life and the reaper's cost tracked
+// **session age** rather than activity.
+// ---------------------------------------------------------------------------
+
+/// Grace after a process is observed to exit before its identity may be
+/// evicted. Covers completion-port reordering, which is tens of milliseconds.
+pub(crate) const EVICTION_GRACE_MS: u64 = 5_000;
+
+/// TTL for the `decisions.is_empty()` deferral.
+///
+/// The plan produced **nothing to kill**, so finalizing loses only the chance
+/// that late metadata would have produced a decision. Aggressive.
+pub(crate) const EMPTY_PLAN_DEFER_MS: u64 = 3_000;
+
+/// TTL for the provisional-empty deferral.
+///
+/// That branch is a possible *real leak*, so this is the conservative one. It
+/// is a backstop, not the normal path: provisional-empty normally finalizes
+/// after a single completion-port quiet period.
+pub(crate) const PROVISIONAL_DEFER_MS: u64 = 60_000;
+
+/// Quiet-period retries an unresolved PID gets before it is moved to the
+/// unkeyable holding pen and stops gating finalization.
+pub(crate) const MAX_METADATA_RETRIES: u32 = 10;
+
+/// Hard cap on the unkeyable holding pen, and on the abandoned retry list.
+/// Neither can be drained by retrying, so both need a cap as well as a TTL.
+pub(crate) const MAX_UNKEYABLE: usize = 256;
+
+/// How long an unkeyable PID is remembered before it is dropped outright.
+pub(crate) const UNKEYABLE_TTL_MS: u64 = 300_000;
+
+/// Everything the tracker remembers about the processes in its job.
+///
+/// Lives in the platform-neutral model, not in the Win32 listener, so the
+/// bounding rules are unit-testable on every platform (#674).
+#[derive(Default)]
+pub(crate) struct TrackerProcesses {
+    pub(crate) known: HashMap<u32, ProcessMeta>,
+    pub(crate) processed_exits: HashSet<(u32, u64)>,
+    pub(crate) provisional_empty_exits: HashSet<(u32, u64)>,
+    pub(crate) unresolved_new_pids: HashSet<u32>,
+    /// Quiet periods charged against each still-unresolved PID. Bounded by
+    /// `unresolved_new_pids`, which this is what bounds.
+    unresolved_retries: HashMap<u32, u32>,
+    /// PIDs that can *never* be keyed — they died before a creation time could
+    /// be read. No amount of retrying produces a key, so this gets a hard TTL
+    /// and a hard cap rather than an eviction rule tied to liveness.
+    #[cfg(test)]
+    pub(crate) unkeyable: VecDeque<(u32, u64)>,
+    #[cfg(not(test))]
+    unkeyable: VecDeque<(u32, u64)>,
+    /// First time each pending exit identity was deferred. The TTL that
+    /// eventually abandons it is measured from here.
+    deferred_since: HashMap<(u32, u64), u64>,
+    /// Exit triggers abandoned at runtime, retried once at foreground exit.
+    abandoned: VecDeque<(u32, u64)>,
+}
+
+/// The mutable exit bookkeeping, handed to [`claim_exit_replay`] while the
+/// process graph holds an immutable borrow of `known`.
+pub(crate) struct ExitLedger<'a> {
+    pub(crate) processed_exits: &'a mut HashSet<(u32, u64)>,
+    pub(crate) provisional_empty_exits: &'a mut HashSet<(u32, u64)>,
+    pub(crate) deferred_since: &'a mut HashMap<(u32, u64), u64>,
+    pub(crate) abandoned: &'a mut VecDeque<(u32, u64)>,
+}
+
+impl<'a> ExitLedger<'a> {
+    /// Has `identity` been deferred for longer than `ttl_ms`?
+    ///
+    /// The first call records the deferral; later calls measure from it.
+    fn defer_expired(&mut self, identity: (u32, u64), now_ms: u64, ttl_ms: u64) -> bool {
+        let since = *self.deferred_since.entry(identity).or_insert(now_ms);
+        now_ms.saturating_sub(since) >= ttl_ms
+    }
+
+    /// Stop tracking `identity` as pending and queue it for the exit sweep.
+    ///
+    /// There is no periodic backstop for these: the daemon sweep filters
+    /// `!parent_alive`, so it catches only orphans whose originating clud is
+    /// **dead**, while this reaper exists for leaks of a *live* clud. The two
+    /// sets are disjoint by construction. Without the retry list an abandoned
+    /// orphan would hold its port or file lock for the rest of the session.
+    fn abandon(&mut self, identity: (u32, u64)) {
+        self.processed_exits.insert(identity);
+        self.provisional_empty_exits.remove(&identity);
+        self.deferred_since.remove(&identity);
+        if !self.abandoned.contains(&identity) {
+            self.abandoned.push_back(identity);
+            while self.abandoned.len() > MAX_UNKEYABLE {
+                self.abandoned.pop_front();
+            }
+        }
+    }
+
+    fn finalize(&mut self, identity: (u32, u64)) {
+        self.provisional_empty_exits.remove(&identity);
+        self.deferred_since.remove(&identity);
+        self.processed_exits.insert(identity);
+    }
+}
+
+impl TrackerProcesses {
+    /// Borrow the graph inputs immutably and the exit bookkeeping mutably, in
+    /// one step, so a reconcile pass can hold both at once.
+    pub(crate) fn split(&mut self) -> (&HashMap<u32, ProcessMeta>, ExitLedger<'_>) {
+        (
+            &self.known,
+            ExitLedger {
+                processed_exits: &mut self.processed_exits,
+                provisional_empty_exits: &mut self.provisional_empty_exits,
+                deferred_since: &mut self.deferred_since,
+                abandoned: &mut self.abandoned,
+            },
+        )
+    }
+
+    /// Only *live* unresolved PIDs gate finalization; see
+    /// [`bump_unresolved_retries`](Self::bump_unresolved_retries) for why the
+    /// set is now bounded.
+    pub(crate) fn metadata_complete(&self) -> bool {
+        self.unresolved_new_pids.is_empty()
+    }
+
+    /// Charge one quiet period against every still-unresolved PID, moving the
+    /// ones that have exhausted their retries into the unkeyable holding pen.
+    ///
+    /// The finalization gate is `unresolved_new_pids.is_empty()` — a **global**
+    /// condition. One PID whose metadata never resolves used to block
+    /// finalization of *every* pending exit for the rest of the session while
+    /// the reconcile pass kept paying its costs. A per-identity TTL on the
+    /// backlog does not fix that; it only mass-abandons entries that were
+    /// genuinely reapable. Bounding the retry bounds the gate itself.
+    ///
+    /// A PID abandoned here is absent from `known`, and `plan_shell_exit`'s
+    /// walk only reaches processes linked through `known`, so its absence can
+    /// only *disconnect* (spare) a subtree — never expand the reap set.
+    pub(crate) fn bump_unresolved_retries(&mut self, now_ms: u64) -> Vec<u32> {
+        let mut abandoned = Vec::new();
+        for pid in self.unresolved_new_pids.iter().copied().collect::<Vec<_>>() {
+            let attempts = self.unresolved_retries.entry(pid).or_insert(0);
+            *attempts += 1;
+            if *attempts >= MAX_METADATA_RETRIES {
+                self.unresolved_new_pids.remove(&pid);
+                self.unresolved_retries.remove(&pid);
+                self.push_unkeyable(pid, now_ms);
+                abandoned.push(pid);
+            }
+        }
+        self.unresolved_retries
+            .retain(|pid, _| self.unresolved_new_pids.contains(pid));
+        abandoned
+    }
+
+    fn push_unkeyable(&mut self, pid: u32, now_ms: u64) {
+        self.unkeyable.push_back((pid, now_ms));
+        while self.unkeyable.len() > MAX_UNKEYABLE {
+            self.unkeyable.pop_front();
+        }
+    }
+
+    /// Identities abandoned at runtime, drained for the exit sweep.
+    pub(crate) fn take_abandoned(&mut self) -> Vec<(u32, u64)> {
+        self.abandoned.drain(..).collect()
+    }
+
+    /// The **one** purge sweep over the tracked keyspace.
+    ///
+    /// An identity is evictable when it is dead, its grace window has elapsed,
+    /// it is no longer pending, and **no live descendant remains beneath it**.
+    /// That last clause is load-bearing: `plan_shell_exit` walks `parent_pid`
+    /// links *through* `known`, so evicting an interior dead node disconnects
+    /// its subtree. The disconnection is spare-biased — `has_non_shell_client`
+    /// and `inherited_spare` both propagate through the walk, so removal can
+    /// only make descendants *less* reapable — but it would silently disable
+    /// reaping of that subtree, which is not a trade worth making for a node
+    /// whose descendants are still running.
+    ///
+    /// The predicate is deliberately independent of `processed_exits`: that set
+    /// only ever receives shell-role entries with non-empty decisions, while
+    /// `known` is dominated by dead `git.exe`/`rg.exe`/`node.exe`/`conhost.exe`
+    /// that never reach it. A predicate keyed on it would prune almost nothing.
+    ///
+    /// Companions are evicted with `known` in the same step, never before it:
+    /// dropping `processed_exits[(pid, st)]` while a dead `known[pid]` survives
+    /// would make `pending_exit_pids` resurrect the identity and re-finalize it
+    /// forever.
+    pub(crate) fn purge(&mut self, now_ms: u64) -> usize {
+        let protected = self.identities_with_live_descendants();
+        let evictable: Vec<(u32, u64)> = self
+            .known
+            .values()
+            .filter(|process| !process.alive && !protected.contains(&process.pid))
+            .filter(|process| !self.is_pending(process))
+            .filter(|process| {
+                process
+                    .exited_at_ms
+                    .is_some_and(|at| now_ms.saturating_sub(at) >= EVICTION_GRACE_MS)
+            })
+            .map(ProcessMeta::identity)
+            .collect();
+
+        for identity in &evictable {
+            self.known.remove(&identity.0);
+            self.processed_exits.remove(identity);
+            self.provisional_empty_exits.remove(identity);
+            self.deferred_since.remove(identity);
+        }
+
+        self.unkeyable
+            .retain(|(_, seen)| now_ms.saturating_sub(*seen) < UNKEYABLE_TTL_MS);
+        // A deferral for an identity that is no longer tracked has nothing left
+        // to age out.
+        let known = &self.known;
+        self.deferred_since
+            .retain(|(pid, start_time), _| known.get(pid).is_some_and(|p| p.start_time == *start_time));
+
+        evictable.len()
+    }
+
+    fn is_pending(&self, process: &ProcessMeta) -> bool {
+        is_shell_image(&process.image_name)
+            && !self.processed_exits.contains(&process.identity())
+    }
+
+    /// PIDs that still have a live process somewhere beneath them in `known`.
+    fn identities_with_live_descendants(&self) -> HashSet<u32> {
+        let mut protected = HashSet::new();
+        for process in self.known.values().filter(|process| process.alive) {
+            let mut cursor = process.parent_pid;
+            // `insert` returning false both dedupes shared ancestry and breaks
+            // any cycle a recycled PID could have created.
+            while let Some(parent) = self.known.get(&cursor) {
+                if !protected.insert(parent.pid) {
+                    break;
+                }
+                cursor = parent.parent_pid;
+            }
+        }
+        protected
+    }
+
+    /// Total tracked entries across every map — the number #673 says must stop
+    /// tracking session age.
+    #[cfg(test)]
+    pub(crate) fn tracked_len(&self) -> usize {
+        self.known.len()
+            + self.processed_exits.len()
+            + self.provisional_empty_exits.len()
+            + self.unresolved_new_pids.len()
+            + self.unresolved_retries.len()
+            + self.unkeyable.len()
+            + self.deferred_since.len()
+            + self.abandoned.len()
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct ReplayControl {
     pub(super) finalize_provisional_empty: bool,
     pub(super) metadata_complete: bool,
+    pub(super) now_ms: u64,
+}
+
+/// What one pending exit resolved to this pass.
+#[derive(Debug)]
+pub(crate) enum ExitClaim {
+    /// Finalized: these decisions are the caller's to execute.
+    Execute(Vec<ReapDecision>),
+    /// Still pending; a later event may resolve it.
+    Deferred,
+    /// Gave up. Queued for the exit sweep rather than dropped.
+    Abandoned,
+}
+
+impl ExitClaim {
+    pub(crate) fn into_decisions(self) -> Option<Vec<ReapDecision>> {
+        match self {
+            Self::Execute(decisions) => Some(decisions),
+            _ => None,
+        }
+    }
 }
 
 /// Claim one pending shell exit against an **already-built** graph.
@@ -787,30 +1087,40 @@ pub(super) struct ReplayControl {
 pub(super) fn claim_exit_replay(
     graph: &ProcessGraph<'_>,
     spares: &SpareList,
-    processed_exits: &mut HashSet<(u32, u64)>,
-    provisional_empty_exits: &mut HashSet<(u32, u64)>,
+    ledger: &mut ExitLedger<'_>,
     exited_pid: u32,
     control: ReplayControl,
-) -> Option<Vec<ReapDecision>> {
+) -> ExitClaim {
     if !control.metadata_complete {
         // Missing metadata can hide a nested shell / conhost / daemon
         // boundary beneath an otherwise reapable ancestor. Never plan from an
         // incomplete graph: ambiguity is a false-negative cleanup, not a
         // destructive false positive.
-        return None;
+        return ExitClaim::Deferred;
     }
-    let trigger = graph.meta(exited_pid)?;
-    let exit_identity = (trigger.pid, trigger.start_time);
-    if processed_exits.contains(&exit_identity) {
-        return None;
+    let Some(trigger) = graph.meta(exited_pid) else {
+        return ExitClaim::Deferred;
+    };
+    let exit_identity = trigger.identity();
+    if ledger.processed_exits.contains(&exit_identity) {
+        return ExitClaim::Deferred;
     }
 
     let decisions = plan_shell_exit(graph, spares, exited_pid);
     if decisions.is_empty() {
         // Registration or descendant metadata may arrive after the exit
         // notification. Leave this identity pending so either event can
-        // replay it.
-        return None;
+        // replay it — but not forever: nothing else ages this branch out, and
+        // before #673 Phase 2c an identity that landed here stayed in the
+        // backlog for the session's life, paying reconcile cost every tick.
+        //
+        // Finalizing loses only the chance that late metadata would have
+        // produced a decision, so the TTL is the aggressive one.
+        if ledger.defer_expired(exit_identity, control.now_ms, EMPTY_PLAN_DEFER_MS) {
+            ledger.abandon(exit_identity);
+            return ExitClaim::Abandoned;
+        }
+        return ExitClaim::Deferred;
     }
     if decisions.len() == 1 && decisions[0].reason == ReapDecisionReason::NoLiveClients {
         // Job notifications can precede Toolhelp metadata publication. "No
@@ -818,15 +1128,22 @@ pub(super) fn claim_exit_replay(
         // quiet period has elapsed. A NEW_PROCESS event during that period
         // can expose and reap the leaked child; genuinely empty tools are then
         // finalized instead of accumulating forever.
-        if !control.finalize_provisional_empty || !provisional_empty_exits.contains(&exit_identity)
+        if !control.finalize_provisional_empty
+            || !ledger.provisional_empty_exits.contains(&exit_identity)
         {
-            provisional_empty_exits.insert(exit_identity);
-            return None;
+            ledger.provisional_empty_exits.insert(exit_identity);
+            // This branch is a possible *real leak*, so its TTL is the
+            // conservative one and exists only as a backstop for the case
+            // where the quiet period somehow never arrives.
+            if ledger.defer_expired(exit_identity, control.now_ms, PROVISIONAL_DEFER_MS) {
+                ledger.abandon(exit_identity);
+                return ExitClaim::Abandoned;
+            }
+            return ExitClaim::Deferred;
         }
     }
-    provisional_empty_exits.remove(&exit_identity);
-    processed_exits.insert(exit_identity);
-    Some(decisions)
+    ledger.finalize(exit_identity);
+    ExitClaim::Execute(decisions)
 }
 }
 
@@ -843,6 +1160,10 @@ impl ForegroundJobTracker {
     }
 
     pub fn register_backend(&self, _pid: u32, _executable_name: &str) {}
+
+    pub fn sweep_abandoned_at_exit(&self) -> usize {
+        0
+    }
 }
 
 #[cfg(windows)]
@@ -880,12 +1201,18 @@ mod imp {
     const NEW_PROCESS: u32 = 6;
     const EXIT_PROCESS: u32 = 7;
 
-    #[derive(Default)]
-    struct TrackerProcesses {
-        known: HashMap<u32, ProcessMeta>,
-        processed_exits: HashSet<(u32, u64)>,
-        provisional_empty_exits: HashSet<(u32, u64)>,
-        unresolved_new_pids: HashSet<u32>,
+    use super::TrackerProcesses;
+
+    /// Milliseconds since the tracker's own start.
+    ///
+    /// A monotonic tracker-local clock, never a wall clock: every TTL here is
+    /// a duration, and a wall clock that steps backwards would freeze the
+    /// eviction sweep for the size of the step.
+    fn now_ms() -> u64 {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
     }
 
     /// State the facts collector carries across passes.
@@ -1010,6 +1337,89 @@ mod imp {
                 false,
             );
         }
+
+        /// Re-plan every exit the tracker gave up on, against a fresh process
+        /// table, and execute whatever the plan now produces (#673 Phase 2d).
+        ///
+        /// Runtime abandonment is bounded by a TTL, so an exit that never
+        /// resolved stops costing reconcile time — but the leak it was
+        /// supposed to clean up would otherwise survive for the rest of the
+        /// session, and **nothing else catches it**: the daemon's periodic
+        /// sweep filters `!parent_alive`, so it only sees orphans whose
+        /// originating clud is dead, while this reaper exists precisely for
+        /// leaks of a *live* clud. The two sets are disjoint by construction.
+        ///
+        /// This is additive over `orphan_reaper::scan_and_report`, which finds
+        /// descendants by originator tag: a descendant whose environment was
+        /// rebuilt somewhere in the spawn chain carries no tag and is invisible
+        /// to that scan, but is still linked into this graph by parent PID.
+        ///
+        /// Returns the number of triggers re-planned.
+        pub fn sweep_abandoned_at_exit(&self) -> usize {
+            let abandoned = match self.processes.lock() {
+                Ok(mut processes) => processes.take_abandoned(),
+                Err(_) => return 0,
+            };
+            if abandoned.is_empty() {
+                return 0;
+            }
+
+            let registered = self
+                .backends
+                .lock()
+                .map(|backends| backends.clone())
+                .unwrap_or_default();
+            let live = snapshot();
+
+            let Ok(mut tracker) = self.processes.lock() else {
+                return 0;
+            };
+            // Refresh liveness from the fresh table without disturbing the
+            // recorded identities: a PID absent from it has exited, and a PID
+            // present under a *different* identity is a recycled number that
+            // must not inherit the old process's place in the tree.
+            for process in tracker.known.values_mut() {
+                if !live.contains_key(&process.pid) {
+                    process.alive = false;
+                } else if process.alive {
+                    process.alive =
+                        crate::process_identity::start_time_of(process.pid) == process.start_time;
+                }
+            }
+
+            let (known, _ledger) = tracker.split();
+            let graph = super::ProcessGraph::build(known.values(), &registered);
+            let facts = {
+                let Ok(mut collector) = self.collector.lock() else {
+                    return 0;
+                };
+                collect_facts(self.job.0 as usize, &graph, &mut collector)
+            };
+            let spares = super::build_spare_list(&facts, graph.spare_candidates());
+
+            let mut swept = 0usize;
+            let mut claimed = Vec::new();
+            for (pid, start_time) in abandoned {
+                let Some(trigger) = graph.meta(pid) else {
+                    continue;
+                };
+                if trigger.start_time != start_time {
+                    continue;
+                }
+                swept += 1;
+                let decisions = super::plan_shell_exit(&graph, &spares, pid);
+                if !decisions.is_empty() {
+                    claimed.push(decisions);
+                }
+            }
+            drop(graph);
+            drop(tracker);
+
+            for decisions in claimed {
+                execute_decisions(decisions, &spares);
+            }
+            swept
+        }
     }
 
     impl Drop for ForegroundJobTracker {
@@ -1100,6 +1510,7 @@ mod imp {
                             unresolved_new_pids,
                             pid,
                             final_observation,
+                            now_ms(),
                         )
                     } else {
                         false
@@ -1117,11 +1528,12 @@ mod imp {
                     reconcile_pending(&processes, &backends, &collector, job_value, false);
                 }
                 ACTIVE_PROCESS_ZERO => {
+                    // The job emptied: nothing tracked can still be relevant.
+                    // This is the *only* clear point, and it never fires while
+                    // the backend lives — which is why the incremental purge
+                    // sweep exists (#673 Phase 2a).
                     if let Ok(mut processes) = processes.lock() {
-                        processes.known.clear();
-                        processes.processed_exits.clear();
-                        processes.provisional_empty_exits.clear();
-                        processes.unresolved_new_pids.clear();
+                        *processes = TrackerProcesses::default();
                     }
                 }
                 _ => {}
@@ -1168,7 +1580,14 @@ mod imp {
             } = &mut *processes;
             super::record_new_process_observation(known, unresolved_new_pids, pid, observed);
         }
-        processes.unresolved_new_pids.is_empty()
+        // #673 Phase 2b: the finalization gate is global, so a PID whose
+        // metadata never resolves used to block every unrelated pending exit
+        // for the session's life. Charge this quiet period against the
+        // stragglers and retire the ones that have run out of retries.
+        for pid in processes.bump_unresolved_retries(now_ms()) {
+            log_metadata_miss(pid);
+        }
+        processes.metadata_complete()
     }
 
     /// One reconcile pass over the whole pending backlog.
@@ -1197,17 +1616,12 @@ mod imp {
         let Ok(mut tracker) = processes.lock() else {
             return;
         };
-        let TrackerProcesses {
-            known,
-            processed_exits,
-            provisional_empty_exits,
-            unresolved_new_pids,
-        } = &mut *tracker;
+        let now = now_ms();
+        // The one purge sweep. It runs before the guard below, because a pass
+        // with an empty backlog is exactly when the tracked keyspace has the
+        // most to give back.
+        tracker.purge(now);
 
-        let pending = super::pending_exit_pids(known, processed_exits);
-        if pending.is_empty() {
-            return;
-        }
         // Only *live* unresolved PIDs gate finalization: a retry can still
         // resolve them into a real nested-shell / conhost / daemon boundary.
         // PIDs that exited unresolved are gone from `known` and can never
@@ -1215,8 +1629,15 @@ mod imp {
         // `record_process_exit`).
         let control = super::ReplayControl {
             finalize_provisional_empty,
-            metadata_complete: unresolved_new_pids.is_empty(),
+            metadata_complete: tracker.metadata_complete(),
+            now_ms: now,
         };
+
+        let (known, mut ledger) = tracker.split();
+        let pending = super::pending_exit_pids(known, ledger.processed_exits);
+        if pending.is_empty() {
+            return;
+        }
 
         let graph = super::ProcessGraph::build(known.values(), &registered);
         let facts = {
@@ -1229,17 +1650,14 @@ mod imp {
 
         let mut claimed = Vec::new();
         for pid in pending {
-            if let Some(decisions) = super::claim_exit_replay(
-                &graph,
-                &spares,
-                processed_exits,
-                provisional_empty_exits,
-                pid,
-                control,
-            ) {
+            if let Some(decisions) =
+                super::claim_exit_replay(&graph, &spares, &mut ledger, pid, control)
+                    .into_decisions()
+            {
                 claimed.push(decisions);
             }
         }
+        drop(graph);
         drop(tracker);
 
         for decisions in claimed {
@@ -1497,6 +1915,7 @@ mod imp {
                             image_name: String::from_utf16_lossy(&entry.szExeFile[..end]),
                             alive: true,
                             start_time: crate::process_identity::UNKNOWN_START_TIME,
+                            exited_at_ms: None,
                         },
                     );
                     if Process32NextW(handle, &mut entry).is_err() {
@@ -1527,6 +1946,7 @@ mod lifecycle_tests {
             image_name: image_name.to_string(),
             alive,
             start_time: pid as u64,
+            exited_at_ms: (!alive).then_some(0),
         }
     }
 
@@ -1563,15 +1983,22 @@ mod lifecycle_tests {
         exited_pid: u32,
         control: super::ReplayControl,
     ) -> Option<Vec<super::ReapDecision>> {
+        let mut deferred_since = HashMap::new();
+        let mut abandoned = std::collections::VecDeque::new();
         let graph = super::ProcessGraph::build(known.values(), backends);
         super::claim_exit_replay(
             &graph,
             &declared(daemons),
-            processed_exits,
-            provisional_empty_exits,
+            &mut super::ExitLedger {
+                processed_exits,
+                provisional_empty_exits,
+                deferred_since: &mut deferred_since,
+                abandoned: &mut abandoned,
+            },
             exited_pid,
             control,
         )
+        .into_decisions()
     }
 
     fn fixture(processes: Vec<ProcessMeta>, exited_pid: u32) -> Vec<super::ReapDecision> {
@@ -1588,9 +2015,296 @@ mod lifecycle_tests {
         metadata_complete: bool,
     ) -> super::ReplayControl {
         super::ReplayControl {
+            now_ms: 0,
             finalize_provisional_empty,
             metadata_complete,
         }
+    }
+
+    // ---- #673 Phase 2: the tracked keyspace stays bounded ----
+
+    fn tracker_of(processes: Vec<ProcessMeta>) -> super::TrackerProcesses {
+        let mut tracker = super::TrackerProcesses::default();
+        for process in processes {
+            tracker.known.insert(process.pid, process);
+        }
+        tracker
+    }
+
+    fn exited(mut process: ProcessMeta, at_ms: u64) -> ProcessMeta {
+        process.alive = false;
+        process.exited_at_ms = Some(at_ms);
+        process
+    }
+
+    /// The headline bound. 500 short-lived **non-shell** exits are the traffic
+    /// `known` is actually dominated by — `git.exe`/`node.exe` that never reach
+    /// `processed_exits` at all, which is why a predicate keyed on that set
+    /// would have pruned nothing.
+    #[test]
+    fn five_hundred_non_shell_exits_leave_every_map_bounded() {
+        let mut tracker = tracker_of(vec![process(10, 1, "codex.exe", true)]);
+
+        for round in 0..500u32 {
+            let pid = 1000 + round;
+            let mut unresolved = HashSet::new();
+            super::record_new_process_observation(
+                &mut tracker.known,
+                &mut unresolved,
+                pid,
+                Some(process(pid, 10, "git.exe", true)),
+            );
+            super::record_process_exit(
+                &mut tracker.known,
+                &mut tracker.unresolved_new_pids,
+                pid,
+                None,
+                u64::from(round),
+            );
+            tracker.purge(u64::from(round) + super::EVICTION_GRACE_MS);
+        }
+
+        // Only the live backend root survives; nothing accumulated anywhere.
+        assert_eq!(tracker.known.len(), 1);
+        assert!(tracker.known.contains_key(&10));
+        assert_eq!(
+            tracker.tracked_len(),
+            1,
+            "every map must be bounded, not just `known`"
+        );
+    }
+
+    /// The grace window is real: an exit observed a moment ago is still there,
+    /// because completion-port notifications can arrive out of order.
+    #[test]
+    fn a_freshly_exited_identity_survives_its_grace_window() {
+        let mut tracker = tracker_of(vec![
+            process(10, 1, "codex.exe", true),
+            exited(process(21, 10, "git.exe", false), 1_000),
+        ]);
+
+        tracker.purge(1_000 + super::EVICTION_GRACE_MS - 1);
+        assert!(tracker.known.contains_key(&21));
+
+        tracker.purge(1_000 + super::EVICTION_GRACE_MS);
+        assert!(!tracker.known.contains_key(&21));
+    }
+
+    /// The load-bearing clause: `plan_shell_exit` walks parent links *through*
+    /// `known`, so evicting an interior dead node would disconnect — and
+    /// silently stop reaping — everything beneath it.
+    #[test]
+    fn an_interior_dead_node_with_live_descendants_is_never_evicted() {
+        let mut tracker = tracker_of(vec![
+            process(10, 1, "codex.exe", true),
+            exited(process(20, 10, "powershell.exe", false), 0),
+            exited(process(21, 20, "wrapper.exe", false), 0),
+            process(22, 21, "node.exe", true), // still running
+        ]);
+        tracker.processed_exits.insert((20, 20));
+
+        tracker.purge(super::EVICTION_GRACE_MS * 10);
+
+        assert!(tracker.known.contains_key(&20), "shell root must stay");
+        assert!(tracker.known.contains_key(&21), "interior node must stay");
+        assert!(tracker.known.contains_key(&22));
+    }
+
+    /// ...and once the subtree is genuinely gone, the whole chain goes with it.
+    #[test]
+    fn a_fully_dead_subtree_is_evicted_together_with_its_companions() {
+        let mut tracker = tracker_of(vec![
+            process(10, 1, "codex.exe", true),
+            exited(process(20, 10, "powershell.exe", false), 0),
+            exited(process(21, 20, "wrapper.exe", false), 0),
+            exited(process(22, 21, "node.exe", false), 0),
+        ]);
+        tracker.processed_exits.insert((20, 20));
+        tracker.provisional_empty_exits.insert((20, 20));
+
+        assert_eq!(tracker.purge(super::EVICTION_GRACE_MS), 3);
+        assert_eq!(tracker.known.len(), 1);
+        assert!(
+            tracker.processed_exits.is_empty() && tracker.provisional_empty_exits.is_empty(),
+            "companions must be evicted with `known`, in the same step"
+        );
+    }
+
+    /// A dead shell that has not been finalized is still *pending*. Evicting it
+    /// would drop the exit silently; abandonment is the only way out, and it is
+    /// what makes the identity evictable afterwards.
+    #[test]
+    fn a_still_pending_shell_exit_is_not_evicted_out_from_under_the_backlog() {
+        let mut tracker = tracker_of(vec![
+            process(10, 1, "codex.exe", true),
+            exited(process(20, 10, "powershell.exe", false), 0),
+        ]);
+
+        tracker.purge(super::EVICTION_GRACE_MS * 10);
+        assert!(tracker.known.contains_key(&20));
+        assert_eq!(
+            super::pending_exit_pids(&tracker.known, &tracker.processed_exits),
+            vec![20]
+        );
+
+        tracker.processed_exits.insert((20, 20));
+        tracker.purge(super::EVICTION_GRACE_MS * 10);
+        assert!(!tracker.known.contains_key(&20));
+    }
+
+    /// #673 Phase 2b. The finalization gate is global, so before this one
+    /// permanently-unresolvable PID blocked *every* pending exit for the
+    /// session's life while the reconcile pass kept paying its costs.
+    #[test]
+    fn one_unresolvable_pid_stops_blocking_finalization_after_bounded_retries() {
+        let mut tracker = super::TrackerProcesses::default();
+        tracker.unresolved_new_pids.insert(999);
+        assert!(!tracker.metadata_complete());
+
+        for round in 1..super::MAX_METADATA_RETRIES {
+            assert!(tracker.bump_unresolved_retries(u64::from(round)).is_empty());
+            assert!(!tracker.metadata_complete(), "round {round} gave up early");
+        }
+
+        assert_eq!(
+            tracker.bump_unresolved_retries(u64::from(super::MAX_METADATA_RETRIES)),
+            vec![999]
+        );
+        assert!(tracker.metadata_complete());
+        assert!(tracker.unresolved_new_pids.is_empty());
+    }
+
+    /// The unkeyable holding pen can never be drained by retrying, so it gets
+    /// both a hard cap and a hard TTL.
+    #[test]
+    fn the_unkeyable_holding_pen_is_capped_and_expires() {
+        let mut tracker = super::TrackerProcesses::default();
+        for pid in 0..(super::MAX_UNKEYABLE as u32 * 2) {
+            tracker.unresolved_new_pids.insert(pid);
+            for _ in 0..super::MAX_METADATA_RETRIES {
+                tracker.bump_unresolved_retries(0);
+            }
+        }
+        assert_eq!(tracker.unkeyable.len(), super::MAX_UNKEYABLE);
+
+        tracker.purge(super::UNKEYABLE_TTL_MS);
+        assert!(tracker.unkeyable.is_empty());
+    }
+
+    /// #673 Phase 2c. Nothing else ages the "plan produced nothing to kill"
+    /// branch out, so before this an identity that landed there stayed in the
+    /// backlog forever, costing a tree walk every tick.
+    #[test]
+    fn an_empty_plan_is_abandoned_on_the_aggressive_ttl() {
+        // A shell exit under no registered backend never produces a plan.
+        let known: HashMap<u32, ProcessMeta> = [
+            process(10, 1, "codex.exe", true),
+            exited(process(20, 10, "powershell.exe", false), 0),
+        ]
+        .into_iter()
+        .map(|process| (process.pid, process))
+        .collect();
+        let graph = super::ProcessGraph::build(known.values(), &[]);
+        let spares = SpareList::new();
+
+        let mut processed = HashSet::new();
+        let mut provisional = HashSet::new();
+        let mut deferred = HashMap::new();
+        let mut abandoned = std::collections::VecDeque::new();
+        let mut ledger = super::ExitLedger {
+            processed_exits: &mut processed,
+            provisional_empty_exits: &mut provisional,
+            deferred_since: &mut deferred,
+            abandoned: &mut abandoned,
+        };
+
+        let deferred_claim = super::claim_exit_replay(
+            &graph,
+            &spares,
+            &mut ledger,
+            20,
+            super::ReplayControl {
+                now_ms: 0,
+                finalize_provisional_empty: false,
+                metadata_complete: true,
+            },
+        );
+        assert!(matches!(deferred_claim, super::ExitClaim::Deferred));
+        assert!(ledger.abandoned.is_empty());
+
+        let expired = super::claim_exit_replay(
+            &graph,
+            &spares,
+            &mut ledger,
+            20,
+            super::ReplayControl {
+                now_ms: super::EMPTY_PLAN_DEFER_MS,
+                finalize_provisional_empty: false,
+                metadata_complete: true,
+            },
+        );
+        assert!(matches!(expired, super::ExitClaim::Abandoned));
+        // #673 Phase 2d: abandonment is a hand-off to the exit sweep, not a
+        // silent drop -- a leaked node.exe holding a port for six hours is the
+        // bug this reaper exists to prevent.
+        assert_eq!(abandoned.into_iter().collect::<Vec<_>>(), vec![(20, 20)]);
+        // ...and it stops being pending, so the backlog actually drains.
+        assert!(super::pending_exit_pids(&known, &processed).is_empty());
+    }
+
+    /// The two deferral branches must not share a TTL. "The plan produced
+    /// nothing to kill" is cheap to give up on; "no live clients yet" is a
+    /// possible real leak, so it must still be pending at the point the other
+    /// branch would already have been abandoned.
+    #[test]
+    fn the_possible_leak_branch_outlives_the_empty_plan_ttl() {
+        let known: HashMap<u32, ProcessMeta> = [
+            process(10, 1, "codex.exe", true),
+            exited(process(20, 10, "powershell.exe", false), 0),
+        ]
+        .into_iter()
+        .map(|process| (process.pid, process))
+        .collect();
+        let registered = [RegisteredBackend::new(10, "codex.exe", 10)];
+        let graph = super::ProcessGraph::build(known.values(), &registered);
+        let spares = SpareList::new();
+
+        let mut processed = HashSet::new();
+        let mut provisional = HashSet::new();
+        let mut deferred = HashMap::new();
+        let mut abandoned = std::collections::VecDeque::new();
+        let mut ledger = super::ExitLedger {
+            processed_exits: &mut processed,
+            provisional_empty_exits: &mut provisional,
+            deferred_since: &mut deferred,
+            abandoned: &mut abandoned,
+        };
+        let claim = |ledger: &mut super::ExitLedger<'_>, now_ms| {
+            super::claim_exit_replay(
+                &graph,
+                &spares,
+                ledger,
+                20,
+                super::ReplayControl {
+                    now_ms,
+                    finalize_provisional_empty: false,
+                    metadata_complete: true,
+                },
+            )
+        };
+
+        assert!(matches!(claim(&mut ledger, 0), super::ExitClaim::Deferred));
+        assert!(
+            matches!(
+                claim(&mut ledger, super::EMPTY_PLAN_DEFER_MS),
+                super::ExitClaim::Deferred
+            ),
+            "the aggressive TTL must not apply to the possible-leak branch"
+        );
+        assert!(matches!(
+            claim(&mut ledger, super::PROVISIONAL_DEFER_MS),
+            super::ExitClaim::Abandoned
+        ));
     }
 
     // ---- #673 Phase 1a: the OS-signal spare-list, as pure data ----
@@ -2160,6 +2874,7 @@ mod lifecycle_tests {
             &mut unresolved,
             21,
             Some(process(21, 20, "git.exe", true)),
+            0,
         ));
         assert!(!known[&21].alive);
         assert!(unresolved.is_empty());
@@ -2172,7 +2887,8 @@ mod lifecycle_tests {
             &mut known,
             &mut unresolved,
             22,
-            None
+            None,
+            0,
         ));
         assert!(unresolved.is_empty());
         assert!(!known.contains_key(&22));
@@ -2202,7 +2918,8 @@ mod lifecycle_tests {
             &mut known,
             &mut unresolved,
             99,
-            None
+            None,
+            0,
         ));
         // The ghost is gone from the live gate and never entered the graph.
         assert!(unresolved.is_empty());
@@ -2221,6 +2938,7 @@ mod lifecycle_tests {
             &mut provisional,
             20,
             super::ReplayControl {
+                now_ms: 0,
                 finalize_provisional_empty: true,
                 metadata_complete,
             },
