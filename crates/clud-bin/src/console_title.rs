@@ -37,8 +37,14 @@ use std::time::Instant;
 
 #[cfg(any(windows, test))]
 const CPU_FLASH_THRESHOLD_PCT: f32 = 70.0;
+/// Fallback RPC cadence, used only when the daemon publishes no snapshot file
+/// (an older daemon, or one that has not sampled yet).
+///
+/// #547 dropped this from 2 s to 15 s: it is now a compatibility path, not the
+/// steady state, and 2 s of polling per open terminal is the cost the issue
+/// exists to remove. The snapshot path costs one `stat` per keeper pass.
 #[cfg(windows)]
-const CPU_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const CPU_METRICS_FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(15);
 #[cfg(any(windows, test))]
 const CPU_ALERT_TTL: Duration = Duration::from_millis(2500);
 #[cfg(any(windows, test))]
@@ -196,14 +202,21 @@ fn spawn_keeper_thread() {
         .name("clud-title-keeper".into())
         .spawn(|| {
             let mut last_metrics_poll = None::<Instant>;
+            let mut last_snapshot_mtime = None::<std::time::SystemTime>;
             let mut cadence = KeeperCadence::new();
             let mut last_title = None::<String>;
             loop {
                 let now = Instant::now();
-                if last_metrics_poll
-                    .map(|last| last.elapsed() >= CPU_METRICS_POLL_INTERVAL)
-                    .unwrap_or(true)
+                // #547: one `stat` per pass. When the daemon publishes, this is
+                // the whole cost of the alert -- no connection, no daemon work,
+                // and no read at all unless the mtime moved.
+                if !refresh_cpu_alert_from_snapshot(now, &mut last_snapshot_mtime)
+                    && last_metrics_poll
+                        .map(|last| last.elapsed() >= CPU_METRICS_FALLBACK_POLL_INTERVAL)
+                        .unwrap_or(true)
                 {
+                    // Compatibility path only: an older daemon that publishes
+                    // nothing still gets its alert, just at 15 s instead of 2 s.
                     last_metrics_poll = Some(now);
                     refresh_cpu_alert_from_daemon(now);
                 }
@@ -287,6 +300,77 @@ fn current_desired_title_locked(state: &mut TitleState, now: Instant) -> String 
         alert.title.clone()
     } else {
         state.base_title.clone()
+    }
+}
+
+/// What the keeper learned from one snapshot check (#547).
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotCheck {
+    /// The file is absent — this daemon does not publish. The caller falls back
+    /// to the RPC at [`CPU_METRICS_FALLBACK_POLL_INTERVAL`].
+    Absent,
+    /// Present and unchanged since the last look. Nothing to do, and nothing
+    /// was read: this is the idle steady state, and it costs one `stat`.
+    Unchanged,
+    /// Present and newer than the last look — worth reading and parsing.
+    Changed,
+}
+
+/// Decide whether the snapshot is worth reading, from its mtime alone.
+///
+/// Pure so the "idle costs one stat, zero reads" property is asserted directly
+/// rather than inferred from a benchmark. `last_seen` is the mtime observed on
+/// the previous pass.
+#[cfg(any(windows, test))]
+pub(crate) fn classify_snapshot(
+    mtime: Option<std::time::SystemTime>,
+    last_seen: &mut Option<std::time::SystemTime>,
+) -> SnapshotCheck {
+    let Some(mtime) = mtime else {
+        // Deliberately does not clear `last_seen`: a daemon restart rewrites
+        // the file with a fresh mtime, which reads as Changed either way.
+        return SnapshotCheck::Absent;
+    };
+    if *last_seen == Some(mtime) {
+        return SnapshotCheck::Unchanged;
+    }
+    *last_seen = Some(mtime);
+    SnapshotCheck::Changed
+}
+
+/// Refresh the CPU alert, preferring the published snapshot over an RPC (#547).
+///
+/// Returns `true` when the snapshot path answered, so the caller knows not to
+/// run the fallback timer.
+#[cfg(windows)]
+fn refresh_cpu_alert_from_snapshot(
+    now: Instant,
+    last_seen: &mut Option<std::time::SystemTime>,
+) -> bool {
+    let Ok(state_dir) = crate::daemon::default_state_dir() else {
+        clear_cpu_alert();
+        return false;
+    };
+    let path = crate::daemon::metrics_snapshot_path(&state_dir);
+    let mtime = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    match classify_snapshot(mtime, last_seen) {
+        SnapshotCheck::Absent => false,
+        SnapshotCheck::Unchanged => true,
+        SnapshotCheck::Changed => {
+            match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<crate::daemon::MetricsSnapshot>(&text).ok())
+            {
+                Some(snapshot) => update_cpu_alert(snapshot.cpu_pct, now),
+                // Torn or malformed read: treat as no alert, same as the RPC
+                // error path always has.
+                None => clear_cpu_alert(),
+            }
+            true
+        }
     }
 }
 
@@ -860,5 +944,106 @@ mod tests {
         let mut s = OscTitleStripper::new();
         let chunk = b"\x1b]52;c;SGVsbG8=\x07";
         assert_eq!(s.process(chunk), chunk);
+    }
+
+    // ---- #547: publish/stat replaces the per-client 2 s poll ----
+
+    use std::time::{Duration as StdDuration, SystemTime};
+
+    /// The acceptance criterion, stated as a count: once the daemon publishes,
+    /// an idle client performs **zero** reads (and therefore zero daemon
+    /// connections) while nothing changes. Before #547 this path was one
+    /// `Metrics` round-trip every 2 s, forever.
+    #[test]
+    fn an_idle_client_reads_the_snapshot_zero_times() {
+        let mtime = SystemTime::UNIX_EPOCH + StdDuration::from_secs(1_000);
+        let mut last_seen = None;
+
+        // First look: the file is new to us, so it is read once.
+        assert_eq!(
+            classify_snapshot(Some(mtime), &mut last_seen),
+            SnapshotCheck::Changed
+        );
+
+        // Every subsequent pass over an unchanged file costs one `stat` and
+        // nothing else. 200 passes ~ 10 minutes of idle at the fast cadence.
+        let reads = (0..200)
+            .filter(|_| classify_snapshot(Some(mtime), &mut last_seen) == SnapshotCheck::Changed)
+            .count();
+        assert_eq!(reads, 0, "an idle client must not read the snapshot at all");
+    }
+
+    /// The falling edge has to reach the client too, or an alert sticks. A
+    /// rewritten file has a new mtime, so it is read again.
+    #[test]
+    fn a_republished_snapshot_is_read_again() {
+        let mut last_seen = None;
+        let first = SystemTime::UNIX_EPOCH + StdDuration::from_secs(1_000);
+        let second = first + StdDuration::from_secs(2);
+
+        assert_eq!(
+            classify_snapshot(Some(first), &mut last_seen),
+            SnapshotCheck::Changed
+        );
+        assert_eq!(
+            classify_snapshot(Some(first), &mut last_seen),
+            SnapshotCheck::Unchanged
+        );
+        assert_eq!(
+            classify_snapshot(Some(second), &mut last_seen),
+            SnapshotCheck::Changed
+        );
+    }
+
+    /// An older daemon publishes nothing. The client must notice and fall back
+    /// to the RPC rather than silently losing the alert -- graceful degradation
+    /// is what makes the file the *preferred* path rather than the only one.
+    #[test]
+    fn an_absent_snapshot_reports_absent_so_the_caller_can_fall_back() {
+        let mut last_seen = None;
+        assert_eq!(
+            classify_snapshot(None, &mut last_seen),
+            SnapshotCheck::Absent
+        );
+        assert!(
+            last_seen.is_none(),
+            "absence must not be recorded as a seen mtime"
+        );
+    }
+
+    /// A daemon restart republishes with a fresh mtime, and the client must
+    /// pick that up even though it had already seen an earlier file.
+    #[test]
+    fn a_daemon_restart_is_observed_through_the_absent_gap() {
+        let mut last_seen = None;
+        let before = SystemTime::UNIX_EPOCH + StdDuration::from_secs(1_000);
+        let after = before + StdDuration::from_secs(30);
+
+        assert_eq!(
+            classify_snapshot(Some(before), &mut last_seen),
+            SnapshotCheck::Changed
+        );
+        // Daemon down: file removed.
+        assert_eq!(
+            classify_snapshot(None, &mut last_seen),
+            SnapshotCheck::Absent
+        );
+        // Daemon back, having republished.
+        assert_eq!(
+            classify_snapshot(Some(after), &mut last_seen),
+            SnapshotCheck::Changed
+        );
+    }
+
+    /// Alert latency budget from #547: an above-threshold transition must reach
+    /// the title within 5 s. The daemon samples every 2 s and the client checks
+    /// every keeper pass, whose *slowest* cadence is the idle ceiling.
+    #[test]
+    fn the_alert_latency_budget_is_met_by_construction() {
+        let worst_case = crate::daemon::CPU_SAMPLE_INTERVAL_FOR_TEST + KEEPER_IDLE_INTERVAL;
+        assert!(
+            worst_case <= Duration::from_secs(5),
+            "worst-case alert latency {worst_case:?} exceeds the 5s budget"
+        );
     }
 }
