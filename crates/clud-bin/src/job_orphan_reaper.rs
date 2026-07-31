@@ -529,6 +529,11 @@ fn decision(
 impl ReapDecision {
     /// The reason string, shared verbatim with the daemon event stream so the
     /// reap log and that stream name the same thing the same way.
+    // Consumed by the Win32 listener in `imp`, which does not exist off
+    // Windows. `model` still compiles under `cfg(test)` everywhere so the
+    // decision table is asserted on every platform — which leaves this
+    // genuinely unreferenced in a non-Windows `lib test` build.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn reason_str(&self) -> &'static str {
         self.reason.as_str()
     }
@@ -747,6 +752,11 @@ impl<'a> ExitLedger<'a> {
 impl TrackerProcesses {
     /// Borrow the graph inputs immutably and the exit bookkeeping mutably, in
     /// one step, so a reconcile pass can hold both at once.
+    // Consumed by the Win32 listener in `imp`, which does not exist off
+    // Windows. `model` still compiles under `cfg(test)` everywhere so the
+    // decision table is asserted on every platform — which leaves this
+    // genuinely unreferenced in a non-Windows `lib test` build.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn split(&mut self) -> (&HashMap<u32, ProcessMeta>, ExitLedger<'_>) {
         (
             &self.known,
@@ -804,6 +814,11 @@ impl TrackerProcesses {
     }
 
     /// Identities abandoned at runtime, drained for the exit sweep.
+    // Consumed by the Win32 listener in `imp`, which does not exist off
+    // Windows. `model` still compiles under `cfg(test)` everywhere so the
+    // decision table is asserted on every platform — which leaves this
+    // genuinely unreferenced in a non-Windows `lib test` build.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn take_abandoned(&mut self) -> Vec<(u32, u64)> {
         self.abandoned.drain(..).collect()
     }
