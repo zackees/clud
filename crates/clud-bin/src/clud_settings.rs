@@ -117,6 +117,20 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
                 .entry("interval_ms".to_string())
                 .or_insert(json!(2_000));
         }
+        // #465 AC 1: the dead-originator sweep period and its grace window are
+        // incident-response knobs, so they belong in settings rather than only
+        // in an env var a running daemon cannot see changed.
+        let orphan_sweep = daemon
+            .entry("orphan_sweep".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(orphan_sweep) = orphan_sweep.as_object_mut() {
+            orphan_sweep
+                .entry("interval_ms".to_string())
+                .or_insert(json!(60_000));
+            orphan_sweep
+                .entry("grace_ms".to_string())
+                .or_insert(json!(10_000));
+        }
     }
 
     seed_codex_config_override_defaults(document);
@@ -1071,6 +1085,10 @@ mod tests {
         assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
         assert_eq!(document["git"]["pr_wait_fail_fast"], false);
         assert_eq!(document["daemon"]["proc_sampler"]["interval_ms"], 2_000);
+        // #465 AC 1: both orphan-sweep knobs are seeded so an operator can
+        // discover them by reading the file, rather than by reading the source.
+        assert_eq!(document["daemon"]["orphan_sweep"]["interval_ms"], 60_000);
+        assert_eq!(document["daemon"]["orphan_sweep"]["grace_ms"], 10_000);
         assert_eq!(
             document["codex"]["config_overrides"][0],
             DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE

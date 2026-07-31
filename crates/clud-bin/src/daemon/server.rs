@@ -818,24 +818,68 @@ const DEFAULT_ORPHAN_SWEEP_INTERVAL_MS: u64 = 60_000;
 /// (each sweep reads `environ` for every process on the host).
 const MIN_ORPHAN_SWEEP_INTERVAL_MS: u64 = 5_000;
 
+/// Floor for the post-death grace window. Below this the periodic sweep starts
+/// racing the on-exit `Drop` guard that owns the same cleanup, which is the
+/// thing the window exists to prevent (#465).
+const MIN_ORPHAN_GRACE_MS: u64 = 1_000;
+
 pub(super) fn orphan_sweep_interval() -> Duration {
-    orphan_sweep_interval_from_raw(std::env::var(ENV_ORPHAN_SWEEP_INTERVAL_MS).ok().as_deref())
+    orphan_sweep_interval_from(
+        std::env::var(ENV_ORPHAN_SWEEP_INTERVAL_MS).ok().as_deref(),
+        settings_u64("/daemon/orphan_sweep/interval_ms"),
+    )
 }
 
-/// Resolve the sweep interval from a raw env value: parse, ignore
-/// zero/garbage, clamp to the floor, else the 60s default. Pure so the
-/// clamping and default are unit-tested without touching the environment.
-fn orphan_sweep_interval_from_raw(raw: Option<&str>) -> Duration {
-    let ms = raw
+/// The grace window a freshly observed orphan gets before the periodic sweep
+/// will reap it (#465).
+pub(super) fn orphan_sweep_grace() -> Duration {
+    orphan_sweep_grace_from(settings_u64("/daemon/orphan_sweep/grace_ms"))
+}
+
+/// Read a `u64` out of the global settings document, or `None` if settings are
+/// unreadable / the key is absent. A daemon must start with defaults rather
+/// than fail because a settings file is missing or malformed.
+fn settings_u64(pointer: &str) -> Option<u64> {
+    crate::clud_settings::load_or_init_global_settings()
+        .ok()?
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+}
+
+/// Resolve the sweep interval: env override first, then settings, then the 60s
+/// default; zero/garbage at either layer is ignored, and the result is clamped
+/// to the floor.
+///
+/// Env wins over settings deliberately. The env var is the break-glass knob for
+/// an incident on a box whose settings file you may not want to edit; settings
+/// are the durable configuration. Pure so both layers and the clamp are
+/// unit-tested without touching the environment or the filesystem.
+fn orphan_sweep_interval_from(raw_env: Option<&str>, from_settings: Option<u64>) -> Duration {
+    let ms = raw_env
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|&ms| ms > 0)
+        .or(from_settings.filter(|&ms| ms > 0))
         .unwrap_or(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
         .max(MIN_ORPHAN_SWEEP_INTERVAL_MS);
     Duration::from_millis(ms)
 }
 
+/// Resolve the grace window from settings, else [`orphan_reaper::ORPHAN_GRACE_MS`],
+/// clamped to [`MIN_ORPHAN_GRACE_MS`].
+fn orphan_sweep_grace_from(from_settings: Option<u64>) -> Duration {
+    let ms = from_settings
+        .filter(|&ms| ms > 0)
+        .unwrap_or(orphan_reaper::ORPHAN_GRACE_MS)
+        .max(MIN_ORPHAN_GRACE_MS);
+    Duration::from_millis(ms)
+}
+
 fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<AtomicBool>) {
+    // Both knobs are read once at bringup, like every other daemon runtime
+    // setting: a sweep that re-read settings each tick would put a file read on
+    // the idle path this sweep is already careful about (#542).
     let interval = orphan_sweep_interval();
+    let grace = orphan_sweep_grace();
     let _ = thread::Builder::new()
         .name("clud-orphan-sweep".to_string())
         .spawn(move || {
@@ -857,7 +901,7 @@ fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<A
                 if shutdown_requested.load(Ordering::SeqCst) {
                     return;
                 }
-                run_orphan_sweep(&state_dir, "periodic", None, Some(&mut first_seen));
+                run_orphan_sweep(&state_dir, "periodic", None, Some((&mut first_seen, grace)));
             }
         });
 }
@@ -876,9 +920,14 @@ fn spawn_orphan_reap_once(
 /// time is recorded and spared; on a later tick, once it has been visible for
 /// [`ORPHAN_GRACE_MS`], it is admitted. Entries for PIDs that stop appearing
 /// are pruned by the caller so the map cannot grow without bound.
-fn grace_admits(first_seen: &mut HashMap<u32, Instant>, pid: u32, now: Instant) -> bool {
+fn grace_admits(
+    first_seen: &mut HashMap<u32, Instant>,
+    pid: u32,
+    now: Instant,
+    grace: Duration,
+) -> bool {
     let first = *first_seen.entry(pid).or_insert(now);
-    now.duration_since(first) >= Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+    now.duration_since(first) >= grace
 }
 
 /// Single-line record of the last completed orphan sweep, alongside the
@@ -905,7 +954,7 @@ fn run_orphan_sweep(
     state_dir: &Path,
     trigger: &'static str,
     request_id: Option<u64>,
-    grace: Option<&mut HashMap<u32, Instant>>,
+    grace: Option<(&mut HashMap<u32, Instant>, Duration)>,
 ) {
     daemon_events::log_event(
         state_dir,
@@ -927,7 +976,7 @@ fn run_orphan_sweep(
     // reap immediately (see `ORPHAN_GRACE_MS`).
     let mut deferred: Vec<u32> = Vec::new();
     let outcome = match grace {
-        Some(first_seen) => {
+        Some((first_seen, grace_window)) => {
             // #465 handover registry: spare intentionally-detached cohorts
             // (registered under the launching daemon's PID) so a successor
             // daemon doesn't reap a live detached session across a restart.
@@ -939,7 +988,7 @@ fn run_orphan_sweep(
             let (outcome, observed_origins) =
                 orphan_reaper::reap_orphans_filtered_sparing(&opts, &spared, &mut |pid| {
                     observed.insert(pid);
-                    let admitted = grace_admits(first_seen, pid, now);
+                    let admitted = grace_admits(first_seen, pid, now, grace_window);
                     if !admitted {
                         deferred.push(pid);
                     }
@@ -1182,27 +1231,109 @@ mod tests {
     fn orphan_sweep_interval_defaults_and_clamps() {
         // Unset / garbage / zero → the 60s default (#465 AC 1).
         assert_eq!(
-            orphan_sweep_interval_from_raw(None),
+            orphan_sweep_interval_from(None, None),
             Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
         );
         assert_eq!(
-            orphan_sweep_interval_from_raw(Some("not-a-number")),
+            orphan_sweep_interval_from(Some("not-a-number"), None),
             Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
         );
         assert_eq!(
-            orphan_sweep_interval_from_raw(Some("0")),
+            orphan_sweep_interval_from(Some("0"), None),
             Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
         );
         // A valid override is honored (with surrounding whitespace trimmed).
         assert_eq!(
-            orphan_sweep_interval_from_raw(Some("  120000 ")),
+            orphan_sweep_interval_from(Some("  120000 "), None),
             Duration::from_millis(120_000)
         );
         // A too-small value is clamped to the floor, never a hot loop.
         assert_eq!(
-            orphan_sweep_interval_from_raw(Some("10")),
+            orphan_sweep_interval_from(Some("10"), None),
             Duration::from_millis(MIN_ORPHAN_SWEEP_INTERVAL_MS)
         );
+    }
+
+    /// #465 AC 1 asks for the interval in `~/.clud/settings.json`, not only in
+    /// an env var — a running daemon cannot see an env var change, and an
+    /// operator editing config expects it to take effect on restart.
+    #[test]
+    fn orphan_sweep_interval_reads_settings_when_no_env_override() {
+        assert_eq!(
+            orphan_sweep_interval_from(None, Some(120_000)),
+            Duration::from_millis(120_000)
+        );
+        // Settings are clamped by the same floor as the env var: a config typo
+        // must not be able to spin a full-host env scan into a hot loop.
+        assert_eq!(
+            orphan_sweep_interval_from(None, Some(10)),
+            Duration::from_millis(MIN_ORPHAN_SWEEP_INTERVAL_MS)
+        );
+        // A zero in settings is garbage, not "disable the sweep".
+        assert_eq!(
+            orphan_sweep_interval_from(None, Some(0)),
+            Duration::from_millis(DEFAULT_ORPHAN_SWEEP_INTERVAL_MS)
+        );
+    }
+
+    /// Env is the break-glass knob for an incident on a box whose settings file
+    /// you may not want to touch, so it outranks the durable configuration.
+    #[test]
+    fn an_env_override_outranks_the_settings_value() {
+        assert_eq!(
+            orphan_sweep_interval_from(Some("30000"), Some(120_000)),
+            Duration::from_millis(30_000)
+        );
+        // ...but a *garbage* env value falls through to settings rather than
+        // silently discarding the operator's configured value.
+        assert_eq!(
+            orphan_sweep_interval_from(Some("nonsense"), Some(120_000)),
+            Duration::from_millis(120_000)
+        );
+    }
+
+    /// The grace window is the other knob #465 wanted exposed: it is what an
+    /// operator reaches for when the sweep is racing the on-exit `Drop` guard.
+    #[test]
+    fn orphan_sweep_grace_defaults_and_clamps() {
+        assert_eq!(
+            orphan_sweep_grace_from(None),
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        );
+        assert_eq!(
+            orphan_sweep_grace_from(Some(30_000)),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(
+            orphan_sweep_grace_from(Some(0)),
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        );
+        // Below the floor the periodic sweep starts racing the `Drop` guard
+        // that owns the same cleanup — the exact thing the window prevents.
+        assert_eq!(
+            orphan_sweep_grace_from(Some(1)),
+            Duration::from_millis(MIN_ORPHAN_GRACE_MS)
+        );
+    }
+
+    /// A configured grace window must actually change admission, not just be
+    /// parsed: the value has to reach `grace_admits`.
+    #[test]
+    fn a_configured_grace_window_changes_admission() {
+        let mut first_seen: HashMap<u32, Instant> = HashMap::new();
+        let now = Instant::now();
+        let grace = orphan_sweep_grace_from(Some(30_000));
+        assert!(!grace_admits(&mut first_seen, 4321, now, grace));
+        // Still inside the *configured* window even though the default one has
+        // long since elapsed.
+        let past_default = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS + 1_000);
+        assert!(!grace_admits(&mut first_seen, 4321, past_default, grace));
+        assert!(grace_admits(
+            &mut first_seen,
+            4321,
+            now + Duration::from_millis(30_000),
+            grace
+        ));
     }
 
     // #380 + #387: even after the N=2->8 / N=9->25 sample bump, 1.2× was
@@ -1812,7 +1943,12 @@ mod tests {
     fn grace_window_spares_a_newly_observed_orphan() {
         let mut first_seen: HashMap<u32, Instant> = HashMap::new();
         let now = Instant::now();
-        assert!(!grace_admits(&mut first_seen, 4321, now));
+        assert!(!grace_admits(
+            &mut first_seen,
+            4321,
+            now,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
         assert!(first_seen.contains_key(&4321), "first sighting is recorded");
     }
 
@@ -1822,9 +1958,19 @@ mod tests {
     fn grace_window_admits_after_the_window_elapses() {
         let mut first_seen: HashMap<u32, Instant> = HashMap::new();
         let now = Instant::now();
-        assert!(!grace_admits(&mut first_seen, 4321, now));
+        assert!(!grace_admits(
+            &mut first_seen,
+            4321,
+            now,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
         let later = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS);
-        assert!(grace_admits(&mut first_seen, 4321, later));
+        assert!(grace_admits(
+            &mut first_seen,
+            4321,
+            later,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
     }
 
     /// A candidate still inside the window on a later tick stays spared --
@@ -1833,9 +1979,19 @@ mod tests {
     fn grace_window_still_spares_just_inside_the_boundary() {
         let mut first_seen: HashMap<u32, Instant> = HashMap::new();
         let now = Instant::now();
-        assert!(!grace_admits(&mut first_seen, 4321, now));
+        assert!(!grace_admits(
+            &mut first_seen,
+            4321,
+            now,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
         let nearly = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS - 1);
-        assert!(!grace_admits(&mut first_seen, 4321, nearly));
+        assert!(!grace_admits(
+            &mut first_seen,
+            4321,
+            nearly,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
     }
 
     /// Each PID is timed independently: an old candidate being admitted must
@@ -1844,11 +2000,26 @@ mod tests {
     fn grace_window_times_each_pid_independently() {
         let mut first_seen: HashMap<u32, Instant> = HashMap::new();
         let now = Instant::now();
-        assert!(!grace_admits(&mut first_seen, 100, now));
+        assert!(!grace_admits(
+            &mut first_seen,
+            100,
+            now,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
         let later = now + Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS);
-        assert!(grace_admits(&mut first_seen, 100, later));
+        assert!(grace_admits(
+            &mut first_seen,
+            100,
+            later,
+            Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+        ));
         assert!(
-            !grace_admits(&mut first_seen, 200, later),
+            !grace_admits(
+                &mut first_seen,
+                200,
+                later,
+                Duration::from_millis(orphan_reaper::ORPHAN_GRACE_MS)
+            ),
             "pid 200 was first seen at `later`, so its own window has not elapsed"
         );
     }
