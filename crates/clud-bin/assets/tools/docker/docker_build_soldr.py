@@ -233,8 +233,18 @@ def cmd_up(path: Path) -> int:
         return 0
 
     sys.stdout.write(f"building image {image} (cached layers reused)...\n")
-    _docker("build", *_label_args(path, "image"),
-            "-t", image, "-f", str(dockerfile), str(stack_dir))
+    # #518: build through clud's own builder so its BuildKit cache lands in a
+    # namespace `gc` can prune without touching anyone else's build cache.
+    # `--load` puts the result in the local image store, which is what the
+    # subsequent `docker run` needs; plain `docker build` is the fallback for
+    # a Docker without buildx.
+    if _ensure_builder():
+        _docker("buildx", "build", "--builder", BUILDER_NAME, "--load",
+                *_label_args(path, "image"),
+                "-t", image, "-f", str(dockerfile), str(stack_dir))
+    else:
+        _docker("build", *_label_args(path, "image"),
+                "-t", image, "-f", str(dockerfile), str(stack_dir))
 
     vol_args = []
     for role, mount in (("target", "/target"), ("cargo-home", "/cargo-home"),
@@ -297,38 +307,143 @@ def cmd_clean(path: Path) -> int:
     return 0
 
 
-def gc_plan(groups: list[dict], *, threshold_hours: float = 48.0) -> tuple[list, list]:
+#: Builder (and therefore BuildKit cache namespace) clud owns (#518).
+#:
+#: BuildKit's cache is *shared per builder*. Pruning the `default` builder
+#: would delete unrelated users' build cache on the same machine — the issue is
+#: explicit that this must not happen. Building through a clud-named builder
+#: gives us a namespace we can prune without touching anyone else's.
+BUILDER_NAME = "clud-docker-build-soldr"
+
+
+def buildx_prune_args(threshold_hours: float, *, force: bool) -> list[str]:
+    """Argv for pruning *only* clud's BuildKit cache namespace.
+
+    Pure so the "never prunes the default builder" and "never prunes younger
+    than the threshold" guarantees are asserted on the argv itself, rather than
+    inferred from a live daemon CI cannot run.
+    """
+    args = [
+        "buildx", "prune",
+        "--builder", BUILDER_NAME,
+        "--filter", f"until={threshold_hours:g}h",
+    ]
+    if force:
+        args.append("--force")
+    return args
+
+
+def _buildx_available() -> bool:
+    return _docker("buildx", "version", capture=True,
+                   check=False).returncode == 0
+
+
+def _builder_exists() -> bool:
+    return _docker("buildx", "inspect", BUILDER_NAME,
+                   capture=True, check=False).returncode == 0
+
+
+def _ensure_builder() -> bool:
+    """Create clud's builder if absent.
+
+    Returns False when buildx is unavailable so callers fall back to plain
+    `docker build` rather than failing: a Docker without buildx must still be
+    able to build, it just gets no prunable cache namespace.
+    """
+    if not _buildx_available():
+        return False
+    if _builder_exists():
+        return True
+    return _docker("buildx", "create", "--name", BUILDER_NAME,
+                   capture=True, check=False).returncode == 0
+
+
+def _prune_buildkit_cache(threshold_hours: float, *, force: bool) -> None:
+    """Prune BuildKit records at least ``threshold_hours`` old, in clud's
+    namespace only.
+
+    Best-effort: a missing builder means nothing of ours has been built on this
+    machine yet, which is not an error.
+    """
+    if not _buildx_available():
+        sys.stdout.write("buildkit: buildx unavailable — skipping cache prune\n")
+        return
+    if not _builder_exists():
+        sys.stdout.write(
+            f"buildkit: no {BUILDER_NAME} builder — nothing of ours to prune\n")
+        return
+    args = buildx_prune_args(threshold_hours, force=force)
+    if not force:
+        sys.stdout.write(
+            f"buildkit: would run `docker {' '.join(args)}` "
+            f"(clud namespace only; other builders untouched)\n")
+        return
+    _docker(*args, capture=True, check=False)
+    sys.stdout.write(
+        f"buildkit: pruned records older than {threshold_hours:g}h "
+        f"in builder {BUILDER_NAME}\n")
+
+
+#: How many managed generations under the shared clud tag prefix count as
+#: "crowded". Three sets is what the reporting box actually had (~43 GB), and
+#: it is the point where repeated `up` is clearly churning generations rather
+#: than one project being rebuilt.
+DENSITY_THRESHOLD = 3
+
+#: Shortened grace applied to unreferenced generations once the prefix is
+#: crowded. Still long enough to survive a normal working session, so an
+#: afternoon of rebuilds does not evict the cache someone is about to reuse.
+CROWDED_GRACE_HOURS = 12.0
+
+
+def gc_plan(groups: list[dict], *, threshold_hours: float = 48.0,
+            density_threshold: int = DENSITY_THRESHOLD,
+            crowded_grace_hours: float = CROWDED_GRACE_HOURS) -> tuple[list, list]:
     """Pure garbage-collection decision over managed resource groups (#518).
 
     Each group is a dict with keys: ``project_key`` (str), ``age_hours``
     (float), ``root_exists`` (bool — does the canonical source worktree still
     exist), ``is_selected`` (bool — is this the group the *current* invocation
-    would reuse). Returns ``(to_remove, kept)`` as lists of
+    would reuse), and optionally ``referenced`` (bool — is any container still
+    using it; defaults to False). Returns ``(to_remove, kept)`` as lists of
     ``(project_key, reason)`` tuples.
 
     Policy (per the issue's superseding clarification — these builds are
     ephemeral, so bounded disk usage wins over preserving old state):
 
     - The currently-selected group is always kept, even past the threshold and
-      even under a crowded tag prefix (the density heuristic must never evict
-      the active group).
+      even under a crowded tag prefix. The density heuristic *accelerates*
+      cleanup of stale generations; it must never evict the active one.
     - A group whose source worktree is gone is eligible immediately, any age.
-    - Otherwise a group at least ``threshold_hours`` old is removed (gc may
-      force-stop the containers pinning it); younger groups are kept.
+    - **Density heuristic:** once at least ``density_threshold`` managed groups
+      share the clud tag prefix, that is evidence of active development
+      churning generations. Unreferenced groups then become eligible at
+      ``crowded_grace_hours`` instead of waiting the full threshold. A group
+      still referenced by a container keeps the full 48 h, because killing a
+      container someone is using to save disk is the wrong trade at 12 h and
+      the right one only once the resource is genuinely stale.
+    - ``threshold_hours`` remains the hard upper bound: past it a group goes,
+      referenced or not (gc may force-stop the containers pinning it).
 
     Pure and dependency-free so the safety boundaries are exhaustively
     unit-tested without a live Docker daemon.
     """
+    crowded = len(groups) >= density_threshold
     to_remove: list = []
     kept: list = []
     for group in groups:
         key = group["project_key"]
+        age = group.get("age_hours", 0.0)
         if group.get("is_selected"):
             kept.append((key, "currently-selected"))
         elif not group.get("root_exists", True):
             to_remove.append((key, "worktree-gone"))
-        elif group.get("age_hours", 0.0) >= threshold_hours:
+        elif age >= threshold_hours:
             to_remove.append((key, "stale-past-threshold"))
+        elif (crowded
+              and not group.get("referenced", False)
+              and age >= crowded_grace_hours):
+            to_remove.append((key, "crowded-prefix-accelerated"))
         else:
             kept.append((key, "within-grace"))
     return to_remove, kept
@@ -347,6 +462,12 @@ def cmd_gc(path: Path, *, force: bool, threshold_hours: float = 48.0) -> int:
         sys.stdout.write(f"  KEEP   {key}  ({reason})\n")
     for key, reason in to_remove:
         sys.stdout.write(f"  REMOVE {key}  ({reason})\n")
+
+    # BuildKit cache is a separate lifecycle from the named-volume caches
+    # (#518): volumes hold the warm `target/`, BuildKit holds layer history.
+    # Both are swept, but reported separately so the distinction the issue
+    # asks to document stays visible at the command line too.
+    _prune_buildkit_cache(threshold_hours, force=force)
 
     if not to_remove:
         sys.stdout.write("nothing to reclaim.\n")
