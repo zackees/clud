@@ -21,7 +21,10 @@ use std::time::{Duration, Instant};
 
 /// Issue #556: pass 1 — the in-process git-index reader (fast path for tracked
 /// files). Wired into [`run`] ahead of the walker for git repos.
+#[cfg(test)]
+mod fallback_tests;
 mod index_pass;
+mod ls_files_pass;
 
 /// 40 kB ≈ 1000 LOC at clud's measured ~37 bytes/line (see issue #132).
 ///
@@ -130,7 +133,22 @@ pub fn run(project_root: &Path) {
     // regresses on non-standard or damaged repos.
     let report = match index_pass::index_pass(project_root) {
         Ok(output) => report_from_index_pass(project_root, output),
-        Err(_) => collect(project_root, DEADLINE),
+        // #556: a *corrupt* index is not the same as no index. The escape
+        // hatch is one killable `git ls-files --debug`, which still reads the
+        // index's cached sizes and still touches no object database — falling
+        // straight to the full tree walk here would give up the entire win on
+        // exactly the repos most likely to be large. Only when that also comes
+        // up empty do we walk.
+        Err(index_pass::IndexPassError::Parse) => {
+            match ls_files_pass::ls_files_pass(project_root) {
+                Some(entries) => report_from_index_pass(
+                    project_root,
+                    index_pass::classify_entries(entries.into_iter()),
+                ),
+                None => collect(project_root, DEADLINE),
+            }
+        }
+        Err(index_pass::IndexPassError::NoIndex) => collect(project_root, DEADLINE),
     };
     emit(&report.files, report.total_qualifying, report.timed_out);
 }
