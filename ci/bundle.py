@@ -44,14 +44,15 @@ DIST = ROOT / "dist"
 #: directory of that name fails with NotADirectoryError on every platform.
 CI_SCRATCH = ROOT / ".ci-build"
 
-#: Workspace binaries the test suites resolve by name. `mock-agent` and the
-#: probe binaries come from testbins/.
+#: Workspace binaries the test suites resolve by name. `mock-agent`,
+#: `daemon-stub` and the probe binaries come from testbins/.
 WORKSPACE_BINARIES = (
     "clud",
     "clud-shim",
     "clud-block-bad-cmd",
     "clud-cmd-scan",
     "clud-ctrlc-probe",
+    "daemon-stub",
     "mock-agent",
 )
 #: Written by `ci.xbuild compile --with-tests`; the parsed `executable` fields

@@ -2671,6 +2671,195 @@ mod lifecycle_tests {
         assert!(!spares.contains_key(&23));
     }
 
+    // ---- #674 Tier 1: every daemon archetype, spare *and* reason ----
+
+    /// The table #674 is about. Each row is a daemon that must survive a clud
+    /// session, the OS signal that actually protects it, and the reason the
+    /// decision must carry.
+    ///
+    /// The **reason** is asserted, not just the outcome: sparing zccache via
+    /// "outside our job" is correct, while sparing it via "no decisions
+    /// produced" would be an accident that regresses silently the next time
+    /// the planner changes. That distinction is the whole point of this table.
+    ///
+    /// Runs on every platform, over synthetic graphs and injected facts. No
+    /// spawning, no Job Object, no dependency on a real sccache or docker
+    /// being installed.
+    #[test]
+    fn every_daemon_archetype_is_spared_for_the_right_reason() {
+        struct Archetype {
+            image: &'static str,
+            /// How it detaches, expressed as the facts the OS would report.
+            signal: fn(&mut super::FactsSnapshot, u32),
+            expected: ReapDecisionReason,
+        }
+
+        let archetypes = [
+            // zccache: detaches through the running-process daemon API and
+            // breaks away from the job. Job membership is the strongest thing
+            // we can know about it.
+            Archetype {
+                image: "zccache.exe",
+                signal: |facts, pid| {
+                    facts.outside_job.insert(pid);
+                    facts.declared_daemons.insert(pid);
+                },
+                expected: ReapDecisionReason::OutsideJobObject,
+            },
+            // soldr-daemon: same API, but staying inside the job. The
+            // cooperative marker is the only thing protecting it, which is the
+            // load-bearing case #673 rev 3.0 nearly deleted.
+            Archetype {
+                image: "soldr-daemon.exe",
+                signal: |facts, pid| {
+                    facts.declared_daemons.insert(pid);
+                },
+                expected: ReapDecisionReason::DeclaredDaemon,
+            },
+            // sccache: own double-fork, no marker, no breakaway. It owns a
+            // listening endpoint, which is what makes it discoverable and
+            // reusable by later unrelated invocations. Before #673 this row
+            // had no protection at all.
+            Archetype {
+                image: "sccache.exe",
+                signal: |facts, pid| {
+                    facts.listening.insert(pid);
+                },
+                expected: ReapDecisionReason::ListeningEndpoint,
+            },
+            // FBuildWorker: detached spawn, no marker, listens for work.
+            Archetype {
+                image: "FBuildWorker.exe",
+                signal: |facts, pid| {
+                    facts.listening.insert(pid);
+                },
+                expected: ReapDecisionReason::ListeningEndpoint,
+            },
+            // dockerd: a Windows service in session 0. Spared for that reason
+            // even though it is not really a descendant at all.
+            Archetype {
+                image: "dockerd.exe",
+                signal: |facts, pid| {
+                    facts.service_session.insert(pid);
+                },
+                expected: ReapDecisionReason::ServiceSession,
+            },
+            // Language servers (rust-analyzer, tsserver): spawned by tooling
+            // under clud, no marker, but they hold a socket for their client.
+            Archetype {
+                image: "rust-analyzer.exe",
+                signal: |facts, pid| {
+                    facts.listening.insert(pid);
+                },
+                expected: ReapDecisionReason::ListeningEndpoint,
+            },
+            // A double-fork daemon on POSIX, where session leadership is the
+            // primary signal and the job object does not exist.
+            Archetype {
+                image: "sccache",
+                signal: |facts, pid| {
+                    facts.unavailable.remove(&super::Signal::SessionLeader);
+                    facts.unavailable.insert(super::Signal::JobMembership);
+                    facts.session_leaders.insert(pid);
+                },
+                expected: ReapDecisionReason::SessionLeader,
+            },
+        ];
+
+        const DAEMON_PID: u32 = 40;
+        for archetype in archetypes {
+            let facts = facts_with(|facts| (archetype.signal)(facts, DAEMON_PID));
+
+            // The signal alone, as data.
+            assert_eq!(
+                signal_for(&facts, DAEMON_PID, archetype.image),
+                Some(archetype.expected),
+                "{} must be spared as {:?}",
+                archetype.image,
+                archetype.expected
+            );
+
+            // ...and the same reason must survive into the planner's decision,
+            // with the daemon's whole subtree pruned along with it.
+            let processes = [
+                process(10, 1, "cmd.exe", true),
+                process(11, 10, "node.exe", true),
+                process(12, 11, "codex.exe", true),
+                process(20, 12, "powershell.exe", false),
+                {
+                    let mut daemon = process(DAEMON_PID, 20, archetype.image, true);
+                    daemon.start_time = u64::from(DAEMON_PID);
+                    daemon
+                },
+                process(41, DAEMON_PID, "worker.exe", true),
+            ];
+            let graph = super::ProcessGraph::build(
+                processes.iter(),
+                &[RegisteredBackend::new(10, "codex.exe", 10)],
+            );
+            let spares = super::build_spare_list(&facts, graph.spare_candidates());
+            let decisions = super::plan_shell_exit(&graph, &spares, 20);
+
+            assert_eq!(
+                decisions.len(),
+                1,
+                "{}: one decision describes the whole pruned subtree",
+                archetype.image
+            );
+            assert_eq!(decisions[0].action, DecisionAction::Spare);
+            assert_eq!(
+                decisions[0].reason, archetype.expected,
+                "{}: the reason must be the signal that actually protected it, \
+                 not an accident of the plan being empty",
+                archetype.image
+            );
+            assert_eq!(decisions[0].candidate_pid, Some(DAEMON_PID));
+        }
+    }
+
+    /// The counterweight to the table above. If sparing were over-broad every
+    /// row would still pass while the reaper had quietly stopped working, so a
+    /// leaked client with **none** of the daemon signals must still be reaped.
+    #[test]
+    fn a_leaked_client_with_no_daemon_signal_is_still_reaped() {
+        let facts = facts_with(|_| {});
+        let processes = [
+            process(10, 1, "cmd.exe", true),
+            process(11, 10, "node.exe", true),
+            process(12, 11, "codex.exe", true),
+            process(20, 12, "powershell.exe", false),
+            process(40, 20, "node.exe", true),
+        ];
+        let graph = super::ProcessGraph::build(
+            processes.iter(),
+            &[RegisteredBackend::new(10, "codex.exe", 10)],
+        );
+        let spares = super::build_spare_list(&facts, graph.spare_candidates());
+        assert!(spares.is_empty(), "nothing here deserves protection");
+
+        let decisions = super::plan_shell_exit(&graph, &spares, 20);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].action, DecisionAction::Reap);
+        assert_eq!(decisions[0].reason, ReapDecisionReason::LeakedToolClient);
+        assert_eq!(decisions[0].candidate_pid, Some(40));
+    }
+
+    /// Session isolation, as a decision-table property: a process that is not
+    /// in *our* job is spared for that reason, whatever else is true of it.
+    /// The live two-tracker version is in `reaper_daemon_survival_windows.rs`;
+    /// this is the part that does not need a real Job Object.
+    #[test]
+    fn another_sessions_descendant_is_out_of_scope_for_this_reaper() {
+        let facts = facts_with(|facts| {
+            facts.outside_job.insert(40);
+        });
+        assert_eq!(
+            signal_for(&facts, 40, "node.exe"),
+            Some(ReapDecisionReason::OutsideJobObject),
+            "a sibling session's descendant is not ours to kill"
+        );
+    }
+
     /// The whole point of the seam: a spare-list built from OS signals prunes
     /// the daemon's subtree in the planner exactly as the marker set did, and
     /// the *reason* survives into the decision. Sparing zccache via
