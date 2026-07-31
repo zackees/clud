@@ -126,6 +126,49 @@ binary), so it is not a factor.
 | `aarch64-apple-darwin`, `x86_64-apple-darwin` | **`soldr build` + target-shaped Apple SDK** | `soldr prepare` fetches the matching SDK and exports `SDKROOT`; there is no repo secret/variable and no native-builder fallback. |
 | `aarch64-unknown-linux-gnu` | **`cargo-zigbuild`** | cleanest cross. `vendor/whisper-rs-sys/build.rs:395-429` already detects a zig C++ toolchain and switches `stdc++`→`c++`, but `:403-405` early-returns on non-Linux targets — this path is Linux→Linux, so it is exactly the case that code was written for. CMake needs `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64`, injectable through the existing `CMAKE_*` env passthrough at `build.rs:298-306`. |
 
+### Invariant: soldr owns Apple and Windows-MSVC cross builds
+
+**No workflow, build helper or release script may install or invoke a cross
+compiler directly for a `*-apple-darwin` or `*-pc-windows-msvc` target.** That
+means no `cargo xwin`, no `cargo-xwin`, no `cargo zigbuild` / `cargo-zigbuild`,
+no `maturin --zig`, no `zig cc`, no `cross`, no `osxcross`, and no hand-rolled
+install of any of them. `soldr prepare --target <triple>` provisions the
+toolchain and `soldr build --target <triple>` links against it. Nothing else.
+
+**Zig stays correct for Linux.** `aarch64-unknown-linux-gnu` crosses through
+`cargo-zigbuild`, and the manylinux wheel links through `maturin --zig`. The
+rule is target-aware, not a blanket ban — a rule that broke the Linux lanes
+would be reverted within a day.
+
+`cargo xwin` and `cargo zigbuild --target *-apple-darwin` remain *technically*
+reachable, and soldr's own `docs/CROSS_COMPILE.md` documents them as legacy
+passthroughs. That is the whole reason this is written down: the fast path and
+the slow path are one word apart in a YAML file.
+
+Three things enforce it, because no one of them is sufficient:
+
+| Guard | Catches | Blind to |
+| --- | --- | --- |
+| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command with a literal target, in YAML, Python or shell — including the argv-list form `["cargo", "xwin", ...]` | a target held in a variable |
+| `ci/xbuild.py::cargo_argv` raises on `zigbuild` + an Apple/MSVC triple | the dispatch itself, whatever the target's provenance | a caller that bypasses `cargo_argv` |
+| `tests/test_ci_matrix.py` | every matrix triple's `strategy`, and the argv `cargo_argv` actually returns for it | a command path outside the matrix |
+
+The linter's failure names the file, line, rejected tool, the target family, and
+the `soldr build --target ...` replacement — a reader who has never seen this
+rule should not have to go looking.
+
+#### Timing evidence
+
+The blessed path is the one that has run in CI since the matrix moved to
+`strategy = soldr`, and the superseded direct-wrapper path is no longer
+reachable — deliberately, since making it reachable is the thing this section
+forbids. So there is no honest A/B measurement to record here, and a synthetic
+one would mean re-introducing the very command path the lint rejects. What can
+be said from the workflow runs: the crossed Apple lanes complete in ~5 minutes
+and the MSVC lane in ~20–26, all on `ubuntu-24.04`, with native runners doing
+no compilation at all. Anyone wanting a genuine comparison should take it from
+soldr's own benchmarks rather than from a temporary regression here.
+
 ### The two `whisper-rs-sys` host-cfg bugs
 
 `vendor/whisper-rs-sys/build.rs` uses `cfg!(target_os = ...)` inside the build
@@ -261,12 +304,14 @@ Requirement: nothing builds `--release` except the release pipeline.
 | `ruff` | 6x | 1x (`static`) |
 | `cargo fmt --check` | 6x | 1x (`static`) |
 | `ci/banned_imports.py` | 6x | 1x (`static`) |
+| `ci/banned_cross_tools.py` | — (#637; new) | 1x (`static`) |
 | `cargo clippy --workspace --all-targets` | 6x native | 2x, both on Linux |
 | dylint | 2x per PR (`push` + `pull_request` both fire) | 0x per PR; 1x on merge/main, Linux only |
 | Rust doc-tests | 6x | 1x (host triple) |
 
 `ci/lint.py` gains `--static-only`, and the checks inside it are reordered
-cheapest-first (ruff → banned imports → `cargo fmt`) so the most common failure
+cheapest-first (ruff → banned imports → banned cross tools → `cargo fmt`) so
+the most common failure
 reds out in seconds instead of behind a cargo subprocess. `bash lint` with no
 flags still runs the whole suite, unchanged.
 

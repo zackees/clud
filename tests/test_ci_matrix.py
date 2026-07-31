@@ -103,6 +103,55 @@ def test_no_target_uses_a_hand_installed_cross_wrapper_for_msvc_or_darwin():
             assert target.strategy == "soldr", target.triple
 
 
+def test_cross_argv_never_routes_apple_or_msvc_through_a_banned_tool():
+    """The behavioural half of #637, and the half a text scan cannot do.
+
+    `ci/banned_cross_tools.py` catches a literal command with a literal target.
+    It cannot follow a target held in a variable — and `cargo_argv` takes the
+    target as an argument, so every real invocation in this repo is exactly the
+    shape the text scan is blind to.
+
+    So ask the real function. For every triple in the matrix, with every
+    strategy it could plausibly be given, assert the argv it produces names no
+    banned wrapper when the target is Apple or MSVC. A future edit that routes
+    a darwin build through zigbuild fails here even though no file contains the
+    string `zigbuild --target aarch64-apple-darwin`.
+    """
+    from ci.xbuild import cargo_argv
+
+    banned = ("xwin", "zigbuild", "zig", "cross", "osxcross")
+    soldr_owned = [t for t in TARGETS if "apple" in t.triple or "windows" in t.triple]
+    assert soldr_owned, "matrix has no crossed targets; this test would be vacuous"
+
+    for target in soldr_owned:
+        # Not just the strategy the matrix assigns today: a future edit could
+        # change it, and the point is that no strategy may reach a banned tool
+        # for these triples.
+        for strategy in ("native", "zigbuild", "soldr"):
+            for subcommand in (["build"], ["test", "--no-run"], ["clippy"]):
+                if strategy == "zigbuild":
+                    # Refused outright rather than silently producing a working
+                    # zigbuild argv. Returning something safe would let the
+                    # misconfiguration sit in the matrix unnoticed.
+                    with pytest.raises(ValueError, match="soldr"):
+                        cargo_argv(subcommand, target.triple, strategy)
+                    continue
+                argv = cargo_argv(subcommand, target.triple, strategy)
+                assert not any(token in banned for token in argv), (
+                    f"{target.triple} / {strategy} / {subcommand[0]} produced "
+                    f"{argv}, which drives a banned cross tool"
+                )
+
+
+def test_linux_targets_keep_the_supported_zig_cross_path():
+    """The counterweight. A rule that also broke Linux would be reverted, so
+    prove the Zig path is still reachable where it is correct."""
+    from ci.xbuild import cargo_argv
+
+    argv = cargo_argv(["build"], "aarch64-unknown-linux-gnu", "zigbuild")
+    assert "zigbuild" in argv, f"Linux zig cross must survive the #637 lint: {argv}"
+
+
 def test_test_matrix_always_uses_native_runners():
     include = exec_matrix(selected("full"))["include"]
     assert len(include) == len(TARGETS) * len(SUITES)

@@ -186,6 +186,15 @@ def build_env(target: str, strategy: str) -> dict[str, str]:
     return env
 
 
+def is_soldr_owned(target: str) -> bool:
+    """Does soldr own this triple's cross toolchain end to end? (#637)
+
+    Apple and Windows-MSVC targets do. Linux does not — Zig is the supported
+    cross there, and for the manylinux wheel.
+    """
+    return target.endswith("-apple-darwin") or target.endswith("-pc-windows-msvc")
+
+
 def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
     """Return the cargo argv for this strategy.
 
@@ -194,6 +203,19 @@ def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
     `cargo clippy --target` already provides.
     """
     verb = subcommand[0]
+    if strategy == "zigbuild" and is_soldr_owned(target):
+        # #637: the matrix assigns `soldr` to every Apple/MSVC triple, and
+        # `tests/test_ci_matrix.py` pins that. But the strategy is not what
+        # runs the compiler -- this function is -- so pinning the matrix value
+        # alone left the alternate command path reachable by a one-word edit.
+        # Refuse structurally instead, so the invariant does not depend on
+        # anyone remembering it.
+        raise ValueError(
+            f"{target} must cross through soldr's blessed surface, not "
+            "cargo-zigbuild. soldr owns the Apple/MSVC toolchain "
+            "(`soldr prepare` / `soldr build`); Zig is correct for "
+            "*-unknown-linux-* only. See docs/architecture/ci.md."
+        )
     if strategy == "soldr" and verb == "build":
         # The blessed cross surface. Everything else under this strategy rides
         # on the env `soldr prepare` exported -- see the module docstring.

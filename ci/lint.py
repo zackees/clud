@@ -1,4 +1,5 @@
-"""Lint orchestrator for clud: cargo fmt + clippy + ruff + banned imports."""
+"""Lint orchestrator for clud: ruff + banned imports + banned cross tools
++ cargo fmt + clippy."""
 
 from __future__ import annotations
 
@@ -26,7 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run the lint suite.
 
     `--static-only` skips clippy. CI splits the suite: the platform-independent
-    checks (banned imports, cargo fmt, ruff) run once in the `static` job, while
+    checks (banned imports, banned cross tools, cargo fmt, ruff) run once in
+    the `static` job, while
     clippy runs once per target triple inside the build job, where that triple's
     dependency graph is already compiled. Running the whole suite six times, as
     the old per-platform workflows did, meant 6x ruff and 6x cargo fmt for
@@ -41,14 +43,21 @@ def main(argv: list[str] | None = None) -> int:
 
     activate()
 
+    from ci.banned_cross_tools import main as check_banned_cross_tools
     from ci.banned_imports import main as check_banned_imports
 
     # Ordered cheapest-first so the common failure reds out soonest: ruff is a
-    # pure-Python scan (~1s), banned_imports is a source grep, and only then do
-    # we pay for a cargo subprocess. The old order put ruff last, behind fmt.
+    # pure-Python scan (~1s), the two banned-* scans are source greps, and only
+    # then do we pay for a cargo subprocess. The old order put ruff last,
+    # behind fmt.
     if run([sys.executable, "-m", "ruff", "check", "src", "tests", "ci"]) != 0:
         return 1
     if check_banned_imports() != 0:
+        return 1
+    # #637: soldr owns Apple/MSVC cross builds. Static-only by nature (it reads
+    # .github/ and ci/), so it belongs in the platform-independent half that CI
+    # runs once rather than per triple.
+    if check_banned_cross_tools() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the

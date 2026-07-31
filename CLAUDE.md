@@ -157,6 +157,18 @@ Things that bite:
   `build-backend = "soldr"`, so `uv run` syncs the project and triggers a full
   PEP 517 maturin build. Use `$VENV_PY` (exported by both composite actions),
   which is what `lint` already does locally.
+- **soldr owns Apple/MSVC cross builds (#637).** Never invoke or install
+  `cargo xwin`, `cargo zigbuild`, `zig cc`, `cross` or `osxcross` for a
+  `*-apple-darwin` / `*-pc-windows-msvc` target — use `soldr prepare` /
+  `soldr build`. Zig stays correct for `*-unknown-linux-*` and the manylinux
+  wheel, so the rule is target-aware, not a blanket ban.
+  `ci/banned_cross_tools.py` scans `.github/`, `ci/` and the root build scripts
+  under `bash lint` and CI's static job; `ci/xbuild.py::cargo_argv` additionally
+  *raises* on the zigbuild+Apple/MSVC combination, because the text scan cannot
+  follow a target held in a variable. *Gotcha*: prose that explains the ban must
+  not trip it — the scanner strips `#` comments and requires a concrete triple
+  (`x86_64-apple-darwin`, not `*-apple-darwin`).
+
 - **Adding a target** means editing `ci/ci_matrix.py` *and* adding the
   build/test job pair in `ci.yml`. They cannot be one matrix (GitHub `needs:`
   on a matrix is all-or-nothing, which would serialize every lane behind the
