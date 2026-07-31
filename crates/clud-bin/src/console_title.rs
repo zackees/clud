@@ -198,17 +198,26 @@ pub fn keep_setting_in_background() {
 
 /// Does this process have a console whose title it could keep?
 ///
-/// `GetConsoleWindow` returns null when no console is attached. That is the
+/// `GetConsoleCP` returns the console input code page, or **0** with
+/// `ERROR_INVALID_HANDLE` when the process has no console at all. That is the
 /// daemon and every worker: `main` starts the keeper before subcommand
 /// dispatch, so console-less processes get one too.
+///
+/// **Not `GetConsoleWindow`.** That returns the console's *window handle*, and
+/// it is documented to return null for a console that has no window — which
+/// includes a pseudoconsole. A ConPTY client (clud's own `--pty` mode, and
+/// Windows Terminal) genuinely *has* a console and can set its title, so
+/// gating on a window handle would disable the keeper in exactly the
+/// environment it exists for. Verified on Windows 10 19045: with a console
+/// `GetConsoleCP` is 65001 and after `FreeConsole` it is 0 / `ERROR_INVALID_HANDLE`.
 #[cfg(windows)]
 fn console_is_attached() -> bool {
     extern "system" {
-        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        fn GetConsoleCP() -> u32;
     }
-    // SAFETY: no arguments and no out-params. The returned HWND is borrowed
-    // (owned by the console host) and only compared against null here.
-    !unsafe { GetConsoleWindow() }.is_null()
+    // SAFETY: no arguments, no out-params, no handles retained.
+    let code_page = unsafe { GetConsoleCP() };
+    code_page != 0
 }
 
 #[cfg(windows)]

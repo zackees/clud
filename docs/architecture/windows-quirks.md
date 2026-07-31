@@ -187,11 +187,18 @@ the codebase stays portable.
   750 ms on every pass. The result was a permanent 750 ms wake loop — a
   `SetConsoleTitleW` into the void plus a `stat` of the metrics snapshot —
   in exactly the processes that are supposed to be idlest.
-  `spawn_keeper_thread` now gates on `GetConsoleWindow()` being non-null and
-  returns without spawning. The cadence state machine is unchanged; it was
-  correct, it simply cannot rescue a keeper whose `changed` flag is pinned,
-  which `a_keeper_that_always_reports_change_never_backs_off` asserts
-  directly.
+  `spawn_keeper_thread` now gates on `GetConsoleCP() != 0` and returns without
+  spawning. The cadence state machine is unchanged; it was correct, it simply
+  cannot rescue a keeper whose `changed` flag is pinned, which
+  `a_keeper_that_always_reports_change_never_backs_off` asserts directly.
+
+  The check is deliberately **not** `GetConsoleWindow`: that returns the
+  console's *window* handle and is documented to be null for a console with no
+  window, which includes a pseudoconsole. A ConPTY client — clud's own `--pty`
+  mode, and Windows Terminal — has a real console and can set its title, so
+  gating on a window handle would disable the keeper in exactly the
+  environment it exists for. `GetConsoleCP` answers "is a console attached"
+  directly: 65001 with one, 0 / `ERROR_INVALID_HANDLE` after `FreeConsole`.
 
   For PTY-mode launches (`--pty` / POSIX `clud loop`) the `OscTitleStripper`
   stream filter in the same file eats OSC 0/2 sequences from the child's
