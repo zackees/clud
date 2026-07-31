@@ -28,18 +28,23 @@ use std::time::{Duration, Instant};
 
 use clud::job_orphan_reaper::ForegroundJobTracker;
 
+#[path = "common/exe.rs"]
+mod exe;
+
+/// `daemon-stub` belongs to `testbins/`, so this crate has no
+/// `CARGO_BIN_EXE_daemon-stub` to fall back on — see `common/exe.rs` for the
+/// bundle-vs-local precedence.
+///
+/// The "one level up from `deps/`" guess this used to make is correct only for
+/// a local `cargo test`. CI compiles harnesses on Linux and runs them from
+/// `bundle/tests/`, where that path resolves to nothing — which is why this
+/// suite has been failing on `main` since it landed.
 fn daemon_stub() -> PathBuf {
-    // The harness binary lives in `target/<triple>/debug/deps/`; the workspace
-    // binaries sit one level up.
-    let mut dir = std::env::current_exe().expect("current test exe");
-    dir.pop();
-    if dir.ends_with("deps") {
-        dir.pop();
-    }
-    let stub = dir.join("daemon-stub.exe");
+    let stub = exe::sibling_bin_path("daemon-stub");
     assert!(
         stub.is_file(),
-        "daemon-stub not built at {}; `soldr cargo build -p daemon-stub`",
+        "daemon-stub not found at {}; `soldr cargo build -p daemon-stub` \
+         (on an exec runner, CLUD_TEST_BIN_DIR should point at the bundle's bin dir)",
         stub.display()
     );
     stub

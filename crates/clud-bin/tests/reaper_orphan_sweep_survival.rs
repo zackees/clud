@@ -38,30 +38,22 @@ use std::time::{Duration, Instant};
 use clud::orphan_reaper::{self, ReapOpts};
 use clud::reaper_facts::SpareReason;
 
+#[path = "common/exe.rs"]
+mod exe;
+
 /// Long enough for a sweep to run and for a doomed process to actually die,
 /// short enough that a hang fails the test rather than the job.
 const SETTLE: Duration = Duration::from_millis(400);
 
-fn exe_name(stem: &str) -> String {
-    if cfg!(windows) {
-        format!("{stem}.exe")
-    } else {
-        stem.to_string()
-    }
-}
-
+/// `daemon-stub` belongs to `testbins/`, so this crate has no
+/// `CARGO_BIN_EXE_daemon-stub` to fall back on — see `common/exe.rs` for the
+/// bundle-vs-local precedence.
 fn daemon_stub() -> PathBuf {
-    // The harness binary lives in `target/<triple>/debug/deps/`; the workspace
-    // binaries sit one level up.
-    let mut dir = std::env::current_exe().expect("current test exe");
-    dir.pop();
-    if dir.ends_with("deps") {
-        dir.pop();
-    }
-    let stub = dir.join(exe_name("daemon-stub"));
+    let stub = exe::sibling_bin_path("daemon-stub");
     assert!(
         stub.is_file(),
-        "daemon-stub not built at {}; `soldr cargo build -p daemon-stub`",
+        "daemon-stub not found at {}; `soldr cargo build -p daemon-stub` \
+         (on an exec runner, CLUD_TEST_BIN_DIR should point at the bundle's bin dir)",
         stub.display()
     );
     stub

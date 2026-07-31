@@ -27,12 +27,38 @@ use std::path::PathBuf;
 /// Callers pass the `env!` themselves because `CARGO_BIN_EXE_*` is only
 /// expanded inside the integration-test crate that Cargo built the binary for.
 pub fn bin_path(name: &str, compiled: &str) -> PathBuf {
-    if let Some(dir) = std::env::var_os("CLUD_TEST_BIN_DIR") {
-        let ext = if cfg!(windows) { ".exe" } else { "" };
-        let candidate = PathBuf::from(dir).join(format!("{name}{ext}"));
-        if candidate.is_file() {
-            return candidate;
-        }
+    bundled(name).unwrap_or_else(|| PathBuf::from(compiled))
+}
+
+/// Resolve a workspace binary that this test crate has **no**
+/// `CARGO_BIN_EXE_*` for, because it belongs to another package —
+/// `testbins/daemon-stub` and friends.
+///
+/// Same precedence as [`bin_path`]: the bundle's bin dir first, then the local
+/// `target/<triple>/debug/` layout beside the harness. Getting only the second
+/// half of that wrong is not a compile error, it is a *runtime* one that shows
+/// up on the exec runners and nowhere else — the bundle puts harnesses in
+/// `bundle/tests/` and workspace binaries in a sibling dir, so
+/// "one level up from `deps/`" resolves to nothing there.
+pub fn sibling_bin_path(name: &str) -> PathBuf {
+    if let Some(path) = bundled(name) {
+        return path;
     }
-    PathBuf::from(compiled)
+    let mut dir = std::env::current_exe().expect("current test exe");
+    dir.pop();
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    dir.join(exe_file_name(name))
+}
+
+fn bundled(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("CLUD_TEST_BIN_DIR")?;
+    let candidate = PathBuf::from(dir).join(exe_file_name(name));
+    candidate.is_file().then_some(candidate)
+}
+
+fn exe_file_name(name: &str) -> String {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    format!("{name}{ext}")
 }
