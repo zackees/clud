@@ -196,9 +196,22 @@ Measured on a 48-process burst: **5 host scans instead of ~48**, with 36
 messages folded into the largest drain. The win grows with churn, because
 heavier load means deeper queues and therefore bigger batches.
 
-`ReapCounters::host_scans` and `peak_batch` make this readable at exit; compare
-`host_scans` against `ticks`. **`host_scans` must never exceed `ticks`** — a
-batch is never empty, so it can never cost more than one enumeration per drain.
+`ReapCounters::host_scans` and `peak_batch` make this readable at exit.
+`host_scans` is incremented inside `snapshot()` itself, so it counts **every**
+enumeration: the batch path, `register_backend`, the exit sweep, and the
+quiet-period retry in `retry_unresolved_new_processes`.
+
+That last one matters and is why the counter is not call-site-scoped. It fires
+on the 200 ms timeout whenever a PID is still unresolved, so it is the one
+recurring host scan the batching does *not* remove. It is self-limiting rather
+than permanent — `MAX_METADATA_RETRIES` bounds each PID to 10 quiet periods, so
+the set drains in ~2 s — but it is real, and counting only the batch path (as
+this first shipped) hid it.
+
+**`host_scans` is therefore not bounded by `ticks`**: one tick can drive both a
+retry scan and a batch scan. The bound that holds is against the *message*
+count — a burst of N messages must not cost N enumerations — which is what
+`reaper_batch_drain_windows` asserts and what `peak_batch` explains.
 
 *Per-PID creation time is deliberately not folded into the batch read.*
 `process_identity::start_time_of` is an `OpenProcess` + `GetProcessTimes` —
