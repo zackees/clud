@@ -386,6 +386,17 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: Option<SymbolsSubcommand>,
     },
+    /// Record and report per-bucket test runtimes for this checkout (#407).
+    ///
+    /// `clud test run --bucket unit -- <cmd>` wraps a test command, records
+    /// what it cost, and returns the child's exit code unchanged.
+    /// `clud test stats` reports p50/p90/n per bucket so the run-all-vs-
+    /// targeted choice is made from data. Store is `.clud/test-runtime/`,
+    /// per-checkout and gitignored.
+    Test {
+        #[command(subcommand)]
+        subcommand: TestSubcommand,
+    },
     /// Interactively toggle global clud settings (zackees/clud).
     ///
     /// Drops into a small cross-platform TUI checkbox menu over
@@ -446,6 +457,33 @@ pub enum ConfigSubcommand {
         /// Editor command to run, e.g. `code --wait`.
         #[arg(long = "editor", value_name = "CMD")]
         editor: Option<String>,
+    },
+}
+
+/// Subcommands under `clud test`. See `crates/clud-bin/src/test_runtime/`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum TestSubcommand {
+    /// Run a test command, recording its duration and the pre-run CPU load.
+    Run {
+        /// Bucket this run belongs to: unit | integration | e2e | smoke.
+        #[arg(long = "bucket", default_value = "unit")]
+        bucket: String,
+        /// Optional test filter/target, recorded alongside the duration so a
+        /// future query can localize "which one is slow".
+        #[arg(long = "target")]
+        target: Option<String>,
+        /// The command to run, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Report per-bucket runtime statistics.
+    Stats {
+        /// Limit the report to one bucket.
+        #[arg(long = "bucket")]
+        bucket: Option<String>,
+        /// Machine-readable output for agent consumption.
+        #[arg(long = "json")]
+        json: bool,
     },
 }
 
@@ -722,14 +760,20 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--list",
     ];
     let short_bool_flags: &[&str] = &["-c", "-v", "-h", "-V", "-y"];
-    // The single subcommand whose own parser consumes `--` as data rather than
-    // as clud's end-of-flags marker. See the `--` branch below (issue #508).
-    const SEPARATOR_OWNING_SUBCOMMAND: &str = "tool";
+    // Subcommands whose own parser consumes `--` as data rather than as clud's
+    // end-of-flags marker. See the `--` branch below (issue #508).
+    //
+    // This was a single constant while `tool run` was the only `trailing_var_arg`
+    // parser in the CLI. `test run -- <cmd>` (#407) is the second, and a
+    // subcommand missing from this list does not fail loudly: clud silently
+    // swallows everything after `--` as backend passthrough, and the subcommand
+    // sees an empty command vector.
+    const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test"];
 
     let subcommands: &[&str] = &[
         "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
         "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "settings",
-        "__daemon", "__worker",
+        "test", "__daemon", "__worker",
     ];
 
     // Which subcommand we are inside, once one has been seen. `None` means the
@@ -756,7 +800,9 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         // CLI declared `trailing_var_arg`, i.e. the only parser that asks for
         // raw argv. Handing `--` to a subcommand that does not expect it makes
         // clap reject the unknown flag and exit the process.
-        if arg == "--" && subcommand != Some(SEPARATOR_OWNING_SUBCOMMAND) {
+        if arg == "--"
+            && !subcommand.is_some_and(|name| SEPARATOR_OWNING_SUBCOMMANDS.contains(&name))
+        {
             unknown.extend_from_slice(&raw[i + 1..]);
             break;
         }

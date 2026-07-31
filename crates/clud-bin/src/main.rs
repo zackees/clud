@@ -2,8 +2,9 @@ use clud::{
     args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
     cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, job_orphan_reaper,
     large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize,
-    orphan_reaper, runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, tool_cli,
-    tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    orphan_reaper, runner, runtime_cache, settings_tui, soldr_activate, startup, symbols,
+    test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
+    verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -158,6 +159,23 @@ fn main() {
     // launches a backend.
     if let Some(args::Command::Symbols { subcommand }) = &args.command {
         std::process::exit(symbols::run(&args, subcommand.clone()));
+    }
+
+    // #407: `clud test` records/reports per-bucket test runtimes. Self-
+    // contained; never launches a backend. `run` returns the wrapped command's
+    // exit code unchanged so prefixing it onto an existing invocation is safe.
+    if let Some(args::Command::Test { subcommand }) = &args.command {
+        let code = match subcommand {
+            args::TestSubcommand::Run {
+                bucket,
+                target,
+                command,
+            } => test_runtime::cli::run(bucket, target.clone(), command),
+            args::TestSubcommand::Stats { bucket, json } => {
+                test_runtime::cli::stats(bucket.as_deref(), *json)
+            }
+        };
+        std::process::exit(code);
     }
 
     // `clud settings` is an interactive global-settings TUI, self-contained;
