@@ -72,4 +72,7 @@ coverage-*.xml
 .claude/settings.local.json
 .claude/*.lock
 .claude/*.patch
+# #407: per-checkout test-runtime histogram. Covered by `.clud/*` above;
+# named explicitly so its purpose is greppable.
+.clud/test-runtime/
 .clud/loop

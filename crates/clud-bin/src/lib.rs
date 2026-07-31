@@ -61,6 +61,7 @@ pub mod startup;
 pub mod stream_json;
 pub mod subprocess;
 pub mod symbols;
+pub mod test_runtime;
 pub mod tool_cli;
 pub mod tool_info;
 pub mod tool_install;

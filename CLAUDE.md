@@ -30,6 +30,7 @@ crates/                    → see crates/README.md
       command/             → see crates/clud-bin/src/command/README.md
       daemon/              → see crates/clud-bin/src/daemon/README.md
       dnd/                 → see crates/clud-bin/src/dnd/README.md
+      test_runtime/        → see crates/clud-bin/src/test_runtime/README.md
       voice/               → see crates/clud-bin/src/voice/README.md
     tests/                 → see crates/clud-bin/tests/README.md
     assets/                → see crates/clud-bin/assets/README.md
@@ -98,10 +99,11 @@ After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, 
 
 Several features have a "single source of truth" registry that must be updated alongside the code change. Forgetting any of these causes silent misbehavior (passthrough instead of dispatch) or surprising failures (banned-import lint, missing bundled file). The full list:
 
-- **New top-level `Command` subcommand** → 3 places:
+- **New top-level `Command` subcommand** → 3 places (4 if it takes a raw command):
   1. `Command` enum variant in `crates/clud-bin/src/args.rs`.
   2. Dispatch arm in `crates/clud-bin/src/main.rs`.
   3. **`subcommands: &[&str]` array in `args.rs::split_known_unknown` (~line 611)** — *gotcha*: a hardcoded list the unknown-flag-passthrough splitter uses; a missing entry routes your subcommand's argv to the backend agent as passthrough instead of dispatching it, and you get errors from the wrong layer (e.g., the backend complaining about your `--cmd` flag). Also extend `value_flags` / `bool_flags` arrays in the same function if your subcommand introduces new flags.
+  4. **`SEPARATOR_OWNING_SUBCOMMANDS` in the same function** — *only* if your subcommand declares a `trailing_var_arg` argument taking a raw command after `--`. *Gotcha*: omitting it fails **silently**, not loudly — clud swallows everything after `--` as backend passthrough and your subcommand sees an empty argument vector, which reads as "the user passed no command". It was a single-valued constant while `tool run` was the only such parser; `test run` (#407) made it a list.
 
 - **New bundled skill** (`crates/clud-bin/assets/skills/*/SKILL.md`) → `BUNDLED_SKILLS` registry in `crates/clud-bin/src/skills.rs`; frontmatter must parse via a real YAML parser. Guardrail tests: `soldr cargo test -p clud --lib skills::`. Same applies to root `skills/*/SKILL.md` via `crates/clud-bin/src/skill_install.rs` (`soldr cargo test -p clud --lib skill_install::`).
 
