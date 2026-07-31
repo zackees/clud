@@ -1,13 +1,19 @@
 # Daemon IPC
 
-The daemon is a long-lived, single-binary session manager that owns backgrounded `clud` runs and brokers `attach` / `list` / `kill` / `logs` / `--repeat`. Without it, every `clud` invocation would be its own foreground process tied to one terminal; with it, a user can `clud --detach -p ...` to spawn a backend (`claude` or `codex`) that survives terminal close, then later `clud attach <id>` to rejoin its PTY from a different TTY. The IPC layer is two pairs of JSON-line-delimited TCP messages on loopback: client-to-daemon (creates / queries / terminates sessions) and client-to-worker (attach handshake, then bidirectional input / output). State lives under a per-user state directory and the daemon process re-enters the same `clud` binary as hidden `__daemon` and `__worker` subcommands.
+The daemon is a long-lived, single-binary session manager that owns backgrounded `clud` runs and brokers `attach` / `list` / `kill` / `logs` / `--repeat`. Without it, every `clud` invocation would be its own foreground process tied to one terminal; with it, a user can `clud --detach -p ...` to spawn a backend (`claude` or `codex`) that survives terminal close, then later `clud attach <id>` to rejoin its PTY from a different TTY. The IPC layer is three lanes: a `running-process` **broker frame lane** (a named pipe on Windows, a Unix socket elsewhere) that daemon RPCs take by default, a loopback-TCP fallback for the same RPCs, and a loopback-TCP stream per attached client for the worker side. A second loopback listener serves the dashboard over HTTP. State lives under a per-user state directory and the daemon process re-enters the same `clud` binary as hidden `__daemon` and `__worker` subcommands.
 
 ## Component map
 
 Three processes, one binary. All files in `crates/clud-bin/src/daemon/`.
 
 **Daemon process** — at most one per state-dir. Spawned lazily by the first client that needs it, accepts loopback TCP, dispatches `Create` / `Session` / `Terminate`, spawns and reaps worker children.
-- `server.rs` — listener, request dispatch, worker spawn, reap thread.
+- `server.rs` — listeners, request dispatch, worker spawn, reap thread.
+- `rp_broker/` — the **default** RPC lane. `endpoint.rs` resolves the named
+  pipe / Unix socket and owns `daemon-identity.json`; `frame_lane.rs` serves it;
+  `mod.rs` is the client half. Disabled by `RUNNING_PROCESS_DISABLE=1`, which
+  drops every caller back to the TCP lane.
+- `http.rs` — the dashboard's own loopback HTTP listener, on a separate port
+  recorded as `dashboard_port` in `daemon.json`.
 - `paths.rs` — on-disk layout helpers under `<state_dir>/`.
 - `process_utils.rs` — `pid_is_alive`, `signal_process_tree` (Term then Kill across the descendant tree via `sysinfo`).
 
@@ -27,65 +33,130 @@ Three processes, one binary. All files in `crates/clud-bin/src/daemon/`.
 
 ## Process model
 
-`clud` is one binary; the daemon and the worker are the same exe re-entered with hidden internal subcommands. The trampoline that detaches the daemon lives in `crate::trampoline`; client invocation is in `ensure_daemon` at `client.rs:18`.
+`clud` is one binary; the daemon and the worker are the same exe re-entered with hidden internal subcommands. The trampoline that detaches the daemon lives in `crate::trampoline`; client invocation is in `ensure_daemon` at `client.rs:43`.
 
 1. A normal `clud` invocation calls `experimental_enabled` (`entry.rs:21`). Centralized routing is now forced on by `--detach` / `--detachable` / `--transcript <path>` / repeat-mode / `--experimental-daemon-centralized` / `CLUD_EXPERIMENTAL_DAEMON=1`. Piped invocations (`clud -p "x" | jq`, CI runners) stay on the direct runner unless one of those explicit daemon features is requested, so stdio framing is byte-identical for script automation. The user can opt out explicitly with `--no-daemon` or `CLUD_NO_DAEMON=1`. When centralized is active, the front-end shells out to `run_centralized_session` (`entry.rs:144`) instead of running the backend directly.
-2. `run_centralized_session` calls `ensure_daemon` which probes the port in `daemon.json`; if no live daemon answers, it spawns `current_exe` with argv `["__daemon", "--state-dir", <path>]` via `trampoline::spawn_detached_self` (`client.rs:27`-`32`) and waits up to 5s for the new daemon to write `daemon.json` and accept a probe.
-3. On a `Create` request, the daemon spawns `current_exe` again with `["__worker", "--state-dir", ..., "--session-id", ..., "--daemon-pid", ..., "--spec-file", ...]` (`server.rs:120`-`133`). The worker is launched with `Containment::Detached`, `StdinMode::Null`, `StderrMode::Stdout`, and on Windows uses `invisible_helper_creationflags` to suppress a conhost flash (issue #55).
-4. Both internal subcommands are dispatched in `handle_special_command` (`entry.rs:38`): `Command::InternalDaemon` → `run_daemon` (`server.rs:23`), `Command::InternalWorker` → `run_worker` (`worker.rs:28`). The same dispatch handles all user-facing subcommands (`Attach`, `Kill`, `List`, `Logs`) so a single early-return covers every "not a normal run" path.
+2. `run_centralized_session` calls `ensure_daemon` which probes the port in `daemon.json`; if no live daemon answers, it spawns `current_exe` with argv `["__daemon", "--state-dir", <path>]` via `trampoline::spawn_detached_self` (`client.rs:81`) and waits up to 5s for the new daemon to write `daemon.json` and accept a probe.
+3. On a `Create` request, the daemon spawns `current_exe` again with `["__worker", "--state-dir", ..., "--session-id", ..., "--daemon-pid", ..., "--spec-file", ...]` (`server.rs:669`). The worker is launched with `Containment::Detached`, `StdinMode::Null`, `StderrMode::Stdout`, and on Windows uses `invisible_helper_creationflags` to suppress a conhost flash (issue #55).
+4. Both internal subcommands are dispatched in `handle_special_command` (`entry.rs:38`): `Command::InternalDaemon` → `run_daemon` (`server.rs:56`), `Command::InternalWorker` → `run_worker` (`worker.rs:32`). The same dispatch handles all user-facing subcommands (`Attach`, `Kill`, `List`, `Logs`) so a single early-return covers every "not a normal run" path.
 
 The hidden subcommands are declared in `crates/clud-bin/src/args.rs` and accept their state-dir / session-id / pid / spec-file as explicit flags rather than env vars, so a stuck worker shows up in `ps` with a self-describing argv.
 
 ## Wire protocol
 
-Loopback TCP (`127.0.0.1:0`, OS-assigned ephemeral port), one request per connection for the daemon side, a persistent connection per attached client for the worker side. Daemon RPCs default to framed prost. The legacy JSON format remains available with `CLUD_DAEMON_WIRE=json`: every message is a single line of UTF-8 JSON terminated by `\n`; see `write_json_line` at `io_helpers.rs:25`. JSON enums are tagged with `"op"` (serde `tag = "op"`, snake_case variants).
+### Three lanes
 
-The prost migration foundation lives in `wire_prost.rs` and `proto/clud_v1.proto`. It defines `CLUD` (`0x434c5544`) for prost payloads and `CLJS` (`0x434c4a53`) for legacy JSON payloads so the dispatcher can route by `Frame.payload_protocol` without changing the existing JSON shapes. Unset `CLUD_DAEMON_WIRE` and `CLUD_DAEMON_WIRE=prost` send daemon RPCs through a `CLUD-FRAME/1 <payload_protocol_hex> <base64_payload>` line envelope that carries the v1 prost payload; the daemon replies in the same format it received. Worker attach streams use the same JSON/prost dispatcher after the initial attach request selects a format. Raw previous-release JSON daemon fixtures cover the fallback path. The live daemon `ListLiveCwds` perf gate pins prost median RPC latency to no more than 20% above the JSON median baseline for this read-only path; running-process `Frame` integration and the remaining JSON mirror migrations still need to land before the migration is complete.
+| Lane | Transport | Carries | Where |
+|---|---|---|---|
+| **Broker frame lane** (default) | named pipe (Windows) / Unix socket (elsewhere) | every `DaemonRequest` | `rp_broker/endpoint.rs:36`, `rp_broker/frame_lane.rs:153` |
+| **Loopback TCP** (fallback) | `127.0.0.1:<port>` from `daemon.json` | the same `DaemonRequest`s | `client.rs:168` |
+| **Worker attach** | `127.0.0.1:<worker_port>` | `WorkerClientMessage` / `WorkerServerMessage` | `worker.rs:32` |
 
-**Client → daemon** (`DaemonRequest`, `types.rs:103`):
+Plus the **dashboard HTTP listener** (`http.rs:521`, spawned at `server.rs:142`),
+a second loopback port recorded as `dashboard_port` in `daemon.json`. It is not
+part of the RPC surface.
+
+`send_daemon_request` (`client.rs:168`) tries the frame lane **first** and falls
+through to TCP on any miss — `RUNNING_PROCESS_DISABLE=1`, no
+`daemon-identity.json` sidecar, or a connect/wire failure. TCP therefore remains
+the authoritative path in the sense that it always works, but it is not the
+common one.
+
+> **The named pipe is the default, not the rejected alternative.** An earlier
+> revision of this doc cited `DESIGN_DECISIONS.md` for choosing "TCP+JSON over
+> named pipes / Unix sockets". That is now backwards and produced at least one
+> confident wrong answer (#692). See [DD-025](../DESIGN_DECISIONS.md) for the
+> reversal.
+
+### Connection lifetime is a client policy, not a protocol limit
+
+The daemon's frame-lane `serve_connection` (`rp_broker/frame_lane.rs:236`) is an
+unbounded loop: it multiplexes as many frames over one connection as the peer
+sends. The **client** is what makes RPCs look one-shot — `try_send_via_frame_lane`
+(`rp_broker/mod.rs:116`) adopts a `BrokerSession`, sends one request, reads one
+reply, and drops it.
+
+So a caller who wants a long-lived two-way channel (a subscription, a stream)
+does **not** need the daemon rewritten. The TCP lane *is* one-request-per-connection
+(`handle_daemon_connection`, `server.rs:307`); the frame lane is not.
+
+### Encoding
+
+Daemon RPCs default to framed prost. Legacy JSON remains available with
+`CLUD_DAEMON_WIRE=json`: every message is a single line of UTF-8 JSON terminated
+by `
+` (`write_json_line`, `io_helpers.rs:25`). JSON enums are tagged with
+`"op"` (serde `tag = "op"`, snake_case variants).
+
+The prost foundation lives in `wire_prost.rs` and `proto/clud_v1.proto`. It
+defines `CLUD` (`0x434c5544`) for prost payloads and `CLJS` (`0x434c4a53`) for
+legacy JSON so the dispatcher routes by `Frame.payload_protocol` without changing
+the JSON shapes. Unset `CLUD_DAEMON_WIRE` and `CLUD_DAEMON_WIRE=prost` send a
+`CLUD-FRAME/1 <payload_protocol_hex> <base64_payload>` line envelope carrying the
+v1 prost payload; the daemon replies in the format it received. Worker attach
+streams use the same dispatcher after the attach request selects a format. The
+live-daemon `ListLiveCwds` perf gate pins prost median RPC latency to no more
+than 20% above the JSON median for that read-only path.
+
+### Client → daemon
+
+`DaemonRequest` (`types.rs:216`) — **all eleven variants**:
 
 | `"op"` | Payload | Reply | Notes |
 |---|---|---|---|
-| `create` | `spec: WorkerLaunchSpec` (boxed) | `created { session }` | Daemon spawns worker, waits up to 5s for snapshot + port-probe before responding. |
+| `create` | `spec: WorkerLaunchSpec` (boxed) | `created { session }` | Daemon spawns the worker and waits up to 5s for snapshot + port-probe. |
 | `session` | `session_id: String` | `session { session }` | Read-only fetch of the on-disk snapshot. |
-| `terminate` | `session_id: String` | `terminated { session }` | Signals worker tree (Term, sleep 150ms, Kill), marks snapshot `exit_code = 130`. |
+| `list_live_cwds` | — | `live_cwds { paths }` | Canonicalized CWD per live session snapshot. |
+| `terminate` | `session_id: String` | `terminated { session }` | Signals the worker tree (Term, 150 ms, Kill); marks `exit_code = 130`. |
+| `interrupt` | `session_id`, `profile: CtrlCProfile` | `interrupted { session }` | |
+| `adopt_kill` | `pids: Vec<u32>`, `reason: Option<String>` | `adopt_kill_ack { accepted }` | **Fire-and-forget.** Acked *before* the kill so the CLI's Ctrl+C-to-shell latency stays sub-100 ms. |
+| `gc` | `payload: GcOp` | `gc { reply }` | Served by the registry worker thread (`gc_service.rs`). One variant wraps every `gc.*` op so wire format and dispatch share a definition. |
+| `shutdown` | — | `shutdown_ack { pid }` | `clud daemon restart`. The daemon exits after replying. |
+| `reap_orphans` | — | `reap_orphans_ack { found, reaped }` | **Fire-and-forget**; sweep runs on a background thread, so the ack carries zeros except on the synchronous test path. See [process-reaping.md](process-reaping.md). |
+| `metrics` | — | `metrics { pid, cpu_pct }` | Ambient status without scraping dashboard JSON. |
+| `proc_snapshot` | `include_dead_since_ms: u64` | `proc_snapshot { snapshot }` | The daemon's most recent **cached** process-tree sample. The daemon must not enumerate synchronously for this request; callers get whatever the background sampler last wrote. This is the seam #687 builds on — it already exists. |
 
-**Daemon → client** (`DaemonResponse`, `types.rs:111`): `created` / `session` / `terminated` each carry one `SessionSnapshot`; `error { message: String }` is the catch-all failure.
+`DaemonResponse` (`types.rs:276`) is the twelve replies above plus
+`error { message: String }`, the catch-all failure.
 
-**Client → worker** (`WorkerClientMessage`, `types.rs:120`):
+### Client → worker
+
+`WorkerClientMessage` (`types.rs:557`):
 
 | `"op"` | Payload | Notes |
 |---|---|---|
-| `attach` | — | Mandatory handshake; any other first message gets `error "expected attach handshake"` and the connection drops (`worker.rs:460`). |
-| `input` | `data_b64: String`, `submit: bool` | Base64-encoded bytes. `submit` is the "press Enter after this paste" hint forwarded to the PTY's `write_impl`. |
-| `resize` | `rows: u16`, `cols: u16` | Forwarded to the PTY and to the server-side `TerminalCapture` parser (`worker.rs:527`-`530`). |
-| `interrupt` | — | Subprocess gets `kill()`, PTY gets `send_interrupt_impl()` (`types.rs:150`-`159`). |
+| `attach` | `terminal: Option<TerminalCapabilities>`, `rows: Option<u16>`, `cols: Option<u16>` | Mandatory handshake; any other first message gets `error "expected attach handshake"` and the connection drops. |
+| `input` | `data_b64: String`, `submit: bool` | Base64 bytes. `submit` is the "press Enter after this paste" hint forwarded to the PTY's `write_impl`. |
+| `resize` | `rows: u16`, `cols: u16` | Forwarded to the PTY and to the server-side `TerminalCapture` parser. |
+| `interrupt` | `profile: Option<CtrlCProfile>` | Subprocess gets `kill()`, PTY gets `send_interrupt_impl()`. |
 
-**Worker → client** (`WorkerServerMessage`, `types.rs:129`):
+### Worker → client
+
+`WorkerServerMessage` (`types.rs:582`):
 
 | `"op"` | Payload | Notes |
 |---|---|---|
-| `attached` | `session: SessionSnapshot` | Always the first message, contains the snapshot at attach time. |
-| `output` | `data_b64: String` | Stream of base64-encoded chunks; on PTY sessions the first one is the synthesized repaint. |
-| `exited` | `exit_code: i32` | Terminal: writer thread breaks, client returns this code. |
+| `attached` | `session: Box<SessionSnapshot>` | Always first; the snapshot at attach time. |
+| `output` | `data_b64: String` | Base64 chunks; on PTY sessions the first is the synthesized repaint. |
+| `exited` | `exit_code: i32` | Terminal: the writer thread breaks and the client returns this code. |
 | `error` | `message: String` | Either pre-handshake (no attach) or during attach (slot taken). |
 
-Forward-compat: `SessionSnapshot` has `#[serde(default)]` on every non-essential field (`types.rs:48`-`74`) and `WorkerLaunchSpec.backlog_bytes` is `Option<usize>` (`types.rs:97`) precisely so older daemons can read spec files written by newer clients without crashing. Add fields the same way; do not rename or retag existing variants.
+Forward-compat: `SessionSnapshot` (`types.rs:80`) has `#[serde(default)]` on every non-essential field and `WorkerLaunchSpec.backlog_bytes` is `Option<usize>` (`types.rs:206`) precisely so older daemons can read spec files written by newer clients without crashing. Add fields the same way; do not rename or retag existing variants.
 
 ## Daemon lifecycle
 
-`run_daemon` (`server.rs:23`):
+`run_daemon` (`server.rs:56`):
 
 1. `fs::create_dir_all(state_dir)`.
-2. `cleanup_stale_state` (`client.rs:96`) — mark snapshots whose `worker_pid` is dead as `exit_code = Some(137)`, GC dangling spec files older than 10s (the grace window for slow worker startup), drop `daemon.json` if its pid is dead.
-3. Bind `TcpListener` on `127.0.0.1:0`, write `DaemonInfo { pid, port }` to `daemon.json` (`server.rs:31`-`52`).
-4. Accept loop spawns one thread per connection running `handle_daemon_connection` (`server.rs:68`). Each connection reads exactly one `DaemonRequest`, dispatches, writes one `DaemonResponse`, closes.
-5. Worker handles are stored in `HashMap<String, Arc<NativeProcess>>` and reaped by `reap_worker_when_done` (`server.rs:206`), which `wait()`s in a thread and removes the entry once the child exits.
+2. `cleanup_stale_state` (`client.rs:457`) — mark snapshots whose `worker_pid` is dead as `exit_code = Some(137)`, GC dangling spec files older than 10s (the grace window for slow worker startup), drop `daemon.json` if its pid is dead.
+3. Bind the frame-lane endpoint (`start_frame_lane`, `rp_broker/frame_lane.rs:153`) and a `TcpListener` on `127.0.0.1:0`, then write `DaemonInfo { pid, port, dashboard_port }` to `daemon.json` (`server.rs:157`). The frame lane additionally writes `daemon-identity.json`, which is what lets a client skip the Hello handshake.
+4. The TCP accept loop spawns one thread per connection running `handle_daemon_connection` (`server.rs:307`); that lane reads exactly one `DaemonRequest`, dispatches, writes one `DaemonResponse`, closes. The frame lane's `serve_connection` (`rp_broker/frame_lane.rs:236`) instead loops, serving frames until the peer hangs up.
+5. Worker handles are stored in `HashMap<String, Arc<NativeProcess>>` and reaped by `reap_worker_when_done` (`server.rs:761`), which `wait()`s in a thread and removes the entry once the child exits.
 6. There is no graceful shutdown — the daemon exits when the process is killed. State on disk is the source of truth; a restarted daemon picks up where the previous one left off (modulo the stale-state cleanup pass).
 
 ## Worker lifecycle
 
-`run_worker` (`worker.rs:28`):
+`run_worker` (`worker.rs:32`):
 
 1. Load `WorkerLaunchSpec` from the spec file the daemon wrote. If `repeat_run_command` is set, divert to `run_repeat_worker` (`worker.rs:171`) — a polling loop that re-spawns `clud loop` once per `repeat_interval_secs`, never accepts attach connections.
 2. Bind a non-blocking `TcpListener` on `127.0.0.1:0` for attaching clients; record `worker_port`.
@@ -164,7 +235,7 @@ Every `push_output` chunk goes to three sinks (`worker_shared.rs:299`-`331`): th
 
 ## Failure modes
 
-**Daemon dead, client wants to start a session.** `ensure_daemon` (`client.rs:18`) probes the port from `daemon.json`; on failure it runs `cleanup_stale_state` to drop the stale `daemon.json` and spawns a fresh `__daemon`. The client retries up to 5s for the new listener to come up; longer than 5s returns `io::ErrorKind::TimedOut`.
+**Daemon dead, client wants to start a session.** `ensure_daemon` (`client.rs:43`) probes the port from `daemon.json`; on failure it runs `cleanup_stale_state` to drop the stale `daemon.json` and spawns a fresh `__daemon`. The client retries up to 5s for the new listener to come up; longer than 5s returns `io::ErrorKind::TimedOut`.
 
 **Daemon dead, worker still running.** `run_worker`'s watchdog thread polls `pid_is_alive(daemon_pid)` every 200ms (`worker.rs:114`-`132`). On daemon death it calls `runtime.cleanup_tree()` (Term, 150ms sleep, Kill across every descendant via `signal_process_tree`), broadcasts exit 137, persists the snapshot, removes the spec file, and the worker process exits. The orphaned session shows up in the next `clud list` only after a daemon restart triggers `cleanup_stale_state` — but the snapshot already has `exit_code = Some(137)`.
 
@@ -190,4 +261,4 @@ Every `push_output` chunk goes to three sinks (`worker_shared.rs:299`-`331`): th
 - `session-lifecycle.md` — `TerminalCapture` parser, PTY pump, input injection, the exact bytes the repaint payload contains.
 - `gc-and-registry.md` — the GC half of the same daemon process: `~/.clud/data.redb` is owned by an in-process registry-worker thread and served via the `DaemonRequest::Gc { payload }` variant on this same TCP listener (issue #135 / DD-012).
 - `launch-plan.md` — `LaunchPlan` is the inner payload that `WorkerLaunchSpec` wraps and ships to the worker.
-- `../DESIGN_DECISIONS.md` — rationale for TCP+JSON over named pipes / Unix sockets, single-binary re-entry over a separate daemon executable, and atomic file writes over a real database.
+- `../DESIGN_DECISIONS.md` — rationale for single-binary re-entry over a separate daemon executable, and atomic file writes over a real database. The original "TCP+JSON over named pipes / Unix sockets" decision has been **reversed**: the broker frame lane is a named pipe on Windows and a Unix socket elsewhere, and it is tried first. See DD-025.
