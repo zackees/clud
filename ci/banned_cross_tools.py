@@ -113,13 +113,14 @@ BANNED_ALWAYS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"""(?:^|[|&;(]|\bRUN\s|\brun:\s*)\s*"""
             # Wrappers that take a command as their argument: `sudo cross
-            # build`, `env RUSTFLAGS=-C cross build`, `xargs cross build`,
-            # `timeout 60 cross build`. Their own arguments are bounded at
-            # three, and `time`/`nice`/`command` are deliberately absent:
-            # unbounded filler after an ordinary English word matches prose
-            # such as `time cross build numbers tracked here`.
-            r"""(?:(?:sudo|env|xargs|timeout|exec)\s+"""
-            r"""(?:[-\w=./]+\s+){0,3})?"""
+            # build`, `env A=1 B=2 C=3 D=4 cross build`, `xargs -n1 cross
+            # build`, `sudo -E env A=1 cross build`. The group repeats because
+            # wrappers stack, and each may carry up to six arguments of its
+            # own — `{0,3}` missed four env assignments, an ordinary CI line.
+            # The filler stays bounded rather than `.*`: after an ordinary
+            # English word such as `time`, unbounded filler matches prose.
+            r"""(?:(?:sudo|env|xargs|timeout|exec|nice|command|time)\s+"""
+            r"""(?:[-\w=./]+\s+){0,6}){0,2}"""
             r"""["']?cross["',\s]+"""
             r"""(?:\+\S+["',\s]+)?(?:build|test|run|check|rustc|bench|clippy)\b"""
         ),
@@ -182,6 +183,19 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "taiki-e/install-action: cargo-zigbuild",
         re.compile(
             r"taiki-e/install-action[^\n]*(?:\n(?!\s*-\s)[^\n]*){0,4}?\bcargo-zigbuild\b"
+        ),
+    ),
+    # `tool:` written as a YAML block sequence puts the tool name on a `- `
+    # line, which the step-boundary lookahead above deliberately refuses to
+    # cross. The item must be nothing but the tool name, so a following
+    # `- run: cargo-xwin build` — a separate step, and a separate violation —
+    # is not swallowed by an install match that started above it.
+    (
+        "taiki-e/install-action: tool list item",
+        re.compile(
+            r"taiki-e/install-action[^\n]*(?:\n(?!\s*-\s)[^\n]*){0,4}?"
+            r"\n\s*-\s*cargo-(?:xwin|zigbuild)[\w.@=]*[ \t]*$",
+            re.MULTILINE,
         ),
     ),
     ("pip install ziglang", re.compile(r"pip3?\s+install\s+[^\n]*\bziglang\b")),
@@ -325,6 +339,14 @@ ALLOW_MARKER = "cross-lint: allow"
 #: closing quote is what distinguishes them.
 RUST_CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\\n])'")
 
+#: The opening delimiter of a raw string: `r"`, `r#"`, `br##"`, and so on.
+#: Backslash is not an escape inside one, so `r"\\?\"` ends at its own closing
+#: quote — a scanner that honours the escape reads straight past it and treats
+#: the rest of the file as string. Five such literals live in this repo
+#: (`r"\\?\"`, `r"\\?\UNC\"` under `hook_health/`), and they left a desynced
+#: region in which a banned tool would have gone unreported.
+RUST_RAW_STRING = re.compile(r'b?r(#*)"')
+
 
 def _strip_rust_comments(text: str) -> str:
     """Blank out Rust comments, character for character.
@@ -392,6 +414,16 @@ def _strip_rust_comments(text: str) -> str:
             if char == '"':
                 in_string = False
             index += 1
+        elif (
+            char in "rb"
+            and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_"))
+            and (raw := RUST_RAW_STRING.match(text, index))
+        ):
+            # A raw string: no escapes inside, so it ends at the first `"`
+            # followed by as many `#` as it opened with.
+            closing = '"' + "#" * len(raw.group(1))
+            end = text.find(closing, raw.end())
+            index = length if end == -1 else end + len(closing)
         elif char == "'" and (literal := RUST_CHAR_LITERAL.match(text, index)):
             # A char literal, not a lifetime. Consumed whole so that `'"'`
             # cannot open a string that was never opened.

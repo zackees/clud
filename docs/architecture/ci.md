@@ -227,8 +227,15 @@ every cheap regex is wrong somewhere that matters: Rust block comments **nest**,
 a `//` inside a URL must survive (a link to `cargo-xwin` is a real reference and
 should be reported), and a stripper with no string awareness turns `let open =
 "/*";` … `let close = "*/";` into a one-line bypass for everything between them.
-The scanner blanks comment characters in place, so offsets and line numbers are
-unchanged by construction. A module docstring is prose no stripper sees, so a
+It also understands char literals (`let q = '"';` must not flip its phase, while
+`&'a str` is a lifetime, not a delimiter) and **raw strings** — `r"\\?\"` has no
+escapes, so a scanner honouring that backslash reads past the closing quote and
+treats the rest of the file as string, hiding every violation after it. Five
+such literals live under `hook_health/`, and they desynced the scanner for two
+review rounds without any fixture noticing; the invariant is now asserted over
+every Rust file the linter walks, not just over fixtures. The scanner blanks
+comment characters in place, so offsets and line numbers are unchanged by
+construction. A module docstring is prose no stripper sees, so a
 line carrying `cross-lint: allow` is skipped outright — read from the *original*
 line, so a trailing `// cross-lint: allow` in Rust is not itself blanked before
 it can be seen. It is

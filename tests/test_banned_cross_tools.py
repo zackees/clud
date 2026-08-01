@@ -72,6 +72,17 @@ REJECTED: list[tuple[str, str, str]] = [
     ("env-prefixed cross", "env RUSTFLAGS=-C cross build", ".sh"),
     ("xargs cross", "xargs cross build", ".sh"),
     ("timeout-wrapped cross", "timeout 60 cross build", ".sh"),
+    # Wrappers stack, and carry more than three arguments of their own. A
+    # tighter bound was briefly used to kill a prose false positive that this
+    # suite had invented and that existed nowhere in the tree — the trade goes
+    # the other way: `time cross build` as prose and as an invocation are
+    # textually identical, and the invocation is the one that costs CI time.
+    # Prose that needs to say it can carry the allow marker.
+    ("env with four assignments", "env A=1 B=2 C=3 D=4 cross build", ".sh"),
+    ("stacked wrappers", "sudo -E env A=1 B=2 cross build", ".sh"),
+    ("xargs with its own flags", "xargs -n1 -P4 -t cross build", ".sh"),
+    ("time-wrapped cross", "time cross build --target aarch64-apple-darwin", ".sh"),
+    ("nice-wrapped cross", "nice cross build --release", ".sh"),
     # The argv form must reach the same verbs as the shell form, with flags or
     # a toolchain override in between.
     ("cross argv with a toolchain", '["cross", "+nightly", "build"]', ".py"),
@@ -102,6 +113,16 @@ REJECTED: list[tuple[str, str, str]] = [
     (
         "a cargo-xwin string after an escaped-quote char literal",
         "let q = '\\'';\nlet u = \"cargo xwin build\";",
+        ".rs",
+    ),
+    # A raw string has no escapes, so `r"\\?\"` ends at its own closing quote.
+    # A scanner that honours the backslash reads past it and treats the rest
+    # of the file as string — hiding every violation after it. Five such
+    # literals are in this repo today.
+    (
+        "a cargo-xwin URL after a Windows raw-string path prefix",
+        'fn f(p: &str) -> bool { p.starts_with(r"\\\\?\\") }\n'
+        'let u = "https://github.com/rust-cross/cargo-xwin";',
         ".rs",
     ),
     (
@@ -348,10 +369,6 @@ ACCEPTED: list[tuple[str, str, str]] = [
     # A lifetime is not a char literal; treating every `'` as a delimiter
     # would desynchronise the scanner on ordinary Rust.
     ("a lifetime followed by a comment", "fn f<'a>(x: &'a str) {} // cargo xwin", ".rs"),
-    # Ordinary English words that happen to precede `cross build`. Unbounded
-    # filler after a wrapper word matched all of these.
-    ("time-prefixed prose", "time cross build numbers tracked here.", ".py"),
-    ("nice-prefixed prose", "        nice cross build docs", ".yml"),
     ("a Rust inner doc comment", "//! cargo xwin build is banned", ".rs"),
     # The marker is read from the original line, so a trailing `//` marker is
     # not itself blanked by the comment scanner before it can be seen.
@@ -487,6 +504,40 @@ def test_exotic_line_breaks_do_not_crash_the_linter(text: str):
     traceback instead of a lint message. `bash lint` and CI's static job both
     hard-failed on it."""
     scan_text(text, ".rs")
+
+
+def test_the_scanner_holds_against_every_rust_file_in_the_tree():
+    """Fixtures only prove the shapes someone thought of. Raw strings desynced
+    the scanner on real source for two review rounds without any fixture
+    noticing, so run the invariant over every `.rs` file the linter walks."""
+    from ci.banned_cross_tools import _iter_files
+
+    checked = 0
+    for path in _iter_files():
+        if path.suffix != ".rs":
+            continue
+        source = path.read_text(encoding="utf-8", errors="replace")
+        stripped = _strip_rust_comments(source)
+        assert len(stripped) == len(source), f"{path} changed length"
+        assert stripped.count("\n") == source.count("\n"), f"{path} changed line count"
+        checked += 1
+    assert checked > 50, f"expected the walk to reach the Rust sources, saw {checked}"
+
+
+def test_a_tool_written_as_a_yaml_block_sequence_is_caught():
+    """`tool:` may be a block sequence, which puts the name on a `- ` line —
+    the one thing the step-boundary lookahead refuses to cross. Spelled with
+    cargo-zigbuild because cargo-xwin would be caught by the unconditional
+    rule regardless, so this would pass without the rule under test."""
+    text = "\n".join(
+        [
+            "      - uses: taiki-e/install-action@v2",
+            "        with:",
+            "          tool:",
+            "            - cargo-zigbuild",
+        ]
+    )
+    assert scan_text(text, ".yml")
 
 
 def test_an_install_step_does_not_silence_the_step_after_it():
