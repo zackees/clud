@@ -594,6 +594,18 @@ def test_quoted_and_long_tool_lists_are_caught(items: list[str]):
     assert scan_text(text, ".yml")
 
 
+def test_a_utf8_bom_does_not_hide_the_first_line():
+    """U+FEFF is a format character, not whitespace, so a BOM sits between the
+    start of the file and the first command and defeats every `^`-anchored
+    rule on line 1. Windows PowerShell writes one by default — this was found
+    by planting a real file, not by a fixture, because the fixtures had no way
+    to acquire a BOM."""
+    line = "env A=1 B=2 C=3 D=4 cross build --target x86_64-apple-darwin"
+    assert scan_text(line, ".sh"), "sanity: the line is a violation"
+    assert scan_text("﻿" + line, ".sh"), "a BOM must not hide it"
+    assert scan_text("﻿cross build --target x86_64-apple-darwin", ".sh")
+
+
 def test_an_unterminated_raw_string_reports_a_lost_sync():
     """The raw-string branch is the one whose bug motivated `ended_clean`, so
     it must not be the one branch that cannot signal a problem: running to EOF

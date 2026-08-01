@@ -512,6 +512,12 @@ def scan_text(text: str, suffix: str = ".py") -> list[tuple[int, str, str]]:
     Pure so the fixtures can exercise it directly, without writing files.
     """
     violations: list[tuple[int, str, str]] = []
+    # A UTF-8 BOM is not whitespace (U+FEFF is a format character), so it sits
+    # between the start of the file and the first command and defeats every
+    # `^`-anchored rule on line 1 — `cross build --target …` as the opening
+    # line of a script read as clean. Windows PowerShell writes a BOM by
+    # default, so this is what a script authored there actually looks like.
+    text = text.lstrip("﻿")
     # The marker is read from the *original* line. Blanking Rust comments
     # first would erase a marker written as a trailing `// cross-lint: allow`,
     # which is where anyone would naturally put one.
@@ -606,7 +612,9 @@ def main() -> int:
         if rel in EXEMPT_PATHS:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            # `utf-8-sig` drops a BOM if present and behaves as plain UTF-8
+            # otherwise. `scan_text` strips one too, for its direct callers.
+            text = path.read_text(encoding="utf-8-sig")
         except (UnicodeDecodeError, OSError):
             continue
         for number, _tool, reason in scan_text(text, path.suffix):
