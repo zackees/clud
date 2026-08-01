@@ -200,11 +200,20 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # window instead of being absorbed into this install.
         #
         # `[^\S\n]` rather than `[ \t]` so a CRLF file's trailing `\r` does
-        # not block the end-of-line anchor.
+        # not block the end-of-line anchor. Both name positions accept
+        # optional quotes: YAML permits `- "cargo-zigbuild"`, and without that
+        # a single quote made the tool invisible — with no fallback, since the
+        # conditional zigbuild rule needs a triple on the line and a list item
+        # names none. A quoted *earlier* item likewise blocked the skip.
+        #
+        # Known trade: an earlier item that is itself a banned name (say
+        # `- osxcross`) is inside the span, so it is suppressed in favour of
+        # the install finding. The file is still reported, just by the
+        # root-cause rule rather than by both.
         re.compile(
             r"taiki-e/install-action[^\n]*(?:\n(?!\s*-\s)[^\n]*){0,4}?"
-            r"(?:\n\s*-\s*[\w.@=+-]+[^\S\n]*$){0,5}?"
-            r"\n\s*-\s*cargo-(?:xwin|zigbuild)[\w.@=]*[^\S\n]*$",
+            r"""(?:\n\s*-\s*["']?[\w.@=+-]+["']?[^\S\n]*$){0,12}?"""
+            r"""\n\s*-\s*["']?cargo-(?:xwin|zigbuild)[\w.@=]*["']?[^\S\n]*$""",
             re.MULTILINE,
         ),
     ),
@@ -410,6 +419,7 @@ def _scan_rust(text: str) -> tuple[str, bool]:
     depth = 0
     in_string = False
     in_line_comment = False
+    unterminated_raw = False
     while index < length:
         char = text[index]
         following = text[index + 1] if index + 1 < length else ""
@@ -448,7 +458,14 @@ def _scan_rust(text: str) -> tuple[str, bool]:
             # followed by as many `#` as it opened with.
             closing = '"' + "#" * len(raw.group(1))
             end = text.find(closing, raw.end())
-            index = length if end == -1 else end + len(closing)
+            if end == -1:
+                # Unterminated. Report it as a lost sync: this is the one
+                # branch whose bug motivated `ended_clean`, so it must not be
+                # the one branch that cannot signal a problem.
+                unterminated_raw = True
+                index = length
+            else:
+                index = end + len(closing)
         elif char == "'" and (literal := RUST_CHAR_LITERAL.match(text, index)):
             # A char literal, not a lifetime. Consumed whole so that `'"'`
             # cannot open a string that was never opened.
@@ -466,7 +483,7 @@ def _scan_rust(text: str) -> tuple[str, bool]:
             index += 2
         else:
             index += 1
-    return "".join(out), not (depth or in_string)
+    return "".join(out), not (depth or in_string or unterminated_raw)
 
 
 def _strip_comment(line: str, suffix: str) -> str:

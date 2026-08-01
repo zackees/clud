@@ -573,6 +573,35 @@ def test_a_tool_list_is_caught_behind_earlier_items():
     assert scan_text(text, ".yml")
 
 
+@pytest.mark.parametrize(
+    "items",
+    [
+        ['            - "cargo-zigbuild"'],
+        ["            - 'cargo-zigbuild'"],
+        ['            - "cargo-nextest"', "            - cargo-zigbuild"],
+        [f"            - tool{n}" for n in range(6)] + ["            - cargo-zigbuild"],
+    ],
+    ids=["quoted", "single-quoted", "quoted-earlier-item", "seven-items"],
+)
+def test_quoted_and_long_tool_lists_are_caught(items: list[str]):
+    """YAML permits quoting a sequence item, and a `tool:` list may be long.
+    Both spellings were one character away from silence: `cargo-zigbuild` has
+    no fallback rule, since the conditional rule needs a triple on the line
+    and a list item names none."""
+    text = "\n".join(
+        ["      - uses: taiki-e/install-action@v2", "        with:", "          tool:", *items]
+    )
+    assert scan_text(text, ".yml")
+
+
+def test_an_unterminated_raw_string_reports_a_lost_sync():
+    """The raw-string branch is the one whose bug motivated `ended_clean`, so
+    it must not be the one branch that cannot signal a problem: running to EOF
+    without a terminator means the scan lost sync."""
+    assert _scan_rust('let s = r"never closed')[1] is False
+    assert _scan_rust('let s = r#"never closed')[1] is False
+
+
 def test_a_tool_list_item_matches_on_a_crlf_file():
     """`$` matches before `\\n`, so a trailing `\\r` sits between the tool name
     and the anchor. `Path.read_text` normalises it away in `main()`, but a
