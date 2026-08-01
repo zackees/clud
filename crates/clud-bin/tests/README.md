@@ -43,3 +43,4 @@ soldr cargo test -p clud --test wedge_watchdog_e2e -- --ignored --nocapture --te
 ```
 
 All `cargo`/`rustc`/`rustfmt` invocations must go through `soldr` (see root `CLAUDE.md`). The mock-agent is auto-built on first run via `cargo build -p mock-agent --message-format json`.
+- `tier_refresh_probe.rs` — Ignored #687 premise probe. Times `ProcessesToUpdate::All` against `Some([pid])` and against clud's direct `OpenProcess`/`GetProcessTimes` path. **On Windows a targeted sysinfo refresh is not cheaper than the host walk** (ratio ~1.0), while the direct per-PID call is ~4 orders of magnitude cheaper — which is why #687's `T1 / Pids(set)` targets must split into *identity* (direct OS call) versus *topology* (needs `parent_pid`, hence the daemon service). Platform-specific: re-run before trusting the conclusion on Linux/macOS.
