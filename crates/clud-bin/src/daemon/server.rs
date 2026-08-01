@@ -182,9 +182,21 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let client_leases = ClientLeaseRegistry::default();
     let mut last_client_lease_prune = Instant::now();
     let shutdown_requested = Arc::new(AtomicBool::new(false));
+    // #548: one host environment pass, shared. The proc sampler and the
+    // periodic orphan sweep both need the `RUNNING_PROCESS_ORIGINATOR` /
+    // daemon-marker populations, and each used to take its own full-host
+    // `ReadProcessMemory` walk of every process's PEB on its own cadence.
+    // Neither owns the cache: whichever finds it older than its own tolerance
+    // refreshes it, which matters because a parked sampler skips its scan
+    // entirely (#720) and leaves the sweep as the only scanner on an idle box.
+    let env_scans = Arc::new(crate::process_scan::EnvScanCache::new());
     let proc_sampler = if runtime_config.host_scans_enabled {
         daemon_events::log_event(state_dir, "proc_sampler_started", []);
-        spawn_proc_sampler(state_dir.to_path_buf(), Arc::clone(&shutdown_requested))
+        spawn_proc_sampler(
+            state_dir.to_path_buf(),
+            Arc::clone(&shutdown_requested),
+            Arc::clone(&env_scans),
+        )
     } else {
         ProcSamplerHandle::empty(DEFAULT_SAMPLE_INTERVAL_MS)
     };
@@ -214,7 +226,11 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // promptly observed.
     if runtime_config.host_scans_enabled {
         daemon_events::log_event(state_dir, "orphan_sweeper_started", []);
-        spawn_orphan_sweeper(state_dir.to_path_buf(), Arc::clone(&shutdown_requested));
+        spawn_orphan_sweeper(
+            state_dir.to_path_buf(),
+            Arc::clone(&shutdown_requested),
+            Arc::clone(&env_scans),
+        );
     }
 
     // #547: publish the CPU-alert state instead of answering one poll per open
@@ -951,7 +967,11 @@ fn orphan_sweep_grace_from(from_settings: Option<u64>) -> Duration {
     Duration::from_millis(ms)
 }
 
-fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<AtomicBool>) {
+fn spawn_orphan_sweeper(
+    state_dir: std::path::PathBuf,
+    shutdown_requested: Arc<AtomicBool>,
+    env_scans: Arc<crate::process_scan::EnvScanCache>,
+) {
     // Both knobs are read once at bringup, like every other daemon runtime
     // setting: a sweep that re-read settings each tick would put a file read on
     // the idle path this sweep is already careful about (#542).
@@ -978,7 +998,17 @@ fn spawn_orphan_sweeper(state_dir: std::path::PathBuf, shutdown_requested: Arc<A
                 if shutdown_requested.load(Ordering::SeqCst) {
                     return;
                 }
-                run_orphan_sweep(&state_dir, "periodic", None, Some((&mut first_seen, grace)));
+                // #548: tolerate a scan up to one sweep interval old. The
+                // sampler refreshes on its own tighter cadence when active,
+                // so in that state this reuses its pass; on a parked daemon
+                // the sampler scans not at all and this is the only pass.
+                run_orphan_sweep(
+                    &state_dir,
+                    "periodic",
+                    None,
+                    Some((&mut first_seen, grace)),
+                    Some((&env_scans, interval)),
+                );
             }
         });
 }
@@ -988,7 +1018,10 @@ fn spawn_orphan_reap_once(
     trigger: &'static str,
     request_id: Option<u64>,
 ) {
-    thread::spawn(move || run_orphan_sweep(&state_dir, trigger, request_id, None));
+    // `None` for the scan cache is deliberate (#548): an explicit `clud slay`
+    // / `ReapOrphans` request means "reap what is there *now*", so it takes a
+    // fresh host pass rather than reusing one the periodic sweep warmed.
+    thread::spawn(move || run_orphan_sweep(&state_dir, trigger, request_id, None, None));
 }
 
 /// Decide which candidates clear the grace window, and refresh `first_seen`.
@@ -1027,11 +1060,19 @@ fn write_orphan_sweep_sentinel(state_dir: &Path, found: usize, reaped: usize) {
     let _ = std::fs::write(orphan_sweep_sentinel_path(state_dir), line);
 }
 
+/// Run one orphan sweep.
+///
+/// `env_scans` is the shared host-environment cache and the caller's staleness
+/// tolerance (#548). `None` means "take a fresh pass" — used by explicit
+/// `clud slay` / `ReapOrphans` requests, where the operator asked for an
+/// answer *now* and reusing a cached population would be the wrong trade. Only
+/// the periodic sweep shares.
 fn run_orphan_sweep(
     state_dir: &Path,
     trigger: &'static str,
     request_id: Option<u64>,
     grace: Option<(&mut HashMap<u32, Instant>, Duration)>,
+    env_scans: Option<(&Arc<crate::process_scan::EnvScanCache>, Duration)>,
 ) {
     daemon_events::log_event(
         state_dir,
@@ -1062,15 +1103,23 @@ fn run_orphan_sweep(
             let spared = super::handover_registry::load(state_dir);
             let now = Instant::now();
             let mut observed: HashSet<u32> = HashSet::new();
-            let (outcome, observed_origins) =
-                orphan_reaper::reap_orphans_filtered_sparing(&opts, &spared, &mut |pid| {
-                    observed.insert(pid);
-                    let admitted = grace_admits(first_seen, pid, now, grace_window);
-                    if !admitted {
-                        deferred.push(pid);
-                    }
-                    admitted
-                });
+            let mut admit = |pid: u32| {
+                observed.insert(pid);
+                let admitted = grace_admits(first_seen, pid, now, grace_window);
+                if !admitted {
+                    deferred.push(pid);
+                }
+                admitted
+            };
+            let (outcome, observed_origins) = match env_scans {
+                Some((cache, max_age)) => orphan_reaper::reap_orphans_from_scan(
+                    (*cache.get("CLUD", max_age)).clone(),
+                    &opts,
+                    &spared,
+                    &mut admit,
+                ),
+                None => orphan_reaper::reap_orphans_filtered_sparing(&opts, &spared, &mut admit),
+            };
             // Drop bookkeeping for PIDs that are gone, so a long-lived daemon
             // doesn't accumulate an entry per orphan it has ever seen.
             first_seen.retain(|pid, _| observed.contains(pid));

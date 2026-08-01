@@ -41,6 +41,9 @@
 //! too much, never kill something it should not have.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -143,6 +146,100 @@ pub fn scan_env(tool: &str) -> EnvScan {
     let mut system = System::new();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, env_refresh());
     classify_scan(&system, tool)
+}
+
+/// A shared, age-bounded cache for [`scan_env`] (#548).
+///
+/// The daemon has two independent consumers of the host environment pass — the
+/// proc sampler (annotating `ProcSnapshot` rows) and the periodic orphan sweep
+/// (finding reap candidates) — running on different threads and different
+/// cadences. Before this they each did their own full-host `ReadProcessMemory`
+/// walk of every process's PEB, which is the single most expensive thing the
+/// daemon does and is `O(host processes)` rather than `O(clud activity)`.
+///
+/// This is deliberately **not** "the sampler owns it and the sweep borrows".
+/// Ownership would break in the case that matters most: since #720 a parked
+/// sampler skips its scan entirely, so on a fully idle daemon the sweep is the
+/// *only* scanner. Either party refreshes when it finds the cache older than
+/// its own tolerance, and both read the same value — so the steady state is
+/// one pass per whichever cadence is tighter, never two.
+///
+/// # Staleness is safe on the reap path
+///
+/// The sweep's candidates come from this cache, so they can be up to one
+/// tolerance window old. That cannot cause a wrong kill:
+/// `process_tree::kill_tree_filtered_automatic` takes its **own fresh**
+/// topology snapshot at kill time and re-derives every target's
+/// `(pid, start_time)` from it, requiring exact equality and rejecting
+/// `UNKNOWN_START_TIME` — for the root *and*, since #688, every descendant.
+/// A stale entry can therefore only name a candidate that fails that gate, so
+/// the failure mode is a *missed* orphan, which the next sweep catches.
+pub struct EnvScanCache {
+    inner: Mutex<Option<CachedScan>>,
+    /// Full host passes actually performed. The number #548 exists to drive
+    /// down, and the only way a test can tell sharing from duplication.
+    passes: AtomicU64,
+}
+
+struct CachedScan {
+    at: Instant,
+    scan: Arc<EnvScan>,
+}
+
+impl EnvScanCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+            passes: AtomicU64::new(0),
+        }
+    }
+
+    /// A scan no older than `max_age`, refreshing only if the cached one is
+    /// older than that (or absent).
+    ///
+    /// `max_age` is the *caller's* tolerance, not a property of the cache: the
+    /// sampler wants ~its scan interval, the sweep wants ~its sweep interval.
+    /// Whoever is tighter ends up doing the refresh, and the other reuses it.
+    pub fn get(&self, tool: &str, max_age: Duration) -> Arc<EnvScan> {
+        // Held across the scan on purpose: two threads arriving on a cold
+        // cache should produce one pass, not two. The pass is the expensive
+        // thing this type exists to avoid duplicating, so a brief wait is the
+        // cheaper side of the trade.
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = guard.as_ref() {
+            if cached.at.elapsed() <= max_age {
+                return Arc::clone(&cached.scan);
+            }
+        }
+        self.passes.fetch_add(1, Ordering::Relaxed);
+        let scan = Arc::new(scan_env(tool));
+        *guard = Some(CachedScan {
+            at: Instant::now(),
+            scan: Arc::clone(&scan),
+        });
+        scan
+    }
+
+    /// How many full host passes this cache has performed.
+    pub fn passes(&self) -> u64 {
+        self.passes.load(Ordering::Relaxed)
+    }
+
+    /// Seed the cache without scanning. Test-only.
+    #[cfg(test)]
+    pub fn seed_for_test(&self, scan: EnvScan, at: Instant) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(CachedScan {
+            at,
+            scan: Arc::new(scan),
+        });
+    }
+}
+
+impl Default for EnvScanCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The pure half of [`scan_env`], over an already-refreshed snapshot.
@@ -503,5 +600,81 @@ mod tests {
             assert_eq!(tagged.identity().pid, tagged.pid);
             assert_eq!(tagged.identity().start_time, tagged.start_time);
         }
+    }
+
+    // #548: the shared cache. These use `seed_for_test` so they assert the
+    // sharing policy without paying for a real host PEB walk per case.
+
+    fn tagged(pid: u32) -> TaggedProcess {
+        TaggedProcess {
+            pid,
+            start_time: 1_700_000_000,
+            name: "x.exe".into(),
+            command: "x".into(),
+            originator: "CLUD:1".into(),
+            parent_pid: 1,
+            parent_alive: false,
+        }
+    }
+
+    fn seeded(cache: &EnvScanCache, age: Duration) {
+        let mut scan = EnvScan::default();
+        scan.tagged.push(tagged(4321));
+        cache.seed_for_test(scan, Instant::now() - age);
+    }
+
+    /// The property the issue is about: two consumers on different cadences
+    /// share one pass instead of taking one each.
+    #[test]
+    fn a_second_consumer_within_tolerance_reuses_the_pass() {
+        let cache = EnvScanCache::new();
+        seeded(&cache, Duration::from_secs(5));
+
+        // Sampler-shaped tolerance (30 s) and sweep-shaped tolerance (60 s):
+        // both accept a 5 s-old scan, so neither triggers a host pass.
+        let a = cache.get("CLUD", Duration::from_secs(30));
+        let b = cache.get("CLUD", Duration::from_secs(60));
+
+        assert_eq!(cache.passes(), 0, "a fresh-enough cache must not rescan");
+        assert_eq!(a.tagged.len(), 1);
+        assert_eq!(b.tagged[0].pid, 4321);
+        assert!(Arc::ptr_eq(&a, &b), "both consumers see the same value");
+    }
+
+    /// The tolerance is the *caller's*, not the cache's: a consumer with a
+    /// tighter window than the cached age must get a fresh pass even though a
+    /// laxer consumer would have been satisfied.
+    #[test]
+    fn a_tighter_tolerance_than_the_cached_age_forces_a_pass() {
+        let cache = EnvScanCache::new();
+        seeded(&cache, Duration::from_secs(45));
+
+        // Sweep-shaped (60 s) is satisfied by a 45 s-old scan...
+        let _ = cache.get("CLUD", Duration::from_secs(60));
+        assert_eq!(cache.passes(), 0);
+
+        // ...sampler-shaped (30 s) is not.
+        let _ = cache.get("CLUD", Duration::from_secs(30));
+        assert_eq!(cache.passes(), 1);
+    }
+
+    #[test]
+    fn a_cold_cache_scans_once_and_then_serves_from_memory() {
+        let cache = EnvScanCache::new();
+        let _ = cache.get("__NONEXISTENT_TOOL_TEST__", Duration::from_secs(60));
+        assert_eq!(cache.passes(), 1);
+        let _ = cache.get("__NONEXISTENT_TOOL_TEST__", Duration::from_secs(60));
+        assert_eq!(cache.passes(), 1, "the second call must be served cached");
+    }
+
+    /// A zero tolerance means "I need it now" and must always rescan — this is
+    /// the shape an explicit `clud slay` would use if it ever shared the cache
+    /// (today it bypasses it entirely).
+    #[test]
+    fn a_zero_tolerance_always_rescans() {
+        let cache = EnvScanCache::new();
+        seeded(&cache, Duration::ZERO);
+        let _ = cache.get("__NONEXISTENT_TOOL_TEST__", Duration::ZERO);
+        assert_eq!(cache.passes(), 1);
     }
 }

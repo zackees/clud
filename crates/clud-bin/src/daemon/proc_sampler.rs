@@ -159,6 +159,7 @@ impl ProcSamplerHandle {
 pub(super) fn spawn_proc_sampler(
     state_dir: PathBuf,
     shutdown_requested: Arc<AtomicBool>,
+    env_scans: Arc<crate::process_scan::EnvScanCache>,
 ) -> ProcSamplerHandle {
     let interval_ms = configured_interval_ms();
     let handle = ProcSamplerHandle::empty(interval_ms);
@@ -167,7 +168,7 @@ pub(super) fn spawn_proc_sampler(
     let _ = thread::Builder::new()
         .name("clud-proc-sampler".to_string())
         .spawn(move || {
-            let mut sampler = ProcSampler::new(state_dir, interval_ms);
+            let mut sampler = ProcSampler::new(state_dir, interval_ms, env_scans);
             while !shutdown_requested.load(Ordering::SeqCst) {
                 // #548: decide the cadence *before* sampling, so a parked tick
                 // can skip the host environment scan. This reads the previous
@@ -253,6 +254,9 @@ struct ProcSampler {
     dead_rows: HashMap<u32, ProcRow>,
     originator_cache: HashMap<u32, OriginatorTag>,
     last_originator_scan: Option<Instant>,
+    /// Shared with the periodic orphan sweep so the two never duplicate the
+    /// full-host environment pass (#548).
+    env_scans: Arc<crate::process_scan::EnvScanCache>,
     interval_ms: u64,
     /// Live sessions seen on the last tick, straight from `SessionIndex`
     /// (issue #548). Counting `rows` instead would be wrong: rows cover the
@@ -262,7 +266,11 @@ struct ProcSampler {
 }
 
 impl ProcSampler {
-    fn new(state_dir: PathBuf, interval_ms: u64) -> Self {
+    fn new(
+        state_dir: PathBuf,
+        interval_ms: u64,
+        env_scans: Arc<crate::process_scan::EnvScanCache>,
+    ) -> Self {
         Self {
             state_dir,
             system: System::new(),
@@ -271,6 +279,7 @@ impl ProcSampler {
             dead_rows: HashMap::new(),
             originator_cache: HashMap::new(),
             last_originator_scan: None,
+            env_scans,
             interval_ms,
             last_live_sessions: 0,
         }
@@ -385,9 +394,16 @@ impl ProcSampler {
             return;
         }
         self.last_originator_scan = Some(Instant::now());
-        self.originator_cache = crate::process_scan::scan_env("CLUD")
+        // #548: shared with the periodic orphan sweep. Asking for a scan no
+        // older than our own interval means we refresh only when the sweep has
+        // not already done it for us, and vice versa — one host pass per
+        // whichever cadence is tighter, instead of one each.
+        self.originator_cache = self
+            .env_scans
+            .get("CLUD", Duration::from_millis(ORIGINATOR_SCAN_INTERVAL_MS))
             .tagged
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|process| {
                 (
                     process.pid,
@@ -876,7 +892,11 @@ mod tests {
     #[test]
     fn dead_rows_are_retained_and_marked_frozen() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut sampler = ProcSampler::new(tmp.path().to_path_buf(), DEFAULT_SAMPLE_INTERVAL_MS);
+        let mut sampler = ProcSampler::new(
+            tmp.path().to_path_buf(),
+            DEFAULT_SAMPLE_INTERVAL_MS,
+            Arc::new(crate::process_scan::EnvScanCache::new()),
+        );
         let live = ProcRow {
             pid: 10,
             ppid: Some(1),

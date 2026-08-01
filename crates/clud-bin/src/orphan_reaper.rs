@@ -389,7 +389,35 @@ pub fn reap_orphans_filtered_sparing(
     spared_origins: &std::collections::BTreeSet<u32>,
     admit: &mut dyn FnMut(u32) -> bool,
 ) -> (ReapOutcome, std::collections::BTreeSet<u32>) {
-    let scan = process_scan::scan_env("CLUD");
+    reap_orphans_from_scan(process_scan::scan_env("CLUD"), opts, spared_origins, admit)
+}
+
+/// [`reap_orphans_filtered_sparing`] over a scan the caller already has.
+///
+/// The daemon's periodic sweep shares one host environment pass with the proc
+/// sampler via `process_scan::EnvScanCache` (#548), so it arrives here holding
+/// a scan that may be up to one cache-tolerance window old. The client-exit
+/// path ([`scan_and_report`]) has no sampler and keeps taking its own.
+///
+/// # Why a stale scan is safe here
+///
+/// Candidates selected from a stale scan cannot become wrong *kills*.
+/// [`crate::process_tree::kill_tree_filtered_automatic`] takes its own fresh
+/// topology snapshot at kill time and re-derives every target's
+/// `(pid, start_time)` from it, requiring exact equality and rejecting
+/// `UNKNOWN_START_TIME` — for the root and, since #688, for every descendant.
+/// A recycled PID therefore fails the gate rather than dying in place of the
+/// process that vacated the number.
+///
+/// What staleness *can* do is omit an orphan that appeared after the scan, or
+/// carry one that has since exited. Both resolve on the next sweep, so the
+/// failure mode is bounded latency, not a wrong action.
+pub fn reap_orphans_from_scan(
+    scan: process_scan::EnvScan,
+    opts: &ReapOpts,
+    spared_origins: &std::collections::BTreeSet<u32>,
+    admit: &mut dyn FnMut(u32) -> bool,
+) -> (ReapOutcome, std::collections::BTreeSet<u32>) {
     let observed_origins: std::collections::BTreeSet<u32> =
         scan.tagged.iter().map(|p| p.parent_pid).collect();
     let orphans: Vec<Descendant> = scan
