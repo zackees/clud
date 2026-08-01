@@ -157,6 +157,13 @@ def main(argv: list[str] | None = None) -> int:
         # subprocess.run in a pipe-EOF wait. Tests don't need hot-reload
         # protection, so this is strictly safer for the test harness.
         int_env["CLUD_NO_UNLOCK"] = "1"
+        # NOT setting CLUD_USE_RUNTIME_CACHE here, deliberately. #333 wants a
+        # soak lane for the runtime-cache re-exec hop, but measuring it first
+        # showed the hop breaks **31 integration tests** on Windows: the
+        # non-Unix branch of `reexec_from_cached_binary` spawns-and-waits
+        # instead of `execv`, so it does not preserve the PID, and clud's
+        # identity model keys off PIDs throughout. See
+        # `runtime_cache.rs::reexec_from_cached_binary` and #333.
         int_cmd = [
             sys.executable,
             "-m",
