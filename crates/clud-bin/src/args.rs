@@ -431,6 +431,24 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// The clap name of this subcommand if it is one of the hidden internal
+    /// process roles, else `None`.
+    ///
+    /// Exists for [`crate::runtime_cache::role_pid_is_load_bearing`] (#333):
+    /// the daemon and worker have their PIDs recorded by *other* processes, so
+    /// they must not take the runtime-cache re-exec hop, which cannot preserve
+    /// a PID on Windows. Returning the clap name rather than a bool keeps the
+    /// policy in `runtime_cache` next to the reason for it.
+    pub fn internal_name(&self) -> Option<&'static str> {
+        match self {
+            Self::InternalDaemon { .. } => Some("__daemon"),
+            Self::InternalWorker { .. } => Some("__worker"),
+            _ => None,
+        }
+    }
+}
+
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptimizeTarget {
     #[value(alias = "soldr")]
