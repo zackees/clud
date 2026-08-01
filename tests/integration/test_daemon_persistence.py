@@ -15,6 +15,7 @@ from ._daemon_helpers import (
     launch_daemonized,
     launch_detached,
     managed_env,
+    run_until,
     session_metadata,
     stop_daemon,
     strip_ansi,
@@ -149,9 +150,7 @@ class TestDaemonCentralizedPersistence:
         # markers are in the attach's output (they are absolute-positioned,
         # so a working replay places them at the right cells).
         paint_path = tmp_path / "paint.ansi"
-        paint_path.write_bytes(
-            b"\x1b[2J\x1b[1;1H__HEADER__\x1b[5;1H__FOOTER__"
-        )
+        paint_path.write_bytes(b"\x1b[2J\x1b[1;1H__HEADER__\x1b[5;1H__FOOTER__")
         state_dir = tmp_path / "daemon-state"
         env = daemon_env(mock_env, state_dir)
         proc, session_id = launch_daemonized(
@@ -184,12 +183,8 @@ class TestDaemonCentralizedPersistence:
             )
             assert result.returncode == 0
             cleaned = strip_ansi(result.stdout)
-            assert "__HEADER__" in cleaned, (
-                f"HEADER missing from attach replay: {cleaned!r}"
-            )
-            assert "__FOOTER__" in cleaned, (
-                f"FOOTER missing from attach replay: {cleaned!r}"
-            )
+            assert "__HEADER__" in cleaned, f"HEADER missing from attach replay: {cleaned!r}"
+            assert "__FOOTER__" in cleaned, f"FOOTER missing from attach replay: {cleaned!r}"
         finally:
             if proc.poll() is None:
                 proc.kill()
@@ -216,19 +211,19 @@ class TestDaemonCentralizedPersistence:
         )
         try:
             assert wait_for_exit(proc, timeout=5) == 0
-            # Give the worker a beat to finish appending to the log file.
-            time.sleep(0.6)
 
-            result = subprocess.run(
+            # The precondition here is the log *body*, not the exit status:
+            # `clud logs <id>` succeeds as soon as the session record exists,
+            # which can be before the worker has finished appending. The mock
+            # agent writes a JSON report to stdout with the args it received,
+            # so our prompt-tag appearing is what says the append landed.
+            result = run_until(
                 [str(clud_binary), "logs", session_id],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0 and "logme-tag" in r.stdout,
+                what="the worker's log append to become visible",
             )
             assert result.returncode == 0, result.stderr
-            # The mock agent writes a JSON report to stdout with the args it
-            # received; our prompt-tag must appear in the captured log.
             assert "logme-tag" in result.stdout, (
                 f"prompt tag missing from logs output: {result.stdout!r}"
             )
@@ -255,15 +250,18 @@ class TestDaemonCentralizedPersistence:
         )
         try:
             assert wait_for_exit(proc, timeout=5) == 0
-            time.sleep(0.6)
 
             # `--last` should pick the session we just ran (the only one).
-            last_result = subprocess.run(
+            #
+            # #718: this is the assertion that flaked on a loaded macOS
+            # runner. `--last` fails with "[clud] no sessions found" until the
+            # daemon has persisted the just-exited session, and a fixed 0.6s
+            # sleep was a guess at how long that takes.
+            last_result = run_until(
                 [str(clud_binary), "logs", "--last"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0 and "tail-me-tag" in r.stdout,
+                what="the daemon to persist the exited session for `logs --last`",
             )
             assert last_result.returncode == 0, last_result.stderr
             assert "tail-me-tag" in last_result.stdout, (
@@ -313,14 +311,14 @@ class TestDaemonCentralizedPersistence:
         )
         try:
             assert wait_for_exit(proc, timeout=5) == 0
-            time.sleep(0.5)
 
-            result = subprocess.run(
+            # Same race as `--last` above: the summary lists nothing until the
+            # daemon has persisted the exited session (#718).
+            result = run_until(
                 [str(clud_binary), "logs"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0 and session_id in r.stdout,
+                what="the exited session to appear in the `logs` summary",
             )
             assert result.returncode == 0, result.stderr
             assert session_id in result.stdout, (
@@ -401,9 +399,7 @@ class TestDaemonCentralizedPersistence:
 
             # The orphan's snapshot must now have an exit_code recorded
             # (cleanup_stale_state sets 137 for sessions with dead workers).
-            orphan_meta = json.loads(
-                snapshot_path.read_text(encoding="utf-8")
-            )
+            orphan_meta = json.loads(snapshot_path.read_text(encoding="utf-8"))
             assert orphan_meta["exit_code"] is not None, (
                 f"orphan still has exit_code=None after daemon reboot: {orphan_meta}"
             )
