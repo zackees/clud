@@ -257,11 +257,26 @@ class TestDaemonCentralizedPersistence:
             # runner. `--last` fails with "[clud] no sessions found" until the
             # daemon has persisted the just-exited session, and a fixed 0.6s
             # sleep was a guess at how long that takes.
+            # The predicate must cover every property asserted below, not just
+            # the first one. Waiting only for the log *content* leaves a
+            # residual race: the backlog is readable as soon as the worker
+            # writes it, but the exit-status line below needs the daemon to
+            # have persisted `exit_code`, which lands later. Polling on the
+            # weaker condition moved #718's flake one assertion down rather
+            # than removing it — observed on a loaded macOS runner as a
+            # resolved-session hint with no status line.
             last_result = run_until(
                 [str(clud_binary), "logs", "--last"],
                 env,
-                lambda r: r.returncode == 0 and "tail-me-tag" in r.stdout,
-                what="the daemon to persist the exited session for `logs --last`",
+                lambda r: (
+                    r.returncode == 0
+                    and "tail-me-tag" in r.stdout
+                    and "exited with status" in r.stderr
+                ),
+                what=(
+                    "the daemon to persist the exited session (backlog + exit "
+                    "status) for `logs --last`"
+                ),
             )
             assert last_result.returncode == 0, last_result.stderr
             assert "tail-me-tag" in last_result.stdout, (
