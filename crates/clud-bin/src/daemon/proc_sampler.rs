@@ -82,6 +82,32 @@ pub(super) fn decide_cadence(
     }
 }
 
+/// Should this tick pay for the host environment scan? (#548)
+///
+/// The scan is a `ReadProcessMemory` walk of **every process's PEB** — the
+/// most expensive thing the daemon does, and it is `O(host processes)` rather
+/// than `O(clud activity)`. It exists to annotate `ProcSnapshot` rows with
+/// their originator tag, and `ProcSnapshot` has exactly one consumer path.
+///
+/// Parking already means *nobody asked for a snapshot in the grace window and
+/// there are no live sessions* — so the annotation this produces has no
+/// reader. Before this, the parked interval (30 s) and the scan interval
+/// (30 s) were equal, so a fully idle daemon still paid a full-host PEB walk
+/// on **every** parked tick: parking cut the sampling but not the scan, which
+/// was the expensive half.
+///
+/// The cost of skipping is bounded and already accepted by #548: the first
+/// snapshot served after a park may carry a stale originator annotation, and
+/// `clud top` renders `snapshot.refresh_age()` so that staleness is visible.
+/// A consumer's arrival wakes the sleep early, so the following tick is
+/// `Active` and rescans.
+pub(super) fn originator_scan_due(cadence: SampleCadence, interval_elapsed: bool) -> bool {
+    match cadence {
+        SampleCadence::Parked => false,
+        SampleCadence::Active => interval_elapsed,
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ProcSamplerHandle {
     snapshot: Arc<Mutex<ProcTreeSnapshot>>,
@@ -143,7 +169,22 @@ pub(super) fn spawn_proc_sampler(
         .spawn(move || {
             let mut sampler = ProcSampler::new(state_dir, interval_ms);
             while !shutdown_requested.load(Ordering::SeqCst) {
-                let next = sampler.sample();
+                // #548: decide the cadence *before* sampling, so a parked tick
+                // can skip the host environment scan. This reads the previous
+                // tick's session count, which is one tick stale — acceptable
+                // because a consumer's arrival already wakes the sleep early,
+                // so the tick that serves them is `Active` either way.
+                //
+                // The post-sample decision below is deliberately left alone:
+                // it uses this tick's fresh session count to size the sleep,
+                // and moving it here would delay waking for a session that
+                // appeared during the sample.
+                let cadence_for_scan = decide_cadence(
+                    unix_millis_now().saturating_sub(last_request_ms.load(Ordering::Relaxed)),
+                    sampler.last_live_sessions,
+                    CONSUMER_IDLE_GRACE_MS,
+                );
+                let next = sampler.sample(cadence_for_scan);
                 *snapshot
                     .lock()
                     .expect("proc sampler snapshot mutex poisoned") = next;
@@ -235,7 +276,11 @@ impl ProcSampler {
         }
     }
 
-    fn sample(&mut self) -> ProcTreeSnapshot {
+    /// Take one sample.
+    ///
+    /// `cadence` is the decision made for *this* tick, not just the next
+    /// sleep: a parked tick skips the host environment scan entirely (#548).
+    fn sample(&mut self, cadence: SampleCadence) -> ProcTreeSnapshot {
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -251,7 +296,7 @@ impl ProcSampler {
                 .with_cmd(UpdateKind::OnlyIfNotSet)
                 .without_tasks(),
         );
-        self.refresh_originator_cache_if_due();
+        self.refresh_originator_cache_if_due(cadence);
 
         let now_ms = unix_millis_now();
         let parent_by_pid = parent_map(&self.system);
@@ -331,12 +376,12 @@ impl ProcSampler {
         snapshot
     }
 
-    fn refresh_originator_cache_if_due(&mut self) {
+    fn refresh_originator_cache_if_due(&mut self, cadence: SampleCadence) {
         let due = self
             .last_originator_scan
             .map(|last| last.elapsed() >= Duration::from_millis(ORIGINATOR_SCAN_INTERVAL_MS))
             .unwrap_or(true);
-        if !due {
+        if !originator_scan_due(cadence, due) {
             return;
         }
         self.last_originator_scan = Some(Instant::now());
@@ -717,6 +762,38 @@ mod tests {
             SampleCadence::Parked.interval_ms(DEFAULT_SAMPLE_INTERVAL_MS),
             PARKED_SAMPLE_INTERVAL_MS
         );
+    }
+
+    // Issue #548: the host environment scan is the expensive half, and
+    // parking did not previously reach it.
+
+    #[test]
+    fn a_parked_tick_never_scans_the_host_environment() {
+        // Even when the interval has elapsed — which, before this, it always
+        // had: the parked interval and the scan interval are both 30 s, so a
+        // fully idle daemon paid a full-host PEB walk on every parked tick.
+        assert!(!originator_scan_due(SampleCadence::Parked, true));
+        assert!(!originator_scan_due(SampleCadence::Parked, false));
+    }
+
+    #[test]
+    fn an_active_tick_still_honours_the_scan_interval() {
+        assert!(originator_scan_due(SampleCadence::Active, true));
+        assert!(!originator_scan_due(SampleCadence::Active, false));
+    }
+
+    /// The regression this guards: the two intervals are equal, so a parked
+    /// tick and a due scan coincide on *every* parked tick rather than
+    /// occasionally. If someone later re-couples the scan to the interval
+    /// alone, an idle daemon silently goes back to one full-host PEB walk
+    /// every 30 s.
+    #[test]
+    fn the_parked_and_scan_intervals_coincide_which_is_why_the_gate_matters() {
+        assert_eq!(
+            PARKED_SAMPLE_INTERVAL_MS, ORIGINATOR_SCAN_INTERVAL_MS,
+            "if these diverge, revisit the reasoning in originator_scan_due"
+        );
+        assert!(!originator_scan_due(SampleCadence::Parked, true));
     }
 
     #[test]
