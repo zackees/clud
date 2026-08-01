@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import psutil
@@ -349,6 +350,66 @@ def wait_for_session_exit(state_dir: Path, session_id: str, timeout: float = 15.
             return metadata
         time.sleep(0.1)
     raise AssertionError(f"timed out waiting for session {session_id} to exit")
+
+
+def run_until(
+    argv: list[str],
+    env: dict[str, str],
+    ready: Callable[[subprocess.CompletedProcess[str]], bool],
+    *,
+    what: str,
+    deadline_secs: float = 20.0,
+    interval: float = 0.1,
+    timeout: float = 10.0,
+) -> subprocess.CompletedProcess[str]:
+    """Re-run `argv` until `ready` accepts its result, then return that result.
+
+    Issue #718. A daemon-facing read (`clud logs --last`, `clud logs`,
+    `clud logs <id>`) can race the daemon's own persistence of a session that
+    has only just exited: the command answers honestly that it sees nothing, a
+    moment before the write lands. Tests used to bridge that with a fixed
+    `time.sleep(0.6)`, which is a guess at the window — and on a loaded macOS
+    runner the guess loses, surfacing as `[clud] no sessions found`.
+
+    Polling the real condition removes the guess without slowing the passing
+    case: the common path succeeds on the first attempt and never sleeps.
+
+    `ready` takes the whole `CompletedProcess` rather than just the exit code
+    because the interesting precondition often is not the exit code. `clud
+    logs <id>` exits 0 as soon as the session record exists, which can be
+    before the worker has finished appending the log body the caller wants to
+    assert on — so that site asks for the content, not the status.
+
+    On timeout the last observed stdout/stderr is included: a bare "timed out"
+    from a flaky-test fix would be strictly worse than the sleep it replaced.
+    """
+    deadline = time.time() + deadline_secs
+    attempts = 0
+    result: subprocess.CompletedProcess[str] | None = None
+    while True:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        attempts += 1
+        if ready(result):
+            return result
+        if time.time() >= deadline:
+            break
+        time.sleep(interval)
+    last_rc = result.returncode if result else None
+    last_stdout = result.stdout if result else ""
+    last_stderr = result.stderr if result else ""
+    raise AssertionError(
+        f"timed out after {deadline_secs}s ({attempts} attempts) waiting for {what}\n"
+        f"  argv={argv!r}\n"
+        f"  last returncode={last_rc}\n"
+        f"  last stdout={last_stdout!r}\n"
+        f"  last stderr={last_stderr!r}"
+    )
 
 
 def kill_process(pid: int) -> None:
