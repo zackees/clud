@@ -2,6 +2,12 @@
 
 Default mode runs unit coverage. `--integration` runs only integration tests;
 `--full` runs both.
+
+Every mode builds clud from the working tree and prints which binary the
+pytest lanes will run. Pass `--use-installed-clud` to test the wheel already
+in `.venv/Scripts` instead — useful for verifying a release artifact, and
+never the default, because a silent swap makes source changes vanish from a
+run that still reports pass/fail (issue #726).
 """
 
 from __future__ import annotations
@@ -21,8 +27,31 @@ def _select_suites(argv: list[str]) -> tuple[bool, bool, list[str]]:
     full = "--full" in argv
     integration = "--integration" in argv or full
     unit = not integration or full
-    pytest_args = [a for a in argv if a not in ("--integration", "--full")]
+    pytest_args = [a for a in argv if a not in ("--integration", "--full", "--use-installed-clud")]
     return unit, integration, pytest_args
+
+
+def _use_installed_clud(argv: list[str]) -> bool:
+    """Should the integration lane run the *installed* wheel instead of a build?
+
+    Issue #726. This used to be implicit — `--integration` without `--unit`
+    silently ran `.venv/Scripts/clud.exe` and skipped building clud entirely,
+    so local source changes were absent from the run with no warning. That is
+    the worst shape for a testing footgun: the suite still builds something,
+    still reports pass/fail, and "my change did nothing" is indistinguishable
+    from a real negative result.
+
+    The behaviour came from #161 ("Speed up CI with setup-soldr shims"), which
+    wired it into the per-platform `*-integration-test.yml` workflows. Those
+    workflows no longer exist — #611 replaced them, and CI now drives pytest
+    through `ci/run_bundle.py`, which never imports this module. So the
+    optimisation has had no CI consumer for some time and only ever affected
+    developers, for whom it is the wrong default.
+
+    Verifying an installed wheel is still a legitimate thing to want, so it
+    stays available — just spelled out rather than inferred.
+    """
+    return "--use-installed-clud" in argv
 
 
 def _pytest_ok(returncode: int) -> bool:
@@ -105,6 +134,12 @@ def _prepare_pytest_binaries(
         print(f"missing built pytest binaries: {', '.join(missing)}", file=sys.stderr)
         return None
 
+    # Issue #726: say which binary is under test, always. The failure this
+    # prevents is silent — a run against a stale installed wheel looks exactly
+    # like a run against your working tree.
+    origin = "installed wheel" if installed_clud is not None else "freshly built"
+    print(f"[ci.test] clud under test: {clud_binary}  ({origin})", file=sys.stderr)
+
     pytest_env = env.copy()
     pytest_env["CLUD_TEST_BINARY"] = str(clud_binary)
     pytest_env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] = str(block_guard_binary)
@@ -127,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
     # collection does not trigger extra cargo builds.
     pytest_env = _prepare_pytest_binaries(
         env,
-        prefer_installed_clud=run_integration and not run_unit,
+        # #726: opt-in only. This was `run_integration and not run_unit`, which
+        # silently ran the installed wheel for a bare `--integration`.
+        prefer_installed_clud=_use_installed_clud(argv),
     )
     if pytest_env is None:
         return 1
