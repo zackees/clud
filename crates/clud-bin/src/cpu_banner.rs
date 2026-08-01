@@ -105,18 +105,109 @@ pub fn sample_interval(subtree_size: usize) -> Duration {
     }
 }
 
+/// Issue #709: ceiling the rebuild interval backs off to while the subtree
+/// stays quiet.
+///
+/// The full-system walk is the banner's dominant cost — #553 measured it at
+/// 225 ms on a loaded box and 2.09 s saturated — and on an idle session it
+/// rediscovers the same pids every 30 s forever. Four times fewer walks on a
+/// quiet session, with no loss of responsiveness: see
+/// [`RebuildCadence::record_walk`] for why activity snaps straight back.
+const TREE_REBUILD_IDLE_INTERVAL: Duration = Duration::from_secs(120);
+
+/// Summed subtree CPU (percent of one core) at or above which a session
+/// counts as *active* for rebuild-backoff purposes.
+///
+/// Deliberately far below [`RELATIVE_HOST_FRACTION`]'s banner threshold: this
+/// is "is anything happening at all", not "is this worth warning about".
+const REBUILD_QUIET_PCT: f32 = 5.0;
+
+/// "Quiet enough to back off" must never be confused with "quiet enough not to
+/// warn". Enforced at compile time rather than by a test: it is a relationship
+/// between two constants, so a build failure is the honest signal.
+const _: () = assert!(REBUILD_QUIET_PCT < RELATIVE_HOST_FRACTION * 100.0);
+
+/// Consecutive quiet rebuilds before backing off one step.
+const REBUILD_QUIET_WALKS_BEFORE_BACKOFF: u32 = 2;
+
+/// Backoff state for the subtree rebuild (issue #709).
+///
+/// Same shape as `console_title::KeeperCadence`, and split out as a pure state
+/// machine for the same reason: the policy is testable without a process tree,
+/// a thread, or two minutes of waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebuildCadence {
+    interval: Duration,
+    quiet_walks: u32,
+}
+
+impl RebuildCadence {
+    pub fn new() -> Self {
+        Self {
+            interval: TREE_REBUILD_INTERVAL,
+            quiet_walks: 0,
+        }
+    }
+
+    pub fn interval(self) -> Duration {
+        self.interval
+    }
+
+    /// Record one rebuild and return the cadence for the next one.
+    ///
+    /// `quiet` means no tick since the previous rebuild saw the subtree above
+    /// [`REBUILD_QUIET_PCT`].
+    ///
+    /// Activity resets to the base interval in one step rather than stepping
+    /// down. The backoff exists to make *doing nothing* cheap; it must never
+    /// be the reason a newly-spawned descendant goes undiscovered. The caller
+    /// additionally forces an immediate rebuild on the transition — backing
+    /// off is only ever paid for by an idle session.
+    pub fn record_walk(self, quiet: bool) -> Self {
+        if !quiet {
+            return Self::new();
+        }
+        let quiet_walks = self.quiet_walks.saturating_add(1);
+        if quiet_walks < REBUILD_QUIET_WALKS_BEFORE_BACKOFF {
+            return Self {
+                interval: self.interval,
+                quiet_walks,
+            };
+        }
+        Self {
+            interval: self
+                .interval
+                .saturating_mul(2)
+                .min(TREE_REBUILD_IDLE_INTERVAL),
+            quiet_walks: 0,
+        }
+    }
+}
+
+impl Default for RebuildCadence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Pure decision for whether [`Sampler::tick`] must pay for a full-system
 /// walk this tick (vs. reusing the cached subtree pid list for a targeted
 /// refresh). Rebuilds when the cache is empty (first tick), when there is
-/// no record of a prior walk, or when the prior walk is at least
-/// [`TREE_REBUILD_INTERVAL`] old.
-fn needs_tree_rebuild(cache_empty: bool, last_walk: Option<Instant>, now: Instant) -> bool {
+/// no record of a prior walk, or when the prior walk is at least `interval`
+/// old — where `interval` comes from [`RebuildCadence`] (#709), not a
+/// constant.
+fn needs_tree_rebuild(
+    cache_empty: bool,
+    last_walk: Option<Instant>,
+    now: Instant,
+    interval: Duration,
+) -> bool {
     if cache_empty {
         return true;
     }
     match last_walk {
         None => true,
-        Some(walked_at) => now.duration_since(walked_at) >= TREE_REBUILD_INTERVAL,
+        Some(walked_at) => now.duration_since(walked_at) >= interval,
     }
 }
 
@@ -386,8 +477,16 @@ pub struct Sampler {
     /// Subtree pid list from the last full-system walk. Reused for
     /// targeted refreshes until [`needs_tree_rebuild`] says otherwise.
     cached_pids: Vec<Pid>,
-    /// When `cached_pids` was last (re)built. `None` before the first tick.
+    /// When `cached_pids` was last (re)built. `None` before the first tick,
+    /// and reset to `None` to force an immediate rebuild when a backed-off
+    /// session comes back to life (#709).
     last_tree_walk: Option<Instant>,
+    /// How long to wait between full-system walks. Backs off while the
+    /// subtree stays quiet (#709).
+    rebuild_cadence: RebuildCadence,
+    /// Whether any tick since the last walk saw the subtree above
+    /// [`REBUILD_QUIET_PCT`].
+    busy_since_last_walk: bool,
 }
 
 impl Sampler {
@@ -397,6 +496,8 @@ impl Sampler {
             started_at: Instant::now(),
             cached_pids: Vec::new(),
             last_tree_walk: None,
+            rebuild_cadence: RebuildCadence::new(),
+            busy_since_last_walk: false,
         }
     }
 
@@ -415,13 +516,22 @@ impl Sampler {
         let now = Instant::now();
         let refresh_kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
 
-        if needs_tree_rebuild(self.cached_pids.is_empty(), self.last_tree_walk, now) {
+        if needs_tree_rebuild(
+            self.cached_pids.is_empty(),
+            self.last_tree_walk,
+            now,
+            self.rebuild_cadence.interval(),
+        ) {
             // Full-system refresh: the only way to discover new/dead
             // descendants and rebuild the parent-PID graph.
             self.system
                 .refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
             self.cached_pids = collect_subtree(&self.system, root);
             self.last_tree_walk = Some(now);
+            // #709: a walk that found a quiet session earns a longer gap
+            // before the next one.
+            self.rebuild_cadence = self.rebuild_cadence.record_walk(!self.busy_since_last_walk);
+            self.busy_since_last_walk = false;
         } else {
             // Targeted refresh: only the cached subtree pids (#540) — the
             // cost win over the old every-tick full refresh.
@@ -442,6 +552,18 @@ impl Sampler {
                 count += 1;
             }
         }
+        // #709: any real activity ends the quiet run. If we had already backed
+        // off, rediscover the subtree on the *next* tick rather than waiting
+        // out the remaining gap — a busy session must never be sampled against
+        // a stale pid list, which is the whole accuracy risk of backing off.
+        if subtree_cpu_pct >= REBUILD_QUIET_PCT {
+            if self.rebuild_cadence.interval() > TREE_REBUILD_INTERVAL {
+                self.last_tree_walk = None;
+            }
+            self.rebuild_cadence = RebuildCadence::new();
+            self.busy_since_last_walk = true;
+        }
+
         Sample {
             at: Instant::now(),
             subtree_cpu_pct,
@@ -996,23 +1118,93 @@ mod tests {
     #[test]
     fn needs_tree_rebuild_pure_decision() {
         let t0 = Instant::now();
+        let base = TREE_REBUILD_INTERVAL;
         assert!(
-            needs_tree_rebuild(true, Some(t0), t0),
+            needs_tree_rebuild(true, Some(t0), t0, base),
             "empty cache always rebuilds"
         );
         assert!(
-            needs_tree_rebuild(false, None, t0),
+            needs_tree_rebuild(false, None, t0, base),
             "no prior walk always rebuilds"
         );
-        let just_under = t0 + TREE_REBUILD_INTERVAL - Duration::from_millis(1);
+        let just_under = t0 + base - Duration::from_millis(1);
         assert!(
-            !needs_tree_rebuild(false, Some(t0), just_under),
+            !needs_tree_rebuild(false, Some(t0), just_under, base),
             "under the interval should reuse the cached list"
         );
-        let at_or_over = t0 + TREE_REBUILD_INTERVAL;
+        let at_or_over = t0 + base;
         assert!(
-            needs_tree_rebuild(false, Some(t0), at_or_over),
+            needs_tree_rebuild(false, Some(t0), at_or_over, base),
             "at/over the interval should rebuild"
+        );
+    }
+
+    /// #709: the interval is a parameter now, so a backed-off sampler really
+    /// does skip walks it used to take.
+    #[test]
+    fn a_backed_off_interval_suppresses_a_walk_the_base_interval_would_take() {
+        let t0 = Instant::now();
+        let at_base = t0 + TREE_REBUILD_INTERVAL;
+        assert!(
+            needs_tree_rebuild(false, Some(t0), at_base, TREE_REBUILD_INTERVAL),
+            "sanity: the base interval rebuilds here"
+        );
+        assert!(
+            !needs_tree_rebuild(false, Some(t0), at_base, TREE_REBUILD_IDLE_INTERVAL),
+            "the backed-off interval must not rebuild yet"
+        );
+        assert!(needs_tree_rebuild(
+            false,
+            Some(t0),
+            t0 + TREE_REBUILD_IDLE_INTERVAL,
+            TREE_REBUILD_IDLE_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn rebuild_cadence_starts_at_the_base_interval() {
+        assert_eq!(RebuildCadence::new().interval(), TREE_REBUILD_INTERVAL);
+    }
+
+    #[test]
+    fn rebuild_cadence_holds_until_enough_quiet_walks() {
+        let mut cadence = RebuildCadence::new();
+        for _ in 0..(REBUILD_QUIET_WALKS_BEFORE_BACKOFF - 1) {
+            cadence = cadence.record_walk(true);
+            assert_eq!(cadence.interval(), TREE_REBUILD_INTERVAL);
+        }
+        cadence = cadence.record_walk(true);
+        assert_eq!(cadence.interval(), TREE_REBUILD_INTERVAL * 2);
+    }
+
+    #[test]
+    fn sustained_quiet_reaches_the_ceiling_and_stops() {
+        let mut cadence = RebuildCadence::new();
+        for _ in 0..200 {
+            cadence = cadence.record_walk(true);
+        }
+        assert_eq!(
+            cadence.interval(),
+            TREE_REBUILD_IDLE_INTERVAL,
+            "backoff must clamp, not grow without bound"
+        );
+    }
+
+    /// Responsiveness is the feature; the backoff only makes idling cheap.
+    /// A busy walk must return to the base interval in one step, never a
+    /// gradual ramp — a session that just started building needs its new
+    /// descendants discovered now.
+    #[test]
+    fn any_activity_snaps_the_rebuild_cadence_straight_back() {
+        let mut cadence = RebuildCadence::new();
+        for _ in 0..200 {
+            cadence = cadence.record_walk(true);
+        }
+        assert_eq!(cadence.interval(), TREE_REBUILD_IDLE_INTERVAL);
+        assert_eq!(
+            cadence.record_walk(false).interval(),
+            TREE_REBUILD_INTERVAL,
+            "a busy walk must reset in one step"
         );
     }
 
