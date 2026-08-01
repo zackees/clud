@@ -250,18 +250,43 @@ fn main() {
         }
     };
 
+    let global_launch_preferences = match if args.dry_run {
+        clud_settings::load_global_launch_preferences_read_only()
+    } else {
+        clud_settings::load_global_launch_preferences()
+    } {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            eprintln!("[clud] warning: failed to load launch preferences: {error}; using defaults");
+            clud_settings::GlobalLaunchPreferences::default()
+        }
+    };
+    let launch_target = match backend::resolve_launch_target(
+        args.claude,
+        args.codex,
+        args.harness,
+        global_launch_preferences.model_provider,
+        global_launch_preferences.harness,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+
     // Issue #112: explicit hook-parity remediation path. This flag resets the
     // sticky opt-out, applies deterministic repairs, and asks the selected
-    // backend to migrate hook definitions when semantic translation is needed.
+    // effective harness to migrate hook definitions when semantic translation
+    // is needed.
     if args.fix_hooks {
-        let selected_backend = backend::resolve_backend(args.claude, args.codex);
         if !args.dry_run {
             if let Err(error) = clud_settings::save_auto_fix_hooks_enabled(true) {
                 eprintln!("[clud] error: failed to persist --fix-hooks: {error}");
                 std::process::exit(1);
             }
         }
-        std::process::exit(hook_health::run_fix_hooks(&args, selected_backend));
+        std::process::exit(hook_health::run_fix_hooks(&args, launch_target));
     }
 
     // Pipe mode: if stdin is not a terminal, read it as the prompt.
@@ -339,7 +364,7 @@ fn main() {
         clud::block_bad_cmd_rollout::run_startup_checks(auto_fix_hooks);
     }
 
-    if hook_health::should_check_launch(&args) {
+    if hook_health::should_check_launch(&args, launch_target) {
         if auto_fix_hooks && !args.dry_run {
             if let Err(error) = hook_health::apply_default_repairs() {
                 eprintln!("[clud] warning: failed to auto-repair hook health: {error}");
@@ -436,19 +461,7 @@ fn main() {
         uv_run_hook_guard::run(&root);
     }
 
-    let configured_default_backend = if args.dry_run {
-        None
-    } else {
-        match clud_settings::load_default_backend() {
-            Ok(backend) => backend,
-            Err(error) => {
-                eprintln!("[clud] warning: failed to load default backend: {error}; using claude");
-                None
-            }
-        }
-    };
-    let backend =
-        backend::resolve_backend_with_default(args.claude, args.codex, configured_default_backend);
+    let backend = launch_target.effective_harness;
     let backend_path = {
         let mut bootstrap_host = backend_bootstrap::ProductionBackendBootstrapHost;
         let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
@@ -473,12 +486,11 @@ fn main() {
     };
 
     // Issue #242: mutable harness setup is scoped per launch until the user
-    // opts into a global selection. Dry-runs ignore stored preferences;
-    // otherwise `backend.default` controls bare launches and the selected
-    // backend's stored setup scope controls whether global setup runs.
-    // Interactive launches with an explicit backend can opt into global setup
-    // through the inline selector, and are prompted again when the explicit
-    // backend differs from `backend.default`.
+    // opts into a global selection. Dry-runs read provider/harness preferences
+    // for faithful metadata but skip mutable setup. Interactive launches with
+    // an explicit provider or harness can opt into global setup through the
+    // inline selector and are prompted again when an explicit choice differs
+    // from its stored default.
     let setup_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
     let configured_scope = if args.dry_run {
         None
@@ -498,8 +510,10 @@ fn main() {
         &args,
         setup_interactive,
         configured_scope,
-        configured_default_backend,
-        backend,
+        global_launch_preferences.model_provider,
+        launch_target.model_provider,
+        global_launch_preferences.harness,
+        launch_target.requested_harness,
     ) {
         scope
     } else {
@@ -523,8 +537,12 @@ fn main() {
         }
     };
     if persist_prompted_global_selection {
-        if let Err(error) = clud_settings::save_global_launch_setup_selection(backend, setup_scope)
-        {
+        let explicit_provider = (args.claude || args.codex).then_some(launch_target.model_provider);
+        if let Err(error) = clud_settings::save_global_launch_preferences(
+            explicit_provider,
+            args.harness,
+            setup_scope,
+        ) {
             eprintln!("[clud] note: could not save global setup preference: {error}");
         }
     }
@@ -552,7 +570,7 @@ fn main() {
         }
     }
 
-    let plan = command::build_launch_plan(&args, backend, &backend_path);
+    let plan = command::build_launch_plan_for_target(&args, launch_target, &backend_path);
     if args.verbose {
         verbose_log::log(format_args!(
             "[clud] plan: backend={} mode={} iterations={} stream_json={}",
@@ -568,6 +586,11 @@ fn main() {
             "command": plan.command,
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
+            "model_provider": launch_target.model_provider.as_str(),
+            "requested_harness": launch_target.requested_harness.as_str(),
+            "effective_harness": launch_target.effective_harness.executable_name(),
+            "provider_source": launch_target.provider_source.as_str(),
+            "harness_source": launch_target.harness_source.as_str(),
             "launch_mode": plan.launch_mode.as_str(),
             "graphics": {
                 "mode": plan.graphics.mode.to_string(),
@@ -582,6 +605,12 @@ fn main() {
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
         std::process::exit(0);
+    }
+
+    if let Some(notice) =
+        backend::saved_harness_override_notice(launch_target, io::stderr().is_terminal(), false)
+    {
+        eprintln!("{notice}");
     }
 
     // Issue #79 / #65 / #66: register `clud` as the IDropTarget for

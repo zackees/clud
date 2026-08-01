@@ -138,13 +138,16 @@ def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProce
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
+        home = Path(temp_dir) / "home"
+        state_dir = Path(temp_dir) / "state"
+        home.mkdir()
         return subprocess.run(
             [str(launch), *args],
             capture_output=True,
             text=True,
             timeout=10,
             input=input_data,
-            env=copied_clud_env(source),
+            env=_isolated_clud_env(source, home, state_dir),
         )
 
 
@@ -377,6 +380,11 @@ def test_dry_run_prompt() -> None:
     assert "-p" in data["command"]
     assert "hello" in data["command"]
     assert data["iterations"] == 1
+    assert data["model_provider"] == "claude"
+    assert data["requested_harness"] == "default"
+    assert data["effective_harness"] == "claude"
+    assert data["provider_source"] == "built_in_default"
+    assert data["harness_source"] == "built_in_default"
 
 
 def test_dry_run_codex() -> None:
@@ -385,6 +393,234 @@ def test_dry_run_codex() -> None:
     data = json.loads(result.stdout)
     assert data["backend"] == "codex"
     assert data["launch_mode"] == "subprocess"
+    assert data["model_provider"] == "codex"
+    assert data["requested_harness"] == "default"
+    assert data["effective_harness"] == "codex"
+    assert data["provider_source"] == "cli"
+    assert data["harness_source"] == "built_in_default"
+
+
+def test_dry_run_reports_independent_provider_and_harness() -> None:
+    result = _run(
+        "--dry-run",
+        "--codex",
+        "--harness",
+        "claude",
+        "-p",
+        "hello",
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["model_provider"] == "codex"
+    assert data["requested_harness"] == "claude"
+    assert data["effective_harness"] == "claude"
+    assert data["provider_source"] == "cli"
+    assert data["harness_source"] == "cli"
+    assert data["backend"] == "claude"
+    assert "--harness" not in data["command"]
+
+
+def test_dry_run_uses_global_harness_and_cli_can_override_it(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    state_dir = tmp_path / "state"
+    settings_dir = home / ".clud"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "backend": {"default": "codex"},
+                "harness": {"default": "claude"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = _isolated_clud_env(source, home, state_dir)
+        saved = subprocess.run(
+            [str(launch), "--dry-run", "-p", "hello"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        overridden = subprocess.run(
+            [
+                str(launch),
+                "--dry-run",
+                "--codex",
+                "--harness",
+                "codex",
+                "-p",
+                "hello",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+
+    assert saved.returncode == 0, saved.stderr
+    saved_data = json.loads(saved.stdout)
+    assert "Harness override:" not in saved.stderr
+    assert saved_data["model_provider"] == "codex"
+    assert saved_data["provider_source"] == "global_setting"
+    assert saved_data["requested_harness"] == "claude"
+    assert saved_data["effective_harness"] == "claude"
+    assert saved_data["harness_source"] == "global_setting"
+
+    assert overridden.returncode == 0, overridden.stderr
+    overridden_data = json.loads(overridden.stdout)
+    assert overridden_data["effective_harness"] == "codex"
+    assert overridden_data["harness_source"] == "cli"
+
+
+def test_saved_harness_override_is_announced_once_in_green_on_tty(
+    tmp_path: Path,
+) -> None:
+    if sys.platform == "win32":
+        # Python's stdlib has no ConPTY API. The pure Rust policy test covers
+        # Windows; this subprocess wiring test runs on Unix CI with openpty.
+        return
+
+    import errno
+    import pty
+    import select
+
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    state_dir = tmp_path / "state"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    home.mkdir()
+    _fake_claude_on_path(fake_bin)
+    settings_dir = home / ".clud"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "backend": {"default": "codex"},
+                "harness": {"default": "claude"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = _isolated_clud_env(source, home, state_dir)
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.Popen(
+                [
+                    str(launch),
+                    "--no-daemon",
+                    "--no-fix-hooks",
+                    "--no-cpu-banner",
+                    "--no-dnd",
+                    "--subprocess",
+                    "-p",
+                    "hello",
+                ],
+                cwd=repo,
+                env=env,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                close_fds=True,
+            )
+        finally:
+            os.close(slave)
+
+        output = bytearray()
+        deadline = time.monotonic() + 15
+        try:
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select([master], [], [], 0.1)
+                if readable:
+                    try:
+                        output.extend(os.read(master, 4096))
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+                        break
+                if process.poll() is not None and not readable:
+                    break
+            returncode = process.wait(timeout=1)
+        finally:
+            os.close(master)
+
+    text = output.decode(errors="replace")
+    notice = "[clud] Harness override: Claude (global setting)"
+    assert returncode == 0, text
+    assert text.count(notice) == 1
+    assert f"\x1b[32m{notice}\x1b[0m" in text
+
+
+def test_dry_run_rejects_unsupported_claude_provider_via_codex_harness() -> None:
+    result = _run(
+        "--dry-run",
+        "--claude",
+        "--harness",
+        "codex",
+        "-p",
+        "hello",
+    )
+    assert result.returncode != 0
+    assert (
+        "unsupported launch target: Claude provider cannot use the Codex harness"
+        in result.stderr
+    )
+
+
+def test_fix_hooks_rejects_unsupported_claude_provider_via_codex_harness() -> None:
+    result = _run(
+        "--dry-run",
+        "--fix-hooks",
+        "--claude",
+        "--harness",
+        "codex",
+    )
+    assert result.returncode == 2
+    assert (
+        "unsupported launch target: Claude provider cannot use the Codex harness"
+        in result.stderr
+    )
+
+
+def test_settings_list_reports_model_and_harness_choices(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    state_dir = tmp_path / "state"
+    settings_dir = home / ".clud"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "backend": {"default": "codex"},
+                "harness": {"default": "claude"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        result = subprocess.run(
+            [str(launch), "settings", "--list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_isolated_clud_env(source, home, state_dir),
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert "backend.default = codex" in result.stdout
+    assert "harness.default = claude" in result.stdout
 
 
 def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:

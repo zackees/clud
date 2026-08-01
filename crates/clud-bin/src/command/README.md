@@ -1,13 +1,15 @@
 # command/
 
-Builds the `LaunchPlan` that downstream runners execute: backend-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring, and Claude `stream-json` progress injection for subprocess-mode loops.
+Builds the `LaunchPlan` that downstream runners execute: effective-harness-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring, and Claude `stream-json` progress injection for subprocess-mode loops.
 
 The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) is documented at [docs/architecture/launch-plan.md](../../../../docs/architecture/launch-plan.md); the DONE/BLOCKED contract and `--repeat` no-overlap scheduler at [docs/architecture/loop-subsystem.md](../../../../docs/architecture/loop-subsystem.md).
+Provider/harness resolution happens before construction and is documented at
+[docs/architecture/launch-targets.md](../../../../docs/architecture/launch-targets.md).
 
 ## Files
 
-- `mod.rs` — module facade; re-exports `build_launch_plan`, `has_noninteractive_prompt`, `next_run_at_millis`, `repeat_implies_no_done_warning`, `summarize_task_name`, and the `LaunchPlan` / `LoopMarkers` / `RepeatSchedule` types.
-- `builder.rs` — core `build_launch_plan` orchestrator plus `parse_repeat_interval`, `repeat_implies_no_done_warning`, `next_run_at_millis`, and `summarize_task_name` helpers.
+- `mod.rs` — module facade; re-exports the resolved-target production builder, the native compatibility builder, supporting helpers, and the `LaunchPlan` / `LoopMarkers` / `RepeatSchedule` types.
+- `builder.rs` — core `build_launch_plan_for_target` orchestrator, the native `build_launch_plan` compatibility wrapper, and repeat/task helpers.
 - `loop_task.rs` — resolves the `clud loop` positional (GH issue/PR URL, `#42` shortform, file path, or literal) into prompt text, with `gh`-backed cache under `.clud/loop/`.
 - `prompts.rs` — static prompt templates (`FIX_PROMPT`, `GITHUB_FIX_TEMPLATE`, `REBASE_PROMPT`, `UP_PROMPT`) and the backend-aware `push_prompt`, `build_up_prompt`, `build_fix_prompt` builders.
 - `types.rs` — `LaunchPlan`, `LoopMarkers`, `RepeatSchedule` serde structs that flow into `--dry-run` JSON and into daemon job records.
@@ -15,24 +17,25 @@ The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) i
 
 ## Key items
 
-- `build_launch_plan(args, backend, backend_path) -> LaunchPlan` — `builder.rs:24`
-- `has_noninteractive_prompt(args) -> bool` — `builder.rs:13`
-- `parse_repeat_interval(raw) -> Result<u64, String>` — `builder.rs:250`
-- `repeat_implies_no_done_warning(repeat, no_done, done) -> Option<&'static str>` — `builder.rs:290`
-- `next_run_at_millis(completed_at_millis, interval_secs) -> u64` — `builder.rs:316`
-- `summarize_task_name(input, max_chars) -> String` — `builder.rs:320`
-- `resolve_loop_task(task, git_root, refresh) -> String` — `loop_task.rs:29`
-- `resolve_marker_paths(cwd, git_root, done_override) -> MarkerPaths` — `loop_task.rs:8`
-- `push_prompt(cmd, backend, prompt)` — `prompts.rs:74`
-- `build_up_prompt(message, publish) -> String` — `prompts.rs:86`
-- `build_fix_prompt(url) -> String` — `prompts.rs:115`
-- `struct LaunchPlan` (command, iterations, backend, launch_mode, cwd, repeat_schedule, task_summary, loop_markers, stream_json_progress) — `types.rs:6`
-- `struct LoopMarkers { done_path, blocked_path }` — `types.rs:28`
-- `struct RepeatSchedule { interval_secs }` — `types.rs:34`
+- `build_launch_plan_for_target(args, target, backend_path) -> LaunchPlan` — production path
+- `build_launch_plan(args, backend, backend_path) -> LaunchPlan` — native compatibility/test wrapper
+- `has_noninteractive_prompt(args) -> bool`
+- `parse_repeat_interval(raw) -> Result<u64, String>`
+- `repeat_implies_no_done_warning(repeat, no_done, done) -> Option<&'static str>`
+- `next_run_at_millis(completed_at_millis, interval_secs) -> u64`
+- `summarize_task_name(input, max_chars) -> String`
+- `resolve_loop_task(task, git_root, refresh) -> String` — `loop_task.rs`
+- `resolve_marker_paths(cwd, git_root, done_override) -> MarkerPaths` — `loop_task.rs`
+- `push_prompt(cmd, backend, prompt)` — `prompts.rs`
+- `build_up_prompt(message, publish) -> String` — `prompts.rs`
+- `build_fix_prompt(url) -> String` — `prompts.rs`
+- `struct LaunchPlan` — executable argv plus provider/harness metadata, launch mode, repeat state, task summary, markers, and stream-json state
+- `struct LoopMarkers { done_path, blocked_path }`
+- `struct RepeatSchedule { interval_secs }`
 
 ## Used by
 
-- `main.rs` — calls `build_launch_plan` and `repeat_implies_no_done_warning` to assemble the plan and emit the `--repeat` warning before dispatch.
+- `main.rs` — calls `build_launch_plan_for_target` and `repeat_implies_no_done_warning` to assemble the resolved plan and emit the `--repeat` warning before dispatch.
 - `runner.rs` — consumes `LaunchPlan` to spawn PTY/subprocess and drive iteration loops.
 - `loop_check.rs` — reads `plan.loop_markers` to poll DONE/BLOCKED after each iteration.
 - `hook_health/prompts.rs` — builds a plan as part of doctor-style health probes.

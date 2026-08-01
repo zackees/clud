@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::{Backend, LaunchMode};
+use crate::backend::{Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource};
 use crate::command::LaunchPlan;
 use crate::daemon::types::SessionKind;
 use crate::graphics::GraphicsConfig;
@@ -11,9 +11,14 @@ use super::session::to_json_vec;
 fn sample_launch_spec() -> WorkerLaunchSpec {
     WorkerLaunchSpec {
         plan: LaunchPlan {
-            command: vec!["codex".to_string(), "exec".to_string()],
+            command: vec!["claude".to_string()],
             iterations: 1,
-            backend: Backend::Codex,
+            backend: Backend::Claude,
+            model_provider: Some(ModelProvider::Codex),
+            requested_harness: Some(HarnessSelection::Claude),
+            effective_harness: Some(Backend::Claude),
+            provider_source: Some(PreferenceSource::GlobalSetting),
+            harness_source: Some(PreferenceSource::GlobalSetting),
             launch_mode: LaunchMode::Subprocess,
             cwd: Some("C:/work/repo".to_string()),
             graphics: GraphicsConfig::default(),
@@ -166,6 +171,76 @@ fn daemon_request_line_prost_carries_frame_envelope() {
     let (decoded, format) = decode_daemon_request_line(&line).unwrap();
     assert_eq!(format, DaemonWireFormat::Prost);
     assert_json_parity(&request, &decoded);
+}
+
+#[test]
+fn daemon_create_roundtrip_preserves_resolved_launch_metadata() {
+    let request = DaemonRequest::Create {
+        spec: Box::new(sample_launch_spec()),
+    };
+    let line = encode_daemon_request_line(&request, DaemonWireFormat::Prost).unwrap();
+    let (decoded, format) = decode_daemon_request_line(&String::from_utf8(line).unwrap()).unwrap();
+    assert_eq!(format, DaemonWireFormat::Prost);
+
+    let DaemonRequest::Create { spec } = decoded else {
+        panic!("expected create request");
+    };
+    assert_eq!(spec.plan.model_provider, Some(ModelProvider::Codex));
+    assert_eq!(spec.plan.requested_harness, Some(HarnessSelection::Claude));
+    assert_eq!(spec.plan.effective_harness, Some(Backend::Claude));
+    assert_eq!(
+        spec.plan.provider_source,
+        Some(PreferenceSource::GlobalSetting)
+    );
+    assert_eq!(
+        spec.plan.harness_source,
+        Some(PreferenceSource::GlobalSetting)
+    );
+}
+
+#[test]
+fn pre_625_daemon_repeat_fixture_defaults_launch_metadata() {
+    let request: DaemonRequest = serde_json::from_str(
+        r#"{
+            "op":"create",
+            "spec":{
+                "plan":{
+                    "command":["codex","exec","hello"],
+                    "iterations":1,
+                    "backend":"Codex",
+                    "launch_mode":"subprocess",
+                    "cwd":"C:/work/repo"
+                },
+                "kind":"subprocess",
+                "rows":24,
+                "cols":80,
+                "repeat_interval_secs":30,
+                "repeat_run_command":["clud","--codex","--repeat","30s"]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let DaemonRequest::Create { spec } = request else {
+        panic!("expected create request");
+    };
+    assert_eq!(spec.plan.model_provider, None);
+    assert_eq!(spec.plan.requested_harness, None);
+    assert_eq!(spec.plan.effective_harness, None);
+    assert_eq!(spec.plan.provider_source, None);
+    assert_eq!(spec.plan.harness_source, None);
+    assert_eq!(spec.plan.model_provider(), ModelProvider::Codex);
+    assert_eq!(spec.plan.effective_harness(), Backend::Codex);
+    assert_eq!(spec.repeat_interval_secs, Some(30));
+    assert_eq!(
+        spec.repeat_run_command,
+        Some(vec![
+            "clud".to_string(),
+            "--codex".to_string(),
+            "--repeat".to_string(),
+            "30s".to_string(),
+        ])
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use crate::backend::HarnessSelection;
 use crate::graphics::GraphicsMode;
 
 /// Fast CLI for running Claude Code and Codex in YOLO mode.
@@ -29,6 +30,10 @@ pub struct Args {
 
     #[arg(long = "codex", conflicts_with = "claude")]
     pub codex: bool,
+
+    /// Select the agent harness independently from the model provider.
+    #[arg(long = "harness", value_enum)]
+    pub harness: Option<HarnessSelection>,
 
     #[arg(long = "subprocess", conflicts_with = "pty")]
     pub subprocess: bool,
@@ -705,6 +710,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--message",
         "--resume",
         "--model",
+        "--harness",
         "--name",
         "--transcript",
         "--backlog-size",

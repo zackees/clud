@@ -40,6 +40,34 @@ fn test_codex_backend() {
 }
 
 #[test]
+fn test_harness_flag_is_typed_and_not_forwarded() {
+    for (raw, expected) in [
+        (
+            vec!["clud", "--harness", "default"],
+            HarnessSelection::Default,
+        ),
+        (
+            vec!["clud", "--harness=claude", "--codex"],
+            HarnessSelection::Claude,
+        ),
+        (
+            vec!["clud", "--codex", "--harness", "codex"],
+            HarnessSelection::Codex,
+        ),
+    ] {
+        let args = parse(&raw);
+        assert_eq!(args.harness, Some(expected));
+        assert!(args.passthrough.is_empty());
+    }
+}
+
+#[test]
+fn test_harness_rejects_invalid_or_missing_values() {
+    assert!(Args::try_parse_from(["clud", "--harness", "other"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--harness"]).is_err());
+}
+
+#[test]
 fn test_model_flag() {
     let args = parse(&["clud", "--model", "opus"]);
     assert_eq!(args.model.as_deref(), Some("opus"));

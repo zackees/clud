@@ -85,9 +85,9 @@ For a new cross-cutting feature: add the topic doc → register it in [`docs/ARC
 
 See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 
-- **YOLO by default** — `--dangerously-skip-permissions` is auto-injected unless `--safe` ([DD-002](docs/DESIGN_DECISIONS.md#dd-002-yolo-mode-is-the-default-safe-is-the-opt-out)).
+- **YOLO by default** — the effective harness's permission-bypass flag is auto-injected unless `--safe` ([DD-002](docs/DESIGN_DECISIONS.md#dd-002-yolo-mode-is-the-default-safe-is-the-opt-out)).
 - **Backend agnostic** — supports both `claude` and `codex` via `--claude` / `--codex` ([DD-004](docs/DESIGN_DECISIONS.md#dd-004-backend-agnostic--support-both-claude-and-codex)).
-- **Single `LaunchPlan`** — every code path goes through `command::build_launch_plan`; `--dry-run` emits it as JSON ([DD-005](docs/DESIGN_DECISIONS.md#dd-005-single-launchplan-as-source-of-truth-for-everything-clud-runs), [launch-plan.md](docs/architecture/launch-plan.md)).
+- **Single `LaunchPlan`** — production launches go through `command::build_launch_plan_for_target`; `build_launch_plan` is the native compatibility/test wrapper, and `--dry-run` emits the resolved plan as JSON ([DD-005](docs/DESIGN_DECISIONS.md#dd-005-single-launchplan-as-source-of-truth-for-everything-clud-runs), [launch-plan.md](docs/architecture/launch-plan.md)).
 - **Unknown flag passthrough** — unrecognized CLI flags are forwarded to the backend.
 - **Test-first** — every feature has both Rust `#[test]` and Python subprocess tests.
 

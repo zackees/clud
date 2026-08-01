@@ -8,7 +8,9 @@ use fs4::fs_std::FileExt;
 use serde_json::{json, Map, Value};
 use toml_edit::{DocumentMut, Item};
 
-use crate::backend::Backend;
+use crate::backend::{
+    resolve_launch_target, Backend, HarnessSelection, LaunchTargetError, ModelProvider,
+};
 use crate::launch_setup::LaunchSetupScope;
 
 pub const CLUD_DIR_NAME: &str = ".clud";
@@ -23,6 +25,19 @@ const SHELL_DISABLE_POWERSHELL_NOTE: &str =
     "When true, clud injects a PreToolUse hook into Claude and Codex that denies any Bash/Shell call resolving to powershell.exe / pwsh / *.ps1. For Claude it also sets CLAUDE_CODE_USE_POWERSHELL_TOOL=0 + CLAUDE_CODE_GIT_BASH_PATH to a vendored bash. Also sets CLUD_DISABLE_POWERSHELL=1 in the backend env so skills/CLAUDE.md content can branch on it. Per-backend overrides under shell.claude.disable_powershell / shell.codex.disable_powershell take precedence; null inherits the top-level value. Default false. See https://github.com/zackees/clud/issues/447.";
 const GIT_PR_WAIT_FAIL_FAST_NOTE: &str =
     "When true, cmd-scan denies raw `gh pr checks --watch` / `gh run watch` and hand-rolled PR-status polling loops, pointing the agent at the bundled fail-fast waiter (`clud tool run github/pr_merge_watch.py <PR>`) instead. Off by default; toggle with `clud settings`.";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlobalLaunchPreferences {
+    pub model_provider: Option<ModelProvider>,
+    pub harness: Option<HarnessSelection>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlobalSettingsPatch {
+    pub model_provider: Option<ModelProvider>,
+    pub harness: Option<HarnessSelection>,
+    pub pr_wait_fail_fast: Option<bool>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustOptimizeSettings {
@@ -46,6 +61,7 @@ pub enum SettingsError {
     NoHomeDir,
     Io(io::Error),
     Parse { path: PathBuf, error: String },
+    InvalidLaunchTarget(LaunchTargetError),
 }
 
 impl std::fmt::Display for SettingsError {
@@ -55,6 +71,9 @@ impl std::fmt::Display for SettingsError {
             SettingsError::Io(error) => write!(f, "{error}"),
             SettingsError::Parse { path, error } => {
                 write!(f, "malformed settings in {}: {error}", path.display())
+            }
+            SettingsError::InvalidLaunchTarget(error) => {
+                write!(f, "invalid launch preferences: {error}")
             }
         }
     }
@@ -205,22 +224,61 @@ pub fn load_or_init_codex_config_overrides_at(
 }
 
 pub fn load_default_backend() -> Result<Option<Backend>, SettingsError> {
+    Ok(load_default_model_provider()?.map(ModelProvider::native_harness))
+}
+
+pub fn load_default_model_provider() -> Result<Option<ModelProvider>, SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
-    load_default_backend_at(&home)
+    load_default_model_provider_at(&home)
 }
 
 pub fn load_default_backend_at(home: &Path) -> Result<Option<Backend>, SettingsError> {
+    Ok(load_default_model_provider_at(home)?.map(ModelProvider::native_harness))
+}
+
+pub fn load_default_model_provider_at(home: &Path) -> Result<Option<ModelProvider>, SettingsError> {
+    Ok(load_global_launch_preferences_at(home)?.model_provider)
+}
+
+pub fn load_global_launch_preferences() -> Result<GlobalLaunchPreferences, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_global_launch_preferences_at(&home)
+}
+
+pub fn load_global_launch_preferences_read_only() -> Result<GlobalLaunchPreferences, SettingsError>
+{
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    let document = read_settings_or_legacy(&home)?;
+    Ok(global_launch_preferences_from_document(&document))
+}
+
+pub fn load_global_launch_preferences_at(
+    home: &Path,
+) -> Result<GlobalLaunchPreferences, SettingsError> {
     let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
     let _lock = acquire_lock(&lock_path)?;
     let document = read_settings_or_legacy(home)?;
-    let Some(value) = document
+    Ok(global_launch_preferences_from_document(&document))
+}
+
+fn global_launch_preferences_from_document(document: &Value) -> GlobalLaunchPreferences {
+    let model_provider = document
         .get("backend")
         .and_then(|item| item.get("default"))
         .and_then(Value::as_str)
-    else {
-        return Ok(infer_default_backend_from_launch_setup(&document));
-    };
-    Ok(Backend::from_settings_str(value))
+        .and_then(ModelProvider::from_settings_str)
+        .or_else(|| {
+            infer_default_backend_from_launch_setup(document).map(Backend::as_model_provider)
+        });
+    let harness = document
+        .get("harness")
+        .and_then(|item| item.get("default"))
+        .and_then(Value::as_str)
+        .and_then(HarnessSelection::from_settings_str);
+    GlobalLaunchPreferences {
+        model_provider,
+        harness,
+    }
 }
 
 pub fn save_default_backend(backend: Backend) -> Result<(), SettingsError> {
@@ -229,9 +287,13 @@ pub fn save_default_backend(backend: Backend) -> Result<(), SettingsError> {
 }
 
 pub fn save_default_backend_at(home: &Path, backend: Backend) -> Result<(), SettingsError> {
-    with_settings_document(home, |document| {
-        set_default_backend(document, backend);
-    })
+    save_settings_patch_at(
+        home,
+        GlobalSettingsPatch {
+            model_provider: Some(backend.as_model_provider()),
+            ..GlobalSettingsPatch::default()
+        },
+    )
 }
 
 pub fn save_global_launch_setup_selection(
@@ -247,10 +309,85 @@ pub fn save_global_launch_setup_selection_at(
     backend: Backend,
     scope: LaunchSetupScope,
 ) -> Result<(), SettingsError> {
-    with_settings_document(home, |document| {
-        set_default_backend(document, backend);
-        set_launch_setup_scope(document, backend, scope);
-    })
+    save_settings_transaction_at(
+        home,
+        GlobalSettingsPatch {
+            model_provider: Some(backend.as_model_provider()),
+            ..GlobalSettingsPatch::default()
+        },
+        Some(scope),
+    )
+}
+
+pub fn save_global_launch_preferences(
+    provider: Option<ModelProvider>,
+    harness: Option<HarnessSelection>,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_global_launch_preferences_at(&home, provider, harness, scope)
+}
+
+pub fn save_global_launch_preferences_at(
+    home: &Path,
+    provider: Option<ModelProvider>,
+    harness: Option<HarnessSelection>,
+    scope: LaunchSetupScope,
+) -> Result<(), SettingsError> {
+    save_settings_transaction_at(
+        home,
+        GlobalSettingsPatch {
+            model_provider: provider,
+            harness,
+            ..GlobalSettingsPatch::default()
+        },
+        Some(scope),
+    )
+}
+
+pub fn save_settings_patch(patch: GlobalSettingsPatch) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_settings_patch_at(&home, patch)
+}
+
+pub fn save_settings_patch_at(
+    home: &Path,
+    patch: GlobalSettingsPatch,
+) -> Result<(), SettingsError> {
+    save_settings_transaction_at(home, patch, None)
+}
+
+fn save_settings_transaction_at(
+    home: &Path,
+    patch: GlobalSettingsPatch,
+    setup_scope: Option<LaunchSetupScope>,
+) -> Result<(), SettingsError> {
+    let clud_dir = home.join(CLUD_DIR_NAME);
+    fs::create_dir_all(&clud_dir)?;
+    let lock_path = clud_dir.join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let path = settings_path_at(home);
+    let mut document = read_settings_or_legacy(home)?;
+    seed_global_settings_defaults(&mut document);
+
+    if let Some(provider) = patch.model_provider {
+        set_default_model_provider(&mut document, provider);
+    }
+    if let Some(harness) = patch.harness {
+        set_default_harness(&mut document, harness);
+    }
+    if let Some(enabled) = patch.pr_wait_fail_fast {
+        object_entry(&mut document, "git")
+            .insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
+    }
+
+    let launch = global_launch_preferences_from_document(&document);
+    let target = resolve_launch_target(false, false, None, launch.model_provider, launch.harness)
+        .map_err(SettingsError::InvalidLaunchTarget)?;
+    if let Some(scope) = setup_scope {
+        set_launch_setup_scope(&mut document, target.effective_harness, scope);
+    }
+    write_settings(&path, &document)
 }
 
 pub fn load_auto_fix_hooks_enabled() -> Result<bool, SettingsError> {
@@ -783,10 +920,17 @@ fn merge_settings_into(target: &mut Value, source: &Value) {
     }
 }
 
-fn set_default_backend(document: &mut Value, backend: Backend) {
+fn set_default_model_provider(document: &mut Value, provider: ModelProvider) {
     object_entry(document, "backend").insert(
         "default".to_string(),
-        Value::String(backend.executable_name().to_string()),
+        Value::String(provider.as_str().to_string()),
+    );
+}
+
+fn set_default_harness(document: &mut Value, harness: HarnessSelection) {
+    object_entry(document, "harness").insert(
+        "default".to_string(),
+        Value::String(harness.as_str().to_string()),
     );
 }
 
@@ -967,6 +1111,10 @@ mod tests {
     fn missing_settings_file_has_no_default_backend() {
         let home = tempdir().unwrap();
         assert_eq!(load_default_backend_at(home.path()).unwrap(), None);
+        assert_eq!(
+            load_global_launch_preferences_at(home.path()).unwrap(),
+            GlobalLaunchPreferences::default()
+        );
     }
 
     #[test]
@@ -1049,6 +1197,192 @@ mod tests {
         let json: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["backend"]["default"], "codex");
         assert_eq!(json["launch_setup"]["codex"]["scope"], "global");
+    }
+
+    #[test]
+    fn round_trips_harness_preference_and_reads_old_settings() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"backend":{"default":"codex"}}"#).unwrap();
+
+        assert_eq!(
+            load_global_launch_preferences_at(home.path()).unwrap(),
+            GlobalLaunchPreferences {
+                model_provider: Some(ModelProvider::Codex),
+                harness: None,
+            }
+        );
+
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                harness: Some(HarnessSelection::Claude),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_global_launch_preferences_at(home.path()).unwrap(),
+            GlobalLaunchPreferences {
+                model_provider: Some(ModelProvider::Codex),
+                harness: Some(HarnessSelection::Claude),
+            }
+        );
+    }
+
+    #[test]
+    fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"unrelated":{"kept":true}}"#).unwrap();
+
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                model_provider: Some(ModelProvider::Codex),
+                harness: Some(HarnessSelection::Claude),
+                pr_wait_fail_fast: Some(true),
+            },
+        )
+        .unwrap();
+
+        let json: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["backend"]["default"], "codex");
+        assert_eq!(json["harness"]["default"], "claude");
+        assert_eq!(json["git"]["pr_wait_fail_fast"], true);
+        assert_eq!(json["unrelated"]["kept"], true);
+    }
+
+    #[test]
+    fn partial_settings_patch_preserves_omission_and_latest_launch_preferences() {
+        let home = tempdir().unwrap();
+        let path = settings_path_at(home.path());
+
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                pr_wait_fail_fast: Some(true),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+        let json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(json.get("backend").is_none());
+        assert!(json.get("harness").is_none());
+
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                model_provider: Some(ModelProvider::Codex),
+                harness: Some(HarnessSelection::Default),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                harness: Some(HarnessSelection::Claude),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+
+        // This represents a TUI save whose snapshot predates the harness
+        // change. Because unchanged rows are omitted, the latest launch
+        // preferences survive the atomic patch.
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                pr_wait_fail_fast: Some(false),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_global_launch_preferences_at(home.path()).unwrap(),
+            GlobalLaunchPreferences {
+                model_provider: Some(ModelProvider::Codex),
+                harness: Some(HarnessSelection::Claude),
+            }
+        );
+    }
+
+    #[test]
+    fn atomic_settings_patch_validates_the_merged_launch_preferences() {
+        let home = tempdir().unwrap();
+        let error = save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                harness: Some(HarnessSelection::Codex),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsError::InvalidLaunchTarget(LaunchTargetError::ClaudeViaCodexUnsupported)
+        ));
+
+        let path = settings_path_at(home.path());
+        assert!(
+            !path.exists(),
+            "an invalid merged preference must not be written"
+        );
+    }
+
+    #[test]
+    fn global_prompt_save_rejects_a_concurrently_invalidated_partial_choice() {
+        let home = tempdir().unwrap();
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                model_provider: Some(ModelProvider::Codex),
+                harness: Some(HarnessSelection::Default),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+
+        // The interactive launch resolved while Codex was the provider, but
+        // another process changes the provider before the user confirms the
+        // global harness choice.
+        save_settings_patch_at(
+            home.path(),
+            GlobalSettingsPatch {
+                model_provider: Some(ModelProvider::Claude),
+                ..GlobalSettingsPatch::default()
+            },
+        )
+        .unwrap();
+        let path = settings_path_at(home.path());
+        let before = fs::read_to_string(&path).unwrap();
+
+        let error = save_global_launch_preferences_at(
+            home.path(),
+            None,
+            Some(HarnessSelection::Codex),
+            LaunchSetupScope::Global,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SettingsError::InvalidLaunchTarget(LaunchTargetError::ClaudeViaCodexUnsupported)
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(
+            load_global_launch_preferences_at(home.path()).unwrap(),
+            GlobalLaunchPreferences {
+                model_provider: Some(ModelProvider::Claude),
+                harness: Some(HarnessSelection::Default),
+            }
+        );
+        assert_eq!(
+            load_launch_setup_scope_at(home.path(), Backend::Codex).unwrap(),
+            None
+        );
     }
 
     #[test]

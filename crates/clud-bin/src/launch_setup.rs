@@ -12,7 +12,8 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
 use crate::args::Args;
-use crate::backend::Backend;
+use crate::backend::{Backend, HarnessSelection, ModelProvider};
+use crate::preference::{ChoiceOption, ChoiceSelector};
 use crate::{codex_hook_normalize, skill_install, skills};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,15 +47,32 @@ pub enum SelectorEvent {
     Cancel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const SCOPE_OPTIONS: [ChoiceOption<LaunchSetupScope>; 2] = [
+    ChoiceOption {
+        value: LaunchSetupScope::SessionOnly,
+        label: "Session only",
+        note: "this launch",
+    },
+    ChoiceOption {
+        value: LaunchSetupScope::Global,
+        label: "Globally",
+        note: "remember launch preferences",
+    },
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeSelector {
-    selected: LaunchSetupScope,
+    choice: ChoiceSelector<LaunchSetupScope>,
 }
 
 impl Default for ScopeSelector {
     fn default() -> Self {
         Self {
-            selected: LaunchSetupScope::SessionOnly,
+            choice: ChoiceSelector::new(
+                &SCOPE_OPTIONS,
+                LaunchSetupScope::SessionOnly,
+                LaunchSetupScope::SessionOnly,
+            ),
         }
     }
 }
@@ -62,16 +80,16 @@ impl Default for ScopeSelector {
 impl ScopeSelector {
     const RENDERED_LINES: usize = 4;
 
-    pub fn selected(self) -> LaunchSetupScope {
-        self.selected
+    pub fn selected(&self) -> LaunchSetupScope {
+        self.choice.selected()
     }
 
     pub fn handle(&mut self, event: SelectorEvent) -> Option<LaunchSetupScope> {
         match event {
-            SelectorEvent::Up => self.selected = LaunchSetupScope::SessionOnly,
-            SelectorEvent::Down => self.selected = LaunchSetupScope::Global,
-            SelectorEvent::Enter => return Some(self.selected),
-            SelectorEvent::Cancel => return Some(LaunchSetupScope::SessionOnly),
+            SelectorEvent::Up => self.choice.previous(),
+            SelectorEvent::Down => self.choice.next(),
+            SelectorEvent::Enter => return Some(self.choice.confirm()),
+            SelectorEvent::Cancel => return Some(self.choice.cancel()),
         }
         None
     }
@@ -82,14 +100,14 @@ impl ScopeSelector {
         writeln!(
             out,
             "{} {} Session only   this launch",
-            cursor(self.selected == LaunchSetupScope::SessionOnly),
-            marker(self.selected == LaunchSetupScope::SessionOnly)
+            cursor(self.selected() == LaunchSetupScope::SessionOnly),
+            marker(self.selected() == LaunchSetupScope::SessionOnly)
         )?;
         writeln!(
             out,
-            "{} {} Globally       remember this backend",
-            cursor(self.selected == LaunchSetupScope::Global),
-            marker(self.selected == LaunchSetupScope::Global)
+            "{} {} Globally       remember launch preferences",
+            cursor(self.selected() == LaunchSetupScope::Global),
+            marker(self.selected() == LaunchSetupScope::Global)
         )?;
         out.flush()
     }
@@ -113,7 +131,7 @@ fn marker(selected: bool) -> &'static str {
 
 pub fn should_prompt_for_scope(args: &Args, interactive_terminal: bool) -> bool {
     interactive_terminal
-        && (args.claude || args.codex)
+        && (args.claude || args.codex || args.harness.is_some())
         && !args.dry_run
         && args.prompt.is_none()
         && args.message.is_none()
@@ -146,11 +164,17 @@ pub fn scope_for_launch_selection(
     args: &Args,
     interactive_terminal: bool,
     configured_scope: Option<LaunchSetupScope>,
-    configured_default_backend: Option<Backend>,
-    selected_backend: Backend,
+    configured_default_provider: Option<ModelProvider>,
+    selected_provider: ModelProvider,
+    configured_default_harness: Option<HarnessSelection>,
+    selected_harness: HarnessSelection,
 ) -> Option<LaunchSetupScope> {
+    let explicit_provider_changed = (args.claude || args.codex)
+        && configured_default_provider.is_some_and(|provider| provider != selected_provider);
+    let explicit_harness_changed = args.harness.is_some()
+        && configured_default_harness.unwrap_or_default() != selected_harness;
     if should_prompt_for_scope(args, interactive_terminal)
-        && configured_default_backend.is_some_and(|backend| backend != selected_backend)
+        && (explicit_provider_changed || explicit_harness_changed)
     {
         return None;
     }
@@ -158,7 +182,9 @@ pub fn scope_for_launch_selection(
 }
 
 pub fn should_persist_prompted_default_backend(args: &Args, scope: LaunchSetupScope) -> bool {
-    !args.dry_run && (args.claude || args.codex) && matches!(scope, LaunchSetupScope::Global)
+    !args.dry_run
+        && (args.claude || args.codex || args.harness.is_some())
+        && matches!(scope, LaunchSetupScope::Global)
 }
 
 pub fn prompt_scope<W: Write>(out: &mut W) -> io::Result<LaunchSetupScope> {
@@ -453,7 +479,7 @@ mod tests {
         selector.render(&mut out).unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "Launch setup scope\n  Up/Down move, Enter select, Esc session-only\n> [x] Session only   this launch\n  [ ] Globally       remember this backend\n"
+            "Launch setup scope\n  Up/Down move, Enter select, Esc session-only\n> [x] Session only   this launch\n  [ ] Globally       remember launch preferences\n"
         );
     }
 
@@ -551,8 +577,10 @@ mod tests {
                 &args,
                 true,
                 Some(LaunchSetupScope::Global),
-                Some(Backend::Claude),
-                Backend::Codex,
+                Some(ModelProvider::Claude),
+                ModelProvider::Codex,
+                None,
+                HarnessSelection::Default,
             ),
             None
         );
@@ -566,8 +594,10 @@ mod tests {
                 &args,
                 true,
                 Some(LaunchSetupScope::Global),
-                Some(Backend::Codex),
-                Backend::Codex,
+                Some(ModelProvider::Codex),
+                ModelProvider::Codex,
+                None,
+                HarnessSelection::Default,
             ),
             Some(LaunchSetupScope::Global)
         );
@@ -581,10 +611,29 @@ mod tests {
                 &args,
                 true,
                 Some(LaunchSetupScope::Global),
-                Some(Backend::Claude),
-                Backend::Codex,
+                Some(ModelProvider::Claude),
+                ModelProvider::Codex,
+                None,
+                HarnessSelection::Default,
             ),
             Some(LaunchSetupScope::Global)
+        );
+    }
+
+    #[test]
+    fn interactive_harness_override_prompts_for_session_or_global_scope() {
+        let args = parse(&["clud", "--codex", "--harness", "claude"]);
+        assert_eq!(
+            scope_for_launch_selection(
+                &args,
+                true,
+                Some(LaunchSetupScope::Global),
+                Some(ModelProvider::Codex),
+                ModelProvider::Codex,
+                Some(HarnessSelection::Default),
+                HarnessSelection::Claude,
+            ),
+            None
         );
     }
 

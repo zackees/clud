@@ -1,5 +1,9 @@
 # daemon/
 
+Provider/harness metadata travels additively inside each worker's
+`LaunchPlan`; repeat commands pin both resolved choices. See
+[docs/architecture/launch-targets.md](../../../../docs/architecture/launch-targets.md).
+
 Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns, served over the RPC lanes below:
 
 1. **Session manager** — spawns per-session worker subprocesses for `clud --detach`, `clud attach`, `clud list`, `clud kill`, `clud logs`, and `clud loop --repeat`. Each worker owns one backend (`claude` or `codex`) running under a PTY or a captured subprocess, persists snapshots + an append-only log to disk, and brokers attach/detach from interactive clients.
