@@ -79,6 +79,19 @@ and why it matters.
 - `process_utils.rs` — `pid_is_alive`, `signal_process_tree`, `descendant_pids` via `sysinfo`, plus their identity-guarded twins `identity_is_alive` / `signal_process_tree_as` (issue #558). Anything working from a PID that came off disk uses the guarded pair; `SessionSnapshot::{worker,root,daemon}_identity()` and `DaemonInfo::identity()` build the argument. See `crates/clud-bin/src/process_identity.rs`.
 
 - `proc_sampler.rs` - daemon-owned process sampler for `clud top`: keeps one persistent `sysinfo::System`, refreshes CPU/RSS/parent data on the hot tick, refreshes `RUNNING_PROCESS_ORIGINATOR` tags on a slower cadence, and serves cached `ProcTreeSnapshot` replies over daemon IPC.
+  `decide_cadence` parks the tick at 30 s when nobody has asked for a snapshot
+  in the grace window *and* no sessions are live (#548), and
+  `originator_scan_due` additionally skips the **host environment scan** on a
+  parked tick. That gate is the point: the parked interval and the scan
+  interval are both 30 s, so before it a fully idle daemon still paid a
+  `ReadProcessMemory` walk of every process's PEB on *every* parked tick —
+  parking had cut the sampling but not the expensive half. The annotation that
+  scan produces has no reader while parked, and a consumer's arrival wakes the
+  sleep early so the next tick is `Active` and rescans; `clud top` renders
+  `snapshot.refresh_age()`, so a first stale reply is visible rather than
+  silent. **Still outstanding on #548:** the periodic orphan sweep
+  (`server.rs`) does its own independent `process_scan::scan_env("CLUD")`, so
+  the two full-host env passes are not yet unified.
 - `top.rs` - `clud top` snapshot filtering, sorting, JSON preparation, and text tree/flat rendering.
 
 ## `clud top --json` schema
