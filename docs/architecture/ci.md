@@ -149,13 +149,101 @@ Three things enforce it, because no one of them is sufficient:
 
 | Guard | Catches | Blind to |
 | --- | --- | --- |
-| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command with a literal target, in YAML, Python or shell — including the argv-list form `["cargo", "xwin", ...]` | a target held in a variable |
+| `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command in YAML, Python, shell, PowerShell, TOML, Rust or a Dockerfile — including the argv-list form `["cargo", "xwin", ...]` and multi-line install steps | a *conditional* tool at a target held in a variable |
 | `ci/xbuild.py::cargo_argv` raises on `zigbuild` + an Apple/MSVC triple | the dispatch itself, whatever the target's provenance | a caller that bypasses `cargo_argv` |
 | `tests/test_ci_matrix.py` | every matrix triple's `strategy`, and the argv `cargo_argv` actually returns for it | a command path outside the matrix |
 
 The linter's failure names the file, line, rejected tool, the target family, and
 the `soldr build --target ...` replacement — a reader who has never seen this
 rule should not have to go looking.
+
+##### Two rule classes (#714)
+
+The linter's original form required a **literal** Apple/MSVC triple on the same
+line as the tool. That is right for Zig and wrong for everything else, so the
+table is split:
+
+- **Unconditional** — `cargo xwin`, the bare `xwin` CLI, `XWIN_*` /
+  `CARGO_XWIN_*` env vars, `osxcross`, `cross` (build/test/run/check/rustc/
+  bench/clippy), `Cross.toml`. These name an MSVC- or Apple-only toolchain by
+  construction, so there is no target that makes them legal here.
+  `cargo xwin build --target $TARGET` and `cargo xwin build --release` both
+  fail, where before neither did. This is also the throughput fix: `cargo xwin`
+  re-downloads and splats the MSVC CRT/SDK on every cold cache.
+
+  Two shapes worth knowing about, because getting them wrong is how this rule
+  goes quietly useless in one direction and gets reverted in the other. The
+  `xwin` CLI pattern does **not** require the subcommand to be adjacent to the
+  binary — `xwin --accept-license splat --output ...` is the form xwin's own
+  README uses, and an adjacency rule would be green in the fixtures and blind
+  in production. Conversely `cross` **is** anchored at a command position
+  (start of line, a shell/Dockerfile continuation, a YAML `run:`, or a quoted
+  argv list), because it is an ordinary English word: unanchored, `name: cross
+  build matrix` and `let msg = "cross build failed";` both fail the lint.
+- **Conditional on a soldr-owned target** — `cargo zigbuild`, `maturin --zig`,
+  `zig cc`. Correct for `*-unknown-linux-*`, rejected at Apple/MSVC.
+- **Installs**, at any target, matched against the whole file rather than line
+  by line so the GitHub Actions shape (`taiki-e/install-action` with
+  `tool: cargo-xwin` two lines below) is caught. Also `cargo binstall`, `brew`,
+  `apt`/`dnf`/`apk`/`choco`, `pip install ziglang`, `houseabsolute/actions-rust-cross`,
+  `cross-rs/cross`, `tpoechtrager/osxcross`, and a `linker =` override under a
+  `[target.<apple-or-msvc-triple>]` section of a Cargo config (quoted or
+  unquoted key; `linker` need not be the section's first entry).
+
+An install **suppresses the invocation rules across every line its match
+spans**. `cargo install cargo-xwin` is an install, and is also — to the
+invocation rules — a mention of `cargo xwin`; reporting both counts one mistake
+twice and makes the fix look bigger than it is. Spanning matters: the
+`taiki-e/install-action` shape puts `uses:` and `tool: cargo-xwin` on different
+lines, so suppressing only the line the match *starts* on would leave the
+`tool:` line to be reported a second time. For spanning to be safe the install
+match must not reach past the end of its own YAML step, so the window stops at
+the next `- ` sequence item: otherwise an install-action for an unrelated tool
+searches forward into the *following* step for its `cargo-xwin`, and every
+genuine violation in between is silenced on the way. With that bound, a
+violation elsewhere in the file is still reported.
+
+One further trap, since it took down the whole linter rather than one rule:
+line splitting must use `split("\n")`, never `splitlines()`. `splitlines()`
+also breaks on form feed, vertical tab, a lone CR and U+0085/U+2028, none of
+which the comment scanner preserves — so a form feed inside a Rust comment (an
+Emacs page break) made the original and stripped line lists differ in length,
+and `bash lint` died with a `ValueError` traceback instead of printing a
+finding.
+
+**Scope.** `.github/`, `ci/`, `bench/`, `crates/`, `dylints/`, `skills/`,
+`testbins/`, `tests/`, `.claude/hooks/`, plus the root entrypoints `build lint
+test install install.sh install.ps1 publish` and `.cargo/config.toml` — 302
+files as of this writing. `crates/` covers the product source and not just the
+asset scripts under it: clud shells out to build commands, so a `cargo xwin` in
+Rust is a real vector. `vendor/` stays out — third-party source we do not
+author, where `whisper-rs-sys/build.rs` legitimately reasons about zig's C++
+runtime for the Linux lanes. `.claude/hooks` rather than `.claude` because the
+latter also holds `worktrees/`, an ignored second checkout.
+
+**Escape hatch.** Comments are stripped so prose explaining the ban stays legal.
+For `#` languages that is a split; Rust gets a real character scanner, because
+every cheap regex is wrong somewhere that matters: Rust block comments **nest**,
+a `//` inside a URL must survive (a link to `cargo-xwin` is a real reference and
+should be reported), and a stripper with no string awareness turns `let open =
+"/*";` … `let close = "*/";` into a one-line bypass for everything between them.
+It also understands char literals (`let q = '"';` must not flip its phase, while
+`&'a str` is a lifetime, not a delimiter) and **raw strings** — `r"\\?\"` has no
+escapes, so a scanner honouring that backslash reads past the closing quote and
+treats the rest of the file as string, hiding every violation after it. Five
+such literals live under `hook_health/`, and they desynced the scanner for two
+review rounds without any fixture noticing; the invariant is now asserted over
+every Rust file the linter walks, not just over fixtures. The scanner blanks
+comment characters in place, so offsets and line numbers are unchanged by
+construction. A module docstring is prose no stripper sees, so a
+line carrying `cross-lint: allow` is skipped outright — read from the *original*
+line, so a trailing `// cross-lint: allow` in Rust is not itself blanked before
+it can be seen. It is
+verbose on purpose: `rg 'cross-lint: allow'` lists every escape in the tree
+(there are two, both in `tests/test_ci_matrix.py`, where the tool names *are*
+the assertion's data). The marker is **strictly line-scoped**, including inside
+a multi-line docstring — it must sit on the same line as the tool name, not on
+the docstring's closing line.
 
 #### Timing evidence
 

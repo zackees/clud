@@ -13,8 +13,8 @@ Three strategies:
 `soldr` is the blessed surface (soldr docs/CROSS_COMPILE.md): `soldr prepare`
 provisions the sysroot in .github/actions/setup-build and exports the
 target-scoped Cargo/cc-rs/linker env, then `soldr build --target <triple>`
-links against it. `cargo xwin` / `cargo zigbuild --target *-apple-darwin` are
-documented there as the explicit legacy passthrough, so neither is used here.
+links against it. The legacy xwin / zigbuild-at-Apple passthroughs documented
+there are deliberately unused, and `ci/banned_cross_tools.py` enforces that.
 
 Only the link-producing `build` verb goes through `soldr build`. clippy, `cargo
 test --no-run` and maturin stay on the plain cargo front door: `soldr prepare`

@@ -83,10 +83,10 @@ def test_every_target_cross_compiles_on_linux():
 
 
 def test_darwin_and_windows_use_the_soldr_blessed_cross_path():
-    """`cargo xwin` / `cargo zigbuild --target *-apple-darwin` are the legacy
-    passthrough in soldr's docs/CROSS_COMPILE.md; `soldr build` is the blessed
-    surface. Pinning this here keeps a future edit from silently regressing to
-    a hand-installed cross wrapper."""
+    """The legacy passthrough in soldr's docs/CROSS_COMPILE.md is
+    `cargo xwin` / `cargo zigbuild`; (cross-lint: allow — named on purpose)
+    `soldr build` is the blessed surface. Pinning this here keeps a future
+    edit from silently regressing to a hand-installed cross wrapper."""
     include = build_matrix(selected("full"))["include"]
     crossed = [
         entry
@@ -119,7 +119,7 @@ def test_cross_argv_never_routes_apple_or_msvc_through_a_banned_tool():
     """
     from ci.xbuild import cargo_argv
 
-    banned = ("xwin", "zigbuild", "zig", "cross", "osxcross")
+    banned = ("xwin", "zigbuild", "zig", "cross", "osxcross")  # cross-lint: allow
     soldr_owned = [t for t in TARGETS if "apple" in t.triple or "windows" in t.triple]
     assert soldr_owned, "matrix has no crossed targets; this test would be vacuous"
 
