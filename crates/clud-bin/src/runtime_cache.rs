@@ -84,8 +84,25 @@ pub fn runtime_cache_hop_enabled() -> bool {
     )
 }
 
-fn runtime_cache_hop_enabled_from_vars(use_runtime_cache: bool, debug_assertions: bool) -> bool {
-    use_runtime_cache && !debug_assertions
+/// An explicit opt-in beats the debug-build default.
+///
+/// `debug_assertions` exists to keep the hop away from developers who did
+/// **not** ask for it: a dev build that silently re-exec'd from a cached copy
+/// would confuse debugging and could serve a stale binary. That reasoning
+/// applies to the *default*, not to someone who set `CLUD_USE_RUNTIME_CACHE`
+/// deliberately.
+///
+/// Requiring both made the flag unusable in every build CI produces — test
+/// lanes are dev-profile (only `auto-release.yml` may pass `--release`), so
+/// setting the variable in CI was a silent no-op. Verified by running a debug
+/// `clud --version` with it set: zero files appeared under `~/.clud/runtime`.
+/// That blocked the soak evidence #333's default-flip is gated on, since there
+/// was no build in which the path could be exercised at all.
+///
+/// **The default is unchanged**: with the variable unset, no build of any
+/// profile hops.
+fn runtime_cache_hop_enabled_from_vars(use_runtime_cache: bool, _debug_assertions: bool) -> bool {
+    use_runtime_cache
 }
 
 /// If `CLUD_USE_RUNTIME_CACHE=1` is set, ensure this clud binary is
@@ -122,6 +139,28 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Re-exec from the cached binary.
+///
+/// # Known defect on Windows (#333)
+///
+/// The two branches below are **not** equivalent, and the difference is
+/// load-bearing rather than cosmetic:
+///
+/// - Unix uses `execv`, which replaces the process image. The PID survives.
+/// - Windows has no `execv`, so it spawns the cached binary and waits. The
+///   PID does **not** survive: every hop leaves a wrapper process holding the
+///   original PID while the real clud runs as its child.
+///
+/// clud's identity model keys off PIDs everywhere — `daemon.json`,
+/// `handover_registry`, `ProcessIdentity`, originator tags, orphan sparing —
+/// so a wrapper PID is not a harmless extra process. Enabling
+/// `CLUD_USE_RUNTIME_CACHE=1` across the integration suite fails **31 tests**
+/// on Windows; the first is a daemon whose recorded PID is already dead.
+///
+/// So the hop is not merely "unsoaked" on Windows, it is **known broken**, and
+/// #333's proposal to make it the default cannot proceed there until this is
+/// resolved — by exempting the `__daemon` / `__worker` paths, or by finding a
+/// PID-preserving mechanism. Unix is unaffected.
 fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
@@ -319,14 +358,25 @@ mod tests {
         assert!(!runtime_cache_hop_enabled_from_vars(false, false));
     }
 
+    /// #333: an explicit opt-in must work in a debug build.
+    ///
+    /// This replaces `runtime_cache_hop_enabled_stays_off_for_debug_builds`,
+    /// which asserted the opposite. That contract made the flag a no-op in
+    /// every build CI produces — all test lanes are dev-profile — so the path
+    /// could not be exercised anywhere, and the soak evidence #333's
+    /// default-flip depends on was unobtainable.
     #[test]
-    fn runtime_cache_hop_enabled_stays_off_for_debug_builds() {
-        assert!(!runtime_cache_hop_enabled_from_vars(true, true));
+    fn an_explicit_opt_in_beats_the_debug_default() {
+        assert!(runtime_cache_hop_enabled_from_vars(true, true));
+        assert!(runtime_cache_hop_enabled_from_vars(true, false));
     }
 
+    /// The part that must not change: without the opt-in, nothing hops, in
+    /// any profile.
     #[test]
-    fn runtime_cache_hop_enabled_when_opted_in() {
-        assert!(runtime_cache_hop_enabled_from_vars(true, false));
+    fn the_default_is_off_in_every_profile() {
+        assert!(!runtime_cache_hop_enabled_from_vars(false, true));
+        assert!(!runtime_cache_hop_enabled_from_vars(false, false));
     }
 
     /// The opt-in is the *only* enabling input, so nothing else can silently
@@ -343,10 +393,9 @@ mod tests {
     #[test]
     fn the_opt_in_is_the_only_enabling_input() {
         for debug_assertions in [true, false] {
-            assert_eq!(
+            assert!(
                 runtime_cache_hop_enabled_from_vars(true, debug_assertions),
-                !debug_assertions,
-                "opt-in plus debug={debug_assertions} must fully determine the answer"
+                "the opt-in alone decides; debug={debug_assertions} must not veto it"
             );
             assert!(
                 !runtime_cache_hop_enabled_from_vars(false, debug_assertions),
