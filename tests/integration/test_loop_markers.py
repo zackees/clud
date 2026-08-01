@@ -28,6 +28,23 @@ def _run(
     )
 
 
+def _assert_rc(result: subprocess.CompletedProcess[str], expected: int) -> None:
+    """Assert the exit code, reporting what actually happened.
+
+    Issue #594: `assert result.returncode == N, f"stderr: {result.stderr}"`
+    omits the two facts a triager needs first — the code that *was* returned,
+    and stdout. A real failure of this suite surfaced with a stderr consisting
+    only of `Warning: .clud/loop was added to .gitignore`, which reads like a
+    cause and is merely a notice; the unexpected exit code itself was never
+    printed, so the message pointed away from the failure.
+    """
+    assert result.returncode == expected, (
+        f"expected exit {expected}, got {result.returncode}\n"
+        f"--- stderr ---\n{result.stderr}\n"
+        f"--- stdout (tail) ---\n{result.stdout[-2000:]}"
+    )
+
+
 def _marker_dir(cwd: Path) -> Path:
     d = cwd / ".clud" / "loop"
     d.mkdir(parents=True, exist_ok=True)
@@ -57,7 +74,7 @@ def test_loop_stops_on_done_marker(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 0, f"stderr: {result.stderr}"
+    _assert_rc(result, 0)
     assert "iteration 3" in result.stderr
     assert "DONE" in result.stderr
     assert done.is_file()
@@ -87,7 +104,7 @@ def test_loop_stops_on_blocked_marker(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 3, f"stderr: {result.stderr}"
+    _assert_rc(result, 3)
     assert "BLOCKED" in result.stderr
     assert "missing credentials" in result.stderr
 
@@ -105,7 +122,7 @@ def test_loop_no_markers_exhausts_iterations(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 2, f"stderr: {result.stderr}"
+    _assert_rc(result, 2)
     assert "did not converge" in result.stderr
     assert "iteration 1" in result.stderr
     assert "iteration 3" in result.stderr
@@ -129,7 +146,7 @@ def test_loop_no_done_flag_keeps_old_semantics(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 0, f"stderr: {result.stderr}"
+    _assert_rc(result, 0)
     # No "did not converge" message — the contract isn't active.
     assert "did not converge" not in result.stderr
 
@@ -157,7 +174,7 @@ def test_loop_clears_stale_done_marker(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 2
+    _assert_rc(result, 2)
     assert "did not converge" in result.stderr
 
 
@@ -175,7 +192,7 @@ def test_loop_dry_run_includes_loop_markers(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 0
+    _assert_rc(result, 0)
     data = json.loads(result.stdout)
     assert data["loop_markers"] is not None
     assert data["loop_markers"]["done_path"].replace("\\", "/").endswith(".clud/loop/DONE")
@@ -213,7 +230,7 @@ def test_loop_emits_clud_loop_artifacts(
         cwd=tmp_path,
     )
     # No marker is written by the mock agent → loop exhausts and exits 2.
-    assert result.returncode == 2, f"stderr: {result.stderr}"
+    _assert_rc(result, 2)
 
     # info.json exists, parses, has at least one iteration recorded.
     info_path = tmp_path / ".clud" / "loop" / "info.json"
@@ -262,7 +279,7 @@ def test_codex_loop_stops_on_done_marker(
         env=mock_env,
         cwd=tmp_path,
     )
-    assert result.returncode == 0, f"stderr: {result.stderr}"
+    _assert_rc(result, 0)
     assert "iteration 2" in result.stderr
     assert "DONE" in result.stderr
     assert done.is_file()
