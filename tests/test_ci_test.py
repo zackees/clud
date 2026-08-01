@@ -21,6 +21,31 @@ def test_select_suites_full_runs_unit_and_integration() -> None:
     assert ci_test._select_suites(["--full", "-x"]) == (True, True, ["-x"])
 
 
+def test_select_suites_strips_the_installed_clud_flag() -> None:
+    # It is ours, not pytest's — leaking it through would make pytest choke.
+    assert ci_test._select_suites(["--integration", "--use-installed-clud", "-x"]) == (
+        False,
+        True,
+        ["-x"],
+    )
+
+
+def test_integration_alone_builds_from_source() -> None:
+    """Issue #726: the regression this guards.
+
+    `--integration` used to imply "run the installed wheel", which silently
+    excluded working-tree changes from the run while still reporting pass/fail.
+    """
+    assert not ci_test._use_installed_clud(["--integration"])
+    assert not ci_test._use_installed_clud(["--full"])
+    assert not ci_test._use_installed_clud([])
+
+
+def test_the_installed_wheel_is_opt_in() -> None:
+    assert ci_test._use_installed_clud(["--integration", "--use-installed-clud"])
+    assert ci_test._use_installed_clud(["--use-installed-clud"])
+
+
 def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) -> None:
     target_dir = tmp_path / "target" / "debug"
     target_dir.mkdir(parents=True)
