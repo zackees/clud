@@ -192,9 +192,19 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # is not swallowed by an install match that started above it.
     (
         "taiki-e/install-action: tool list item",
+        # Earlier items in the same sequence must be skippable, or only a
+        # single-tool list is caught and `tool:` with `- cargo-nextest` above
+        # `- cargo-zigbuild` — the canonical multi-tool shape — reads as
+        # clean. Those items must be *bare names*: `[\w.@=+-]+` excludes the
+        # `:` in `- run: xwin splat`, so a following step still ends the
+        # window instead of being absorbed into this install.
+        #
+        # `[^\S\n]` rather than `[ \t]` so a CRLF file's trailing `\r` does
+        # not block the end-of-line anchor.
         re.compile(
             r"taiki-e/install-action[^\n]*(?:\n(?!\s*-\s)[^\n]*){0,4}?"
-            r"\n\s*-\s*cargo-(?:xwin|zigbuild)[\w.@=]*[ \t]*$",
+            r"(?:\n\s*-\s*[\w.@=+-]+[^\S\n]*$){0,5}?"
+            r"\n\s*-\s*cargo-(?:xwin|zigbuild)[\w.@=]*[^\S\n]*$",
             re.MULTILINE,
         ),
     ),
@@ -280,12 +290,13 @@ SKIP_DIR_NAMES: frozenset[str] = frozenset(
 )
 
 #: This file names every banned tool by construction, as do the fixtures that
-#: prove it rejects them and the doc that states the invariant.
+#: prove it rejects them. Both are inside `SCAN_DIRS`, so both exemptions are
+#: reachable — `docs/architecture/ci.md` used to be listed here too and was
+#: dead weight, since `docs/` is walked by nothing.
 EXEMPT_PATHS: frozenset[str] = frozenset(
     {
         "ci/banned_cross_tools.py",
         "tests/test_banned_cross_tools.py",
-        "docs/architecture/ci.md",
     }
 )
 
@@ -349,6 +360,11 @@ RUST_RAW_STRING = re.compile(r'b?r(#*)"')
 
 
 def _strip_rust_comments(text: str) -> str:
+    """Blank Rust comments; see `_scan_rust` for the scanner and its contract."""
+    return _scan_rust(text)[0]
+
+
+def _scan_rust(text: str) -> tuple[str, bool]:
     """Blank out Rust comments, character for character.
 
     A scanner rather than a regex, because all three of the cheap regex
@@ -378,6 +394,15 @@ def _strip_rust_comments(text: str) -> str:
     blanking the rest of the line. That is a *missed violation*, not the
     harmless over-reporting an earlier version of this docstring claimed, and
     four files in this repo were already desynced by it.
+
+    Returns `(stripped, ended_clean)`. `ended_clean` is false when the scan
+    finishes mid-string or mid-block-comment, which means the scanner lost
+    sync with the source somewhere and everything after that point was read in
+    the wrong state. That is the property worth asserting over real files:
+    length and newline count are preserved *unconditionally* — the scanner
+    only ever writes `" "`, and never at a newline — so a test that checks
+    only those passes against a scanner that is desynced from the first line,
+    which is exactly how the raw-string bug survived two review rounds.
     """
     out = list(text)
     length = len(text)
@@ -441,7 +466,7 @@ def _strip_rust_comments(text: str) -> str:
             index += 2
         else:
             index += 1
-    return "".join(out)
+    return "".join(out), not (depth or in_string)
 
 
 def _strip_comment(line: str, suffix: str) -> str:

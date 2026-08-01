@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from ci.banned_cross_tools import _strip_rust_comments, main, scan_text
+from ci.banned_cross_tools import _scan_rust, _strip_rust_comments, main, scan_text
 
 # --------------------------------------------------------------- rejected --
 
@@ -506,10 +506,17 @@ def test_exotic_line_breaks_do_not_crash_the_linter(text: str):
     scan_text(text, ".rs")
 
 
-def test_the_scanner_holds_against_every_rust_file_in_the_tree():
+def test_the_scanner_stays_in_sync_with_every_rust_file_in_the_tree():
     """Fixtures only prove the shapes someone thought of. Raw strings desynced
     the scanner on real source for two review rounds without any fixture
-    noticing, so run the invariant over every `.rs` file the linter walks."""
+    noticing, so run the invariant over every `.rs` file the linter walks.
+
+    The assertion is `ended_clean`, not length. Length and newline count are
+    preserved *unconditionally* — the scanner only ever writes a space, never
+    at a newline — so asserting those passes against a scanner desynced from
+    line one. A first version of this test did exactly that, and would have
+    passed against the raw-string bug it was written to guard.
+    """
     from ci.banned_cross_tools import _iter_files
 
     checked = 0
@@ -517,11 +524,21 @@ def test_the_scanner_holds_against_every_rust_file_in_the_tree():
         if path.suffix != ".rs":
             continue
         source = path.read_text(encoding="utf-8", errors="replace")
-        stripped = _strip_rust_comments(source)
+        stripped, ended_clean = _scan_rust(source)
+        assert ended_clean, f"{path}: scanner ended mid-string or mid-comment"
         assert len(stripped) == len(source), f"{path} changed length"
         assert stripped.count("\n") == source.count("\n"), f"{path} changed line count"
         checked += 1
     assert checked > 50, f"expected the walk to reach the Rust sources, saw {checked}"
+
+
+def test_the_sync_check_would_catch_a_desynced_scanner():
+    """Guard for the guard: prove `ended_clean` can be false, so the test above
+    is not another tautology. An unterminated string is the shape a raw-string
+    misparse leaves behind."""
+    assert _scan_rust('let s = "never closed')[1] is False
+    assert _scan_rust("let s = /* never closed")[1] is False
+    assert _scan_rust('let ok = r"\\\\?\\"; let s = "closed";')[1] is True
 
 
 def test_a_tool_written_as_a_yaml_block_sequence_is_caught():
@@ -530,6 +547,37 @@ def test_a_tool_written_as_a_yaml_block_sequence_is_caught():
     cargo-zigbuild because cargo-xwin would be caught by the unconditional
     rule regardless, so this would pass without the rule under test."""
     text = "\n".join(
+        [
+            "      - uses: taiki-e/install-action@v2",
+            "        with:",
+            "          tool:",
+            "            - cargo-zigbuild",
+        ]
+    )
+    assert scan_text(text, ".yml")
+
+
+def test_a_tool_list_is_caught_behind_earlier_items():
+    """The multi-tool list is the canonical shape, and an earlier item must
+    not end the search: with only a single item reachable, `- cargo-nextest`
+    above `- cargo-zigbuild` read as clean."""
+    text = "\n".join(
+        [
+            "      - uses: taiki-e/install-action@v2",
+            "        with:",
+            "          tool:",
+            "            - cargo-nextest",
+            "            - cargo-zigbuild",
+        ]
+    )
+    assert scan_text(text, ".yml")
+
+
+def test_a_tool_list_item_matches_on_a_crlf_file():
+    """`$` matches before `\\n`, so a trailing `\\r` sits between the tool name
+    and the anchor. `Path.read_text` normalises it away in `main()`, but a
+    direct `scan_text` caller — every fixture here — would see the raw text."""
+    text = "\r\n".join(
         [
             "      - uses: taiki-e/install-action@v2",
             "        with:",
