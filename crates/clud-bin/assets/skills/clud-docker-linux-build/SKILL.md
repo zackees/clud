@@ -66,6 +66,18 @@ So "I ran `clean` and the rebuild was still quick" is expected, not a bug: `clea
 | `target/`, `CARGO_HOME`, `RUSTUP_HOME`, `cargo-chef`, `/root/.soldr` | **anonymous (named) Docker volumes** |
 | Build output (binaries you want out) | anon volume → `docker cp` at the end (NEVER host bind) |
 
+The Rust image points every toolchain path at those volumes, so nothing warm
+lands on the bind mount (values as shipped in the generated Dockerfile):
+
+```
+CARGO_TARGET_DIR=/target        CARGO_HOME=/cargo-home
+RUSTUP_HOME=/rustup-home        CARGO_CHEF_LOCAL_DIR=/cargo-chef
+```
+
+If you adapt this for another stack, the equivalent step is redirecting that
+stack's build/cache roots the same way (e.g. `UV_CACHE_DIR`, `CCACHE_DIR`) —
+a volume that nothing writes to is just a slower bind mount.
+
 Host bind mounts on Docker-for-Windows / Docker-for-Mac pay a 5-10× FS-translation tax through the FUSE / 9p / virtiofs layer between the Linux VM and the host filesystem. Named volumes live inside Docker's own native ext4 — no translation. Observed datapoint from the zackees/zccache prototype: cold-build 20m22s with host bind → ~3 min with anon volume. Same machine, same image, single config change.
 
 ## Path conversion — the Windows trap
@@ -80,6 +92,27 @@ Each shell mangles `docker -v` arguments differently:
 | WSL2 bash | POSIX paths native, but `C:\` isn't reachable — use `/mnt/c/...`. |
 
 The bundled tools detect MSYS shells in `doctor` and warn loudly. If `doctor` says "MSYS shell detected", switch to PowerShell before continuing.
+
+**Resolving the host path per shell.** When you do drive `docker -v` by hand, the
+*host* side is the only part that varies — inside the container the path is
+always POSIX:
+
+```powershell
+# PowerShell (recommended on Windows)
+$repo = (Get-Location).Path                 # C:\Users\me\repo
+```
+```bash
+# MSYS Git Bash — hand docker a Windows path, not an MSYS one
+repo="$(cygpath -w "$(pwd)")"               # C:\Users\me\repo
+
+# WSL2 — Docker Desktop wants the Windows path, not /mnt/c/...
+repo="$(wslpath -w "$(pwd)")"               # C:\Users\me\repo
+```
+
+`cygpath` ships with Git for Windows and `wslpath` with WSL, so each is present
+exactly where it applies. Pair the Git Bash form with `MSYS_NO_PATHCONV=1` on
+the docker invocation itself, so the `:/src` *container* side is not rewritten
+too.
 
 ## mtime — the silent correctness footgun
 
