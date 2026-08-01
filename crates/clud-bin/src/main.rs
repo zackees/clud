@@ -54,7 +54,10 @@ fn main() {
 
     verbose_log::init_launch_clock();
 
-    if let Err(err) = runtime_cache::hop_to_runtime_cache_if_enabled() {
+    // #333: the daemon and worker roles are exempt — on Windows the hop cannot
+    // preserve the PID, and theirs is recorded by other processes.
+    let subcommand_name = args.command.as_ref().and_then(args::Command::internal_name);
+    if let Err(err) = runtime_cache::hop_to_runtime_cache_if_enabled(subcommand_name) {
         eprintln!("[clud] warning: runtime cache hop failed: {err}");
     }
 

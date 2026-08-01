@@ -76,6 +76,47 @@ pub fn cached_clud_path() -> Option<PathBuf> {
     Some(runtime_cache_dir()?.join(cached_clud_binary_name()))
 }
 
+/// Is this invocation's own PID load-bearing to something outside it? (#333)
+///
+/// On Windows the hop cannot preserve the PID — see
+/// [`reexec_from_cached_binary`] — so any role whose PID is recorded by, or
+/// observed from, another process must not hop.
+///
+/// The two internal roles are exactly that:
+///
+/// - `__daemon` writes `daemon.json`, is looked up by `ensure_daemon`,
+///   `clud daemon stop`, the handover registry and every liveness probe.
+/// - `__worker` is recorded in its session snapshot as `worker_pid` and is
+///   reaped through that identity.
+///
+/// Both are also spawned *detached*, so the wrapper the Windows hop leaves
+/// behind has nothing meaningful to wait for.
+///
+/// The foreground CLI is deliberately **not** exempt. It stamps descendants
+/// with `RUNNING_PROCESS_ORIGINATOR=CLUD:<pid>` using its *own* `process::id()`
+/// after the hop has happened, so the tag, the reaper it installs, and the
+/// session records it writes all agree on the post-hop PID. Nothing outside
+/// records the pre-hop PID for it.
+///
+/// # This guard is necessary but **not sufficient**
+///
+/// Do not read it as fixing the Windows hop. Measured with it in place, on a
+/// freshly built binary:
+///
+/// ```text
+/// hop OFF -> daemon.json pid alive,  daemon running from target/debug/clud.exe
+/// hop ON  -> daemon.json pid DEAD,   no clud process alive at all
+/// ```
+///
+/// So with the hop enabled the daemon starts, records itself, and then dies —
+/// and exempting `__daemon` does not change that. The remaining cause is not
+/// yet identified; `tests/integration/test_daemon_restart.py` reproduces it,
+/// as does a bare `clud daemon restart` with `CLUD_USE_RUNTIME_CACHE=1` and
+/// `CLUD_DAEMON_STATE_DIR` pointed at a scratch directory. See #333.
+pub fn role_pid_is_load_bearing(subcommand_name: Option<&str>) -> bool {
+    matches!(subcommand_name, Some("__daemon") | Some("__worker"))
+}
+
 /// Returns true when the runtime-cache hop should run.
 pub fn runtime_cache_hop_enabled() -> bool {
     runtime_cache_hop_enabled_from_vars(
@@ -114,8 +155,13 @@ fn runtime_cache_hop_enabled_from_vars(use_runtime_cache: bool, _debug_assertion
 /// cached binary fails. On a successful hop this function replaces the
 /// process on Unix, or waits for the child and exits with its status on
 /// Windows.
-pub fn hop_to_runtime_cache_if_enabled() -> io::Result<()> {
+pub fn hop_to_runtime_cache_if_enabled(subcommand_name: Option<&str>) -> io::Result<()> {
     if !runtime_cache_hop_enabled() {
+        return Ok(());
+    }
+    // #333: roles whose PID is observed from outside cannot hop on Windows,
+    // where the re-exec does not preserve it.
+    if role_pid_is_load_bearing(subcommand_name) {
         return Ok(());
     }
 
@@ -369,6 +415,24 @@ mod tests {
     fn an_explicit_opt_in_beats_the_debug_default() {
         assert!(runtime_cache_hop_enabled_from_vars(true, true));
         assert!(runtime_cache_hop_enabled_from_vars(true, false));
+    }
+
+    /// #333: the two internal roles must never hop. Their PID is recorded by
+    /// another process, and the Windows hop cannot preserve it.
+    #[test]
+    fn the_daemon_and_worker_roles_never_hop() {
+        assert!(role_pid_is_load_bearing(Some("__daemon")));
+        assert!(role_pid_is_load_bearing(Some("__worker")));
+    }
+
+    /// Everything else may hop. The foreground CLI stamps descendants with its
+    /// own post-hop `process::id()`, so nothing outside holds the pre-hop PID.
+    #[test]
+    fn ordinary_invocations_may_hop() {
+        assert!(!role_pid_is_load_bearing(None));
+        assert!(!role_pid_is_load_bearing(Some("loop")));
+        assert!(!role_pid_is_load_bearing(Some("attach")));
+        assert!(!role_pid_is_load_bearing(Some("top")));
     }
 
     /// The part that must not change: without the opt-in, nothing hops, in
