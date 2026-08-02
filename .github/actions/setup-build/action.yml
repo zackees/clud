@@ -33,7 +33,7 @@ inputs:
       other setup-soldr version. The backend and these shims share one daemon
       socket, and mixing protocol versions resets the connection (#580).
     required: false
-    default: "0.8.28"
+    default: "0.8.30"
 
 runs:
   using: composite
@@ -117,8 +117,16 @@ runs:
     #
     #   *-pc-windows-msvc   LLVM toolchain + the vendored xwin MSVC CRT cache
     #   *-apple-darwin      the target-shaped Apple SDK, exported as SDKROOT
-    #   *-unknown-linux-*   cargo-zigbuild + zig
+    #   *-unknown-linux-*   the blessed Linux prep (dispatch=blessed-linux)
     #   all                 rustup target add <triple>
+    #
+    # The Linux arm is why this pin moved to 0.8.30. Through 0.8.28 that arm
+    # printed `dispatch=zigbuild` and provisioned a managed zig WITHOUT
+    # exporting its bin dir, so the later `cargo zigbuild` died with
+    # "Failed to find zig" -- `main`'s Build linux-arm lane, red for 20+ runs
+    # (clud#732). 0.8.30 routes Linux through the same
+    # `target_lifecycle::prepare_target` + `apply_blessed_prep_env` path the
+    # msvc/darwin arms use, which writes the toolchain PATH into $GITHUB_ENV.
     #
     # It then exports the target-scoped Cargo/cc-rs/linker env into $GITHUB_ENV,
     # which is what lets the later `cargo test --no-run` / maturin steps link a
@@ -135,6 +143,16 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # NB: soldr's `<triple>.<glibc>` floor spelling (soldr#2139) is NOT
+        # usable here yet. It exists on soldr `main` but is absent from the
+        # pinned 0.8.30, which rejects it outright:
+        #
+        #   soldr build --target `aarch64-unknown-linux-gnu.2.17`:
+        #     not a known alias or Rust triple. Did you mean `all`?
+        #
+        # The dev wheel therefore opts out of the manylinux audit instead --
+        # see ci/xbuild.py. Revisit once a soldr release carries the floor;
+        # tracked as Ask 2 on zackees/soldr#2211.
         "${SOLDR_BINARY:-soldr}" prepare \
           --target "${{ inputs.target }}" \
           --github-env "$GITHUB_ENV"

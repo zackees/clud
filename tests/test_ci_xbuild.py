@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from ci import bundle, xbuild
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -111,20 +109,57 @@ def test_windows_soldr_env_keeps_msvc_cmake_and_advapi_contract() -> None:
     )
 
 
-@pytest.mark.parametrize("encoded", ["", "-C\x1fdebuginfo=0"])
-def test_windows_soldr_env_rejects_encoded_flags_that_override_sdk_paths(
-    encoded: str,
-) -> None:
+def test_windows_soldr_env_preserves_encoded_sdk_paths_from_soldr_0_8_30() -> None:
+    """soldr >= 0.8.30 exports the MSVC link config in the encoded variable.
+
+    This previously raised, which was correct while the SDK paths lived only
+    in the target-scoped variable that CARGO_ENCODED_RUSTFLAGS shadows. Once
+    soldr moved them into the winning variable, refusing to proceed rejected
+    the correct configuration and reddened every Windows lane.
+    """
+    encoded = "\x1f".join(
+        [
+            "-Clinker-flavor=lld-link",
+            "-Clink-arg=/NODEFAULTLIB:libucrt.lib",
+            "-Clink-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64",
+        ]
+    )
+    env = xbuild.whisper_env(
+        "x86_64-pc-windows-msvc",
+        "soldr",
+        {"CARGO_ENCODED_RUSTFLAGS": encoded},
+    )
+    parts = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
+    # The prepared link configuration survives, in order...
+    assert parts[:3] == encoded.split("\x1f")
+    # ...and our own library is appended rather than replacing it.
+    assert parts[-1] == "-Clink-arg=advapi32.lib"
+
+
+def test_windows_soldr_env_folds_shadowed_rustflags_into_encoded() -> None:
+    """Anything the encoded variable shadows must be merged, not dropped.
+
+    CARGO_ENCODED_RUSTFLAGS outranks both RUSTFLAGS and
+    target.<triple>.rustflags, so a toolchain that sets it without the SDK
+    paths would otherwise silently lose them.
+    """
     rustflags_key = "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"
-    with pytest.raises(ValueError, match=r"would override.*Windows SDK"):
-        xbuild.whisper_env(
-            "x86_64-pc-windows-msvc",
-            "soldr",
-            {
-                "CARGO_ENCODED_RUSTFLAGS": encoded,
-                rustflags_key: "-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64",
-            },
-        )
+    env = xbuild.whisper_env(
+        "x86_64-pc-windows-msvc",
+        "soldr",
+        {
+            "CARGO_ENCODED_RUSTFLAGS": "-Clinker-flavor=lld-link",
+            "RUSTFLAGS": "-C debuginfo=0",
+            rustflags_key: "-C link-arg=/LIBPATH:/opt/xwin/sdk/lib/um/x86_64",
+        },
+    )
+    parts = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
+    assert "/LIBPATH:/opt/xwin/sdk/lib/um/x86_64" in " ".join(parts)
+    assert "debuginfo=0" in " ".join(parts)
+    assert parts[-1] == "-Clink-arg=advapi32.lib"
+    # Both shadowed sources are removed so nothing reads a stale value.
+    assert "RUSTFLAGS" not in env
+    assert rustflags_key not in env
 
 
 def test_windows_soldr_bindgen_uses_target_sdk_headers_when_available() -> None:

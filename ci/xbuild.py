@@ -153,20 +153,40 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         # generic flags too: leaving RUSTFLAGS set would make Cargo ignore the
         # target-specific value we need to preserve.
         rustflags_key = f"CARGO_TARGET_{target.upper().replace('-', '_')}_RUSTFLAGS"
-        if "CARGO_ENCODED_RUSTFLAGS" in env:
-            raise ValueError(
-                "CARGO_ENCODED_RUSTFLAGS would override "
-                f"{rustflags_key}; cannot preserve the prepared Windows SDK "
-                "link paths"
-            )
         generic_rustflags = env.pop("RUSTFLAGS", "")
         target_rustflags = env.get(rustflags_key, "")
-        env[rustflags_key] = " ".join(
-            filter(
-                None,
-                (target_rustflags, generic_rustflags, "-C link-arg=advapi32.lib"),
+        if "CARGO_ENCODED_RUSTFLAGS" in env:
+            # soldr >= 0.8.30 exports the prepared MSVC link configuration --
+            # `-Clinker-flavor=lld-link` plus the SDK /LIBPATH arguments --
+            # through CARGO_ENCODED_RUSTFLAGS rather than the target-scoped
+            # variable. 0.8.28 used the target-scoped one.
+            #
+            # This used to raise. That was right when the SDK paths lived
+            # *only* in the target-scoped variable: CARGO_ENCODED_RUSTFLAGS
+            # outranks both RUSTFLAGS and target.<triple>.rustflags, so its
+            # mere presence meant those paths were about to be dropped and
+            # lld-link would fail to find even kernel32.lib. Now that soldr
+            # puts them in the winning variable, refusing to proceed rejects
+            # the correct configuration.
+            #
+            # Merging instead of failing is also strictly safer than either
+            # branch alone: if a future toolchain sets the encoded variable
+            # *without* the SDK paths, folding the target-scoped value in
+            # preserves them rather than erroring out.
+            encoded = [part for part in env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if part]
+            encoded += shlex.split(target_rustflags)
+            encoded += shlex.split(generic_rustflags)
+            encoded.append("-Clink-arg=advapi32.lib")
+            env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(encoded)
+            # Drop the now-shadowed variable so nothing reads a stale value.
+            env.pop(rustflags_key, None)
+        else:
+            env[rustflags_key] = " ".join(
+                filter(
+                    None,
+                    (target_rustflags, generic_rustflags, "-C link-arg=advapi32.lib"),
+                )
             )
-        )
     return env
 
 
@@ -337,6 +357,25 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     ]
     if args.profile == "dev":
         subcommand += ["--profile", "dev"]
+        if args.target.endswith("-unknown-linux-gnu"):
+            # Dev wheels are CI artifacts, not distributables, and must not be
+            # audited for manylinux compliance.
+            #
+            # maturin audits by default on Linux even with no --compatibility
+            # flag. The release path opts into manylinux2014 explicitly and
+            # pairs it with --zig, which is what actually supplies the 2.17
+            # floor -- maturin hands the glibc version down to zigbuild. Dev
+            # passes neither, so it inherited the audit without the mechanism
+            # that satisfies it, and once the blessed Linux prep started
+            # linking at zig's default floor the wheel step died with:
+            #
+            #   Error ensuring manylinux_2_17 compliance ... too-recent
+            #   versioned symbols: ["libm.so.6 offending versions: GLIBC_2.27"]
+            #
+            # This wheel is only ever installed on the exec runner for the same
+            # triple, whose glibc is far newer, so the property being asserted
+            # is one nothing downstream consumes. Release keeps its audit.
+            subcommand += ["--compatibility", "linux"]
     else:
         subcommand.append("--release")
         if args.target.endswith("-unknown-linux-gnu"):
