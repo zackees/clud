@@ -492,10 +492,7 @@ fn run_interactive_command(command: CommandSpec, cwd: Option<PathBuf>) -> Result
 }
 
 fn verify_backend(_backend: Backend, path: &Path) -> Result<(), String> {
-    let command = subprocess::command_spec_for_subprocess(vec![
-        path.to_string_lossy().to_string(),
-        "--version".to_string(),
-    ]);
+    let command = vec![path.to_string_lossy().to_string(), "--version".to_string()];
     let (exit_code, output) = run_captured_command(command)
         .map_err(|err| format!("failed to run {} --version: {err}", path.display()))?;
     if exit_code == 0 {
@@ -510,33 +507,26 @@ fn verify_backend(_backend: Backend, path: &Path) -> Result<(), String> {
     }
 }
 
-fn run_captured_command(command: CommandSpec) -> Result<(i32, String), String> {
-    let process = NativeProcess::new(ProcessConfig {
+fn run_captured_command(command: Vec<String>) -> Result<(i32, String), String> {
+    let process = subprocess::ManagedSubprocess::start_inheriting_env(
         command,
-        cwd: None,
-        env: None,
-        capture: true,
-        stderr_mode: StderrMode::Stdout,
-        creationflags: invisible_helper_creationflags(),
-        create_process_group: false,
-        stdin_mode: StdinMode::Null,
-        nice: None,
-    });
-    process
-        .start()
-        .map_err(|err| format!("failed to start command: {err}"))?;
+        None,
+        true,
+        invisible_helper_creationflags(),
+    )
+    .map_err(|err| format!("failed to start command: {err}"))?;
 
     let mut buf = Vec::<u8>::new();
     loop {
-        match process.read_combined(Some(Duration::from_millis(100))) {
-            ReadStatus::Line(event) => {
-                buf.extend_from_slice(&event.line);
-                buf.push(b'\n');
+        match process.read_stdout(Some(Duration::from_millis(100))) {
+            ReadStatus::Line(line) => {
+                buf.extend_from_slice(&line);
             }
             ReadStatus::Timeout => {
-                if process.returncode().is_some() {
-                    break;
-                }
+                // Polling observes direct-root exit and closes its Job, but
+                // reader threads can still be draining buffered final bytes.
+                // Continue until EOF synchronizes with both readers.
+                let _ = process.poll();
             }
             ReadStatus::Eof => break,
         }

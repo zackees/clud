@@ -20,9 +20,400 @@
 //! every code path stays argv-based there.
 
 #[cfg(windows)]
+use std::collections::VecDeque;
+use std::io::IsTerminal;
+#[cfg(windows)]
+use std::io::{BufRead, BufReader};
+#[cfg(windows)]
 use std::path::Path;
+use std::path::PathBuf;
+#[cfg(windows)]
+use std::process::Command; // running-process: command-builder
+#[cfg(windows)]
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
-use running_process::CommandSpec;
+use running_process::{
+    CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode, StreamKind,
+};
+
+/// A backend child whose Windows pipe-owning launches use the race-free
+/// contained-spawn API.
+///
+/// `NativeProcess` creates a running child and only then assigns its Job
+/// Object. A very short-lived `cmd.exe` can spawn a descendant and exit in
+/// that gap, leaving the descendant outside the Job with inherited capture
+/// handles. `running_process::spawn` creates the child suspended, assigns the
+/// Job, and only then resumes it. We use that path exactly when pipes are
+/// load-bearing: clud is capturing internally, or either of its own output
+/// streams is a non-terminal (pytest/CI/supervisor capture). Console-attached launches
+/// keep `NativeProcess`, preserving their console process-group and Ctrl-C
+/// behavior; a terminal handle has no EOF reader for a descendant to strand.
+pub struct ManagedSubprocess(ManagedSubprocessInner);
+
+enum ManagedSubprocessInner {
+    Native(NativeProcess),
+    #[cfg(windows)]
+    Suspended(SuspendedSubprocess),
+}
+
+impl ManagedSubprocess {
+    pub fn start(
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
+        capture: bool,
+        creationflags: Option<u32>,
+    ) -> Result<Self, String> {
+        Self::start_with_env(argv, cwd, Some(env), capture, creationflags, true)
+    }
+
+    pub fn start_inheriting_env(
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        capture: bool,
+        creationflags: Option<u32>,
+    ) -> Result<Self, String> {
+        Self::start_with_env(argv, cwd, None, capture, creationflags, false)
+    }
+
+    fn start_with_env(
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: Option<Vec<(String, String)>>,
+        capture: bool,
+        creationflags: Option<u32>,
+        inherit_stdin: bool,
+    ) -> Result<Self, String> {
+        if use_suspended_spawn(
+            capture,
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        ) {
+            #[cfg(windows)]
+            {
+                return SuspendedSubprocess::spawn(argv, cwd, env, capture, inherit_stdin)
+                    .map(ManagedSubprocessInner::Suspended)
+                    .map(Self)
+                    .map_err(|error| error.to_string());
+            }
+        }
+
+        let process = NativeProcess::new(ProcessConfig {
+            command: command_spec_for_subprocess(argv),
+            cwd,
+            env,
+            capture,
+            stderr_mode: StderrMode::Stdout,
+            creationflags,
+            create_process_group: false,
+            stdin_mode: if inherit_stdin {
+                StdinMode::Inherit
+            } else {
+                StdinMode::Null
+            },
+            nice: None,
+        });
+        process.start().map_err(|error| error.to_string())?;
+        Ok(Self(ManagedSubprocessInner::Native(process)))
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        match &self.0 {
+            ManagedSubprocessInner::Native(process) => process.pid(),
+            #[cfg(windows)]
+            ManagedSubprocessInner::Suspended(process) => Some(process.pid()),
+        }
+    }
+
+    pub fn poll(&self) -> Result<Option<i32>, String> {
+        match &self.0 {
+            ManagedSubprocessInner::Native(process) => {
+                process.poll().map_err(|error| error.to_string())
+            }
+            #[cfg(windows)]
+            ManagedSubprocessInner::Suspended(process) => {
+                process.poll().map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    pub fn wait(&self, timeout: Option<Duration>) -> Result<i32, String> {
+        match &self.0 {
+            ManagedSubprocessInner::Native(process) => {
+                process.wait(timeout).map_err(|error| error.to_string())
+            }
+            #[cfg(windows)]
+            ManagedSubprocessInner::Suspended(process) => {
+                process.wait(timeout).map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    pub fn kill(&self) -> Result<(), String> {
+        match &self.0 {
+            ManagedSubprocessInner::Native(process) => {
+                process.kill().map_err(|error| error.to_string())
+            }
+            #[cfg(windows)]
+            ManagedSubprocessInner::Suspended(process) => {
+                process.kill().map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    pub fn returncode(&self) -> Option<i32> {
+        match &self.0 {
+            ManagedSubprocessInner::Native(process) => process.returncode(),
+            #[cfg(windows)]
+            ManagedSubprocessInner::Suspended(process) => process.poll().ok().flatten(),
+        }
+    }
+
+    pub fn read_stdout(&self, timeout: Option<Duration>) -> ReadStatus<Vec<u8>> {
+        match &self.0 {
+            ManagedSubprocessInner::Native(process) => {
+                process.read_stream(StreamKind::Stdout, timeout)
+            }
+            #[cfg(windows)]
+            ManagedSubprocessInner::Suspended(process) => process.read_stdout(timeout),
+        }
+    }
+}
+
+fn use_suspended_spawn(capture: bool, stdout_terminal: bool, stderr_terminal: bool) -> bool {
+    cfg!(windows) && (capture || !stdout_terminal || !stderr_terminal)
+}
+
+#[cfg(windows)]
+struct SuspendedSubprocess {
+    pid: u32,
+    child: Mutex<SuspendedChildState>,
+    capture: Arc<CaptureState>,
+}
+
+#[cfg(windows)]
+struct SuspendedChildState {
+    child: Option<running_process::SpawnedChild>,
+    returncode: Option<i32>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct CaptureState {
+    inner: Mutex<CaptureInner>,
+    ready: Condvar,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct CaptureInner {
+    stdout: VecDeque<Vec<u8>>,
+    readers_open: usize,
+}
+
+#[cfg(windows)]
+impl SuspendedSubprocess {
+    fn spawn(
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: Option<Vec<(String, String)>>,
+        capture: bool,
+        inherit_stdin: bool,
+    ) -> std::io::Result<Self> {
+        let mut command = command_for_suspended_spawn(&argv)?;
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let environment_policy = match env {
+            Some(env) => {
+                command.envs(env);
+                running_process::EnvironmentPolicy::Clear
+            }
+            None => running_process::EnvironmentPolicy::Inherit,
+        };
+        let pipe = if capture {
+            running_process::StdioSource::Pipe
+        } else {
+            running_process::StdioSource::Parent
+        };
+        let stdio = running_process::SpawnStdio {
+            stdin: if inherit_stdin {
+                running_process::StdioSource::Parent
+            } else {
+                running_process::StdioSource::Null
+            },
+            stdout: pipe,
+            stderr: if capture {
+                running_process::StdioSource::Pipe
+            } else {
+                running_process::StdioSource::Parent
+            },
+            drain_timeout: Some(Duration::from_secs(2)),
+            // This branch owns pipes rather than an interactive console. A
+            // console-less child does not receive the parent's Ctrl-C event;
+            // clud remains the sole cancellation owner, as in the existing
+            // CREATE_NEW_PROCESS_GROUP path.
+            show_console: false,
+        };
+        let mut child =
+            running_process::spawn_with_env_policy(&mut command, stdio, environment_policy)?;
+        let state = Arc::new(CaptureState::default());
+        if capture {
+            let stdout = child.stdout.take().expect("captured stdout missing");
+            let stderr = child.stderr.take().expect("captured stderr missing");
+            state
+                .inner
+                .lock()
+                .expect("capture mutex poisoned")
+                .readers_open = 2;
+            spawn_capture_reader(stdout, Arc::clone(&state));
+            spawn_capture_reader(stderr, Arc::clone(&state));
+        }
+        let pid = child.id();
+        Ok(Self {
+            pid,
+            child: Mutex::new(SuspendedChildState {
+                child: Some(child),
+                returncode: None,
+            }),
+            capture: state,
+        })
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn poll(&self) -> std::io::Result<Option<i32>> {
+        let mut state = self.child.lock().expect("child mutex poisoned");
+        if let Some(code) = state.returncode {
+            return Ok(Some(code));
+        }
+        let Some(child) = state.child.as_mut() else {
+            return Ok(None);
+        };
+        let result = child.try_wait()?;
+        if let Some(code) = result {
+            state.returncode = Some(code);
+            // The direct backend has finished, so its clud session is over.
+            // Close the kill-on-close Job now, rather than waiting for this
+            // wrapper to drop: contained descendants may still own inherited
+            // capture writers, and the renderer cannot observe EOF until they
+            // are terminated. Any bytes already written remain in the kernel
+            // pipe buffers for the reader threads to drain.
+            drop(state.child.take());
+        }
+        Ok(result)
+    }
+
+    fn wait(&self, timeout: Option<Duration>) -> std::io::Result<i32> {
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        loop {
+            if let Some(code) = self.poll()? {
+                return Ok(code);
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out waiting for child",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn kill(&self) -> std::io::Result<()> {
+        let mut state = self.child.lock().expect("child mutex poisoned");
+        match state.child.as_mut() {
+            Some(child) => child.kill(),
+            None => Ok(()),
+        }
+    }
+
+    fn read_stdout(&self, timeout: Option<Duration>) -> ReadStatus<Vec<u8>> {
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        let mut inner = self.capture.inner.lock().expect("capture mutex poisoned");
+        loop {
+            if let Some(line) = inner.stdout.pop_front() {
+                return ReadStatus::Line(line);
+            }
+            if inner.readers_open == 0 {
+                return ReadStatus::Eof;
+            }
+            inner = match deadline {
+                Some(deadline) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return ReadStatus::Timeout;
+                    };
+                    let (guard, result) = self
+                        .capture
+                        .ready
+                        .wait_timeout(inner, remaining)
+                        .expect("capture mutex poisoned");
+                    if result.timed_out() {
+                        return ReadStatus::Timeout;
+                    }
+                    guard
+                }
+                None => self
+                    .capture
+                    .ready
+                    .wait(inner)
+                    .expect("capture mutex poisoned"),
+            };
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_capture_reader(reader: impl std::io::Read + Send + 'static, state: Arc<CaptureState>) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        loop {
+            let mut line = Vec::new();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    state
+                        .inner
+                        .lock()
+                        .expect("capture mutex poisoned")
+                        .stdout
+                        .push_back(line);
+                    state.ready.notify_all();
+                }
+            }
+        }
+        let mut inner = state.inner.lock().expect("capture mutex poisoned");
+        inner.readers_open = inner.readers_open.saturating_sub(1);
+        state.ready.notify_all();
+    });
+}
+
+#[cfg(windows)]
+fn command_for_suspended_spawn(argv: &[String]) -> std::io::Result<Command> {
+    let Some(program) = argv.first() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty subprocess argv",
+        ));
+    };
+    if is_windows_batch_wrapper(Some(program)) {
+        let comspec = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+        // running-process: command-builder
+        let mut command = Command::new(comspec);
+        command.args(["/D", "/S", "/C", &render_windows_batch_command(argv)]);
+        Ok(command)
+    } else {
+        // running-process: command-builder
+        let mut command = Command::new(program);
+        command.args(&argv[1..]);
+        Ok(command)
+    }
+}
 
 /// Translate an argv-style launch into the most compatible `CommandSpec` for
 /// the current platform.
@@ -105,7 +496,7 @@ fn is_windows_batch_wrapper(program: Option<&str>) -> bool {
 /// configuration refuses the codepage switch — the worst case is then
 /// the same as before this change, not a hard failure (issue #168).
 #[cfg(windows)]
-fn render_windows_batch_command(argv: &[String]) -> String {
+pub(crate) fn render_windows_batch_command(argv: &[String]) -> String {
     let cmd = argv
         .iter()
         .map(|arg| quote_for_cmd(arg))
@@ -150,7 +541,103 @@ fn quote_for_cmd(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{argv_is_batch_wrapped, command_spec_for_subprocess};
+    use super::{argv_is_batch_wrapped, command_spec_for_subprocess, use_suspended_spawn};
+
+    #[test]
+    fn suspended_spawn_selection_matches_the_pipe_ownership_boundary() {
+        #[cfg(windows)]
+        {
+            assert!(use_suspended_spawn(true, true, true));
+            assert!(use_suspended_spawn(false, false, false));
+            assert!(use_suspended_spawn(false, false, true));
+            assert!(use_suspended_spawn(false, true, false));
+            assert!(!use_suspended_spawn(false, true, true));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(!use_suspended_spawn(true, false, false));
+        }
+    }
+
+    #[cfg(windows)]
+    fn start_windows(args: &[&str], capture: bool) -> super::ManagedSubprocess {
+        let mut argv = vec!["cmd.exe".to_string()];
+        argv.extend(args.iter().map(|arg| (*arg).to_string()));
+        super::ManagedSubprocess::start(
+            argv,
+            None,
+            std::env::vars().collect(),
+            capture,
+            Some(crate::win_creation_flags::CREATE_NEW_PROCESS_GROUP),
+        )
+        .expect("race-free contained spawn")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn suspended_spawn_covers_success_and_child_nonzero() {
+        let success = start_windows(&["/D", "/S", "/C", "exit /b 0"], true);
+        assert_eq!(success.wait(Some(std::time::Duration::from_secs(5))), Ok(0));
+
+        let nonzero = start_windows(&["/D", "/S", "/C", "exit /b 23"], true);
+        assert_eq!(
+            nonzero.wait(Some(std::time::Duration::from_secs(5))),
+            Ok(23)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn suspended_spawn_surfaces_spawn_failure() {
+        let result = super::ManagedSubprocess::start(
+            vec![r"Z:\clud-definitely-missing\missing.exe".to_string()],
+            None,
+            std::env::vars().collect(),
+            true,
+            Some(crate::win_creation_flags::CREATE_NEW_PROCESS_GROUP),
+        );
+        assert!(result.is_err(), "a missing executable must fail at spawn");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn suspended_spawn_stream_capture_reaches_eof() {
+        let process = start_windows(
+            &["/D", "/S", "/C", "echo capture-line & echo error-line 1>&2"],
+            true,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut output = Vec::new();
+        loop {
+            match process.read_stdout(Some(std::time::Duration::from_millis(100))) {
+                running_process::ReadStatus::Line(line) => output.extend(line),
+                running_process::ReadStatus::Eof => break,
+                running_process::ReadStatus::Timeout if std::time::Instant::now() < deadline => {}
+                running_process::ReadStatus::Timeout => panic!("capture did not reach EOF"),
+            }
+        }
+        assert_eq!(process.wait(Some(std::time::Duration::from_secs(5))), Ok(0));
+        let output = String::from_utf8_lossy(&output);
+        assert!(
+            output.contains("capture-line"),
+            "stdout missing: {output:?}"
+        );
+        assert!(output.contains("error-line"), "stderr missing: {output:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn suspended_spawn_cancellation_is_bounded() {
+        let process = start_windows(&["/D", "/S", "/C", "ping -n 30 127.0.0.1 > nul"], true);
+        assert_eq!(process.poll().expect("poll"), None);
+        process.kill().expect("cancel direct child");
+        assert!(
+            process
+                .wait(Some(std::time::Duration::from_secs(5)))
+                .is_ok(),
+            "cancelled child must become waitable"
+        );
+    }
 
     #[test]
     fn argv_is_batch_wrapped_false_for_native_and_empty_argv() {
