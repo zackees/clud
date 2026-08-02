@@ -102,6 +102,40 @@ faithful equivalent — `top_k`, `stop_sequences`, thinking blocks replayed in
 history, images inside a `tool_result`, unknown block or `tool_choice` types —
 is an explicit error rather than a silent drop.
 
+## Response streaming
+
+`codex_sse.rs` translates the upstream Responses SSE stream into Anthropic SSE
+(#627 step 3), in two separable layers so fragmentation can be tested apart
+from event semantics:
+
+- `FrameDecoder` is byte-level. Line terminators are normalised on ingest (the
+  SSE spec treats CRLF, LF, and bare CR alike), and a `\r` at the end of a read
+  is held back so a CRLF split across two segments is not misread as CR plus a
+  blank line. Comments/heartbeats are skipped, multiple `data:` lines join with
+  a newline, and `finish()` flushes a final frame that arrived without a
+  trailing blank line.
+- `StreamTranslator` is semantic. It allocates Anthropic content-block indices
+  monotonically in the order blocks open, keyed off the upstream
+  `(output_index, content_index)`, so interleaved text and parallel tool calls
+  each address their own block.
+
+The invariant that shapes the design: **never emit a malformed Anthropic
+block.** A `content_block_start` for a tool call cannot be sent until the
+call's id and name are both known, so argument deltas that arrive first are
+buffered and flushed once the block is legally open. A half-formed tool block
+is worse than a late one — it makes the client fail to parse a turn it could
+otherwise have used.
+
+Termination is guaranteed: a truncated or disconnected stream still closes
+every open block and emits `message_delta`/`message_stop`. Upstream failures
+close open blocks and then emit a **sanitized** error — the upstream body is
+never echoed, since it can carry account identifiers or key fragments and this
+frame is written straight to the harness.
+
+Reasoning summaries are deliberately not forwarded: an Anthropic `thinking`
+block carries a signature the Responses API does not supply, and an unsigned
+one is rejected by clients.
+
 ## Persistence
 
 Global launch preferences use the existing settings document and `fs4` lock:

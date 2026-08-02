@@ -56,6 +56,10 @@ Entry and orchestration:
   mapping for #627 step 2: typed in/out structs, transcript-order-preserving
   tool loops, and explicit rejection of unrepresentable inputs. HTTP-free and
   not yet wired into the bridge (that is step 5).
+- `codex_sse.rs` - #627 step 3: `FrameDecoder` (byte-level SSE framing,
+  fragmentation/CRLF/heartbeat tolerant) and `StreamTranslator` (Responses
+  events -> Anthropic events with monotonic block indices). A tool block never
+  opens before its id and name are known. HTTP-free; wired in at step 5.
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every
