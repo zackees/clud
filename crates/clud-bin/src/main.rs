@@ -765,6 +765,17 @@ fn main() {
     // (unless --keep-orphans) reap them. Skip for detached / detachable
     // sessions — those descendants are intentionally outliving us and are
     // owned by the daemon now.
+    // #594: the timeout victims on the Windows lanes finish their payload — the
+    // backend's full report is already on stdout — and then miss the budget on
+    // the way out, so the open question is which exit stage holds the process
+    // open. Each stage below is `O(host processes)` or a daemon round trip, and
+    // none of them is currently attributable from a timed-out run.
+    //
+    // Opt-in only: `verbose_log::log` writes to stderr, and an unconditional
+    // line there would break every test that asserts clean stderr — the exact
+    // failure mode #594 already documents. Default runs emit nothing.
+    let exit_timing = args.verbose || std::env::var_os("CLUD_EXIT_TIMING").is_some();
+    let mut exit_stages: Vec<(&'static str, u128)> = Vec::new();
     if !args.detach && !args.detachable {
         // #673 Phase 2d: exits the job tracker gave up on at runtime get one
         // last replan against a fresh process table. Runs before the
@@ -774,7 +785,9 @@ fn main() {
         // paths, where those descendants are outliving us on purpose.
         if let Some(tracker) = job_orphan_reaper.as_ref() {
             if !args.keep_orphans {
+                let started = std::time::Instant::now();
                 let swept = tracker.sweep_abandoned_at_exit();
+                exit_stages.push(("sweep_abandoned_at_exit", started.elapsed().as_millis()));
                 if args.verbose && swept > 0 {
                     verbose_log::log(format_args!(
                         "[clud] reaper: re-planned {swept} abandoned tool-shell exit(s)"
@@ -784,7 +797,10 @@ fn main() {
             // #673 Phase 5: reaping is destructive and was silent, which is
             // how #651 could be closed while the same symptom kept growing.
             // Suppressed entirely when nothing was tracked.
-            for line in tracker.finish_and_report(args.verbose) {
+            let started = std::time::Instant::now();
+            let report_lines = tracker.finish_and_report(args.verbose);
+            exit_stages.push(("finish_and_report", started.elapsed().as_millis()));
+            for line in report_lines {
                 if args.quiet_orphans {
                     verbose_log::log(format_args!("{line}"));
                 } else {
@@ -797,7 +813,9 @@ fn main() {
             quiet: args.quiet_orphans,
             explain: args.explain_orphans,
         };
+        let started = std::time::Instant::now();
         let outcome = orphan_reaper::scan_and_report(std::process::id(), &opts);
+        exit_stages.push(("scan_and_report", started.elapsed().as_millis()));
         if args.verbose && outcome.found > 0 {
             verbose_log::log(format_args!(
                 "[clud] orphan reaper: found={} reaped={}",
@@ -814,9 +832,20 @@ fn main() {
         // `clud slay` does the synchronous version.
         if !args.keep_orphans {
             if let Ok(state_dir) = daemon::default_state_dir() {
+                let started = std::time::Instant::now();
                 let _ = daemon::try_request_orphan_reap(&state_dir);
+                exit_stages.push(("request_orphan_reap", started.elapsed().as_millis()));
             }
         }
+    }
+    if exit_timing && !exit_stages.is_empty() {
+        let detail = exit_stages
+            .iter()
+            .map(|(name, ms)| format!("{name}={ms}ms"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let total: u128 = exit_stages.iter().map(|(_, ms)| *ms).sum();
+        verbose_log::log(format_args!("[clud] exit timing: total={total}ms {detail}"));
     }
     if args.verbose {
         verbose_log::log(format_args!("[clud] exit: code {exit_code}"));
