@@ -23,12 +23,12 @@ from ._daemon_helpers import _read_exit_stages, run_clud
 pytestmark = pytest.mark.integration
 
 
-def test_exit_stage_file_records_each_stage_as_it_runs(clud_binary):
+def test_exit_stage_file_records_each_stage_as_it_runs(clud_binary, mock_env):
     """`CLUD_EXIT_TIMING_FILE` gets a begin/done pair per teardown stage."""
     fd, trace = tempfile.mkstemp(prefix="clud-exit-stage-test-", suffix=".log")
     os.close(fd)
     try:
-        env = dict(os.environ)
+        env = dict(mock_env)
         env["CLUD_EXIT_TIMING_FILE"] = trace
         result = subprocess.run(
             [str(clud_binary), "-p", "hello"],
@@ -56,7 +56,7 @@ def test_exit_stage_file_records_each_stage_as_it_runs(clud_binary):
             os.unlink(trace)
 
 
-def test_exit_stage_trace_stays_off_stderr(clud_binary):
+def test_exit_stage_trace_stays_off_stderr(clud_binary, mock_env):
     """The file sink must not leak to stderr.
 
     The many tests asserting clean stderr are why this sink is a file at all;
@@ -65,7 +65,7 @@ def test_exit_stage_trace_stays_off_stderr(clud_binary):
     fd, trace = tempfile.mkstemp(prefix="clud-exit-stage-quiet-", suffix=".log")
     os.close(fd)
     try:
-        env = dict(os.environ)
+        env = dict(mock_env)
         env["CLUD_EXIT_TIMING_FILE"] = trace
         result = subprocess.run(
             [str(clud_binary), "-p", "hello"],
@@ -114,11 +114,19 @@ def test_read_exit_stages_handles_a_process_that_never_reached_teardown():
             os.unlink(trace)
 
 
-def test_run_clud_reports_exit_stages_on_timeout(clud_binary):
-    """A timed-out launch surfaces the trace in the failure message."""
+def test_run_clud_reports_exit_stages_on_timeout(clud_binary, mock_env):
+    """A timed-out launch surfaces the trace in the failure message.
+
+    `--mock-sleep-ms` is only meaningful against the mock agent, so this needs
+    `mock_env`: without it clud resolves whatever `claude` is on PATH (nothing,
+    on a CI runner), exits immediately, and never times out at all.
+    """
     with pytest.raises(AssertionError) as excinfo:
         run_clud(
-            [str(clud_binary), "-p", "hello", "--", "--mock-sleep-ms", "10000"],
-            timeout=1.0,
+            [str(clud_binary), "-p", "hello", "--", "--mock-sleep-ms", "20000"],
+            timeout=2.0,
+            env=mock_env,
         )
-    assert "--- exit stages ---" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "--- exit stages ---" in message
+    assert "timed out after 2.0s" in message
