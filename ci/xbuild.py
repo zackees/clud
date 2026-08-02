@@ -337,6 +337,25 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     ]
     if args.profile == "dev":
         subcommand += ["--profile", "dev"]
+        if args.target.endswith("-unknown-linux-gnu"):
+            # Dev wheels are CI artifacts, not distributables, and must not be
+            # audited for manylinux compliance.
+            #
+            # maturin audits by default on Linux even with no --compatibility
+            # flag. The release path opts into manylinux2014 explicitly and
+            # pairs it with --zig, which is what actually supplies the 2.17
+            # floor -- maturin hands the glibc version down to zigbuild. Dev
+            # passes neither, so it inherited the audit without the mechanism
+            # that satisfies it, and once the blessed Linux prep started
+            # linking at zig's default floor the wheel step died with:
+            #
+            #   Error ensuring manylinux_2_17 compliance ... too-recent
+            #   versioned symbols: ["libm.so.6 offending versions: GLIBC_2.27"]
+            #
+            # This wheel is only ever installed on the exec runner for the same
+            # triple, whose glibc is far newer, so the property being asserted
+            # is one nothing downstream consumes. Release keeps its audit.
+            subcommand += ["--compatibility", "linux"]
     else:
         subcommand.append("--release")
         if args.target.endswith("-unknown-linux-gnu"):

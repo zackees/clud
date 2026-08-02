@@ -143,31 +143,18 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # Ask for an explicit glibc floor on Linux GNU targets.
+        # NB: soldr's `<triple>.<glibc>` floor spelling (soldr#2139) is NOT
+        # usable here yet. It exists on soldr `main` but is absent from the
+        # pinned 0.8.30, which rejects it outright:
         #
-        # Without it the blessed Linux prep links against the managed
-        # toolchain's default floor (~2.27/2.28 for aarch64), and the wheel
-        # step then dies in maturin's compliance check:
+        #   soldr build --target `aarch64-unknown-linux-gnu.2.17`:
+        #     not a known alias or Rust triple. Did you mean `all`?
         #
-        #   Error ensuring manylinux_2_17 compliance ... too-recent versioned
-        #   symbols: ["libm.so.6 offending versions: GLIBC_2.27"]
-        #
-        # manylinux2014 IS glibc 2.17, so the floor has to be requested, not
-        # inherited. `<triple>.<glibc>` is a soldr-level spelling (soldr#2139):
-        # it splits the floor off and hands only the base triple to rustc and
-        # rustup, which know nothing about it -- which is why `rustup target
-        # add` below still takes the unsuffixed target.
-        #
-        # Only x86_64/aarch64-unknown-linux-gnu accept a floor
-        # (GLIBC_FLOOR_SUPPORTED_BASES), and asking for one on anything else is
-        # a hard error, so this is gated on the GNU-Linux suffix.
-        PREPARE_TARGET="${{ inputs.target }}"
-        case "$PREPARE_TARGET" in
-          *-unknown-linux-gnu) PREPARE_TARGET="${PREPARE_TARGET}.2.17" ;;
-        esac
-        echo "soldr prepare target: $PREPARE_TARGET"
+        # The dev wheel therefore opts out of the manylinux audit instead --
+        # see ci/xbuild.py. Revisit once a soldr release carries the floor;
+        # tracked as Ask 2 on zackees/soldr#2211.
         "${SOLDR_BINARY:-soldr}" prepare \
-          --target "$PREPARE_TARGET" \
+          --target "${{ inputs.target }}" \
           --github-env "$GITHUB_ENV"
         # `soldr prepare` can keep target rust-std in its managed sysroot, while
         # plain Cargo verbs such as clippy and test --no-run use rustup's
