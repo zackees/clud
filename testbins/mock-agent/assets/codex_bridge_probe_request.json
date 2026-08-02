@@ -1,0 +1,11 @@
+{
+  "model": "clud-fixture",
+  "max_tokens": 16,
+  "messages": [
+    {
+      "role": "user",
+      "content": "probe"
+    }
+  ],
+  "stream": false
+}

@@ -46,6 +46,14 @@ Entry and orchestration:
   the two undocumented kill-switch env vars `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`
   + `CLAUDE_CODE_GIT_BASH_PATH` (resolved via
   [`shell/`](shell/README.md)) — see issue #447.
+- `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell for
+  Codex-provider launches through Claude: ephemeral listener + per-launch
+  bearer, bounded parser/workers/timeouts, deterministic Anthropic fixture
+  routes, and joined shutdown.
+- `foreground_runtime.rs` - shared foreground lifetime owner and injectable
+  subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
+  applies child-local Claude overrides, and tears the listener down on every
+  runner return path.
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a

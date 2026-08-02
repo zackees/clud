@@ -425,6 +425,7 @@ dependencies = [
  "ctrlc",
  "dirs 5.0.1",
  "fs4",
+ "getrandom 0.4.2",
  "gix-hash",
  "gix-index",
  "icy_sixel",

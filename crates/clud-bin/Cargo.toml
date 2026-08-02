@@ -30,6 +30,10 @@ ctrlc = "3"
 # a small blocking HTTP client, and a hash verifier. `ureq` is sync and
 # avoids dragging in a tokio runtime just to fetch one file.
 dirs = "5"
+# Issue #626: per-launch bearer tokens for the authenticated loopback bridge.
+# `fill` delegates to the operating system CSPRNG and avoids a general-purpose
+# RNG dependency for one 256-bit secret.
+getrandom = "0.4"
 # Issue #132: gitignore-aware repo walk for the startup large-file guard.
 # Matches the major version ripgrep / fd use; no feature flags needed.
 ignore = "0.4"

@@ -969,3 +969,29 @@ to their legacy `backend`; repeat jobs pin their choices in argv.
 `clud --codex --harness claude` is represented without lying about either
 dimension. Later bridge phases can attach transport/auth behavior to the
 resolved route rather than adding more backend booleans.
+
+## DD-027: The Codex-to-Claude bridge is a launch-scoped bounded HTTP shell
+
+**Context:** zackees/clud#626. A Codex model can be selected while the Claude
+executable remains the effective harness, but that child expects an Anthropic
+HTTP endpoint and bearer token. The compatibility route therefore needs a
+local transport owner before later phases add request translation.
+
+**Decision:** A single foreground runtime owns an authenticated bridge for the
+whole launch and overlays only the spawned child's environment. The bridge
+binds an ephemeral IPv4 loopback port, generates a per-launch 256-bit bearer
+token, implements the minimal `/v1/messages` fixture surface, and shuts down
+with the child on every return path. Native routes and dry-run do not start it.
+
+The listener uses a small standard-library HTTP shell instead of `tiny_http`.
+`tiny_http` starts connection parsing before application code receives a
+request, so clud cannot enforce the required header-byte cap and header read
+timeout at the transport boundary. The local shell keeps those controls, the
+body cap, and the worker concurrency bound in one auditable layer.
+
+**Consequences:** The bridge is intentionally not a daemon and does not yet
+translate or forward production traffic. Its deterministic non-streaming and
+SSE responses exist for compiled-fixture validation. Any debug upstream seam
+is gated by both a debug build and `CLUD_INTEGRATION_TESTS=1`; release builds
+ignore it. Logs and fixture reports expose only sanitized presence, port, and
+status metadata, never the token or full authenticated URL.
