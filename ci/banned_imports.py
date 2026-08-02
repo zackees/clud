@@ -34,10 +34,104 @@ ALLOWED_PATTERNS: list[str] = [
     r"process::exit",
 ]
 
+COMMAND_BUILDER_MARKER = "running-process: command-builder"
+COMMAND_IMPORT_RE = re.compile(r"^use std::process::Command;\s*(?://.*)?$")
+COMMAND_BUILDER_RE = re.compile(
+    r"^let\s+mut\s+(?P<name>[A-Za-z_]\w*)\s*=\s*Command::new\([^;]+\);\s*(?://.*)?$"
+)
 
-def is_allowed(line: str) -> bool:
+
+def is_allowed(line: str, previous_line: str = "") -> bool:
     """Check if the line only uses allowed std::process items."""
-    return any(re.search(pat, line) for pat in ALLOWED_PATTERNS)
+    if any(re.search(pat, line) for pat in ALLOWED_PATTERNS):
+        return True
+    # A std::process::Command may be used purely as a configuration builder
+    # handed to running_process::spawn. Rustfmt can move the marker onto the
+    # preceding line, so accept either location — but only for construction,
+    # never for a raw `.spawn()` call. This is intentionally narrower than a
+    # file exemption for production code.
+    marked = COMMAND_BUILDER_MARKER in line or COMMAND_BUILDER_MARKER in previous_line
+    if not marked:
+        return False
+    # Full-line matching prevents the marker from suppressing another banned
+    # construct appended to the same line. Execution methods are checked both
+    # here and across rustfmt-style multiline continuations in `scan_file`.
+    return bool(COMMAND_IMPORT_RE.fullmatch(line) or COMMAND_BUILDER_RE.fullmatch(line))
+
+
+def _rust_code_only(content: str) -> str:
+    """Blank comments and string literals while preserving offsets/newlines."""
+    out = list(content)
+    index = 0
+    block_depth = 0
+    while index < len(content):
+        if block_depth:
+            if content.startswith("/*", index):
+                out[index : index + 2] = "  "
+                block_depth += 1
+                index += 2
+            elif content.startswith("*/", index):
+                out[index : index + 2] = "  "
+                block_depth -= 1
+                index += 2
+            else:
+                if content[index] != "\n":
+                    out[index] = " "
+                index += 1
+            continue
+
+        if content.startswith("//", index):
+            end = content.find("\n", index)
+            end = len(content) if end == -1 else end
+            out[index:end] = " " * (end - index)
+            index = end
+            continue
+        if content.startswith("/*", index):
+            out[index : index + 2] = "  "
+            block_depth = 1
+            index += 2
+            continue
+
+        char_literal = re.match(
+            r"(?:b)?'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\}|.)|[^\\'\r\n])'",
+            content[index:],
+        )
+        if char_literal:
+            end = index + char_literal.end()
+            out[index:end] = " " * (end - index)
+            index = end
+            continue
+
+        raw = re.match(r'r(?P<hashes>#{0,255})"', content[index:])
+        if raw:
+            delimiter = '"' + raw.group("hashes")
+            end = content.find(delimiter, index + raw.end())
+            end = len(content) if end == -1 else end + len(delimiter)
+            for pos in range(index, end):
+                if content[pos] != "\n":
+                    out[pos] = " "
+            index = end
+            continue
+
+        if content[index] == '"':
+            end = index + 1
+            escaped = False
+            while end < len(content):
+                char = content[end]
+                if char == '"' and not escaped:
+                    end += 1
+                    break
+                escaped = char == "\\" and not escaped
+                if char != "\\":
+                    escaped = False
+                end += 1
+            for pos in range(index, end):
+                if content[pos] != "\n":
+                    out[pos] = " "
+            index = end
+            continue
+        index += 1
+    return "".join(out)
 
 
 def scan_file(path: Path) -> list[tuple[int, str, str]]:
@@ -48,18 +142,40 @@ def scan_file(path: Path) -> list[tuple[int, str, str]]:
     except (OSError, UnicodeDecodeError):
         return violations
 
+    previous_line = ""
+    command_builders: set[str] = set()
     for line_num, line in enumerate(content.splitlines(), start=1):
         stripped = line.strip()
         # Skip comments
         if stripped.startswith("//"):
+            previous_line = line
             continue
         # Skip if it's an allowed usage
-        if is_allowed(stripped):
+        if is_allowed(stripped, previous_line.strip()):
+            if match := COMMAND_BUILDER_RE.fullmatch(stripped):
+                command_builders.add(match.group("name"))
+            previous_line = line
             continue
         for pattern, reason in BANNED_PATTERNS:
             if re.search(pattern, stripped):
                 violations.append((line_num, stripped, reason))
                 break  # One violation per line is enough
+        previous_line = line
+
+    # A marked Command is configuration-only: it may be handed to
+    # running_process, but it may never execute directly. Match across
+    # whitespace/newlines so rustfmt cannot turn a raw launch into a bypass.
+    code_only = _rust_code_only(content)
+    for name in command_builders:
+        raw_execution = re.compile(
+            rf"\b{re.escape(name)}\s*\.\s*(?:spawn|status|output)\s*\("
+        )
+        for match in raw_execution.finditer(code_only):
+            line_num = code_only.count("\n", 0, match.start()) + 1
+            line = content.splitlines()[line_num - 1].strip()
+            violations.append(
+                (line_num, line, "hand std::process::Command to running_process")
+            )
 
     return violations
 
@@ -129,6 +245,10 @@ def main() -> int:
     # condition under test; NativeProcess manages its handle internally and does
     # not guarantee it survives `wait()`, so wrapping this would delete the
     # scenario rather than exercise it.
+    # subprocess_capture_lifecycle_windows.rs is exempt (#634) — its compiled
+    # fixture must spawn a descendant before any containment is attached. The
+    # production side of the same test goes through ManagedSubprocess; using it
+    # for the fixture would make the test green even if the race returned.
     exempt = {
         "trampoline.rs",
         "process_identity.rs",
@@ -142,6 +262,7 @@ def main() -> int:
         "ctrlc_windows_events.rs",
         "cpu_banner.rs",
         "tool_shell_lifecycle_windows.rs",
+        "subprocess_capture_lifecycle_windows.rs",
     }
     rs_files = sorted(crates_dir.rglob("*.rs"))
     total_violations = 0

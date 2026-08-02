@@ -274,8 +274,6 @@ pub fn run_plan_subprocess(
 ) -> i32 {
     use std::path::PathBuf;
 
-    use running_process::{NativeProcess, ProcessConfig, StderrMode, StdinMode};
-
     // Issue #466: CPU-burn banner. Watcher thread joins on drop at function
     // exit. Inert when cfg.enabled = false (no thread spawned).
     let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
@@ -312,54 +310,29 @@ pub fn run_plan_subprocess(
         }
 
         let batch_wrapped = subprocess::argv_is_batch_wrapped(&plan.command);
-        let config = ProcessConfig {
-            command: subprocess::command_spec_for_subprocess(plan.command.clone()),
-            cwd: plan.cwd.as_ref().map(PathBuf::from),
-            env: Some(env.clone()),
-            // When stream-json progress is on, we capture stdout so we can
-            // drain it line-by-line and route each event through the
-            // renderer. Otherwise stdio is inherited and the child writes
-            // directly to our console (preserving any TUI behavior).
-            capture: plan.stream_json_progress,
-            stderr_mode: StderrMode::Stdout,
-            // Windows: spawn the backend in its own console process
-            // group so the OS does not deliver `CTRL_C_EVENT` to the
-            // child (or its descendants) when the user hits Ctrl+C.
-            // clud's own `ctrlc` handler catches the event and tears
-            // the child tree down via `process_tree::kill_tree`; the
-            // child only receives a hard termination, never a stray
-            // signal that would let the `nodejs-wheel` Python launcher
-            // raise `KeyboardInterrupt` and dump a traceback over
-            // clud's clean exit message. POSIX has no equivalent flag
-            // and the terminal foreground-process-group behavior is
-            // already correct, so the helper returns `None` there.
-            creationflags: win_creation_flags::user_facing_backend_creationflags(),
-            create_process_group: false,
-            stdin_mode: StdinMode::Inherit,
-            nice: None,
-            // Issue #9: Claude/Codex spawn tool subprocesses (cargo test,
-            // npm test, long builds) that leak as zombies when clud dies
-            // abnormally. Since `running-process-core` 3.4, every
-            // `NativeProcess` is automatically placed in a kill-on-close
-            // Job Object on Windows, which gives us the same blast-radius
-            // bound as the old `Containment::Contained` opt-in. On Linux
-            // the wrapper no longer sets `PR_SET_PDEATHSIG(SIGKILL)`
-            // implicitly; orphan reaping there falls back to the daemon
-            // worker's `pid_is_alive` watchdog (foreground sessions still
-            // rely on the OS killing the process tree at terminal close).
+        // Windows pipe-owning launches use `ManagedSubprocess`'s suspended
+        // spawn: the child is assigned to its Job Object before it can run.
+        // Console-attached launches and every non-Windows launch retain the
+        // existing NativeProcess path and its Ctrl-C process-group behavior.
+        let process = match subprocess::ManagedSubprocess::start(
+            plan.command.clone(),
+            plan.cwd.as_ref().map(PathBuf::from),
+            env.clone(),
+            plan.stream_json_progress,
+            win_creation_flags::user_facing_backend_creationflags(),
+        ) {
+            Ok(process) => process,
+            Err(e) => {
+                eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
+                if verbose {
+                    verbose_log::log(format_args!("[clud] subprocess: start failed: {e}"));
+                }
+                if let Some(s) = loop_session.as_deref_mut() {
+                    s.on_iteration_end(iter_num, 1, Some(format!("failed to start: {e}")));
+                }
+                return 1;
+            }
         };
-
-        let process = NativeProcess::new(config);
-        if let Err(e) = process.start() {
-            eprintln!("[clud] failed to execute {}: {}", plan.command[0], e);
-            if verbose {
-                verbose_log::log(format_args!("[clud] subprocess: start failed: {e}"));
-            }
-            if let Some(s) = loop_session.as_deref_mut() {
-                s.on_iteration_end(iter_num, 1, Some(format!("failed to start: {e}")));
-            }
-            return 1;
-        }
         if verbose {
             verbose_log::log("[clud] subprocess: started");
         }
@@ -464,7 +437,7 @@ enum ProcessOutcome {
 /// `Terminate batch job (Y/N)?`. If the daemon isn't available we fall
 /// back to the old synchronous path (with the cooperative Ctrl+Break +
 /// `kill_tree` + bounded wait) so `--no-daemon` users still get cleanup.
-fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wrapped: bool) {
+fn teardown_interrupted_child(process: &subprocess::ManagedSubprocess, batch_wrapped: bool) {
     if let Some(pid) = process.pid() {
         crate::ctrl_c_track::record_forensics(Some(pid));
         match crate::daemon::default_state_dir() {
@@ -509,7 +482,7 @@ fn teardown_interrupted_child(process: &running_process::NativeProcess, batch_wr
 /// the stream-json path can sit alongside it without duplicating the
 /// non-streaming control flow.
 fn run_with_inherited_stdio(
-    process: &running_process::NativeProcess,
+    process: &subprocess::ManagedSubprocess,
     interrupted: &AtomicBool,
     batch_wrapped: bool,
 ) -> ProcessOutcome {
@@ -548,12 +521,12 @@ fn run_with_inherited_stdio(
 /// is what the agent emits in a non-JSON-wrapped chunk; we keep the
 /// payload as-is so token recognition isn't confused by event framing.
 fn run_with_stream_json_renderer(
-    process: &running_process::NativeProcess,
+    process: &subprocess::ManagedSubprocess,
     interrupted: &AtomicBool,
     captured_output: &mut String,
     batch_wrapped: bool,
 ) -> ProcessOutcome {
-    use running_process::{ReadStatus, StreamKind};
+    use running_process::ReadStatus;
     use std::time::Duration;
 
     let timeout = Duration::from_millis(100);
@@ -562,18 +535,17 @@ fn run_with_stream_json_renderer(
             teardown_interrupted_child(process, batch_wrapped);
             return ProcessOutcome::Interrupted;
         }
-        match process.read_stream(StreamKind::Stdout, Some(timeout)) {
+        match process.read_stdout(Some(timeout)) {
             ReadStatus::Line(bytes) => {
                 emit_rendered_line(&bytes, captured_output);
             }
             ReadStatus::Timeout => {
                 // No new data within the window; check if the child has
-                // exited so we don't spin forever after a slow turn.
-                if let Ok(Some(_)) = process.poll() {
-                    // Drain anything still queued before declaring done.
-                    drain_remaining_stdout(process, captured_output);
-                    break;
-                }
+                // exited. On Windows that terminal poll closes the Job and
+                // its descendant-held writers. Keep reading until EOF: the
+                // reader threads may still be enqueueing buffered final
+                // output and EOF is their completion barrier.
+                let _ = process.poll();
             }
             ReadStatus::Eof => {
                 break;
@@ -589,13 +561,6 @@ fn run_with_stream_json_renderer(
             Some(code) => ProcessOutcome::Exited(code),
             None => ProcessOutcome::Exited(0),
         },
-    }
-}
-
-fn drain_remaining_stdout(process: &running_process::NativeProcess, captured_output: &mut String) {
-    use running_process::StreamKind;
-    for chunk in process.drain_stream(StreamKind::Stdout) {
-        emit_rendered_line(&chunk, captured_output);
     }
 }
 
