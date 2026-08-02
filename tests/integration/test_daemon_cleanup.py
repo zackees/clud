@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import time
@@ -10,6 +9,7 @@ import pytest
 
 from ._daemon_helpers import (
     DETACH_EXIT_TIMEOUT,
+    attach_for_report,
     daemon_env,
     kill_daemon_for_session,
     kill_process,
@@ -154,15 +154,14 @@ class TestDaemonSessionHardening:
         )
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
-            attached = subprocess.run(
-                [str(clud_binary), "attach"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=env,
+            report = attach_for_report(
+                clud_binary,
+                env,
+                state_dir,
+                session_id,
+                "auto-attach",
+                attach_args=[],
             )
-            assert attached.returncode == 0
-            report = json.loads(attached.stdout)
             assert "auto-attach" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)
@@ -273,15 +272,14 @@ class TestDaemonSessionHardening:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
 
             # Attach by name instead of ID
-            attached = subprocess.run(
-                [str(clud_binary), "attach", "my-refactor"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=env,
+            report = attach_for_report(
+                clud_binary,
+                env,
+                state_dir,
+                session_id,
+                "named-test",
+                attach_args=["my-refactor"],
             )
-            assert attached.returncode == 0
-            report = json.loads(attached.stdout)
             assert "named-test" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)
@@ -337,15 +335,14 @@ class TestDaemonSessionHardening:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
             # Use first 10 chars of session_id as prefix
             prefix = session_id[:10]
-            attached = subprocess.run(
-                [str(clud_binary), "attach", prefix],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=env,
+            report = attach_for_report(
+                clud_binary,
+                env,
+                state_dir,
+                session_id,
+                "prefix-test",
+                attach_args=[prefix],
             )
-            assert attached.returncode == 0
-            report = json.loads(attached.stdout)
             assert "prefix-test" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id)
@@ -400,7 +397,7 @@ class TestDaemonSessionHardening:
         assert wait_for_exit(proc1, timeout=DETACH_EXIT_TIMEOUT) == 0
         time.sleep(0.2)
         # Create second session (most recent)
-        proc2, _session_id_2 = launch_detached(
+        proc2, session_id_2 = launch_detached(
             clud_binary,
             env,
             "--codex",
@@ -413,15 +410,14 @@ class TestDaemonSessionHardening:
         assert wait_for_exit(proc2, timeout=DETACH_EXIT_TIMEOUT) == 0
         try:
             # attach --last should get the second session
-            attached = subprocess.run(
-                [str(clud_binary), "attach", "--last"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=env,
+            report = attach_for_report(
+                clud_binary,
+                env,
+                state_dir,
+                session_id_2,
+                "second-session",
+                attach_args=["--last"],
             )
-            assert attached.returncode == 0
-            report = json.loads(attached.stdout)
             assert "second-session" in report["args"]
         finally:
             kill_daemon_for_session(state_dir, session_id_1)

@@ -272,8 +272,16 @@ def attach_for_report(
     session_id: str,
     expect: str,
     timeout: float = 30.0,
+    attach_args: list[str] | None = None,
 ) -> dict:
     """Return the mock agent's JSON report for `session_id`.
+
+    `attach_args` overrides what is passed to `clud attach` (default
+    `[session_id]`) so callers that exercise a *selector* — by name, by id
+    prefix, `--last`, or no argument at all — get the same race handling
+    without giving up the thing they are testing. `session_id` is still
+    required, because the `clud logs` fallback below needs the exact session
+    even when the attach under test addressed it indirectly.
 
     Issue #595, second attempt. The mock agent writes its report at the *end*
     of its run, so an attach landing before then connects fine, exits 0, and
@@ -302,7 +310,14 @@ def attach_for_report(
     while time.time() < deadline:
         attempts += 1
         attached = subprocess.run(
-            [str(clud_binary), "attach", session_id],
+            # `is None`, not `or`: an empty list is a meaningful selector --
+            # bare `clud attach` with no argument -- and `or` would silently
+            # substitute the session id, testing the opposite of the intent.
+            [
+                str(clud_binary),
+                "attach",
+                *([session_id] if attach_args is None else attach_args),
+            ],
             capture_output=True,
             text=True,
             timeout=15,
