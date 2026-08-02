@@ -41,6 +41,29 @@ unsupported launch target: Claude provider cannot use the Codex harness
 There is no fallback. HTTP translation and credentials are later phases under
 issue #622.
 
+## Foreground Codex-through-Claude bridge
+
+Issue #626 gives the supported cross-route a foreground-only runtime shell.
+`ForegroundRuntime` starts one authenticated bridge before the first harness
+spawn, supplies its child-local environment to both `ManagedSubprocess` and
+`NativePtyProcess`, and owns the bridge until the whole foreground runner
+returns. Native provider/harness pairs retain their original environment
+unchanged. The same bridge spans every in-process foreground iteration; only
+daemon, detached, and repeat-worker ownership remain later #622 phases.
+
+The cross-route overlay replaces `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN`, removes ambient `ANTHROPIC_API_KEY`, and adds Claude's
+long request timeout/nonessential-traffic tuning only when the user has not set
+those values. No parent-process environment is mutated. The bearer and complete
+base URL are deliberately absent from Debug/error/report surfaces.
+
+`codex_bridge.rs` binds only `127.0.0.1:0` and implements the phase-2 routing
+shell: authenticated `POST`/`HEAD /v1/messages`, an explicit unsupported 404
+for token counting, and 404 elsewhere. Header/body sizes, socket deadlines, and
+worker concurrency are bounded; handle Drop signals shutdown and joins the
+listener plus admitted workers. See DD-027 for why this parser uses `std::net`
+instead of the repository's existing `tiny_http` dependency.
+
 ## Persistence
 
 Global launch preferences use the existing settings document and `fs4` lock:
@@ -108,4 +131,6 @@ executable. The additive fields make both dimensions explicit:
 - `launch_setup.rs` / `settings_tui.rs`: session/global and settings UI.
 - `command/types.rs` / `command/builder.rs`: plan metadata and harness argv.
 - `main.rs`: bootstrap/setup the effective harness and emit dry-run metadata.
+- `codex_bridge.rs` / `foreground_runtime.rs`: phase-2 foreground transport,
+  child overlay, spawn seam, and lifetime ownership.
 - `daemon/entry.rs`: pin repeat-job provider/harness choices.

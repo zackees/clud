@@ -45,12 +45,17 @@ before exiting with the test-requested code.
     The mock agent (copied as `codex.exe`) launches a PowerShell tool root
     which leaves a sleeping client behind, then writes whether clud's
     foreground Job tracker reaped that client.
+  - `--mock-codex-bridge-probe <path>` — issue #626 bridge probe. Reads the
+    child-only Anthropic URL/token, sends the embedded deterministic Messages
+    request, and records only sanitized loopback/status/fixture observations
+    plus the ephemeral port (never the URL or bearer).
   - `--mock-stream-json <path>` with `--mock-stream-delay-ms <ms>` — emit one
     pre-canned `--output-format stream-json` line per file line, flushing
     between each, then exit (no JSON report tail).
 - Env vars `IN_CLUD` and `RUNNING_PROCESS_ORIGINATOR` are captured and
-  included under `env` in the report; current working directory is captured
-  as `cwd`.
+  included under `env` in the report; #626 bridge variables are recorded as
+  presence booleans and non-secret tuning values only; current working
+  directory is captured as `cwd`.
 - Stdout: the JSON report (one line) unless a mode above short-circuits
   (`--mock-stream-json`, `--mock-report-pty-size`, helper role). Scripted ANSI
   or stream-json bytes are emitted before the report when configured.

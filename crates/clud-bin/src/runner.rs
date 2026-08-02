@@ -278,7 +278,19 @@ pub fn run_plan_subprocess(
     // exit. Inert when cfg.enabled = false (no thread spawned).
     let _cpu_banner = cpu_banner::BannerWatcher::spawn(cpu_banner_cfg);
 
-    let env = child_env_for_backend(plan.backend);
+    let runtime = match crate::foreground_runtime::ForegroundRuntime::start(
+        plan,
+        child_env_for_backend(plan.backend),
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[clud] failed to start provider bridge: {error}");
+            if verbose {
+                verbose_log::log("[clud] provider bridge startup failed");
+            }
+            return 1;
+        }
+    };
     let mut last_exit = 0i32;
 
     for iteration in 0..plan.iterations {
@@ -314,10 +326,9 @@ pub fn run_plan_subprocess(
         // spawn: the child is assigned to its Job Object before it can run.
         // Console-attached launches and every non-Windows launch retain the
         // existing NativeProcess path and its Ctrl-C process-group behavior.
-        let process = match subprocess::ManagedSubprocess::start(
+        let process = match runtime.spawn_subprocess(
             plan.command.clone(),
             plan.cwd.as_ref().map(PathBuf::from),
-            env.clone(),
             plan.stream_json_progress,
             win_creation_flags::user_facing_backend_creationflags(),
         ) {
@@ -585,8 +596,6 @@ pub fn run_plan_pty(
     mut loop_session: Option<&mut loop_artifacts::LoopSession>,
     cpu_banner_cfg: cpu_banner::CpuBannerCfg,
 ) -> i32 {
-    use running_process::pty::NativePtyProcess;
-
     // Issue #466: CPU-burn banner. Same shape as the subprocess runner —
     // background thread joins on drop at function exit. Inert when
     // cfg.enabled = false.
@@ -609,7 +618,19 @@ pub fn run_plan_pty(
         (None, None)
     };
 
-    let env = child_env_for_backend(plan.backend);
+    let runtime = match crate::foreground_runtime::ForegroundRuntime::start(
+        plan,
+        child_env_for_backend(plan.backend),
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[clud] failed to start provider bridge: {error}");
+            if verbose {
+                verbose_log::log("[clud] provider bridge startup failed (pty)");
+            }
+            return 1;
+        }
+    };
     let mut last_exit = 0i32;
     let terminal_capabilities = (plan.graphics.mode != crate::graphics::GraphicsMode::Off)
         .then(crate::graphics::detect_current_terminal);
@@ -681,14 +702,7 @@ pub fn run_plan_pty(
             ));
         }
 
-        let process = match NativePtyProcess::new(
-            plan.command.clone(),
-            plan.cwd.clone(),
-            Some(env.clone()),
-            rows,
-            cols,
-            None,
-        ) {
+        let process = match runtime.spawn_pty(plan.command.clone(), plan.cwd.clone(), rows, cols) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[clud] failed to create pty: {}", e);

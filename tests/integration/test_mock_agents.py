@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -106,6 +107,7 @@ class TestBackendSelection:
         report = _parse_agent_report(result)
         assert "claude" in report["program"].lower()
 
+
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object lifecycle")
     def test_tool_shell_exit_reaps_leaked_client(
         self,
@@ -164,6 +166,144 @@ class TestBackendSelection:
         assert result.returncode == 0
         report = _parse_agent_report(result)
         assert report["cwd"] == str(tmp_path)
+
+
+class TestCodexBridgeForeground:
+    """Issue #626: Codex provider through the Claude foreground harness."""
+
+    @pytest.mark.parametrize("launch_mode", ["--subprocess", "--pty"])
+    def test_cross_route_reaches_fixture_and_closes_listener(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        launch_mode: str,
+    ) -> None:
+        env = mock_env.copy()
+        env["ANTHROPIC_API_KEY"] = "ambient-secret-that-must-not-leak"
+        probe_path = tmp_path / "codex-bridge-probe.json"
+        agent_report_path = tmp_path / "codex-bridge-agent-report.json"
+        result = _run(
+            clud_binary,
+            "--codex",
+            "--harness",
+            "claude",
+            launch_mode,
+            "-p",
+            "hello",
+            "--",
+            "--mock-codex-bridge-probe",
+            str(probe_path),
+            "--mock-report-file",
+            str(agent_report_path),
+            env=env,
+            input_data="\x1b[1;1R" if launch_mode == "--pty" else None,
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(agent_report_path.read_text(encoding="utf-8"))
+        assert "claude" in report["program"].lower()
+        assert set(report["env"]) == {
+            "IN_CLUD",
+            "RUNNING_PROCESS_ORIGINATOR",
+            "ANTHROPIC_BASE_URL_PRESENT",
+            "ANTHROPIC_AUTH_TOKEN_PRESENT",
+            "ANTHROPIC_API_KEY_PRESENT",
+            "API_TIMEOUT_MS",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        }
+        assert report["env"]["ANTHROPIC_BASE_URL_PRESENT"] is True
+        assert report["env"]["ANTHROPIC_AUTH_TOKEN_PRESENT"] is True
+        assert report["env"]["ANTHROPIC_API_KEY_PRESENT"] is False
+        assert report["env"]["API_TIMEOUT_MS"] == "3000000"
+        assert report["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+        probe = json.loads(probe_path.read_text(encoding="utf-8"))
+        assert probe == report["codex_bridge_probe"]
+        assert set(probe) == {
+            "attempted",
+            "loopback",
+            "port",
+            "status",
+            "fixture_received",
+            "error",
+        }
+        assert probe["attempted"] is True
+        assert probe["loopback"] is True
+        assert probe["status"] == 200
+        assert probe["fixture_received"] is True
+        assert probe["error"] is None
+        assert "ambient-secret-that-must-not-leak" not in result.stdout
+        assert "ambient-secret-that-must-not-leak" not in result.stderr
+        address = ("127.0.0.1", probe["port"])
+        try:
+            connection = socket.create_connection(address, timeout=0.2)
+        except ConnectionRefusedError:
+            pass
+        except TimeoutError:
+            # Some Windows firewall policies drop closed-loopback SYN packets
+            # instead of returning WSAECONNREFUSED. Rebinding the exact address
+            # distinguishes that host behavior from a surviving listener.
+            with socket.socket() as rebound:
+                rebound.bind(address)
+        else:
+            connection.close()
+            pytest.fail("bridge listener survived foreground process exit")
+
+    @pytest.mark.parametrize("provider_flag", ["--claude", "--codex"])
+    def test_native_routes_receive_no_bridge_overlay(
+        self,
+        clud_binary: Path,
+        mock_env: dict[str, str],
+        tmp_path: Path,
+        provider_flag: str,
+    ) -> None:
+        env = mock_env.copy()
+        for key in (
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+        ):
+            env.pop(key, None)
+        probe_path = tmp_path / f"native-{provider_flag[2:]}.json"
+        result = _run(
+            clud_binary,
+            provider_flag,
+            "--subprocess",
+            "-p",
+            "hello",
+            "--",
+            "--mock-codex-bridge-probe",
+            str(probe_path),
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        report = _parse_agent_report(result)
+        assert report["env"]["ANTHROPIC_BASE_URL_PRESENT"] is False
+        assert report["env"]["ANTHROPIC_AUTH_TOKEN_PRESENT"] is False
+        assert report["env"]["ANTHROPIC_API_KEY_PRESENT"] is False
+        assert report["codex_bridge_probe"]["attempted"] is False
+
+    def test_cross_route_dry_run_starts_no_bridge_and_emits_no_secret(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        probe_path = tmp_path / "dry-run-probe.json"
+        result = _run(
+            clud_binary,
+            "--codex",
+            "--harness",
+            "claude",
+            "--dry-run",
+            "-p",
+            "hello",
+            "--",
+            "--mock-codex-bridge-probe",
+            str(probe_path),
+            env=mock_env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert not probe_path.exists()
+        combined = result.stdout + result.stderr
+        assert "ANTHROPIC_AUTH_TOKEN" not in combined
+        assert "Bearer " not in combined
 
 
 class TestYoloMode:

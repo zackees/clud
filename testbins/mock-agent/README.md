@@ -12,6 +12,9 @@ stdin capture, PTY size reporting, exit-code controls).
   `serde_json`, `terminal_size`, and `libc` (unix only).
 - [`src/`](src/README.md) — single-file binary (`src/main.rs`) plus its
   behavior contract.
+- `assets/codex_bridge_probe_request.json` — deterministic Anthropic Messages
+  fixture embedded into mock-agent with `include_str!`, so execution-only CI
+  can probe #626 without a Rust toolchain.
 
 ## Build
 

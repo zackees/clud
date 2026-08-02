@@ -14,9 +14,12 @@
 //!   `terminal_size` crate to a JSON file for the resize-propagation test.
 
 use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+const CODEX_BRIDGE_PROBE_REQUEST: &str = include_str!("../assets/codex_bridge_probe_request.json");
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -39,6 +42,7 @@ fn main() {
     let mut pty_size_interval_ms: u64 = 100;
     let mut ansi_script: Option<PathBuf> = None;
     let mut tool_shell_probe_to: Option<PathBuf> = None;
+    let mut codex_bridge_probe_to: Option<PathBuf> = None;
     // Emit canned `--output-format stream-json` lines from a file (one line
     // each, separated by `--mock-stream-delay-ms`). Used by integration tests
     // that exercise clud's stream-json renderer without needing a real
@@ -171,6 +175,13 @@ fn main() {
             skip_next = true;
             continue;
         }
+        if arg == "--mock-codex-bridge-probe" {
+            if let Some(path) = args.get(i + 1) {
+                codex_bridge_probe_to = Some(PathBuf::from(path));
+            }
+            skip_next = true;
+            continue;
+        }
         if arg == "--mock-stream-json" {
             if let Some(path) = args.get(i + 1) {
                 stream_json_script = Some(PathBuf::from(path));
@@ -294,6 +305,15 @@ fn main() {
     // Capture env vars relevant for testing
     let in_clud = std::env::var("IN_CLUD").ok();
     let originator = std::env::var("RUNNING_PROCESS_ORIGINATOR").ok();
+    let anthropic_base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    let anthropic_auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
+    let anthropic_base_url_present = anthropic_base_url.is_some();
+    let anthropic_auth_token_present = anthropic_auth_token.is_some();
+    let anthropic_api_key_present = std::env::var_os("ANTHROPIC_API_KEY").is_some();
+    let api_timeout_ms = std::env::var("API_TIMEOUT_MS").ok();
+    let disable_nonessential_traffic =
+        std::env::var("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC").ok();
+    let bridge_probe = codex_bridge_probe_to.as_deref().map(run_codex_bridge_probe);
     let cwd = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().to_string());
@@ -314,10 +334,27 @@ fn main() {
         "env": {
             "IN_CLUD": in_clud,
             "RUNNING_PROCESS_ORIGINATOR": originator,
+            "ANTHROPIC_BASE_URL_PRESENT": anthropic_base_url_present,
+            "ANTHROPIC_AUTH_TOKEN_PRESENT": anthropic_auth_token_present,
+            "ANTHROPIC_API_KEY_PRESENT": anthropic_api_key_present,
+            "API_TIMEOUT_MS": api_timeout_ms,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": disable_nonessential_traffic,
         },
+        "codex_bridge_probe": bridge_probe,
     });
 
     let report_str = serde_json::to_string(&report).unwrap();
+    if [
+        anthropic_base_url.as_deref(),
+        anthropic_auth_token.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|secret| !secret.is_empty() && report_str.contains(secret))
+    {
+        eprintln!("mock-agent refused to serialize a bridge credential");
+        std::process::exit(86);
+    }
     println!("{}", report_str);
 
     // Also write to file if requested (useful when stdout is captured by PTY)
@@ -329,6 +366,66 @@ fn main() {
     }
 
     std::process::exit(exit_code);
+}
+
+fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {
+    let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+    let token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
+    let mut report = serde_json::json!({
+        "attempted": false,
+        "loopback": false,
+        "port": null,
+        "status": null,
+        "fixture_received": false,
+        "error": null,
+    });
+
+    let result = (|| -> Result<(), String> {
+        let base_url = base_url.as_deref().ok_or("missing bridge URL")?;
+        let token = token.as_deref().ok_or("missing bridge token")?;
+        let address: SocketAddr = base_url
+            .strip_prefix("http://")
+            .ok_or("bridge URL is not HTTP")?
+            .parse()
+            .map_err(|_| "bridge URL is not a socket address")?;
+        report["attempted"] = true.into();
+        report["loopback"] = address.ip().is_loopback().into();
+        report["port"] = address.port().into();
+
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+            .map_err(|error| format!("connect failed: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("read timeout failed: {error}"))?;
+        let body = CODEX_BRIDGE_PROBE_REQUEST.trim();
+        let request = format!(
+            "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("write failed: {error}"))?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|error| format!("read failed: {error}"))?;
+        let status = response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or("missing HTTP status")?;
+        report["status"] = status.into();
+        report["fixture_received"] = response.contains("clud bridge fixture").into();
+        Ok(())
+    })();
+    if let Err(error) = result {
+        report["error"] = error.into();
+    }
+    if let Some(parent) = report_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(report_path, serde_json::to_vec(&report).unwrap_or_default());
+    report
 }
 
 /// Put stdin into raw mode (no canonical line buffering, no echo) when it is
