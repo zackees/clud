@@ -1287,7 +1287,7 @@ mod imp {
             // lived backend can still post exit notifications first. Seed the
             // root synchronously and replay every unprocessed exit so that
             // listener ordering cannot make cleanup disappear.
-            if let Some(mut process) = snapshot(&self.telemetry).remove(&pid) {
+            if let Some(mut process) = snapshot_pid(&self.telemetry, pid) {
                 process.start_time = start_time;
                 if let Ok(mut processes) = self.processes.lock() {
                     processes.known.entry(pid).or_insert(process);
@@ -2117,6 +2117,56 @@ mod imp {
     /// whenever any PID is still unresolved, so the counter that #706 exists
     /// to drive down was under-reporting exactly the recurring caller a reader
     /// would want to see.
+    /// Read one PID's metadata without materialising the whole host table.
+    ///
+    /// #687 lists this call site first: the registration path wanted a single
+    /// PID and got it by building a `HashMap` of every process on the host and
+    /// then throwing all but one entry away. The Toolhelp32 walk itself is
+    /// unavoidable here — `parent_pid` has no cheap per-PID Win32 answer,
+    /// which is exactly why #687 wants a daemon-owned service and why
+    /// `tests/tier_refresh_probe.rs` concluded a "targeted" sysinfo refresh
+    /// saves nothing on Windows — but the per-process `String` allocation and
+    /// map insert are pure waste when one entry is wanted. On a 500-process
+    /// host that is 500 UTF-16 decodes traded for at most one.
+    ///
+    /// Counted as a host scan like `snapshot`, because it is one: the saving
+    /// is allocation, not the enumeration. Keeping the telemetry honest
+    /// matters more than making the number look better.
+    fn snapshot_pid(telemetry: &Mutex<Telemetry>, wanted: u32) -> Option<ProcessMeta> {
+        with_telemetry(telemetry, |t| t.epoch.host_scans += 1);
+        unsafe {
+            let handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+            let mut entry: PROCESSENTRY32W = zeroed();
+            entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+            let mut found = None;
+            if Process32FirstW(handle, &mut entry).is_ok() {
+                loop {
+                    if entry.th32ProcessID == wanted {
+                        let end = entry
+                            .szExeFile
+                            .iter()
+                            .position(|c| *c == 0)
+                            .unwrap_or(entry.szExeFile.len());
+                        found = Some(ProcessMeta {
+                            pid: entry.th32ProcessID,
+                            parent_pid: entry.th32ParentProcessID,
+                            image_name: String::from_utf16_lossy(&entry.szExeFile[..end]),
+                            alive: true,
+                            start_time: crate::process_identity::UNKNOWN_START_TIME,
+                            exited_at_ms: None,
+                        });
+                        break;
+                    }
+                    if Process32NextW(handle, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(handle);
+            found
+        }
+    }
+
     fn snapshot(telemetry: &Mutex<Telemetry>) -> HashMap<u32, ProcessMeta> {
         with_telemetry(telemetry, |t| t.epoch.host_scans += 1);
         let mut out = HashMap::new();
@@ -2151,6 +2201,55 @@ mod imp {
             }
             let _ = CloseHandle(handle);
             out
+        }
+    }
+
+    /// #687: the targeted read must agree with the full-table read.
+    ///
+    /// The saving is allocation, not enumeration, so the only thing that can
+    /// regress is correctness — the targeted walk skipping the entry the
+    /// full walk would have found, or reporting different fields for it.
+    /// Asserting equivalence against `snapshot` pins exactly that.
+    #[cfg(test)]
+    mod snapshot_pid_tests {
+        use super::{snapshot, snapshot_pid, Telemetry};
+        use std::sync::Mutex;
+
+        #[test]
+        fn targeted_read_matches_the_full_table_for_self() {
+            let telemetry = Mutex::new(Telemetry::default());
+            let me = std::process::id();
+
+            let targeted = snapshot_pid(&telemetry, me).expect("self must be in the process table");
+            let full = snapshot(&telemetry);
+            let expected = full.get(&me).expect("self must be in the full table");
+
+            assert_eq!(targeted.pid, me);
+            assert_eq!(targeted.pid, expected.pid);
+            assert_eq!(targeted.parent_pid, expected.parent_pid);
+            assert_eq!(targeted.image_name, expected.image_name);
+            assert!(targeted.alive);
+            assert!(!targeted.image_name.is_empty());
+        }
+
+        #[test]
+        fn targeted_read_reports_a_missing_pid_as_none() {
+            let telemetry = Mutex::new(Telemetry::default());
+            // Windows PIDs are multiples of four and far below this; a value
+            // the full walk cannot contain must come back as None rather than
+            // as a defaulted row.
+            assert!(snapshot_pid(&telemetry, u32::MAX - 1).is_none());
+        }
+
+        #[test]
+        fn targeted_read_is_counted_as_a_host_scan() {
+            let telemetry = Mutex::new(Telemetry::default());
+            let _ = snapshot_pid(&telemetry, std::process::id());
+            assert_eq!(
+                telemetry.lock().expect("telemetry").epoch.host_scans,
+                1,
+                "the walk still happens, so it must still be counted"
+            );
         }
     }
 }
