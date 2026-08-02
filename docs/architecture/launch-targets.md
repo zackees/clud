@@ -59,10 +59,21 @@ base URL are deliberately absent from Debug/error/report surfaces.
 
 `codex_bridge.rs` binds only `127.0.0.1:0` and implements the phase-2 routing
 shell: authenticated `POST`/`HEAD /v1/messages`, an explicit unsupported 404
-for token counting, and 404 elsewhere. Header/body sizes, socket deadlines, and
-worker concurrency are bounded; handle Drop signals shutdown and joins the
-listener plus admitted workers. See DD-027 for why this parser uses `std::net`
-instead of the repository's existing `tiny_http` dependency.
+for token counting, and 404 elsewhere. Header/body sizes and worker concurrency
+are bounded; handle Drop signals shutdown and joins the listener plus admitted
+workers. See DD-027 for why this parser uses `std::net` instead of the
+repository's existing `tiny_http` dependency.
+
+Each I/O phase carries its own budget rather than sharing one connection
+deadline: `header_timeout` (5 s) and `body_timeout` (30 s) are absolute, while
+`stream_idle_timeout` (300 s) is re-armed per frame so a long model turn is
+bounded by silence, not by elapsed time. Streamed replies go through
+`write_event_stream`, which uses chunked transfer encoding and flushes one SSE
+event at a time; `write_response` remains the `Content-Length` writer for
+errors, `HEAD`, and non-streaming bodies. Accepted sockets are explicitly put
+back into blocking mode, and a read timeout is fatal only once the phase
+deadline has passed. See DD-028 — the previous single-deadline arrangement
+answered `408` to any request whose body arrived in a later TCP segment.
 
 ## Persistence
 

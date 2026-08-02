@@ -49,7 +49,9 @@ Entry and orchestration:
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell for
   Codex-provider launches through Claude: ephemeral listener + per-launch
   bearer, bounded parser/workers/timeouts, deterministic Anthropic fixture
-  routes, and joined shutdown.
+  routes, and joined shutdown. Per-phase header/body deadlines and a per-frame
+  idle timeout, with chunked progressive SSE via `write_event_stream` (#627
+  step 1, DD-028).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every
