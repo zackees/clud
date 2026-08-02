@@ -776,6 +776,50 @@ fn main() {
     // failure mode #594 already documents. Default runs emit nothing.
     let exit_timing = args.verbose || std::env::var_os("CLUD_EXIT_TIMING").is_some();
     let mut exit_stages: Vec<(&'static str, u128)> = Vec::new();
+
+    // Breadcrumbs are emitted as each stage starts and finishes, not batched
+    // into the summary at the end of this block. The summary only prints on a
+    // run that survives every stage -- and the case #594 needs attributed is
+    // exactly the one that does not, because the harness kills the process at
+    // the timeout. A `begin` with no matching `done` in the captured partial
+    // stderr names the stage that held the process open; the summary alone
+    // would say nothing at all about it.
+    //
+    // Two sinks, deliberately. stderr stays behind the opt-in above, because
+    // an unconditional line there would break every test asserting clean
+    // stderr. `CLUD_EXIT_TIMING_FILE` is the sink the integration harness
+    // uses: it never touches stderr, so the harness can enable attribution on
+    // *every* launch without perturbing a single assertion, and still recover
+    // the trace from a process it had to kill.
+    fn exit_stage_trace(enabled: bool, line: &str) {
+        if enabled {
+            verbose_log::log(format_args!("[clud] {line}"));
+        }
+        if let Some(path) = std::env::var_os("CLUD_EXIT_TIMING_FILE") {
+            use std::io::Write as _;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(file, "{line}");
+                let _ = file.flush();
+            }
+        }
+    }
+    fn exit_stage_begin(enabled: bool, name: &str) {
+        exit_stage_trace(enabled, &format!("exit-stage begin {name}"));
+    }
+    fn exit_stage_done(
+        enabled: bool,
+        stages: &mut Vec<(&'static str, u128)>,
+        name: &'static str,
+        started: std::time::Instant,
+    ) {
+        let ms = started.elapsed().as_millis();
+        stages.push((name, ms));
+        exit_stage_trace(enabled, &format!("exit-stage done {name}={ms}ms"));
+    }
     if !args.detach && !args.detachable {
         // #673 Phase 2d: exits the job tracker gave up on at runtime get one
         // last replan against a fresh process table. Runs before the
@@ -785,9 +829,15 @@ fn main() {
         // paths, where those descendants are outliving us on purpose.
         if let Some(tracker) = job_orphan_reaper.as_ref() {
             if !args.keep_orphans {
+                exit_stage_begin(exit_timing, "sweep_abandoned_at_exit");
                 let started = std::time::Instant::now();
                 let swept = tracker.sweep_abandoned_at_exit();
-                exit_stages.push(("sweep_abandoned_at_exit", started.elapsed().as_millis()));
+                exit_stage_done(
+                    exit_timing,
+                    &mut exit_stages,
+                    "sweep_abandoned_at_exit",
+                    started,
+                );
                 if args.verbose && swept > 0 {
                     verbose_log::log(format_args!(
                         "[clud] reaper: re-planned {swept} abandoned tool-shell exit(s)"
@@ -797,9 +847,10 @@ fn main() {
             // #673 Phase 5: reaping is destructive and was silent, which is
             // how #651 could be closed while the same symptom kept growing.
             // Suppressed entirely when nothing was tracked.
+            exit_stage_begin(exit_timing, "finish_and_report");
             let started = std::time::Instant::now();
             let report_lines = tracker.finish_and_report(args.verbose);
-            exit_stages.push(("finish_and_report", started.elapsed().as_millis()));
+            exit_stage_done(exit_timing, &mut exit_stages, "finish_and_report", started);
             for line in report_lines {
                 if args.quiet_orphans {
                     verbose_log::log(format_args!("{line}"));
@@ -813,9 +864,10 @@ fn main() {
             quiet: args.quiet_orphans,
             explain: args.explain_orphans,
         };
+        exit_stage_begin(exit_timing, "scan_and_report");
         let started = std::time::Instant::now();
         let outcome = orphan_reaper::scan_and_report(std::process::id(), &opts);
-        exit_stages.push(("scan_and_report", started.elapsed().as_millis()));
+        exit_stage_done(exit_timing, &mut exit_stages, "scan_and_report", started);
         if args.verbose && outcome.found > 0 {
             verbose_log::log(format_args!(
                 "[clud] orphan reaper: found={} reaped={}",
@@ -832,12 +884,37 @@ fn main() {
         // `clud slay` does the synchronous version.
         if !args.keep_orphans {
             if let Ok(state_dir) = daemon::default_state_dir() {
+                exit_stage_begin(exit_timing, "request_orphan_reap");
                 let started = std::time::Instant::now();
                 let _ = daemon::try_request_orphan_reap(&state_dir);
-                exit_stages.push(("request_orphan_reap", started.elapsed().as_millis()));
+                exit_stage_done(
+                    exit_timing,
+                    &mut exit_stages,
+                    "request_orphan_reap",
+                    started,
+                );
             }
         }
     }
+
+    // Dropping the tracker explicitly, rather than letting it fall off the end
+    // of `main`, is what makes its `Drop` attributable. #594 names the
+    // completion-port listener join as a suspect precisely because it can wait
+    // on a queue that a churny CI host is still feeding -- and an unattributed
+    // stall inside an implicit drop is invisible to every stage above. Line 786
+    // is the last read of `job_orphan_reaper`, so this only makes the existing
+    // drop point explicit; it does not move work.
+    exit_stage_begin(exit_timing, "tracker_drop");
+    let started = std::time::Instant::now();
+    // `ForegroundJobTracker`'s `Drop` lives in `#[cfg(windows)] mod imp`, so on
+    // every other platform this type has no destructor and clippy's
+    // `drop_non_drop` correctly reports the call as a no-op. Suppressed rather
+    // than obeyed: the join being timed is the Windows completion-port
+    // listener, which is the only platform #594 fires on, and keeping the call
+    // unconditional keeps the stage list identical across platforms.
+    #[allow(clippy::drop_non_drop)]
+    drop(job_orphan_reaper);
+    exit_stage_done(exit_timing, &mut exit_stages, "tracker_drop", started);
     if exit_timing && !exit_stages.is_empty() {
         let detail = exit_stages
             .iter()

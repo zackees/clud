@@ -9,6 +9,7 @@ a test module.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -80,12 +82,30 @@ def run_clud(
     the question; widening them would answer it by erasing it.
     """
     started = time.monotonic()
+    # Exit-stage attribution, via a file rather than stderr.
+    #
+    # The partial-stderr capture below proved the payload completes and the
+    # process then fails to *exit* in budget, which moved #594's open question
+    # to "what holds it open after the work is done". clud's own exit-timing
+    # summary cannot answer that: it prints after the last stage, so a process
+    # we kill mid-teardown emits nothing. The per-stage breadcrumbs go to this
+    # file as they happen, so a `begin` with no matching `done` names the
+    # culprit even though the process never finished.
+    #
+    # A file, not `CLUD_EXIT_TIMING=1`, because that variable routes to stderr
+    # and would break every test that asserts on clean stderr.
+    env = dict(kwargs.pop("env", None) or os.environ)
+    trace_fd, trace_path = tempfile.mkstemp(prefix="clud-exit-stage-", suffix=".log")
+    os.close(trace_fd)
+    env["CLUD_EXIT_TIMING_FILE"] = trace_path
+
     proc = subprocess.Popen(
         argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.PIPE if kwargs.get("input") is not None else None,
         text=True,
+        env=env,
         **{k: v for k, v in kwargs.items() if k != "input"},
     )
     try:
@@ -101,9 +121,35 @@ def run_clud(
         raise AssertionError(
             f"timed out after {timeout}s (waited {elapsed:.1f}s): {argv}\n"
             f"--- partial stdout ---\n{stdout}\n"
-            f"--- partial stderr ---\n{stderr}"
+            f"--- partial stderr ---\n{stderr}\n"
+            f"--- exit stages ---\n{_read_exit_stages(trace_path)}"
         ) from expired
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(trace_path)
     return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
+def _read_exit_stages(path: str) -> str:
+    """Render the exit-stage trace, calling out an unterminated stage.
+
+    An unmatched `begin` is the whole point of the file: it is the stage the
+    process was still inside when the harness killed it.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = [line.rstrip("\n") for line in handle if line.strip()]
+    except OSError as err:
+        return f"<unreadable: {err}>"
+    if not lines:
+        return "<none recorded — never reached the exit path>"
+    started = [ln.split()[-1] for ln in lines if ln.startswith("exit-stage begin ")]
+    finished = [ln.split()[-1].split("=")[0] for ln in lines if ln.startswith("exit-stage done ")]
+    rendered = "\n".join(lines)
+    stuck = [name for name in started if name not in finished]
+    if stuck:
+        rendered += f"\n>>> STALLED IN: {', '.join(stuck)} (entered, never completed)"
+    return rendered
 
 
 _ANSI_RE = re.compile(
