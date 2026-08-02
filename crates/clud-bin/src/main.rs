@@ -906,6 +906,13 @@ fn main() {
     // drop point explicit; it does not move work.
     exit_stage_begin(exit_timing, "tracker_drop");
     let started = std::time::Instant::now();
+    // `ForegroundJobTracker`'s `Drop` lives in `#[cfg(windows)] mod imp`, so on
+    // every other platform this type has no destructor and clippy's
+    // `drop_non_drop` correctly reports the call as a no-op. Suppressed rather
+    // than obeyed: the join being timed is the Windows completion-port
+    // listener, which is the only platform #594 fires on, and keeping the call
+    // unconditional keeps the stage list identical across platforms.
+    #[allow(clippy::drop_non_drop)]
     drop(job_orphan_reaper);
     exit_stage_done(exit_timing, &mut exit_stages, "tracker_drop", started);
     if exit_timing && !exit_stages.is_empty() {
