@@ -369,7 +369,10 @@ pub fn terminals_are_interactive() -> bool {
 /// through crossterm's `event::read` — a lossy demultiplexer that dropped
 /// every escape sequence it didn't recognize (DSR replies, DA, XTWINOPS,
 /// OSC color queries, etc.), which hung child TUIs like codex Ink that
-/// write those queries on startup and wait for a reply. See issue #46.
+/// write those queries on startup and wait for a reply. See **PR #47**,
+/// which made this replacement — not issue #46, which despite being named in
+/// that PR's title is "CI: macos-15-intel integration test can't locate
+/// mock-agent" and concluded it was not a PTY regression.
 ///
 /// Current scope: stdin forwarding + F3 observation + hook ticks +
 /// Ctrl+C + child-exit detection. Resize handling (SIGWINCH on Unix,

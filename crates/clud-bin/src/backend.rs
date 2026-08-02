@@ -290,7 +290,12 @@ pub fn saved_harness_override_notice(
 /// Resolve how the backend should be launched.
 ///
 /// Explicit `--pty` / `--subprocess` always wins. Otherwise:
-/// - Claude defaults to subprocess while the PTY-default audit in #328 runs.
+/// - Claude defaults to subprocess. #328 is **closed** (2026-06-16) and did
+///   not flip this: it landed the Ctrl+V / Shift+Enter work plus the opt-in
+///   flag below, but its audit criterion — flip the default and run the
+///   platform matrix — was never carried out. The open proposal to flip is
+///   #691; until that lands, subprocess stays the default by inertia rather
+///   than by an in-progress audit.
 ///   `CLUD_PTY_DEFAULT=1` opts Claude into PTY by default so the matrix and
 ///   manual Windows checks can exercise the keyboard-interception path without
 ///   changing the stable default yet. In `clud loop` mode, non-Windows already
@@ -555,8 +560,16 @@ mod tests {
     fn test_claude_loop_uses_pty_for_streaming() {
         // #32: subprocess silence during long loop iterations makes it
         // impossible to tell if claude is working or hung. Loop mode opts
-        // into PTY so token output streams live. Gated to non-Windows
-        // until #38's Windows ConPTY handle-inheritance is fixed.
+        // into PTY so token output streams live.
+        //
+        // Still gated to non-Windows, but NOT for the reason this comment
+        // used to give. It cited #38's "Windows ConPTY handle-inheritance",
+        // and #38 is closed (2026-04-19) and was about `clud attach` hanging
+        // on *daemon-worker* PTY sessions spawned through
+        // `spawn_detached_self(bInheritHandles=TRUE)` — a different code path
+        // from this foreground pump, which inherits nothing. So the gate has
+        // no verified justification on record; whether Windows loop-PTY
+        // actually misbehaves is untested. #691 owns re-testing it.
         let expected = if cfg!(target_os = "windows") {
             LaunchMode::Subprocess
         } else {
@@ -649,10 +662,17 @@ mod tests {
 
     #[test]
     fn test_codex_interactive_with_tty_uses_subprocess() {
-        // #46: when clud already runs in a real terminal, inherit that TTY
+        // When clud already runs in a real terminal, inherit that TTY
         // directly instead of wrapping in ConPTY. The terminal answers DSR
         // queries natively; the ConPTY path was leaving codex's Ink TUI
         // hung on startup waiting for a reply.
+        //
+        // Cite PR #47, not issue #46. The PR is titled `... (#46)`, so the
+        // number is not wrong -- but the *issue* is "CI: macos-15-intel
+        // integration test can't locate mock-agent", which concluded it was
+        // not a PTY regression. A reader chasing #46 for this mechanism finds
+        // a CI path bug and reasonably concludes the comment is nonsense. The
+        // fix that made TTY inheritance correct is PR #47.
         assert_eq!(
             resolve_launch_mode(false, false, Backend::Codex, false, false, true),
             LaunchMode::Subprocess
