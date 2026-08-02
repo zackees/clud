@@ -67,9 +67,27 @@ impl SampleCadence {
 ///
 /// Parked requires **both** conditions: nobody has asked for a snapshot
 /// recently, *and* there are no live sessions. Either alone is insufficient —
-/// a running session with no dashboard attached still needs its process tree
-/// tracked for the reconciliation the daemon does on its behalf, and a
-/// consumer polling an empty machine still expects fresh numbers.
+/// a running session with no dashboard attached still needs the fast cadence
+/// to keep its history intact, and a consumer polling an empty machine still
+/// expects fresh numbers.
+///
+/// The reason for the live-session half is **snapshot continuity**, not
+/// reconciliation (#722). This comment previously claimed the daemon
+/// reconciles the session's process tree "on its behalf"; it does not. The
+/// snapshot this sampler produces has exactly one consumer path —
+/// `DaemonRequest::ProcSnapshot` (`server.rs`) — and every caller of that is
+/// by definition someone watching, which bumps `last_request_ms`. Session
+/// reconciliation (`sessions::reconcile_session_records`) takes its own
+/// independent `refreshed_minimal_system()` and never touches
+/// `ProcSamplerHandle`; so does orphan reaping, which shares only the
+/// `EnvScanCache`.
+///
+/// What actually breaks at a 30 s tick is the per-pid history: `EWMA_ALPHA`
+/// smoothing over a 15x coarser interval, and `DEAD_ROW_RETENTION_MS` of 60 s
+/// meaning short-lived children could be born *and* die between two ticks and
+/// never appear at all. A consumer attaching later would then read a session
+/// history full of holes. That is worth the idle cost; the vanished
+/// reconciliation was not.
 pub(super) fn decide_cadence(
     ms_since_last_request: u64,
     live_sessions: usize,
@@ -742,9 +760,12 @@ mod tests {
     }
 
     #[test]
-    fn a_live_session_keeps_the_fast_cadence_with_nobody_watching() {
-        // The daemon still reconciles that session's process tree on its
-        // behalf, so parking here would degrade real work, not idle work.
+    fn a_live_session_keeps_the_fast_cadence_to_preserve_its_history() {
+        // Not "because the daemon reconciles the tree on its behalf" -- it
+        // does not, see decide_cadence's doc comment and #722. Parking here
+        // would coarsen the EWMA 15x and let short-lived children live and die
+        // entirely between two ticks, so a consumer attaching later would read
+        // a history with holes in it.
         assert_eq!(
             decide_cadence(CONSUMER_IDLE_GRACE_MS * 100, 1, CONSUMER_IDLE_GRACE_MS),
             SampleCadence::Active
