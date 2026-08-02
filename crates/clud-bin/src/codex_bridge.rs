@@ -13,9 +13,26 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_HEADER_BYTES: usize = 32 * 1024;
-const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Header reads stay on a short absolute deadline: it is the slowloris
+/// defence, and a well-behaved client sends its headers in one segment.
+const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Body reads get their own budget. A large transcript or image upload is
+/// legitimately slower than a header, but is still bounded.
+const DEFAULT_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Streaming responses are governed by an *idle* timeout between frames, not
+/// by a total deadline: a model that thinks for ten minutes before its first
+/// token is healthy, whereas a socket that accepts no bytes for five minutes
+/// is not. Phase 3 replaces the fixture frames but keeps this primitive.
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_CONCURRENCY: usize = 4;
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
+/// Upper bound on a single blocking read. Reads are resumed until their phase
+/// deadline expires; the cap exists so a worker parked on a quiet socket still
+/// observes shutdown promptly instead of holding teardown for its full budget.
+const READ_POLL: Duration = Duration::from_millis(100);
+/// Pseudo-status meaning "stop without replying": the connection is being torn
+/// down, so there is nobody left to receive an error document.
+const ABANDON: u16 = 0;
 
 type ActiveConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
 
@@ -24,11 +41,15 @@ type ActiveConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
 pub struct BridgeConfig {
     pub max_body_bytes: usize,
     pub max_header_bytes: usize,
-    pub io_timeout: Duration,
+    pub header_timeout: Duration,
+    pub body_timeout: Duration,
+    pub stream_idle_timeout: Duration,
     pub max_concurrency: usize,
     test_upstream_url: Option<String>,
     #[cfg(test)]
     request_hold: Duration,
+    #[cfg(test)]
+    frame_hold: Duration,
     #[cfg(test)]
     admission_notifier: Option<std::sync::mpsc::SyncSender<()>>,
 }
@@ -38,11 +59,15 @@ impl Default for BridgeConfig {
         Self {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
-            io_timeout: DEFAULT_IO_TIMEOUT,
+            header_timeout: DEFAULT_HEADER_TIMEOUT,
+            body_timeout: DEFAULT_BODY_TIMEOUT,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             test_upstream_url: test_upstream_override_from_process(),
             #[cfg(test)]
             request_hold: Duration::ZERO,
+            #[cfg(test)]
+            frame_hold: Duration::ZERO,
             #[cfg(test)]
             admission_notifier: None,
         }
@@ -62,6 +87,15 @@ impl BridgeConfig {
         self
     }
 
+    /// Delay inserted between streamed frames so a test can observe partial
+    /// delivery. Without it, a fixture stream completes too fast to prove the
+    /// difference between progressive flushing and one buffered write.
+    #[cfg(test)]
+    fn with_frame_hold(mut self, hold: Duration) -> Self {
+        self.frame_hold = hold;
+        self
+    }
+
     #[cfg(test)]
     fn with_admission_notifier(mut self, notifier: std::sync::mpsc::SyncSender<()>) -> Self {
         self.admission_notifier = Some(notifier);
@@ -75,7 +109,9 @@ impl fmt::Debug for BridgeConfig {
             .debug_struct("BridgeConfig")
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_header_bytes", &self.max_header_bytes)
-            .field("io_timeout", &self.io_timeout)
+            .field("header_timeout", &self.header_timeout)
+            .field("body_timeout", &self.body_timeout)
+            .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("max_concurrency", &self.max_concurrency)
             .field(
                 "test_upstream_url",
@@ -233,8 +269,19 @@ fn serve(
         workers.retain(|worker| !worker.is_finished());
         match listener.accept() {
             Ok((stream, _peer)) => {
+                // The listener is non-blocking so the accept loop can poll for
+                // shutdown. On Windows an accepted socket inherits that mode,
+                // and a non-blocking socket ignores SO_RCVTIMEO: every read
+                // that outruns the client's next segment returns WouldBlock,
+                // which the readers below classify as a timeout. The result is
+                // an instant 408 for any request whose body lands in a
+                // separate segment from its headers. Restore blocking mode per
+                // connection so the read deadlines are the real bound.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 if !reserve_worker(&active, config.max_concurrency.max(1)) {
-                    reject_busy(stream, config.io_timeout);
+                    reject_busy(stream, config.header_timeout, &shutdown);
                     continue;
                 }
                 let shutdown_stream = match stream.try_clone() {
@@ -257,6 +304,7 @@ fn serve(
                 }
                 let worker_active = Arc::clone(&active);
                 let worker_connections = Arc::clone(&connections);
+                let worker_shutdown = Arc::clone(&shutdown);
                 let worker_config = config.clone();
                 let worker_token = bearer_token.clone();
                 match thread::Builder::new()
@@ -267,7 +315,7 @@ fn serve(
                             connections: worker_connections,
                             worker_id,
                         };
-                        handle_connection(stream, &worker_config, &worker_token);
+                        handle_connection(stream, &worker_config, &worker_token, &worker_shutdown);
                     }) {
                     Ok(worker) => workers.push(worker),
                     Err(_) => {
@@ -317,13 +365,13 @@ impl Drop for ActiveWorker {
     }
 }
 
-fn reject_busy(mut stream: TcpStream, timeout: Duration) {
+fn reject_busy(mut stream: TcpStream, timeout: Duration, shutdown: &AtomicBool) {
     // Consume the already-buffered request headers before closing. On Windows,
     // closing a TCP socket with unread inbound bytes sends RST and can discard
     // the 503 that was just written.
     let drain_timeout = timeout.min(Duration::from_millis(100));
     let deadline = Instant::now() + drain_timeout;
-    let _ = read_headers(&mut stream, DEFAULT_MAX_HEADER_BYTES, deadline);
+    let _ = read_headers(&mut stream, DEFAULT_MAX_HEADER_BYTES, deadline, shutdown);
     if stream.set_write_timeout(Some(timeout)).is_err() {
         return;
     }
@@ -336,7 +384,12 @@ fn reject_busy(mut stream: TcpStream, timeout: Duration) {
     );
 }
 
-fn handle_connection(mut stream: TcpStream, config: &BridgeConfig, bearer_token: &str) {
+fn handle_connection(
+    mut stream: TcpStream,
+    config: &BridgeConfig,
+    bearer_token: &str,
+    shutdown: &AtomicBool,
+) {
     #[cfg(test)]
     if let Some(notifier) = &config.admission_notifier {
         let _ = notifier.try_send(());
@@ -345,13 +398,25 @@ fn handle_connection(mut stream: TcpStream, config: &BridgeConfig, bearer_token:
     if !config.request_hold.is_zero() {
         thread::sleep(config.request_hold);
     }
-    let deadline = Instant::now() + config.io_timeout;
-    if stream.set_write_timeout(Some(config.io_timeout)).is_err() {
+    // Each phase gets its own budget. Sharing one deadline across header read,
+    // body read, and response write is what made a real (multi-minute) model
+    // response indistinguishable from a stalled socket.
+    let header_deadline = Instant::now() + config.header_timeout;
+    if stream
+        .set_write_timeout(Some(config.header_timeout))
+        .is_err()
+    {
         return;
     }
 
-    let parsed = match read_headers(&mut stream, config.max_header_bytes, deadline) {
+    let parsed = match read_headers(
+        &mut stream,
+        config.max_header_bytes,
+        header_deadline,
+        shutdown,
+    ) {
         Ok(parsed) => parsed,
+        Err(ABANDON) => return,
         Err(status) => {
             let _ = write_error(&mut stream, status);
             return;
@@ -386,13 +451,16 @@ fn handle_connection(mut stream: TcpStream, config: &BridgeConfig, bearer_token:
             );
         }
         ("POST", "/v1/messages") => {
+            let body_deadline = Instant::now() + config.body_timeout;
             let body = match read_body(
                 &mut stream,
                 parsed.body_prefix,
                 parsed.content_length,
-                deadline,
+                body_deadline,
+                shutdown,
             ) {
                 Ok(body) => body,
+                Err(ABANDON) => return,
                 Err(status) => {
                     let _ = write_error(&mut stream, status);
                     return;
@@ -408,13 +476,7 @@ fn handle_connection(mut stream: TcpStream, config: &BridgeConfig, bearer_token:
             if let Some(upstream_url) = config.test_upstream_url.as_deref() {
                 forward_test_upstream(&mut stream, config, upstream_url, &body);
             } else if json.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
-                let _ = write_response(
-                    &mut stream,
-                    200,
-                    "text/event-stream",
-                    fixture_sse().as_bytes(),
-                    false,
-                );
+                let _ = write_event_stream(&mut stream, config, &fixture_sse_frames());
             } else {
                 let _ = write_response(
                     &mut stream,
@@ -443,6 +505,7 @@ fn read_headers(
     stream: &mut TcpStream,
     limit: usize,
     deadline: Instant,
+    shutdown: &AtomicBool,
 ) -> Result<ParsedRequest, u16> {
     let mut buffer = Vec::with_capacity(limit.min(4096));
     let header_end = loop {
@@ -455,7 +518,7 @@ fn read_headers(
         if buffer.len() >= limit {
             return Err(431);
         }
-        set_remaining_read_timeout(stream, deadline)?;
+        set_remaining_read_timeout(stream, deadline, shutdown)?;
         let mut chunk = [0_u8; 1024];
         match stream.read(&mut chunk) {
             Ok(0) => return Err(400),
@@ -466,7 +529,10 @@ fn read_headers(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                return Err(408);
+                match read_expired(deadline, shutdown) {
+                    Some(status) => return Err(status),
+                    None => continue,
+                }
             }
             Err(_) => return Err(400),
         }
@@ -509,10 +575,11 @@ fn read_body(
     mut body: Vec<u8>,
     content_length: usize,
     deadline: Instant,
+    shutdown: &AtomicBool,
 ) -> Result<Vec<u8>, u16> {
     body.truncate(content_length);
     while body.len() < content_length {
-        set_remaining_read_timeout(stream, deadline)?;
+        set_remaining_read_timeout(stream, deadline, shutdown)?;
         let remaining = content_length - body.len();
         let mut chunk = [0_u8; 4096];
         match stream.read(&mut chunk[..remaining.min(4096)]) {
@@ -524,7 +591,10 @@ fn read_body(
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                return Err(408);
+                match read_expired(deadline, shutdown) {
+                    Some(status) => return Err(status),
+                    None => continue,
+                }
             }
             Err(_) => return Err(400),
         }
@@ -532,12 +602,33 @@ fn read_body(
     Ok(body)
 }
 
-fn set_remaining_read_timeout(stream: &TcpStream, deadline: Instant) -> Result<(), u16> {
+/// Arm the next read. The timeout is the smaller of the remaining phase budget
+/// and [`READ_POLL`], so a caller that sees a timeout must consult the deadline
+/// itself before deciding the peer is late — see [`read_expired`].
+fn set_remaining_read_timeout(
+    stream: &TcpStream,
+    deadline: Instant,
+    shutdown: &AtomicBool,
+) -> Result<(), u16> {
+    if shutdown.load(Ordering::Acquire) {
+        return Err(ABANDON);
+    }
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
         .ok_or(408_u16)?;
-    stream.set_read_timeout(Some(remaining)).map_err(|_| 400)
+    stream
+        .set_read_timeout(Some(remaining.min(READ_POLL)))
+        .map_err(|_| 400)
+}
+
+/// Classify a read timeout: a real deadline breach is 408, a poll-interval
+/// expiry is just "nothing yet, look again".
+fn read_expired(deadline: Instant, shutdown: &AtomicBool) -> Option<u16> {
+    if shutdown.load(Ordering::Acquire) {
+        return Some(ABANDON);
+    }
+    (Instant::now() >= deadline).then_some(408)
 }
 
 fn forward_test_upstream(
@@ -551,7 +642,9 @@ fn forward_test_upstream(
     } else {
         format!("{}/v1/messages", upstream_url.trim_end_matches('/'))
     };
-    let agent = ureq::AgentBuilder::new().timeout(config.io_timeout).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(config.body_timeout)
+        .build();
     let response = match agent
         .post(&messages_url)
         .set("Content-Type", "application/json")
@@ -596,6 +689,53 @@ fn write_error(stream: &mut TcpStream, status: u16) -> io::Result<()> {
     };
     let body = format!(r#"{{"error":{{"type":"{error_type}","message":"{message}"}}}}"#);
     write_response(stream, status, "application/json", body.as_bytes(), false)
+}
+
+/// Write an SSE response incrementally.
+///
+/// `write_response` cannot serve this path: it derives `Content-Length` from a
+/// fully materialised body and writes once, so a caller can only ever send a
+/// stream that has already finished. Chunked transfer plus a flush per frame is
+/// what lets Claude render tokens as they arrive rather than at end-of-turn.
+///
+/// The write timeout is re-armed per frame, making it an idle timeout: total
+/// response duration is unbounded, but a peer that stops reading is still cut
+/// off. Errors are returned rather than reported downstream — once the 200 and
+/// its headers are on the wire, there is no longer a status code to change.
+fn write_event_stream(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    frames: &[String],
+) -> io::Result<()> {
+    let idle_timeout = if config.stream_idle_timeout.is_zero() {
+        DEFAULT_STREAM_IDLE_TIMEOUT
+    } else {
+        config.stream_idle_timeout
+    };
+    stream.set_write_timeout(Some(idle_timeout))?;
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    )?;
+    stream.flush()?;
+
+    for frame in frames {
+        // Re-arm per frame so the budget is "silence between frames", not
+        // "total time to produce the response".
+        stream.set_write_timeout(Some(idle_timeout))?;
+        write!(stream, "{:x}\r\n", frame.len())?;
+        stream.write_all(frame.as_bytes())?;
+        stream.write_all(b"\r\n")?;
+        stream.flush()?;
+        #[cfg(test)]
+        if !config.frame_hold.is_zero() {
+            thread::sleep(config.frame_hold);
+        }
+    }
+
+    stream.write_all(b"0\r\n\r\n")?;
+    stream.flush()?;
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(())
 }
 
 fn write_response(
@@ -654,28 +794,44 @@ fn fixture_message() -> String {
     .to_string()
 }
 
-fn fixture_sse() -> String {
-    concat!(
-        "event: message_start\n",
-        r#"data: {"type":"message_start","message":{"id":"msg_clud_fixture","type":"message","role":"assistant","model":"clud-bridge-fixture","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#,
-        "\n\n",
-        "event: content_block_start\n",
-        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-        "\n\n",
-        "event: content_block_delta\n",
-        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"clud bridge fixture"}}"#,
-        "\n\n",
-        "event: content_block_stop\n",
-        r#"data: {"type":"content_block_stop","index":0}"#,
-        "\n\n",
-        "event: message_delta\n",
-        r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}"#,
-        "\n\n",
-        "event: message_stop\n",
-        r#"data: {"type":"message_stop"}"#,
-        "\n\n",
-    )
-    .to_owned()
+/// One SSE event per element, so each is flushed as its own chunk. Phase 3
+/// replaces this vector with translator output; the framing contract that each
+/// element is a complete, independently deliverable SSE event stays.
+fn fixture_sse_frames() -> Vec<String> {
+    [
+        concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_clud_fixture","type":"message","role":"assistant","model":"clud-bridge-fixture","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+            "\n\n",
+        ),
+        concat!(
+            "event: content_block_start\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            "\n\n",
+        ),
+        concat!(
+            "event: content_block_delta\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"clud bridge fixture"}}"#,
+            "\n\n",
+        ),
+        concat!(
+            "event: content_block_stop\n",
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            "\n\n",
+        ),
+        concat!(
+            "event: message_delta\n",
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}"#,
+            "\n\n",
+        ),
+        concat!(
+            "event: message_stop\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+        ),
+    ]
+    .map(str::to_owned)
+    .to_vec()
 }
 
 fn test_upstream_override_from_process() -> Option<String> {
@@ -811,7 +967,7 @@ mod tests {
         let config = BridgeConfig {
             max_body_bytes: 64,
             max_header_bytes: 256,
-            io_timeout: Duration::from_millis(100),
+            header_timeout: Duration::from_millis(100),
             max_concurrency: 1,
             ..BridgeConfig::default()
         };
@@ -845,7 +1001,7 @@ mod tests {
         let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
         let bridge = BridgeHandle::start(
             BridgeConfig {
-                io_timeout: Duration::from_millis(150),
+                header_timeout: Duration::from_millis(150),
                 ..BridgeConfig::default()
             }
             .with_admission_notifier(admitted_tx),
@@ -900,7 +1056,7 @@ mod tests {
         let bridge = BridgeHandle::start(
             BridgeConfig {
                 max_concurrency: 1,
-                io_timeout: Duration::from_secs(2),
+                header_timeout: Duration::from_secs(2),
                 ..BridgeConfig::default()
             }
             .with_request_hold(Duration::from_secs(1)),
@@ -934,7 +1090,7 @@ mod tests {
         let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
         let mut bridge = BridgeHandle::start(
             BridgeConfig {
-                io_timeout: Duration::from_secs(10),
+                header_timeout: Duration::from_secs(10),
                 ..BridgeConfig::default()
             }
             .with_admission_notifier(admitted_tx),
@@ -992,6 +1148,193 @@ mod tests {
             None
         );
         assert_eq!(resolve_test_upstream_override(true, false, value), None);
+    }
+
+    /// Split a chunked response into its decoded body. Deliberately strict:
+    /// a malformed chunk header panics rather than silently returning a short
+    /// body, so a framing regression fails loudly.
+    fn decode_chunked_body(response: &str) -> String {
+        let (headers, mut rest) = response.split_once("\r\n\r\n").expect("header terminator");
+        assert!(
+            headers.contains("Transfer-Encoding: chunked"),
+            "streamed response must be chunked, got headers: {headers}"
+        );
+        assert!(
+            !headers.contains("Content-Length"),
+            "a streamed response cannot carry Content-Length: {headers}"
+        );
+        let mut body = String::new();
+        loop {
+            let (size_line, remainder) = rest.split_once("\r\n").expect("chunk size line");
+            let size = usize::from_str_radix(size_line.trim(), 16).expect("hex chunk size");
+            if size == 0 {
+                break;
+            }
+            let (chunk, remainder) = remainder.split_at(size);
+            body.push_str(chunk);
+            rest = remainder
+                .strip_prefix("\r\n")
+                .expect("chunk data must be CRLF terminated");
+        }
+        body
+    }
+
+    #[test]
+    fn streamed_responses_are_chunked_and_flushed_frame_by_frame() {
+        let frame_hold = Duration::from_millis(120);
+        let bridge =
+            BridgeHandle::start(BridgeConfig::default().with_frame_hold(frame_hold)).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .write_all(
+                authorized(
+                    "POST",
+                    "/v1/messages",
+                    &token,
+                    r#"{"model":"fixture","messages":[],"stream":true}"#,
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+
+        // Read incrementally and timestamp the first frame against completion.
+        // A single buffered write would make these two instants identical.
+        let started = Instant::now();
+        let mut raw = Vec::new();
+        let mut chunk = [0_u8; 512];
+        let mut first_frame_at = None;
+        loop {
+            let count = stream.read(&mut chunk).unwrap();
+            if count == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..count]);
+            if first_frame_at.is_none()
+                && String::from_utf8_lossy(&raw).contains("\"type\":\"message_start\"")
+            {
+                first_frame_at = Some(started.elapsed());
+            }
+        }
+        let completed_at = started.elapsed();
+        let first_frame_at = first_frame_at.expect("message_start frame never arrived");
+
+        let response = String::from_utf8(raw).expect("utf-8 response");
+        assert_eq!(status(&response), 200);
+        assert!(response.contains("text/event-stream"));
+
+        // The whole point of the phase: usable output well before the end.
+        assert!(
+            completed_at >= first_frame_at + frame_hold * 2,
+            "stream was not progressive: first frame at {first_frame_at:?}, done at {completed_at:?}"
+        );
+
+        let body = decode_chunked_body(&response);
+        assert_eq!(body, fixture_sse_frames().concat());
+        assert!(body.starts_with("event: message_start\ndata:"));
+        assert!(body.ends_with("\n\n"));
+        assert!(body.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn header_body_and_stream_timeouts_are_independent() {
+        // Header budget is short; body budget is long. A client that sends its
+        // headers promptly and its body slowly must succeed -- under the single
+        // whole-connection deadline this replaced, it returned 408.
+        let bridge = BridgeHandle::start(BridgeConfig {
+            header_timeout: Duration::from_millis(300),
+            body_timeout: Duration::from_secs(5),
+            ..BridgeConfig::default()
+        })
+        .unwrap();
+        let token = bridge.bearer_token().to_owned();
+        let body = r#"{"model":"fixture","messages":[],"stream":false}"#;
+
+        let mut stream = TcpStream::connect(bridge.socket_addr()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        stream.flush().unwrap();
+
+        // Longer than the header budget, comfortably inside the body budget.
+        thread::sleep(Duration::from_millis(600));
+        stream.write_all(body.as_bytes()).unwrap();
+        stream.flush().unwrap();
+
+        let mut raw = Vec::new();
+        let mut chunk = [0_u8; 512];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => raw.extend_from_slice(&chunk[..count]),
+                Err(error) => panic!("read failed after {} bytes: {error}", raw.len()),
+            }
+        }
+        let response = String::from_utf8_lossy(&raw).into_owned();
+        assert_eq!(
+            status(&response),
+            200,
+            "slow body must not be charged the header budget: {response}"
+        );
+        assert!(response.contains("clud bridge fixture"));
+    }
+
+    /// Regression guard: a body split across many segments must be reassembled.
+    /// Accepted sockets inherit the listener's non-blocking mode on Windows,
+    /// which made every read that outran the client's next segment look like a
+    /// timeout and answered 408. Real Claude requests carrying a transcript or
+    /// an image always span segments, so this is the shape that matters.
+    #[test]
+    fn bodies_split_across_segments_are_reassembled() {
+        let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
+        let token = bridge.bearer_token().to_owned();
+        let filler = "x".repeat(4096);
+        let body =
+            format!(r#"{{"model":"fixture","messages":[],"stream":false,"note":"{filler}"}}"#);
+
+        let mut stream = TcpStream::connect(bridge.socket_addr()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        stream.flush().unwrap();
+
+        for segment in body.as_bytes().chunks(512) {
+            thread::sleep(Duration::from_millis(20));
+            stream.write_all(segment).unwrap();
+            stream.flush().unwrap();
+        }
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert_eq!(
+            status(&response),
+            200,
+            "segmented body must not read as a timeout: {response}"
+        );
+        assert!(response.contains("clud bridge fixture"));
     }
 
     #[test]

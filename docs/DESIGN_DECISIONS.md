@@ -995,3 +995,43 @@ SSE responses exist for compiled-fixture validation. Any debug upstream seam
 is gated by both a debug build and `CLUD_INTEGRATION_TESTS=1`; release builds
 ignore it. Logs and fixture reports expose only sanitized presence, port, and
 status metadata, never the token or full authenticated URL.
+
+## DD-028: The bridge times each I/O phase separately and streams responses chunked
+
+**Context:** zackees/clud#627 phase 3 step 1. Phase 2's bridge carried one
+`io_timeout` used as a whole-connection deadline, and a single `write_response`
+that derives `Content-Length` from a fully materialised body. Both are correct
+for a fixture server and wrong for model traffic: a real streamed completion
+routinely outlives any deadline short enough to be a useful slowloris defence,
+and a response whose length must be known up front cannot be delivered
+progressively. The child is already configured for long turns —
+`apply_cross_route_overlay` sets `API_TIMEOUT_MS` to 3 000 000.
+
+**Decision:** Split the single budget into `header_timeout` (5 s),
+`body_timeout` (30 s), and `stream_idle_timeout` (300 s). The first two are
+absolute per-phase deadlines; the third is an *idle* timeout re-armed before
+every frame, so total response duration is unbounded while a peer that stops
+reading is still cut off. Add `write_event_stream` alongside `write_response`:
+chunked transfer encoding, one chunk and one flush per SSE event. Errors and
+non-streaming replies keep the original writer, which still owns the only path
+that can choose a status code.
+
+Reads are performed on blocking sockets with the per-read timeout capped at
+`READ_POLL`, and a timeout is only fatal once the phase deadline has actually
+passed. The cap exists so a worker parked on a quiet socket observes the
+shutdown flag promptly; before this, a blocked read held teardown for its full
+budget, because `shutdown()` on another thread does not reliably interrupt a
+blocking `recv` on Windows.
+
+**Consequences:** A body arriving in a different TCP segment from its headers
+is now read correctly. It previously could not be: `TcpListener::set_nonblocking`
+is inherited by accepted sockets on Windows, a non-blocking socket ignores
+`SO_RCVTIMEO`, and the readers classified the resulting `WouldBlock` as a
+timeout — so any request whose body did not arrive with its headers was
+answered `408` immediately. Phase 2's tests never saw it because they write
+headers and body in one call; every real Claude request carrying a transcript
+or an image spans segments. Accepted sockets are now explicitly returned to
+blocking mode, which also keeps the retry loop from busy-spinning.
+
+Phase 3's translator replaces the fixture frames but inherits this framing
+contract: one vector element per complete SSE event, flushed as produced.
