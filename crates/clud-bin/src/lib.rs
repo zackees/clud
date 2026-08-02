@@ -13,6 +13,7 @@ pub mod capture;
 pub mod clud_settings;
 pub mod codex_bridge;
 pub mod codex_hook_normalize;
+pub mod codex_translate;
 pub mod command;
 pub mod config;
 pub mod console_input;

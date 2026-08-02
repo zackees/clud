@@ -52,6 +52,10 @@ Entry and orchestration:
   routes, and joined shutdown. Per-phase header/body deadlines and a per-frame
   idle timeout, with chunked progressive SSE via `write_event_stream` (#627
   step 1, DD-028).
+- `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
+  mapping for #627 step 2: typed in/out structs, transcript-order-preserving
+  tool loops, and explicit rejection of unrepresentable inputs. HTTP-free and
+  not yet wired into the bridge (that is step 5).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every
