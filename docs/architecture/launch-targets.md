@@ -75,6 +75,33 @@ back into blocking mode, and a read timeout is fatal only once the phase
 deadline has passed. See DD-028 — the previous single-deadline arrangement
 answered `408` to any request whose body arrived in a later TCP segment.
 
+## Request translation
+
+`codex_translate.rs` maps an Anthropic Messages request onto an OpenAI
+Responses request (#627 step 2). It is a pure function over typed structs with
+no HTTP, socket, or credential dependency, so the mapping table can be driven
+directly by fixtures; step 5 wires it into the bridge.
+
+The shape difference that drives the design: one Messages `content` array can
+become several Responses input items. An assistant turn holding text plus two
+`tool_use` blocks becomes one message item and two `function_call` items, and
+`tool_result` blocks become top-level `function_call_output` items rather than
+message content. Order is preserved because the model reads the result as a
+transcript.
+
+Notable mappings: `system` → `instructions`; `input_schema` → `parameters`;
+`tool_choice: any` → `required`; `disable_parallel_tool_use` (an opt-out) →
+`parallel_tool_calls: false` (an opt-in), sent only when asked; `max_tokens` →
+`max_output_tokens`; `thinking.budget_tokens` → the coarse `reasoning.effort`
+ladder. A `claude*` model id resolves to the Codex default, while any other id
+is honoured verbatim as an explicit override.
+
+Unknown *top-level* request fields are tolerated so an additive Anthropic API
+change cannot break the route, but anything that changes meaning and has no
+faithful equivalent — `top_k`, `stop_sequences`, thinking blocks replayed in
+history, images inside a `tool_result`, unknown block or `tool_choice` types —
+is an explicit error rather than a silent drop.
+
 ## Persistence
 
 Global launch preferences use the existing settings document and `fs4` lock:
