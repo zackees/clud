@@ -15,11 +15,19 @@ pub(super) fn child_env() -> Vec<(String, String)> {
     // the parent env.
     let overrides = crate::gc::session_tmp::env_overrides();
     let strip_temp = !overrides.is_empty();
+    // Issue #753: same Git-Bash completion suppression the foreground runner
+    // applies (see shell::completion_guard). This builder is a deliberate
+    // duplicate of `runner::child_env` for the daemon-launched path — any
+    // policy added to one belongs in both, or daemon sessions silently miss
+    // it.
+    let completion = crate::shell::completion_guard::env_overrides();
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(key, _)| key != "IN_CLUD" && key != originator_key)
         .filter(|(key, _)| {
             !strip_temp || !crate::gc::session_tmp::OVERRIDDEN_KEYS.contains(&key.as_str())
         })
+        // Strip any inherited value so the override below is the only one.
+        .filter(|(key, _)| !completion.iter().any(|(k, _)| k == key))
         .collect();
     env.push(("IN_CLUD".to_string(), "1".to_string()));
     env.push((
@@ -27,6 +35,7 @@ pub(super) fn child_env() -> Vec<(String, String)> {
         format!("CLUD:{}", std::process::id()),
     ));
     env.extend(overrides);
+    env.extend(completion);
     env
 }
 
@@ -127,6 +136,45 @@ pub(super) fn parse_byte_size(raw: &str) -> Option<usize> {
 mod tests {
     //! Issue #25: configurable attach-replay backlog cap.
     use super::*;
+
+    /// Issue #753: the daemon builds its own child env and historically
+    /// drifted from `runner::child_env`. Assert the completion suppression
+    /// reaches daemon-launched sessions too, exactly once.
+    #[cfg(windows)]
+    #[test]
+    fn child_env_suppresses_git_bash_completions() {
+        use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
+
+        let guard = EnvGuard::unset(OPT_OUT_KEY);
+        let env = child_env();
+        drop(guard);
+
+        let hits: Vec<_> = env.iter().filter(|(k, _)| k == SUPPRESS_KEY).collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{SUPPRESS_KEY} must appear exactly once in the daemon child env"
+        );
+        assert_eq!(hits[0].1, "1");
+    }
+
+    /// The opt-out must reach the daemon path as well, and must not leave a
+    /// stale inherited value behind.
+    #[cfg(windows)]
+    #[test]
+    fn child_env_opt_out_drops_suppression() {
+        use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
+
+        let opt_out = EnvGuard::set(OPT_OUT_KEY, "1");
+        let env = child_env();
+        drop(opt_out);
+
+        // Inherited ambient value (if any) is all that may remain; we must not
+        // have injected one ourselves.
+        let injected = std::env::var(SUPPRESS_KEY).is_err()
+            && env.iter().any(|(k, _)| k == SUPPRESS_KEY);
+        assert!(!injected, "{OPT_OUT_KEY}=1 must suppress the injection");
+    }
 
     #[test]
     fn parse_byte_size_raw_bytes() {

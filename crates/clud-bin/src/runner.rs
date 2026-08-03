@@ -103,6 +103,14 @@ pub fn child_env() -> Vec<(String, String)> {
         push_or_replace(&mut env, &key, &value);
     }
 
+    // Issue #753: keep Git-Bash completion functions out of the backend's
+    // shell snapshot. Without this, every Bash tool call re-sources ~85
+    // base64-decoded function definitions (~170 process spawns) before it
+    // runs anything. See shell::completion_guard.
+    for (key, value) in crate::shell::completion_guard::env_overrides() {
+        push_or_replace(&mut env, &key, &value);
+    }
+
     env
 }
 
@@ -935,6 +943,42 @@ mod tests {
         );
         let pyio_count = env.iter().filter(|(k, _)| k == "PYTHONIOENCODING").count();
         assert_eq!(pyio_count, 1, "PYTHONIOENCODING must appear exactly once");
+    }
+
+    /// Issue #753: the backend's shell snapshot must not capture Git-Bash
+    /// completion functions. Windows-only — see shell::completion_guard for
+    /// why this variable is deliberately not set elsewhere.
+    #[cfg(windows)]
+    #[test]
+    fn child_env_suppresses_git_bash_completions_on_windows() {
+        use crate::shell::completion_guard::{OPT_OUT_KEY, SUPPRESS_KEY};
+
+        // Guard the process-global opt-out so this test is order-independent.
+        let prior = std::env::var(OPT_OUT_KEY).ok();
+        std::env::remove_var(OPT_OUT_KEY);
+        let env = child_env();
+        match prior {
+            Some(v) => std::env::set_var(OPT_OUT_KEY, v),
+            None => std::env::remove_var(OPT_OUT_KEY),
+        }
+
+        assert_eq!(
+            env_lookup(&env, SUPPRESS_KEY).as_deref(),
+            Some("1"),
+            "{SUPPRESS_KEY} must be set so the login shell skips git-completion.bash"
+        );
+        let count = env.iter().filter(|(k, _)| k == SUPPRESS_KEY).count();
+        assert_eq!(count, 1, "{SUPPRESS_KEY} must appear exactly once");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn child_env_leaves_wine_loader_alone_off_windows() {
+        use crate::shell::completion_guard::SUPPRESS_KEY;
+        // Only meaningful when the ambient env doesn't already carry it.
+        if std::env::var(SUPPRESS_KEY).is_err() {
+            assert_eq!(env_lookup(&child_env(), SUPPRESS_KEY), None);
+        }
     }
 
     fn env_lookup(env: &[(String, String)], key: &str) -> Option<String> {

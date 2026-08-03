@@ -1122,3 +1122,74 @@ tool-use round trip both complete end to end. That validation surfaced a routing
 defect no mock could: Claude Code sends `POST /v1/messages?beta=true`, and the
 bridge matched the raw request target, so every real request 404'd. The mock
 probe sends a bare path and had never exercised it.
+
+## DD-031: Git-Bash completions are suppressed in the backend's login shell
+
+**Context:** zackees/clud#753. On Windows every Claude Code `Bash` tool call was
+costing ~4.4 s of CPU on an idle machine — ~20 s once the resulting process
+storm saturated the box — before running any of the actual command.
+
+The cause is a three-way collision, none of whose parts is wrong alone. Claude
+Code builds a per-session "shell snapshot" by running the shell as a **login**
+shell (`execFile(shell, ["-c", "-l", script])`) and replaying the captured
+functions into every later tool call. Its capture filter,
+`declare -F | cut -d' ' -f3 | grep -vE '^_[^_]'`, drops single-underscore
+completion functions but *deliberately* keeps double-underscore helpers so
+things like mise's `__zsh_like_cd` survive. On Windows, `-l` pulls in
+`/etc/profile.d/git-prompt.sh`, which sources `git-completion.bash` — and Git's
+completion internals are all `__git_*`, so ~84 of them pass the filter. Each is
+serialised as ``eval "$(echo '<base64>' | base64 -d)"``: a subshell plus a real
+`base64.exe`, i.e. **two process spawns per function, ~170 per tool call**,
+under MSYS2's emulated `fork()`.
+
+It is self-reinforcing rather than a fixed cost — more overhead means more
+concurrent `bash.exe`, which means more contention, which means more overhead.
+That is why the measured figure ranges from 4.4 s to ~20 s depending on load.
+
+**Decision:** Export `WINELOADERNOEXEC=1` into the backend agent's environment
+on Windows. Git for Windows guards both completion-sourcing blocks in
+`/etc/profile.d/git-prompt.sh` with `test -z "$WINELOADERNOEXEC"`, so the login
+shell skips `git-completion.bash` entirely. Measured: 85 captured functions → 1,
+and 4,413 ms → 49 ms per tool call.
+
+The policy lives in `shell::completion_guard::env_overrides()` and is applied by
+**both** child-env builders — `runner::child_env` and
+`daemon::io_helpers::child_env`. Those two are long-standing duplicates and the
+daemon one had already drifted (it misses `CLUD_DISABLE_POWERSHELL` and the
+Codex bridge overlay); wiring only the runner would have left daemon-launched
+sessions paying the full tax. `CLUD_GIT_BASH_COMPLETIONS=1` opts back in.
+
+**Why not the alternatives:**
+
+- **`~/.config/git/git-prompt.sh`** — `git-prompt.sh:8` short-circuits the whole
+  block if that file exists, which is cleaner and officially supported. But it
+  is a *user-global* file that also changes the user's interactive shells. clud
+  must not write it silently.
+- **`CLAUDE_CODE_DONT_INHERIT_ENV`** — exists in the binary but only governs
+  whether `process.env` is inherited. The functions come from `/etc/profile.d`,
+  which a login shell reads regardless.
+- **Fixing it in Claude Code** — the actual fix, and it is three lines: append
+  `declare -f "$func"` straight to the snapshot instead of round-tripping
+  through base64. Claude Code's own *zsh* branch already does exactly this
+  (`typeset -f`); only the bash branch takes the detour. That costs zero spawns
+  regardless of how many functions are captured, on every platform. Filed
+  upstream; this DD covers the mitigation we control.
+
+**Consequences:** This is a mitigation scoped to the worst-case platform. A
+Linux or macOS user with a function-heavy `.bashrc` still pays the full
+round-trip, because the lever is Git-for-Windows-specific.
+
+`WINELOADERNOEXEC` is a variable Git for Windows *consults*, not one it
+documents as an API, so a change on their side would silently stop suppressing
+completions and the tax would quietly return. The guardrail is therefore
+`tests/shell_completion_guard.rs`, which asserts the observed **function count**
+of a real login shell rather than merely that the variable is set — an
+env-var-presence assertion would keep passing through exactly the regression it
+is meant to catch. The variable is deliberately not set off Windows, where Wine
+may genuinely be running.
+
+Side-effect surface was verified as a single line: diffing the full exported
+environment of a login shell with and without it set shows only `PS1` losing its
+`` `__git_ps1` `` segment, which is meaningless in a non-interactive tool-call
+shell. PATH, every other exported variable, aliases and `git` itself are
+identical.

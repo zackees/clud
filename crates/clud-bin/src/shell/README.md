@@ -1,7 +1,8 @@
 # shell/
 
 Backend-shell selection plumbing for [issue #447](https://github.com/zackees/clud/issues/447) — the
-"disable PowerShell on Windows" toggle.
+"disable PowerShell on Windows" toggle, plus the login-shell environment policy
+for [issue #753](https://github.com/zackees/clud/issues/753).
 
 ## Why this module exists
 
@@ -30,6 +31,28 @@ The two enforcement layers live elsewhere:
 ## What's here
 
 - `mod.rs` — module root.
+- `completion_guard.rs` — keeps Git-Bash completion functions out of the
+  backend's **shell snapshot** (#753). Unrelated to shell *selection*: this is
+  about the login environment the chosen shell starts in. Claude Code snapshots
+  a login shell once per session and replays every captured function into every
+  later `Bash` tool call; Git's `__git_*` completions survive its
+  double-underscore filter and each costs two process spawns per replay (~170
+  per tool call, 4.4 s → 20 s of CPU depending on load). Exporting
+  `WINELOADERNOEXEC=1` makes `/etc/profile.d/git-prompt.sh` skip
+  `git-completion.bash`: 85 captured functions → 1, 4,413 ms → 49 ms. Public
+  API:
+  ```rust
+  pub fn env_overrides() -> Vec<(String, String)>          // policy
+  pub fn env_overrides_for(is_windows: bool, opted_out: bool) -> Vec<(String, String)>  // test seam
+  ```
+  Applied by **both** `runner::child_env` and `daemon::io_helpers::child_env` —
+  those builders are duplicates and the daemon one has drifted before, so a
+  policy added to one belongs in both. Opt out with
+  `CLUD_GIT_BASH_COMPLETIONS=1`. Guardrail:
+  `tests/shell_completion_guard.rs` asserts a real login shell's **function
+  count**, not the env var, because the lever is a Git-for-Windows
+  implementation detail that could change silently. Rationale:
+  [DD-031](../../../../docs/DESIGN_DECISIONS.md#dd-031-git-bash-completions-are-suppressed-in-the-backends-login-shell).
 - `git_bash_resolver.rs` — lazy fetch + sha256 verify + extract of a
   portable Git Bash bundle sourced from `zackees/zcmds_win32` (9.4 MB,
   pinned). Cache layout:
