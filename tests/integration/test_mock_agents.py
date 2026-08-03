@@ -332,7 +332,11 @@ class TestCodexBridgeForeground:
         assert upstream_request.startswith(b"POST /v1/responses HTTP/1.1")
         head, _, body = upstream_request.partition(b"\r\n\r\n")
         sent = json.loads(body)
-        assert sent["model"] == "gpt-5.6-sol"
+        # The billed default, end to end through a real launch. Asserted as a
+        # literal on purpose: this is the one place the model id is observed
+        # after travelling the whole path, so it is the assertion that would
+        # catch an unintended change to what the user is charged.
+        assert sent["model"] == "gpt-5.6-terra"
         assert sent["stream"] is True
         assert sent["input"][0]["content"][0]["type"] == "input_text"
         assert "messages" not in sent, "Anthropic request shape leaked upstream"
