@@ -39,10 +39,6 @@ pub struct BundledSkill {
 /// another `assets/skills/<name>/SKILL.md`.
 pub const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
-        name: "clud-loop",
-        skill_md: include_str!("../assets/skills/clud-loop/SKILL.md"),
-    },
-    BundledSkill {
         name: "clud-issue",
         skill_md: include_str!("../assets/skills/clud-issue/SKILL.md"),
     },
@@ -115,6 +111,30 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-docker-recover/SKILL.md"),
     },
 ];
+
+/// Bundled skills that have been retired. Entries stay here after the
+/// `assets/skills/<name>/` source is deleted so an upgrade cleans the copies
+/// already written into user homes — removing a [`BUNDLED_SKILLS`] entry
+/// alone stops *new* installs but leaves every existing one in place, and a
+/// stale skill keeps being offered to the agent forever.
+///
+/// `clud-loop` was the Codex-facing polyfill for Claude's native `/loop`.
+/// The `--harness claude` cross-route (#622) gives Codex models the real
+/// thing, so the polyfill is redundant. It also mis-fired there: its
+/// triggers key on the word "Codex", so a Codex model driving the *Claude*
+/// harness picked it over the built-in `/loop`.
+///
+/// `clud-docker-rust-app` was superseded by `clud-docker-rust-app-dev` and
+/// dropped from `assets/skills/`, but every home that installed it still has
+/// it — the exact leak this list exists to close.
+///
+/// This is deliberately an explicit list rather than "sweep any clud-managed
+/// skill dir not in [`BUNDLED_SKILLS`]". An orphan sweep looks tempting and is
+/// destructive: skills such as `coding-standards` and `verification-loop` were
+/// installed by a since-removed bundler (62a26e4), still carry the marker, and
+/// are still in daily use. A sweep would also delete newer skills whenever an
+/// older clud binary ran. Retirement is a decision, not an inference.
+pub const PURGED_BUNDLED_SKILLS: &[&str] = &["clud-loop", "clud-docker-rust-app"];
 
 /// One CLI backend that consumes `SKILL.md` files. Adding support for a
 /// new tool is a one-line append to [`SKILL_BACKENDS`] — the on-disk layout
@@ -208,6 +228,8 @@ impl From<io::Error> for InstallError {
 pub struct InstallReport {
     pub installed: Vec<&'static str>,
     pub skipped_existing: Vec<&'static str>,
+    /// Clud-managed copies rewritten because the bundled body changed.
+    pub refreshed: Vec<&'static str>,
 }
 
 /// Result of the legacy Codex skill cleanup pass.
@@ -233,6 +255,7 @@ pub fn ensure_installed_at(
     home: &Path,
 ) -> Result<Vec<(&'static SkillBackend, InstallReport)>, InstallError> {
     let _ = purge_stale_agents_skills(home, BUNDLED_SKILLS);
+    let _ = purge_retired_bundled_skills(home, PURGED_BUNDLED_SKILLS);
     let mut results = Vec::new();
     for backend in active_backends(home) {
         let report = install_to(&backend.skills_dir(home), BUNDLED_SKILLS)?;
@@ -255,6 +278,10 @@ pub fn ensure_installed_for_backend_at(
     if matches!(backend, Backend::Codex) {
         let _ = purge_stale_agents_skills(home, BUNDLED_SKILLS);
     }
+    // Runs for either backend, and sweeps both backends' dirs: a retired
+    // skill installed under Codex must not survive because the user now
+    // only ever launches Claude.
+    let _ = purge_retired_bundled_skills(home, PURGED_BUNDLED_SKILLS);
     let Some(skill_backend) = backend_for(backend) else {
         return Ok(None);
     };
@@ -285,13 +312,30 @@ pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport,
     for skill in skills {
         let skill_dir = base.join(skill.name);
         let skill_md = skill_dir.join("SKILL.md");
-        if skill_md.exists() {
-            report.skipped_existing.push(skill.name);
-            continue;
+        match std::fs::read_to_string(&skill_md) {
+            // Never installed here: write it.
+            Err(_) => {
+                std::fs::create_dir_all(&skill_dir)?;
+                std::fs::write(&skill_md, skill.skill_md)?;
+                report.installed.push(skill.name);
+            }
+            // A copy the user has taken ownership of (marker stripped, or
+            // hand-authored): never touch it.
+            Ok(existing) if !existing.contains(MANAGED_BY_CLUD_MARKER) => {
+                report.skipped_existing.push(skill.name);
+            }
+            // Ours, and current.
+            Ok(existing) if existing == skill.skill_md => {
+                report.skipped_existing.push(skill.name);
+            }
+            // Ours, and stale. Without this arm an edit to a bundled skill
+            // only ever reaches users who never installed it — every
+            // existing home keeps the version it first got, forever.
+            Ok(_) => {
+                std::fs::write(&skill_md, skill.skill_md)?;
+                report.refreshed.push(skill.name);
+            }
         }
-        std::fs::create_dir_all(&skill_dir)?;
-        std::fs::write(&skill_md, skill.skill_md)?;
-        report.installed.push(skill.name);
     }
     Ok(report)
 }
@@ -339,6 +383,50 @@ pub fn purge_stale_agents_skills(home: &Path, skills: &[BundledSkill]) -> Legacy
     }
 
     let _ = std::fs::remove_dir(&stale_dir);
+    report
+}
+
+/// Remove retired bundled skills from every backend's skills dir.
+///
+/// Same conservative discipline as [`purge_stale_agents_skills`]: only
+/// directories named in [`PURGED_BUNDLED_SKILLS`] are considered, and only a
+/// `SKILL.md` still carrying the clud ownership marker is deleted. A user who
+/// edited or hand-wrote the file keeps it. Unrelated files in the skill
+/// directory are left alone, so the directory itself only disappears when it
+/// held nothing but our `SKILL.md`.
+pub fn purge_retired_bundled_skills(home: &Path, retired: &[&'static str]) -> LegacyPurgeReport {
+    let mut report = LegacyPurgeReport::default();
+    for backend in SKILL_BACKENDS {
+        let skills_dir = backend.skills_dir(home);
+        if !skills_dir.is_dir() {
+            continue;
+        }
+        for name in retired {
+            let skill_dir = skills_dir.join(name);
+            let skill_md = skill_dir.join("SKILL.md");
+            if !skill_md.is_file() {
+                continue;
+            }
+            let body = match std::fs::read_to_string(&skill_md) {
+                Ok(body) => body,
+                Err(_) => {
+                    report.failed.push(name);
+                    continue;
+                }
+            };
+            if !body.contains(MANAGED_BY_CLUD_MARKER) {
+                report.preserved.push(name);
+                continue;
+            }
+            match std::fs::remove_file(&skill_md) {
+                Ok(()) => {
+                    report.removed.push(name);
+                    let _ = std::fs::remove_dir(&skill_dir);
+                }
+                Err(_) => report.failed.push(name),
+            }
+        }
+    }
     report
 }
 
@@ -439,6 +527,75 @@ mod tests {
     }
 
     #[test]
+    fn refreshes_a_stale_clud_managed_copy() {
+        // The bug this closes: a user who installed clud-issue months ago
+        // kept the interview-era body forever, because install skipped any
+        // existing file. Editing the bundled skill reached nobody.
+        let dir = tempdir().unwrap();
+        let managed = [BundledSkill {
+            name: "alpha",
+            skill_md: "<!-- managed-by: clud -->\nnew body\n",
+        }];
+        let alpha_dir = dir.path().join("alpha");
+        std::fs::create_dir_all(&alpha_dir).unwrap();
+        std::fs::write(
+            alpha_dir.join("SKILL.md"),
+            "<!-- managed-by: clud -->\nold body\n",
+        )
+        .unwrap();
+
+        let report = install_to(dir.path(), &managed).unwrap();
+
+        assert_eq!(report.refreshed, vec!["alpha"]);
+        assert!(report.installed.is_empty());
+        assert!(report.skipped_existing.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(alpha_dir.join("SKILL.md")).unwrap(),
+            "<!-- managed-by: clud -->\nnew body\n"
+        );
+
+        // Second pass is quiet.
+        let again = install_to(dir.path(), &managed).unwrap();
+        assert!(again.refreshed.is_empty());
+        assert_eq!(again.skipped_existing, vec!["alpha"]);
+    }
+
+    #[test]
+    fn refresh_never_touches_a_copy_whose_marker_the_user_removed() {
+        let dir = tempdir().unwrap();
+        let managed = [BundledSkill {
+            name: "alpha",
+            skill_md: "<!-- managed-by: clud -->\nnew body\n",
+        }];
+        let alpha_dir = dir.path().join("alpha");
+        std::fs::create_dir_all(&alpha_dir).unwrap();
+        std::fs::write(alpha_dir.join("SKILL.md"), "mine now\n").unwrap();
+
+        let report = install_to(dir.path(), &managed).unwrap();
+
+        assert_eq!(report.skipped_existing, vec!["alpha"]);
+        assert!(report.refreshed.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(alpha_dir.join("SKILL.md")).unwrap(),
+            "mine now\n",
+            "dropping the marker is how a user claims ownership"
+        );
+    }
+
+    #[test]
+    fn bundled_skills_all_carry_the_ownership_marker() {
+        // Refresh keys on the marker; a bundled skill without one would be
+        // installed and then never updated again.
+        for skill in BUNDLED_SKILLS {
+            assert!(
+                skill.skill_md.contains(MANAGED_BY_CLUD_MARKER),
+                "skill {} is missing the `{MANAGED_BY_CLUD_MARKER}` marker",
+                skill.name
+            );
+        }
+    }
+
+    #[test]
     fn idempotent_second_pass_is_a_noop() {
         let dir = tempdir().unwrap();
         let first = install_to(dir.path(), &fake_skills()).unwrap();
@@ -498,7 +655,6 @@ mod tests {
     #[test]
     fn bundled_includes_all_known_skills() {
         let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
-        assert!(names.contains(&"clud-loop"));
         assert!(names.contains(&"clud-issue"));
         assert!(names.contains(&"clud-issue-triage"));
         assert!(names.contains(&"clud-pr"));
@@ -597,26 +753,72 @@ mod tests {
     }
 
     #[test]
-    fn clud_loop_skill_uses_codex_native_orchestration() {
-        let skill = BUNDLED_SKILLS
-            .iter()
-            .find(|skill| skill.name == "clud-loop")
-            .expect("clud-loop must be bundled")
-            .skill_md;
-
-        for required in [
-            "Foreground In-Chat Orchestration",
-            "main Codex agent is the single orchestrator",
-            "status: DONE | PARTIAL | BLOCKED | FAILED | NOOP",
-            "LOOP_DETECTED",
-            "Legacy External Process Mode",
-            "Do not run `clud --codex loop` for normal foreground in-chat work.",
-        ] {
+    fn retired_skills_are_not_also_bundled() {
+        // A name in both lists would install and then immediately purge on
+        // every launch, or purge-then-reinstall depending on call order.
+        let bundled: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
+        for retired in PURGED_BUNDLED_SKILLS {
             assert!(
-                skill.contains(required),
-                "clud-loop skill missing required Codex-native loop guidance: {required}"
+                !bundled.contains(retired),
+                "{retired} is retired but still bundled"
             );
         }
+    }
+
+    #[test]
+    fn clud_loop_is_retired() {
+        assert!(
+            PURGED_BUNDLED_SKILLS.contains(&"clud-loop"),
+            "clud-loop must stay in the purge list so upgrades clean old homes"
+        );
+    }
+
+    #[test]
+    fn purge_removes_retired_skill_from_every_backend() {
+        let home = tempdir().unwrap();
+        let mut dirs = Vec::new();
+        for backend in SKILL_BACKENDS {
+            let dir = backend.skills_dir(home.path()).join("clud-loop");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                "---\nname: clud-loop\n---\n<!-- managed-by: clud -->\n",
+            )
+            .unwrap();
+            dirs.push(dir);
+        }
+
+        let report = purge_retired_bundled_skills(home.path(), &["clud-loop"]);
+
+        assert_eq!(report.removed.len(), SKILL_BACKENDS.len());
+        assert!(report.failed.is_empty());
+        for dir in dirs {
+            assert!(!dir.exists(), "{} should be gone", dir.display());
+        }
+    }
+
+    #[test]
+    fn purge_preserves_a_skill_the_user_owns() {
+        let home = tempdir().unwrap();
+        let dir = SKILL_BACKENDS[0].skills_dir(home.path()).join("clud-loop");
+        std::fs::create_dir_all(&dir).unwrap();
+        // No `managed-by: clud` marker: the user hand-wrote or edited this.
+        std::fs::write(dir.join("SKILL.md"), "---\nname: clud-loop\n---\nmine\n").unwrap();
+
+        let report = purge_retired_bundled_skills(home.path(), &["clud-loop"]);
+
+        assert_eq!(report.preserved, vec!["clud-loop"]);
+        assert!(report.removed.is_empty());
+        assert!(dir.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn purge_is_idempotent_and_quiet_when_nothing_is_installed() {
+        let home = tempdir().unwrap();
+        let report = purge_retired_bundled_skills(home.path(), PURGED_BUNDLED_SKILLS);
+        assert!(report.removed.is_empty());
+        assert!(report.preserved.is_empty());
+        assert!(report.failed.is_empty());
     }
 
     #[test]

@@ -271,38 +271,29 @@ clud loop https://github.com/org/repo/issues/42    # Fetch & iterate on a GH iss
 clud loop --loop-count 10 "fix bugs"               # Custom iteration count
 ```
 
-### `/clud-loop` for Codex
+### In-chat `/loop` for Codex models
 
-`/clud-loop` is the Codex-facing polyfill for Claude-style `/loop`. Codex does
-not document arbitrary top-level custom slash-command registration, so clud
-ships this as a bundled `clud-loop` skill and installs it into Codex skill
-locations. If your Codex surface does not show `/clud-loop` directly, invoke the
-skill through `/skills` or `$clud-loop`.
-
-```text
-/clud-loop [interval] [prompt]
-/clud-loop 30m check CI and fix new failures
-/clud-loop check CI and fix new failures
-```
-
-The skill keeps the durable task and work journal in `.clud/loop/LOOP.md`.
-Without a cadence, it keeps the current Codex chat as the orchestrator: the main
-agent runs one bounded iteration at a time, optionally dispatches bounded worker
-subagents, records structured results, updates the ledger, and stops on explicit
-DONE/NO_WORK/BLOCKED/FAILED/RESOURCE_LIMIT/LOOP_DETECTED/USER_STOP conditions.
-
-With a cadence, the skill prefers a Codex same-thread automation that wakes the
-current thread for one bounded iteration and then stops. The old external
-process runner remains available only when the user explicitly asks for legacy
-or daemon-backed automation.
-
-The legacy interval form is:
+Codex does not ship a `/loop` command. clud used to fill that gap with a bundled
+`clud-loop` skill; it is **retired** as of the `--harness claude` cross-route.
+Run Codex models under the Claude harness and you get the harness's own `/loop`:
 
 ```bash
-clud --codex loop --repeat 30m --loop-count 1 --no-done .clud/loop/LOOP.md
+clud --codex --harness claude
 ```
 
-The legacy one-shot external form is `clud --codex loop .clud/loop/LOOP.md`.
+Retiring it also fixes a mis-fire: the skill's triggers keyed on the word
+"Codex", so a Codex model driving the *Claude* harness would pick the polyfill
+over the harness's native `/loop`. clud purges the installed copy from both
+`~/.claude/skills/` and `~/.codex/skills/` on next launch, leaving any copy you
+edited yourself in place.
+
+For a plain `clud --codex` session with no cross-route, the external runner is
+still there:
+
+```bash
+clud --codex loop .clud/loop/LOOP.md
+clud --codex loop --repeat 30m --loop-count 1 --no-done .clud/loop/LOOP.md
+```
 
 ### Task input modes
 

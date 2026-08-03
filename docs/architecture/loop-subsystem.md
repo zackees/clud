@@ -13,14 +13,22 @@ The `--repeat <duration>` variant takes a different path: it disables
 the marker contract entirely and hands the plan to the daemon worker
 (`daemon/worker.rs`) for cron-style re-invocation.
 
-`/clud-loop` is the Codex-facing skill polyfill for Claude-style `/loop`.
-Codex does not document arbitrary top-level custom slash-command registration,
-so clud ships a `clud-loop` skill. The skill keeps a compact parent ledger in
-`.clud/loop/LOOP.md`. Foreground mode keeps the current Codex chat as the
-single orchestrator, dispatching subagents only as bounded workers that return
-structured summaries. Cadence mode prefers Codex same-thread automation. The
-old `clud --codex loop` / `--repeat` process-runner path remains documented
-only as explicit legacy external automation.
+`clud-loop`, the Codex-facing skill polyfill for Claude-style `/loop`, is
+**retired**. `clud --codex --harness claude` (#622) runs Codex models under the
+Claude harness, which has its own `/loop`, so the polyfill no longer earns its
+place. It was also actively harmful on that route: its triggers key on the word
+"Codex", so a Codex model driving the Claude harness selected the polyfill over
+the harness's native `/loop`. Skill selection for a slash name is model-driven,
+not deterministic expansion, which is why the same harness behaved differently
+depending only on which model was reading the skill list.
+
+Its name lives on in `skills::PURGED_BUNDLED_SKILLS`, which sweeps the installed
+copies out of every backend's skills dir on launch. Dropping the
+`BUNDLED_SKILLS` entry alone would only stop *new* installs — every user who
+already had it would keep it forever. See [skill-system.md](skill-system.md).
+
+A plain `clud --codex` session with no cross-route still has the external
+`clud --codex loop` / `--repeat` process-runner path described above.
 
 ## Component map
 

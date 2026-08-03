@@ -7,11 +7,12 @@ selected backend's skill directory (`~/.claude/skills/` for Claude,
 do not write persistent skill files. Stale clud-managed copies under
 `~/.agents/skills/` are purged only during Codex global setup.
 
+Retired skills are listed in `skills::PURGED_BUNDLED_SKILLS` and swept out of
+every backend's skills dir on launch. `clud-loop` was retired once
+`clud --codex --harness claude` gave Codex models the harness's native `/loop`.
+
 ## Skills
 
-- [clud-loop/](clud-loop/README.md) - Polyfill Claude-style `/loop` behavior
-  for Codex with in-chat orchestration, a compact `.clud/loop/LOOP.md`
-  ledger, bounded worker subagents, and explicit legacy external mode.
 - [clud-issue/](clud-issue/README.md) - File a deeply-researched GitHub issue
   via investigate -> interview -> investigate -> post, returning a summary plus
   the issue URL.

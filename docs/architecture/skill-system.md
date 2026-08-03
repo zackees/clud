@@ -33,8 +33,8 @@ multi-backend expander landed.
 | Backends targeted | Selected backend during global setup; Claude plus Codex today | Claude global setup only |
 | Source tree | `crates/clud-bin/assets/skills/` | Top-level `skills/` |
 | Existing file behavior | Skip, preserving user edits | Compare modulo whitespace; overwrite semantic divergence |
-| Bundled skills | `clud-loop`, `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-fix`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos`, `clud-improve` | `clud-pr`, `clud-fix`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
-| Retired purge list | Stale clud-managed copies under `~/.agents/skills/` | `clud-pr-merge` |
+| Bundled skills | `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-fix`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos`, `clud-improve` | `clud-pr`, `clud-fix`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
+| Retired purge list | `PURGED_BUNDLED_SKILLS` (`clud-loop`), plus stale clud-managed copies under `~/.agents/skills/` | `PURGED_SKILLS` (currently empty) |
 
 Both flows are non-fatal. A failure logs a `[clud] note: ...` line and launch
 continues.
@@ -53,7 +53,9 @@ When global setup is selected:
 
 1. `skills::ensure_installed_for_backend()` runs for the selected backend. For
    Codex, it first purges stale clud-managed `~/.agents/skills/` copies and
-   then writes missing skills to `~/.codex/skills/`.
+   then writes missing skills to `~/.codex/skills/`. Either backend also sweeps
+   `PURGED_BUNDLED_SKILLS` out of *every* backend's skills dir, so a skill
+   retired while the user was on Codex still goes away for a Claude-only user.
 2. `skill_install::ensure_installed()` runs only for Claude global setup. It
    installs or updates the Claude-owned skills and then walks `PURGED_SKILLS`,
    removing retired managed skill directories.
@@ -62,7 +64,6 @@ When global setup is selected:
 
 | Skill | `assets/skills/` (`skills.rs`) | top-level `skills/` (`skill_install.rs`) |
 |---|---|---|
-| `clud-loop` | yes | no |
 | `clud-issue` | yes | yes |
 | `clud-pr` | yes | yes |
 | `clud-fix` | yes | yes |
