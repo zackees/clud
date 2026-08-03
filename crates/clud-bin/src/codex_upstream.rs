@@ -1873,7 +1873,7 @@ mod live_probe {
         assert!(target.responses_url().ends_with("/responses"));
 
         let client = UpstreamClient::new(credentials, UpstreamConfig::default());
-        let body = br#"{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say BRIDGED"}]}],"stream":true,"store":false,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"}}"#;
+        let body = br#"{"model":"gpt-5.6-terra","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say BRIDGED"}]}],"stream":true,"store":false,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"}}"#;
         let mut received = String::new();
         let outcome = client
             .stream(body, &AtomicBool::new(false), &mut |chunk| {

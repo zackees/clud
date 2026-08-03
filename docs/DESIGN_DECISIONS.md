@@ -1313,3 +1313,56 @@ The token stays `=`-bound and comma-separated for the reason in DD-002's
 neighborhood and `builder.rs`: `claude` declares `--disallowedTools` as
 variadic, so a space-separated spelling swallows a following `-p <prompt>` and
 claude exits 0 with no output and no diagnostic.
+
+## DD-034: The bridge's default model is the cheap tier, not the flagship
+
+**Status:** Accepted
+
+**Context:** zackees/clud#776. `DEFAULT_CODEX_MODEL` was `gpt-5.6-sol`, the
+flagship of the gpt-5.6 family, and nothing could override it at runtime:
+`resolve_model` (`codex_translate.rs`) only forwards a request's own model when
+the id does *not* start with `claude`, and the Claude harness always sends
+`claude-*`, so every bridged request fell through to the constant. The two
+override seams that exist — `UpstreamTarget::with_model_override` and
+`Pipeline::with_default_model` — had no production callers.
+
+The family is three tiers at one context size (1,050,000 tokens), differing
+only in price and default effort:
+
+| id | tier | $/1M in | $/1M out | catalog default effort |
+| --- | --- | --- | --- | --- |
+| `gpt-5.6-sol` | flagship | $5 | $30 | `low` |
+| `gpt-5.6-terra` | mid | $2 | $12 | `medium` |
+| `gpt-5.6-luna` | fast/cheap | $0.2 | $1.2 | `medium` |
+
+A default nobody selected was billing at 2.5x the mid tier on both input and
+output, and it drained a real credit account before anyone noticed — the more
+so because the resulting out-of-credits 429 was itself swallowed (#774).
+
+**Decision:** `DEFAULT_CODEX_MODEL` is `gpt-5.6-terra`. Effort is unchanged:
+`reasoning_for` already emits `medium` when the request carries no `thinking`
+block, and `medium` is terra's own catalog default — so the cheap tier is also
+the correctly-configured one, and "terra at medium" needs no effort change.
+
+The default is asserted on the **wire**, not against the constant
+(`codex_pipeline.rs::the_billed_default_is_terra_at_medium`). A test written as
+`assert_eq!(sent["model"], DEFAULT_CODEX_MODEL)` follows the constant wherever
+it goes and by construction cannot notice a change in what the user is charged;
+three such assertions existed and all three stayed green across the flip.
+
+**Alternatives rejected:**
+
+- **`luna`.** 10x cheaper again, but it is the fast tier and wrong for a main
+  coding loop. It belongs in the alias table as an explicit opt-in.
+- **Keep `sol` and add an override first.** Rejected on sequencing, not merit:
+  the override work (#752) carries an open question about whether Claude Code
+  offers effort controls for a non-`claude` model id, and the cost bleed should
+  not wait on it. The flip is one string; the selection feature lands after.
+- **Read the model from an env var here.** Rejected as scope: an escape hatch
+  needs a settings-persistence story (`GlobalLaunchPreferences`) to be worth
+  having, which is #752's territory.
+
+**Consequences:** `codex_upstream.rs`'s version-gate regression fixture still
+names `gpt-5.6-sol` deliberately — it asserts against a real upstream error
+message that happens to mention that id, and renaming it would weaken the
+regression it guards.
