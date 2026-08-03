@@ -38,7 +38,15 @@ const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Claude Code issues several requests at once: the foreground turn plus
 /// background side-model calls and any subagents. The bound still exists, but
 /// exceeding it now queues in the listen backlog rather than failing.
-const DEFAULT_MAX_CONCURRENCY: usize = 16;
+///
+/// Set to 1: a single worker keeps the bridge's host footprint flat no matter
+/// how many bridges a process stands up. Forensics captured 15 bridges
+/// constructed inside one millisecond in a single pid, each advertising a
+/// 16-worker ceiling; the ceilings are lazy, but the advertised total is the
+/// number an operator has to reason about when the host is already saturated.
+/// Excess connections wait in the listen backlog for up to
+/// `DEFAULT_ADMISSION_WAIT` rather than being rejected.
+const DEFAULT_MAX_CONCURRENCY: usize = 1;
 /// How long a connection may wait in the kernel's listen backlog for a worker
 /// slot before the bridge accepts it only to answer 503. Queueing beats
 /// rejecting -- a 503 surfaces to the user as a hard API error, whereas a short
