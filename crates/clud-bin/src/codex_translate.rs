@@ -29,7 +29,14 @@ use sha2::{Digest, Sha256};
 /// hardcodes almost nothing, so this stays a single overridable value rather
 /// than growing into a table that would rot (`gpt-5.4` retires from
 /// ChatGPT-auth Codex on 2026-08-31).
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+///
+/// `terra`, not the `sol` flagship: same 1.05M context, 2.5x cheaper on both
+/// input and output ($2/$12 per 1M vs $5/$30), and `medium` — what
+/// [`reasoning_for`] already emits absent a thinking block — is terra's own
+/// catalog default effort, so the cheap tier is also the correctly-configured
+/// one. Defaulting to the flagship drained a real account (#776); a default
+/// nobody chose should not be the most expensive option available.
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-terra";
 
 /// Responses rejects identifiers longer than this.
 const MAX_IDENTIFIER_LEN: usize = 64;
@@ -1206,7 +1213,7 @@ mod tests {
         assert_eq!(resolve_model(Some("Claude-3"), "fallback"), "fallback");
         assert_eq!(resolve_model(Some("   "), "fallback"), "fallback");
         assert_eq!(resolve_model(None, "fallback"), "fallback");
-        assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.6-sol");
+        assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.6-terra");
     }
 
     #[test]

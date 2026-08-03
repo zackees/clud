@@ -726,6 +726,27 @@ mod tests {
             .is_some_and(|k| !k.is_empty()));
     }
 
+    /// The billed default, asserted as a literal on the wire rather than
+    /// through `DEFAULT_CODEX_MODEL` — a constant-based assertion follows the
+    /// constant wherever it goes and cannot notice a change in what the user
+    /// is charged for. `terra` at `medium` is the pair #776 selected: `sol`
+    /// costs 2.5x on both input and output, and `medium` is terra's own
+    /// catalog default effort.
+    #[test]
+    fn the_billed_default_is_terra_at_medium() {
+        let server = FakeResponses::start(text_reply());
+        pipeline(&server.base_url)
+            .complete(
+                br#"{"messages":[{"role":"user","content":"x"}]}"#,
+                "msg_default",
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let sent = server.request();
+        assert_eq!(sent["model"], "gpt-5.6-terra");
+        assert_eq!(sent["reasoning"]["effort"], "medium");
+    }
+
     #[test]
     fn malformed_json_is_a_400() {
         let server = FakeResponses::start(text_reply());
