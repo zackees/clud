@@ -15,7 +15,7 @@
 //! fixtures there is nothing here a Job Object would distort — we only read
 //! the child's stdout.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clud::shell::completion_guard::{env_overrides_for, SUPPRESS_KEY};
@@ -58,7 +58,7 @@ fn find_git_bash() -> Option<PathBuf> {
 
 /// Run `script` in a **login** shell (`-l`), the mode Claude Code uses to build
 /// the snapshot, and return trimmed stdout.
-fn login_shell_output(bash: &PathBuf, script: &str, extra_env: &[(String, String)]) -> String {
+fn login_shell_output(bash: &Path, script: &str, extra_env: &[(String, String)]) -> String {
     // Inherit the ambient environment, then layer the override. A cleared env
     // would leave bash without SystemRoot/PATH and tell us nothing.
     let mut env: Vec<(String, String)> = std::env::vars()
@@ -107,7 +107,7 @@ fn login_shell_output(bash: &PathBuf, script: &str, extra_env: &[(String, String
     out.trim().to_string()
 }
 
-fn captured_function_count(bash: &PathBuf, extra_env: &[(String, String)]) -> usize {
+fn captured_function_count(bash: &Path, extra_env: &[(String, String)]) -> usize {
     let raw = login_shell_output(bash, COUNT_CAPTURED_FUNCTIONS, extra_env);
     raw.lines()
         .rev()
