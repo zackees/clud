@@ -1,9 +1,11 @@
 //! Authenticated loopback bridge used by Codex-provider launches through the
 //! Claude harness (issue #626).
 
+use crate::bridge_log::{unix_ms, BridgeLog};
 use crate::codex_pipeline::{Pipeline, PipelineError};
 use crate::codex_upstream::{
     ApiKeyCredentials, ResolvedCredentials, UpstreamClient, UpstreamConfig, UpstreamError,
+    UpstreamFailure,
 };
 use base64::Engine as _;
 use std::collections::HashMap;
@@ -52,6 +54,7 @@ const READ_POLL: Duration = Duration::from_millis(100);
 const ABANDON: u16 = 0;
 
 type ActiveConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
+type SharedBridgeLog = Arc<Mutex<BridgeLog>>;
 
 /// Resource and test-seam policy for one bridge launch.
 #[derive(Clone)]
@@ -63,6 +66,8 @@ pub struct BridgeConfig {
     pub stream_idle_timeout: Duration,
     pub max_concurrency: usize,
     pub admission_wait: Duration,
+    log_path: Option<std::path::PathBuf>,
+    log_max_bytes: usize,
     test_upstream_url: Option<String>,
     #[cfg(test)]
     request_hold: Duration,
@@ -82,6 +87,8 @@ impl Default for BridgeConfig {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             admission_wait: DEFAULT_ADMISSION_WAIT,
+            log_path: default_bridge_log_path(),
+            log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
             test_upstream_url: test_upstream_override_from_process(),
             #[cfg(test)]
             request_hold: Duration::ZERO,
@@ -97,6 +104,18 @@ impl BridgeConfig {
     #[cfg(test)]
     fn with_test_upstream_url(mut self, url: Option<String>) -> Self {
         self.test_upstream_url = url;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_log_path(mut self, path: std::path::PathBuf) -> Self {
+        self.log_path = Some(path);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_log_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.log_max_bytes = max_bytes;
         self
     }
 
@@ -176,6 +195,7 @@ pub struct BridgeHandle {
     shutdown: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
     connections: ActiveConnections,
+    log: Option<SharedBridgeLog>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -194,10 +214,17 @@ impl BridgeHandle {
         let shutdown = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicUsize::new(0));
         let connections = Arc::new(Mutex::new(HashMap::new()));
+        let log = config.log_path.clone().map(|path| {
+            Arc::new(Mutex::new(BridgeLog::with_max_bytes(
+                path,
+                config.log_max_bytes,
+            )))
+        });
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_active = Arc::clone(&active);
         let thread_connections = Arc::clone(&connections);
+        let thread_log = log.clone();
         let thread_token = bearer_token.clone();
         let join = thread::Builder::new()
             .name("clud-codex-bridge".to_string())
@@ -210,6 +237,7 @@ impl BridgeHandle {
                     thread_shutdown,
                     thread_active,
                     thread_connections,
+                    thread_log,
                 )
             })
             .map_err(BridgeError::Spawn)?;
@@ -223,6 +251,7 @@ impl BridgeHandle {
             shutdown,
             active,
             connections,
+            log,
             join: Some(join),
         })
     }
@@ -252,8 +281,18 @@ impl BridgeHandle {
             let _ = stream.shutdown(Shutdown::Both);
         }
         drop(connections);
+        let was_running = self.join.is_some();
         if let Some(join) = self.join.take() {
             join.join().map_err(|_| BridgeError::Join)?;
+        }
+        if was_running {
+            if let Some(log) = &self.log {
+                let mut log = lock_log(log);
+                log.flush();
+                if log.has_records() {
+                    eprintln!("[clud] codex bridge log: {}", log.path().display());
+                }
+            }
         }
         Ok(())
     }
@@ -282,6 +321,7 @@ fn serve(
     shutdown: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
     connections: ActiveConnections,
+    log: Option<SharedBridgeLog>,
 ) {
     let mut workers = Vec::<JoinHandle<()>>::new();
     let mut next_worker_id = 0_usize;
@@ -318,7 +358,7 @@ fn serve(
                 if !reserve_worker(&active, limit) {
                     // Only reachable once `admission_wait` has elapsed: the
                     // backstop that keeps a client from waiting forever.
-                    reject_busy(stream, config.header_timeout, &shutdown);
+                    reject_busy(stream, config.header_timeout, &shutdown, log.as_ref());
                     continue;
                 }
                 let shutdown_stream = match stream.try_clone() {
@@ -344,6 +384,7 @@ fn serve(
                 let worker_shutdown = Arc::clone(&shutdown);
                 let worker_config = config.clone();
                 let worker_token = bearer_token.clone();
+                let worker_log = log.clone();
                 match thread::Builder::new()
                     .name("clud-codex-bridge-request".to_string())
                     .spawn(move || {
@@ -352,7 +393,13 @@ fn serve(
                             connections: worker_connections,
                             worker_id,
                         };
-                        handle_connection(stream, &worker_config, &worker_token, &worker_shutdown);
+                        handle_connection(
+                            stream,
+                            &worker_config,
+                            &worker_token,
+                            &worker_shutdown,
+                            worker_log.as_ref(),
+                        );
                     }) {
                     Ok(worker) => workers.push(worker),
                     Err(_) => {
@@ -402,7 +449,13 @@ impl Drop for ActiveWorker {
     }
 }
 
-fn reject_busy(mut stream: TcpStream, timeout: Duration, shutdown: &AtomicBool) {
+fn reject_busy(
+    mut stream: TcpStream,
+    timeout: Duration,
+    shutdown: &AtomicBool,
+    log: Option<&SharedBridgeLog>,
+) {
+    record_rejection(log, 503, "admission_cap");
     // Consume the already-buffered request headers before closing. On Windows,
     // closing a TCP socket with unread inbound bytes sends RST and can discard
     // the 503 that was just written.
@@ -426,6 +479,7 @@ fn handle_connection(
     config: &BridgeConfig,
     bearer_token: &str,
     shutdown: &AtomicBool,
+    log: Option<&SharedBridgeLog>,
 ) {
     #[cfg(test)]
     if let Some(notifier) = &config.admission_notifier {
@@ -455,12 +509,14 @@ fn handle_connection(
         Ok(parsed) => parsed,
         Err(ABANDON) => return,
         Err(status) => {
+            record_rejection(log, status, "request_headers");
             let _ = write_error(&mut stream, status);
             return;
         }
     };
 
     if parsed.content_length > config.max_body_bytes {
+        record_rejection(log, 413, "request_body_too_large");
         let _ = write_error(&mut stream, 413);
         return;
     }
@@ -470,6 +526,7 @@ fn handle_connection(
         .as_deref()
         .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
     {
+        record_rejection(log, 401, "bearer_mismatch");
         let _ = write_error(&mut stream, 401);
         return;
     }
@@ -489,6 +546,7 @@ fn handle_connection(
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
         ("POST", "/v1/messages/count_tokens") => {
+            record_rejection(log, 404, "token_counting_unsupported");
             let _ = write_response(
                 &mut stream,
                 404,
@@ -509,6 +567,7 @@ fn handle_connection(
                 Ok(body) => body,
                 Err(ABANDON) => return,
                 Err(status) => {
+                    record_rejection(log, status, "request_body");
                     let _ = write_error(&mut stream, status);
                     return;
                 }
@@ -516,12 +575,13 @@ fn handle_connection(
             let json: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(json) => json,
                 Err(_) => {
+                    record_rejection(log, 400, "invalid_json");
                     let _ = write_error(&mut stream, 400);
                     return;
                 }
             };
             let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
-            serve_messages(&mut stream, config, shutdown, &body, streaming);
+            serve_messages(&mut stream, config, shutdown, &body, streaming, log);
         }
         _ => {
             if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
@@ -530,6 +590,7 @@ fn handle_connection(
                     parsed.method, parsed.path
                 );
             }
+            record_rejection(log, 404, "unrouted_request");
             let _ = write_error(&mut stream, 404);
         }
     }
@@ -540,7 +601,10 @@ fn handle_connection(
 /// The debug seam repoints the *upstream base URL* at a Responses-shaped fake.
 /// Phase 2 used it to pass an Anthropic body through unchanged, which meant the
 /// end-to-end tests proved transport and auth but nothing about translation.
-fn build_pipeline(config: &BridgeConfig) -> Result<Pipeline<ResolvedCredentials>, UpstreamError> {
+fn build_pipeline(
+    config: &BridgeConfig,
+    log: Option<&SharedBridgeLog>,
+) -> Result<Pipeline<ResolvedCredentials>, UpstreamError> {
     let credentials = match config.test_upstream_url.as_deref() {
         Some(base_url) => ResolvedCredentials::ApiKey(ApiKeyCredentials::new(
             "clud-test-upstream-key",
@@ -548,7 +612,12 @@ fn build_pipeline(config: &BridgeConfig) -> Result<Pipeline<ResolvedCredentials>
         )?),
         None => ResolvedCredentials::resolve_default()?,
     };
-    let client = UpstreamClient::new(credentials, UpstreamConfig::default());
+    let mut client = UpstreamClient::new(credentials, UpstreamConfig::default());
+    if let Some(log) = log.cloned() {
+        client = client.with_retry_observer(move |error, attempt, budget, backoff| {
+            record_retry(&log, error, attempt, budget, backoff);
+        });
+    }
     Ok(Pipeline::new(client))
 }
 
@@ -564,12 +633,13 @@ fn serve_messages(
     shutdown: &AtomicBool,
     body: &[u8],
     streaming: bool,
+    log: Option<&SharedBridgeLog>,
 ) {
-    let pipeline = match build_pipeline(config) {
+    let pipeline = match build_pipeline(config, log) {
         Ok(pipeline) => pipeline,
         Err(error) => {
             let failure = PipelineError::Upstream(error);
-            let _ = write_pipeline_error(stream, &failure);
+            let _ = write_pipeline_error(stream, &failure, log);
             return;
         }
     };
@@ -590,10 +660,10 @@ fn serve_messages(
                 if writer.started() {
                     // Committed: the pipeline has already emitted a sanitized
                     // `error` event, so just close the body cleanly.
-                    log_pipeline_error(&error);
+                    log_pipeline_error(&error, log);
                     let _ = writer.finish();
                 } else {
-                    let _ = write_pipeline_error(stream, &error);
+                    let _ = write_pipeline_error(stream, &error, log);
                 }
             }
         }
@@ -606,7 +676,7 @@ fn serve_messages(
             let _ = write_response(stream, 200, "application/json", &rendered, false);
         }
         Err(error) => {
-            let _ = write_pipeline_error(stream, &error);
+            let _ = write_pipeline_error(stream, &error, log);
         }
     }
 }
@@ -615,7 +685,19 @@ fn serve_messages(
 /// which is correct but leaves an operator with no way to tell a translation
 /// bug from an upstream outage. This prints the classification only -- never an
 /// upstream body, which can carry account identifiers.
-fn log_pipeline_error(error: &PipelineError) {
+fn log_pipeline_error(error: &PipelineError, log: Option<&SharedBridgeLog>) {
+    if let Some(log) = log {
+        let mut event = serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "pipeline_failure",
+            "downstream_status": error.http_status(),
+            "kind": pipeline_error_kind(error),
+        });
+        if let PipelineError::Upstream(UpstreamError::Status(failure)) = error {
+            add_failure_fields(&mut event, failure);
+        }
+        lock_log(log).record(event);
+    }
     if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
         eprintln!(
             "[clud] codex bridge: {} -> HTTP {}",
@@ -631,8 +713,12 @@ fn log_pipeline_error(error: &PipelineError) {
     }
 }
 
-fn write_pipeline_error(stream: &mut TcpStream, error: &PipelineError) -> io::Result<()> {
-    log_pipeline_error(error);
+fn write_pipeline_error(
+    stream: &mut TcpStream,
+    error: &PipelineError,
+    log: Option<&SharedBridgeLog>,
+) -> io::Result<()> {
+    log_pipeline_error(error, log);
     let status = error.http_status();
     let body = serde_json::json!({
         "type": "error",
@@ -645,6 +731,99 @@ fn write_pipeline_error(stream: &mut TcpStream, error: &PipelineError) -> io::Re
         body.to_string().as_bytes(),
         false,
     )
+}
+
+fn lock_log(log: &SharedBridgeLog) -> std::sync::MutexGuard<'_, BridgeLog> {
+    log.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn record_rejection(log: Option<&SharedBridgeLog>, status: u16, reason: &'static str) {
+    if let Some(log) = log {
+        lock_log(log).record(serde_json::json!({
+            "ts_ms": unix_ms(),
+            "event": "request_rejected",
+            "downstream_status": status,
+            "reason": reason,
+        }));
+    }
+}
+
+fn record_retry(
+    log: &SharedBridgeLog,
+    error: &UpstreamError,
+    attempt: u32,
+    budget: u32,
+    backoff: Option<Duration>,
+) {
+    let mut event = serde_json::json!({
+        "ts_ms": unix_ms(),
+        "event": "upstream_attempt",
+        "kind": upstream_error_kind(error),
+        "attempt": attempt,
+        "budget": budget,
+        "decision": if backoff.is_some() { "retry" } else { "stop" },
+        "backoff_ms": backoff.map(|value| value.as_millis() as u64),
+    });
+    if let UpstreamError::Status(failure) = error {
+        add_failure_fields(&mut event, failure);
+    }
+    lock_log(log).record(event);
+}
+
+fn add_failure_fields(event: &mut serde_json::Value, failure: &UpstreamFailure) {
+    let Some(fields) = event.as_object_mut() else {
+        return;
+    };
+    fields.insert("upstream_status".into(), failure.status().into());
+    fields.insert(
+        "class".into(),
+        format!("{:?}", failure.class()).to_ascii_lowercase().into(),
+    );
+    fields.insert("cf_ray".into(), failure.cf_ray().into());
+    fields.insert("x_request_id".into(), failure.request_id().into());
+    fields.insert(
+        "retry_after_ms".into(),
+        failure
+            .retry_after()
+            .map(|value| value.as_millis() as u64)
+            .into(),
+    );
+    fields.insert(
+        "resets_in_ms".into(),
+        failure
+            .resets_in()
+            .map(|value| value.as_millis() as u64)
+            .into(),
+    );
+    fields.insert("detail".into(), failure.detail().into());
+}
+
+fn upstream_error_kind(error: &UpstreamError) -> &'static str {
+    match error {
+        UpstreamError::Credentials(_) => "credentials",
+        UpstreamError::Transport(_) => "transport",
+        UpstreamError::Status(_) => "status",
+        UpstreamError::Timeout => "timeout",
+        UpstreamError::TooLarge => "too_large",
+        UpstreamError::Cancelled => "cancelled",
+        UpstreamError::Downstream(_) => "downstream",
+    }
+}
+
+fn pipeline_error_kind(error: &PipelineError) -> &'static str {
+    match error {
+        PipelineError::Translate(_) => "translate",
+        PipelineError::Upstream(error) => upstream_error_kind(error),
+    }
+}
+
+fn default_bridge_log_path() -> Option<std::path::PathBuf> {
+    let state_dir = crate::daemon::default_state_dir().ok()?;
+    Some(crate::bridge_log::session_bridge_log_path(
+        &state_dir,
+        std::process::id(),
+        crate::process_identity::self_start_time(),
+    ))
 }
 
 fn anthropic_error_type(status: u16) -> &'static str {
@@ -1011,6 +1190,10 @@ mod tests {
 
     impl FakeResponses {
         fn start() -> Self {
+            Self::start_with_response(None)
+        }
+
+        fn start_with_response(scripted: Option<Vec<u8>>) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let addr = listener.local_addr().unwrap();
@@ -1058,6 +1241,12 @@ mod tests {
                         .unwrap()
                         .push(format!("{head}{}", String::from_utf8_lossy(&request_body)));
 
+                    if let Some(reply) = &scripted {
+                        let _ = upstream.write_all(reply);
+                        let _ = upstream.flush();
+                        let _ = upstream.shutdown(Shutdown::Both);
+                        continue;
+                    }
                     let events = concat!(
                         "event: response.created
 data: {\"type\":\"response.created\"}
@@ -1135,6 +1324,97 @@ Connection: close
             .expect("HTTP status")
             .parse()
             .unwrap()
+    }
+
+    #[test]
+    fn default_502_is_persisted_with_safe_diagnostics() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789SECRET";
+        let body = format!(r#"{{"error":{{"message":"bad gateway {secret}"}}}}"#);
+        let reply = format!(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\ncf-ray: ray_772\r\nx-request-id: req_772\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let upstream = FakeResponses::start_with_response(Some(reply));
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let config = bridged_config(&upstream).with_log_path(log_path.clone());
+        let mut bridge = BridgeHandle::start(config).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        let base_url = upstream.base_url.clone();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&response), 502);
+        bridge.shutdown().unwrap();
+
+        let text = std::fs::read_to_string(log_path).unwrap();
+        assert!(text.contains(r#""upstream_status":502"#), "{text}");
+        assert!(text.contains(r#""class":"transient""#), "{text}");
+        assert!(text.contains("ray_772"), "{text}");
+        assert!(text.contains("req_772"), "{text}");
+        for forbidden in [secret, bearer.as_str(), base_url.as_str(), "Authorization"] {
+            assert!(!text.contains(forbidden), "leaked {forbidden:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn successful_turn_creates_no_forensic_log() {
+        let upstream = FakeResponses::start();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&response), 200);
+        bridge.shutdown().unwrap();
+        assert!(!log_path.exists());
+    }
+
+    #[test]
+    fn bearer_rejection_log_never_contains_the_bearer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(BridgeConfig::default().with_log_path(log_path.clone())).unwrap();
+        let bearer = bridge.bearer_token().to_string();
+        let response = request(
+            bridge.socket_addr(),
+            "POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert_eq!(status(&response), 401);
+        bridge.shutdown().unwrap();
+        let text = std::fs::read_to_string(log_path).unwrap();
+        assert!(text.contains(r#""reason":"bearer_mismatch""#));
+        assert!(!text.contains(&bearer));
+    }
+
+    #[test]
+    fn bridge_log_cap_is_visible_through_the_real_bridge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge = BridgeHandle::start(
+            BridgeConfig::default()
+                .with_log_path(log_path.clone())
+                .with_log_max_bytes(150),
+        )
+        .unwrap();
+        for _ in 0..10 {
+            let _ = request(
+                bridge.socket_addr(),
+                "POST /nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            );
+        }
+        bridge.shutdown().unwrap();
+        let text = std::fs::read_to_string(log_path).unwrap();
+        assert!(text.contains(r#""event":"truncated""#), "{text}");
+        for line in text.lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
     }
 
     #[test]

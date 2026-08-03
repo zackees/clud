@@ -817,11 +817,15 @@ pub struct StreamOutcome {
     pub bytes: usize,
 }
 
+type RetryObserver =
+    std::sync::Arc<dyn Fn(&UpstreamError, u32, u32, Option<Duration>) + Send + Sync>;
+
 pub struct UpstreamClient<C: CredentialSource> {
     credentials: C,
     config: UpstreamConfig,
     /// Stable for the life of the client so upstream can correlate a turn.
     session_id: String,
+    retry_observer: Option<RetryObserver>,
 }
 
 impl<C: CredentialSource> std::fmt::Debug for UpstreamClient<C> {
@@ -839,7 +843,16 @@ impl<C: CredentialSource> UpstreamClient<C> {
             credentials,
             config,
             session_id: new_session_id(),
+            retry_observer: None,
         }
+    }
+
+    pub fn with_retry_observer(
+        mut self,
+        observer: impl Fn(&UpstreamError, u32, u32, Option<Duration>) + Send + Sync + 'static,
+    ) -> Self {
+        self.retry_observer = Some(std::sync::Arc::new(observer));
+        self
     }
 
     pub fn session_id(&self) -> &str {
@@ -885,11 +898,15 @@ impl<C: CredentialSource> UpstreamClient<C> {
                     // reached the sink the response is committed, however
                     // retryable the failure looks. Everything below only ever
                     // widens the *pre-commit* window.
-                    if delivered
-                        || !error.is_retryable()
-                        || attempt >= error.max_attempts(&self.config)
-                        || Instant::now() >= deadline
-                    {
+                    let budget = error.max_attempts(&self.config);
+                    let retry_allowed = !delivered
+                        && error.is_retryable()
+                        && attempt < budget
+                        && Instant::now() < deadline;
+                    if !retry_allowed {
+                        if let Some(observer) = &self.retry_observer {
+                            observer(&error, attempt, budget, None);
+                        }
                         return Err(error);
                     }
                     // A server hint wins over our own guess, but is clamped by
@@ -899,7 +916,13 @@ impl<C: CredentialSource> UpstreamClient<C> {
                         None => backoff_delay(attempt, &self.config, jitter_fraction()),
                     };
                     if slept + backoff > self.config.max_retry_elapsed {
+                        if let Some(observer) = &self.retry_observer {
+                            observer(&error, attempt, budget, None);
+                        }
                         return Err(error);
+                    }
+                    if let Some(observer) = &self.retry_observer {
+                        observer(&error, attempt, budget, Some(backoff));
                     }
                     slept += backoff;
                     if wait_or_cancel(backoff, cancel) {

@@ -46,6 +46,10 @@ Entry and orchestration:
   the two undocumented kill-switch env vars `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`
   + `CLAUDE_CODE_GIT_BASH_PATH` (resolved via
   [`shell/`](shell/README.md)) — see issue #447.
+- `bridge_log.rs` - issue #772's always-on, failure-only, bounded JSONL writer
+  for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; buffers complete
+  lines across concurrent bridge workers, emits one visible truncation marker,
+  and creates no file for a healthy launch.
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell for
   Codex-provider launches through Claude: ephemeral listener + per-launch
   bearer, bounded parser/workers/timeouts, deterministic Anthropic fixture
@@ -69,7 +73,8 @@ Entry and orchestration:
   header can leak upstream. #764 added `UpstreamFailure`/`FailureClass`: the
   error response is read (bounded body prefix, `cf-ray`, `x-request-id`,
   `Retry-After`), classified permanent/transient/unknown, and dropped — the
-  class picks the retry budget, and backoff is exponential with jitter. See
+  class picks the retry budget, backoff is exponential with jitter, and a
+  narrow observer reports each attempt/backoff to the bridge forensic log. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md)
   and DD-032.
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into

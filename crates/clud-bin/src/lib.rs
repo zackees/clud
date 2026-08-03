@@ -9,6 +9,7 @@ pub mod backend;
 pub mod backend_bootstrap;
 pub mod block_bad_cmd;
 pub mod block_bad_cmd_rollout;
+pub mod bridge_log;
 pub mod capture;
 pub mod clud_settings;
 pub mod codex_bridge;
