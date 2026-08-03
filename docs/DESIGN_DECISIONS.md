@@ -1450,3 +1450,78 @@ The two previously-dead override seams (`UpstreamTarget::with_model_override`,
 `Pipeline::with_default_model`) now have production callers and carry a
 `ModelSpec` rather than a `String`, so a model and its effort cannot drift
 apart in transit.
+
+## DD-036: The bridge propagates the classification, not the status
+
+**Status:** Accepted
+
+**Context:** zackees/clud#774. A real out-of-credits condition reached the user
+as `upstream provider returned status 429` — naming no cause, no account, no
+reset, and no remedy. The session then retried into the wall and went quiet;
+the account was discovered to be empty hours later, from a different tool's
+output.
+
+Upstream had told us everything needed. #764 fixed the first half by capturing
+the failure instead of binding the response to `_`, so `UpstreamFailure`
+already carried the status, `Retry-After`, `resets_in_seconds`, `cf-ray` and
+`x-request-id`. What remained was that **every consumer downstream of that
+capture re-derived its answer from the status code**, which had already lost
+the distinction the classifier computed:
+
+- `anthropic_error_type(status)` mapped `429 -> rate_limit_error`, so
+  `billing_error` could not reach the client on the non-streaming path.
+- `complete()` replaced any in-band failure with
+  `Transport("upstream stream failed")` — a semantic quota failure became a
+  transport failure, became a `502 api_error`.
+- `StreamTranslator::fail` received the full upstream error object and used it
+  only to pick one of four type constants, hardcoding the message to
+  `"upstream provider error"`. The provider's own wording was not redacted; it
+  was never read.
+- The streaming path returned HTTP 200 for a failure delivered inside a 200
+  SSE stream, with **no log line even under `CLUD_CODEX_BRIDGE_DEBUG=1`**.
+- `stream_json::render_line` dropped `{"type":"error"}` through its catch-all,
+  so the entire user-visible trace of a failed turn was `[claude] error`.
+
+**Decision:** The classification travels; the status is derived from it, never
+the reverse.
+
+- `FailureClass::Exhausted` splits out of `Permanent`. It is checked **before**
+  the "408/429 are transient" rule, because the ChatGPT backend reports plan
+  exhaustion as a 429 and status alone cannot distinguish it from a throttle.
+  It earns exactly one attempt: a multi-day exhaustion previously burned three
+  attempts in ~750 ms.
+- `PipelineError::Provider` carries an in-band failure with its classified
+  kind, so a quota failure inside a 200 keeps its identity instead of being
+  relabelled transport.
+- `error_type_for` consults `failure_class()` first, so `billing_error` reaches
+  the client on both paths.
+- The bridge emits `Retry-After` (its first response header beyond the fixed
+  four) and gained the missing `429 Too Many Requests` reason phrase.
+- Durations are rendered as a clock — `5d 2h`, not `442242s`.
+- A terminal account failure prints one ungated, belled `[clud]` stderr line
+  per process, following `wedge_watchdog`'s warn-once-per-episode precedent.
+  Every other bridge diagnostic is either debug-gated or in a forensic log
+  nothing reads back, and a drained account is not a debugging detail.
+
+**The secrecy invariant is unchanged (#630).** No upstream byte reaches the
+client. The bug was never that the body was redacted — it was that the body was
+*deleted unread*, so no failure could be reported as what it was. Every
+client-facing string here is one we wrote, selected by a classification derived
+from the body and then discarded.
+
+**Alternatives rejected:**
+
+- **Widen `UpstreamError::Status(u16)` to carry the body.** Would put an
+  upstream-controlled string one careless `format!` away from the client.
+  Typed, non-secret fields make the leak impossible rather than unlikely.
+- **Echo the provider's `message`.** It is the only place the words "out of
+  credits" appear upstream, and it is also where account identifiers and key
+  fragments appear. Synthesizing from the classification gets the same
+  information across with none of the risk.
+- **Treat every 429 as non-retryable.** Simpler, and wrong: an ordinary
+  throttle is exactly the case retry-with-backoff exists for. The body is what
+  separates them.
+- **Fail the turn on an in-band failure inside a committed 200.** DD-029's
+  no-status-after-first-byte invariant stands. The status cannot change, so the
+  fix is to make the failure *visible* — log, banner, and a named SSE error
+  frame — not to pretend the status is still choosable.

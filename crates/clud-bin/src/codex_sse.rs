@@ -191,6 +191,9 @@ pub struct StreamTranslator {
     stop_reason: Option<String>,
     /// Shortened tool name -> original, so the client sees what it sent.
     tool_names: HashMap<String, String>,
+    /// Set when the stream ended in a drained account or dead credentials --
+    /// the two failures a user must act on personally.
+    terminal_account_failure: bool,
 }
 
 impl StreamTranslator {
@@ -213,6 +216,7 @@ impl StreamTranslator {
             cached_tokens: 0,
             stop_reason: None,
             tool_names: HashMap::new(),
+            terminal_account_failure: false,
         }
     }
 
@@ -457,18 +461,37 @@ impl StreamTranslator {
         for index in std::mem::take(&mut self.open_blocks) {
             out.push(content_block_stop_frame(index));
         }
+        let kind = upstream_error_type(upstream);
+        if matches!(kind, "billing_error" | "authentication_error") {
+            self.terminal_account_failure = true;
+        }
         out.push(anthropic_frame(
             "error",
             serde_json::json!({
                 "type": "error",
                 "error": {
-                    "type": upstream_error_type(upstream),
-                    "message": "upstream provider error",
+                    "type": kind,
+                    // Synthesized from the classification, never echoed. The
+                    // upstream body can quote account identifiers and key
+                    // fragments, so it is read to classify and then dropped
+                    // (#630). What was wrong before was not the redaction --
+                    // it was that the body was never *read*, so every failure
+                    // collapsed onto one constant and an out-of-credits
+                    // condition could not be reported as one.
+                    "message": upstream_error_message(kind),
                 },
             }),
         ));
         self.finished = true;
         out
+    }
+
+    /// Whether the stream ended in a failure the user must act on personally
+    /// -- a drained account or dead credentials. The bridge uses this to
+    /// surface a quota failure that arrived *inside* a 200 SSE stream, which
+    /// otherwise produces HTTP 200 and no diagnostic anywhere.
+    pub fn terminal_account_failure(&self) -> bool {
+        self.terminal_account_failure
     }
 
     /// Terminate with a sanitized error and no upstream detail.
@@ -778,9 +801,28 @@ fn upstream_error_type(value: &serde_json::Value) -> &'static str {
     match (code, kind) {
         ("cyber_policy", _) | (_, "invalid_request") => "invalid_request_error",
         ("rate_limit_exceeded", _) => "rate_limit_error",
-        ("insufficient_quota", _) => "billing_error",
+        // `usage_limit_reached` is how the ChatGPT backend spells an
+        // exhausted plan; it is a billing condition, not a throttle.
+        ("insufficient_quota", _) | ("usage_limit_reached", _) | ("quota_exceeded", _) => {
+            "billing_error"
+        }
         ("context_length_exceeded", _) => "invalid_request_error",
         _ => "api_error",
+    }
+}
+
+/// A safe, actionable message per error class.
+///
+/// Derived, never echoed: every string here is one we wrote.
+fn upstream_error_message(kind: &str) -> &'static str {
+    match kind {
+        "billing_error" => {
+            "upstream account quota exhausted -- check your plan usage, or switch providers with --claude"
+        }
+        "rate_limit_error" => "upstream rate limited this request",
+        "invalid_request_error" => "upstream rejected the request as invalid",
+        "authentication_error" => "upstream rejected the bridge's credentials",
+        _ => "upstream provider error",
     }
 }
 
@@ -1274,7 +1316,33 @@ mod tests {
         let rendered = frames.concat();
         assert!(!rendered.contains("sk-secret-123"));
         assert!(!rendered.contains("org_42"));
+        // The secrecy invariant is unchanged; what changed is that a failure
+        // with no recognised class still gets our generic text rather than the
+        // body.
         assert!(rendered.contains("upstream provider error"));
+    }
+
+    /// The reported failure delivered *inside* a 200 stream. The body is still
+    /// never echoed -- but it is now read, so the frame can say what happened
+    /// instead of collapsing onto one constant.
+    #[test]
+    fn an_in_band_quota_failure_is_classified_and_named() {
+        let stream = [
+            upstream("response.created", json!({})),
+            upstream(
+                "response.failed",
+                json!({"response": {"error": {
+                    "code": "usage_limit_reached",
+                    "message": "You have exhausted your credits for account acct_42"}}}),
+            ),
+        ]
+        .concat();
+        let frames = run(&stream, 4096);
+        let rendered = frames.concat();
+        assert!(rendered.contains("billing_error"), "{rendered}");
+        assert!(rendered.contains("quota exhausted"), "{rendered}");
+        // Derived, not echoed.
+        assert!(!rendered.contains("acct_42"), "{rendered}");
     }
 
     /// An error after partial output must still close what it opened, or the

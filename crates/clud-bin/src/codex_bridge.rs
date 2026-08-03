@@ -3,10 +3,10 @@
 
 use crate::bridge_log::{unix_ms, BridgeLog};
 use crate::codex_model::ModelSpec;
-use crate::codex_pipeline::{Pipeline, PipelineError};
+use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
 use crate::codex_upstream::{
-    ApiKeyCredentials, ResolvedCredentials, UpstreamClient, UpstreamConfig, UpstreamError,
-    UpstreamFailure,
+    ApiKeyCredentials, FailureClass, ResolvedCredentials, UpstreamClient, UpstreamConfig,
+    UpstreamError, UpstreamFailure,
 };
 use base64::Engine as _;
 use std::collections::HashMap;
@@ -23,6 +23,13 @@ use std::time::{Duration, Instant};
 /// that API accepts turns a legitimate request into a bridge-only `413` that
 /// looks like a client bug. A single base64 screenshot already exceeds the
 /// fixture-era 1 MiB; see `a_representative_request_fits_the_body_cap`.
+/// What the operator log and the stderr banner say when the exhaustion
+/// arrived in-band. The client already received the translator's own
+/// synthesized `error` frame; this is the copy for the human watching the
+/// terminal.
+const IN_BAND_QUOTA_MESSAGE: &str =
+    "upstream account quota exhausted mid-stream -- check your plan usage, or switch providers with --claude";
+
 const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_HEADER_BYTES: usize = 32 * 1024;
 /// Header reads stay on a short absolute deadline: it is the slowloris
@@ -685,7 +692,19 @@ fn serve_messages(
                 .map_err(|_| UpstreamError::Downstream("client write failed"))
         };
         match pipeline.stream(body, &message_id, shutdown, &mut sink) {
-            Ok(()) => {
+            Ok(summary) => {
+                // A quota failure delivered inside a 200 SSE stream used to
+                // produce HTTP 200, no log line even under
+                // `CLUD_CODEX_BRIDGE_DEBUG=1`, and an abruptly truncated turn.
+                // The status is committed by now, but silence is not forced.
+                if summary.terminal_account_failure {
+                    let error = PipelineError::Provider(ProviderFailure {
+                        kind: "billing_error".to_string(),
+                        message: IN_BAND_QUOTA_MESSAGE.to_string(),
+                    });
+                    log_pipeline_error(&error, log);
+                    warn_once_on_terminal_failure(&error);
+                }
                 let _ = writer.finish();
             }
             Err(error) => {
@@ -711,6 +730,30 @@ fn serve_messages(
             let _ = write_pipeline_error(stream, &error, log);
         }
     }
+}
+
+/// Announce a terminal account failure on stderr, once per process.
+///
+/// Every other diagnostic the bridge produces is gated behind
+/// `CLUD_CODEX_BRIDGE_DEBUG=1` or buried in the forensic log that nothing
+/// reads back. A drained account is not a debugging detail: the session cannot
+/// continue, no retry will fix it, and the user has to go do something in a
+/// browser. It gets the one ungated line in the module.
+///
+/// Once per process, not per request: a failing turn can produce several of
+/// these, and a banner repeated ten times is noise that trains people to
+/// ignore it. Follows the `wedge_watchdog` warn-once-per-episode precedent.
+fn warn_once_on_terminal_failure(error: &PipelineError) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !error.is_terminal_account_failure() {
+        return;
+    }
+    if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // The leading `\x07` is a terminal bell: this is the failure most likely
+    // to be waiting on a user who has looked away from an unattended run.
+    eprintln!("\x07[clud] codex bridge: {}", error.client_message());
 }
 
 /// Opt-in diagnostics. The bridge answers the harness with a sanitized error,
@@ -751,18 +794,49 @@ fn write_pipeline_error(
     log: Option<&SharedBridgeLog>,
 ) -> io::Result<()> {
     log_pipeline_error(error, log);
+    warn_once_on_terminal_failure(error);
     let status = error.http_status();
     let body = serde_json::json!({
         "type": "error",
-        "error": {"type": anthropic_error_type(status), "message": error.client_message()},
+        "error": {
+            "type": error_type_for(error),
+            "message": error.client_message(),
+        },
     });
-    write_response(
+    write_response_with(
         stream,
         status,
         "application/json",
         body.to_string().as_bytes(),
         false,
+        &retry_after_header(error),
     )
+}
+
+/// The Anthropic error type, derived from the *classification* where one
+/// exists and only falling back to the status otherwise.
+///
+/// Re-deriving it from the number alone is what kept `billing_error` from ever
+/// reaching the client: a drained account and an ordinary throttle are both
+/// 429, and the status has already lost the distinction the pipeline computed.
+fn error_type_for(error: &PipelineError) -> &'static str {
+    match error.failure_class() {
+        Some(FailureClass::Exhausted) => "billing_error",
+        _ => anthropic_error_type(error.http_status()),
+    }
+}
+
+/// `Retry-After`, echoed to the client on a throttle or an exhaustion.
+///
+/// The bridge previously emitted exactly four hardcoded headers and never this
+/// one, on any status -- so a client showing a reset time was reporting its own
+/// separate accounting, about a different limit than the one that broke the
+/// turn.
+fn retry_after_header(error: &PipelineError) -> Vec<(String, String)> {
+    match error.retry_after_seconds() {
+        Some(seconds) => vec![("Retry-After".to_string(), seconds.to_string())],
+        None => Vec::new(),
+    }
 }
 
 fn lock_log(log: &SharedBridgeLog) -> std::sync::MutexGuard<'_, BridgeLog> {
@@ -845,6 +919,7 @@ fn upstream_error_kind(error: &UpstreamError) -> &'static str {
 fn pipeline_error_kind(error: &PipelineError) -> &'static str {
     match error {
         PipelineError::Translate(_) => "translate",
+        PipelineError::Provider(_) => "provider_in_band",
         PipelineError::Upstream(error) => upstream_error_kind(error),
     }
 }
@@ -1126,6 +1201,17 @@ fn write_response(
     body: &[u8],
     head_only: bool,
 ) -> io::Result<()> {
+    write_response_with(stream, status, content_type, body, head_only, &[])
+}
+
+fn write_response_with(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    extra_headers: &[(String, String)],
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -1133,6 +1219,7 @@ fn write_response(
         404 => "Not Found",
         408 => "Request Timeout",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         499 => "Client Closed Request",
         502 => "Bad Gateway",
@@ -1142,9 +1229,15 @@ fn write_response(
     };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
         body.len()
     )?;
+    // Header names here are ours, never echoed from upstream, so no folding or
+    // injection check is needed beyond that invariant.
+    for (name, value) in extra_headers {
+        write!(stream, "{name}: {value}\r\n")?;
+    }
+    write!(stream, "\r\n")?;
     if !head_only {
         stream.write_all(body)?;
     }
@@ -2122,6 +2215,56 @@ Connection: close
         let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
         assert_eq!(json["model"], "gpt-5.6-sol");
         assert_eq!(json["reasoning"]["effort"], "xhigh");
+    }
+
+    /// The reported incident, reproduced at the HTTP layer.
+    ///
+    /// A drained account previously reached the user as
+    /// `upstream provider returned status 429` with no `Retry-After`, so the
+    /// only reset time on screen came from the client's own separate
+    /// accounting -- about a different limit than the one that broke the turn.
+    #[test]
+    fn an_exhausted_account_answers_429_billing_error_with_a_retry_after() {
+        let body = r#"{"error":{"code":"usage_limit_reached","message":"quota exhausted for acct_42","resets_in_seconds":442242}}"#;
+        let reply = format!(
+            "HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+            body.len()
+        )
+        .into_bytes();
+        let upstream = FakeResponses::start_with_response(Some(reply));
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        bridge.shutdown().unwrap();
+
+        assert_eq!(status(&response), 429);
+        assert!(
+            response.starts_with("HTTP/1.1 429 Too Many Requests"),
+            "the status line had no reason phrase: {response}"
+        );
+        assert!(
+            response.contains("Retry-After: 442242"),
+            "no Retry-After header: {response}"
+        );
+        assert!(response.contains("billing_error"), "{response}");
+        assert!(response.contains("quota exhausted"), "{response}");
+        // Human-readable, not a raw second count to do arithmetic on.
+        assert!(response.contains("5d 2h"), "{response}");
+        // The upstream body never crosses over.
+        assert!(!response.contains("acct_42"), "{response}");
+        // Attempted exactly once: a multi-day exhaustion is not transient.
+        assert_eq!(
+            upstream.requests().len(),
+            1,
+            "an exhausted plan was retried"
+        );
     }
 
     /// A typo must not be silently billed as the default model.

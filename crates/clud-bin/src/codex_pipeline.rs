@@ -13,6 +13,7 @@
 //! separately-wrong mapping for the non-streaming shape.
 
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use crate::codex_model::ModelSpec;
 use crate::codex_sse::{FrameDecoder, StreamTranslator};
@@ -20,7 +21,8 @@ use crate::codex_translate::{
     default_model_spec, translate_bytes, SystemPlacement, TranslateError, TranslateOptions,
 };
 use crate::codex_upstream::{
-    CredentialSource, UpstreamClient, UpstreamError, UpstreamFailure, CREDENTIALS_EXPIRED,
+    CredentialSource, FailureClass, UpstreamClient, UpstreamError, UpstreamFailure,
+    CREDENTIALS_EXPIRED,
 };
 
 /// "Client Closed Request". Not in the RFC status registry, but the
@@ -28,10 +30,42 @@ use crate::codex_upstream::{
 /// chosen there is normally no reader left to receive it anyway.
 const CLIENT_CLOSED_REQUEST: u16 = 499;
 
+/// What the client is told when the account is out of quota.
+///
+/// Names the condition and an action. The previous text, "upstream provider
+/// returned status 429", named neither -- and read identically for an ordinary
+/// throttle, which is how a drained account went unnoticed for hours.
+const QUOTA_EXHAUSTED_MESSAGE: &str =
+    "upstream account quota exhausted -- check your plan usage, or switch providers with --claude";
+
+/// What a completed stream is worth reporting even though it succeeded at the
+/// HTTP layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamSummary {
+    /// The turn ended in a drained account or dead credentials, delivered
+    /// in-band. HTTP status is already committed to 200 by then, so this is
+    /// the only way the caller can learn it happened.
+    pub terminal_account_failure: bool,
+}
+
+/// A provider failure delivered *inside* an otherwise-successful stream.
+///
+/// The ChatGPT backend commonly reports quota exhaustion this way: HTTP 200,
+/// then a `response.failed` event. Both fields are ours -- the type comes from
+/// classifying the upstream error object, the message is synthesized from that
+/// type. No upstream byte is carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFailure {
+    pub kind: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
     Translate(TranslateError),
     Upstream(UpstreamError),
+    /// An in-band provider failure, classified rather than flattened.
+    Provider(ProviderFailure),
 }
 
 impl std::fmt::Display for PipelineError {
@@ -39,6 +73,7 @@ impl std::fmt::Display for PipelineError {
         match self {
             Self::Translate(error) => write!(formatter, "{error}"),
             Self::Upstream(error) => write!(formatter, "{error}"),
+            Self::Provider(failure) => write!(formatter, "{}", failure.message),
         }
     }
 }
@@ -61,6 +96,14 @@ impl PipelineError {
                 400 | 401 | 403 | 404 | 413 | 422 | 429 => failure.status(),
                 _ => 502,
             },
+            // The classification decides the status, not the transport. A
+            // quota failure that arrived inside a 200 is still a 429.
+            Self::Provider(failure) => match failure.kind.as_str() {
+                "billing_error" | "rate_limit_error" => 429,
+                "invalid_request_error" => 400,
+                "authentication_error" => 401,
+                _ => 502,
+            },
             Self::Upstream(UpstreamError::Timeout) => 504,
             // 502 means "the gateway hop failed", so only the failures that
             // really are gateway failures keep it (#764). The three below are
@@ -73,6 +116,41 @@ impl PipelineError {
         }
     }
 
+    /// The upstream classification, where the failure carries one.
+    ///
+    /// Exposed so the HTTP layer can choose an error *type* from what was
+    /// classified rather than re-deriving it from a status code that has
+    /// already lost the distinction.
+    pub fn failure_class(&self) -> Option<FailureClass> {
+        match self {
+            Self::Upstream(error) => error.failure().map(UpstreamFailure::class),
+            Self::Provider(failure) if failure.kind == "billing_error" => {
+                Some(FailureClass::Exhausted)
+            }
+            Self::Translate(_) | Self::Provider(_) => None,
+        }
+    }
+
+    /// Seconds to put in a `Retry-After` header, if upstream gave a hint.
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Upstream(error) => error
+                .failure()
+                .and_then(|failure| failure.retry_after().or_else(|| failure.resets_in()))
+                .map(|hint| hint.as_secs()),
+            Self::Translate(_) | Self::Provider(_) => None,
+        }
+    }
+
+    /// Whether this is a terminal account-level failure -- quota exhausted or
+    /// credentials that will not self-heal. These are the two the user must
+    /// act on personally; everything else is the bridge's problem.
+    pub fn is_terminal_account_failure(&self) -> bool {
+        matches!(self.failure_class(), Some(FailureClass::Exhausted))
+            || matches!(self, Self::Upstream(UpstreamError::Credentials(_)))
+            || matches!(self, Self::Provider(failure) if failure.kind == "authentication_error")
+    }
+
     /// The classified upstream summary, for the operator log only.
     ///
     /// Never reaches the client: [`Self::client_message`] is what the harness
@@ -80,6 +158,7 @@ impl PipelineError {
     pub fn upstream_diagnostic(&self) -> Option<String> {
         match self {
             Self::Upstream(error) => error.failure().map(UpstreamFailure::diagnostic),
+            Self::Provider(failure) => Some(format!("in-band provider error: {}", failure.kind)),
             Self::Translate(_) => None,
         }
     }
@@ -92,6 +171,8 @@ impl PipelineError {
             // feature, so they are worth surfacing -- that is the difference
             // between "the bridge refused top_k" and an opaque 422.
             Self::Translate(error) => error.to_string(),
+            // Already synthesized by the translator from the classification.
+            Self::Provider(failure) => failure.message.clone(),
             // An expired login is the one credential failure with an action
             // attached, so it is worth forwarding verbatim. Every other reason
             // names an environment variable and stays behind the generic text.
@@ -107,9 +188,21 @@ impl PipelineError {
             // traced upstream and one that cannot. The body never travels: it
             // can carry account identifiers and key fragments.
             Self::Upstream(UpstreamError::Status(failure)) => {
-                let mut message = format!("upstream provider returned status {}", failure.status());
-                if let Some(resets) = failure.resets_in() {
-                    message.push_str(&format!("; rate limit resets in {}s", resets.as_secs()));
+                // Lead with what happened, not with a number. "status 429"
+                // names no cause, no remedy, and reads identically for an
+                // ordinary throttle and a drained account -- which is how a
+                // real exhaustion went unnoticed until the balance was gone.
+                let mut message = match failure.class() {
+                    FailureClass::Exhausted => QUOTA_EXHAUSTED_MESSAGE.to_string(),
+                    _ if failure.status() == 429 => {
+                        "upstream rate limited this request".to_string()
+                    }
+                    _ => format!("upstream provider returned status {}", failure.status()),
+                };
+                // Prefer the server's own `Retry-After` over a body hint; it is
+                // the value the retry loop honoured, so the two agree.
+                if let Some(resets) = failure.retry_after().or_else(|| failure.resets_in()) {
+                    message.push_str(&format!("; retry in {}", humanize(resets)));
                 }
                 if let Some(id) = failure.request_id() {
                     message.push_str(&format!(" (request-id {id})"));
@@ -128,6 +221,25 @@ impl PipelineError {
     }
 }
 
+/// Render a duration the way a person reads a clock, not a counter.
+///
+/// A quota reset is routinely days out, and `442242s` is a number a user has
+/// to do arithmetic on before it means anything.
+fn humanize(duration: Duration) -> String {
+    let total = duration.as_secs();
+    let (days, hours, minutes) = (
+        total / 86_400,
+        (total % 86_400) / 3_600,
+        (total % 3_600) / 60,
+    );
+    match (days, hours, minutes) {
+        (0, 0, 0) => format!("{total}s"),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 /// Accumulates translated Anthropic SSE frames into one `Message` object.
 ///
 /// Anthropic's non-streaming reply is exactly the stream's fixed point, so
@@ -143,6 +255,7 @@ pub struct MessageAggregator {
     input_tokens: u64,
     output_tokens: u64,
     errored: bool,
+    provider_error: Option<ProviderFailure>,
 }
 
 impl MessageAggregator {
@@ -206,7 +319,19 @@ impl MessageAggregator {
                     self.input_tokens = tokens;
                 }
             }
-            Some("error") => self.errored = true,
+            Some("error") => {
+                self.errored = true;
+                // Keep the classification the translator already computed.
+                // Reducing it to a bool is what forced `complete` to relabel a
+                // billing failure as a transport failure, which then became a
+                // 502 `api_error` -- the signal erased by the code holding it.
+                if let Some(error) = value.get("error") {
+                    self.provider_error = Some(ProviderFailure {
+                        kind: string_at(error, "type"),
+                        message: string_at(error, "message"),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -244,6 +369,10 @@ impl MessageAggregator {
 
     pub fn errored(&self) -> bool {
         self.errored
+    }
+
+    pub fn provider_error(&self) -> Option<&ProviderFailure> {
+        self.provider_error.as_ref()
     }
 
     pub fn finish(mut self) -> serde_json::Value {
@@ -319,7 +448,7 @@ impl<C: CredentialSource> Pipeline<C> {
         message_id: &str,
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
-    ) -> Result<(), PipelineError> {
+    ) -> Result<StreamSummary, PipelineError> {
         let (upstream_body, model, tool_names) = self.prepare(request_body)?;
 
         let mut decoder = FrameDecoder::new();
@@ -344,7 +473,9 @@ impl<C: CredentialSource> Pipeline<C> {
                 for out in translator.finish() {
                     sink(&out).map_err(PipelineError::Upstream)?;
                 }
-                Ok(())
+                Ok(StreamSummary {
+                    terminal_account_failure: translator.terminal_account_failure(),
+                })
             }
             Err(error) => {
                 // A failure after the first frame cannot change the status, so
@@ -375,9 +506,13 @@ impl<C: CredentialSource> Pipeline<C> {
         };
         self.stream(request_body, message_id, cancel, &mut sink)?;
         if aggregator.errored() {
-            return Err(PipelineError::Upstream(UpstreamError::Transport(
-                "upstream stream failed",
-            )));
+            // Propagate the classification, not a generic transport failure.
+            // The old relabel turned every in-band provider error -- including
+            // a drained account -- into `502 api_error`.
+            return Err(match aggregator.provider_error() {
+                Some(failure) => PipelineError::Provider(failure.clone()),
+                None => PipelineError::Upstream(UpstreamError::Transport("upstream stream failed")),
+            });
         }
         Ok(aggregator.finish())
     }
@@ -842,14 +977,42 @@ mod tests {
         assert_eq!(error.http_status(), 502);
     }
 
+    /// The reported failure, end to end at the message layer: the class is
+    /// named, and the reset is rendered as a clock rather than a raw count of
+    /// seconds a user has to do arithmetic on.
     #[test]
-    fn a_rate_limit_reset_hint_reaches_the_client_message() {
-        let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":3600}}"#;
+    fn an_exhausted_account_says_so_and_renders_the_reset_readably() {
+        let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":442242}}"#;
         let failure = UpstreamFailure::from_parts(429, |_| None, body, Duration::ZERO);
         let error = PipelineError::Upstream(UpstreamError::Status(failure));
         assert_eq!(error.http_status(), 429);
+        assert_eq!(error.failure_class(), Some(FailureClass::Exhausted));
+        assert!(error.is_terminal_account_failure());
+
         let message = error.client_message();
-        assert!(message.contains("resets in 3600s"), "{message}");
+        assert!(message.contains("quota exhausted"), "{message}");
+        // 442242s -- the number the original report showed the user.
+        assert!(message.contains("5d 2h"), "{message}");
+        assert!(!message.contains("442242"), "{message}");
+        assert_eq!(error.retry_after_seconds(), Some(442_242));
+    }
+
+    /// An ordinary throttle is not an exhaustion and keeps its own wording.
+    #[test]
+    fn a_plain_429_is_a_rate_limit_not_a_billing_failure() {
+        let failure = UpstreamFailure::from_parts(429, |_| None, "slow down", Duration::ZERO);
+        let error = PipelineError::Upstream(UpstreamError::Status(failure));
+        assert_eq!(error.failure_class(), Some(FailureClass::Transient));
+        assert!(!error.is_terminal_account_failure());
+        assert!(error.client_message().contains("rate limited"));
+    }
+
+    #[test]
+    fn humanize_reads_like_a_clock() {
+        assert_eq!(humanize(Duration::from_secs(45)), "45s");
+        assert_eq!(humanize(Duration::from_secs(600)), "10m");
+        assert_eq!(humanize(Duration::from_secs(3_600)), "1h 0m");
+        assert_eq!(humanize(Duration::from_secs(442_242)), "5d 2h");
     }
 
     /// The request id is an opaque correlation handle, and it is the difference
