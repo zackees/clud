@@ -481,7 +481,7 @@ fn handle_connection(
                 &mut stream,
                 404,
                 "application/json",
-                br#"{"error":{"type":"not_found_error","message":"count_tokens unsupported in bridge phase 2"}}"#,
+                br#"{"error":{"type":"not_found_error","message":"token counting is not supported by the Codex bridge"}}"#,
                 false,
             );
         }
@@ -1143,7 +1143,7 @@ Connection: close
             &authorized("POST", "/v1/messages/count_tokens", &token, "{}"),
         );
         assert_eq!(status(&count), 404);
-        assert!(count.contains("unsupported"));
+        assert!(count.contains("not supported"));
         for (method, path) in [
             ("GET", "/v1/messages"),
             ("POST", "/unknown"),

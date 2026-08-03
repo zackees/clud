@@ -989,8 +989,15 @@ request, so clud cannot enforce the required header-byte cap and header read
 timeout at the transport boundary. The local shell keeps those controls, the
 body cap, and the worker concurrency bound in one auditable layer.
 
-**Consequences:** The bridge is intentionally not a daemon and does not yet
-translate or forward production traffic. Its deterministic non-streaming and
+**Consequences:** The bridge is intentionally not a daemon.
+
+> **Partly superseded by [DD-029](#dd-029-the-bridge-always-streams-upstream-and-status-is-chosen-only-before-the-first-frame).**
+> The paragraph below described phase 2, where the bridge did not yet translate
+> or forward production traffic and answered from compiled fixtures. Since
+> #627 step 5 it runs the real pipeline; the fixtures are gone. The transport
+> and security decisions above still stand.
+
+Its deterministic non-streaming and
 SSE responses exist for compiled-fixture validation. Any debug upstream seam
 is gated by both a debug build and `CLUD_INTEGRATION_TESTS=1`; release builds
 ignore it. Logs and fixture reports expose only sanitized presence, port, and
