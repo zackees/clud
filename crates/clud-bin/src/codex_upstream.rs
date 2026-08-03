@@ -29,7 +29,7 @@
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 /// ChatGPT-subscription auth is a *different backend*, not just a different
@@ -45,16 +45,322 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_OVERALL_TIMEOUT: Duration = Duration::from_secs(3600);
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-const DEFAULT_MAX_ATTEMPTS: u32 = 3;
-const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(250);
+/// Retry budget for a failure we positively recognise as transient.
+const DEFAULT_MAX_ATTEMPTS: u32 = 4;
+/// Retry budget for a 5xx whose body matches neither the permanent nor the
+/// transient signatures. Deliberately smaller than the transient budget: #764
+/// documents how treating every unrecognised 5xx as fully retryable is what
+/// turns one bad request into a credential-burning cascade upstream.
+const DEFAULT_UNKNOWN_MAX_ATTEMPTS: u32 = 2;
+const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(500);
+/// Ceiling on any single backoff sleep, including one derived from
+/// `Retry-After`: a generous server hint must not pin a turn open.
+const DEFAULT_MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
+/// Ceiling on time spent sleeping between attempts, across the whole request.
+const DEFAULT_MAX_RETRY_ELAPSED: Duration = Duration::from_secs(30);
+/// How much of an error body is read before classification. Enough for a JSON
+/// error envelope, small enough to bound allocation on a hostile response.
+const ERROR_BODY_PREFIX_LIMIT: usize = 8 * 1024;
+/// Treat a login this close to its expiry as already expired, so a turn cannot
+/// start on a token that dies mid-flight.
+const TOKEN_EXPIRY_SKEW: Duration = Duration::from_secs(60);
+
+/// The one credential failure a user can fix without reading a log.
+///
+/// Shared rather than duplicated because [`crate::codex_pipeline`] matches on
+/// it to decide that this reason — unlike the others, which name environment
+/// variables — is safe and useful to forward to the harness.
+pub const CREDENTIALS_EXPIRED: &str = "the Codex login has expired -- run `codex login`";
+
+/// Whether a failure could ever succeed on a fresh attempt.
+///
+/// This is the distinction the retry loop was missing (#764): upstream returns
+/// *permanent* rejections wearing a 5xx costume — a model that needs a newer
+/// client, an unsupported parameter — and retrying those can never succeed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// Retrying cannot help. Fail on the first attempt.
+    Permanent,
+    /// Recognised as retryable: transport, 408/429, or a 5xx whose body reads
+    /// like an outage.
+    Transient,
+    /// A 5xx we do not recognise. Retried, but on a reduced budget.
+    Unknown,
+}
+
+/// A non-2xx upstream response, reduced to what is safe to keep.
+///
+/// The raw body is **never** retained. It is read to a bounded prefix, used to
+/// classify the failure, mined for a scrubbed one-line detail, and dropped. The
+/// previous code discarded the whole response unread, which left an operator
+/// unable to tell a Cloudflare edge blip from a hard rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamFailure {
+    status: u16,
+    class: FailureClass,
+    /// `x-request-id`. Opaque correlation handle, safe to log and to name in a
+    /// client-facing message.
+    request_id: Option<String>,
+    /// `cf-ray`. Its presence is what identifies a failure as edge-side rather
+    /// than application-side.
+    cf_ray: Option<String>,
+    /// `Retry-After`, already clamped to the configured ceiling.
+    retry_after: Option<Duration>,
+    /// `resets_in_seconds` / `resets_at` from a `usage_limit_reached` body.
+    resets_in: Option<Duration>,
+    /// Scrubbed reason for logs. Token-shaped runs are redacted, and this never
+    /// travels downstream.
+    detail: Option<String>,
+}
+
+impl UpstreamFailure {
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub fn class(&self) -> FailureClass {
+        self.class
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    pub fn cf_ray(&self) -> Option<&str> {
+        self.cf_ray.as_deref()
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    pub fn resets_in(&self) -> Option<Duration> {
+        self.resets_in
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    /// Attempt budget this failure earns.
+    fn max_attempts(&self, config: &UpstreamConfig) -> u32 {
+        match self.class {
+            FailureClass::Permanent => 1,
+            FailureClass::Transient => config.max_attempts.max(1),
+            FailureClass::Unknown => config.unknown_max_attempts.max(1),
+        }
+    }
+
+    /// One line for the operator log. Safe by construction: every field here is
+    /// either a status, an opaque id, or already scrubbed.
+    pub fn diagnostic(&self) -> String {
+        let mut parts = vec![
+            format!("status={}", self.status),
+            format!("class={:?}", self.class),
+        ];
+        if let Some(id) = &self.request_id {
+            parts.push(format!("request-id={id}"));
+        }
+        if let Some(ray) = &self.cf_ray {
+            parts.push(format!("cf-ray={ray}"));
+        }
+        if let Some(after) = self.retry_after {
+            parts.push(format!("retry-after={}s", after.as_secs()));
+        }
+        if let Some(resets) = self.resets_in {
+            parts.push(format!("resets-in={}s", resets.as_secs()));
+        }
+        if let Some(detail) = &self.detail {
+            parts.push(format!("detail={detail:?}"));
+        }
+        parts.join(" ")
+    }
+
+    /// Build from a status plus the response's headers and body prefix.
+    ///
+    /// Split from the transport so classification is testable without a socket.
+    pub fn from_parts(
+        status: u16,
+        header: impl Fn(&str) -> Option<String>,
+        body_prefix: &str,
+        max_retry_delay: Duration,
+    ) -> Self {
+        let request_id = header("x-request-id").filter(|value| !value.trim().is_empty());
+        let cf_ray = header("cf-ray").filter(|value| !value.trim().is_empty());
+        let retry_after = header("retry-after")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .map(|value| value.min(max_retry_delay));
+        let resets_in = parse_resets_in(body_prefix);
+        let detail = error_detail(body_prefix);
+        let class = classify(status, body_prefix);
+        Self {
+            status,
+            class,
+            request_id,
+            cf_ray,
+            retry_after,
+            resets_in,
+            detail,
+        }
+    }
+}
+
+/// Body signatures that mean "this request will never succeed as written".
+///
+/// Kept as substrings of the lowercased body rather than a JSON shape, because
+/// the same rejection arrives as a 400, a 422 or a 502 depending on which hop
+/// produced it.
+const PERMANENT_SIGNATURES: &[&str] = &[
+    "requires a newer version",
+    "unsupported_value",
+    "unsupported_parameter",
+    "unsupported_country_region_territory",
+    "invalid_request_error",
+    "unknown provider",
+    "model_not_found",
+    "does not exist",
+    "invalid_api_key",
+    "insufficient_quota",
+];
+
+/// Body signatures that positively mark a 5xx as an outage rather than a
+/// rejection. Anything else at 5xx is [`FailureClass::Unknown`].
+const TRANSIENT_SIGNATURES: &[&str] = &[
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "temporarily unavailable",
+    "overloaded",
+    "try again",
+    "circuit_open",
+    "circuit open",
+    "cloudflare",
+    "internal server error",
+    "server_error",
+    "timeout",
+];
+
+/// Statuses the bridge passes through untouched; retrying them cannot help.
+const NON_RETRYABLE_STATUSES: &[u16] = &[400, 401, 403, 404, 405, 409, 413, 422];
+
+fn classify(status: u16, body_prefix: &str) -> FailureClass {
+    let body = body_prefix.to_ascii_lowercase();
+    if PERMANENT_SIGNATURES
+        .iter()
+        .any(|signature| body.contains(signature))
+    {
+        return FailureClass::Permanent;
+    }
+    if NON_RETRYABLE_STATUSES.contains(&status) {
+        return FailureClass::Permanent;
+    }
+    // 408 and 429 are retryable by definition; 429 additionally carries a reset
+    // hint that the retry loop honours.
+    if status == 408 || status == 429 {
+        return FailureClass::Transient;
+    }
+    if status >= 500 {
+        if body.trim().is_empty()
+            || TRANSIENT_SIGNATURES
+                .iter()
+                .any(|signature| body.contains(signature))
+        {
+            return FailureClass::Transient;
+        }
+        return FailureClass::Unknown;
+    }
+    FailureClass::Permanent
+}
+
+/// Pull `resets_in_seconds` (or `resets_at`, as a delta) out of a rate-limit
+/// body. Unparsed until CLIProxyAPI#1666; clud made the same omission.
+fn parse_resets_in(body_prefix: &str) -> Option<Duration> {
+    let value: serde_json::Value = serde_json::from_str(body_prefix).ok()?;
+    for pointer in [
+        "/error/resets_in_seconds",
+        "/resets_in_seconds",
+        "/error/resets_in",
+        "/resets_in",
+    ] {
+        if let Some(seconds) = value.pointer(pointer).and_then(serde_json::Value::as_u64) {
+            return Some(Duration::from_secs(seconds));
+        }
+    }
+    None
+}
+
+/// A short, scrubbed reason for the operator log.
+///
+/// Prefers the enum-like `code`/`type` fields. `message` is free text written
+/// by upstream and can quote account identifiers or key fragments, so it is
+/// passed through [`scrub`] before it is kept, and it never leaves the log.
+fn error_detail(body_prefix: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body_prefix).ok()?;
+    let at = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    let code = at("/error/code")
+        .or_else(|| at("/error/type"))
+        .or_else(|| at("/code"));
+    let message = at("/error/message").or_else(|| at("/message"));
+    let detail = match (code, message) {
+        (Some(code), Some(message)) => format!("{code}: {}", scrub(&message)),
+        (Some(code), None) => code,
+        (None, Some(message)) => scrub(&message),
+        (None, None) => return None,
+    };
+    Some(truncate_chars(&detail, 200))
+}
+
+/// Redact token-shaped runs from free text.
+///
+/// Deliberately blunt: a long unbroken alphanumeric run in an error message is
+/// far more likely to be a key, an org id or an account id than a word worth
+/// keeping.
+fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.len() >= 20 || run.starts_with("sk-") || run.starts_with("org_") {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+            run.push(character);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(character);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    text.chars().take(limit).collect::<String>() + "..."
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpstreamError {
     /// No usable credentials. Deliberately never names the variable's value.
     Credentials(&'static str),
-    /// Upstream returned a non-2xx status. The body is not carried: it can
-    /// contain account identifiers and key fragments.
-    Status(u16),
+    /// Upstream returned a non-2xx status, reduced to a classified summary.
+    /// The raw body is never carried: it can contain account identifiers and
+    /// key fragments.
+    Status(UpstreamFailure),
     /// Classified transport failure. A fixed string, never the library's
     /// message, which embeds the URL.
     Transport(&'static str),
@@ -74,7 +380,9 @@ impl std::fmt::Display for UpstreamError {
             Self::Credentials(what) => {
                 write!(formatter, "upstream credentials unavailable: {what}")
             }
-            Self::Status(status) => write!(formatter, "upstream returned status {status}"),
+            Self::Status(failure) => {
+                write!(formatter, "upstream returned status {}", failure.status)
+            }
             Self::Transport(what) => write!(formatter, "upstream transport failure: {what}"),
             Self::TooLarge => formatter.write_str("upstream response exceeded the size budget"),
             Self::Timeout => formatter.write_str("upstream request timed out"),
@@ -90,16 +398,45 @@ impl UpstreamError {
     /// Whether this failure could plausibly succeed on a fresh attempt.
     ///
     /// Note this is only half the decision: [`UpstreamClient::stream`] also
-    /// requires that nothing has reached the sink yet.
+    /// requires that nothing has reached the sink yet, and consults
+    /// [`UpstreamError::max_attempts`] for how much budget the failure earns.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Transport(_) => true,
-            Self::Status(status) => *status == 408 || *status == 429 || *status >= 500,
+            Self::Status(failure) => !matches!(failure.class, FailureClass::Permanent),
             Self::Credentials(_)
             | Self::TooLarge
             | Self::Timeout
             | Self::Cancelled
             | Self::Downstream(_) => false,
+        }
+    }
+
+    /// Total attempts this failure is worth, including the one already spent.
+    ///
+    /// A transport failure gets the full transient budget; a classified status
+    /// gets whatever its class earns.
+    pub fn max_attempts(&self, config: &UpstreamConfig) -> u32 {
+        match self {
+            Self::Transport(_) => config.max_attempts.max(1),
+            Self::Status(failure) => failure.max_attempts(config),
+            _ => 1,
+        }
+    }
+
+    /// A server-supplied hint about when to try again, already clamped.
+    pub fn retry_hint(&self) -> Option<Duration> {
+        match self {
+            Self::Status(failure) => failure.retry_after,
+            _ => None,
+        }
+    }
+
+    /// The classified summary, when this is a status failure.
+    pub fn failure(&self) -> Option<&UpstreamFailure> {
+        match self {
+            Self::Status(failure) => Some(failure),
+            _ => None,
         }
     }
 }
@@ -314,6 +651,12 @@ impl CodexCliCredentials {
             .ok_or(UpstreamError::Credentials(
                 "Codex auth.json has no access token",
             ))?;
+        // Full refresh is #629's scope. This is only the guardrail: a login
+        // that has already expired must fail with an instruction the user can
+        // act on, rather than an opaque upstream error a retry cannot fix.
+        if token_is_expired(access_token, SystemTime::now()) {
+            return Err(UpstreamError::Credentials(CREDENTIALS_EXPIRED));
+        }
         let account_id = document
             .pointer("/tokens/account_id")
             .and_then(serde_json::Value::as_str)
@@ -324,6 +667,52 @@ impl CodexCliCredentials {
                 .with_account_id(account_id),
         })
     }
+}
+
+/// Whether a bearer is a JWT whose `exp` claim has passed.
+///
+/// The signature is deliberately not verified — that is the issuer's job, and
+/// clud has no key. This only reads a claim to avoid *starting* a turn on a
+/// token that is already dead. A bearer that is not a JWT, or carries no `exp`,
+/// is treated as live: opaque tokens are legitimate and must keep working.
+fn token_is_expired(token: &str, now: SystemTime) -> bool {
+    let Some(expiry) = token_expiry(token) else {
+        return false;
+    };
+    let Ok(elapsed) = now.duration_since(SystemTime::UNIX_EPOCH) else {
+        return false;
+    };
+    elapsed + TOKEN_EXPIRY_SKEW >= Duration::from_secs(expiry)
+}
+
+/// The `exp` claim of a JWT, if the bearer is one.
+fn token_expiry(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = base64url_decode(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    claims.get("exp").and_then(serde_json::Value::as_u64)
+}
+
+/// Minimal unpadded base64url decoder. A dependency for one claim read would be
+/// a poor trade, and the alphabet is fixed.
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut buffer = 0_u32;
+    let mut bits = 0_u32;
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    for byte in input.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        let value = ALPHABET.iter().position(|candidate| *candidate == byte)? as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
@@ -393,8 +782,16 @@ pub struct UpstreamConfig {
     pub read_timeout: Duration,
     pub overall_timeout: Duration,
     pub max_response_bytes: usize,
+    /// Attempt budget for a recognised transient failure.
     pub max_attempts: u32,
+    /// Attempt budget for an unrecognised 5xx.
+    pub unknown_max_attempts: u32,
+    /// Base of the exponential backoff.
     pub retry_delay: Duration,
+    /// Ceiling on one sleep, including a `Retry-After`-derived one.
+    pub max_retry_delay: Duration,
+    /// Ceiling on total time spent sleeping between attempts.
+    pub max_retry_elapsed: Duration,
 }
 
 impl Default for UpstreamConfig {
@@ -405,7 +802,10 @@ impl Default for UpstreamConfig {
             overall_timeout: DEFAULT_OVERALL_TIMEOUT,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            unknown_max_attempts: DEFAULT_UNKNOWN_MAX_ATTEMPTS,
             retry_delay: DEFAULT_RETRY_DELAY,
+            max_retry_delay: DEFAULT_MAX_RETRY_DELAY,
+            max_retry_elapsed: DEFAULT_MAX_RETRY_ELAPSED,
         }
     }
 }
@@ -466,6 +866,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
         let deadline = Instant::now() + self.config.overall_timeout;
         let mut delivered = false;
         let mut attempt = 0_u32;
+        let mut slept = Duration::ZERO;
 
         loop {
             attempt += 1;
@@ -480,16 +881,27 @@ impl<C: CredentialSource> UpstreamClient<C> {
                     })
                 }
                 Err(error) => {
-                    // The absolute rule: once anything has reached the sink the
-                    // response is committed, however retryable the failure is.
+                    // The absolute rule, unchanged (DD-029): once anything has
+                    // reached the sink the response is committed, however
+                    // retryable the failure looks. Everything below only ever
+                    // widens the *pre-commit* window.
                     if delivered
                         || !error.is_retryable()
-                        || attempt >= self.config.max_attempts.max(1)
+                        || attempt >= error.max_attempts(&self.config)
                         || Instant::now() >= deadline
                     {
                         return Err(error);
                     }
-                    let backoff = self.config.retry_delay * attempt;
+                    // A server hint wins over our own guess, but is clamped by
+                    // the same ceiling so it cannot pin the turn open.
+                    let backoff = match error.retry_hint() {
+                        Some(hint) => hint.min(self.config.max_retry_delay),
+                        None => backoff_delay(attempt, &self.config, jitter_fraction()),
+                    };
+                    if slept + backoff > self.config.max_retry_elapsed {
+                        return Err(error);
+                    }
+                    slept += backoff;
                     if wait_or_cancel(backoff, cancel) {
                         return Err(UpstreamError::Cancelled);
                     }
@@ -538,7 +950,17 @@ impl<C: CredentialSource> UpstreamClient<C> {
 
         let response = match request.send_bytes(body) {
             Ok(response) => response,
-            Err(ureq::Error::Status(status, _)) => return Err(UpstreamError::Status(status)),
+            // The response is *read*, not discarded. Its headers carry the
+            // `cf-ray` that distinguishes an edge failure from an application
+            // one, and its body is what separates a permanent rejection from a
+            // transient outage (#764). Neither survives past classification.
+            Err(ureq::Error::Status(status, response)) => {
+                return Err(UpstreamError::Status(capture_failure(
+                    status,
+                    response,
+                    self.config.max_retry_delay,
+                )));
+            }
             Err(ureq::Error::Transport(_)) => {
                 return Err(UpstreamError::Transport("connection failed"));
             }
@@ -574,6 +996,68 @@ impl<C: CredentialSource> UpstreamClient<C> {
         }
         Ok(total)
     }
+}
+
+/// Reduce an error response to a classified summary, then drop it.
+///
+/// Reading the body is bounded by [`ERROR_BODY_PREFIX_LIMIT`]; a body that
+/// cannot be read at all still yields a usable classification from the status.
+fn capture_failure(
+    status: u16,
+    response: ureq::Response,
+    max_retry_delay: Duration,
+) -> UpstreamFailure {
+    let header = |name: &str| response.header(name).map(str::to_string);
+    let request_id = header("x-request-id");
+    let cf_ray = header("cf-ray");
+    let retry_after = header("retry-after");
+
+    let mut body = Vec::new();
+    let mut reader = response.into_reader().take(ERROR_BODY_PREFIX_LIMIT as u64);
+    let _ = reader.read_to_end(&mut body);
+    let body_prefix = String::from_utf8_lossy(&body);
+
+    UpstreamFailure::from_parts(
+        status,
+        |name| match name {
+            "x-request-id" => request_id.clone(),
+            "cf-ray" => cf_ray.clone(),
+            "retry-after" => retry_after.clone(),
+            _ => None,
+        },
+        &body_prefix,
+        max_retry_delay,
+    )
+}
+
+/// Exponential backoff with jitter, clamped to the configured ceiling.
+///
+/// `jitter` is a fraction in `[0, 1)` supplied by the caller so the policy is a
+/// pure function and can be tested without sampling randomness. Jitter matters
+/// here: a fixed window makes every client retry in lockstep, which is how a
+/// recovering upstream gets knocked straight back over.
+fn backoff_delay(attempt: u32, config: &UpstreamConfig, jitter: f64) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(16);
+    let base = config
+        .retry_delay
+        .saturating_mul(1_u32 << exponent)
+        .min(config.max_retry_delay);
+    // Jitter spans the lower half of the window, so the delay stays within
+    // `[base/2, base]` and can never exceed the ceiling.
+    let span = base.mul_f64(0.5);
+    let clamped = jitter.clamp(0.0, 1.0);
+    base - span.mul_f64(clamped)
+}
+
+/// A jitter fraction in `[0, 1)`. Falls back to the midpoint if the OS entropy
+/// source is unavailable — a fixed delay is worse than a jittered one, but far
+/// better than failing the request over it.
+fn jitter_fraction() -> f64 {
+    let mut bytes = [0_u8; 4];
+    if getrandom::fill(&mut bytes).is_err() {
+        return 0.5;
+    }
+    f64::from(u32::from_le_bytes(bytes)) / f64::from(u32::MAX)
 }
 
 /// Sleep in short slices so cancellation is observed during backoff.
@@ -881,11 +1365,15 @@ mod tests {
             .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
             .unwrap_err();
 
-        assert_eq!(error, UpstreamError::Status(401));
+        let failure = error.failure().expect("a status failure");
+        assert_eq!(failure.status(), 401);
+        assert_eq!(failure.class(), FailureClass::Permanent);
         assert_eq!(server.hits(), 1, "a 401 must not be retried");
-        let rendered = format!("{error} {error:?}");
-        assert!(!rendered.contains("sk-secret-abc"));
-        assert!(!rendered.contains("org_9"));
+        // Reading the body to classify it must not turn the error into a
+        // credential map: the scrubber runs before anything is retained.
+        let rendered = format!("{error} {error:?} {}", failure.diagnostic());
+        assert!(!rendered.contains("sk-secret-abc"), "{rendered}");
+        assert!(!rendered.contains("org_9"), "{rendered}");
     }
 
     #[test]
@@ -901,7 +1389,7 @@ mod tests {
         let error = client
             .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
             .unwrap_err();
-        assert_eq!(error, UpstreamError::Status(500));
+        assert_eq!(error.failure().map(UpstreamFailure::status), Some(500));
         assert_eq!(server.hits(), 2);
     }
 
@@ -991,13 +1479,36 @@ mod tests {
         assert_eq!(error, UpstreamError::TooLarge);
     }
 
+    /// Build a failure without a socket, so classification is testable alone.
+    fn failure_from(status: u16, body: &str) -> UpstreamFailure {
+        UpstreamFailure::from_parts(status, |_| None, body, DEFAULT_MAX_RETRY_DELAY)
+    }
+
+    fn body_response(status: u16, body: &str, headers: &[(&str, &str)]) -> Vec<u8> {
+        let extra: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        format!(
+            "HTTP/1.1 {status} Err\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
     #[test]
     fn retry_classification_matches_the_documented_policy() {
+        // Recognised outages stay retryable.
         for status in [408, 429, 500, 502, 503] {
-            assert!(UpstreamError::Status(status).is_retryable(), "{status}");
+            let failure = failure_from(status, r#"{"error":{"message":"try again"}}"#);
+            assert_eq!(failure.class(), FailureClass::Transient, "{status}");
+            assert!(UpstreamError::Status(failure).is_retryable(), "{status}");
         }
+        // Statuses the bridge passes through are never retried.
         for status in [400, 401, 403, 404, 422] {
-            assert!(!UpstreamError::Status(status).is_retryable(), "{status}");
+            let failure = failure_from(status, "");
+            assert_eq!(failure.class(), FailureClass::Permanent, "{status}");
+            assert!(!UpstreamError::Status(failure).is_retryable(), "{status}");
         }
         assert!(UpstreamError::Transport("connection failed").is_retryable());
         for error in [
@@ -1008,6 +1519,279 @@ mod tests {
             UpstreamError::Downstream("x"),
         ] {
             assert!(!error.is_retryable(), "{error:?}");
+        }
+    }
+
+    /// The reversal this change exists for: a 502 can carry a *permanent*
+    /// rejection, and retrying it can never succeed.
+    ///
+    /// Regression guard for the sub2api#4020 shape, where `gpt-5.6-sol` is
+    /// refused with a version-gate message wrapped in a 502.
+    #[test]
+    fn a_permanent_rejection_wrapped_in_a_502_is_attempted_exactly_once() {
+        let body = r#"{"error":{"message":"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade."}}"#;
+        let server = FakeUpstream::start(vec![body_response(502, body, &[])]);
+        let client = client(&server.base_url, fast_config());
+
+        let error = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
+            .unwrap_err();
+
+        let failure = error.failure().expect("a status failure");
+        assert_eq!(failure.status(), 502);
+        assert_eq!(failure.class(), FailureClass::Permanent);
+        assert_eq!(
+            server.hits(),
+            1,
+            "a permanent rejection must not be retried, however 5xx it looks"
+        );
+    }
+
+    /// A 5xx we cannot read gets a reduced budget rather than the full ladder:
+    /// treating every unrecognised 5xx as fully retryable is what produced the
+    /// credential-burning cascade this policy is designed to avoid.
+    #[test]
+    fn an_unrecognised_5xx_retries_on_the_reduced_budget() {
+        let body = r#"{"error":{"message":"something we have never seen"}}"#;
+        assert_eq!(failure_from(500, body).class(), FailureClass::Unknown);
+
+        let server = FakeUpstream::start(vec![body_response(500, body, &[])]);
+        let client = client(
+            &server.base_url,
+            UpstreamConfig {
+                max_attempts: 6,
+                unknown_max_attempts: 2,
+                ..fast_config()
+            },
+        );
+        let error = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
+            .unwrap_err();
+
+        assert_eq!(
+            error.failure().map(UpstreamFailure::class),
+            Some(FailureClass::Unknown)
+        );
+        assert_eq!(
+            server.hits(),
+            2,
+            "an unrecognised 5xx must use the reduced budget, not max_attempts"
+        );
+    }
+
+    #[test]
+    fn correlation_identifiers_are_captured_from_the_error_response() {
+        let body = r#"{"error":{"code":"server_error","message":"bad gateway"}}"#;
+        let server = FakeUpstream::start(vec![body_response(
+            502,
+            body,
+            &[
+                ("cf-ray", "9a1b2c3d4e5f-HKG"),
+                ("x-request-id", "req_abc123"),
+            ],
+        )]);
+        let client = client(
+            &server.base_url,
+            UpstreamConfig {
+                max_attempts: 1,
+                ..fast_config()
+            },
+        );
+        let error = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
+            .unwrap_err();
+
+        let failure = error.failure().expect("a status failure");
+        assert_eq!(failure.cf_ray(), Some("9a1b2c3d4e5f-HKG"));
+        assert_eq!(failure.request_id(), Some("req_abc123"));
+        // Both must reach the operator log, which is the whole point: a cf-ray
+        // is what identifies a failure as edge-side rather than provider-side.
+        let diagnostic = failure.diagnostic();
+        assert!(diagnostic.contains("9a1b2c3d4e5f-HKG"), "{diagnostic}");
+        assert!(diagnostic.contains("req_abc123"), "{diagnostic}");
+        assert!(diagnostic.contains("class=Transient"), "{diagnostic}");
+    }
+
+    #[test]
+    fn a_retry_after_header_is_honoured_and_clamped() {
+        // Far larger than the ceiling: a generous hint must not pin the turn.
+        let server = FakeUpstream::start(vec![
+            body_response(503, "unavailable", &[("retry-after", "3600")]),
+            sse_response("data: ok\n\n"),
+        ]);
+        let config = UpstreamConfig {
+            max_retry_delay: Duration::from_millis(80),
+            ..fast_config()
+        };
+        let client = client(&server.base_url, config);
+
+        let started = Instant::now();
+        let outcome = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome.attempts, 2);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a 3600s Retry-After was not clamped: waited {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_body_surfaces_its_reset_hint() {
+        let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":529498}}"#;
+        let failure = failure_from(429, body);
+        assert_eq!(failure.class(), FailureClass::Transient);
+        assert_eq!(failure.resets_in(), Some(Duration::from_secs(529_498)));
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_is_capped_and_is_jittered() {
+        let config = UpstreamConfig {
+            retry_delay: Duration::from_millis(100),
+            max_retry_delay: Duration::from_millis(1000),
+            ..UpstreamConfig::default()
+        };
+        // Without jitter the ladder doubles until it hits the ceiling.
+        let ladder: Vec<Duration> = (1..=6)
+            .map(|attempt| backoff_delay(attempt, &config, 0.0))
+            .collect();
+        assert_eq!(ladder[0], Duration::from_millis(100));
+        assert_eq!(ladder[1], Duration::from_millis(200));
+        assert_eq!(ladder[2], Duration::from_millis(400));
+        assert_eq!(ladder[3], Duration::from_millis(800));
+        for delay in &ladder {
+            assert!(
+                *delay <= config.max_retry_delay,
+                "{delay:?} exceeded the cap"
+            );
+        }
+        assert_eq!(
+            ladder[4], config.max_retry_delay,
+            "the ladder must saturate"
+        );
+        assert_eq!(ladder[5], config.max_retry_delay);
+
+        // Jitter spreads each step over the lower half of its window, so two
+        // clients that fail together do not retry in lockstep.
+        let spread: Vec<Duration> = [0.0, 0.25, 0.5, 0.75, 1.0]
+            .into_iter()
+            .map(|fraction| backoff_delay(3, &config, fraction))
+            .collect();
+        assert!(
+            spread.windows(2).all(|pair| pair[0] > pair[1]),
+            "jitter produced no variation: {spread:?}"
+        );
+        assert_eq!(spread[0], Duration::from_millis(400));
+        assert_eq!(spread[4], Duration::from_millis(200));
+        for delay in &spread {
+            assert!(*delay >= Duration::from_millis(200) && *delay <= Duration::from_millis(400));
+        }
+        // An out-of-range fraction must not escape the window.
+        assert_eq!(backoff_delay(3, &config, 5.0), Duration::from_millis(200));
+        assert_eq!(backoff_delay(3, &config, -5.0), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn the_total_retry_sleep_is_bounded() {
+        let server = FakeUpstream::start(vec![body_response(503, "service unavailable", &[])]);
+        let client = client(
+            &server.base_url,
+            UpstreamConfig {
+                max_attempts: 20,
+                retry_delay: Duration::from_millis(40),
+                max_retry_delay: Duration::from_millis(80),
+                max_retry_elapsed: Duration::from_millis(200),
+                ..fast_config()
+            },
+        );
+        let started = Instant::now();
+        let error = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert_eq!(error.failure().map(UpstreamFailure::status), Some(503));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the elapsed-sleep budget did not bound the loop: {elapsed:?}"
+        );
+        assert!(
+            server.hits() < 20,
+            "the budget must stop the loop before max_attempts"
+        );
+    }
+
+    #[test]
+    fn the_scrubber_redacts_token_shaped_runs() {
+        let scrubbed = scrub("key sk-secret-abc for org org_9 and AKIAIOSFODNN7EXAMPLEXYZ ok");
+        assert!(!scrubbed.contains("sk-secret-abc"), "{scrubbed}");
+        assert!(!scrubbed.contains("org_9"), "{scrubbed}");
+        assert!(!scrubbed.contains("AKIAIOSFODNN7EXAMPLEXYZ"), "{scrubbed}");
+        // Ordinary words survive, or the detail would be useless.
+        assert!(scrubbed.contains("key"), "{scrubbed}");
+        assert!(scrubbed.contains("for"), "{scrubbed}");
+        assert!(scrubbed.contains("ok"), "{scrubbed}");
+    }
+
+    #[test]
+    fn an_expired_codex_login_is_refused_with_an_actionable_message() {
+        let expired = auth_json_with_expiry(1_000_000_000);
+        let error = CodexCliCredentials::from_auth_json(expired.as_bytes()).unwrap_err();
+        assert_eq!(
+            error,
+            UpstreamError::Credentials("the Codex login has expired -- run `codex login`")
+        );
+
+        // A live token still resolves.
+        let live_expiry = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86_400;
+        let live = auth_json_with_expiry(live_expiry);
+        assert!(CodexCliCredentials::from_auth_json(live.as_bytes()).is_ok());
+
+        // An opaque (non-JWT) bearer is legitimate and must keep working.
+        let opaque = r#"{"tokens":{"access_token":"opaque-token","account_id":"acct"}}"#;
+        assert!(CodexCliCredentials::from_auth_json(opaque.as_bytes()).is_ok());
+    }
+
+    /// Build an `auth.json` whose access token is an unsigned JWT with `exp`.
+    fn auth_json_with_expiry(exp: u64) -> String {
+        let claims = base64url_encode(format!(r#"{{"exp":{exp}}}"#).as_bytes());
+        let header = base64url_encode(br#"{"alg":"none"}"#);
+        format!(r#"{{"tokens":{{"access_token":"{header}.{claims}.sig","account_id":"acct"}}}}"#)
+    }
+
+    fn base64url_encode(input: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in input.chunks(3) {
+            let mut buffer = 0_u32;
+            for (index, byte) in chunk.iter().enumerate() {
+                buffer |= u32::from(*byte) << (16 - 8 * index);
+            }
+            let characters = chunk.len() + 1;
+            for index in 0..characters {
+                let value = (buffer >> (18 - 6 * index)) & 0x3F;
+                out.push(ALPHABET[value as usize] as char);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn base64url_round_trips() {
+        let samples: [&[u8]; 6] = [b"", b"a", b"ab", b"abc", b"abcd", br#"{"exp":123}"#];
+        for sample in samples {
+            let encoded = base64url_encode(sample);
+            assert_eq!(
+                base64url_decode(&encoded).as_deref(),
+                Some(sample),
+                "sample {sample:?} encoded as {encoded}"
+            );
         }
     }
 

@@ -622,6 +622,12 @@ fn log_pipeline_error(error: &PipelineError) {
             error,
             error.http_status()
         );
+        // The classification, the correlation ids, and the scrubbed reason.
+        // Without this an operator can see *that* a 502 happened but not
+        // whether it came from the edge, the provider, or clud itself (#764).
+        if let Some(diagnostic) = error.upstream_diagnostic() {
+            eprintln!("[clud] codex bridge: upstream {diagnostic}");
+        }
     }
 }
 
@@ -650,6 +656,8 @@ fn anthropic_error_type(status: u16) -> &'static str {
         413 => "request_too_large",
         422 => "invalid_request_error",
         429 => "rate_limit_error",
+        // #764 stopped folding these into 502; they need types of their own.
+        499 => "request_cancelled",
         504 => "timeout_error",
         _ => "api_error",
     }
@@ -814,7 +822,9 @@ fn write_error(stream: &mut TcpStream, status: u16) -> io::Result<()> {
         408 => ("timeout_error", "request timeout"),
         413 => ("invalid_request_error", "request body too large"),
         431 => ("invalid_request_error", "request headers too large"),
-        502 => ("api_error", "test upstream unavailable"),
+        // No 502 arm: an upstream failure is written by `write_pipeline_error`,
+        // which carries the classified message. This path only serves statuses
+        // the connection layer itself chooses.
         _ => ("api_error", "bridge error"),
     };
     let body = format!(r#"{{"error":{{"type":"{error_type}","message":"{message}"}}}}"#);
@@ -913,8 +923,10 @@ fn write_response(
         408 => "Request Timeout",
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
+        499 => "Client Closed Request",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Error",
     };
     write!(
