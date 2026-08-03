@@ -238,8 +238,15 @@ reset, an oversized response and a genuine outage indistinguishable in a log.
 
 `client_message` carries the status, an opaque `x-request-id` when upstream
 supplied one, and a rate-limit reset hint when the body had one — never the
-body itself. The richer `upstream_diagnostic()` (class, `cf-ray`, scrubbed
-detail) is printed only under `CLUD_CODEX_BRIDGE_DEBUG=1`.
+body itself. Issue #772 adds an always-on forensic floor at
+`~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`: failures and retry
+attempts only, buffered across workers, capped at 1 MiB with a visible
+`truncated` marker. Records contain only fixed bridge reasons and fields already
+exposed by `UpstreamFailure` (status, class, correlation IDs, retry hints, and
+scrubbed detail); request/response bodies, credentials, bearers, authorization
+headers, and upstream URLs are never inputs to the logger. A healthy launch
+creates no file. On shutdown, a launch that recorded failures prints the path.
+`CLUD_CODEX_BRIDGE_DEBUG=1` remains the richer interactive stderr tier.
 
 Once `EventStreamWriter` has flushed a frame the response is committed, so a
 later failure is reported in-band as a sanitized SSE `error` event and the
