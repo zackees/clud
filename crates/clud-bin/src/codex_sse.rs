@@ -390,7 +390,13 @@ impl StreamTranslator {
             serde_json::json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": {"output_tokens": self.output_tokens},
+                // input_tokens is only known once upstream reports usage, which
+                // is long after message_start has been flushed. Carrying it
+                // here is the only chance the client gets to learn it.
+                "usage": {
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                },
             }),
         ));
         out.push(anthropic_frame(

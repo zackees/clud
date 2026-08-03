@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -168,19 +169,111 @@ class TestBackendSelection:
         assert report["cwd"] == str(tmp_path)
 
 
+_RESPONSES_SSE = (
+    b'event: response.created\ndata: {"type":"response.created"}\n\n'
+    b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+    b'"output_index":0,"content_index":0,"delta":"bridged "}\n\n'
+    b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+    b'"output_index":0,"content_index":0,"delta":"reply"}\n\n'
+    b'event: response.output_text.done\ndata: {"type":"response.output_text.done",'
+    b'"output_index":0,"content_index":0}\n\n'
+    b'event: response.completed\ndata: {"type":"response.completed",'
+    b'"response":{"usage":{"input_tokens":4,"output_tokens":2}}}\n\n'
+)
+
+
+class _FakeResponsesServer:
+    """A deterministic OpenAI-Responses-shaped upstream.
+
+    Issue #627 step 5 repointed the bridge's debug seam at this rather than at
+    the phase-2 passthrough, so the end-to-end tests exercise real translation
+    instead of proving only transport and auth.
+    """
+
+    def __init__(self) -> None:
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.2)
+        self.port = self._listener.getsockname()[1]
+        self.requests: list[bytes] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _ = self._listener.accept()
+            except (TimeoutError, OSError):
+                continue
+            with connection:
+                connection.settimeout(5)
+                try:
+                    raw = b""
+                    while b"\r\n\r\n" not in raw:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        raw += chunk
+                    head, _, rest = raw.partition(b"\r\n\r\n")
+                    length = 0
+                    for line in head.split(b"\r\n"):
+                        name, _, value = line.partition(b":")
+                        if name.lower() == b"content-length":
+                            length = int(value.strip())
+                    while len(rest) < length:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        rest += chunk
+                    self.requests.append(head + b"\r\n\r\n" + rest)
+                    connection.sendall(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                        b"Content-Length: %d\r\nConnection: close\r\n\r\n%s"
+                        % (len(_RESPONSES_SSE), _RESPONSES_SSE)
+                    )
+                except OSError:
+                    continue
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._listener.close()
+
+
+@pytest.fixture
+def fake_responses():
+    server = _FakeResponsesServer()
+    try:
+        yield server
+    finally:
+        server.close()
+
+
 class TestCodexBridgeForeground:
     """Issue #626: Codex provider through the Claude foreground harness."""
 
     @pytest.mark.parametrize("launch_mode", ["--subprocess", "--pty"])
-    def test_cross_route_reaches_fixture_and_closes_listener(
+    def test_cross_route_translates_upstream_and_closes_listener(
         self,
         clud_binary: Path,
         mock_env: dict[str, str],
         tmp_path: Path,
         launch_mode: str,
+        fake_responses: _FakeResponsesServer,
     ) -> None:
         env = mock_env.copy()
         env["ANTHROPIC_API_KEY"] = "ambient-secret-that-must-not-leak"
+        # The seam is gated on a debug build *and* this flag; release builds
+        # ignore it entirely.
+        env["CLUD_INTEGRATION_TESTS"] = "1"
+        env["CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL"] = fake_responses.base_url
         probe_path = tmp_path / "codex-bridge-probe.json"
         agent_report_path = tmp_path / "codex-bridge-agent-report.json"
         result = _run(
@@ -223,14 +316,29 @@ class TestCodexBridgeForeground:
             "loopback",
             "port",
             "status",
-            "fixture_received",
+            "bridged_reply_received",
             "error",
         }
         assert probe["attempted"] is True
         assert probe["loopback"] is True
         assert probe["status"] == 200
-        assert probe["fixture_received"] is True
+        assert probe["bridged_reply_received"] is True
         assert probe["error"] is None
+
+        # The bridge must have spoken the Responses protocol upstream, in the
+        # translated shape -- not passed the Anthropic body through.
+        assert fake_responses.requests, "the bridge never called upstream"
+        upstream_request = fake_responses.requests[0]
+        assert upstream_request.startswith(b"POST /v1/responses HTTP/1.1")
+        head, _, body = upstream_request.partition(b"\r\n\r\n")
+        sent = json.loads(body)
+        assert sent["model"] == "gpt-5.6-sol"
+        assert sent["stream"] is True
+        assert sent["input"][0]["content"][0]["type"] == "input_text"
+        assert "messages" not in sent, "Anthropic request shape leaked upstream"
+        # Neither the ambient key nor the bridge's own bearer may travel on.
+        assert b"ambient-secret-that-must-not-leak" not in upstream_request
+        assert b"x-api-key" not in head.lower()
         assert "ambient-secret-that-must-not-leak" not in result.stdout
         assert "ambient-secret-that-must-not-leak" not in result.stderr
         address = ("127.0.0.1", probe["port"])

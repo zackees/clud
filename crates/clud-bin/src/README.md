@@ -66,6 +66,9 @@ Entry and orchestration:
   buffering, cancellation, and a retry policy that stops the moment any byte
   reaches the sink. Builds every outbound header itself, so no downstream
   header can leak upstream.
+- `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
+  one call, plus `MessageAggregator` so a non-streaming request reuses the
+  streaming state machine. Owns the downstream status policy.
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every

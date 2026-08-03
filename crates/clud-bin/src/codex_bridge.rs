@@ -1,6 +1,8 @@
 //! Authenticated loopback bridge used by Codex-provider launches through the
 //! Claude harness (issue #626).
 
+use crate::codex_pipeline::{Pipeline, PipelineError};
+use crate::codex_upstream::{ApiKeyCredentials, UpstreamClient, UpstreamConfig, UpstreamError};
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::fmt;
@@ -473,24 +475,129 @@ fn handle_connection(
                     return;
                 }
             };
-            if let Some(upstream_url) = config.test_upstream_url.as_deref() {
-                forward_test_upstream(&mut stream, config, upstream_url, &body);
-            } else if json.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
-                let _ = write_event_stream(&mut stream, config, &fixture_sse_frames());
-            } else {
-                let _ = write_response(
-                    &mut stream,
-                    200,
-                    "application/json",
-                    fixture_message().as_bytes(),
-                    false,
-                );
-            }
+            let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
+            serve_messages(&mut stream, config, shutdown, &body, streaming);
         }
         _ => {
             let _ = write_error(&mut stream, 404);
         }
     }
+}
+
+/// Build the pipeline for one request.
+///
+/// The debug seam repoints the *upstream base URL* at a Responses-shaped fake.
+/// Phase 2 used it to pass an Anthropic body through unchanged, which meant the
+/// end-to-end tests proved transport and auth but nothing about translation.
+fn build_pipeline(config: &BridgeConfig) -> Result<Pipeline<ApiKeyCredentials>, UpstreamError> {
+    let credentials = match config.test_upstream_url.as_deref() {
+        Some(base_url) => ApiKeyCredentials::new("clud-test-upstream-key", Some(base_url.into()))?,
+        None => ApiKeyCredentials::from_env()?,
+    };
+    Ok(Pipeline::new(UpstreamClient::new(
+        credentials,
+        UpstreamConfig::default(),
+    )))
+}
+
+/// Serve one `POST /v1/messages`.
+///
+/// The status is chosen only while nothing has been written. Once the writer
+/// has emitted a frame the response is committed, so a later failure is
+/// reported in-band by the translator's own `error` event (already appended by
+/// the pipeline) and the chunked body is simply terminated.
+fn serve_messages(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    shutdown: &AtomicBool,
+    body: &[u8],
+    streaming: bool,
+) {
+    let pipeline = match build_pipeline(config) {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            let failure = PipelineError::Upstream(error);
+            let _ = write_pipeline_error(stream, &failure);
+            return;
+        }
+    };
+    let message_id = new_message_id();
+
+    if streaming {
+        let mut writer = EventStreamWriter::new(stream, config);
+        let mut sink = |frame: &str| -> Result<(), UpstreamError> {
+            writer
+                .write_frame(frame)
+                .map_err(|_| UpstreamError::Downstream("client write failed"))
+        };
+        match pipeline.stream(body, &message_id, shutdown, &mut sink) {
+            Ok(()) => {
+                let _ = writer.finish();
+            }
+            Err(error) => {
+                if writer.started() {
+                    // Committed: the pipeline has already emitted a sanitized
+                    // `error` event, so just close the body cleanly.
+                    let _ = writer.finish();
+                } else {
+                    let _ = write_pipeline_error(stream, &error);
+                }
+            }
+        }
+        return;
+    }
+
+    match pipeline.complete(body, &message_id, shutdown) {
+        Ok(message) => {
+            let rendered = serde_json::to_vec(&message).unwrap_or_default();
+            let _ = write_response(stream, 200, "application/json", &rendered, false);
+        }
+        Err(error) => {
+            let _ = write_pipeline_error(stream, &error);
+        }
+    }
+}
+
+fn write_pipeline_error(stream: &mut TcpStream, error: &PipelineError) -> io::Result<()> {
+    let status = error.http_status();
+    let body = serde_json::json!({
+        "type": "error",
+        "error": {"type": anthropic_error_type(status), "message": error.client_message()},
+    });
+    write_response(
+        stream,
+        status,
+        "application/json",
+        body.to_string().as_bytes(),
+        false,
+    )
+}
+
+fn anthropic_error_type(status: u16) -> &'static str {
+    match status {
+        400 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        422 => "invalid_request_error",
+        429 => "rate_limit_error",
+        504 => "timeout_error",
+        _ => "api_error",
+    }
+}
+
+/// Per-response identifier. Anthropic clients treat this as opaque; it only has
+/// to be unique enough to correlate one turn.
+fn new_message_id() -> String {
+    let mut bytes = [0_u8; 12];
+    if getrandom::fill(&mut bytes).is_err() {
+        return "msg_clud_bridge".to_string();
+    }
+    format!(
+        "msg_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    )
 }
 
 struct ParsedRequest {
@@ -631,51 +738,6 @@ fn read_expired(deadline: Instant, shutdown: &AtomicBool) -> Option<u16> {
     (Instant::now() >= deadline).then_some(408)
 }
 
-fn forward_test_upstream(
-    stream: &mut TcpStream,
-    config: &BridgeConfig,
-    upstream_url: &str,
-    body: &[u8],
-) {
-    let messages_url = if upstream_url.trim_end_matches('/').ends_with("/v1/messages") {
-        upstream_url.trim_end_matches('/').to_string()
-    } else {
-        format!("{}/v1/messages", upstream_url.trim_end_matches('/'))
-    };
-    let agent = ureq::AgentBuilder::new()
-        .timeout(config.body_timeout)
-        .build();
-    let response = match agent
-        .post(&messages_url)
-        .set("Content-Type", "application/json")
-        .send_bytes(body)
-    {
-        Ok(response) => response,
-        Err(ureq::Error::Status(_, response)) => response,
-        Err(ureq::Error::Transport(_)) => {
-            let _ = write_error(stream, 502);
-            return;
-        }
-    };
-    let status = response.status();
-    let content_type = response
-        .header("Content-Type")
-        .unwrap_or("application/json")
-        .to_string();
-    let mut upstream_body = Vec::new();
-    if response
-        .into_reader()
-        .take(config.max_body_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut upstream_body)
-        .is_err()
-        || upstream_body.len() > config.max_body_bytes
-    {
-        let _ = write_error(stream, 502);
-        return;
-    }
-    let _ = write_response(stream, status, &content_type, &upstream_body, false);
-}
-
 fn write_error(stream: &mut TcpStream, status: u16) -> io::Result<()> {
     let (error_type, message) = match status {
         400 => ("invalid_request_error", "invalid request"),
@@ -691,51 +753,81 @@ fn write_error(stream: &mut TcpStream, status: u16) -> io::Result<()> {
     write_response(stream, status, "application/json", body.as_bytes(), false)
 }
 
-/// Write an SSE response incrementally.
+/// Incremental SSE writer.
 ///
 /// `write_response` cannot serve this path: it derives `Content-Length` from a
-/// fully materialised body and writes once, so a caller can only ever send a
-/// stream that has already finished. Chunked transfer plus a flush per frame is
+/// fully materialised body and writes once, so a caller could only ever send a
+/// stream that had already finished. Chunked transfer plus a flush per frame is
 /// what lets Claude render tokens as they arrive rather than at end-of-turn.
+///
+/// Headers are deferred until the first frame. That is deliberate: a failure
+/// before any output can still choose a status code, and only once a frame is
+/// on the wire does the response become committed.
 ///
 /// The write timeout is re-armed per frame, making it an idle timeout: total
 /// response duration is unbounded, but a peer that stops reading is still cut
-/// off. Errors are returned rather than reported downstream — once the 200 and
-/// its headers are on the wire, there is no longer a status code to change.
-fn write_event_stream(
-    stream: &mut TcpStream,
-    config: &BridgeConfig,
-    frames: &[String],
-) -> io::Result<()> {
-    let idle_timeout = if config.stream_idle_timeout.is_zero() {
-        DEFAULT_STREAM_IDLE_TIMEOUT
-    } else {
-        config.stream_idle_timeout
-    };
-    stream.set_write_timeout(Some(idle_timeout))?;
-    stream.write_all(
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-    )?;
-    stream.flush()?;
+/// off.
+struct EventStreamWriter<'a> {
+    stream: &'a mut TcpStream,
+    idle_timeout: Duration,
+    started: bool,
+    #[cfg(test)]
+    frame_hold: Duration,
+}
 
-    for frame in frames {
-        // Re-arm per frame so the budget is "silence between frames", not
-        // "total time to produce the response".
-        stream.set_write_timeout(Some(idle_timeout))?;
-        write!(stream, "{:x}\r\n", frame.len())?;
-        stream.write_all(frame.as_bytes())?;
-        stream.write_all(b"\r\n")?;
-        stream.flush()?;
-        #[cfg(test)]
-        if !config.frame_hold.is_zero() {
-            thread::sleep(config.frame_hold);
+impl<'a> EventStreamWriter<'a> {
+    fn new(stream: &'a mut TcpStream, config: &BridgeConfig) -> Self {
+        let idle_timeout = if config.stream_idle_timeout.is_zero() {
+            DEFAULT_STREAM_IDLE_TIMEOUT
+        } else {
+            config.stream_idle_timeout
+        };
+        Self {
+            stream,
+            idle_timeout,
+            started: false,
+            #[cfg(test)]
+            frame_hold: config.frame_hold,
         }
     }
 
-    stream.write_all(b"0\r\n\r\n")?;
-    stream.flush()?;
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(())
+    fn started(&self) -> bool {
+        self.started
+    }
+
+    fn write_frame(&mut self, frame: &str) -> io::Result<()> {
+        // Re-arm per frame so the budget is "silence between frames", not
+        // "total time to produce the response".
+        self.stream.set_write_timeout(Some(self.idle_timeout))?;
+        if !self.started {
+            self.stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            )?;
+            self.stream.flush()?;
+            self.started = true;
+        }
+        // Chunked framing is CRLF-delimited by specification; an LF-only
+        // variant is not merely untidy, clients fail to parse it.
+        write!(self.stream, "{:x}\r\n", frame.len())?;
+        self.stream.write_all(frame.as_bytes())?;
+        self.stream.write_all(b"\r\n")?;
+        self.stream.flush()?;
+        #[cfg(test)]
+        if !self.frame_hold.is_zero() {
+            thread::sleep(self.frame_hold);
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if !self.started {
+            return Ok(());
+        }
+        self.stream.write_all(b"0\r\n\r\n")?;
+        self.stream.flush()?;
+        let _ = self.stream.shutdown(Shutdown::Both);
+        Ok(())
+    }
 }
 
 fn write_response(
@@ -780,60 +872,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn fixture_message() -> String {
-    serde_json::json!({
-        "id": "msg_clud_fixture",
-        "type": "message",
-        "role": "assistant",
-        "model": "clud-bridge-fixture",
-        "content": [{"type": "text", "text": "clud bridge fixture"}],
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": {"input_tokens": 0, "output_tokens": 4}
-    })
-    .to_string()
-}
-
-/// One SSE event per element, so each is flushed as its own chunk. Phase 3
-/// replaces this vector with translator output; the framing contract that each
-/// element is a complete, independently deliverable SSE event stays.
-fn fixture_sse_frames() -> Vec<String> {
-    [
-        concat!(
-            "event: message_start\n",
-            r#"data: {"type":"message_start","message":{"id":"msg_clud_fixture","type":"message","role":"assistant","model":"clud-bridge-fixture","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#,
-            "\n\n",
-        ),
-        concat!(
-            "event: content_block_start\n",
-            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            "\n\n",
-        ),
-        concat!(
-            "event: content_block_delta\n",
-            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"clud bridge fixture"}}"#,
-            "\n\n",
-        ),
-        concat!(
-            "event: content_block_stop\n",
-            r#"data: {"type":"content_block_stop","index":0}"#,
-            "\n\n",
-        ),
-        concat!(
-            "event: message_delta\n",
-            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}"#,
-            "\n\n",
-        ),
-        concat!(
-            "event: message_stop\n",
-            r#"data: {"type":"message_stop"}"#,
-            "\n\n",
-        ),
-    ]
-    .map(str::to_owned)
-    .to_vec()
-}
-
 fn test_upstream_override_from_process() -> Option<String> {
     let integration_enabled =
         std::env::var_os("CLUD_INTEGRATION_TESTS").is_some_and(|value| value == "1");
@@ -864,7 +902,7 @@ mod tests {
     fn request(addr: SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).expect("connect to bridge");
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
@@ -879,6 +917,136 @@ mod tests {
             body.len()
         )
     }
+
+    /// A Responses-shaped fake. Phase 2's seam passed an Anthropic body
+    /// straight through, so the end-to-end tests proved transport and auth but
+    /// nothing about translation; this one speaks the upstream protocol and
+    /// records what it was actually sent.
+    struct FakeResponses {
+        base_url: String,
+        requests: std::sync::Arc<Mutex<Vec<String>>>,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl FakeResponses {
+        fn start() -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let thread_requests = std::sync::Arc::clone(&requests);
+            let thread_shutdown = Arc::clone(&shutdown);
+            let handle = thread::spawn(move || {
+                while !thread_shutdown.load(Ordering::Acquire) {
+                    let (mut upstream, _) = match listener.accept() {
+                        Ok(pair) => pair,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    upstream.set_nonblocking(false).unwrap();
+                    upstream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut raw = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match upstream.read(&mut byte) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => raw.push(byte[0]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&raw).to_string();
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    let mut request_body = vec![0_u8; length];
+                    if length > 0 {
+                        let _ = upstream.read_exact(&mut request_body);
+                    }
+                    thread_requests
+                        .lock()
+                        .unwrap()
+                        .push(format!("{head}{}", String::from_utf8_lossy(&request_body)));
+
+                    let events = concat!(
+                        "event: response.created
+data: {\"type\":\"response.created\"}
+
+",
+                        "event: response.output_text.delta
+data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"bridged \"}
+
+",
+                        "event: response.output_text.delta
+data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"reply\"}
+
+",
+                        "event: response.output_text.done
+data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0}
+
+",
+                        "event: response.completed
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":2}}}
+
+",
+                    );
+                    let reply = format!(
+                        "HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Content-Length: {}
+Connection: close
+
+{events}",
+                        events.len()
+                    );
+                    let _ = upstream.write_all(reply.as_bytes());
+                    let _ = upstream.flush();
+                    let _ = upstream.shutdown(Shutdown::Both);
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                requests,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for FakeResponses {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Config wired to a fake upstream, so POST /v1/messages exercises the real
+    /// translate -> upstream -> translate pipeline.
+    fn bridged_config(upstream: &FakeResponses) -> BridgeConfig {
+        BridgeConfig::default().with_test_upstream_url(Some(upstream.base_url.clone()))
+    }
+
+    /// The smallest request the translator accepts.
+    const PROBE_BODY: &str =
+        r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
+    const PROBE_STREAM_BODY: &str =
+        r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
 
     fn status(response: &str) -> u16 {
         response
@@ -901,7 +1069,8 @@ mod tests {
 
     #[test]
     fn bearer_and_route_method_matrix_is_exact() {
-        let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
         let addr = bridge.socket_addr();
         let token = bridge.bearer_token().to_owned();
 
@@ -919,26 +1088,16 @@ mod tests {
 
         let non_stream = request(
             addr,
-            &authorized(
-                "POST",
-                "/v1/messages",
-                &token,
-                r#"{"model":"fixture","messages":[],"stream":false}"#,
-            ),
+            &authorized("POST", "/v1/messages", &token, PROBE_BODY),
         );
         assert_eq!(status(&non_stream), 200);
         assert!(non_stream.contains("application/json"));
         assert!(non_stream.contains("\"type\":\"message\""));
-        assert!(non_stream.contains("\"text\":\"clud bridge fixture\""));
+        assert!(non_stream.contains("\"text\":\"bridged reply\""));
 
         let stream = request(
             addr,
-            &authorized(
-                "POST",
-                "/v1/messages",
-                &token,
-                r#"{"model":"fixture","messages":[],"stream":true}"#,
-            ),
+            &authorized("POST", "/v1/messages", &token, PROBE_STREAM_BODY),
         );
         assert_eq!(status(&stream), 200);
         assert!(stream.contains("text/event-stream"));
@@ -1182,8 +1341,9 @@ mod tests {
     #[test]
     fn streamed_responses_are_chunked_and_flushed_frame_by_frame() {
         let frame_hold = Duration::from_millis(120);
+        let upstream = FakeResponses::start();
         let bridge =
-            BridgeHandle::start(BridgeConfig::default().with_frame_hold(frame_hold)).unwrap();
+            BridgeHandle::start(bridged_config(&upstream).with_frame_hold(frame_hold)).unwrap();
         let addr = bridge.socket_addr();
         let token = bridge.bearer_token().to_owned();
 
@@ -1192,15 +1352,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         stream
-            .write_all(
-                authorized(
-                    "POST",
-                    "/v1/messages",
-                    &token,
-                    r#"{"model":"fixture","messages":[],"stream":true}"#,
-                )
-                .as_bytes(),
-            )
+            .write_all(authorized("POST", "/v1/messages", &token, PROBE_STREAM_BODY).as_bytes())
             .unwrap();
 
         // Read incrementally and timestamp the first frame against completion.
@@ -1235,7 +1387,9 @@ mod tests {
         );
 
         let body = decode_chunked_body(&response);
-        assert_eq!(body, fixture_sse_frames().concat());
+        // Translated upstream content, not a canned fixture.
+        assert!(body.contains(r#""text":"bridged "#));
+        assert!(body.contains("event: content_block_stop"));
         assert!(body.starts_with("event: message_start\ndata:"));
         assert!(body.ends_with("\n\n"));
         assert!(body.contains("event: message_stop"));
@@ -1246,14 +1400,15 @@ mod tests {
         // Header budget is short; body budget is long. A client that sends its
         // headers promptly and its body slowly must succeed -- under the single
         // whole-connection deadline this replaced, it returned 408.
+        let upstream = FakeResponses::start();
         let bridge = BridgeHandle::start(BridgeConfig {
             header_timeout: Duration::from_millis(300),
             body_timeout: Duration::from_secs(5),
-            ..BridgeConfig::default()
+            ..bridged_config(&upstream)
         })
         .unwrap();
         let token = bridge.bearer_token().to_owned();
-        let body = r#"{"model":"fixture","messages":[],"stream":false}"#;
+        let body = PROBE_BODY;
 
         let mut stream = TcpStream::connect(bridge.socket_addr()).unwrap();
         stream
@@ -1290,7 +1445,7 @@ mod tests {
             200,
             "slow body must not be charged the header budget: {response}"
         );
-        assert!(response.contains("clud bridge fixture"));
+        assert!(response.contains("bridged reply"));
     }
 
     /// Regression guard: a body split across many segments must be reassembled.
@@ -1300,11 +1455,13 @@ mod tests {
     /// an image always span segments, so this is the shape that matters.
     #[test]
     fn bodies_split_across_segments_are_reassembled() {
-        let bridge = BridgeHandle::start(BridgeConfig::default()).unwrap();
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
         let token = bridge.bearer_token().to_owned();
         let filler = "x".repeat(4096);
-        let body =
-            format!(r#"{{"model":"fixture","messages":[],"stream":false,"note":"{filler}"}}"#);
+        let body = format!(
+            r#"{{"model":"claude-x","messages":[{{"role":"user","content":"hi"}}],"stream":false,"note":"{filler}"}}"#
+        );
 
         let mut stream = TcpStream::connect(bridge.socket_addr()).unwrap();
         stream
@@ -1334,49 +1491,39 @@ mod tests {
             200,
             "segmented body must not read as a timeout: {response}"
         );
-        assert!(response.contains("clud bridge fixture"));
+        assert!(response.contains("bridged reply"));
     }
 
     #[test]
-    fn gated_test_upstream_is_used_for_message_requests() {
-        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let worker = thread::spawn(move || {
-            let (mut stream, _) = upstream.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.ends_with(b"}") {
-                let count = stream.read(&mut chunk).unwrap();
-                assert_ne!(count, 0);
-                request.extend_from_slice(&chunk[..count]);
-            }
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\nConnection: close\r\n\r\n{\"test_upstream\":\"reached\"}",
-                )
-                .unwrap();
-            String::from_utf8(request).unwrap()
-        });
-        let bridge = BridgeHandle::start(
-            BridgeConfig::default().with_test_upstream_url(Some(format!("http://{upstream_addr}"))),
-        )
-        .unwrap();
+    fn the_debug_seam_speaks_the_responses_protocol_and_carries_no_downstream_secret() {
+        // Phase 2's seam passed the Anthropic body through unchanged, so the
+        // end-to-end tests proved transport and auth but nothing about
+        // translation. Assert on what the fake actually receives, so a
+        // translation regression fails here.
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
         let response = request(
             bridge.socket_addr(),
-            &authorized(
-                "POST",
-                "/v1/messages",
-                bridge.bearer_token(),
-                r#"{"stream":false}"#,
-            ),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
         );
         assert_eq!(status(&response), 200);
-        assert!(response.contains(r#"{"test_upstream":"reached"}"#));
-        let upstream_request = worker.join().unwrap();
-        assert!(upstream_request.starts_with("POST /v1/messages HTTP/1.1"));
-        assert!(!upstream_request.contains(bridge.bearer_token()));
+        assert!(response.contains(r#""text":"bridged reply""#));
+
+        let sent = upstream.requests().remove(0);
+        assert!(
+            sent.starts_with("POST /v1/responses HTTP/1.1"),
+            "the bridge must address the Responses endpoint: {sent}"
+        );
+        assert!(sent.contains("Authorization: Bearer clud-test-upstream-key"));
+        // Translated shape, not a passed-through Anthropic body.
+        let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
+        let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+        assert_eq!(json["model"], "gpt-5.6-sol");
+        assert_eq!(json["stream"], true, "upstream is always streamed");
+        assert_eq!(json["input"][0]["content"][0]["type"], "input_text");
+        assert!(json.get("messages").is_none(), "Anthropic shape leaked");
+
+        // The harness's own downstream bearer must never travel upstream.
+        assert!(!sent.contains(bridge.bearer_token()));
     }
 }

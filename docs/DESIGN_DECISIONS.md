@@ -1035,3 +1035,37 @@ blocking mode, which also keeps the retry loop from busy-spinning.
 
 Phase 3's translator replaces the fixture frames but inherits this framing
 contract: one vector element per complete SSE event, flushed as produced.
+
+## DD-029: The bridge always streams upstream, and status is chosen only before the first frame
+
+**Context:** zackees/clud#627 step 5 wired the translator, upstream client, and
+SSE state machine into the bridge's `POST /v1/messages` handler, replacing the
+phase-2 fixtures. Two shapes had to be served — Anthropic's streaming and
+non-streaming replies — and failures can occur either before or after output
+has started.
+
+**Decision:** Send `stream: true` upstream unconditionally. A non-streaming
+Messages request is answered by folding the translated Anthropic events back
+into one `Message` with `MessageAggregator`. The alternative, a second
+request/response mapping for the non-streaming shape, would double the surface
+that has to stay correct while reusing none of the fuzzing that step 3 spent on
+the streaming path.
+
+Downstream status is chosen only while nothing has been written.
+`EventStreamWriter` therefore defers its HTTP headers until the first frame:
+before that a failure is a real status (`400` malformed, `422` unrepresentable,
+`401` no credentials, upstream `4xx` passed through, `502`/`504` otherwise);
+after it the response is committed and a failure is reported in-band as a
+sanitized SSE `error` event, with the chunked body terminated cleanly. This is
+the same boundary the upstream retry policy uses, and for the same reason.
+
+**Consequences:** Aggregation is a pure function of the event stream, so the
+non-streaming path inherits every property the streaming path proves. The
+handler never has to decide whether it is "too late" to fail — it asks the
+writer. Upstream bodies are never propagated in either direction, since they
+carry account identifiers and key fragments.
+
+The debug seam now points at a Responses-shaped fake rather than phase 2's
+passthrough. That passthrough echoed the Anthropic body, so the end-to-end
+tests could pass while translation was entirely wrong; the integration tests
+now assert on the request the fake receives.
