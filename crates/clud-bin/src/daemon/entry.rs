@@ -1072,6 +1072,7 @@ mod tests {
             demo_gfx_sixel: false,
             model: None,
             safe: false,
+            unattended: false,
             dry_run: false,
             detach: false,
             detachable: false,

@@ -109,6 +109,22 @@ fn build_launch_plan_for_target_at(
         }
     }
 
+    // `clud loop` is unattended by definition; `--unattended` extends the same
+    // policy to any other launch. Strip the tools that park a run on a human.
+    // `--dangerously-skip-permissions` does not cover these; the model reaches
+    // for them on its own, most often at the top of a `/loop` iteration.
+    //
+    // Emitted as one `=`-bound, comma-separated token on purpose. `claude`
+    // declares `--disallowedTools <tools...>` as variadic, so the
+    // space-separated spelling eats whatever argv token follows it — including
+    // a later `-p <prompt>`, which makes claude exit 0 with no output and no
+    // diagnostic. A single token cannot swallow anything, so this stays correct
+    // wherever it lands relative to the prompt and to unknown-flag passthrough.
+    let is_unattended = args.unattended || matches!(args.command, Some(Command::Loop { .. }));
+    if is_unattended && matches!(backend, Backend::Claude) {
+        cmd.push("--disallowedTools=EnterPlanMode,AskUserQuestion".to_string());
+    }
+
     if let Some(ref model) = args.model {
         match backend {
             Backend::Claude => {

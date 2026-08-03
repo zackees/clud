@@ -59,6 +59,16 @@ pub struct Args {
     #[arg(long = "safe")]
     pub safe: bool,
 
+    /// Strip the harness tools that stall an unattended run waiting on a
+    /// human: plan mode and multiple-choice questions. `--dangerously-skip-
+    /// permissions` does not cover these — the model volunteers them on its
+    /// own, most visibly at the top of each `/loop` iteration, and the run
+    /// then sits idle until someone approves the plan.
+    ///
+    /// Claude harness only; Codex has no equivalent tool surface.
+    #[arg(long = "unattended")]
+    pub unattended: bool,
+
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
@@ -752,6 +762,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--subprocess",
         "--pty",
         "--safe",
+        "--unattended",
         "--dry-run",
         "--detach",
         "--detachable",
