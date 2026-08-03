@@ -201,6 +201,32 @@ meant the end-to-end tests proved transport and auth but nothing about
 translation; the integration tests now assert on the request the fake actually
 receives, so a translation regression fails there.
 
+## Resource bounds
+
+The fixture-era defaults were replaced in #627 step 6, each with a stated
+reason rather than a guess:
+
+- **Body cap: 32 MiB** (was 1 MiB). The governing principle is that *the bridge
+  must not be stricter than the endpoint it impersonates* — Claude Code sizes
+  its requests against the real Anthropic API, so a lower cap turns a
+  legitimate request into a bridge-only `413` that reads as a client bug. A
+  single base64 screenshot already exceeds 1 MiB before any text is counted;
+  `a_representative_request_fits_the_body_cap` builds a request from the parts
+  a real turn always carries and asserts it clears the old cap and fits the new
+  one.
+- **Concurrency: 16** (was 4), and exceeding it now **queues** instead of
+  failing. Claude Code issues several requests at once — the foreground turn
+  plus background side-model calls and any subagents. While every slot is busy
+  the accept loop simply declines to accept, so pending connections wait in the
+  kernel's listen backlog; a short wait is invisible, whereas a `503` reaches
+  the user as a hard API error. `admission_wait` (10 s) bounds that wait: past
+  it the bridge accepts and answers `503` anyway, so a wedged worker cannot
+  hang a client forever.
+
+The representative request is *constructed*, not captured production traffic.
+That distinction is deliberate and is stated in the test: it is evidence about
+the shape and scale of a real turn, not a measurement of one.
+
 ## Persistence
 
 Global launch preferences use the existing settings document and `fs4` lock:
