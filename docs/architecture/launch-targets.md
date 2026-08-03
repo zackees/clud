@@ -155,9 +155,43 @@ step-1 streaming writer is what makes it absolute: once a single SSE frame has
 been flushed, the `200` and its headers are already on the wire, so there is no
 status left to change and a replay would duplicate content the user has already
 seen. The client tracks whether the sink has accepted anything and refuses to
-retry once it has, however retryable the failure looks. Retries otherwise cover
-transport failures and `408`/`429`/`5xx`, bounded by `max_attempts` with linear
-backoff.
+retry once it has, however retryable the failure looks. That rule is unchanged
+by everything below: classification only ever widens the *pre-commit* window.
+
+### Failure classification (#764)
+
+A status alone is not enough to decide whether retrying can help. Upstream
+returns permanent rejections wearing a 5xx costume — a model that needs a newer
+client, an unsupported parameter — and retrying those can never succeed, while
+burning quota and, with enough concurrency, tipping a healthy account into
+cooldown.
+
+So the error response is **read rather than discarded**. `capture_failure`
+takes a bounded 8 KiB prefix of the body plus `cf-ray`, `x-request-id` and
+`Retry-After`, reduces them to an `UpstreamFailure`, and drops the raw bytes.
+Nothing downstream ever sees the body; the scrubbed one-line `detail` exists
+for the operator log only, and `scrub` redacts token-shaped runs before it is
+even retained.
+
+`FailureClass` then drives the budget:
+
+| Class | Recognised by | Attempts |
+| --- | --- | --- |
+| `Permanent` | a permanent body signature, or a passed-through 4xx | 1 |
+| `Transient` | transport, `408`/`429`, or a 5xx body that reads like an outage | `max_attempts` |
+| `Unknown` | any other 5xx | `unknown_max_attempts` |
+
+`Unknown` is deliberately not folded into `Transient`. Treating every
+unrecognised 5xx as fully retryable is what produces the cascade documented in
+CLIProxyAPI#4327, and treating it as permanent would break on a legitimately
+new transient code; a reduced budget is the safe middle.
+
+Backoff is exponential with **jitter** over the lower half of each window, so
+clients that fail together do not retry in lockstep, capped per-sleep by
+`max_retry_delay` and in total by `max_retry_elapsed`. A `Retry-After` hint
+wins over the computed delay but is clamped by the same ceiling, so a generous
+server hint cannot pin a turn open. A `usage_limit_reached` body's
+`resets_in_seconds` is parsed and surfaced in the client message.
 
 Timeouts follow the same split as the bridge's own: connect, an *idle* read
 timeout (a model may think for minutes before its first token), and an overall
@@ -186,13 +220,31 @@ Upstream is **always** streamed, even for a non-streaming Messages request:
 instead of introducing a second, separately-wrong mapping.
 
 Status selection follows the same committed/uncommitted boundary as the retry
-policy. Before any frame is written, a failure picks a status —
-`400` for a malformed request, `422` for one naming something the bridge
-refuses to approximate, `401` for missing credentials, a passed-through `4xx`
-or `502` for upstream, `504` on timeout. Once `EventStreamWriter` has flushed a
-frame the response is committed, so a later failure is reported in-band as a
-sanitized SSE `error` event and the chunked body is simply terminated. That is
-why the writer defers its headers until the first frame.
+policy. Before any frame is written, a failure picks a status:
+
+| Failure | Status |
+| --- | --- |
+| malformed request | `400` |
+| missing credentials, or an expired Codex login | `401` |
+| upstream `400`/`401`/`403`/`404`/`413`/`422`/`429` | passed through |
+| any other upstream status, or a transport failure | `502` |
+| overall deadline elapsed | `504` |
+| response over the byte budget | `413` |
+| cancelled, or the downstream client hung up | `499` |
+
+`502` is reserved for failures that really are gateway failures (#764). It used
+to be the catch-all for five unrelated cases, which made an edge blip, a TLS
+reset, an oversized response and a genuine outage indistinguishable in a log.
+
+`client_message` carries the status, an opaque `x-request-id` when upstream
+supplied one, and a rate-limit reset hint when the body had one — never the
+body itself. The richer `upstream_diagnostic()` (class, `cf-ray`, scrubbed
+detail) is printed only under `CLUD_CODEX_BRIDGE_DEBUG=1`.
+
+Once `EventStreamWriter` has flushed a frame the response is committed, so a
+later failure is reported in-band as a sanitized SSE `error` event and the
+chunked body is simply terminated. That is why the writer defers its headers
+until the first frame.
 
 The debug seam (`CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL`, still gated on a debug
 build *and* `CLUD_INTEGRATION_TESTS=1`) now points at a **Responses-shaped**

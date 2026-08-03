@@ -18,7 +18,14 @@ use crate::codex_sse::{FrameDecoder, StreamTranslator};
 use crate::codex_translate::{
     translate_bytes, SystemPlacement, TranslateError, TranslateOptions, DEFAULT_CODEX_MODEL,
 };
-use crate::codex_upstream::{CredentialSource, UpstreamClient, UpstreamError};
+use crate::codex_upstream::{
+    CredentialSource, UpstreamClient, UpstreamError, UpstreamFailure, CREDENTIALS_EXPIRED,
+};
+
+/// "Client Closed Request". Not in the RFC status registry, but the
+/// conventional code for it and unambiguous in a log — and by the time it is
+/// chosen there is normally no reader left to receive it anyway.
+const CLIENT_CLOSED_REQUEST: u16 = 499;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
@@ -49,12 +56,30 @@ impl PipelineError {
             // left is a request that is not a valid Messages request at all.
             Self::Translate(TranslateError::Invalid(_)) => 400,
             Self::Upstream(UpstreamError::Credentials(_)) => 401,
-            Self::Upstream(UpstreamError::Status(status)) => match status {
-                400 | 401 | 403 | 404 | 413 | 422 | 429 => *status,
+            Self::Upstream(UpstreamError::Status(failure)) => match failure.status() {
+                400 | 401 | 403 | 404 | 413 | 422 | 429 => failure.status(),
                 _ => 502,
             },
             Self::Upstream(UpstreamError::Timeout) => 504,
-            Self::Upstream(_) => 502,
+            // 502 means "the gateway hop failed", so only the failures that
+            // really are gateway failures keep it (#764). The three below are
+            // not: an oversized response is a payload problem, and a cancelled
+            // or hung-up request has no reader left to serve.
+            Self::Upstream(UpstreamError::TooLarge) => 413,
+            Self::Upstream(UpstreamError::Cancelled) => CLIENT_CLOSED_REQUEST,
+            Self::Upstream(UpstreamError::Downstream(_)) => CLIENT_CLOSED_REQUEST,
+            Self::Upstream(UpstreamError::Transport(_)) => 502,
+        }
+    }
+
+    /// The classified upstream summary, for the operator log only.
+    ///
+    /// Never reaches the client: [`Self::client_message`] is what the harness
+    /// sees, and it deliberately carries less.
+    pub fn upstream_diagnostic(&self) -> Option<String> {
+        match self {
+            Self::Upstream(error) => error.failure().map(UpstreamFailure::diagnostic),
+            Self::Translate(_) => None,
         }
     }
 
@@ -66,14 +91,38 @@ impl PipelineError {
             // feature, so they are worth surfacing -- that is the difference
             // between "the bridge refused top_k" and an opaque 422.
             Self::Translate(error) => error.to_string(),
+            // An expired login is the one credential failure with an action
+            // attached, so it is worth forwarding verbatim. Every other reason
+            // names an environment variable and stays behind the generic text.
+            Self::Upstream(UpstreamError::Credentials(what)) if *what == CREDENTIALS_EXPIRED => {
+                CREDENTIALS_EXPIRED.to_string()
+            }
             Self::Upstream(UpstreamError::Credentials(_)) => {
                 "the Codex bridge has no upstream credentials".to_string()
             }
             Self::Upstream(UpstreamError::Timeout) => "upstream request timed out".to_string(),
-            Self::Upstream(UpstreamError::Status(status)) => {
-                format!("upstream provider returned status {status}")
+            // Only the request id crosses over. It is an opaque correlation
+            // handle, and it is the difference between a bug report that can be
+            // traced upstream and one that cannot. The body never travels: it
+            // can carry account identifiers and key fragments.
+            Self::Upstream(UpstreamError::Status(failure)) => {
+                let mut message = format!("upstream provider returned status {}", failure.status());
+                if let Some(resets) = failure.resets_in() {
+                    message.push_str(&format!("; rate limit resets in {}s", resets.as_secs()));
+                }
+                if let Some(id) = failure.request_id() {
+                    message.push_str(&format!(" (request-id {id})"));
+                }
+                message
             }
-            Self::Upstream(_) => "upstream provider error".to_string(),
+            Self::Upstream(UpstreamError::Transport(_)) => "upstream unreachable".to_string(),
+            Self::Upstream(UpstreamError::TooLarge) => {
+                "upstream response exceeded the size budget".to_string()
+            }
+            Self::Upstream(UpstreamError::Cancelled) => "request cancelled".to_string(),
+            Self::Upstream(UpstreamError::Downstream(_)) => {
+                "downstream client disconnected".to_string()
+            }
         }
     }
 }
@@ -730,6 +779,83 @@ mod tests {
         let rendered = format!("{} {:?}", error.client_message(), error);
         assert!(!rendered.contains("sk-secret"));
         assert!(!rendered.contains("org_1"));
+        // The diagnostic is richer than the client message, and is still clean:
+        // it is the only place the body is allowed to have left a trace.
+        let diagnostic = error.upstream_diagnostic().expect("a status diagnostic");
+        assert!(diagnostic.contains("status=403"), "{diagnostic}");
+        assert!(!diagnostic.contains("sk-secret"), "{diagnostic}");
+        assert!(!diagnostic.contains("org_1"), "{diagnostic}");
+    }
+
+    /// 502 means "the gateway hop failed". Failures that are not that must not
+    /// borrow it, or every one of them becomes indistinguishable in a log.
+    #[test]
+    fn non_gateway_failures_no_longer_report_502() {
+        let cases = [
+            (UpstreamError::TooLarge, 413_u16),
+            (UpstreamError::Cancelled, 499),
+            (UpstreamError::Downstream("client hung up"), 499),
+            (UpstreamError::Timeout, 504),
+            // These two genuinely are gateway failures and keep 502.
+            (UpstreamError::Transport("connection failed"), 502),
+        ];
+        for (error, expected) in cases {
+            let rendered = PipelineError::Upstream(error.clone());
+            assert_eq!(rendered.http_status(), expected, "{error:?}");
+            assert_ne!(
+                rendered.client_message(),
+                "upstream provider error",
+                "{error:?} still reports the old catch-all message"
+            );
+        }
+    }
+
+    /// An unmapped upstream 5xx is still a 502 — that part was always right.
+    #[test]
+    fn an_unmapped_upstream_status_is_still_a_502() {
+        let failure = UpstreamFailure::from_parts(503, |_| None, "overloaded", Duration::ZERO);
+        let error = PipelineError::Upstream(UpstreamError::Status(failure));
+        assert_eq!(error.http_status(), 502);
+    }
+
+    #[test]
+    fn a_rate_limit_reset_hint_reaches_the_client_message() {
+        let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":3600}}"#;
+        let failure = UpstreamFailure::from_parts(429, |_| None, body, Duration::ZERO);
+        let error = PipelineError::Upstream(UpstreamError::Status(failure));
+        assert_eq!(error.http_status(), 429);
+        let message = error.client_message();
+        assert!(message.contains("resets in 3600s"), "{message}");
+    }
+
+    /// The request id is an opaque correlation handle, and it is the difference
+    /// between a report that can be traced upstream and one that cannot.
+    #[test]
+    fn the_request_id_reaches_the_client_message_but_the_body_does_not() {
+        let body = r#"{"error":{"message":"key sk-secret for org org_1"}}"#;
+        let failure = UpstreamFailure::from_parts(
+            502,
+            |name| (name == "x-request-id").then(|| "req_xyz".to_string()),
+            body,
+            Duration::ZERO,
+        );
+        let error = PipelineError::Upstream(UpstreamError::Status(failure));
+        let message = error.client_message();
+        assert!(message.contains("req_xyz"), "{message}");
+        assert!(!message.contains("sk-secret"), "{message}");
+        assert!(!message.contains("org_1"), "{message}");
+    }
+
+    #[test]
+    fn an_expired_login_is_the_one_credential_reason_forwarded_verbatim() {
+        let expired = PipelineError::Upstream(UpstreamError::Credentials(CREDENTIALS_EXPIRED));
+        assert_eq!(expired.http_status(), 401);
+        assert!(expired.client_message().contains("codex login"));
+
+        // Every other reason stays generic: they name environment variables.
+        let missing =
+            PipelineError::Upstream(UpstreamError::Credentials("OPENAI_API_KEY is not set"));
+        assert!(!missing.client_message().contains("OPENAI_API_KEY"));
     }
 
     /// A mid-stream failure cannot change the status, so the turn is closed

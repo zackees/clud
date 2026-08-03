@@ -1193,3 +1193,67 @@ environment of a login shell with and without it set shows only `PS1` losing its
 `` `__git_ps1` `` segment, which is meaningless in a non-interactive tool-call
 shell. PATH, every other exported variable, aliases and `git` itself are
 identical.
+
+## DD-032: The bridge classifies an upstream failure before deciding to retry it
+
+**Decision:** `UpstreamClient` reads the error response — a bounded body prefix
+plus `cf-ray`, `x-request-id` and `Retry-After` — reduces it to a classified
+`UpstreamFailure`, and lets that class pick the retry budget. `502` is no longer
+the catch-all downstream status for every non-gateway failure.
+
+**Context:** The previous code discarded the response entirely
+(`Err(ureq::Error::Status(status, _))`), keeping only the integer, and mapped
+five unrelated failures — a real upstream 5xx, a transport reset, an oversized
+response, a cancelled request, a downstream hangup — onto a single `502` whose
+client message was the generic `"upstream provider error"`. An operator seeing a
+502 could not tell a Cloudflare edge blip from a hard rejection from a bug in
+clud itself, and neither could the retry loop.
+
+That mattered because retrying is not always safe. Upstream returns *permanent*
+rejections wearing a 5xx costume: a model that requires a newer client, an
+unsupported parameter. Retrying those can never succeed, and CLIProxyAPI#4327
+documents where it ends — one request fanning out to N upstream attempts, a
+burst from a single exit IP tripping a Cloudflare 520, and healthy credentials
+driven into cooldown. The old policy retried every `>= 500` identically, and its
+total retry window was ~0.75s, which is simultaneously too eager for the
+permanent class and far too short for the transient one.
+
+**Alternatives rejected:**
+
+- *Just raise `max_attempts`.* This is the change that produces the cascade
+  above. Widening retry is only safe once the permanent class can be excluded,
+  which is why classification is the load-bearing half and the budget increase
+  rides behind it.
+- *Retain the raw body on the error.* Rejected: upstream bodies can carry
+  account identifiers and key fragments, and #630 makes not propagating them a
+  hard rule. The body is read, classified, mined for a scrubbed one-line
+  `detail`, and dropped. Only the class, the opaque ids and that scrubbed detail
+  survive, and only the ids reach the client.
+- *Fold `Unknown` into `Transient`.* Rejected for the same cascade reason.
+  Folding it into `Permanent` was also rejected: it would break the first time
+  upstream introduces a legitimately new transient code. A reduced budget is the
+  safe middle, and it is the case that stays quiet when we guess wrong.
+- *Classify on status alone.* Insufficient by construction — the whole problem
+  is that the same status carries both classes. sub2api#4020 is the worked
+  example: `gpt-5.6-sol` refused with a version-gate message inside a `502`.
+
+**Consequences:** Classification is substring matching over a lowercased body,
+so it is heuristic and will mis-file novel messages. The blast radius of a wrong
+guess is bounded on purpose: a mis-filed permanent failure costs one extra
+attempt (the `Unknown` budget), and a mis-filed transient one fails a request
+that would likely have failed anyway. The signature lists are the thing to
+extend when a new shape shows up, not the control flow.
+
+The no-replay-after-first-byte invariant (DD-029) is untouched and still tested;
+every change here is confined to the pre-commit window, which is the only place
+a `502` could ever have been chosen.
+
+`499` is not an RFC status. It is the conventional code for "client closed
+request" and unambiguous in a log, and by the time it is selected there is
+normally no reader left to receive it.
+
+The expired-login guardrail reads a JWT `exp` claim **without verifying the
+signature** — clud has no key, and verification is the issuer's job. It exists
+only to avoid starting a turn on a token that is already dead, so a bearer that
+is not a JWT, or carries no `exp`, is deliberately treated as live: opaque
+tokens are legitimate. Actual refresh remains #629's scope.

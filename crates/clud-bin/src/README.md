@@ -66,10 +66,17 @@ Entry and orchestration:
   `POST /v1/responses` client with connect/read/overall timeouts, bounded
   buffering, cancellation, and a retry policy that stops the moment any byte
   reaches the sink. Builds every outbound header itself, so no downstream
-  header can leak upstream.
+  header can leak upstream. #764 added `UpstreamFailure`/`FailureClass`: the
+  error response is read (bounded body prefix, `cf-ray`, `x-request-id`,
+  `Retry-After`), classified permanent/transient/unknown, and dropped — the
+  class picks the retry budget, and backoff is exponential with jitter. See
+  [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md)
+  and DD-032.
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
   one call, plus `MessageAggregator` so a non-streaming request reuses the
-  streaming state machine. Owns the downstream status policy.
+  streaming state machine. Owns the downstream status policy — since #764,
+  `502` means only a genuine gateway failure, and `TooLarge`/`Cancelled`/
+  `Downstream` map to `413`/`499`/`499` instead of borrowing it.
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every
