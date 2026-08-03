@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clud::shell::completion_guard::{env_overrides_for, SUPPRESS_KEY};
+use clud::win_creation_flags::invisible_helper_creationflags;
 use running_process::{
     CommandSpec, NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode,
 };
@@ -76,7 +77,9 @@ fn login_shell_output(bash: &PathBuf, script: &str, extra_env: &[(String, String
         env: Some(env),
         capture: true,
         stderr_mode: StderrMode::Stdout,
-        creationflags: 0,
+        // Piped helper — nobody interacts with this child's console, so
+        // suppress the conhost popup (issue #55 pattern).
+        creationflags: invisible_helper_creationflags(),
         create_process_group: false,
         stdin_mode: StdinMode::Null,
         nice: None,
