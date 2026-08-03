@@ -616,6 +616,15 @@ fn main() {
         eprintln!("{notice}");
     }
 
+    if let Some(notice) = command::plan_mode_suppression_notice(
+        &args,
+        launch_target,
+        io::stderr().is_terminal(),
+        false,
+    ) {
+        eprintln!("{notice}");
+    }
+
     // Issue #79 / #65 / #66: register `clud` as the IDropTarget for
     // the console window so dropped files reach the backend. Held for
     // the lifetime of the launch; dropped on graceful exit so the

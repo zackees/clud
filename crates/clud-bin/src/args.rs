@@ -69,6 +69,20 @@ pub struct Args {
     #[arg(long = "unattended")]
     pub unattended: bool,
 
+    /// Restore the model's ability to enter plan mode on the Codex-provider /
+    /// Claude-harness bridge, where clud otherwise disallows `EnterPlanMode`
+    /// unconditionally.
+    ///
+    /// The bridge suppresses it because the harness hands the model an
+    /// `EnterPlanMode` tool whose own description tells it to reach for plan
+    /// mode proactively on any non-trivial implementation ask — so a plain
+    /// question turns into an unrequested planning session. Suppression is not
+    /// tied to `--unattended` here: it applies to interactive bridge runs too.
+    ///
+    /// `AskUserQuestion` is deliberately left alone; only plan mode is stripped.
+    #[arg(long = "allow-plan-mode")]
+    pub allow_plan_mode: bool,
+
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 
@@ -763,6 +777,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--pty",
         "--safe",
         "--unattended",
+        "--allow-plan-mode",
         "--dry-run",
         "--detach",
         "--detachable",

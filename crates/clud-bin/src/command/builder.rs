@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::args::{Args, Command};
 use crate::backend::{
-    Backend, HarnessSelection, LaunchMode, PreferenceSource, ResolvedLaunchTarget,
+    Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource, ResolvedLaunchTarget,
 };
 use crate::graphics::GraphicsConfig;
 use crate::loop_spec::{done_marker_contract, git_root_from};
@@ -27,6 +27,46 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
                 | Some(Command::Rebase)
                 | Some(Command::Fix { .. })
         )
+}
+
+/// True when this launch is the Codex-provider / Claude-harness bridge and the
+/// user has not opted back in with `--allow-plan-mode`.
+///
+/// On that bridge the model is a Codex model driving the Claude harness, and
+/// the harness offers it an `EnterPlanMode` tool whose description instructs it
+/// to reach for plan mode *proactively* on any non-trivial implementation ask.
+/// The result is unrequested planning sessions in the middle of ordinary
+/// questions, so plan mode is stripped here regardless of `--unattended` — the
+/// interactive case is precisely where it was biting.
+///
+/// Deliberately narrow: a plain `clud` (Claude provider, Claude harness) keeps
+/// plan mode, and `AskUserQuestion` is never touched by this rule.
+pub fn bridge_suppresses_plan_mode(args: &Args, target: ResolvedLaunchTarget) -> bool {
+    !args.allow_plan_mode
+        && matches!(target.model_provider, ModelProvider::Codex)
+        && matches!(target.effective_harness, Backend::Claude)
+}
+
+/// Green, stderr, TTY-only notice announcing the [`bridge_suppresses_plan_mode`]
+/// suppression and how to undo it. Mirrors
+/// [`crate::backend::saved_harness_override_notice`]: suppressed when stderr is
+/// not a terminal or the caller wants structured output, so machine-readable
+/// stderr stays clean.
+pub fn plan_mode_suppression_notice(
+    args: &Args,
+    target: ResolvedLaunchTarget,
+    stderr_is_terminal: bool,
+    structured_output: bool,
+) -> Option<String> {
+    if structured_output || !stderr_is_terminal || !bridge_suppresses_plan_mode(args, target) {
+        return None;
+    }
+    Some(
+        "\x1b[32m[clud] Plan mode disabled on the Codex->Claude bridge \
+         (the model can otherwise enter it unprompted). \
+         Override with --allow-plan-mode\x1b[0m"
+            .to_string(),
+    )
 }
 
 pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
@@ -109,10 +149,16 @@ fn build_launch_plan_for_target_at(
         }
     }
 
-    // `clud loop` is unattended by definition; `--unattended` extends the same
-    // policy to any other launch. Strip the tools that park a run on a human.
-    // `--dangerously-skip-permissions` does not cover these; the model reaches
-    // for them on its own, most often at the top of a `/loop` iteration.
+    // Two independent rules feed one `--disallowedTools` token:
+    //
+    // 1. `clud loop` is unattended by definition; `--unattended` extends the
+    //    same policy to any other launch. Strip both tools that park a run on
+    //    a human. `--dangerously-skip-permissions` does not cover these; the
+    //    model reaches for them on its own, most often at the top of a `/loop`
+    //    iteration.
+    // 2. The Codex->Claude bridge strips plan mode *always*, attended or not —
+    //    see `bridge_suppresses_plan_mode` and DD-033. `AskUserQuestion`
+    //    survives that rule, so the token is composed rather than fixed.
     //
     // Emitted as one `=`-bound, comma-separated token on purpose. `claude`
     // declares `--disallowedTools <tools...>` as variadic, so the
@@ -121,8 +167,19 @@ fn build_launch_plan_for_target_at(
     // diagnostic. A single token cannot swallow anything, so this stays correct
     // wherever it lands relative to the prompt and to unknown-flag passthrough.
     let is_unattended = args.unattended || matches!(args.command, Some(Command::Loop { .. }));
-    if is_unattended && matches!(backend, Backend::Claude) {
-        cmd.push("--disallowedTools=EnterPlanMode,AskUserQuestion".to_string());
+    let mut disallowed: Vec<&str> = Vec::new();
+    if matches!(backend, Backend::Claude) {
+        // Order matters only for stability of the emitted token, which the
+        // tests assert on literally.
+        if is_unattended || bridge_suppresses_plan_mode(args, target) {
+            disallowed.push("EnterPlanMode");
+        }
+        if is_unattended {
+            disallowed.push("AskUserQuestion");
+        }
+    }
+    if !disallowed.is_empty() {
+        cmd.push(format!("--disallowedTools={}", disallowed.join(",")));
     }
 
     if let Some(ref model) = args.model {

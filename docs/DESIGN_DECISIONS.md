@@ -1257,3 +1257,59 @@ signature** — clud has no key, and verification is the issuer's job. It exists
 only to avoid starting a turn on a token that is already dead, so a bearer that
 is not a JWT, or carries no `exp`, is deliberately treated as live: opaque
 tokens are legitimate. Actual refresh remains #629's scope.
+---
+
+## DD-033: Plan mode is disabled unconditionally on the Codex-to-Claude bridge
+
+**Status:** Accepted
+
+**Context:** On `clud --codex --harness claude`, users reported the agent
+entering plan mode with no prompting — an ordinary question ("can we always
+enable that debug log?") turning into an unrequested planning session with
+three exploration subagents.
+
+This is not a clud defect and not a bridge translation bug. Plan mode has two
+entry paths in the Claude harness: the user toggles it (shift+tab), or **the
+model enters it itself** by calling the harness-provided `EnterPlanMode` tool.
+That tool's own description instructs the model to use it *proactively* for
+non-trivial implementation asks, listing new features, multiple valid
+approaches, architectural decisions, multi-file changes and unclear
+requirements as triggers. A feature-shaped question hits several at once, so
+the model volunteers a plan. `--dangerously-skip-permissions` does not cover
+this; only `--disallowedTools` removes the tool.
+
+clud already stripped `EnterPlanMode,AskUserQuestion`, but only when
+`is_unattended` (a `clud loop`, or explicit `--unattended`). The reported
+sessions were **interactive**, so the flag was never emitted.
+
+**Decision:** Disallow `EnterPlanMode` on every launch where the model provider
+is Codex and the effective harness is Claude, independent of `--unattended`.
+`--allow-plan-mode` opts back out. When the suppression applies, clud prints a
+green, stderr, TTY-only notice naming the override, so the behavior is never
+silent.
+
+**Alternatives rejected:**
+
+- **Extend the rule to all Claude-harness launches.** Simplest diff — delete
+  `is_unattended &&`. Rejected: on a plain `clud`, plan mode is a feature users
+  deliberately reach for, and a global kill would take shift+tab away from
+  people who never asked. The complaint is specific to the bridge, where a
+  Codex model is driving Claude-harness tooling it was not tuned against.
+- **Suppress `AskUserQuestion` too, matching the unattended token.** Rejected:
+  multiple-choice questions are useful interactively and were not part of the
+  complaint. The unattended rule keeps stripping both, because a run with no
+  human attached stalls on either one; the bridge rule is narrower on purpose.
+- **A silent suppression.** Rejected: removing a harness capability without
+  saying so produces the mirror-image confusion — "why can I not plan?" The
+  notice costs one line and carries the override.
+
+**Consequences:** The two rules now compose into one `--disallowedTools` token
+rather than a fixed string, and `--allow-plan-mode` deliberately does **not**
+re-enable plan mode for `--unattended` / `clud loop` runs on the bridge; the
+older stall-avoidance reason still applies there and is asserted by
+`test_allow_plan_mode_does_not_re_enable_it_for_unattended_runs`.
+
+The token stays `=`-bound and comma-separated for the reason in DD-002's
+neighborhood and `builder.rs`: `claude` declares `--disallowedTools` as
+variadic, so a space-separated spelling swallows a following `-p <prompt>` and
+claude exits 0 with no output and no diagnostic.

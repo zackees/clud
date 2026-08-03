@@ -1,6 +1,6 @@
 use super::builder::{
     build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, next_run_at_millis,
-    parse_repeat_interval, repeat_implies_no_done_warning,
+    parse_repeat_interval, plan_mode_suppression_notice, repeat_implies_no_done_warning,
 };
 use super::prompts::{build_fix_prompt, build_up_prompt, is_github_url, FIX_PROMPT};
 use super::types::LaunchPlan;
@@ -111,6 +111,101 @@ fn test_loop_under_codex_provider_claude_harness_disallows_interactive_tools() {
         .command
         .iter()
         .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+}
+
+/// `clud --codex --harness claude`, interactive, no `--unattended`.
+fn bridge_target() -> ResolvedLaunchTarget {
+    ResolvedLaunchTarget {
+        model_provider: ModelProvider::Codex,
+        requested_harness: HarnessSelection::Claude,
+        effective_harness: Backend::Claude,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    }
+}
+
+#[test]
+fn test_bridge_disallows_plan_mode_even_when_interactive() {
+    // The reported bug: an ordinary interactive question on this bridge turned
+    // into an unprompted planning session. Suppression must not be gated on
+    // `--unattended`.
+    let args = parse(&["clud"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(p
+        .command
+        .iter()
+        .any(|a| a == "--disallowedTools=EnterPlanMode"));
+}
+
+#[test]
+fn test_bridge_leaves_ask_user_question_alone() {
+    // Only plan mode is the complaint; multiple-choice questions stay usable
+    // in an interactive session.
+    let args = parse(&["clud"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(!p.command.iter().any(|a| a.contains("AskUserQuestion")));
+}
+
+#[test]
+fn test_allow_plan_mode_restores_plan_mode_on_the_bridge() {
+    let args = parse(&["clud", "--allow-plan-mode"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
+    // And the flag itself must not leak to the backend as passthrough.
+    assert!(!p.command.iter().any(|a| a == "--allow-plan-mode"));
+}
+
+#[test]
+fn test_allow_plan_mode_does_not_re_enable_it_for_unattended_runs() {
+    // `--unattended` has its own, older reason to strip plan mode (a loop that
+    // parks on a human never finishes). Opting into plan mode must not defeat
+    // that; the bridge rule is the only thing `--allow-plan-mode` turns off.
+    let args = parse(&["clud", "--allow-plan-mode", "--unattended", "-p", "hi"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(p
+        .command
+        .iter()
+        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+}
+
+#[test]
+fn test_plain_claude_keeps_plan_mode_interactively() {
+    // Narrow rule: only the Codex->Claude bridge is affected.
+    let p = plan(&["clud"]);
+    assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
+}
+
+#[test]
+fn test_plain_codex_harness_keeps_getting_no_claude_only_flag() {
+    // Codex harness has no EnterPlanMode surface and rejects the flag.
+    let p = plan(&["clud", "--codex"]);
+    assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
+}
+
+#[test]
+fn test_plan_mode_suppression_notice_is_green_and_tty_only() {
+    let args = parse(&["clud"]);
+    let notice = plan_mode_suppression_notice(&args, bridge_target(), true, false).unwrap();
+    assert!(notice.starts_with("\x1b[32m"));
+    assert!(notice.ends_with("\x1b[0m"));
+    assert!(notice.contains("--allow-plan-mode"));
+
+    // Not a terminal, or structured output wanted: stay silent.
+    assert_eq!(
+        plan_mode_suppression_notice(&args, bridge_target(), false, false),
+        None
+    );
+    assert_eq!(
+        plan_mode_suppression_notice(&args, bridge_target(), true, true),
+        None
+    );
+
+    // Nothing suppressed => nothing announced.
+    let allowed = parse(&["clud", "--allow-plan-mode"]);
+    assert_eq!(
+        plan_mode_suppression_notice(&allowed, bridge_target(), true, false),
+        None
+    );
 }
 
 #[test]
