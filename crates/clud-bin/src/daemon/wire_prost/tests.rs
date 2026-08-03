@@ -26,6 +26,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             task_summary: Some("wire test".to_string()),
             loop_markers: None,
             stream_json_progress: false,
+            codex_model: None,
         },
         kind: SessionKind::Subprocess,
         name: Some("sample".to_string()),

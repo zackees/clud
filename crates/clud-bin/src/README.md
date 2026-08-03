@@ -56,6 +56,13 @@ Entry and orchestration:
   routes, and joined shutdown. Per-phase header/body deadlines and a per-frame
   idle timeout, with chunked progressive SSE via `write_event_stream` (#627
   step 1, DD-028).
+- `codex_model.rs` - #752's model + reasoning-effort selection: the gpt-5.6
+  alias table (`sol`/`terra`/`luna` -> wire ids, each with its own catalog
+  default effort), the `<model>@<effort>` parser, and the `Effort` ladder
+  restricted to what the family accepts (no `minimal`, no `ultra`). Selection
+  rides the model string because that is the one field a custom
+  `ANTHROPIC_BASE_URL` gateway is allowed to own, so it cannot be dropped in
+  transit the way `output_config` can (DD-035).
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
   mapping: typed in/out structs, transcript-order-preserving tool loops,
   auth-mode-dependent system placement, reasoning round-trip, and bounded

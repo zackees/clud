@@ -2,6 +2,7 @@
 
 use crate::backend::{Backend, ModelProvider};
 use crate::codex_bridge::{BridgeConfig, BridgeError, BridgeHandle};
+use crate::codex_model::ModelSpec;
 use crate::command::LaunchPlan;
 use crate::subprocess::ManagedSubprocess;
 use running_process::pty::NativePtyProcess;
@@ -42,8 +43,19 @@ pub struct ForegroundRuntime {
 impl ForegroundRuntime {
     pub fn start(plan: &LaunchPlan, mut env: Vec<(String, String)>) -> Result<Self, BridgeError> {
         let bridge = if is_codex_via_claude(plan) {
-            let bridge = BridgeHandle::start(BridgeConfig::default())?;
-            apply_cross_route_overlay(&mut env, &bridge);
+            // A selection that does not parse fails the launch rather than
+            // the first turn: by the time a request is in flight the user has
+            // already waited, and the message would arrive wrapped in the
+            // harness's own API-error framing.
+            let selection = match plan.codex_model.as_deref() {
+                Some(raw) => Some(
+                    ModelSpec::parse(raw).map_err(|error| BridgeError::Model(error.to_string()))?,
+                ),
+                None => None,
+            };
+            let bridge =
+                BridgeHandle::start(BridgeConfig::default().with_default_model(selection.clone()))?;
+            apply_cross_route_overlay(&mut env, &bridge, selection.as_ref());
             Some(bridge)
         } else {
             None
@@ -139,7 +151,11 @@ fn is_codex_via_claude(plan: &LaunchPlan) -> bool {
     plan.model_provider() == ModelProvider::Codex && plan.effective_harness() == Backend::Claude
 }
 
-fn apply_cross_route_overlay(env: &mut Vec<(String, String)>, bridge: &BridgeHandle) {
+fn apply_cross_route_overlay(
+    env: &mut Vec<(String, String)>,
+    bridge: &BridgeHandle,
+    selection: Option<&ModelSpec>,
+) {
     env.retain(|(key, _)| {
         ![
             "ANTHROPIC_BASE_URL",
@@ -157,6 +173,19 @@ fn apply_cross_route_overlay(env: &mut Vec<(String, String)>, bridge: &BridgeHan
         "ANTHROPIC_AUTH_TOKEN".to_string(),
         bridge.bearer_token().to_string(),
     ));
+    // Put the selection in the harness's model picker. Gateway model
+    // discovery cannot carry it — that path drops every id not prefixed
+    // `claude`/`anthropic`, which is every id the bridge serves — but this
+    // variable is documented to skip validation, so one honest row is
+    // reachable where a discovered list is not.
+    if let Some(selection) = selection {
+        push_default(env, "ANTHROPIC_CUSTOM_MODEL_OPTION", &selection.display());
+        push_default(
+            env,
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+            &format!("Codex {}", selection.display()),
+        );
+    }
     push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
     push_default(
         env,
@@ -254,6 +283,7 @@ mod tests {
             task_summary: None,
             loop_markers: None,
             stream_json_progress: false,
+            codex_model: None,
         }
     }
 
@@ -290,6 +320,40 @@ mod tests {
             Some("1")
         );
         assert_eq!(lookup(&base, "ANTHROPIC_API_KEY"), Some("ambient-key"));
+        // No selection was made, so no picker entry is invented.
+        assert_eq!(lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"), None);
+    }
+
+    /// The selection reaches the child as a picker entry. Gateway model
+    /// discovery cannot carry it (it drops every id not prefixed `claude`),
+    /// so this variable is the only route to a visible, honest row.
+    #[test]
+    fn a_selection_becomes_a_picker_entry_in_the_child_environment() {
+        let mut plan = plan(ModelProvider::Codex, Backend::Claude);
+        plan.codex_model = Some("gpt-5.6-luna@high".to_string());
+        let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
+        let env = runtime.env();
+        assert_eq!(
+            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"),
+            Some("gpt-5.6-luna@high")
+        );
+        assert_eq!(
+            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"),
+            Some("Codex gpt-5.6-luna@high")
+        );
+    }
+
+    /// A bad selection fails the launch, not the first turn: by the time a
+    /// request is in flight the user has waited, and the message arrives
+    /// wrapped in the harness's own API-error framing.
+    #[test]
+    fn an_unparseable_selection_fails_the_launch_with_the_valid_names() {
+        let mut plan = plan(ModelProvider::Codex, Backend::Claude);
+        plan.codex_model = Some("tera".to_string());
+        let error = ForegroundRuntime::start(&plan, Vec::new()).unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("tera"), "{rendered}");
+        assert!(rendered.contains("terra"), "{rendered}");
     }
 
     #[test]

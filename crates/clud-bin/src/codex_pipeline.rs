@@ -14,9 +14,10 @@
 
 use std::sync::atomic::AtomicBool;
 
+use crate::codex_model::ModelSpec;
 use crate::codex_sse::{FrameDecoder, StreamTranslator};
 use crate::codex_translate::{
-    translate_bytes, SystemPlacement, TranslateError, TranslateOptions, DEFAULT_CODEX_MODEL,
+    default_model_spec, translate_bytes, SystemPlacement, TranslateError, TranslateOptions,
 };
 use crate::codex_upstream::{
     CredentialSource, UpstreamClient, UpstreamError, UpstreamFailure, CREDENTIALS_EXPIRED,
@@ -281,7 +282,7 @@ fn string_at_pointer(value: &serde_json::Value, pointer: &str) -> String {
 
 pub struct Pipeline<C: CredentialSource> {
     client: UpstreamClient<C>,
-    default_model: String,
+    default_model: ModelSpec,
 }
 
 impl<C: CredentialSource> std::fmt::Debug for Pipeline<C> {
@@ -297,12 +298,14 @@ impl<C: CredentialSource> Pipeline<C> {
     pub fn new(client: UpstreamClient<C>) -> Self {
         Self {
             client,
-            default_model: DEFAULT_CODEX_MODEL.to_string(),
+            default_model: default_model_spec(),
         }
     }
 
-    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
-        self.default_model = model.into();
+    /// Pin the selection used when a request carries no model of its own.
+    /// This is how a launch-time `--model terra@high` reaches the wire.
+    pub fn with_default_model(mut self, model: ModelSpec) -> Self {
+        self.default_model = model;
         self
     }
 
@@ -393,8 +396,8 @@ impl<C: CredentialSource> Pipeline<C> {
         let options = TranslateOptions {
             model: target
                 .model_override()
-                .unwrap_or(self.default_model.as_str())
-                .to_string(),
+                .cloned()
+                .unwrap_or_else(|| self.default_model.clone()),
             // The Codex backend expects `instructions` to be Codex's own
             // prompt, so a foreign system prompt travels as a developer
             // message there instead. See #750 A3.
@@ -581,7 +584,7 @@ mod tests {
         // What the fake actually received is the real assertion: a translation
         // regression must fail here, not merely change our own output.
         let sent = server.request();
-        assert_eq!(sent["model"], DEFAULT_CODEX_MODEL);
+        assert_eq!(sent["model"], "gpt-5.6-terra");
         assert_eq!(sent["instructions"], "be brief");
         assert!(sent.get("max_output_tokens").is_none());
         assert_eq!(sent["stream"], true);
@@ -618,7 +621,7 @@ mod tests {
                 "id": "msg_agg",
                 "type": "message",
                 "role": "assistant",
-                "model": DEFAULT_CODEX_MODEL,
+                "model": "gpt-5.6-terra",
                 "content": [{"type": "text", "text": "Hello world"}],
                 "stop_reason": "end_turn",
                 "stop_sequence": null,

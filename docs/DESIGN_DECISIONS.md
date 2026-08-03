@@ -1366,3 +1366,87 @@ three such assertions existed and all three stayed green across the flip.
 names `gpt-5.6-sol` deliberately — it asserts against a real upstream error
 message that happens to mention that id, and renaming it would weaken the
 regression it guards.
+
+## DD-035: Codex model and effort travel in the model string, not beside it
+
+**Status:** Accepted
+
+**Context:** zackees/clud#752. DD-034 made the default cheap; this is how a
+user picks something else. The Claude harness talks to the bridge over the
+Anthropic Messages API, which has no field for "which Codex model" or "at what
+effort". Two channels could carry that intent, and they are not equally
+reliable:
+
+- **`output_config.effort`** — where `/effort`, `--effort`,
+  `CLAUDE_CODE_EFFORT_LEVEL` and the `/model` effort slider land. The harness
+  only sends it when it decides the model *supports* effort, which it decides
+  by matching the model id against known families. A raw `gpt-5.6-*` id matches
+  nothing.
+- **The model id itself** — never validated, never rewritten, never dropped
+  behind a custom `ANTHROPIC_BASE_URL`, because the gateway is declared to own
+  the model namespace. Whatever the user types in `/model` arrives verbatim.
+
+The bridge modelled neither. `MessagesRequest` had no `output_config` field
+and unknown fields are deliberately tolerated, so the user's effort choice was
+**dropped without a trace**: every request ran at the ladder's `medium`
+regardless of what was selected. `/effort xhigh` was a silent no-op.
+
+**Decision:** Selection is spelled `<model>[@<effort>]` in the model string —
+`terra`, `sol@max`, `gpt-5.6-luna@low` — parsed by `codex_model.rs`.
+`output_config.effort` is *also* read now, as a secondary channel.
+
+Precedence, most explicit first: `@effort` suffix → `output_config.effort` →
+the `thinking` budget ladder → the model's own catalog default.
+
+Three supporting rules:
+
+- **An unknown short name is a 400 that names the valid ones; an unknown full
+  id passes through.** `/model tera` is a typo, and forwarding it would either
+  earn a confusing upstream error or — worse — silently bill a model nobody
+  chose. But `gpt-5.7-whatever` is how a user reaches a model released after
+  this table was written. The split is punctuation: a bare word must be in the
+  table, anything containing `-` or `.` is a full id.
+- **"No effort specified" is not `medium`.** Each model has its own catalog
+  default (`sol` = `low`, `terra`/`luna` = `medium`), and the harness sends
+  `thinking: {"type":"adaptive"}` with *no* budget for ids it does not
+  recognize — which is every id the bridge serves. Reading a missing budget as
+  an explicit `medium` pinned every request to `medium`.
+- **The ladder no longer emits `minimal` and can now reach `max`.** `minimal`
+  is a real Responses value that **no gpt-5.6 model accepts** (the family
+  starts at `low`), so every small-budget request was being rejected upstream
+  for a reason the user could not see. `max` is supported by all three and was
+  unreachable from any budget.
+
+**Alternatives rejected:**
+
+- **`output_config` alone.** The obvious reading of the problem ("model the
+  field you forgot"), and insufficient: it depends on the harness's capability
+  matching offering the control for a non-`claude` id at all, which is exactly
+  the thing we cannot rely on. It is kept as the secondary channel because
+  users who *do* get the native control should have it work.
+- **Gateway model discovery (`GET /v1/models`) to populate the picker.**
+  Blocked three ways: the bridge does not serve the route, clud forces
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (discovery does not run when
+  nonessential traffic is off), and discovery *ignores every id not prefixed
+  `claude`/`anthropic`* — i.e. every id we would advertise. Making that work
+  needs synthetic `claude-codex-*` ids mapped back through the alias table, and
+  it would invert `resolve_selection`'s `claude*` rule. Deferred;
+  `ANTHROPIC_CUSTOM_MODEL_OPTION` (documented to skip validation) gives one
+  honest picker row today for a fraction of the work.
+- **Patching the harness binary** to bake in aliases, as `@bman654/clodex`
+  does. It confirms the constraint is real, but an unmaintainable coupling to
+  someone else's build.
+- **Tier hijacking** (`ANTHROPIC_DEFAULT_OPUS_MODEL` → a Codex id), which most
+  of the proxy ecosystem does. Cheap, but it lies about which model is running
+  and burns the `opus`/`sonnet`/`haiku` names.
+
+**Consequences:** `--model` on the bridge is expanded to the wire id in argv
+and recorded on `LaunchPlan::codex_model`, so `--dry-run` shows what will be
+billed rather than the shorthand that was typed, and every launch path —
+subprocess, PTY, daemon, detach, repeat — hands the bridge the same value. A
+selection that does not parse fails the *launch* rather than the first turn.
+
+The two previously-dead override seams (`UpstreamTarget::with_model_override`,
+`Pipeline::with_default_model`) now have production callers and carry a
+`ModelSpec` rather than a `String`, so a model and its effort cannot drift
+apart in transit.

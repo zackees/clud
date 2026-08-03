@@ -4,6 +4,7 @@ use crate::args::{Args, Command};
 use crate::backend::{
     Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource, ResolvedLaunchTarget,
 };
+use crate::codex_model::ModelSpec;
 use crate::graphics::GraphicsConfig;
 use crate::loop_spec::{done_marker_contract, git_root_from};
 
@@ -182,15 +183,27 @@ fn build_launch_plan_for_target_at(
         cmd.push(format!("--disallowedTools={}", disallowed.join(",")));
     }
 
+    // On the Codex-provider / Claude-harness bridge, `--model` selects a
+    // *Codex* model even though the flag is handed to the Claude harness. The
+    // short name is expanded to the wire id here so the harness forwards
+    // something upstream understands, and so `--dry-run` shows what will
+    // actually be billed rather than the shorthand that was typed.
+    //
+    // This works at all because a custom `ANTHROPIC_BASE_URL` makes the
+    // gateway the owner of the model namespace: the harness passes the string
+    // through without validating it. An id that does not parse is left alone
+    // and rejected by the bridge, which owns the error message.
+    let codex_model = codex_model_selection(args, target);
     if let Some(ref model) = args.model {
+        let emitted = codex_model.clone().unwrap_or_else(|| model.clone());
         match backend {
             Backend::Claude => {
                 cmd.push("--model".to_string());
-                cmd.push(model.clone());
+                cmd.push(emitted);
             }
             Backend::Codex => {
                 cmd.push("-m".to_string());
-                cmd.push(model.clone());
+                cmd.push(emitted);
             }
         }
     }
@@ -382,7 +395,22 @@ fn build_launch_plan_for_target_at(
         task_summary,
         loop_markers,
         stream_json_progress,
+        codex_model,
     }
+}
+
+/// Canonicalize `--model` for a Codex-provider / Claude-harness launch.
+///
+/// `None` when this is not that cross-route, when no model was given, or when
+/// the value does not parse — the bridge owns rejection, so a parse failure
+/// here means "leave the string alone", not "substitute a default".
+fn codex_model_selection(args: &Args, target: ResolvedLaunchTarget) -> Option<String> {
+    if target.model_provider != ModelProvider::Codex || target.effective_harness != Backend::Claude
+    {
+        return None;
+    }
+    let requested = args.model.as_deref()?;
+    ModelSpec::parse(requested).ok().map(|spec| spec.display())
 }
 
 fn has_codex_project_doc_fallback_override(overrides: &[String]) -> bool {

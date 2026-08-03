@@ -2,6 +2,7 @@
 //! Claude harness (issue #626).
 
 use crate::bridge_log::{unix_ms, BridgeLog};
+use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError};
 use crate::codex_upstream::{
     ApiKeyCredentials, ResolvedCredentials, UpstreamClient, UpstreamConfig, UpstreamError,
@@ -74,6 +75,10 @@ pub struct BridgeConfig {
     pub stream_idle_timeout: Duration,
     pub max_concurrency: usize,
     pub admission_wait: Duration,
+    /// Default model+effort selection, from `--model` on the launch. `None`
+    /// keeps the built-in default. A request that names its own model still
+    /// wins over this.
+    default_model: Option<ModelSpec>,
     log_path: Option<std::path::PathBuf>,
     log_max_bytes: usize,
     test_upstream_url: Option<String>,
@@ -95,6 +100,7 @@ impl Default for BridgeConfig {
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             admission_wait: DEFAULT_ADMISSION_WAIT,
+            default_model: None,
             log_path: default_bridge_log_path(),
             log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
             test_upstream_url: test_upstream_override_from_process(),
@@ -109,6 +115,12 @@ impl Default for BridgeConfig {
 }
 
 impl BridgeConfig {
+    /// Pin the selection used when a request carries no model of its own.
+    pub fn with_default_model(mut self, model: Option<ModelSpec>) -> Self {
+        self.default_model = model;
+        self
+    }
+
     #[cfg(test)]
     fn with_test_upstream_url(mut self, url: Option<String>) -> Self {
         self.test_upstream_url = url;
@@ -161,6 +173,10 @@ impl fmt::Debug for BridgeConfig {
             .field("max_concurrency", &self.max_concurrency)
             .field("admission_wait", &self.admission_wait)
             .field(
+                "default_model",
+                &self.default_model.as_ref().map(ModelSpec::display),
+            )
+            .field(
                 "test_upstream_url",
                 &self.test_upstream_url.as_ref().map(|_| "[redacted]"),
             )
@@ -175,6 +191,9 @@ pub enum BridgeError {
     Random(String),
     Spawn(io::Error),
     Join,
+    /// The launch named a model or effort that does not parse. Carries the
+    /// selector's own message, which names the valid values.
+    Model(String),
 }
 
 impl fmt::Display for BridgeError {
@@ -186,6 +205,7 @@ impl fmt::Display for BridgeError {
             }
             Self::Spawn(error) => write!(formatter, "failed to start bridge worker: {error}"),
             Self::Join => formatter.write_str("bridge worker panicked during shutdown"),
+            Self::Model(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -626,7 +646,11 @@ fn build_pipeline(
             record_retry(&log, error, attempt, budget, backoff);
         });
     }
-    Ok(Pipeline::new(client))
+    let mut pipeline = Pipeline::new(client);
+    if let Some(model) = config.default_model.clone() {
+        pipeline = pipeline.with_default_model(model);
+    }
+    Ok(pipeline)
 }
 
 /// Serve one `POST /v1/messages`.
@@ -2041,5 +2065,84 @@ Connection: close
 
         // The harness's own downstream bearer must never travel upstream.
         assert!(!sent.contains(bridge.bearer_token()));
+    }
+
+    /// What a user typing `/model luna@high` actually produces on the wire.
+    ///
+    /// The premise this rests on is that the harness forwards the model
+    /// string unvalidated behind a custom `ANTHROPIC_BASE_URL`; this test
+    /// pins our half of that contract — whatever arrives in the request is
+    /// parsed, expanded, and sent, with the suffix landing in
+    /// `reasoning.effort` rather than in the model id.
+    #[test]
+    fn a_request_selecting_a_model_and_effort_reaches_upstream_expanded() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"luna@high","messages":[{"role":"user","content":"hi"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&response), 200);
+
+        let sent = upstream.requests().remove(0);
+        let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
+        let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+        assert_eq!(json["model"], "gpt-5.6-luna");
+        assert_eq!(json["reasoning"]["effort"], "high");
+        assert!(
+            !body.contains("luna@high"),
+            "the suffix must not travel as part of the model id: {body}"
+        );
+    }
+
+    /// A launch-time `--model` selection is the default for requests that do
+    /// not name one — which is every request the harness sends, since it
+    /// sends its own `claude-*` id.
+    #[test]
+    fn the_launch_time_selection_becomes_the_default_for_claude_ids() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(
+            bridged_config(&upstream)
+                .with_default_model(Some(ModelSpec::parse("sol@xhigh").unwrap())),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&response), 200);
+
+        let sent = upstream.requests().remove(0);
+        let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
+        let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+        assert_eq!(json["model"], "gpt-5.6-sol");
+        assert_eq!(json["reasoning"]["effort"], "xhigh");
+    }
+
+    /// A typo must not be silently billed as the default model.
+    #[test]
+    fn an_unknown_alias_in_a_request_is_a_400_naming_the_valid_names() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"tera","messages":[{"role":"user","content":"hi"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&response), 400);
+        assert!(response.contains("terra"), "{response}");
+        assert!(
+            upstream.requests().is_empty(),
+            "a rejected selection must not reach upstream"
+        );
     }
 }
