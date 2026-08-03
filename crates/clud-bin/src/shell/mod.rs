@@ -9,4 +9,10 @@
 //! `CLAUDE_CODE_GIT_BASH_PATH` + `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`) lands in
 //! a follow-up PR; this module is the storage layer.
 
+//! [`completion_guard`] is unrelated to shell *selection* — it keeps Git-Bash
+//! completion functions out of the backend agent's shell snapshot (issue
+//! #753), which is a property of the shell's login environment rather than of
+//! which shell gets picked.
+
+pub mod completion_guard;
 pub mod git_bash_resolver;
