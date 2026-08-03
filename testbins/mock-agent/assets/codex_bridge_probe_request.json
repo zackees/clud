@@ -1,5 +1,5 @@
 {
-  "model": "clud-fixture",
+  "model": "claude-probe-model",
   "max_tokens": 16,
   "messages": [
     {

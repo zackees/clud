@@ -57,9 +57,10 @@ long request timeout/nonessential-traffic tuning only when the user has not set
 those values. No parent-process environment is mutated. The bearer and complete
 base URL are deliberately absent from Debug/error/report surfaces.
 
-`codex_bridge.rs` binds only `127.0.0.1:0` and implements the phase-2 routing
-shell: authenticated `POST`/`HEAD /v1/messages`, an explicit unsupported 404
-for token counting, and 404 elsewhere. Header/body sizes and worker concurrency
+`codex_bridge.rs` binds only `127.0.0.1:0` and routes authenticated
+`POST`/`HEAD /v1/messages`, with an explicit unsupported 404 for token counting
+and 404 elsewhere. Since #627 step 5 the `POST` handler runs the real pipeline
+rather than a fixture. Header/body sizes and worker concurrency
 are bounded; handle Drop signals shutdown and joins the listener plus admitted
 workers. See DD-027 for why this parser uses `std::net` instead of the
 repository's existing `tiny_http` dependency.
@@ -170,6 +171,35 @@ an upstream request. Transport failures are classified into fixed strings
 rather than carrying the library's message, which embeds the URL, and upstream
 error bodies are never propagated because they can contain account identifiers
 and key fragments.
+
+## Request pipeline
+
+`codex_pipeline.rs` (#627 step 5) chains the pieces above into one call:
+
+```text
+Anthropic request -> codex_translate -> codex_upstream -> codex_sse -> Anthropic SSE
+```
+
+Upstream is **always** streamed, even for a non-streaming Messages request:
+`MessageAggregator` folds the translated Anthropic events back into a single
+`Message`, so the non-streaming shape reuses the state machine step 3 fuzzed
+instead of introducing a second, separately-wrong mapping.
+
+Status selection follows the same committed/uncommitted boundary as the retry
+policy. Before any frame is written, a failure picks a status —
+`400` for a malformed request, `422` for one naming something the bridge
+refuses to approximate, `401` for missing credentials, a passed-through `4xx`
+or `502` for upstream, `504` on timeout. Once `EventStreamWriter` has flushed a
+frame the response is committed, so a later failure is reported in-band as a
+sanitized SSE `error` event and the chunked body is simply terminated. That is
+why the writer defers its headers until the first frame.
+
+The debug seam (`CLUD_TEST_CODEX_BRIDGE_UPSTREAM_URL`, still gated on a debug
+build *and* `CLUD_INTEGRATION_TESTS=1`) now points at a **Responses-shaped**
+fake. Phase 2 pointed it at a passthrough that echoed the Anthropic body, which
+meant the end-to-end tests proved transport and auth but nothing about
+translation; the integration tests now assert on the request the fake actually
+receives, so a translation regression fails there.
 
 ## Persistence
 

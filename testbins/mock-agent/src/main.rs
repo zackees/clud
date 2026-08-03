@@ -376,7 +376,7 @@ fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {
         "loopback": false,
         "port": null,
         "status": null,
-        "fixture_received": false,
+        "bridged_reply_received": false,
         "error": null,
     });
 
@@ -415,7 +415,9 @@ fn run_codex_bridge_probe(report_path: &Path) -> serde_json::Value {
             .and_then(|value| value.parse::<u16>().ok())
             .ok_or("missing HTTP status")?;
         report["status"] = status.into();
-        report["fixture_received"] = response.contains("clud bridge fixture").into();
+        // #627 step 5: the bridge now translates a real upstream reply, so the
+        // probe looks for the text the fake Responses server produced.
+        report["bridged_reply_received"] = response.contains("bridged reply").into();
         Ok(())
     })();
     if let Err(error) = result {
