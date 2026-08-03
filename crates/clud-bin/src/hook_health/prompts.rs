@@ -209,6 +209,7 @@ fn backend_prompt_launch_plan(
         demo_gfx_sixel: false,
         model: args.model.clone(),
         safe: args.safe,
+        unattended: args.unattended,
         dry_run: false,
         detach: false,
         detachable: false,

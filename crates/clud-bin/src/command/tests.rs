@@ -1,11 +1,13 @@
 use super::builder::{
-    build_launch_plan, build_launch_plan_at, next_run_at_millis, parse_repeat_interval,
-    repeat_implies_no_done_warning,
+    build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, next_run_at_millis,
+    parse_repeat_interval, repeat_implies_no_done_warning,
 };
 use super::prompts::{build_fix_prompt, build_up_prompt, is_github_url, FIX_PROMPT};
 use super::types::LaunchPlan;
 use crate::args::Args;
-use crate::backend::{Backend, LaunchMode};
+use crate::backend::{
+    Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource, ResolvedLaunchTarget,
+};
 use crate::clud_settings::DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE;
 
 fn parse(raw: &[&str]) -> Args {
@@ -70,6 +72,93 @@ fn test_prompt_with_yolo() {
     );
     assert_eq!(p.iterations, 1);
     assert_eq!(p.launch_mode, LaunchMode::Subprocess);
+}
+
+#[test]
+fn test_loop_automatically_disallows_interactive_tools() {
+    let p = plan(&["clud", "loop", "fix the build"]);
+    assert!(p
+        .command
+        .iter()
+        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+}
+
+#[test]
+fn test_repeat_loop_automatically_disallows_interactive_tools() {
+    let p = plan(&["clud", "loop", "fix the build", "--repeat", "1m"]);
+    assert!(p
+        .command
+        .iter()
+        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+    assert_eq!(
+        p.repeat_schedule.as_ref().map(|s| s.interval_secs),
+        Some(60)
+    );
+}
+
+#[test]
+fn test_loop_under_codex_provider_claude_harness_disallows_interactive_tools() {
+    let args = parse(&["clud", "loop", "fix the build"]);
+    let target = ResolvedLaunchTarget {
+        model_provider: ModelProvider::Codex,
+        requested_harness: HarnessSelection::Claude,
+        effective_harness: Backend::Claude,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    };
+    let p = build_launch_plan_for_target(&args, target, "claude");
+    assert!(p
+        .command
+        .iter()
+        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+}
+
+#[test]
+fn test_unattended_disallows_interactive_tools() {
+    let p = plan(&["clud", "--unattended", "-p", "hello"]);
+    assert_eq!(
+        p.command,
+        vec![
+            "claude",
+            "--dangerously-skip-permissions",
+            "--disallowedTools=EnterPlanMode,AskUserQuestion",
+            "-p",
+            "hello"
+        ]
+    );
+}
+
+#[test]
+fn test_unattended_emits_a_single_argv_token() {
+    // `claude` declares `--disallowedTools <tools...>` as variadic: the
+    // space-separated spelling swallows the following token, so a later
+    // `-p <prompt>` silently vanishes and claude exits 0 producing nothing.
+    // Keeping this one `=`-bound token is what makes the flag order-safe.
+    let p = plan(&["clud", "--unattended", "-p", "hello"]);
+    assert!(!p.command.iter().any(|a| a == "--disallowedTools"));
+    assert!(p
+        .command
+        .iter()
+        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+    // The prompt must survive intact directly after its own flag.
+    let idx = p.command.iter().position(|a| a == "-p").unwrap();
+    assert_eq!(p.command[idx + 1], "hello");
+}
+
+#[test]
+fn test_unattended_is_a_noop_for_codex_harness() {
+    // Codex has no EnterPlanMode/AskUserQuestion surface, and it would reject
+    // a claude-only flag.
+    let p = plan(&["clud", "--codex", "--unattended", "-p", "hello"]);
+    assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
+}
+
+#[test]
+fn test_unattended_is_not_forwarded_as_passthrough() {
+    // `--unattended` must be in `bool_flags` in `split_known_unknown`, or the
+    // splitter routes it to the backend, which errors on an unknown flag.
+    let p = plan(&["clud", "--unattended", "-p", "hello"]);
+    assert!(!p.command.iter().any(|a| a == "--unattended"));
 }
 
 #[test]
