@@ -561,6 +561,122 @@ def test_saved_harness_override_is_announced_once_in_green_on_tty(
     assert f"\x1b[32m{notice}\x1b[0m" in text
 
 
+def _run_on_tty(launch: Path, env: dict[str, str], cwd: Path, args: list[str]) -> tuple[int, str]:
+    """Run `clud` with a real pty on all three stdio fds, return (rc, output).
+
+    The plan-mode and harness-override notices are both TTY-gated, so a piped
+    subprocess cannot observe them at all — the pty is the point of this helper,
+    not an incidental detail.
+    """
+    import errno
+    import pty
+    import select
+
+    master, slave = pty.openpty()
+    try:
+        process = subprocess.Popen(
+            [str(launch), *args],
+            cwd=cwd,
+            env=env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+    finally:
+        os.close(slave)
+
+    output = bytearray()
+    deadline = time.monotonic() + 15
+    try:
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.1)
+            if readable:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    break
+            if process.poll() is not None and not readable:
+                break
+        returncode = process.wait(timeout=1)
+    finally:
+        os.close(master)
+
+    return returncode, output.decode(errors="replace")
+
+
+def test_plan_mode_suppression_is_announced_once_in_green_on_tty(
+    tmp_path: Path,
+) -> None:
+    """Covers the `main.rs` wiring of the DD-033 notice, not just its formatter.
+
+    `plan_mode_suppression_notice` has a Rust unit test for the string and its
+    gating. What only a real launch can catch is the call site: a dropped or
+    duplicated block, a wrong `stderr_is_terminal`, or the block drifting above
+    the `--dry-run` early-exit and polluting the JSON.
+    """
+    if sys.platform == "win32":
+        # Python's stdlib has no ConPTY API. The pure Rust policy test covers
+        # Windows; this subprocess wiring test runs on Unix CI with openpty.
+        return
+
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    state_dir = tmp_path / "state"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    home.mkdir()
+    _fake_claude_on_path(fake_bin)
+
+    notice_marker = "[clud] Plan mode disabled on the Codex->Claude bridge"
+    base = [
+        "--no-daemon",
+        "--no-fix-hooks",
+        "--no-cpu-banner",
+        "--no-dnd",
+        "--subprocess",
+    ]
+    bridge = ["--codex", "--harness", "claude"]
+
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = _isolated_clud_env(source, home, state_dir)
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+
+        def run(args: list[str]) -> tuple[int, str]:
+            return _run_on_tty(launch, env, repo, args)
+
+        rc, text = run([*base, *bridge, "-p", "hello"])
+        assert rc == 0, text
+        # `count == 1` is the assertion that matters: a substring check would
+        # pass just as happily on a duplicated emission.
+        assert text.count(notice_marker) == 1, text
+        assert f"\x1b[32m{notice_marker}" in text, text
+        # The override has to reach the user in the message itself, not only in
+        # `--help` — the notice is the only place they learn it exists.
+        assert "--allow-plan-mode" in text, text
+
+        # Opted out: nothing suppressed, so nothing announced.
+        rc, text = run([*base, *bridge, "--allow-plan-mode", "-p", "hello"])
+        assert rc == 0, text
+        assert notice_marker not in text, text
+
+        # The rule is scoped to the bridge. A plain Claude launch keeps plan
+        # mode and must stay silent.
+        rc, text = run([*base, "-p", "hello"])
+        assert rc == 0, text
+        assert notice_marker not in text, text
+
+        # `--dry-run` exits before the notice block, keeping machine-readable
+        # output clean. This pins that ordering.
+        rc, text = run([*base, *bridge, "--dry-run", "-p", "hello"])
+        assert rc == 0, text
+        assert notice_marker not in text, text
+
+
 def test_dry_run_rejects_unsupported_claude_provider_via_codex_harness() -> None:
     result = _run(
         "--dry-run",
