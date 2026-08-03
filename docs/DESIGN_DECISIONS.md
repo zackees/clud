@@ -1076,3 +1076,49 @@ The debug seam now points at a Responses-shaped fake rather than phase 2's
 passthrough. That passthrough echoed the Anthropic body, so the end-to-end
 tests could pass while translation was entirely wrong; the integration tests
 now assert on the request the fake receives.
+
+## DD-030: The bridge conforms to the live Codex clients, and translation is total
+
+**Context:** zackees/clud#750. Phase 3 built the translator from the *shape* of
+the Anthropic and OpenAI APIs. An audit against CLIProxyAPI (MIT) and
+`openai/codex` (Apache-2.0) — the two implementations #622 names as references —
+found it diverging from both in ways that break real traffic.
+
+**Decision:** Match observable behaviour of the live clients, not a reading of
+the API surface. Concretely:
+
+- **Translation is total.** #627 made "unsupported semantics fail explicitly" an
+  acceptance criterion; this reverses it. CLIProxyAPI's translator never errors,
+  and Claude Code really does send `top_k`, `stop_sequences`, replayed
+  `thinking` blocks and `role: "system"` messages. A 4xx the bridge invents is a
+  failure the user cannot act on, so those inputs are dropped or adapted.
+  `Invalid` — a request that is not a Messages request at all — is the only
+  remaining error.
+- **Sampling parameters are never forwarded.** Neither reference sends
+  `temperature`, `top_p` or `max_output_tokens`, and reasoning models reject
+  them.
+- **`store: false` plus `include: ["reasoning.encrypted_content"]`** are sent
+  unconditionally, as both references do. They are load-bearing together: with
+  no server-side state, reasoning has to round-trip.
+- **Reasoning round-trips.** An Anthropic `thinking` block's `signature` *is*
+  the reasoning item's `encrypted_content`. Phase 3 dropped reasoning believing
+  no signature was available; that premise was wrong. Foreign or malformed
+  signatures are dropped rather than replayed, because replaying one is a hard
+  upstream error.
+- **System-prompt placement depends on auth mode.** `openai/codex` uses
+  `instructions`; CLIProxyAPI uses a `developer` message because the Codex
+  backend expects `instructions` to be Codex's *own* prompt. Modelled as
+  `SystemPlacement` and selected from the resolved target.
+- **Identifiers are bounded and reversible.** `call_id` and tool names are
+  shortened to 64 characters with a hash suffix and a per-request reverse map,
+  so MCP tool names survive the round trip with the names the client sent.
+
+**Consequences:** The default model stays a single overridable value. Codex
+fetches its catalogue from the server, so a hardcoded table would rot — and one
+already would have: `gpt-5.4` retires from ChatGPT-auth Codex on 2026-08-31.
+
+Validated against a real ChatGPT subscription: a streamed text turn and a
+tool-use round trip both complete end to end. That validation surfaced a routing
+defect no mock could: Claude Code sends `POST /v1/messages?beta=true`, and the
+bridge matched the raw request target, so every real request 404'd. The mock
+probe sends a bare path and had never exercised it.

@@ -144,20 +144,31 @@ fn parse_frame(raw: &str) -> Option<SseFrame> {
 // Semantic translation
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+/// One in-flight upstream function call.
+#[derive(Debug, Default)]
 struct CallState {
     index: Option<u32>,
     call_id: Option<String>,
     name: Option<String>,
-    /// Argument text that arrived before the block could legally be opened.
-    buffered_arguments: String,
+    /// Everything received so far, whether buffered or already emitted.
+    arguments: String,
+    /// How much of `arguments` has been forwarded downstream.
+    emitted: usize,
     closed: bool,
+}
+
+/// The thinking block currently being assembled from one reasoning item.
+#[derive(Debug)]
+struct ThinkingState {
+    index: u32,
+    parts: usize,
+    signature: Option<String>,
 }
 
 /// Responses events -> Anthropic events.
 ///
-/// Emits complete SSE frames as strings so the caller can write each one and
-/// flush, which is what makes the turn render progressively.
+/// Emits complete SSE frames as strings so the caller can write and flush each
+/// one, which is what makes a turn render progressively.
 #[derive(Debug)]
 pub struct StreamTranslator {
     model: String,
@@ -167,11 +178,19 @@ pub struct StreamTranslator {
     next_index: u32,
     text_indices: HashMap<(i64, i64), u32>,
     open_blocks: Vec<u32>,
-    calls: HashMap<i64, CallState>,
+    calls: Vec<CallState>,
+    /// Upstream events do not all carry the same identifier, so a call is
+    /// reachable by output index, call id, or item id.
+    aliases: HashMap<String, usize>,
+    thinking: Option<ThinkingState>,
     saw_tool_call: bool,
+    has_text_delta: bool,
     input_tokens: u64,
     output_tokens: u64,
-    stop_reason: Option<&'static str>,
+    cached_tokens: u64,
+    stop_reason: Option<String>,
+    /// Shortened tool name -> original, so the client sees what it sent.
+    tool_names: HashMap<String, String>,
 }
 
 impl StreamTranslator {
@@ -184,12 +203,23 @@ impl StreamTranslator {
             next_index: 0,
             text_indices: HashMap::new(),
             open_blocks: Vec::new(),
-            calls: HashMap::new(),
+            calls: Vec::new(),
+            aliases: HashMap::new(),
+            thinking: None,
             saw_tool_call: false,
+            has_text_delta: false,
             input_tokens: 0,
             output_tokens: 0,
+            cached_tokens: 0,
             stop_reason: None,
+            tool_names: HashMap::new(),
         }
+    }
+
+    /// Supply the shortening map produced by the request translator.
+    pub fn with_tool_names(mut self, tool_names: HashMap<String, String>) -> Self {
+        self.tool_names = tool_names;
+        self
     }
 
     /// Translate one upstream frame into zero or more Anthropic frames.
@@ -197,15 +227,11 @@ impl StreamTranslator {
         if self.finished {
             return Vec::new();
         }
-        // The Responses stream carries its type in the JSON body; the SSE
-        // `event:` field mirrors it. Prefer the body, fall back to the field.
         let value: serde_json::Value = match serde_json::from_str(&frame.data) {
             Ok(value) => value,
-            Err(_) => {
-                // `[DONE]` sentinels and other non-JSON payloads are not
-                // errors; they simply carry nothing to translate.
-                return Vec::new();
-            }
+            // `[DONE]` sentinels and other non-JSON payloads carry nothing to
+            // translate; they are not errors.
+            Err(_) => return Vec::new(),
         };
         let kind = value
             .get("type")
@@ -216,187 +242,198 @@ impl StreamTranslator {
 
         let mut out = Vec::new();
         match kind.as_str() {
-            "response.created" | "response.in_progress" => {
-                self.ensure_started(&mut out);
-            }
+            "response.created" | "response.in_progress" => self.ensure_started(&mut out),
+
             "response.output_text.delta" => {
                 self.ensure_started(&mut out);
-                let key = (
-                    json_i64(&value, "output_index").unwrap_or(0),
-                    json_i64(&value, "content_index").unwrap_or(0),
-                );
+                self.finalize_thinking(&mut out);
+                self.has_text_delta = true;
+                let key = text_key(&value);
                 let index = self.ensure_text_block(key, &mut out);
                 if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
-                    out.push(anthropic_frame(
-                        "content_block_delta",
-                        serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": index,
-                            "delta": {"type": "text_delta", "text": delta},
-                        }),
-                    ));
+                    out.push(text_delta_frame(index, delta));
                 }
             }
             "response.content_part.done" | "response.output_text.done" => {
-                let key = (
-                    json_i64(&value, "output_index").unwrap_or(0),
-                    json_i64(&value, "content_index").unwrap_or(0),
-                );
-                if let Some(index) = self.text_indices.get(&key).copied() {
+                if let Some(index) = self.text_indices.get(&text_key(&value)).copied() {
                     self.close_block(index, &mut out);
                 }
             }
+
+            // --- reasoning -------------------------------------------------
+            "response.reasoning_summary_part.added" => {
+                self.ensure_started(&mut out);
+                if let Some(state) = self.thinking.as_mut() {
+                    // Several summary parts belong to ONE thinking block; only
+                    // the item's `done` carries the signature that closes it.
+                    if state.parts > 0 {
+                        let index = state.index;
+                        state.parts += 1;
+                        out.push(thinking_delta_frame(index, "\n\n"));
+                    } else {
+                        state.parts += 1;
+                    }
+                }
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                self.ensure_started(&mut out);
+                let index = self.ensure_thinking_block(&mut out);
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                    out.push(thinking_delta_frame(index, delta));
+                }
+            }
+
             "response.output_item.added" => {
                 self.ensure_started(&mut out);
-                let output_index = json_i64(&value, "output_index").unwrap_or(0);
-                if let Some(item) = value.get("item") {
-                    if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
-                    {
+                let Some(item) = value.get("item") else {
+                    return out;
+                };
+                match item.get("type").and_then(serde_json::Value::as_str) {
+                    Some("function_call") => {
+                        self.finalize_thinking(&mut out);
+                        let slot = self.slot_for(&value, item);
+                        merge_identity(&mut self.calls[slot], item);
+                        if let Some(seed) =
+                            item.get("arguments").and_then(serde_json::Value::as_str)
+                        {
+                            self.calls[slot].arguments.push_str(seed);
+                        }
                         self.saw_tool_call = true;
-                        let entry = self.calls.entry(output_index).or_insert(CallState {
-                            index: None,
-                            call_id: None,
-                            name: None,
-                            buffered_arguments: String::new(),
-                            closed: false,
-                        });
-                        merge_call_identity(entry, item);
-                        let seed = item
-                            .get("arguments")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("");
-                        entry.buffered_arguments.push_str(seed);
-                        self.try_open_call(output_index, &mut out);
+                        self.open_call(slot, &mut out);
                     }
+                    Some("reasoning") => {
+                        // Close any previous item so an unterminated block
+                        // cannot leak into this one.
+                        self.finalize_thinking(&mut out);
+                    }
+                    _ => {}
                 }
             }
+
             "response.function_call_arguments.delta" => {
                 self.ensure_started(&mut out);
-                let output_index = json_i64(&value, "output_index").unwrap_or(0);
-                let delta = value
-                    .get("delta")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let entry = self.calls.entry(output_index).or_insert(CallState {
-                    index: None,
-                    call_id: None,
-                    name: None,
-                    buffered_arguments: String::new(),
-                    closed: false,
-                });
+                self.finalize_thinking(&mut out);
+                let slot = self.slot_for(&value, &serde_json::Value::Null);
                 self.saw_tool_call = true;
-                match entry.index {
-                    // Block is open: forward the fragment as-is. Anthropic
-                    // explicitly allows partial (invalid) JSON here.
-                    Some(index) => out.push(anthropic_frame(
-                        "content_block_delta",
-                        serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": index,
-                            "delta": {"type": "input_json_delta", "partial_json": delta},
-                        }),
-                    )),
-                    // Identity still unknown: hold the fragment rather than
-                    // address a block that does not exist.
-                    None => entry.buffered_arguments.push_str(delta),
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                    self.calls[slot].arguments.push_str(delta);
                 }
+                self.flush_call_arguments(slot, &mut out);
             }
             "response.function_call_arguments.done" => {
-                let output_index = json_i64(&value, "output_index").unwrap_or(0);
+                let slot = self.slot_for(&value, &serde_json::Value::Null);
                 if let Some(arguments) = value.get("arguments").and_then(serde_json::Value::as_str)
                 {
-                    if let Some(entry) = self.calls.get_mut(&output_index) {
-                        // Only adopt the terminal value when nothing was
-                        // streamed; otherwise this would duplicate the body.
-                        if entry.index.is_none() && entry.buffered_arguments.is_empty() {
-                            entry.buffered_arguments.push_str(arguments);
-                        }
+                    // The terminal value is absolute. Adopt it only when it
+                    // extends what we already have, so a stream that sent both
+                    // deltas and a final value cannot double-count.
+                    if arguments.starts_with(self.calls[slot].arguments.as_str()) {
+                        self.calls[slot].arguments = arguments.to_string();
                     }
                 }
+                self.flush_call_arguments(slot, &mut out);
             }
+
             "response.output_item.done" => {
-                let output_index = json_i64(&value, "output_index").unwrap_or(0);
-                if let Some(item) = value.get("item") {
-                    if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call")
-                    {
-                        if let Some(entry) = self.calls.get_mut(&output_index) {
-                            merge_call_identity(entry, item);
-                            if entry.index.is_none() && entry.buffered_arguments.is_empty() {
-                                if let Some(arguments) =
-                                    item.get("arguments").and_then(serde_json::Value::as_str)
-                                {
-                                    entry.buffered_arguments.push_str(arguments);
-                                }
+                let Some(item) = value.get("item") else {
+                    return out;
+                };
+                match item.get("type").and_then(serde_json::Value::as_str) {
+                    Some("function_call") => {
+                        let slot = self.slot_for(&value, item);
+                        merge_identity(&mut self.calls[slot], item);
+                        if let Some(arguments) =
+                            item.get("arguments").and_then(serde_json::Value::as_str)
+                        {
+                            if arguments.starts_with(self.calls[slot].arguments.as_str()) {
+                                self.calls[slot].arguments = arguments.to_string();
                             }
                         }
-                        self.try_open_call(output_index, &mut out);
-                        if let Some(index) =
-                            self.calls.get(&output_index).and_then(|entry| entry.index)
-                        {
+                        self.saw_tool_call = true;
+                        self.open_call(slot, &mut out);
+                        self.flush_call_arguments(slot, &mut out);
+                        if let Some(index) = self.calls[slot].index {
                             self.close_block(index, &mut out);
-                            if let Some(entry) = self.calls.get_mut(&output_index) {
-                                entry.closed = true;
+                            self.calls[slot].closed = true;
+                        }
+                    }
+                    Some("reasoning") => {
+                        let signature = item
+                            .get("encrypted_content")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string);
+                        if signature.is_some() && self.thinking.is_none() {
+                            // A signature with no summary text still has to
+                            // reach the client: it is the round-trip carrier.
+                            self.ensure_thinking_block(&mut out);
+                        }
+                        if let Some(state) = self.thinking.as_mut() {
+                            state.signature = signature;
+                        }
+                        self.finalize_thinking(&mut out);
+                    }
+                    Some("message") => {
+                        // Fallback for a stream that never sent text deltas.
+                        if !self.has_text_delta {
+                            if let Some(text) = message_item_text(item) {
+                                let index = self.ensure_text_block((0, 0), &mut out);
+                                out.push(text_delta_frame(index, &text));
+                                self.close_block(index, &mut out);
                             }
                         }
                     }
+                    _ => {}
                 }
             }
+
             "response.completed" | "response.incomplete" => {
                 self.absorb_usage(&value);
                 if self.stop_reason.is_none() {
-                    self.stop_reason = Some(if kind == "response.incomplete" {
-                        "max_tokens"
-                    } else if self.saw_tool_call {
-                        "tool_use"
-                    } else {
-                        "end_turn"
-                    });
+                    self.stop_reason = Some(map_stop_reason(&kind, &value, self.saw_tool_call));
                 }
                 out.extend(self.finish());
             }
-            "response.failed" | "error" => {
-                out.extend(self.fail());
-            }
-            // Reasoning summaries are intentionally not forwarded. An
-            // Anthropic `thinking` block carries a signature that the
-            // Responses API does not provide, and clients reject an unsigned
-            // one -- emitting it would break the very turn it decorates.
-            // Revisit if a signed equivalent appears.
+            "response.failed" | "error" => out.extend(self.fail(&value)),
             _ => {}
         }
         out
     }
 
-    /// Close the turn: shut any open blocks, then send message_delta/stop.
+    /// Close the turn: shut any open blocks, then message_delta/stop.
     pub fn finish(&mut self) -> Vec<String> {
         if self.finished {
             return Vec::new();
         }
         let mut out = Vec::new();
         self.ensure_started(&mut out);
+        self.finalize_thinking(&mut out);
         for index in std::mem::take(&mut self.open_blocks) {
-            out.push(anthropic_frame(
-                "content_block_stop",
-                serde_json::json!({"type": "content_block_stop", "index": index}),
-            ));
+            out.push(content_block_stop_frame(index));
         }
-        let stop_reason = self.stop_reason.unwrap_or(if self.saw_tool_call {
-            "tool_use"
-        } else {
-            "end_turn"
+        let stop_reason = self.stop_reason.clone().unwrap_or_else(|| {
+            if self.saw_tool_call {
+                "tool_use".to_string()
+            } else {
+                "end_turn".to_string()
+            }
         });
+        // Anthropic's input_tokens excludes cached tokens; the Responses usage
+        // includes them. Subtracting keeps clients from double-counting.
+        let input_tokens = self.input_tokens.saturating_sub(self.cached_tokens);
+        let mut usage = serde_json::json!({
+            "input_tokens": input_tokens,
+            "output_tokens": self.output_tokens,
+        });
+        if self.cached_tokens > 0 {
+            usage["cache_read_input_tokens"] = serde_json::json!(self.cached_tokens);
+        }
         out.push(anthropic_frame(
             "message_delta",
             serde_json::json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                // input_tokens is only known once upstream reports usage, which
-                // is long after message_start has been flushed. Carrying it
-                // here is the only chance the client gets to learn it.
-                "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": self.output_tokens,
-                },
+                "usage": usage,
             }),
         ));
         out.push(anthropic_frame(
@@ -407,31 +444,36 @@ impl StreamTranslator {
         out
     }
 
-    /// Terminate the stream with a sanitized error.
+    /// Terminate with a sanitized error.
     ///
-    /// The upstream body is deliberately not echoed: it can carry account
-    /// identifiers or key fragments, and this frame is written straight to the
-    /// harness.
-    pub fn fail(&mut self) -> Vec<String> {
+    /// The upstream body is never echoed: it can carry account identifiers and
+    /// key fragments, and this frame is written straight to the harness.
+    pub fn fail(&mut self, upstream: &serde_json::Value) -> Vec<String> {
         if self.finished {
             return Vec::new();
         }
         let mut out = Vec::new();
+        self.finalize_thinking(&mut out);
         for index in std::mem::take(&mut self.open_blocks) {
-            out.push(anthropic_frame(
-                "content_block_stop",
-                serde_json::json!({"type": "content_block_stop", "index": index}),
-            ));
+            out.push(content_block_stop_frame(index));
         }
         out.push(anthropic_frame(
             "error",
             serde_json::json!({
                 "type": "error",
-                "error": {"type": "api_error", "message": "upstream provider error"},
+                "error": {
+                    "type": upstream_error_type(upstream),
+                    "message": "upstream provider error",
+                },
             }),
         ));
         self.finished = true;
         out
+    }
+
+    /// Terminate with a sanitized error and no upstream detail.
+    pub fn fail_opaque(&mut self) -> Vec<String> {
+        self.fail(&serde_json::Value::Null)
     }
 
     pub fn is_finished(&self) -> bool {
@@ -455,10 +497,7 @@ impl StreamTranslator {
                     "content": [],
                     "stop_reason": null,
                     "stop_sequence": null,
-                    "usage": {
-                        "input_tokens": self.input_tokens,
-                        "output_tokens": 0,
-                    },
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
                 },
             }),
         ));
@@ -482,52 +521,137 @@ impl StreamTranslator {
         index
     }
 
-    /// Open a tool block once -- and only once -- its id and name are known,
-    /// flushing whatever arguments were buffered while waiting.
-    fn try_open_call(&mut self, output_index: i64, out: &mut Vec<String>) {
-        let Some(entry) = self.calls.get(&output_index) else {
-            return;
-        };
-        if entry.index.is_some() || entry.closed {
-            return;
+    fn ensure_thinking_block(&mut self, out: &mut Vec<String>) -> u32 {
+        if let Some(state) = self.thinking.as_ref() {
+            return state.index;
         }
-        let (Some(call_id), Some(name)) = (entry.call_id.clone(), entry.name.clone()) else {
-            return;
-        };
-        let buffered = entry.buffered_arguments.clone();
         let index = self.allocate_index();
-        if let Some(entry) = self.calls.get_mut(&output_index) {
-            entry.index = Some(index);
-            entry.buffered_arguments.clear();
+        self.open_blocks.push(index);
+        self.thinking = Some(ThinkingState {
+            index,
+            parts: 1,
+            signature: None,
+        });
+        out.push(anthropic_frame(
+            "content_block_start",
+            serde_json::json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }),
+        ));
+        index
+    }
+
+    /// Close the open thinking block, emitting its signature exactly once.
+    ///
+    /// The signature is the reasoning item's `encrypted_content` verbatim --
+    /// that is what the client echoes back so the next turn can carry the
+    /// reasoning forward under `store: false`.
+    fn finalize_thinking(&mut self, out: &mut Vec<String>) {
+        let Some(state) = self.thinking.take() else {
+            return;
+        };
+        if let Some(signature) = state.signature.as_deref() {
+            out.push(anthropic_frame(
+                "content_block_delta",
+                serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": state.index,
+                    "delta": {"type": "signature_delta", "signature": signature},
+                }),
+            ));
         }
+        self.close_block(state.index, out);
+    }
+
+    /// Resolve the slot for a call, registering every identifier the event
+    /// carries so a later event can find it by any of them.
+    fn slot_for(&mut self, event: &serde_json::Value, item: &serde_json::Value) -> usize {
+        let mut keys = Vec::new();
+        if let Some(index) = event
+            .get("output_index")
+            .and_then(serde_json::Value::as_i64)
+        {
+            keys.push(format!("output:{index}"));
+        }
+        for source in [event, item] {
+            for field in ["call_id", "item_id", "id"] {
+                if let Some(value) = source.get(field).and_then(serde_json::Value::as_str) {
+                    if !value.is_empty() {
+                        let prefix = if field == "call_id" { "call" } else { "item" };
+                        keys.push(format!("{prefix}:{value}"));
+                    }
+                }
+            }
+        }
+        let slot = keys
+            .iter()
+            .find_map(|key| self.aliases.get(key).copied())
+            .unwrap_or_else(|| {
+                self.calls.push(CallState::default());
+                self.calls.len() - 1
+            });
+        for key in keys {
+            self.aliases.insert(key, slot);
+        }
+        slot
+    }
+
+    /// Open a tool block once -- and only once -- its id and name are known.
+    fn open_call(&mut self, slot: usize, out: &mut Vec<String>) {
+        let call = &self.calls[slot];
+        if call.index.is_some() || call.closed {
+            return;
+        }
+        let (Some(call_id), Some(name)) = (call.call_id.clone(), call.name.clone()) else {
+            return;
+        };
+        // Restore the client's original tool name if we shortened it.
+        let name = self.tool_names.get(&name).cloned().unwrap_or(name);
+        let index = self.allocate_index();
+        self.calls[slot].index = Some(index);
         self.open_blocks.push(index);
         out.push(anthropic_frame(
             "content_block_start",
             serde_json::json!({
                 "type": "content_block_start",
                 "index": index,
-                "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}},
+                "content_block": {
+                    "type": "tool_use",
+                    "id": sanitize_tool_id(&call_id),
+                    "name": name,
+                    "input": {},
+                },
             }),
         ));
-        if !buffered.is_empty() {
-            out.push(anthropic_frame(
-                "content_block_delta",
-                serde_json::json!({
-                    "type": "content_block_delta",
-                    "index": index,
-                    "delta": {"type": "input_json_delta", "partial_json": buffered},
-                }),
-            ));
+    }
+
+    /// Forward whatever argument text has not been sent yet.
+    fn flush_call_arguments(&mut self, slot: usize, out: &mut Vec<String>) {
+        let Some(index) = self.calls[slot].index else {
+            return;
+        };
+        let call = &mut self.calls[slot];
+        if call.emitted >= call.arguments.len() {
+            return;
         }
+        let pending = call.arguments[call.emitted..].to_string();
+        call.emitted = call.arguments.len();
+        out.push(anthropic_frame(
+            "content_block_delta",
+            serde_json::json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": pending},
+            }),
+        ));
     }
 
     fn close_block(&mut self, index: u32, out: &mut Vec<String>) {
         if let Some(position) = self.open_blocks.iter().position(|open| *open == index) {
             self.open_blocks.remove(position);
-            out.push(anthropic_frame(
-                "content_block_stop",
-                serde_json::json!({"type": "content_block_stop", "index": index}),
-            ));
+            out.push(content_block_stop_frame(index));
         }
     }
 
@@ -553,34 +677,163 @@ impl StreamTranslator {
         {
             self.output_tokens = output;
         }
+        if let Some(cached) = usage
+            .pointer("/input_tokens_details/cached_tokens")
+            .and_then(serde_json::Value::as_u64)
+        {
+            self.cached_tokens = cached;
+        }
     }
 }
 
-fn merge_call_identity(entry: &mut CallState, item: &serde_json::Value) {
-    // `call_id` is the identifier the follow-up tool_result must quote; `id`
-    // is the item's own handle. Prefer the former, accept the latter.
-    if entry.call_id.is_none() {
+fn text_key(value: &serde_json::Value) -> (i64, i64) {
+    (
+        value
+            .get("output_index")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        value
+            .get("content_index")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+    )
+}
+
+fn message_item_text(item: &serde_json::Value) -> Option<String> {
+    let parts = item.get("content")?.as_array()?;
+    let text: String = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Anthropic clients enforce `^[a-zA-Z0-9_-]+$` on `tool_use.id`; upstream
+/// call ids do not always satisfy it.
+fn sanitize_tool_id(id: &str) -> String {
+    let sanitized: String = id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "tool_call".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn map_stop_reason(kind: &str, value: &serde_json::Value, saw_tool_call: bool) -> String {
+    // A turn that produced a tool call is a tool_use turn regardless of what
+    // the transport called it.
+    if saw_tool_call {
+        return "tool_use".to_string();
+    }
+    let raw = value
+        .pointer("/response/stop_reason")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/response/incomplete_details/reason")
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or("");
+    if raw.is_empty() && kind == "response.incomplete" {
+        // An incomplete response with no stated reason is, in practice, a
+        // length cutoff.
+        return "max_tokens".to_string();
+    }
+    match raw {
+        "max_tokens" | "max_output_tokens" => "max_tokens",
+        "content_filter" => "refusal",
+        "end_turn"
+        | "stop_sequence"
+        | "pause_turn"
+        | "refusal"
+        | "model_context_window_exceeded" => raw,
+        // "", "stop", "completed", "tool_use", "tool_calls", "function_call"
+        // and anything unrecognised.
+        _ => "end_turn",
+    }
+    .to_string()
+}
+
+fn upstream_error_type(value: &serde_json::Value) -> &'static str {
+    let code = value
+        .pointer("/response/error/code")
+        .or_else(|| value.pointer("/error/code"))
+        .or_else(|| value.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let kind = value
+        .pointer("/response/error/type")
+        .or_else(|| value.pointer("/error/type"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    match (code, kind) {
+        ("cyber_policy", _) | (_, "invalid_request") => "invalid_request_error",
+        ("rate_limit_exceeded", _) => "rate_limit_error",
+        ("insufficient_quota", _) => "billing_error",
+        ("context_length_exceeded", _) => "invalid_request_error",
+        _ => "api_error",
+    }
+}
+
+fn merge_identity(call: &mut CallState, item: &serde_json::Value) {
+    // `call_id` is the identifier a follow-up tool_result must quote; `id` is
+    // the item's own handle. Prefer the former, accept the latter.
+    if call.call_id.is_none() {
         if let Some(call_id) = item
             .get("call_id")
             .and_then(serde_json::Value::as_str)
             .or_else(|| item.get("id").and_then(serde_json::Value::as_str))
         {
             if !call_id.is_empty() {
-                entry.call_id = Some(call_id.to_string());
+                call.call_id = Some(call_id.to_string());
             }
         }
     }
-    if entry.name.is_none() {
+    if call.name.is_none() {
         if let Some(name) = item.get("name").and_then(serde_json::Value::as_str) {
             if !name.is_empty() {
-                entry.name = Some(name.to_string());
+                call.name = Some(name.to_string());
             }
         }
     }
 }
 
-fn json_i64(value: &serde_json::Value, field: &str) -> Option<i64> {
-    value.get(field).and_then(serde_json::Value::as_i64)
+fn text_delta_frame(index: u32, text: &str) -> String {
+    anthropic_frame(
+        "content_block_delta",
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": text},
+        }),
+    )
+}
+
+fn thinking_delta_frame(index: u32, text: &str) -> String {
+    anthropic_frame(
+        "content_block_delta",
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "thinking_delta", "thinking": text},
+        }),
+    )
+}
+
+fn content_block_stop_frame(index: u32) -> String {
+    anthropic_frame(
+        "content_block_stop",
+        serde_json::json!({"type": "content_block_stop", "index": index}),
+    )
 }
 
 fn anthropic_frame(event: &str, body: serde_json::Value) -> String {
@@ -1111,28 +1364,92 @@ mod tests {
         // Late frames, a second finish, and a late failure are all no-ops.
         assert!(translator.push(&created).is_empty());
         assert!(translator.finish().is_empty());
-        assert!(translator.fail().is_empty());
+        assert!(translator.fail_opaque().is_empty());
     }
 
+    /// #750 A5: reasoning round-trips. The Anthropic `signature` is the
+    /// reasoning item's `encrypted_content`, verbatim -- that is what the
+    /// client echoes back so the next turn keeps its reasoning under
+    /// `store: false`.
     #[test]
-    fn reasoning_summaries_are_not_forwarded() {
+    fn reasoning_becomes_a_signed_thinking_block() {
         let stream = [
             upstream("response.created", json!({})),
             upstream(
                 "response.reasoning_summary_text.delta",
-                json!({"output_index": 0, "delta": "thinking about it"}),
+                json!({"output_index": 0, "delta": "first thought"}),
+            ),
+            upstream(
+                "response.reasoning_summary_part.added",
+                json!({"output_index": 0}),
+            ),
+            upstream(
+                "response.reasoning_summary_text.delta",
+                json!({"output_index": 0, "delta": "second thought"}),
+            ),
+            upstream(
+                "response.output_item.done",
+                json!({"output_index": 0, "item": {
+                    "type": "reasoning", "encrypted_content": "gAAAA-signature"}}),
             ),
             upstream(
                 "response.output_text.delta",
-                json!({"output_index": 0, "content_index": 0, "delta": "answer"}),
+                json!({"output_index": 1, "content_index": 0, "delta": "answer"}),
+            ),
+            upstream("response.completed", json!({})),
+        ]
+        .concat();
+        let frames = run(&stream, 4096);
+        let names = events(&frames);
+        let bodies = bodies(&frames);
+
+        assert_eq!(bodies[1]["content_block"]["type"], "thinking");
+        // Several summary parts stay in ONE block, joined by a blank line.
+        let joined: String = bodies
+            .iter()
+            .filter(|body| body["delta"]["type"] == "thinking_delta")
+            .map(|body| body["delta"]["thinking"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            joined,
+            "first thought
+
+second thought"
+        );
+
+        // Signature emitted exactly once, immediately before the stop.
+        let signature_positions: Vec<usize> = bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| body["delta"]["type"] == "signature_delta")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(signature_positions.len(), 1);
+        let at = signature_positions[0];
+        assert_eq!(bodies[at]["delta"]["signature"], "gAAAA-signature");
+        assert_eq!(names[at + 1], "content_block_stop");
+        assert_balanced(&frames);
+    }
+
+    /// A reasoning item can carry a signature with no summary text at all.
+    /// That signature is still the round-trip carrier, so an empty thinking
+    /// block is opened to deliver it.
+    #[test]
+    fn a_signature_only_reasoning_item_still_reaches_the_client() {
+        let stream = [
+            upstream("response.created", json!({})),
+            upstream(
+                "response.output_item.done",
+                json!({"output_index": 0, "item": {
+                    "type": "reasoning", "encrypted_content": "gAAAA-only"}}),
             ),
             upstream("response.completed", json!({})),
         ]
         .concat();
         let frames = run(&stream, 4096);
         let rendered = frames.concat();
-        assert!(!rendered.contains("thinking about it"));
-        assert!(rendered.contains("answer"));
+        assert!(rendered.contains("\"type\":\"thinking\""));
+        assert!(rendered.contains("gAAAA-only"));
         assert_balanced(&frames);
     }
 

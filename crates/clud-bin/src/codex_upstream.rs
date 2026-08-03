@@ -32,6 +32,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+/// ChatGPT-subscription auth is a *different backend*, not just a different
+/// token (`openai/codex` `model-provider-info`). Endpoint, system-prompt
+/// placement, and required headers all change with it.
+pub const CODEX_BACKEND_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+/// Identifies the client to the Codex backend.
+pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle timeout between reads, not a cap on the whole turn: a model may think
 /// for minutes before its first token, which is healthy, whereas a socket that
@@ -105,6 +111,8 @@ pub struct UpstreamTarget {
     authorization: String,
     extra_headers: Vec<(String, String)>,
     model_override: Option<String>,
+    account_id: Option<String>,
+    prompt_cache_key: Option<String>,
 }
 
 impl UpstreamTarget {
@@ -114,7 +122,32 @@ impl UpstreamTarget {
             authorization: authorization.into(),
             extra_headers: Vec::new(),
             model_override: None,
+            account_id: None,
+            prompt_cache_key: None,
         }
+    }
+
+    /// ChatGPT account id. Sent as `ChatGPT-Account-ID`, and its presence is
+    /// what marks a target as the Codex backend.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
+    /// Buys prompt-cache hits across turns; omitting it pays full input price.
+    pub fn with_prompt_cache_key(mut self, key: Option<String>) -> Self {
+        self.prompt_cache_key = key;
+        self
+    }
+
+    pub fn prompt_cache_key(&self) -> Option<&str> {
+        self.prompt_cache_key.as_deref()
+    }
+
+    /// Whether this target is the ChatGPT Codex backend rather than the
+    /// platform API. Drives system-prompt placement (#750 A3).
+    pub fn uses_codex_backend(&self) -> bool {
+        self.base_url.contains("chatgpt.com")
     }
 
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -137,9 +170,11 @@ impl UpstreamTarget {
     /// can point at a gateway that exposes it at a fixed path.
     pub fn responses_url(&self) -> String {
         let trimmed = self.base_url.trim_end_matches('/');
-        if trimmed.ends_with("/v1/responses") {
+        if trimmed.ends_with("/responses") {
             trimmed.to_string()
-        } else if trimmed.ends_with("/v1") {
+        } else if trimmed.ends_with("/v1") || self.uses_codex_backend() {
+            // The Codex backend exposes `/responses` directly under its base;
+            // it has no `/v1` segment.
             format!("{trimmed}/responses")
         } else {
             format!("{trimmed}/v1/responses")
@@ -157,6 +192,10 @@ impl std::fmt::Debug for UpstreamTarget {
             .field("authorization", &"[redacted]")
             .field("extra_headers", &self.extra_headers.len())
             .field("model_override", &self.model_override)
+            .field(
+                "account_id",
+                &self.account_id.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
@@ -208,6 +247,24 @@ impl CredentialSource for ApiKeyCredentials {
 }
 
 /// Pure resolution so the policy is testable without touching process env.
+/// A per-client identifier. Opaque upstream; it only has to be stable and
+/// unique enough to correlate one session.
+fn new_session_id() -> String {
+    let mut bytes = [0_u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        return "00000000-0000-4000-8000-000000000000".to_string();
+    }
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-4{}-8{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[13..16],
+        &hex[17..20],
+        &hex[20..32]
+    )
+}
+
 fn resolve_api_key_target(
     api_key: Option<String>,
     base_url: Option<String>,
@@ -221,6 +278,113 @@ fn resolve_api_key_target(
         .filter(|url| !url.is_empty())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
     Ok(UpstreamTarget::new(base, format!("Bearer {key}")))
+}
+
+/// Credentials read from the Codex CLI's own `auth.json`.
+///
+/// This reads an existing login; it does **not** implement the OAuth/PKCE
+/// flow, which stays #629's scope. It exists so the bridge can be validated
+/// against a real subscription without inventing a second login path.
+#[derive(Clone)]
+pub struct CodexCliCredentials {
+    target: UpstreamTarget,
+}
+
+impl CodexCliCredentials {
+    /// Load from `$CODEX_HOME/auth.json`, defaulting to `~/.codex`.
+    pub fn from_codex_home() -> Result<Self, UpstreamError> {
+        let home = std::env::var_os("CODEX_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs_home().map(|home| home.join(".codex")))
+            .ok_or(UpstreamError::Credentials("no Codex home directory"))?;
+        let raw = std::fs::read(home.join("auth.json"))
+            .map_err(|_| UpstreamError::Credentials("Codex auth.json is not readable"))?;
+        Self::from_auth_json(&raw)
+    }
+
+    /// Parse an `auth.json` document. Split out so the shape is testable
+    /// without touching a real credential file.
+    pub fn from_auth_json(raw: &[u8]) -> Result<Self, UpstreamError> {
+        let document: serde_json::Value = serde_json::from_slice(raw)
+            .map_err(|_| UpstreamError::Credentials("Codex auth.json is not valid JSON"))?;
+        let access_token = document
+            .pointer("/tokens/access_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.trim().is_empty())
+            .ok_or(UpstreamError::Credentials(
+                "Codex auth.json has no access token",
+            ))?;
+        let account_id = document
+            .pointer("/tokens/account_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
+        Ok(Self {
+            target: UpstreamTarget::new(CODEX_BACKEND_BASE_URL, format!("Bearer {access_token}"))
+                .with_account_id(account_id),
+        })
+    }
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+}
+
+impl std::fmt::Debug for CodexCliCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("CodexCliCredentials").finish()
+    }
+}
+
+impl CredentialSource for CodexCliCredentials {
+    fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
+        Ok(self.target.clone())
+    }
+}
+
+/// The credential source the bridge uses, resolved once per launch.
+#[derive(Debug, Clone)]
+pub enum ResolvedCredentials {
+    ApiKey(ApiKeyCredentials),
+    CodexCli(CodexCliCredentials),
+}
+
+impl ResolvedCredentials {
+    /// Platform key first, then an existing Codex CLI login.
+    ///
+    /// #629 requires that subscription and platform credentials never
+    /// *silently* substitute for one another. The precedence here is fixed and
+    /// documented rather than silent, and `describe()` names the chosen source
+    /// so a launch can report it; #629 replaces this with an explicit selector.
+    pub fn resolve_default() -> Result<Self, UpstreamError> {
+        match ApiKeyCredentials::from_env() {
+            Ok(credentials) => Ok(Self::ApiKey(credentials)),
+            Err(api_key_error) => match CodexCliCredentials::from_codex_home() {
+                Ok(credentials) => Ok(Self::CodexCli(credentials)),
+                // Report the platform-key error: it is the one a user who set
+                // out to use an API key needs to see.
+                Err(_) => Err(api_key_error),
+            },
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::ApiKey(_) => "OPENAI_API_KEY",
+            Self::CodexCli(_) => "Codex CLI login",
+        }
+    }
+}
+
+impl CredentialSource for ResolvedCredentials {
+    fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
+        match self {
+            Self::ApiKey(credentials) => credentials.resolve(),
+            Self::CodexCli(credentials) => credentials.resolve(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +420,8 @@ pub struct StreamOutcome {
 pub struct UpstreamClient<C: CredentialSource> {
     credentials: C,
     config: UpstreamConfig,
+    /// Stable for the life of the client so upstream can correlate a turn.
+    session_id: String,
 }
 
 impl<C: CredentialSource> std::fmt::Debug for UpstreamClient<C> {
@@ -272,7 +438,12 @@ impl<C: CredentialSource> UpstreamClient<C> {
         Self {
             credentials,
             config,
+            session_id: new_session_id(),
         }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     pub fn credentials(&self) -> &C {
@@ -343,11 +514,24 @@ impl<C: CredentialSource> UpstreamClient<C> {
 
         // Every header is constructed here. Nothing from the downstream request
         // is copied, so the harness's Anthropic bearer cannot travel upstream.
+        // Identity headers the Codex client sends. `session-id`/`thread-id`
+        // are hyphenated upstream, not underscored.
         let mut request = agent
             .post(&target.responses_url())
             .set("Content-Type", "application/json")
             .set("Accept", "text/event-stream")
-            .set("Authorization", &target.authorization);
+            .set("Authorization", &target.authorization)
+            .set("originator", CODEX_ORIGINATOR)
+            .set("session-id", &self.session_id)
+            .set("thread-id", &self.session_id)
+            .set("x-client-request-id", &self.session_id)
+            .set(
+                "User-Agent",
+                &format!("{CODEX_ORIGINATOR}/{} (clud)", env!("CARGO_PKG_VERSION")),
+            );
+        if let Some(account_id) = target.account_id.as_deref() {
+            request = request.set("ChatGPT-Account-ID", account_id);
+        }
         for (name, value) in &target.extra_headers {
             request = request.set(name, value);
         }
@@ -860,5 +1044,39 @@ mod tests {
             UpstreamTarget::new("https://gw.test", "Bearer k").model_override(),
             None
         );
+    }
+}
+
+/// Manual, network-touching validation against a real account.
+///
+/// Ignored by default so CI never runs it. #631 needs a way to re-validate
+/// against a live subscription without inventing a second harness:
+/// `cargo test -p clud --lib live_probe -- --ignored --nocapture`.
+#[cfg(test)]
+mod live_probe {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    #[ignore = "requires real credentials and network access"]
+    fn a_real_upstream_request_streams_back() {
+        let credentials = ResolvedCredentials::resolve_default().expect("credentials");
+        eprintln!("credential source = {}", credentials.describe());
+        let target = credentials.resolve().expect("target");
+        assert!(target.responses_url().ends_with("/responses"));
+
+        let client = UpstreamClient::new(credentials, UpstreamConfig::default());
+        let body = br#"{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say BRIDGED"}]}],"stream":true,"store":false,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"}}"#;
+        let mut received = String::new();
+        let outcome = client
+            .stream(body, &AtomicBool::new(false), &mut |chunk| {
+                received.push_str(&String::from_utf8_lossy(chunk));
+                Ok(())
+            })
+            .expect("a real upstream request must succeed");
+
+        assert_eq!(outcome.attempts, 1);
+        assert!(received.contains("response.created"), "{received:.200}");
+        assert!(received.contains("response.completed"));
     }
 }

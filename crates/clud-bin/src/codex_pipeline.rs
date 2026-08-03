@@ -15,7 +15,9 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::codex_sse::{FrameDecoder, StreamTranslator};
-use crate::codex_translate::{translate_bytes, TranslateError, DEFAULT_CODEX_MODEL};
+use crate::codex_translate::{
+    translate_bytes, SystemPlacement, TranslateError, TranslateOptions, DEFAULT_CODEX_MODEL,
+};
 use crate::codex_upstream::{CredentialSource, UpstreamClient, UpstreamError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,10 +45,9 @@ impl PipelineError {
     /// instead (see [`StreamTranslator::fail`]).
     pub fn http_status(&self) -> u16 {
         match self {
+            // Translation is total (#750 A1), so the only translate failure
+            // left is a request that is not a valid Messages request at all.
             Self::Translate(TranslateError::Invalid(_)) => 400,
-            // The request is well-formed but names something we refuse to
-            // approximate; 422 keeps that distinct from a parse failure.
-            Self::Translate(TranslateError::Unsupported(_)) => 422,
             Self::Upstream(UpstreamError::Credentials(_)) => 401,
             Self::Upstream(UpstreamError::Status(status)) => match status {
                 400 | 401 | 403 | 404 | 413 | 422 | 429 => *status,
@@ -267,10 +268,10 @@ impl<C: CredentialSource> Pipeline<C> {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
     ) -> Result<(), PipelineError> {
-        let (upstream_body, model) = self.prepare(request_body)?;
+        let (upstream_body, model, tool_names) = self.prepare(request_body)?;
 
         let mut decoder = FrameDecoder::new();
-        let mut translator = StreamTranslator::new(model, message_id);
+        let mut translator = StreamTranslator::new(model, message_id).with_tool_names(tool_names);
         let mut pump = |chunk: &[u8]| -> Result<(), UpstreamError> {
             for frame in decoder.push(chunk) {
                 for out in translator.push(&frame) {
@@ -300,7 +301,7 @@ impl<C: CredentialSource> Pipeline<C> {
                 if translator.is_finished() {
                     return Err(PipelineError::Upstream(error));
                 }
-                for out in translator.fail() {
+                for out in translator.fail_opaque() {
                     let _ = sink(&out);
                 }
                 Err(PipelineError::Upstream(error))
@@ -330,26 +331,44 @@ impl<C: CredentialSource> Pipeline<C> {
     }
 
     /// Translate the request and force streaming upstream.
-    fn prepare(&self, request_body: &[u8]) -> Result<(Vec<u8>, String), PipelineError> {
+    #[allow(clippy::type_complexity)]
+    fn prepare(
+        &self,
+        request_body: &[u8],
+    ) -> Result<(Vec<u8>, String, std::collections::HashMap<String, String>), PipelineError> {
         let target = self
             .client
             .credentials()
             .resolve()
             .map_err(PipelineError::Upstream)?;
-        let default_model = target
-            .model_override()
-            .unwrap_or(self.default_model.as_str())
-            .to_string();
-        let mut translated =
-            translate_bytes(request_body, &default_model).map_err(PipelineError::Translate)?;
-        // Always stream upstream: `complete` folds the events back into one
-        // message rather than maintaining a second mapping.
-        translated.stream = true;
-        let model = translated.model.clone();
-        let body = serde_json::to_vec(&translated).map_err(|error| {
+        let options = TranslateOptions {
+            model: target
+                .model_override()
+                .unwrap_or(self.default_model.as_str())
+                .to_string(),
+            // The Codex backend expects `instructions` to be Codex's own
+            // prompt, so a foreign system prompt travels as a developer
+            // message there instead. See #750 A3.
+            system_placement: if target.uses_codex_backend() {
+                SystemPlacement::DeveloperMessage
+            } else {
+                SystemPlacement::Instructions
+            },
+            // Codex uses its session id here. Without a stable key every
+            // turn re-pays full input price.
+            prompt_cache_key: target
+                .prompt_cache_key()
+                .map(str::to_string)
+                .or_else(|| Some(self.client.session_id().to_string())),
+            service_tier: None,
+        };
+        let translated =
+            translate_bytes(request_body, &options).map_err(PipelineError::Translate)?;
+        let model = translated.request.model.clone();
+        let body = serde_json::to_vec(&translated.request).map_err(|error| {
             PipelineError::Translate(TranslateError::Invalid(error.to_string()))
         })?;
-        Ok((body, model))
+        Ok((body, model, translated.tool_names))
     }
 }
 
@@ -515,7 +534,7 @@ mod tests {
         let sent = server.request();
         assert_eq!(sent["model"], DEFAULT_CODEX_MODEL);
         assert_eq!(sent["instructions"], "be brief");
-        assert_eq!(sent["max_output_tokens"], 32);
+        assert!(sent.get("max_output_tokens").is_none());
         assert_eq!(sent["stream"], true);
         assert_eq!(sent["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(sent["input"][0]["content"][0]["text"], "hi");
@@ -608,24 +627,54 @@ mod tests {
         assert_eq!(sent["parallel_tool_calls"], false);
     }
 
+    /// #750 A1: translation is total, so a request carrying Anthropic-only
+    /// fields still reaches upstream -- with those fields dropped rather than
+    /// turned into a 4xx the user cannot act on.
     #[test]
-    fn an_unsupported_request_fails_before_any_upstream_call() {
+    fn anthropic_only_fields_are_dropped_and_the_request_still_flows() {
         let server = FakeResponses::start(text_reply());
-        let error = pipeline(&server.base_url)
-            .stream(
-                br#"{"messages":[{"role":"user","content":"x"}],"top_k":5}"#,
-                "msg_bad",
+        pipeline(&server.base_url)
+            .complete(
+                br#"{"messages":[{"role":"user","content":"x"}],"top_k":5,
+                     "stop_sequences":["STOP"],"temperature":0.7,"max_tokens":16}"#,
+                "msg_total",
                 &AtomicBool::new(false),
-                &mut |_| Ok(()),
             )
-            .unwrap_err();
+            .expect("a droppable field must not fail the request");
 
-        assert_eq!(error.http_status(), 422);
-        assert!(error.client_message().contains("top_k"));
-        assert!(
-            server.requests.lock().unwrap().is_empty(),
-            "a rejected request must never reach upstream"
-        );
+        let sent = server.request();
+        for banned in [
+            "top_k",
+            "stop_sequences",
+            "temperature",
+            "max_output_tokens",
+        ] {
+            assert!(sent.get(banned).is_none(), "{banned} must not be forwarded");
+        }
+    }
+
+    /// Conformance defaults must survive the whole pipeline, not just the
+    /// translator unit tests.
+    #[test]
+    fn conformance_defaults_reach_upstream() {
+        let server = FakeResponses::start(text_reply());
+        pipeline(&server.base_url)
+            .complete(
+                br#"{"messages":[{"role":"user","content":"x"}]}"#,
+                "msg_conf",
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let sent = server.request();
+        assert_eq!(sent["store"], false);
+        assert_eq!(sent["include"][0], "reasoning.encrypted_content");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["reasoning"]["effort"], "medium");
+        assert_eq!(sent["parallel_tool_calls"], true);
+        // A stable cache key is what buys prompt-cache hits across turns.
+        assert!(sent["prompt_cache_key"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty()));
     }
 
     #[test]
