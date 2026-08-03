@@ -76,7 +76,9 @@ impl Effort {
 
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim().to_ascii_lowercase();
-        Self::ALL.into_iter().find(|effort| effort.as_str() == value)
+        Self::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
     }
 
     fn catalog() -> String {
@@ -188,9 +190,13 @@ impl ModelSpec {
 
         let effort = match effort_part {
             None => None,
-            Some(value) => Some(Effort::parse(value).ok_or_else(|| SelectionError::UnknownEffort {
-                given: value.to_string(),
-            })?),
+            Some(value) => {
+                Some(
+                    Effort::parse(value).ok_or_else(|| SelectionError::UnknownEffort {
+                        given: value.to_string(),
+                    })?,
+                )
+            }
         };
 
         let model = match model_by_alias(model_part) {
@@ -368,7 +374,10 @@ mod tests {
 
     #[test]
     fn empty_and_malformed_selections_are_rejected() {
-        assert_eq!(ModelSpec::parse("").unwrap_err(), SelectionError::EmptyModel);
+        assert_eq!(
+            ModelSpec::parse("").unwrap_err(),
+            SelectionError::EmptyModel
+        );
         assert_eq!(
             ModelSpec::parse("   ").unwrap_err(),
             SelectionError::EmptyModel

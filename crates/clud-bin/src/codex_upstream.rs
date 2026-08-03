@@ -31,6 +31,8 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::codex_model::ModelSpec;
+
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 /// ChatGPT-subscription auth is a *different backend*, not just a different
 /// token (`openai/codex` `model-provider-info`). Endpoint, system-prompt
@@ -447,7 +449,7 @@ pub struct UpstreamTarget {
     base_url: String,
     authorization: String,
     extra_headers: Vec<(String, String)>,
-    model_override: Option<String>,
+    model_override: Option<ModelSpec>,
     account_id: Option<String>,
     prompt_cache_key: Option<String>,
 }
@@ -492,13 +494,13 @@ impl UpstreamTarget {
         self
     }
 
-    pub fn with_model_override(mut self, model: Option<String>) -> Self {
+    pub fn with_model_override(mut self, model: Option<ModelSpec>) -> Self {
         self.model_override = model;
         self
     }
 
-    pub fn model_override(&self) -> Option<&str> {
-        self.model_override.as_deref()
+    pub fn model_override(&self) -> Option<&ModelSpec> {
+        self.model_override.as_ref()
     }
 
     /// Absolute URL of the Responses endpoint.
@@ -1845,8 +1847,11 @@ mod tests {
     #[test]
     fn model_override_travels_with_the_target() {
         let target = UpstreamTarget::new("https://gw.test", "Bearer k")
-            .with_model_override(Some("gpt-5.6-codex".into()));
-        assert_eq!(target.model_override(), Some("gpt-5.6-codex"));
+            .with_model_override(Some(ModelSpec::parse("terra@high").unwrap()));
+        assert_eq!(
+            target.model_override().map(ModelSpec::display),
+            Some("gpt-5.6-terra@high".to_string())
+        );
         assert_eq!(
             UpstreamTarget::new("https://gw.test", "Bearer k").model_override(),
             None

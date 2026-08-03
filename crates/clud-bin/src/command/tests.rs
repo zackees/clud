@@ -182,6 +182,50 @@ fn test_plain_codex_harness_keeps_getting_no_claude_only_flag() {
     assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
 }
 
+/// On the bridge, `--model` names a *Codex* model even though the flag goes
+/// to the Claude harness. The short name is expanded so `--dry-run` shows
+/// what will actually be billed, not the shorthand that was typed.
+#[test]
+fn test_bridge_expands_a_short_model_name_in_argv_and_on_the_plan() {
+    let args = parse(&["clud", "--model", "terra@high"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    let model_index = p.command.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(p.command[model_index + 1], "gpt-5.6-terra@high");
+    assert_eq!(p.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
+}
+
+/// An id we do not know is forwarded untouched — the alias table gives short
+/// names, it does not gate which models are reachable.
+#[test]
+fn test_bridge_forwards_an_unknown_full_model_id_untouched() {
+    let args = parse(&["clud", "--model", "gpt-5.7-nova"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    let model_index = p.command.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(p.command[model_index + 1], "gpt-5.7-nova");
+    assert_eq!(p.codex_model.as_deref(), Some("gpt-5.7-nova"));
+}
+
+/// A typo is left alone here and rejected by the bridge, which owns the
+/// message. What must not happen is a silent substitution of the default.
+#[test]
+fn test_bridge_does_not_substitute_a_default_for_an_unknown_alias() {
+    let args = parse(&["clud", "--model", "tera"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    let model_index = p.command.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(p.command[model_index + 1], "tera");
+    assert_eq!(p.codex_model, None);
+}
+
+/// Off the bridge, `--model` is the harness's own flag and must not be
+/// rewritten: `clud --model sonnet` selects a Claude model, not a Codex one.
+#[test]
+fn test_native_routes_never_rewrite_the_model_flag() {
+    let p = plan(&["clud", "--model", "sonnet"]);
+    let model_index = p.command.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(p.command[model_index + 1], "sonnet");
+    assert_eq!(p.codex_model, None);
+}
+
 #[test]
 fn test_plan_mode_suppression_notice_is_green_and_tty_only() {
     let args = parse(&["clud"]);

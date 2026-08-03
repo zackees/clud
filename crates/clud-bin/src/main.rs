@@ -600,6 +600,9 @@ fn main() {
                 "image": plan.graphics.image_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             },
             "repeat_interval_secs": plan.repeat_schedule.as_ref().map(|s| s.interval_secs),
+            // The resolved Codex selection, expanded from whatever short form
+            // was typed, so a dry run shows what will actually be billed.
+            "codex_model": plan.codex_model,
             "transcript": args.transcript.as_ref().map(|p| p.to_string_lossy().to_string()),
             "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({
                 "done_path": m.done_path,

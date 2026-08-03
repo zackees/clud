@@ -25,17 +25,21 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::codex_model::{Effort, ModelSpec};
+
 /// Default upstream model. Codex fetches its catalogue from the server and
 /// hardcodes almost nothing, so this stays a single overridable value rather
 /// than growing into a table that would rot (`gpt-5.4` retires from
 /// ChatGPT-auth Codex on 2026-08-31).
 ///
 /// `terra`, not the `sol` flagship: same 1.05M context, 2.5x cheaper on both
-/// input and output ($2/$12 per 1M vs $5/$30), and `medium` — what
-/// [`reasoning_for`] already emits absent a thinking block — is terra's own
-/// catalog default effort, so the cheap tier is also the correctly-configured
-/// one. Defaulting to the flagship drained a real account (#776); a default
-/// nobody chose should not be the most expensive option available.
+/// input and output ($2/$12 per 1M vs $5/$30), and `medium` -- terra's own
+/// catalog default effort -- so the cheap tier is also the correctly-
+/// configured one. Defaulting to the flagship drained a real account (#776);
+/// a default nobody chose should not be the most expensive option available.
+///
+/// This is only the *fallback*. A request that names a model
+/// ([`resolve_selection`]) wins over it.
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-terra";
 
 /// Responses rejects identifiers longer than this.
@@ -84,9 +88,19 @@ pub enum SystemPlacement {
     DeveloperMessage,
 }
 
+/// The default selection when a request does not carry one of its own.
+pub fn default_model_spec() -> ModelSpec {
+    ModelSpec {
+        model: DEFAULT_CODEX_MODEL.to_string(),
+        effort: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TranslateOptions {
-    pub model: String,
+    /// Model *and* optional effort. Carried as one value because the two are
+    /// selected together (`terra@max`) and a split would let them drift.
+    pub model: ModelSpec,
     pub system_placement: SystemPlacement,
     /// Buys prompt-cache hits across turns. Omitting it silently pays full
     /// input price on every request.
@@ -97,7 +111,7 @@ pub struct TranslateOptions {
 impl Default for TranslateOptions {
     fn default() -> Self {
         Self {
-            model: DEFAULT_CODEX_MODEL.to_string(),
+            model: default_model_spec(),
             system_placement: SystemPlacement::Instructions,
             prompt_cache_key: None,
             service_tier: None,
@@ -123,9 +137,22 @@ pub struct MessagesRequest {
     #[serde(default)]
     pub stream: bool,
     pub thinking: Option<Thinking>,
+    /// Where `/effort`, `--effort`, `CLAUDE_CODE_EFFORT_LEVEL` and the
+    /// `/model` effort slider land. Previously unmodelled, and because
+    /// unknown fields are tolerated (deliberately, see above), the user's
+    /// effort choice was dropped without a trace — every request ran at the
+    /// ladder's `medium` no matter what was selected.
+    pub output_config: Option<OutputConfig>,
     // `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` and
     // `metadata` are deliberately not modelled. Neither reference forwards
     // them, and reasoning models reject sampling parameters outright.
+}
+
+/// The harness's own output/effort settings block. Only `effort` is read;
+/// structured-output format and task budget are not ours to interpret.
+#[derive(Debug, Default, Deserialize)]
+pub struct OutputConfig {
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -408,47 +435,94 @@ fn base64_decode_urlsafe(value: &str) -> Result<Vec<u8>, ()> {
 }
 
 /// Map Anthropic's token-denominated thinking budget onto the effort ladder.
-/// Thresholds mirror CLIProxyAPI's `ConvertBudgetToLevel`.
-fn effort_for_budget(budget: i64) -> &'static str {
+///
+/// `None` means *the request stated no budget*, which is not the same as
+/// "medium" — it defers to the model's own catalog default. That distinction
+/// is load-bearing: the harness sends `thinking: {"type":"adaptive"}` with no
+/// `budget_tokens` for model ids it does not recognize, i.e. for every id the
+/// bridge serves, so treating a missing budget as an explicit `medium` pinned
+/// every request to `medium` regardless of the model.
+///
+/// Thresholds follow CLIProxyAPI's `ConvertBudgetToLevel` with two
+/// corrections for this model family: the sub-512 band emitted `minimal`,
+/// which **no gpt-5.6 model accepts** (the family starts at `low`), and the
+/// ladder topped out at `xhigh` so `max` — supported by all three — was
+/// unreachable from any budget.
+fn effort_for_budget(budget: i64) -> Option<Effort> {
     match budget {
-        i64::MIN..=-2 => "medium",
-        -1 => "medium",
-        0 => "none",
-        1..=512 => "minimal",
-        513..=1024 => "low",
-        1025..=8192 => "medium",
-        8193..=24576 => "high",
-        _ => "xhigh",
+        i64::MIN..=-1 => None,
+        0 => Some(Effort::None),
+        1..=1024 => Some(Effort::Low),
+        1025..=8192 => Some(Effort::Medium),
+        8193..=24576 => Some(Effort::High),
+        24577..=49152 => Some(Effort::XHigh),
+        _ => Some(Effort::Max),
     }
 }
 
-fn reasoning_for(thinking: Option<&Thinking>) -> Reasoning {
-    let effort = match thinking {
-        None => "medium",
-        Some(thinking) => match thinking.kind.as_str() {
-            "disabled" => "none",
-            // "enabled", "adaptive", "auto" and anything else fall through to
-            // the budget ladder rather than erroring: an unknown mode is not a
-            // reason to fail a request.
-            _ => effort_for_budget(thinking.budget_tokens.unwrap_or(-1)),
-        },
-    };
-    Reasoning { effort }
+fn effort_from_thinking(thinking: Option<&Thinking>) -> Option<Effort> {
+    let thinking = thinking?;
+    match thinking.kind.as_str() {
+        "disabled" => Some(Effort::None),
+        // "enabled", "adaptive", "auto" and anything else fall through to the
+        // budget ladder rather than erroring: an unknown mode is not a reason
+        // to fail a request.
+        _ => effort_for_budget(thinking.budget_tokens.unwrap_or(-1)),
+    }
+}
+
+/// Resolve effort across all four channels, most explicit first.
+///
+/// 1. `@effort` on the model id — the only channel that cannot be dropped in
+///    transit, so it outranks everything.
+/// 2. `output_config.effort` — the native `/effort` control, when the harness
+///    decides to send it.
+/// 3. The `thinking` budget ladder — inferred, and only when a budget was
+///    actually stated.
+/// 4. The model's own catalog default.
+///
+/// An unparseable `output_config.effort` falls through rather than failing:
+/// it is the harness's field, and a value we do not recognize is not a reason
+/// to reject a turn the user is waiting on. An unparseable `@effort` *does*
+/// fail, because the user typed it and needs to know it was wrong.
+fn effort_for(request: &MessagesRequest, spec: &ModelSpec) -> Effort {
+    spec.effort
+        .or_else(|| {
+            request
+                .output_config
+                .as_ref()
+                .and_then(|config| config.effort.as_deref())
+                .and_then(Effort::parse)
+        })
+        .or_else(|| effort_from_thinking(request.thinking.as_ref()))
+        .unwrap_or_else(|| spec.effective_effort())
 }
 
 // ---------------------------------------------------------------------------
 // Translation
 // ---------------------------------------------------------------------------
 
-/// Resolve the upstream model.
+/// Resolve the upstream selection from what the client asked for.
 ///
 /// Claude Code sends its own model id, which is meaningless upstream, so any
-/// `claude*` id resolves to the configured default. Any other id is honoured
-/// verbatim -- that is how a caller pins a specific Codex model.
-pub fn resolve_model(requested: Option<&str>, default_model: &str) -> String {
+/// `claude*` id resolves to the configured default. Any other id is parsed as
+/// a `<model>[@<effort>]` selection -- that is how a user pins a specific
+/// Codex model and effort from `/model`, and it works because a custom
+/// `ANTHROPIC_BASE_URL` makes the gateway the owner of the model namespace,
+/// so the harness forwards the string unvalidated.
+///
+/// A selection that does not parse is a **400, not a fallback**. Silently
+/// substituting the default for `/model tera` would bill a model the user did
+/// not choose and give them no way to notice.
+pub fn resolve_selection(
+    requested: Option<&str>,
+    default: &ModelSpec,
+) -> Result<ModelSpec, TranslateError> {
     match requested.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(model) if !model.to_ascii_lowercase().starts_with("claude") => model.to_string(),
-        _ => default_model.to_string(),
+        Some(model) if !model.to_ascii_lowercase().starts_with("claude") => {
+            ModelSpec::parse(model).map_err(|error| invalid(error.to_string()))
+        }
+        _ => Ok(default.clone()),
     }
 }
 
@@ -727,9 +801,12 @@ pub fn translate_request(
     // Upstream rejects `tool_choice` without `tools`.
     let tool_choice = tools.as_ref().and(tool_choice);
 
+    let selection = resolve_selection(request.model.as_deref(), &options.model)?;
+    let effort = effort_for(request, &selection);
+
     Ok(Translated {
         request: ResponsesRequest {
-            model: resolve_model(request.model.as_deref(), &options.model),
+            model: selection.model,
             input,
             stream: true,
             store: false,
@@ -738,7 +815,9 @@ pub fn translate_request(
             tools,
             tool_choice,
             parallel_tool_calls,
-            reasoning: Some(reasoning_for(request.thinking.as_ref())),
+            reasoning: Some(Reasoning {
+                effort: effort.as_str(),
+            }),
             prompt_cache_key: options.prompt_cache_key.clone(),
             service_tier: options.service_tier.clone(),
         },
@@ -1162,8 +1241,12 @@ mod tests {
         assert_eq!(no_tools.tool_choice, None);
     }
 
+    /// The ladder, with the two corrections this family needs: nothing maps
+    /// to `minimal` (unsupported by every gpt-5.6 model, so every small-budget
+    /// request used to be rejected upstream for a reason the user could not
+    /// see), and a large enough budget can reach `max`.
     #[test]
-    fn reasoning_effort_ladder_matches_the_reference() {
+    fn the_budget_ladder_never_emits_minimal_and_can_reach_max() {
         let effort = |thinking: serde_json::Value| {
             ok(json!({
                 "messages": [{"role": "user", "content": "x"}],
@@ -1173,47 +1256,119 @@ mod tests {
             .unwrap()
             .effort
         };
+        let enabled = |budget: i64| effort(json!({"type": "enabled", "budget_tokens": budget}));
+
         assert_eq!(effort(json!({"type": "disabled"})), "none");
+        assert_eq!(enabled(0), "none");
+        // Was `minimal`, which upstream rejects.
+        assert_eq!(enabled(512), "low");
+        assert_eq!(enabled(1024), "low");
+        assert_eq!(enabled(8192), "medium");
+        assert_eq!(enabled(24576), "high");
+        assert_eq!(enabled(32768), "xhigh");
+        // Was unreachable at any budget.
+        assert_eq!(enabled(200_000), "max");
+
+        for budget in [-1, 0, 512, 1024, 8192, 24576, 32768, 200_000, i64::MAX] {
+            assert_ne!(enabled(budget), "minimal", "budget {budget}");
+        }
+    }
+
+    /// A stated budget is a choice; a missing one is not. The harness sends
+    /// `adaptive` with no budget for model ids it does not recognize -- which
+    /// is every id the bridge serves -- so reading that as an explicit
+    /// `medium` pinned every request to `medium` regardless of the model.
+    #[test]
+    fn an_absent_budget_defers_to_the_models_own_default() {
+        let effort_for_model = |model: &str, thinking: serde_json::Value| {
+            translate_bytes(
+                json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "x"}],
+                    "thinking": thinking,
+                })
+                .to_string()
+                .as_bytes(),
+                &options(),
+            )
+            .unwrap()
+            .request
+            .reasoning
+            .unwrap()
+            .effort
+        };
+
+        // sol's catalog default is `low`, terra's and luna's is `medium`.
+        assert_eq!(effort_for_model("sol", json!({"type": "adaptive"})), "low");
         assert_eq!(
-            effort(json!({"type": "enabled", "budget_tokens": 0})),
-            "none"
-        );
-        assert_eq!(
-            effort(json!({"type": "enabled", "budget_tokens": 512})),
-            "minimal"
-        );
-        assert_eq!(
-            effort(json!({"type": "enabled", "budget_tokens": 1024})),
-            "low"
-        );
-        assert_eq!(
-            effort(json!({"type": "enabled", "budget_tokens": 8192})),
+            effort_for_model("terra", json!({"type": "adaptive"})),
             "medium"
         );
+        // A stated budget still wins over the model default.
         assert_eq!(
-            effort(json!({"type": "enabled", "budget_tokens": 24576})),
-            "high"
-        );
-        assert_eq!(
-            effort(json!({"type": "enabled", "budget_tokens": 32768})),
+            effort_for_model("sol", json!({"type": "enabled", "budget_tokens": 30000})),
             "xhigh"
         );
     }
 
+    /// `/effort` reaches the wire. Before this, `output_config` was not
+    /// modelled at all and the field was dropped without a trace.
     #[test]
-    fn model_resolution_stays_a_single_overridable_default() {
-        assert_eq!(
-            resolve_model(Some("gpt-5.6-codex"), "fallback"),
-            "gpt-5.6-codex"
-        );
-        assert_eq!(
-            resolve_model(Some("claude-opus-4-8"), "fallback"),
-            "fallback"
-        );
-        assert_eq!(resolve_model(Some("Claude-3"), "fallback"), "fallback");
-        assert_eq!(resolve_model(Some("   "), "fallback"), "fallback");
-        assert_eq!(resolve_model(None, "fallback"), "fallback");
+    fn output_config_effort_is_read_and_the_suffix_outranks_it() {
+        let effort = |model: &str, config: serde_json::Value| {
+            translate_bytes(
+                json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "x"}],
+                    "output_config": config,
+                })
+                .to_string()
+                .as_bytes(),
+                &options(),
+            )
+            .unwrap()
+            .request
+            .reasoning
+            .unwrap()
+            .effort
+        };
+
+        assert_eq!(effort("terra", json!({"effort": "xhigh"})), "xhigh");
+        // The suffix is the channel that cannot be dropped in transit, so it
+        // wins when both are present.
+        assert_eq!(effort("terra@low", json!({"effort": "xhigh"})), "low");
+        // An effort we do not recognize falls through instead of failing a
+        // turn the user is waiting on.
+        assert_eq!(effort("terra", json!({"effort": "wat"})), "medium");
+    }
+
+    #[test]
+    fn a_claude_id_resolves_to_the_default_and_anything_else_is_honoured() {
+        let default = ModelSpec::parse("terra").unwrap();
+        let resolved = |requested| resolve_selection(requested, &default).unwrap();
+
+        // A real Codex id passes through verbatim -- this is how `/model`
+        // pins a model through a gateway that never validates the string.
+        assert_eq!(resolved(Some("gpt-5.6-luna")).model, "gpt-5.6-luna");
+        // ... and the short name is expanded on the way.
+        assert_eq!(resolved(Some("sol")).model, "gpt-5.6-sol");
+
+        // The harness's own ids are meaningless upstream.
+        for claude in ["claude-opus-4-8", "Claude-3", "   "] {
+            assert_eq!(resolved(Some(claude)), default, "{claude}");
+        }
+        assert_eq!(resolved(None), default);
         assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.6-terra");
+    }
+
+    /// A typo must not be quietly billed as the default model.
+    #[test]
+    fn an_unparseable_selection_is_a_400_not_a_fallback() {
+        let default = ModelSpec::parse("terra").unwrap();
+        let error = resolve_selection(Some("tera"), &default).unwrap_err();
+        let TranslateError::Invalid(message) = error;
+        assert!(message.contains("tera"), "{message}");
+        assert!(message.contains("terra"), "{message}");
     }
 
     #[test]

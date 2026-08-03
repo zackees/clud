@@ -37,6 +37,13 @@ pub struct LaunchPlan {
     /// through `stream_json::render_line` so the user sees live progress.
     #[serde(default)]
     pub stream_json_progress: bool,
+    /// The Codex model+effort selection for a Codex-provider / Claude-harness
+    /// launch, canonicalized (`gpt-5.6-terra@high`) from whatever short form
+    /// the user gave. Carried on the plan rather than re-derived from argv so
+    /// every launch path — subprocess, PTY, daemon, detach, repeat — hands the
+    /// bridge the same value, and so `--dry-run` can show it.
+    #[serde(default)]
+    pub codex_model: Option<String>,
 }
 
 impl LaunchPlan {
@@ -77,6 +84,7 @@ mod tests {
             task_summary: None,
             loop_markers: None,
             stream_json_progress: false,
+            codex_model: None,
         }
     }
 
