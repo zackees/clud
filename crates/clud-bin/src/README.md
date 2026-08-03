@@ -53,9 +53,10 @@ Entry and orchestration:
   idle timeout, with chunked progressive SSE via `write_event_stream` (#627
   step 1, DD-028).
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
-  mapping for #627 step 2: typed in/out structs, transcript-order-preserving
-  tool loops, and explicit rejection of unrepresentable inputs. HTTP-free and
-  not yet wired into the bridge (that is step 5).
+  mapping: typed in/out structs, transcript-order-preserving tool loops,
+  auth-mode-dependent system placement, reasoning round-trip, and bounded
+  reversible identifiers. Translation is **total** -- droppable Anthropic
+  fields are dropped, not rejected (#750, DD-030).
 - `codex_sse.rs` - #627 step 3: `FrameDecoder` (byte-level SSE framing,
   fragmentation/CRLF/heartbeat tolerant) and `StreamTranslator` (Responses
   events -> Anthropic events with monotonic block indices). A tool block never

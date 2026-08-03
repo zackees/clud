@@ -2,7 +2,9 @@
 //! Claude harness (issue #626).
 
 use crate::codex_pipeline::{Pipeline, PipelineError};
-use crate::codex_upstream::{ApiKeyCredentials, UpstreamClient, UpstreamConfig, UpstreamError};
+use crate::codex_upstream::{
+    ApiKeyCredentials, ResolvedCredentials, UpstreamClient, UpstreamConfig, UpstreamError,
+};
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::fmt;
@@ -472,7 +474,17 @@ fn handle_connection(
         return;
     }
 
-    match (parsed.method.as_str(), parsed.path.as_str()) {
+    // Route on the path alone. Claude Code sends `POST /v1/messages?beta=true`,
+    // so matching the raw request target 404s a request that is perfectly
+    // valid -- a defect only a live client surfaces, since the mock probe
+    // sends a bare path.
+    let route = parsed
+        .path
+        .split('?')
+        .next()
+        .unwrap_or(parsed.path.as_str())
+        .to_string();
+    match (parsed.method.as_str(), route.as_str()) {
         ("HEAD", "/v1/messages") => {
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
@@ -512,6 +524,12 @@ fn handle_connection(
             serve_messages(&mut stream, config, shutdown, &body, streaming);
         }
         _ => {
+            if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
+                eprintln!(
+                    "[clud] codex bridge: unhandled {} {}",
+                    parsed.method, parsed.path
+                );
+            }
             let _ = write_error(&mut stream, 404);
         }
     }
@@ -522,15 +540,16 @@ fn handle_connection(
 /// The debug seam repoints the *upstream base URL* at a Responses-shaped fake.
 /// Phase 2 used it to pass an Anthropic body through unchanged, which meant the
 /// end-to-end tests proved transport and auth but nothing about translation.
-fn build_pipeline(config: &BridgeConfig) -> Result<Pipeline<ApiKeyCredentials>, UpstreamError> {
+fn build_pipeline(config: &BridgeConfig) -> Result<Pipeline<ResolvedCredentials>, UpstreamError> {
     let credentials = match config.test_upstream_url.as_deref() {
-        Some(base_url) => ApiKeyCredentials::new("clud-test-upstream-key", Some(base_url.into()))?,
-        None => ApiKeyCredentials::from_env()?,
+        Some(base_url) => ResolvedCredentials::ApiKey(ApiKeyCredentials::new(
+            "clud-test-upstream-key",
+            Some(base_url.into()),
+        )?),
+        None => ResolvedCredentials::resolve_default()?,
     };
-    Ok(Pipeline::new(UpstreamClient::new(
-        credentials,
-        UpstreamConfig::default(),
-    )))
+    let client = UpstreamClient::new(credentials, UpstreamConfig::default());
+    Ok(Pipeline::new(client))
 }
 
 /// Serve one `POST /v1/messages`.
@@ -571,6 +590,7 @@ fn serve_messages(
                 if writer.started() {
                     // Committed: the pipeline has already emitted a sanitized
                     // `error` event, so just close the body cleanly.
+                    log_pipeline_error(&error);
                     let _ = writer.finish();
                 } else {
                     let _ = write_pipeline_error(stream, &error);
@@ -591,7 +611,22 @@ fn serve_messages(
     }
 }
 
+/// Opt-in diagnostics. The bridge answers the harness with a sanitized error,
+/// which is correct but leaves an operator with no way to tell a translation
+/// bug from an upstream outage. This prints the classification only -- never an
+/// upstream body, which can carry account identifiers.
+fn log_pipeline_error(error: &PipelineError) {
+    if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
+        eprintln!(
+            "[clud] codex bridge: {} -> HTTP {}",
+            error,
+            error.http_status()
+        );
+    }
+}
+
 fn write_pipeline_error(stream: &mut TcpStream, error: &PipelineError) -> io::Result<()> {
+    log_pipeline_error(error);
     let status = error.http_status();
     let body = serde_json::json!({
         "type": "error",
@@ -1565,8 +1600,11 @@ Connection: close
         );
         // It must also translate: a cap that admits a request the translator
         // then refuses would not have bought anything.
-        crate::codex_translate::translate_bytes(&encoded, "gpt-5.6-sol")
-            .expect("a representative request must translate");
+        crate::codex_translate::translate_bytes(
+            &encoded,
+            &crate::codex_translate::TranslateOptions::default(),
+        )
+        .expect("a representative request must translate");
     }
 
     /// Justifies the admission policy: concurrent requests beyond the bound
@@ -1641,6 +1679,35 @@ Connection: close
             "the 503 must come only after the admission wait"
         );
         drop(occupied);
+    }
+
+    /// Regression guard: Claude Code sends `POST /v1/messages?beta=true`.
+    /// Matching the raw request target 404s a valid request -- and the mock
+    /// probe never caught it because it sends a bare path. Found only by
+    /// running a real client against the bridge.
+    #[test]
+    fn a_query_string_does_not_change_the_route() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let token = bridge.bearer_token().to_owned();
+        for path in [
+            "/v1/messages",
+            "/v1/messages?beta=true",
+            "/v1/messages?beta=true&foo=bar",
+        ] {
+            let response = request(
+                bridge.socket_addr(),
+                &authorized("POST", path, &token, PROBE_BODY),
+            );
+            assert_eq!(status(&response), 200, "path {path}: {response}");
+            assert!(response.contains("bridged reply"), "path {path}");
+        }
+        // Unknown routes still 404, query string or not.
+        let unknown = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/unknown?beta=true", &token, PROBE_BODY),
+        );
+        assert_eq!(status(&unknown), 404);
     }
 
     #[test]
