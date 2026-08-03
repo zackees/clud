@@ -13,7 +13,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+/// The bridge must not be stricter than the endpoint it impersonates. Claude
+/// Code sizes its requests against the real Anthropic API, so a cap below what
+/// that API accepts turns a legitimate request into a bridge-only `413` that
+/// looks like a client bug. A single base64 screenshot already exceeds the
+/// fixture-era 1 MiB; see `a_representative_request_fits_the_body_cap`.
+const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_HEADER_BYTES: usize = 32 * 1024;
 /// Header reads stay on a short absolute deadline: it is the slowloris
 /// defence, and a well-behaved client sends its headers in one segment.
@@ -26,7 +31,15 @@ const DEFAULT_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// token is healthy, whereas a socket that accepts no bytes for five minutes
 /// is not. Phase 3 replaces the fixture frames but keeps this primitive.
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-const DEFAULT_MAX_CONCURRENCY: usize = 4;
+/// Claude Code issues several requests at once: the foreground turn plus
+/// background side-model calls and any subagents. The bound still exists, but
+/// exceeding it now queues in the listen backlog rather than failing.
+const DEFAULT_MAX_CONCURRENCY: usize = 16;
+/// How long a connection may wait in the kernel's listen backlog for a worker
+/// slot before the bridge accepts it only to answer 503. Queueing beats
+/// rejecting -- a 503 surfaces to the user as a hard API error, whereas a short
+/// wait is invisible -- but an unbounded wait would hang the client instead.
+const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(10);
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
 /// Upper bound on a single blocking read. Reads are resumed until their phase
 /// deadline expires; the cap exists so a worker parked on a quiet socket still
@@ -47,6 +60,7 @@ pub struct BridgeConfig {
     pub body_timeout: Duration,
     pub stream_idle_timeout: Duration,
     pub max_concurrency: usize,
+    pub admission_wait: Duration,
     test_upstream_url: Option<String>,
     #[cfg(test)]
     request_hold: Duration,
@@ -65,6 +79,7 @@ impl Default for BridgeConfig {
             body_timeout: DEFAULT_BODY_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
+            admission_wait: DEFAULT_ADMISSION_WAIT,
             test_upstream_url: test_upstream_override_from_process(),
             #[cfg(test)]
             request_hold: Duration::ZERO,
@@ -115,6 +130,7 @@ impl fmt::Debug for BridgeConfig {
             .field("body_timeout", &self.body_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
             .field("max_concurrency", &self.max_concurrency)
+            .field("admission_wait", &self.admission_wait)
             .field(
                 "test_upstream_url",
                 &self.test_upstream_url.as_ref().map(|_| "[redacted]"),
@@ -267,8 +283,23 @@ fn serve(
 ) {
     let mut workers = Vec::<JoinHandle<()>>::new();
     let mut next_worker_id = 0_usize;
+    // When every slot is busy, decline to *accept*: pending connections wait in
+    // the kernel's listen backlog instead of being answered 503. A short wait is
+    // invisible to the user; a 503 is a hard API error. `full_since` bounds that
+    // wait so a wedged worker cannot hang a client indefinitely.
+    let mut full_since: Option<Instant> = None;
     while !shutdown.load(Ordering::Acquire) {
         workers.retain(|worker| !worker.is_finished());
+        let limit = config.max_concurrency.max(1);
+        if active.load(Ordering::Acquire) >= limit {
+            let waiting_since = *full_since.get_or_insert_with(Instant::now);
+            if waiting_since.elapsed() < config.admission_wait {
+                thread::sleep(ACCEPT_POLL);
+                continue;
+            }
+        } else {
+            full_since = None;
+        }
         match listener.accept() {
             Ok((stream, _peer)) => {
                 // The listener is non-blocking so the accept loop can poll for
@@ -282,7 +313,9 @@ fn serve(
                 if stream.set_nonblocking(false).is_err() {
                     continue;
                 }
-                if !reserve_worker(&active, config.max_concurrency.max(1)) {
+                if !reserve_worker(&active, limit) {
+                    // Only reachable once `admission_wait` has elapsed: the
+                    // backstop that keeps a client from waiting forever.
                     reject_busy(stream, config.header_timeout, &shutdown);
                     continue;
                 }
@@ -1122,7 +1155,9 @@ Connection: close
     }
 
     #[test]
-    fn enforces_body_header_timeout_and_concurrency_bounds() {
+    /// Admission/concurrency behaviour moved to its own tests when queueing
+    /// replaced immediate rejection; this one owns the size and time bounds.
+    fn enforces_body_header_and_timeout_bounds() {
         let config = BridgeConfig {
             max_body_bytes: 64,
             max_header_bytes: 256,
@@ -1210,38 +1245,6 @@ Connection: close
         assert!(started.elapsed() < Duration::from_secs(2));
         drop(dripping);
         writer.join().unwrap();
-
-        drop(bridge);
-        let bridge = BridgeHandle::start(
-            BridgeConfig {
-                max_concurrency: 1,
-                header_timeout: Duration::from_secs(2),
-                ..BridgeConfig::default()
-            }
-            .with_request_hold(Duration::from_secs(1)),
-        )
-        .unwrap();
-        let addr = bridge.socket_addr();
-        let token = bridge.bearer_token().to_owned();
-        let mut occupied = TcpStream::connect(addr).unwrap();
-        occupied
-            .write_all(authorized("HEAD", "/v1/messages", &token, "").as_bytes())
-            .unwrap();
-        // A heavily loaded Windows host can take over a second to schedule a
-        // freshly created listener thread. Observe admission rather than
-        // assuming a wall-clock sleep is enough.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while bridge.active_requests() != 1 && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(
-            bridge.active_requests(),
-            1,
-            "blocking request was not admitted"
-        );
-        let saturated = request(addr, &authorized("HEAD", "/v1/messages", &token, ""));
-        assert_eq!(status(&saturated), 503);
-        drop(occupied);
     }
 
     #[test]
@@ -1492,6 +1495,152 @@ Connection: close
             "segmented body must not read as a timeout: {response}"
         );
         assert!(response.contains("bridged reply"));
+    }
+
+    /// Justifies `DEFAULT_MAX_BODY_BYTES`.
+    ///
+    /// This is a *constructed* representative request, not captured production
+    /// traffic -- stated plainly because the distinction matters. It is built
+    /// from the parts a real Claude Code turn always carries: a system prompt,
+    /// a set of tool definitions with JSON Schemas, a multi-turn transcript,
+    /// and one screenshot. The screenshot alone is what breaks the fixture-era
+    /// cap: base64 inflates bytes by 4/3, so even a modest image clears 1 MiB
+    /// before any text is counted.
+    #[test]
+    fn a_representative_request_fits_the_body_cap() {
+        let system = "You are Claude Code. ".repeat(500);
+        let tools: Vec<serde_json::Value> = (0..15)
+            .map(|index| {
+                serde_json::json!({
+                    "name": format!("tool_{index}"),
+                    "description": "A tool with a realistic schema. ".repeat(20),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "x".repeat(200)},
+                            "content": {"type": "string", "description": "y".repeat(200)},
+                        },
+                        "required": ["path"],
+                    },
+                })
+            })
+            .collect();
+        let mut messages: Vec<serde_json::Value> = (0..20)
+            .map(|index| {
+                serde_json::json!({
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": format!("turn {index}: {}", "transcript text ".repeat(120)),
+                })
+            })
+            .collect();
+        // One 1-megapixel screenshot. 3 bytes per pixel, then base64's 4/3.
+        let screenshot = "A".repeat(1024 * 1024 * 3 / 3 * 4);
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": screenshot},
+            }],
+        }));
+        let request = serde_json::json!({
+            "model": "claude-sonnet-5",
+            "max_tokens": 8192,
+            "system": system,
+            "tools": tools,
+            "messages": messages,
+            "stream": true,
+        });
+        let encoded = serde_json::to_vec(&request).unwrap();
+
+        const FIXTURE_ERA_CAP: usize = 1024 * 1024;
+        assert!(
+            encoded.len() > FIXTURE_ERA_CAP,
+            "the old 1 MiB cap was meant to be the thing this outgrows; got {} bytes",
+            encoded.len()
+        );
+        assert!(
+            encoded.len() < DEFAULT_MAX_BODY_BYTES,
+            "representative request ({} bytes) must fit the configured cap ({DEFAULT_MAX_BODY_BYTES})",
+            encoded.len()
+        );
+        // It must also translate: a cap that admits a request the translator
+        // then refuses would not have bought anything.
+        crate::codex_translate::translate_bytes(&encoded, "gpt-5.6-sol")
+            .expect("a representative request must translate");
+    }
+
+    /// Justifies the admission policy: concurrent requests beyond the bound
+    /// wait in the listen backlog instead of collecting a 503.
+    #[test]
+    fn concurrent_requests_beyond_the_bound_queue_rather_than_fail() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(BridgeConfig {
+            max_concurrency: 1,
+            admission_wait: Duration::from_secs(20),
+            ..bridged_config(&upstream)
+        })
+        .unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let token = token.clone();
+                thread::spawn(move || {
+                    request(
+                        addr,
+                        &authorized("POST", "/v1/messages", &token, PROBE_BODY),
+                    )
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let response = handle.join().expect("request thread");
+            assert_eq!(
+                status(&response),
+                200,
+                "a queued request must not be answered 503: {response}"
+            );
+            assert!(response.contains("bridged reply"));
+        }
+    }
+
+    /// The backstop still exists: once `admission_wait` elapses, a client gets
+    /// a definite answer rather than waiting forever behind a wedged worker.
+    #[test]
+    fn a_saturated_bridge_still_answers_after_the_admission_wait() {
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
+        let bridge = BridgeHandle::start(
+            BridgeConfig {
+                max_concurrency: 1,
+                admission_wait: Duration::from_millis(50),
+                header_timeout: Duration::from_secs(5),
+                ..BridgeConfig::default()
+            }
+            .with_request_hold(Duration::from_secs(2))
+            .with_admission_notifier(admitted_tx),
+        )
+        .unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+
+        let mut occupied = TcpStream::connect(addr).unwrap();
+        occupied
+            .write_all(authorized("HEAD", "/v1/messages", &token, "").as_bytes())
+            .unwrap();
+        admitted_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("first request admitted");
+
+        let started = Instant::now();
+        let saturated = request(addr, &authorized("HEAD", "/v1/messages", &token, ""));
+        assert_eq!(status(&saturated), 503);
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "the 503 must come only after the admission wait"
+        );
+        drop(occupied);
     }
 
     #[test]
