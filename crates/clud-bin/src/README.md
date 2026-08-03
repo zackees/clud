@@ -60,6 +60,12 @@ Entry and orchestration:
   fragmentation/CRLF/heartbeat tolerant) and `StreamTranslator` (Responses
   events -> Anthropic events with monotonic block indices). A tool block never
   opens before its id and name are known. HTTP-free; wired in at step 5.
+- `codex_upstream.rs` - #627 step 4: `CredentialSource` (so #629's
+  subscription auth reuses translation unchanged) plus a streaming
+  `POST /v1/responses` client with connect/read/overall timeouts, bounded
+  buffering, cancellation, and a retry policy that stops the moment any byte
+  reaches the sink. Builds every outbound header itself, so no downstream
+  header can leak upstream.
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every

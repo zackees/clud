@@ -15,6 +15,7 @@ pub mod codex_bridge;
 pub mod codex_hook_normalize;
 pub mod codex_sse;
 pub mod codex_translate;
+pub mod codex_upstream;
 pub mod command;
 pub mod config;
 pub mod console_input;

@@ -136,6 +136,41 @@ Reasoning summaries are deliberately not forwarded: an Anthropic `thinking`
 block carries a signature the Responses API does not supply, and an unsigned
 one is rejected by clients.
 
+## Upstream client
+
+`codex_upstream.rs` (#627 step 4) splits two concerns. `CredentialSource`
+yields the base URL, auth material, account headers, and model policy;
+`UpstreamClient` performs one streaming `POST /v1/responses` and hands each
+byte chunk to a sink as it arrives. The trait is the seam that lets #629's
+subscription auth reuse every line of translation unchanged. `ApiKeyCredentials`
+is the only implementation today, and it has **no fallback chain** — a missing
+`OPENAI_API_KEY` is an error, never a silent downgrade, because #629 requires
+that subscription and platform credentials never substitute for one another.
+
+### The retry boundary
+
+The rule is *never replay after downstream-visible output has begun*, and the
+step-1 streaming writer is what makes it absolute: once a single SSE frame has
+been flushed, the `200` and its headers are already on the wire, so there is no
+status left to change and a replay would duplicate content the user has already
+seen. The client tracks whether the sink has accepted anything and refuses to
+retry once it has, however retryable the failure looks. Retries otherwise cover
+transport failures and `408`/`429`/`5xx`, bounded by `max_attempts` with linear
+backoff.
+
+Timeouts follow the same split as the bridge's own: connect, an *idle* read
+timeout (a model may think for minutes before its first token), and an overall
+deadline. Cancellation is polled between reads, so its latency is bounded by
+the read timeout rather than immediate — the cost of not putting an async
+runtime behind a synchronous bridge.
+
+No downstream header is forwarded upstream; the module constructs every
+outbound header itself, so the harness's own Anthropic bearer cannot leak into
+an upstream request. Transport failures are classified into fixed strings
+rather than carrying the library's message, which embeds the URL, and upstream
+error bodies are never propagated because they can contain account identifiers
+and key fragments.
+
 ## Persistence
 
 Global launch preferences use the existing settings document and `fs4` lock:
