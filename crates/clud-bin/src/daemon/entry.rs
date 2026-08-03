@@ -1073,6 +1073,7 @@ mod tests {
             model: None,
             safe: false,
             unattended: false,
+            allow_plan_mode: false,
             dry_run: false,
             detach: false,
             detachable: false,

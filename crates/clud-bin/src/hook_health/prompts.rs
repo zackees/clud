@@ -210,6 +210,7 @@ fn backend_prompt_launch_plan(
         model: args.model.clone(),
         safe: args.safe,
         unattended: args.unattended,
+        allow_plan_mode: args.allow_plan_mode,
         dry_run: false,
         detach: false,
         detachable: false,
