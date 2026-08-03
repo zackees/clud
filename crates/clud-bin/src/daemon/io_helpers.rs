@@ -171,8 +171,8 @@ mod tests {
 
         // Inherited ambient value (if any) is all that may remain; we must not
         // have injected one ourselves.
-        let injected = std::env::var(SUPPRESS_KEY).is_err()
-            && env.iter().any(|(k, _)| k == SUPPRESS_KEY);
+        let injected =
+            std::env::var(SUPPRESS_KEY).is_err() && env.iter().any(|(k, _)| k == SUPPRESS_KEY);
         assert!(!injected, "{OPT_OUT_KEY}=1 must suppress the injection");
     }
 

@@ -128,7 +128,9 @@ fn suppression_collapses_the_snapshot_function_count() {
     // so there is nothing for this guardrail to prove. Skip rather than fail:
     // CI images vary, and a false red here would be noise, not signal.
     if baseline < 20 {
-        eprintln!("skipping: login shell captured only {baseline} functions — no completions to suppress");
+        eprintln!(
+            "skipping: login shell captured only {baseline} functions — no completions to suppress"
+        );
         return;
     }
 
