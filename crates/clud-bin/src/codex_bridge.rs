@@ -4,6 +4,7 @@
 use crate::bridge_log::{unix_ms, BridgeLog};
 use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
+use crate::codex_sse::InBandFailure;
 use crate::codex_upstream::{
     ApiKeyCredentials, FailureClass, ResolvedCredentials, UpstreamClient, UpstreamConfig,
     UpstreamError, UpstreamFailure,
@@ -693,6 +694,9 @@ fn serve_messages(
         };
         match pipeline.stream(body, &message_id, shutdown, &mut sink) {
             Ok(summary) => {
+                if let Some(failure) = summary.in_band_failure.as_ref() {
+                    log_in_band_failure(log, failure, request_phase(body), summary.request_shape);
+                }
                 // A quota failure delivered inside a 200 SSE stream used to
                 // produce HTTP 200, no log line even under
                 // `CLUD_CODEX_BRIDGE_DEBUG=1`, and an abruptly truncated turn.
@@ -791,6 +795,46 @@ fn log_pipeline_error(error: &PipelineError, log: Option<&SharedBridgeLog>) {
             eprintln!("[clud] codex bridge: upstream {diagnostic}");
         }
     }
+}
+
+fn log_in_band_failure(
+    log: Option<&SharedBridgeLog>,
+    failure: &InBandFailure,
+    phase: &'static str,
+    request_shape: serde_json::Value,
+) {
+    let event = serde_json::json!({
+        "ts_ms": unix_ms(),
+        "event": "in_band_upstream_failure",
+        "upstream_status": 400,
+        "category": failure.category,
+        "code": failure.code,
+        "request_id": failure.request_id,
+        "phase": phase,
+        "request_shape": request_shape,
+    });
+    if let Some(log) = log {
+        lock_log(log).record(event.clone());
+    }
+    if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
+        eprintln!("[clud] codex bridge: {}", event);
+    }
+}
+
+fn request_phase(body: &[u8]) -> &'static str {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return "initial";
+    };
+    let messages = value
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    messages
+        .iter()
+        .any(|message| message.get("role").and_then(serde_json::Value::as_str) == Some("assistant"))
+        .then_some("continuation")
+        .unwrap_or("initial")
 }
 
 fn write_pipeline_error(
@@ -1335,12 +1379,22 @@ mod tests {
         }
 
         fn start_with_response(scripted: Option<Vec<u8>>) -> Self {
+            Self::start_with_responses(vec![scripted])
+        }
+
+        fn start_with_responses(scripted: Vec<Option<Vec<u8>>>) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let addr = listener.local_addr().unwrap();
             let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let scripted = std::sync::Arc::new(Mutex::new(
+                scripted
+                    .into_iter()
+                    .collect::<std::collections::VecDeque<Option<Vec<u8>>>>(),
+            ));
             let shutdown = Arc::new(AtomicBool::new(false));
             let thread_requests = std::sync::Arc::clone(&requests);
+            let thread_scripted = std::sync::Arc::clone(&scripted);
             let thread_shutdown = Arc::clone(&shutdown);
             let handle = thread::spawn(move || {
                 while !thread_shutdown.load(Ordering::Acquire) {
@@ -1382,8 +1436,8 @@ mod tests {
                         .unwrap()
                         .push(format!("{head}{}", String::from_utf8_lossy(&request_body)));
 
-                    if let Some(reply) = &scripted {
-                        let _ = upstream.write_all(reply);
+                    if let Some(Some(reply)) = thread_scripted.lock().unwrap().pop_front() {
+                        let _ = upstream.write_all(&reply);
                         let _ = upstream.flush();
                         let _ = upstream.shutdown(Shutdown::Both);
                         continue;
@@ -2296,6 +2350,83 @@ Connection: close
     /// `upstream provider returned status 429` with no `Retry-After`, so the
     /// only reset time on screen came from the client's own separate
     /// accounting -- about a different limit than the one that broke the turn.
+    #[test]
+    fn an_in_band_400_after_a_successful_turn_is_redacted_and_classified() {
+        let secret = "second-turn prompt SECRET_PROMPT";
+        let tool_output = "tool-output SECRET_TOOL_OUTPUT";
+        let upstream_secret = "upstream-message SECRET_UPSTREAM_DETAIL";
+        let failed_event = format!(
+            "event: response.failed\ndata: {{\"type\":\"response.failed\",\"response\":{{\"error\":{{\"type\":\"invalid_request\",\"code\":\"context_length_exceeded\",\"message\":\"{upstream_secret}\"}},\"request_id\":\"req_second_turn\"}}}}\n\n"
+        );
+        let failed_reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{failed_event}",
+            failed_event.len()
+        )
+        .into_bytes();
+        let upstream = FakeResponses::start_with_responses(vec![None, Some(failed_reply)]);
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+
+        let first = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_STREAM_BODY,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+        let continuation = format!(
+            r#"{{"model":"claude-x","messages":[{{"role":"user","content":"{secret}"}},{{"role":"assistant","content":"done"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"call_1","content":"{tool_output}"}}]}}],"stream":true}}"#
+        );
+        let second = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), &continuation),
+        );
+        bridge.shutdown().unwrap();
+
+        assert_eq!(status(&second), 200, "{second}");
+        assert!(second.contains("context is too long"), "{second}");
+        let text = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            text.contains(r#""event":"in_band_upstream_failure""#),
+            "{text}"
+        );
+        assert!(text.contains(r#""category":"context_length""#), "{text}");
+        assert!(
+            text.contains(r#""code":"context_length_exceeded""#),
+            "{text}"
+        );
+        assert!(text.contains(r#""request_id":"req_second_turn""#), "{text}");
+        assert!(text.contains(r#""phase":"continuation""#), "{text}");
+        let event: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(
+            event.pointer("/request_shape/input_kinds"),
+            Some(&serde_json::json!([
+                "message",
+                "message",
+                "function_call_output"
+            ]))
+        );
+        assert_eq!(
+            event.pointer("/request_shape/has_reasoning"),
+            Some(&serde_json::json!(true))
+        );
+        for forbidden in [secret, tool_output, upstream_secret, "Authorization"] {
+            assert!(
+                !second.contains(forbidden),
+                "client leaked {forbidden:?}: {second}"
+            );
+            assert!(
+                !text.contains(forbidden),
+                "log leaked {forbidden:?}: {text}"
+            );
+        }
+    }
+
     #[test]
     fn an_exhausted_account_answers_429_billing_error_with_a_retry_after() {
         let body = r#"{"error":{"code":"usage_limit_reached","message":"quota exhausted for acct_42","resets_in_seconds":442242}}"#;
