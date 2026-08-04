@@ -67,6 +67,20 @@ fn test_harness_rejects_invalid_or_missing_values() {
     assert!(Args::try_parse_from(["clud", "--harness"]).is_err());
 }
 
+/// #629: auth management is a first-class clud command, never backend
+/// passthrough. This intentionally uses clap directly so the RED state proves
+/// the command family is registered before the unknown-flag splitter learns it.
+#[test]
+fn codex_auth_status_is_a_registered_command() {
+    let args = Args::try_parse_from(["clud", "codex-auth", "status"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::CodexAuth {
+            subcommand: CodexAuthSubcommand::Status { json: false }
+        })
+    ));
+}
+
 #[test]
 fn test_model_flag() {
     let args = parse(&["clud", "--model", "opus"]);

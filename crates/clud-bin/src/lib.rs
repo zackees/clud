@@ -12,6 +12,7 @@ pub mod block_bad_cmd_rollout;
 pub mod bridge_log;
 pub mod capture;
 pub mod clud_settings;
+pub mod codex_auth;
 pub mod codex_bridge;
 pub mod codex_hook_normalize;
 pub mod codex_model;

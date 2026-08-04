@@ -31,6 +31,7 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::codex_auth::{self, SubscriptionCredentials};
 use crate::codex_model::ModelSpec;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -73,6 +74,9 @@ const TOKEN_EXPIRY_SKEW: Duration = Duration::from_secs(60);
 /// it to decide that this reason — unlike the others, which name environment
 /// variables — is safe and useful to forward to the harness.
 pub const CREDENTIALS_EXPIRED: &str = "the Codex login has expired -- run `codex login`";
+/// Expiry guidance for clud's separately-managed subscription credential.
+pub const CLUD_CREDENTIALS_EXPIRED: &str =
+    "the Codex login has expired -- run `clud codex-auth login`";
 
 /// Whether a failure could ever succeed on a fresh attempt.
 ///
@@ -659,6 +663,75 @@ pub struct CodexCliCredentials {
     target: UpstreamTarget,
 }
 
+/// ChatGPT subscription credentials created exclusively by `clud codex-auth`.
+/// The presence of this record is an explicit persisted source selection: it
+/// never falls back to `OPENAI_API_KEY`, and logout removes only this source.
+#[derive(Clone)]
+pub struct CludSubscriptionCredentials {
+    target: UpstreamTarget,
+}
+
+impl CludSubscriptionCredentials {
+    pub fn from_home() -> Result<Self, UpstreamError> {
+        let home = dirs_home().ok_or(UpstreamError::Credentials("no home directory"))?;
+        let credentials = match codex_auth::load_fresh_at(&home) {
+            Ok(credentials) => credentials,
+            Err(error) if error == "no clud ChatGPT subscription login" => {
+                return Err(UpstreamError::Credentials(
+                    "no clud ChatGPT subscription login",
+                ));
+            }
+            Err(_) => {
+                return Err(UpstreamError::Credentials(
+                    "the Codex login has expired -- run `clud codex-auth login`",
+                ));
+            }
+        };
+        Self::from_record(credentials)
+    }
+
+    pub fn from_record(credentials: SubscriptionCredentials) -> Result<Self, UpstreamError> {
+        if credentials.access_token.trim().is_empty() {
+            return Err(UpstreamError::Credentials(
+                "clud subscription credentials have no access token",
+            ));
+        }
+        if credentials
+            .expires_at_unix
+            .is_some_and(|expiry| token_expiry_reached(expiry, SystemTime::now()))
+        {
+            return Err(UpstreamError::Credentials(CLUD_CREDENTIALS_EXPIRED));
+        }
+        Ok(Self {
+            target: UpstreamTarget::new(
+                CODEX_BACKEND_BASE_URL,
+                format!("Bearer {}", credentials.access_token),
+            )
+            .with_account_id(credentials.account_id)
+            .with_header("originator", CODEX_ORIGINATOR),
+        })
+    }
+}
+
+fn token_expiry_reached(expiry: u64, now: SystemTime) -> bool {
+    now.duration_since(SystemTime::UNIX_EPOCH)
+        .is_ok_and(|elapsed| elapsed + TOKEN_EXPIRY_SKEW >= Duration::from_secs(expiry))
+}
+
+impl std::fmt::Debug for CludSubscriptionCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CludSubscriptionCredentials")
+            .finish()
+    }
+}
+
+impl CredentialSource for CludSubscriptionCredentials {
+    fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
+        Ok(self.target.clone())
+    }
+}
+
 impl CodexCliCredentials {
     /// Load from `$CODEX_HOME/auth.json`, defaulting to `~/.codex`.
     pub fn from_codex_home() -> Result<Self, UpstreamError> {
@@ -769,32 +842,37 @@ impl CredentialSource for CodexCliCredentials {
 #[derive(Debug, Clone)]
 pub enum ResolvedCredentials {
     ApiKey(ApiKeyCredentials),
-    CodexCli(CodexCliCredentials),
+    Subscription(CludSubscriptionCredentials),
 }
 
 impl ResolvedCredentials {
-    /// Platform key first, then an existing Codex CLI login.
-    ///
-    /// #629 requires that subscription and platform credentials never
-    /// *silently* substitute for one another. The precedence here is fixed and
-    /// documented rather than silent, and `describe()` names the chosen source
-    /// so a launch can report it; #629 replaces this with an explicit selector.
+    /// A clud-managed subscription record is an explicit, persisted selection
+    /// made by `clud codex-auth login`; while it exists no API-key fallback is
+    /// attempted. Without it, only the platform API-key path is considered.
     pub fn resolve_default() -> Result<Self, UpstreamError> {
-        match ApiKeyCredentials::from_env() {
-            Ok(credentials) => Ok(Self::ApiKey(credentials)),
-            Err(api_key_error) => match CodexCliCredentials::from_codex_home() {
-                Ok(credentials) => Ok(Self::CodexCli(credentials)),
-                // Report the platform-key error: it is the one a user who set
-                // out to use an API key needs to see.
-                Err(_) => Err(api_key_error),
-            },
+        Self::resolve_with(
+            CludSubscriptionCredentials::from_home(),
+            ApiKeyCredentials::from_env,
+        )
+    }
+
+    fn resolve_with(
+        subscription: Result<CludSubscriptionCredentials, UpstreamError>,
+        api_key: impl FnOnce() -> Result<ApiKeyCredentials, UpstreamError>,
+    ) -> Result<Self, UpstreamError> {
+        match subscription {
+            Ok(credentials) => Ok(Self::Subscription(credentials)),
+            Err(UpstreamError::Credentials("no clud ChatGPT subscription login")) => {
+                api_key().map(Self::ApiKey)
+            }
+            Err(error) => Err(error),
         }
     }
 
     pub fn describe(&self) -> &'static str {
         match self {
             Self::ApiKey(_) => "OPENAI_API_KEY",
-            Self::CodexCli(_) => "Codex CLI login",
+            Self::Subscription(_) => "clud ChatGPT subscription",
         }
     }
 }
@@ -803,7 +881,7 @@ impl CredentialSource for ResolvedCredentials {
     fn resolve(&self) -> Result<UpstreamTarget, UpstreamError> {
         match self {
             Self::ApiKey(credentials) => credentials.resolve(),
-            Self::CodexCli(credentials) => credentials.resolve(),
+            Self::Subscription(credentials) => credentials.resolve(),
         }
     }
 }
@@ -1327,6 +1405,35 @@ mod tests {
         let custom =
             resolve_api_key_target(Some("k".into()), Some("https://gw.test".into())).unwrap();
         assert_eq!(custom.responses_url(), "https://gw.test/v1/responses");
+    }
+
+    #[test]
+    fn clud_subscription_is_a_distinct_codex_backend_source() {
+        let credentials = CludSubscriptionCredentials::from_record(SubscriptionCredentials {
+            access_token: "subscription-secret".to_string(),
+            refresh_token: "refresh-secret".to_string(),
+            account_id: Some("account-123".to_string()),
+            email: None,
+            expires_at_unix: None,
+        })
+        .unwrap();
+        let target = credentials.resolve().unwrap();
+        assert!(target.uses_codex_backend());
+        assert!(target.responses_url().ends_with("/codex/responses"));
+        assert!(!format!("{target:?}").contains("subscription-secret"));
+        assert!(!format!("{credentials:?}").contains("refresh-secret"));
+    }
+
+    #[test]
+    fn expired_subscription_never_falls_back_to_an_api_key() {
+        let result = ResolvedCredentials::resolve_with(
+            Err(UpstreamError::Credentials(CLUD_CREDENTIALS_EXPIRED)),
+            || panic!("an expired subscription must not select OPENAI_API_KEY"),
+        );
+        assert!(matches!(
+            result,
+            Err(UpstreamError::Credentials(CLUD_CREDENTIALS_EXPIRED))
+        ));
     }
 
     #[test]
