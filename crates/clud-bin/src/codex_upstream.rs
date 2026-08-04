@@ -296,6 +296,16 @@ fn classify(status: u16, body_prefix: &str) -> FailureClass {
     if NON_RETRYABLE_STATUSES.contains(&status) {
         return FailureClass::Permanent;
     }
+    // #774: an exhausted quota is a 429 that retrying cannot help. It has to be
+    // checked before the blanket 429 rule below, or the reported failure --
+    // `usage_limit_reached`, resetting in five days -- burns the whole attempt
+    // ladder in under a second and still reports nothing useful.
+    if QUOTA_SIGNATURES
+        .iter()
+        .any(|signature| body.contains(signature))
+    {
+        return FailureClass::Permanent;
+    }
     // 408 and 429 are retryable by definition; 429 additionally carries a reset
     // hint that the retry loop honours.
     if status == 408 || status == 429 {
@@ -1702,12 +1712,54 @@ mod tests {
         );
     }
 
+    /// #774 flipped this from `Transient`: a reset 6 days out is not something
+    /// to retry through, and the old classification burned the whole ladder in
+    /// under a second before reporting a bare status.
     #[test]
     fn a_rate_limit_body_surfaces_its_reset_hint() {
         let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":529498}}"#;
         let failure = failure_from(429, body);
-        assert_eq!(failure.class(), FailureClass::Transient);
+        assert_eq!(failure.class(), FailureClass::Permanent);
+        assert!(failure.quota_exhausted());
         assert_eq!(failure.resets_in(), Some(Duration::from_secs(529_498)));
+        assert_eq!(failure.human_reset().as_deref(), Some("6d 3h"));
+    }
+
+    /// Criterion 1 of #774: the reported failure, at the wire. An exhausted
+    /// quota must cost exactly one attempt -- it used to cost three, spent in
+    /// ~750ms, and still reported `upstream provider returned status 429`.
+    #[test]
+    fn a_quota_exhausted_429_is_attempted_exactly_once() {
+        let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":442242,"message":"quota for org_9 key sk-secret-abc"}}"#;
+        let server = FakeUpstream::start(vec![body_response(429, body, &[])]);
+        let client = client(&server.base_url, fast_config());
+
+        let error = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |_| Ok(()))
+            .unwrap_err();
+
+        let failure = error.failure().expect("a status failure");
+        assert_eq!(failure.status(), 429);
+        assert_eq!(failure.class(), FailureClass::Permanent);
+        assert!(failure.quota_exhausted());
+        assert_eq!(
+            server.hits(),
+            1,
+            "an exhausted quota must not be retried: the reset is days away"
+        );
+        // The body named an org and a key; neither survives into the error.
+        let rendered = format!("{error} {error:?}");
+        for secret in ["sk-secret-abc", "org_9"] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
+    }
+
+    /// The neighbouring case must keep retrying: a plain throttle is transient.
+    #[test]
+    fn a_throttling_429_is_still_retried() {
+        let body = r#"{"error":{"code":"rate_limit_exceeded"}}"#;
+        assert_eq!(failure_from(429, body).class(), FailureClass::Transient);
+        assert!(!failure_from(429, body).quota_exhausted());
     }
 
     #[test]
