@@ -127,6 +127,9 @@ pub(crate) enum ReapDecisionReason {
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
     ListeningEndpoint,
+    /// Owns the active Windows desktop shell window and must survive a shell
+    /// restart requested from a foreground tool call (#746).
+    ActiveDesktopShell,
     DockerDesktopProcessFamily,
     /// Matched the operator's configured spare-list. Last resort, and data
     /// rather than code — see [`ProcessFacts::spare_listed`].
@@ -149,6 +152,7 @@ impl ReapDecisionReason {
             Self::SessionLeader => "session_leader",
             Self::ForeignTokenOwner => "foreign_token_owner",
             Self::ListeningEndpoint => "listening_endpoint",
+            Self::ActiveDesktopShell => "active_desktop_shell",
             Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
             Self::ConfiguredSpareList => "configured_spare_list",
             #[cfg(windows)]
@@ -193,6 +197,7 @@ impl From<SpareReason> for ReapDecisionReason {
             SpareReason::ForeignTokenOwner => Self::ForeignTokenOwner,
             SpareReason::DeclaredDaemon => Self::DeclaredDaemon,
             SpareReason::ListeningEndpoint => Self::ListeningEndpoint,
+            SpareReason::ActiveDesktopShell => Self::ActiveDesktopShell,
             SpareReason::DockerDesktopProcessFamily => Self::DockerDesktopProcessFamily,
             SpareReason::ConfiguredSpareList => Self::ConfiguredSpareList,
         }
@@ -1992,6 +1997,10 @@ mod imp {
             .map(|(pid, _)| *pid)
             .filter(|pid| listening.contains(pid))
             .collect();
+        snapshot.active_desktop_shells = win32::active_desktop_shell_pid()
+            .filter(|pid| survivors.iter().any(|(candidate, _)| candidate == pid))
+            .into_iter()
+            .collect();
 
         snapshot
     }
@@ -2014,6 +2023,7 @@ mod imp {
         use windows::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
         };
+        use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
 
         /// `Some(false)` = broke away from our job. `None` = the process could
         /// not be opened for the query at all.
@@ -2039,6 +2049,20 @@ mod imp {
                 ProcessIdToSessionId(pid, &mut session)
                     .is_ok()
                     .then_some(session)
+            }
+        }
+
+        /// PID owning the active Windows shell window, if Explorer has created
+        /// one. This is an OS-authoritative shell identity, not a GUI heuristic.
+        pub(super) fn active_desktop_shell_pid() -> Option<u32> {
+            unsafe {
+                let window = GetShellWindow();
+                if window.0.is_null() {
+                    return None;
+                }
+                let mut pid = 0;
+                GetWindowThreadProcessId(window, Some(&mut pid));
+                (pid != 0).then_some(pid)
             }
         }
 
@@ -2873,6 +2897,44 @@ mod lifecycle_tests {
     fn a_process_with_no_signal_is_not_spared() {
         let facts = facts_with(|_| {});
         assert_eq!(signal_for(&facts, 21, "node.exe"), None);
+    }
+
+    /// #746: the authoritative active Windows shell may be relaunched from a
+    /// tool shell to restore the taskbar. It remains in the Job Object, so the
+    /// shell-window owner signal must spare it with a named decision.
+    #[test]
+    fn the_active_desktop_shell_is_spared_while_an_ordinary_client_is_reaped() {
+        let facts = facts_with(|facts| {
+            facts.active_desktop_shells.insert(30);
+        });
+        let processes = [
+            process(10, 1, "codex.exe", true),
+            process(20, 10, "powershell.exe", false),
+            process(30, 20, "explorer.exe", true),
+            process(40, 20, "git.exe", true),
+        ];
+        let spares = super::build_spare_list(
+            &facts,
+            processes
+                .iter()
+                .map(|process| (process.pid, process.image_name.clone())),
+        );
+        let graph = super::ProcessGraph::build(
+            processes.iter(),
+            &[RegisteredBackend::new(10, "codex.exe", 10)],
+        );
+        let decisions = super::plan_shell_exit(&graph, &spares, 20);
+
+        assert!(decisions.iter().any(|decision| {
+            decision.candidate_pid == Some(30)
+                && decision.action == DecisionAction::Spare
+                && decision.reason == ReapDecisionReason::ActiveDesktopShell
+        }));
+        assert!(decisions.iter().any(|decision| {
+            decision.candidate_pid == Some(40)
+                && decision.action == DecisionAction::Reap
+                && decision.reason == ReapDecisionReason::LeakedToolClient
+        }));
     }
 
     /// A process that broke away from our Job Object was never ours to kill,

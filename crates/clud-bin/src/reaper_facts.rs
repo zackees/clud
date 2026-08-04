@@ -55,6 +55,9 @@ pub enum SpareReason {
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
     ListeningEndpoint,
+    /// Owns the active Windows desktop shell window. This narrowly protects an
+    /// Explorer process intentionally restarted to restore the taskbar (#746).
+    ActiveDesktopShell,
     /// Docker Desktop's interactive UI/backend root. Its WSL runtime children
     /// inherit this protection through the reaper's subtree pruning.
     DockerDesktopProcessFamily,
@@ -72,6 +75,7 @@ impl SpareReason {
             Self::ForeignTokenOwner => "foreign_token_owner",
             Self::DeclaredDaemon => "declared_daemon",
             Self::ListeningEndpoint => "listening_endpoint",
+            Self::ActiveDesktopShell => "active_desktop_shell",
             Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
             Self::ConfiguredSpareList => "configured_spare_list",
         }
@@ -116,6 +120,12 @@ pub trait ProcessFacts {
     /// service, whatever it did or did not declare.
     fn owns_listening_endpoint(&self, pid: u32) -> Option<bool>;
 
+    /// Does `pid` own the active Windows desktop shell window?
+    ///
+    /// This authoritative predicate deliberately identifies only the shell
+    /// window, not arbitrary GUI applications.
+    fn is_active_desktop_shell(&self, pid: u32) -> Option<bool>;
+
     /// Did the operator name this image in a configured spare-list?
     ///
     /// A whitelist is a last resort and must be **data, not code** — nothing in
@@ -133,6 +143,7 @@ pub enum Signal {
     TokenOwner,
     DaemonMarker,
     ListeningEndpoint,
+    ActiveDesktopShell,
 }
 
 /// Process facts collected once per pass and then consulted as pure data.
@@ -153,6 +164,7 @@ pub struct FactsSnapshot {
     pub foreign_owner: HashSet<u32>,
     pub declared_daemons: HashSet<u32>,
     pub listening: HashSet<u32>,
+    pub active_desktop_shells: HashSet<u32>,
     /// Operator-configured image names. Data, not code: nothing in clud
     /// hard-codes an entry here.
     pub spare_images: Vec<String>,
@@ -188,6 +200,13 @@ impl ProcessFacts for FactsSnapshot {
 
     fn owns_listening_endpoint(&self, pid: u32) -> Option<bool> {
         self.answer(Signal::ListeningEndpoint, self.listening.contains(&pid))
+    }
+
+    fn is_active_desktop_shell(&self, pid: u32) -> Option<bool> {
+        self.answer(
+            Signal::ActiveDesktopShell,
+            self.active_desktop_shells.contains(&pid),
+        )
     }
 
     fn spare_listed(&self, _pid: u32, image_name: &str) -> bool {
@@ -262,6 +281,9 @@ pub fn spare_signal(facts: &dyn ProcessFacts, pid: u32, image_name: &str) -> Opt
     }
     if facts.owns_listening_endpoint(pid) == Some(true) {
         return Some(SpareReason::ListeningEndpoint);
+    }
+    if facts.is_active_desktop_shell(pid) == Some(true) {
+        return Some(SpareReason::ActiveDesktopShell);
     }
     if is_docker_desktop_family_root(image_name) {
         return Some(SpareReason::DockerDesktopProcessFamily);
@@ -387,8 +409,13 @@ mod platform {
 
         let listening = win32::listening_pids();
         snapshot.listening = survivors
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|pid| listening.contains(pid))
+            .collect();
+        snapshot.active_desktop_shells = win32::active_desktop_shell_pid()
+            .filter(|pid| survivors.contains(pid))
+            .into_iter()
             .collect();
     }
 
@@ -407,6 +434,7 @@ mod platform {
         use windows::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
         };
+        use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
 
         /// `Some(false)` = the process exists but we may not terminate it.
         /// `None` = it is gone, or the answer is not usable.
@@ -433,6 +461,20 @@ mod platform {
                 ProcessIdToSessionId(pid, &mut session)
                     .is_ok()
                     .then_some(session)
+            }
+        }
+
+        /// PID owning the active Windows shell window, if Explorer has created
+        /// one. This is an OS-authoritative shell identity, not a GUI heuristic.
+        pub(super) fn active_desktop_shell_pid() -> Option<u32> {
+            unsafe {
+                let window = GetShellWindow();
+                if window.0.is_null() {
+                    return None;
+                }
+                let mut pid = 0;
+                GetWindowThreadProcessId(window, Some(&mut pid));
+                (pid != 0).then_some(pid)
             }
         }
 
@@ -505,8 +547,9 @@ mod platform {
     use super::{FactsSnapshot, Signal};
 
     pub(super) fn mark_unavailable(snapshot: &mut FactsSnapshot) {
-        // No Windows services session anywhere on Unix.
+        // No Windows services session or desktop shell anywhere on Unix.
         snapshot.unavailable.insert(Signal::ServiceSession);
+        snapshot.unavailable.insert(Signal::ActiveDesktopShell);
         #[cfg(not(target_os = "linux"))]
         {
             // `/proc` is the only interface here that answers these without
@@ -664,6 +707,7 @@ mod platform {
             Signal::SessionLeader,
             Signal::TokenOwner,
             Signal::ListeningEndpoint,
+            Signal::ActiveDesktopShell,
         ]);
     }
 
@@ -788,6 +832,7 @@ mod tests {
             Signal::SessionLeader,
             Signal::TokenOwner,
             Signal::ListeningEndpoint,
+            Signal::ActiveDesktopShell,
         ]
         .into_iter()
         .filter(|signal| !facts.unavailable.contains(signal))

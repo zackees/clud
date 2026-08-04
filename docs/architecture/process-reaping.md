@@ -111,8 +111,9 @@ reaper that never saw the process at all also leaves it running.
 | 4 | **Token owner** | process cannot be opened for termination | `euid` differs | services; also cases where the kill would fail anyway |
 | 5 | **Declared daemon** | `RUNNING_PROCESS_IS_DAEMON` | same | **zccache**, **soldr** — everything that opted in |
 | 6 | **Listening endpoint** | `GetExtendedTcpTable` over `AF_INET` **and** `AF_INET6` | `/proc/net/tcp{,6}` + `/proc/net/unix`, matched to `/proc/<pid>/fd` | **sccache**, **FBuildWorker**, language servers |
-| 7 | **Docker Desktop family** | `Docker Desktop.exe` / `com.docker.*` roots | same | Docker Desktop backend plus its WSL runtime subtree (#773) |
-| 8 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
+| 7 | **Active desktop shell** | `GetShellWindow` + `GetWindowThreadProcessId` | unavailable | Explorer intentionally restarted to restore the taskbar (#746) |
+| 8 | **Docker Desktop family** | `Docker Desktop.exe` / `com.docker.*` roots | same | Docker Desktop backend plus its WSL runtime subtree (#773) |
+| 9 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
 
 Cheap and authoritative first, expensive last. 1–4 are one syscall each and no
 memory read, and every PID they rule out is a PID whose environment is never
@@ -122,6 +123,12 @@ Known gap: **Windows named pipes**. Windows exposes no documented
 pipe-name-to-owning-PID mapping, so a daemon whose only endpoint is a named pipe
 still needs the marker or the operator spare-list. The POSIX analogue is
 covered — `/proc/net/unix` is read alongside the TCP tables.
+
+The active-desktop-shell signal is deliberately narrower than a GUI exemption:
+`GetShellWindow` identifies Windows' active shell window, and
+`GetWindowThreadProcessId` identifies its owner. Only that owner is spared, and
+only while it remains a tracked candidate, so a restarted Explorer survives the
+tool shell that launched it without protecting unrelated visible applications.
 
 Coverage is not uniform across platforms, and the table says so rather than
 guessing: on macOS only rows 3 and 5 are answerable without linking a
