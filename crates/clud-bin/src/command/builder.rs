@@ -42,10 +42,13 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
 ///
 /// Deliberately narrow: a plain `clud` (Claude provider, Claude harness) keeps
 /// plan mode, and `AskUserQuestion` is never touched by this rule.
-pub fn bridge_suppresses_plan_mode(args: &Args, target: ResolvedLaunchTarget) -> bool {
-    !args.allow_plan_mode
-        && matches!(target.model_provider, ModelProvider::Codex)
+fn is_codex_claude_bridge(target: ResolvedLaunchTarget) -> bool {
+    matches!(target.model_provider, ModelProvider::Codex)
         && matches!(target.effective_harness, Backend::Claude)
+}
+
+pub fn bridge_suppresses_plan_mode(args: &Args, target: ResolvedLaunchTarget) -> bool {
+    !args.allow_plan_mode && is_codex_claude_bridge(target)
 }
 
 /// Green, stderr, TTY-only notice announcing the [`bridge_suppresses_plan_mode`]
@@ -157,9 +160,11 @@ fn build_launch_plan_for_target_at(
     //    a human. `--dangerously-skip-permissions` does not cover these; the
     //    model reaches for them on its own, most often at the top of a `/loop`
     //    iteration.
-    // 2. The Codex->Claude bridge strips plan mode *always*, attended or not —
-    //    see `bridge_suppresses_plan_mode` and DD-033. `AskUserQuestion`
-    //    survives that rule, so the token is composed rather than fixed.
+    // 2. The Codex->Claude bridge allows exactly one Claude process. It strips
+    //    the `Task` tool on every bridge launch, because Task creates Claude
+    //    subagents whose requests all consume the same provider budget. Plan
+    //    mode is also stripped unless explicitly restored; `AskUserQuestion`
+    //    survives the bridge rules, so the token is composed rather than fixed.
     //
     // Emitted as one `=`-bound, comma-separated token on purpose. `claude`
     // declares `--disallowedTools <tools...>` as variadic, so the
@@ -174,6 +179,9 @@ fn build_launch_plan_for_target_at(
         // tests assert on literally.
         if is_unattended || bridge_suppresses_plan_mode(args, target) {
             disallowed.push("EnterPlanMode");
+        }
+        if is_codex_claude_bridge(target) {
+            disallowed.push("Task");
         }
         if is_unattended {
             disallowed.push("AskUserQuestion");

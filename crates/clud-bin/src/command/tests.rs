@@ -110,7 +110,7 @@ fn test_loop_under_codex_provider_claude_harness_disallows_interactive_tools() {
     assert!(p
         .command
         .iter()
-        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+        .any(|a| a == "--disallowedTools=EnterPlanMode,Task,AskUserQuestion"));
 }
 
 /// `clud --codex --harness claude`, interactive, no `--unattended`.
@@ -134,7 +134,14 @@ fn test_bridge_disallows_plan_mode_even_when_interactive() {
     assert!(p
         .command
         .iter()
-        .any(|a| a == "--disallowedTools=EnterPlanMode"));
+        .any(|a| a == "--disallowedTools=EnterPlanMode,Task"));
+}
+
+#[test]
+fn test_bridge_permanently_disallows_task_subagents() {
+    let args = parse(&["clud", "--allow-plan-mode"]);
+    let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(p.command.iter().any(|a| a == "--disallowedTools=Task"));
 }
 
 #[test]
@@ -150,7 +157,7 @@ fn test_bridge_leaves_ask_user_question_alone() {
 fn test_allow_plan_mode_restores_plan_mode_on_the_bridge() {
     let args = parse(&["clud", "--allow-plan-mode"]);
     let p = build_launch_plan_for_target(&args, bridge_target(), "claude");
-    assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
+    assert!(p.command.iter().any(|a| a == "--disallowedTools=Task"));
     // And the flag itself must not leak to the backend as passthrough.
     assert!(!p.command.iter().any(|a| a == "--allow-plan-mode"));
 }
@@ -165,7 +172,7 @@ fn test_allow_plan_mode_does_not_re_enable_it_for_unattended_runs() {
     assert!(p
         .command
         .iter()
-        .any(|a| a == "--disallowedTools=EnterPlanMode,AskUserQuestion"));
+        .any(|a| a == "--disallowedTools=EnterPlanMode,Task,AskUserQuestion"));
 }
 
 #[test]

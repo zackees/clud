@@ -1259,7 +1259,7 @@ is not a JWT, or carries no `exp`, is deliberately treated as live: opaque
 tokens are legitimate. Actual refresh remains #629's scope.
 ---
 
-## DD-033: Plan mode is disabled unconditionally on the Codex-to-Claude bridge
+## DD-033: Plan mode and subagents are constrained on the Codex-to-Claude bridge
 
 **Status:** Accepted
 
@@ -1284,9 +1284,12 @@ sessions were **interactive**, so the flag was never emitted.
 
 **Decision:** Disallow `EnterPlanMode` on every launch where the model provider
 is Codex and the effective harness is Claude, independent of `--unattended`.
-`--allow-plan-mode` opts back out. When the suppression applies, clud prints a
-green, stderr, TTY-only notice naming the override, so the behavior is never
-silent.
+Also disallow Claude Code's `Task` tool on that bridge: the Task tool creates
+background Claude agents, each with an independent provider request, so it can
+turn one requested harness run into unbounded subscription spend. `--allow-plan-mode`
+opts back into planning only; it never restores `Task`. When plan suppression
+applies, clud prints a green, stderr, TTY-only notice naming the override, so
+the behavior is never silent.
 
 **Alternatives rejected:**
 
