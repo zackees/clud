@@ -1382,10 +1382,17 @@ mod tests {
         }
 
         fn start_with_response(scripted: Option<Vec<u8>>) -> Self {
-            Self::start_with_responses(vec![scripted])
+            Self::start_with_scripted_responses(vec![scripted.clone()], scripted)
         }
 
         fn start_with_responses(scripted: Vec<Option<Vec<u8>>>) -> Self {
+            Self::start_with_scripted_responses(scripted, None)
+        }
+
+        fn start_with_scripted_responses(
+            scripted: Vec<Option<Vec<u8>>>,
+            fallback_response: Option<Vec<u8>>,
+        ) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             listener.set_nonblocking(true).unwrap();
             let addr = listener.local_addr().unwrap();
@@ -1398,6 +1405,7 @@ mod tests {
             let shutdown = Arc::new(AtomicBool::new(false));
             let thread_requests = std::sync::Arc::clone(&requests);
             let thread_scripted = std::sync::Arc::clone(&scripted);
+            let thread_fallback_response = fallback_response;
             let thread_shutdown = Arc::clone(&shutdown);
             let handle = thread::spawn(move || {
                 while !thread_shutdown.load(Ordering::Acquire) {
@@ -1439,7 +1447,13 @@ mod tests {
                         .unwrap()
                         .push(format!("{head}{}", String::from_utf8_lossy(&request_body)));
 
-                    if let Some(Some(reply)) = thread_scripted.lock().unwrap().pop_front() {
+                    let scripted_reply = thread_scripted
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .flatten()
+                        .or_else(|| thread_fallback_response.clone());
+                    if let Some(reply) = scripted_reply {
                         let _ = upstream.write_all(&reply);
                         let _ = upstream.flush();
                         let _ = upstream.shutdown(Shutdown::Both);
