@@ -239,6 +239,15 @@ the background?` with a 5-second countdown. Press `y` to background it. Press
 `clud attach` without a session ID lists background sessions. `clud list` shows
 the same sessions with their root PID and current working directory.
 
+### Daemon idle lifetime
+
+The daemon starts on demand and, by default, exits after 15 minutes with no active work. This
+releases its GC database and background resources; the next normal daemon-backed command starts
+it again transparently. Active foreground clients, detached/repeat sessions, dashboard or top
+polling, RPC connections, and maintenance prevent this shutdown. Configure
+`daemon.idle_timeout_secs` in `~/.clud/settings.json` to another positive number of seconds, or
+set it to `0` to disable idle retirement.
+
 ## Voice Mode (F3 push-to-talk)
 
 `clud` captures microphone input and transcribes it directly into the active
