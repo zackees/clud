@@ -47,12 +47,16 @@ pub fn run(json: bool, no_open: bool) -> i32 {
         eprintln!("{}", dashboard_listener_missing_message(info.pid));
         return 1;
     };
+    let Some(token) = info.dashboard_token.as_deref() else {
+        eprintln!("error: this daemon is missing its dashboard capability. Restart it with `clud daemon restart`, then re-run `clud ui`.");
+        return 1;
+    };
 
     if json {
-        return print_state_json(port);
+        return print_state_json(port, token);
     }
 
-    let url = dashboard_url_from_info(port);
+    let url = dashboard_url_from_info(port, token);
     println!("{}", url);
 
     if no_open {
@@ -62,8 +66,8 @@ pub fn run(json: bool, no_open: bool) -> i32 {
     open_browser(&url, &info)
 }
 
-fn print_state_json(port: u16) -> i32 {
-    match fetch_state_json(port) {
+fn print_state_json(port: u16, token: &str) -> i32 {
+    match fetch_state_json(port, token) {
         Ok(body) => {
             println!("{}", body);
             0

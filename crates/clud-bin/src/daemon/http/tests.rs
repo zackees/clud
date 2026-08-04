@@ -45,8 +45,26 @@ fn fake_snapshot(id: &str, name: &str, cwd: &str) -> SessionSnapshot {
 }
 
 #[test]
-fn dashboard_url_format() {
-    assert_eq!(dashboard_url_from_info(54321), "http://127.0.0.1:54321/");
+fn dashboard_url_uses_a_one_time_capability_bootstrap() {
+    assert_eq!(
+        dashboard_url_from_info(54321, "test-capability"),
+        "http://127.0.0.1:54321/?token=test-capability"
+    );
+}
+
+#[test]
+fn dashboard_access_requires_loopback_host_and_capability_token() {
+    let access = DashboardAccess::new("test-capability".to_string());
+
+    assert!(access.allows_host(Some("127.0.0.1:54321"), 54321));
+    assert!(access.allows_host(Some("localhost:54321"), 54321));
+    assert!(!access.allows_host(Some("attacker.example:54321"), 54321));
+    assert!(!access.allows_host(None, 54321));
+
+    assert!(access.allows_token(Some("test-capability"), None));
+    assert!(access.allows_token(None, Some("clud_dashboard_token=test-capability")));
+    assert!(!access.allows_token(Some("wrong"), None));
+    assert!(!access.allows_token(None, None));
 }
 
 #[test]
@@ -375,11 +393,12 @@ fn end_to_end_state_endpoint_returns_all_three_kinds() {
         empty_live_provider(),
         TelemetryStore::new(),
         ToolTelemetryStore::new(),
+        "test-capability".to_string(),
     )
     .expect("dashboard spawned");
 
     // Hit /state.json.
-    let body = fetch_state_json(port).expect("fetch state");
+    let body = fetch_state_json(port, "test-capability").expect("fetch state");
     let state: DashboardState = serde_json::from_str(&body).expect("parse");
     assert_eq!(state.stats.session_count, 1);
     assert_eq!(state.stats.gc_count, 1);
@@ -405,6 +424,7 @@ fn end_to_end_tool_event_endpoint_round_trips_summary() {
         empty_live_provider(),
         TelemetryStore::new(),
         ToolTelemetryStore::new(),
+        "test-capability".to_string(),
     )
     .expect("dashboard spawned");
 
@@ -456,6 +476,7 @@ fn end_to_end_purge_kind_round_trip_mutates_registry() {
         empty_live_provider(),
         TelemetryStore::new(),
         ToolTelemetryStore::new(),
+        "test-capability".to_string(),
     )
     .expect("dashboard spawned");
 
@@ -480,7 +501,7 @@ fn end_to_end_purge_kind_round_trip_mutates_registry() {
     // until the registry shrinks rather than racing against it.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let state_body = fetch_state_json(port).expect("re-fetch state");
+        let state_body = fetch_state_json(port, "test-capability").expect("re-fetch state");
         let state: DashboardState = serde_json::from_str(&state_body).expect("parse state");
         if state.stats.gc_count == 0 {
             break;
@@ -542,11 +563,12 @@ fn end_to_end_per_row_delete_only_targets_requested_id() {
         empty_live_provider(),
         TelemetryStore::new(),
         ToolTelemetryStore::new(),
+        "test-capability".to_string(),
     )
     .expect("dashboard spawned");
 
     // Fetch /state.json to get the assigned ids.
-    let state_body = fetch_state_json(port).expect("fetch state");
+    let state_body = fetch_state_json(port, "test-capability").expect("fetch state");
     let state: DashboardState = serde_json::from_str(&state_body).expect("parse");
     let middle = state
         .gc
@@ -570,7 +592,7 @@ fn end_to_end_per_row_delete_only_targets_requested_id() {
     assert_eq!(resp.skipped, 0);
 
     // The two siblings must survive.
-    let after = fetch_state_json(port).expect("re-fetch state");
+    let after = fetch_state_json(port, "test-capability").expect("re-fetch state");
     let after_state: DashboardState = serde_json::from_str(&after).expect("parse");
     let surviving: Vec<&str> = after_state.gc.iter().map(|r| r.path.as_str()).collect();
     assert_eq!(after_state.gc.len(), 2);
@@ -590,7 +612,9 @@ fn fetch_path(port: u16, method: &str, path: &str, body: Option<String>) -> io::
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut req = format!("{method} {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n",);
+    let mut req = format!(
+        "{method} {path} HTTP/1.0\r\nHost: localhost:{port}\r\nCookie: clud_dashboard_token=test-capability\r\nConnection: close\r\n",
+    );
     if let Some(b) = &body {
         req.push_str(&format!(
             "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",

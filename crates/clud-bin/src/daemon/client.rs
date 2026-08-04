@@ -777,6 +777,7 @@ mod tests {
             pid_start: 0,
             port: 0,
             dashboard_port: None,
+            dashboard_token: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };
         assert!(daemon_version_matches(&info));
@@ -792,6 +793,7 @@ mod tests {
             pid_start: 0,
             port: 0,
             dashboard_port: None,
+            dashboard_token: None,
             version: Some("0.0.0-not-the-current".to_string()),
         };
         assert!(!daemon_version_matches(&info));
@@ -808,6 +810,7 @@ mod tests {
             pid_start: 0,
             port: 0,
             dashboard_port: None,
+            dashboard_token: None,
             version: None,
         };
         assert!(!daemon_version_matches(&info));
@@ -820,6 +823,7 @@ mod tests {
             pid_start: crate::process_identity::start_time_of(pid),
             port,
             dashboard_port: None,
+            dashboard_token: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };
         super::super::io_helpers::write_json_file(&daemon_info_path(state_dir), &info).unwrap();

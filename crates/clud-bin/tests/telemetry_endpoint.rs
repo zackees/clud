@@ -42,9 +42,14 @@ fn clud_exe() -> PathBuf {
 fn telemetry_round_trip_via_clud_log_subprocess() {
     let dir = tempfile::tempdir().expect("tempdir");
     let telemetry = TelemetryStore::new();
-    let port =
-        spawn_dashboard_telemetry_only(dir.path().to_path_buf(), 9999, 100, telemetry.clone())
-            .expect("dashboard spawned");
+    let port = spawn_dashboard_telemetry_only(
+        dir.path().to_path_buf(),
+        9999,
+        100,
+        telemetry.clone(),
+        "test-capability".to_string(),
+    )
+    .expect("dashboard spawned");
 
     // Invoke `clud log` against the spawned port. --fail-on-no-server
     // guarantees a non-zero exit if the POST doesn't round-trip, which
@@ -59,10 +64,15 @@ fn telemetry_round_trip_via_clud_log_subprocess() {
     env.retain(|(k, _)| {
         k != "CLUD_DAEMON_HTTP_SERVER"
             && k != "CLUD_TEST_MARKER"
+            && k != "CLUD_DAEMON_HTTP_TOKEN"
             && k != "RUNNING_PROCESS_ORIGINATOR"
     });
     env.push(("CLUD_DAEMON_HTTP_SERVER".to_string(), url.clone()));
     env.push(("CLUD_TEST_MARKER".to_string(), "42".to_string()));
+    env.push((
+        "CLUD_DAEMON_HTTP_TOKEN".to_string(),
+        "test-capability".to_string(),
+    ));
 
     let config = ProcessConfig {
         command: CommandSpec::Argv(vec![
@@ -145,6 +155,11 @@ fn telemetry_round_trip_via_clud_log_subprocess() {
         entry.env.get("CLUD_TEST_MARKER").map(String::as_str),
         Some("42"),
         "CLUD_TEST_MARKER missing from captured env: {:?}",
+        entry.env
+    );
+    assert!(
+        !entry.env.contains_key("CLUD_DAEMON_HTTP_TOKEN"),
+        "dashboard capability leaked into telemetry: {:?}",
         entry.env
     );
     // All captured env keys must start with CLUD_ (the logger filters).
@@ -257,9 +272,14 @@ fn clud_log_unreachable_server_with_fail_flag_exits_nonzero() {
 fn telemetry_summary_endpoint_returns_independent_list() {
     let dir = tempfile::tempdir().expect("tempdir");
     let telemetry = TelemetryStore::new();
-    let port =
-        spawn_dashboard_telemetry_only(dir.path().to_path_buf(), 9999, 100, telemetry.clone())
-            .expect("dashboard spawned");
+    let port = spawn_dashboard_telemetry_only(
+        dir.path().to_path_buf(),
+        9999,
+        100,
+        telemetry.clone(),
+        "test-capability".to_string(),
+    )
+    .expect("dashboard spawned");
 
     // Empty case: no POSTs yet → empty array.
     let empty_body = fetch_path(port, "GET", "/telemetry", None).expect("GET /telemetry empty");
@@ -302,7 +322,9 @@ fn fetch_path(port: u16, method: &str, path: &str, body: Option<String>) -> io::
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut req = format!("{method} {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n",);
+    let mut req = format!(
+        "{method} {path} HTTP/1.0\r\nHost: localhost:{port}\r\nCookie: clud_dashboard_token=test-capability\r\nConnection: close\r\n",
+    );
     if let Some(b) = &body {
         req.push_str(&format!(
             "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
