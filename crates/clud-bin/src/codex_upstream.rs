@@ -88,6 +88,12 @@ pub enum FailureClass {
     Transient,
     /// A 5xx we do not recognise. Retried, but on a reduced budget.
     Unknown,
+    /// The account is out of quota or credits. Retrying is not merely
+    /// unhelpful, it is actively wrong: a multi-day exhaustion would burn the
+    /// whole budget in under a second and report nothing the user can act on.
+    /// Split out of [`Self::Permanent`] because it is the one failure with a
+    /// *reset time* and a remedy, and the client-facing message says so.
+    Exhausted,
 }
 
 /// A non-2xx upstream response, reduced to what is safe to keep.
@@ -147,7 +153,7 @@ impl UpstreamFailure {
     /// Attempt budget this failure earns.
     fn max_attempts(&self, config: &UpstreamConfig) -> u32 {
         match self.class {
-            FailureClass::Permanent => 1,
+            FailureClass::Permanent | FailureClass::Exhausted => 1,
             FailureClass::Transient => config.max_attempts.max(1),
             FailureClass::Unknown => config.unknown_max_attempts.max(1),
         }
@@ -223,7 +229,22 @@ const PERMANENT_SIGNATURES: &[&str] = &[
     "model_not_found",
     "does not exist",
     "invalid_api_key",
+];
+
+/// Body signatures that mark an account as out of quota or credits.
+///
+/// Checked before every other rule, including the 408/429-are-transient rule:
+/// the ChatGPT backend reports exhaustion as a 429, which is indistinguishable
+/// from an ordinary throttle by status alone. That ambiguity is why a real
+/// exhaustion was retried three times in ~750ms and reported as a bare
+/// "status 429".
+const EXHAUSTED_SIGNATURES: &[&str] = &[
     "insufficient_quota",
+    "usage_limit_reached",
+    "quota_exceeded",
+    "out of credits",
+    "credit balance",
+    "billing_hard_limit_reached",
 ];
 
 /// Body signatures that positively mark a 5xx as an outage rather than a
@@ -248,6 +269,12 @@ const NON_RETRYABLE_STATUSES: &[u16] = &[400, 401, 403, 404, 405, 409, 413, 422]
 
 fn classify(status: u16, body_prefix: &str) -> FailureClass {
     let body = body_prefix.to_ascii_lowercase();
+    if EXHAUSTED_SIGNATURES
+        .iter()
+        .any(|signature| body.contains(signature))
+    {
+        return FailureClass::Exhausted;
+    }
     if PERMANENT_SIGNATURES
         .iter()
         .any(|signature| body.contains(signature))
@@ -405,7 +432,10 @@ impl UpstreamError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Transport(_) => true,
-            Self::Status(failure) => !matches!(failure.class, FailureClass::Permanent),
+            Self::Status(failure) => !matches!(
+                failure.class,
+                FailureClass::Permanent | FailureClass::Exhausted
+            ),
             Self::Credentials(_)
             | Self::TooLarge
             | Self::Timeout
@@ -1663,12 +1693,43 @@ mod tests {
         );
     }
 
+    /// A 429 whose body says the plan is exhausted is **not** a throttle.
+    ///
+    /// This assertion used to read `Transient`, which meant a multi-day
+    /// exhaustion burned three attempts in ~750ms and was reported as a bare
+    /// "status 429". Status alone cannot tell the two apart -- only the body
+    /// can, which is why it is classified before the 408/429 rule runs.
     #[test]
-    fn a_rate_limit_body_surfaces_its_reset_hint() {
+    fn an_exhausted_plan_is_not_retried_however_it_is_spelled() {
         let body = r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":529498}}"#;
         let failure = failure_from(429, body);
-        assert_eq!(failure.class(), FailureClass::Transient);
+        assert_eq!(failure.class(), FailureClass::Exhausted);
         assert_eq!(failure.resets_in(), Some(Duration::from_secs(529_498)));
+        assert_eq!(
+            failure.max_attempts(&UpstreamConfig::default()),
+            1,
+            "an exhausted plan must be attempted exactly once"
+        );
+
+        for spelling in [
+            r#"{"error":{"code":"insufficient_quota"}}"#,
+            r#"{"error":{"type":"quota_exceeded"}}"#,
+            r#"{"error":{"message":"You are out of credits"}}"#,
+        ] {
+            assert_eq!(
+                failure_from(429, spelling).class(),
+                FailureClass::Exhausted,
+                "{spelling}"
+            );
+        }
+    }
+
+    /// A 429 with no exhaustion signature stays retryable.
+    #[test]
+    fn an_ordinary_throttle_is_still_transient() {
+        let failure = failure_from(429, r#"{"error":{"code":"rate_limit_exceeded"}}"#);
+        assert_eq!(failure.class(), FailureClass::Transient);
+        assert!(failure.max_attempts(&UpstreamConfig::default()) > 1);
     }
 
     #[test]

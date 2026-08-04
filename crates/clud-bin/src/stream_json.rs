@@ -48,10 +48,29 @@ pub fn render_line(line: &str) -> Option<String> {
         "system" => render_system(&value),
         "assistant" => render_assistant(&value),
         "result" => render_result(&value),
+        // An Anthropic-shaped error was previously skipped by the catch-all
+        // below, so a turn that failed for a nameable reason -- a drained
+        // account, dead credentials -- rendered as nothing at all, and the
+        // only user-visible trace was `[claude] error` with no cause.
+        "error" => render_error(&value),
         // `user` events carry tool_result payloads — usually long, often
         // duplicating what the tool_use line already conveyed. Skipped.
         _ => None,
     }
+}
+
+fn render_error(value: &Value) -> Option<String> {
+    let error = value.get("error")?;
+    let kind = error
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("api_error");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("no detail")
+        .trim();
+    Some(format!("[claude] {kind} · {message}"))
 }
 
 fn render_system(value: &Value) -> Option<String> {
@@ -348,6 +367,16 @@ mod tests {
     fn unknown_event_type_is_skipped() {
         let line = r#"{"type":"some_future_event","payload":42}"#;
         assert!(render_line(line).is_none());
+    }
+
+    /// A failed turn must name its cause. The catch-all used to swallow this
+    /// shape, leaving `[claude] error` as the entire user-visible signal.
+    #[test]
+    fn error_events_are_rendered_with_their_type_and_message() {
+        let line = r#"{"type":"error","error":{"type":"billing_error","message":"upstream account quota exhausted"}}"#;
+        let rendered = render_line(line).expect("an error line must render");
+        assert!(rendered.contains("billing_error"), "{rendered}");
+        assert!(rendered.contains("quota exhausted"), "{rendered}");
     }
 
     #[test]
