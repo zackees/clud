@@ -618,17 +618,12 @@ fn report_and_reap(
     // process table 20 times to answer 20 questions it could answer from one —
     // plus one targeted refresh per orphan for the identity check.
     let topology = process_tree::TopologySnapshot::capture();
-    // A candidate helper can be selected independently of its interactive root.
-    // Expand all spared candidates through the one topology snapshot before
-    // starting any kill, so every protected family is pruned consistently.
-    let protected_families =
-        topology.subtree_pids(&spares.keys().copied().collect::<HashSet<u32>>());
     let mut reaped = 0usize;
     let mut reaped_pids = Vec::with_capacity(descendants.len());
     let mut skipped_recycled = 0usize;
-    let admit = |pid: u32| !protected_families.contains(&pid) && may_kill(&spares, daemons, pid);
+    let admit = |pid: u32| may_kill(&spares, daemons, pid);
     for d in &descendants {
-        if protected_families.contains(&d.pid) {
+        if spares.contains_key(&d.pid) {
             continue;
         }
         // #673 Phase 6: the scan that selected this PID and the kill that acts

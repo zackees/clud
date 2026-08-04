@@ -111,9 +111,8 @@ reaper that never saw the process at all also leaves it running.
 | 4 | **Token owner** | process cannot be opened for termination | `euid` differs | services; also cases where the kill would fail anyway |
 | 5 | **Declared daemon** | `RUNNING_PROCESS_IS_DAEMON` | same | **zccache**, **soldr** — everything that opted in |
 | 6 | **Listening endpoint** | `GetExtendedTcpTable` over `AF_INET` **and** `AF_INET6` | `/proc/net/tcp{,6}` + `/proc/net/unix`, matched to `/proc/<pid>/fd` | **sccache**, **FBuildWorker**, language servers |
-| 7 | **Interactive desktop root** | visible non-tool top-level window in the current interactive session | unavailable | protects its whole user-facing process family |
-| 8 | **Docker Desktop family** | `Docker Desktop.exe` / `com.docker.*` roots | same | Docker Desktop backend plus its WSL runtime subtree (#773) |
-| 9 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
+| 7 | **Docker Desktop family** | `Docker Desktop.exe` / `com.docker.*` roots | same | Docker Desktop backend plus its WSL runtime subtree (#773) |
+| 8 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
 
 Cheap and authoritative first, expensive last. 1–4 are one syscall each and no
 memory read, and every PID they rule out is a PID whose environment is never
@@ -123,13 +122,6 @@ Known gap: **Windows named pipes**. Windows exposes no documented
 pipe-name-to-owning-PID mapping, so a daemon whose only endpoint is a named pipe
 still needs the marker or the operator spare-list. The POSIX analogue is
 covered — `/proc/net/unix` is read alongside the TCP tables.
-
-The interactive-desktop signal is deliberately narrower than arbitrary GUI or
-console attachment: the one-pass Win32 enumeration accepts only visible,
-non-tool top-level windows in the current interactive session. A spared root is
-expanded through the sweep's topology snapshot before any candidate is killed,
-so versioned helper images (for example plugin hosts) survive as a family rather
-than through a brittle image-name allowlist.
 
 Coverage is not uniform across platforms, and the table says so rather than
 guessing: on macOS only rows 3 and 5 are answerable without linking a

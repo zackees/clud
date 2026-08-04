@@ -55,9 +55,6 @@ pub enum SpareReason {
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
     ListeningEndpoint,
-    /// Owns a visible, taskbar-style top-level window in the current interactive
-    /// Windows session. Its helpers inherit protection through subtree pruning.
-    InteractiveDesktopApplication,
     /// Docker Desktop's interactive UI/backend root. Its WSL runtime children
     /// inherit this protection through the reaper's subtree pruning.
     DockerDesktopProcessFamily,
@@ -75,7 +72,6 @@ impl SpareReason {
             Self::ForeignTokenOwner => "foreign_token_owner",
             Self::DeclaredDaemon => "declared_daemon",
             Self::ListeningEndpoint => "listening_endpoint",
-            Self::InteractiveDesktopApplication => "interactive_desktop_application",
             Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
             Self::ConfiguredSpareList => "configured_spare_list",
         }
@@ -120,10 +116,6 @@ pub trait ProcessFacts {
     /// service, whatever it did or did not declare.
     fn owns_listening_endpoint(&self, pid: u32) -> Option<bool>;
 
-    /// Does `pid` own a visible, taskbar-style top-level window in the current
-    /// interactive Windows session?
-    fn is_interactive_desktop_root(&self, pid: u32) -> Option<bool>;
-
     /// Did the operator name this image in a configured spare-list?
     ///
     /// A whitelist is a last resort and must be **data, not code** — nothing in
@@ -141,7 +133,6 @@ pub enum Signal {
     TokenOwner,
     DaemonMarker,
     ListeningEndpoint,
-    InteractiveDesktopRoot,
 }
 
 /// Process facts collected once per pass and then consulted as pure data.
@@ -162,7 +153,6 @@ pub struct FactsSnapshot {
     pub foreign_owner: HashSet<u32>,
     pub declared_daemons: HashSet<u32>,
     pub listening: HashSet<u32>,
-    pub interactive_desktop_roots: HashSet<u32>,
     /// Operator-configured image names. Data, not code: nothing in clud
     /// hard-codes an entry here.
     pub spare_images: Vec<String>,
@@ -198,13 +188,6 @@ impl ProcessFacts for FactsSnapshot {
 
     fn owns_listening_endpoint(&self, pid: u32) -> Option<bool> {
         self.answer(Signal::ListeningEndpoint, self.listening.contains(&pid))
-    }
-
-    fn is_interactive_desktop_root(&self, pid: u32) -> Option<bool> {
-        self.answer(
-            Signal::InteractiveDesktopRoot,
-            self.interactive_desktop_roots.contains(&pid),
-        )
     }
 
     fn spare_listed(&self, _pid: u32, image_name: &str) -> bool {
@@ -255,9 +238,7 @@ pub type SpareList = HashMap<u32, SpareReason>;
 ///    signal precisely because opting in is optional.
 /// 6. **Listening endpoint** — evaluated only for PIDs that survived all of the
 ///    above, because it is the costly one.
-/// 7. **Interactive desktop root** — a visible, taskbar-style window in the
-///    current Windows session; its process family is pruned by the reaper.
-/// 8. **Configured spare-list** — operator data, last resort.
+/// 7. **Configured spare-list** — operator data, last resort.
 ///
 /// Console attachment is deliberately **not** ranked. Once the trigger shell
 /// has exited its console goes with it, which makes "no console"
@@ -281,9 +262,6 @@ pub fn spare_signal(facts: &dyn ProcessFacts, pid: u32, image_name: &str) -> Opt
     }
     if facts.owns_listening_endpoint(pid) == Some(true) {
         return Some(SpareReason::ListeningEndpoint);
-    }
-    if facts.is_interactive_desktop_root(pid) == Some(true) {
-        return Some(SpareReason::InteractiveDesktopApplication);
     }
     if is_docker_desktop_family_root(image_name) {
         return Some(SpareReason::DockerDesktopProcessFamily);
@@ -368,18 +346,6 @@ pub fn collect_host_facts(
     snapshot
 }
 
-/// Candidate PIDs owning visible, taskbar-style top-level windows in the
-/// current interactive Windows session. Other platforms report no roots.
-#[cfg(windows)]
-pub fn interactive_desktop_roots(candidates: &[u32]) -> HashSet<u32> {
-    platform::interactive_desktop_roots(candidates)
-}
-
-#[cfg(not(windows))]
-pub fn interactive_desktop_roots(_candidates: &[u32]) -> HashSet<u32> {
-    HashSet::new()
-}
-
 #[cfg(windows)]
 mod platform {
     use super::{FactsSnapshot, Signal};
@@ -421,17 +387,9 @@ mod platform {
 
         let listening = win32::listening_pids();
         snapshot.listening = survivors
-            .iter()
-            .copied()
+            .into_iter()
             .filter(|pid| listening.contains(pid))
             .collect();
-        snapshot.interactive_desktop_roots = interactive_desktop_roots(&survivors);
-    }
-
-    /// Visible, taskbar-style top-level window owners among `candidates` in the
-    /// current interactive session. The enumeration runs once per fact pass.
-    pub(super) fn interactive_desktop_roots(candidates: &[u32]) -> std::collections::HashSet<u32> {
-        win32::interactive_desktop_roots(candidates)
     }
 
     /// The Win32 half of the [`super::ProcessFacts`] signals for the
@@ -447,11 +405,7 @@ mod platform {
         use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
         use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
         use windows::Win32::System::Threading::{
-            GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-        };
-        use windows::Win32::UI::WindowsAndMessaging::{
-            EnumWindows, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsWindowVisible,
-            GWL_EXSTYLE, GW_OWNER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
         };
 
         /// `Some(false)` = the process exists but we may not terminate it.
@@ -480,46 +434,6 @@ mod platform {
                     .is_ok()
                     .then_some(session)
             }
-        }
-
-        /// Candidate PIDs with a visible, non-tool top-level window in the
-        /// current interactive session. This intentionally excludes invisible
-        /// and tool windows, so it is not a blanket GUI-process exemption.
-        pub(super) fn interactive_desktop_roots(candidates: &[u32]) -> HashSet<u32> {
-            let candidate_pids: HashSet<u32> = candidates.iter().copied().collect();
-            let Some(current_session) = session_id(unsafe { GetCurrentProcessId() }) else {
-                return HashSet::new();
-            };
-            let mut roots = HashSet::new();
-            unsafe extern "system" fn visit(
-                window: windows::Win32::Foundation::HWND,
-                state: windows::Win32::Foundation::LPARAM,
-            ) -> windows_core::BOOL {
-                let state = &mut *(state.0 as *mut (&HashSet<u32>, u32, &mut HashSet<u32>));
-                let ex_style = GetWindowLongW(window, GWL_EXSTYLE) as u32;
-                let taskbar_style = ex_style & WS_EX_APPWINDOW.0 != 0
-                    || GetWindow(window, GW_OWNER).is_ok_and(|owner| owner.0.is_null());
-                if !IsWindowVisible(window).as_bool()
-                    || ex_style & WS_EX_TOOLWINDOW.0 != 0
-                    || !taskbar_style
-                {
-                    return windows_core::BOOL(1);
-                }
-                let mut pid = 0;
-                GetWindowThreadProcessId(window, Some(&mut pid));
-                if state.0.contains(&pid) && session_id(pid) == Some(state.1) {
-                    state.2.insert(pid);
-                }
-                windows_core::BOOL(1)
-            }
-            let mut state = (&candidate_pids, current_session, &mut roots);
-            let _ = unsafe {
-                EnumWindows(
-                    Some(visit),
-                    windows::Win32::Foundation::LPARAM((&mut state as *mut _) as isize),
-                )
-            };
-            roots
         }
 
         /// PIDs owning a TCP listener, over **both** address families.
@@ -593,7 +507,6 @@ mod platform {
     pub(super) fn mark_unavailable(snapshot: &mut FactsSnapshot) {
         // No Windows services session anywhere on Unix.
         snapshot.unavailable.insert(Signal::ServiceSession);
-        snapshot.unavailable.insert(Signal::InteractiveDesktopRoot);
         #[cfg(not(target_os = "linux"))]
         {
             // `/proc` is the only interface here that answers these without
@@ -751,7 +664,6 @@ mod platform {
             Signal::SessionLeader,
             Signal::TokenOwner,
             Signal::ListeningEndpoint,
-            Signal::InteractiveDesktopRoot,
         ]);
     }
 
@@ -800,18 +712,6 @@ mod tests {
             spare_signal(&facts, 11, "sccache"),
             Some(SpareReason::ListeningEndpoint)
         );
-    }
-
-    #[test]
-    fn an_interactive_desktop_root_is_spared_with_a_precise_reason() {
-        let facts = facts_with(|f| {
-            f.interactive_desktop_roots.insert(42);
-        });
-        assert_eq!(
-            spare_signal(&facts, 42, "sublime_text.exe"),
-            Some(SpareReason::InteractiveDesktopApplication)
-        );
-        assert_eq!(spare_signal(&facts, 43, "powershell.exe"), None);
     }
 
     #[test]
