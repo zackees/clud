@@ -165,6 +165,66 @@ struct ThinkingState {
     signature: Option<String>,
 }
 
+/// A safe classification of an upstream error delivered inside a 200 stream.
+///
+/// Every field is allowlisted: the raw error message and response body can
+/// contain prompt content, account identifiers, or credential fragments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InBandFailure {
+    pub category: &'static str,
+    pub code: Option<&'static str>,
+    pub request_id: Option<String>,
+}
+
+impl InBandFailure {
+    fn from_upstream(value: &serde_json::Value) -> Self {
+        let code = value
+            .pointer("/response/error/code")
+            .or_else(|| value.pointer("/error/code"))
+            .or_else(|| value.get("code"))
+            .and_then(serde_json::Value::as_str);
+        let category = match code {
+            Some("context_length_exceeded") => "context_length",
+            Some("cyber_policy") => "policy",
+            _ if value
+                .pointer("/response/error/type")
+                .or_else(|| value.pointer("/error/type"))
+                .and_then(serde_json::Value::as_str)
+                == Some("invalid_request") =>
+            {
+                "malformed_request"
+            }
+            _ => "unknown_invalid_request",
+        };
+        let code = match code {
+            Some("context_length_exceeded") => Some("context_length_exceeded"),
+            Some("cyber_policy") => Some("cyber_policy"),
+            _ => None,
+        };
+        let request_id = value
+            .pointer("/response/request_id")
+            .or_else(|| value.pointer("/request_id"))
+            .or_else(|| value.get("request_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Self {
+            category,
+            code,
+            request_id,
+        }
+    }
+
+    fn client_message(&self) -> &'static str {
+        match self.category {
+            "context_length" => "upstream rejected this request because its context is too long",
+            "policy" => "upstream rejected this request due to provider policy",
+            "malformed_request" => "upstream rejected an unsupported or malformed bridge request",
+            _ => "upstream rejected the request as invalid (unclassified; enable CLUD_CODEX_BRIDGE_DEBUG=1 for a safe diagnostic)",
+        }
+    }
+}
+
 /// Responses events -> Anthropic events.
 ///
 /// Emits complete SSE frames as strings so the caller can write and flush each
@@ -191,6 +251,10 @@ pub struct StreamTranslator {
     stop_reason: Option<String>,
     /// Shortened tool name -> original, so the client sees what it sent.
     tool_names: HashMap<String, String>,
+    /// Classification for a provider error delivered after HTTP 200 committed.
+    /// The bridge reads this into its operator log but never forwards raw
+    /// upstream detail to the harness.
+    in_band_failure: Option<InBandFailure>,
     /// Set when the stream ended in a drained account or dead credentials --
     /// the two failures a user must act on personally.
     terminal_account_failure: bool,
@@ -216,6 +280,7 @@ impl StreamTranslator {
             cached_tokens: 0,
             stop_reason: None,
             tool_names: HashMap::new(),
+            in_band_failure: None,
             terminal_account_failure: false,
         }
     }
@@ -461,7 +526,11 @@ impl StreamTranslator {
         for index in std::mem::take(&mut self.open_blocks) {
             out.push(content_block_stop_frame(index));
         }
+        let failure = InBandFailure::from_upstream(upstream);
         let kind = upstream_error_type(upstream);
+        if kind == "invalid_request_error" {
+            self.in_band_failure = Some(failure.clone());
+        }
         if matches!(kind, "billing_error" | "authentication_error") {
             self.terminal_account_failure = true;
         }
@@ -478,7 +547,11 @@ impl StreamTranslator {
                     // it was that the body was never *read*, so every failure
                     // collapsed onto one constant and an out-of-credits
                     // condition could not be reported as one.
-                    "message": upstream_error_message(kind),
+                    "message": if kind == "invalid_request_error" {
+                        failure.client_message()
+                    } else {
+                        upstream_error_message(kind)
+                    },
                 },
             }),
         ));
@@ -492,6 +565,11 @@ impl StreamTranslator {
     /// otherwise produces HTTP 200 and no diagnostic anywhere.
     pub fn terminal_account_failure(&self) -> bool {
         self.terminal_account_failure
+    }
+
+    /// Return a redacted error classification for bridge diagnostics.
+    pub fn in_band_failure(&self) -> Option<&InBandFailure> {
+        self.in_band_failure.as_ref()
     }
 
     /// Terminate with a sanitized error and no upstream detail.
@@ -799,7 +877,9 @@ fn upstream_error_type(value: &serde_json::Value) -> &'static str {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     match (code, kind) {
-        ("cyber_policy", _) | (_, "invalid_request") => "invalid_request_error",
+        ("cyber_policy", _) | ("invalid_request", _) | (_, "invalid_request") => {
+            "invalid_request_error"
+        }
         ("rate_limit_exceeded", _) => "rate_limit_error",
         // `usage_limit_reached` is how the ChatGPT backend spells an
         // exhausted plan; it is a billing condition, not a throttle.
@@ -995,6 +1075,43 @@ mod tests {
                 reference,
                 "fragmentation at {chunk} bytes changed the output"
             );
+        }
+    }
+
+    #[test]
+    fn invalid_request_categories_are_safe_and_specific() {
+        let cases = [
+            (
+                json!({"response": {"error": {"type": "invalid_request", "code": "context_length_exceeded", "message": "SECRET"}, "request_id": "req_context"}}),
+                "context_length",
+                Some("context_length_exceeded"),
+                "context is too long",
+            ),
+            (
+                json!({"response": {"error": {"code": "cyber_policy", "message": "SECRET"}}}),
+                "policy",
+                Some("cyber_policy"),
+                "provider policy",
+            ),
+            (
+                json!({"response": {"error": {"type": "invalid_request", "message": "SECRET"}}}),
+                "malformed_request",
+                None,
+                "unsupported or malformed",
+            ),
+            (
+                json!({"response": {"error": {"message": "SECRET"}}}),
+                "unknown_invalid_request",
+                None,
+                "unclassified",
+            ),
+        ];
+        for (upstream, category, code, message) in cases {
+            let failure = InBandFailure::from_upstream(&upstream);
+            assert_eq!(failure.category, category);
+            assert_eq!(failure.code, code);
+            assert!(failure.client_message().contains(message));
+            assert!(!failure.client_message().contains("SECRET"));
         }
     }
 

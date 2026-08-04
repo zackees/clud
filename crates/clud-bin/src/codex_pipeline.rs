@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::codex_model::ModelSpec;
-use crate::codex_sse::{FrameDecoder, StreamTranslator};
+use crate::codex_sse::{FrameDecoder, InBandFailure, StreamTranslator};
 use crate::codex_translate::{
     default_model_spec, translate_bytes, SystemPlacement, TranslateError, TranslateOptions,
 };
@@ -40,12 +40,28 @@ const QUOTA_EXHAUSTED_MESSAGE: &str =
 
 /// What a completed stream is worth reporting even though it succeeded at the
 /// HTTP layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamSummary {
     /// The turn ended in a drained account or dead credentials, delivered
     /// in-band. HTTP status is already committed to 200 by then, so this is
     /// the only way the caller can learn it happened.
     pub terminal_account_failure: bool,
+    /// Safe upstream classification captured from an in-band 400. This is
+    /// operator-only metadata; the raw error body never leaves the translator.
+    pub in_band_failure: Option<InBandFailure>,
+    /// Field names, item kinds, and counts from the translated Responses
+    /// request. It intentionally omits all user/model/tool values.
+    pub request_shape: serde_json::Value,
+}
+
+/// Operator-only diagnostic paired with an in-band invalid request.
+///
+/// Boxing it keeps the hot `PipelineError` result compact while preserving the
+/// bounded, allowlisted failure metadata for the HTTP boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InBandDiagnostic {
+    pub failure: InBandFailure,
+    pub request_shape: serde_json::Value,
 }
 
 /// A provider failure delivered *inside* an otherwise-successful stream.
@@ -58,6 +74,9 @@ pub struct StreamSummary {
 pub struct ProviderFailure {
     pub kind: String,
     pub message: String,
+    /// Operator-only metadata retained from an in-band invalid request. This
+    /// cannot contain an upstream body; [`InBandFailure`] is allowlisted.
+    pub diagnostic: Option<Box<InBandDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +350,7 @@ impl MessageAggregator {
                     self.provider_error = Some(ProviderFailure {
                         kind: string_at(error, "type"),
                         message: string_at(error, "message"),
+                        diagnostic: None,
                     });
                 }
             }
@@ -451,7 +471,7 @@ impl<C: CredentialSource> Pipeline<C> {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
     ) -> Result<StreamSummary, PipelineError> {
-        let (upstream_body, model, tool_names) = self.prepare(request_body)?;
+        let (upstream_body, model, tool_names, request_shape) = self.prepare(request_body)?;
 
         let mut decoder = FrameDecoder::new();
         let mut translator = StreamTranslator::new(model, message_id).with_tool_names(tool_names);
@@ -477,6 +497,8 @@ impl<C: CredentialSource> Pipeline<C> {
                 }
                 Ok(StreamSummary {
                     terminal_account_failure: translator.terminal_account_failure(),
+                    in_band_failure: translator.in_band_failure().cloned(),
+                    request_shape,
                 })
             }
             Err(error) => {
@@ -506,15 +528,28 @@ impl<C: CredentialSource> Pipeline<C> {
             aggregator.push_frame(frame);
             Ok(())
         };
-        self.stream(request_body, message_id, cancel, &mut sink)?;
+        let summary = self.stream(request_body, message_id, cancel, &mut sink)?;
         if aggregator.errored() {
             // Propagate the classification, not a generic transport failure.
             // The old relabel turned every in-band provider error -- including
             // a drained account -- into `502 api_error`.
-            return Err(match aggregator.provider_error() {
-                Some(failure) => PipelineError::Provider(failure.clone()),
-                None => PipelineError::Upstream(UpstreamError::Transport("upstream stream failed")),
-            });
+            let mut failure = aggregator
+                .provider_error()
+                .cloned()
+                .unwrap_or(ProviderFailure {
+                    kind: "api_error".to_string(),
+                    message: "upstream stream failed".to_string(),
+                    diagnostic: None,
+                });
+            if failure.kind == "invalid_request_error" {
+                failure.diagnostic = summary.in_band_failure.map(|failure| {
+                    Box::new(InBandDiagnostic {
+                        failure,
+                        request_shape: summary.request_shape,
+                    })
+                });
+            }
+            return Err(PipelineError::Provider(failure));
         }
         Ok(aggregator.finish())
     }
@@ -524,7 +559,15 @@ impl<C: CredentialSource> Pipeline<C> {
     fn prepare(
         &self,
         request_body: &[u8],
-    ) -> Result<(Vec<u8>, String, std::collections::HashMap<String, String>), PipelineError> {
+    ) -> Result<
+        (
+            Vec<u8>,
+            String,
+            std::collections::HashMap<String, String>,
+            serde_json::Value,
+        ),
+        PipelineError,
+    > {
         let target = self
             .client
             .credentials()
@@ -553,12 +596,42 @@ impl<C: CredentialSource> Pipeline<C> {
         };
         let translated =
             translate_bytes(request_body, &options).map_err(PipelineError::Translate)?;
+        let request_shape = translated_request_shape(&translated.request);
         let model = translated.request.model.clone();
         let body = serde_json::to_vec(&translated.request).map_err(|error| {
             PipelineError::Translate(TranslateError::Invalid(error.to_string()))
         })?;
-        Ok((body, model, translated.tool_names))
+        Ok((body, model, translated.tool_names, request_shape))
     }
+}
+
+fn translated_request_shape(
+    request: &crate::codex_translate::ResponsesRequest,
+) -> serde_json::Value {
+    let input_kinds = request
+        .input
+        .iter()
+        .map(|item| match item {
+            crate::codex_translate::InputItem::Message { .. } => "message",
+            crate::codex_translate::InputItem::FunctionCall { .. } => "function_call",
+            crate::codex_translate::InputItem::FunctionCallOutput { .. } => "function_call_output",
+            crate::codex_translate::InputItem::Reasoning { .. } => "reasoning",
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "top_level_fields": [
+            "model", "input", "stream", "store", "include", "instructions", "tools",
+            "tool_choice", "parallel_tool_calls", "reasoning", "prompt_cache_key", "service_tier"
+        ],
+        "input_count": request.input.len(),
+        "input_kinds": input_kinds,
+        "tool_count": request.tools.as_ref().map_or(0, Vec::len),
+        "has_instructions": request.instructions.is_some(),
+        "has_tool_choice": request.tool_choice.is_some(),
+        "has_reasoning": request.reasoning.is_some(),
+        "has_prompt_cache_key": request.prompt_cache_key.is_some(),
+        "has_service_tier": request.service_tier.is_some(),
+    })
 }
 
 #[cfg(test)]
