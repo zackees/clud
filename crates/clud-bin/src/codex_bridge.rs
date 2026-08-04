@@ -1270,15 +1270,25 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    /// Read timeout for the test client.
+    ///
+    /// This is a backstop against a wedged bridge, not an assertion about
+    /// latency, so it has to sit above the longest *legitimate* response. A
+    /// transient upstream failure is retried with exponential backoff, and on a
+    /// loaded CI runner that ladder can outrun a tight budget -- which surfaces
+    /// as `WouldBlock` from `read_to_string` and reads like a hang rather than
+    /// the timing artefact it is. 10s was under the ladder; this is over it.
+    const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
     fn request(addr: SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).expect("connect to bridge");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
+        stream.set_read_timeout(Some(CLIENT_READ_TIMEOUT)).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        stream
+            .read_to_string(&mut response)
+            .expect("bridge response within the client read timeout");
         response
     }
 
