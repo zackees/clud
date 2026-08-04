@@ -1659,6 +1659,30 @@ mod tests {
     }
 
     #[test]
+    fn every_known_failure_signature_classifies_as_intended() {
+        // Keep the signature tables load-bearing: changing or moving a signature
+        // must not silently alter its retry class.
+        for (class, signatures) in [
+            (FailureClass::Permanent, PERMANENT_SIGNATURES),
+            (FailureClass::Exhausted, EXHAUSTED_SIGNATURES),
+            (FailureClass::Transient, TRANSIENT_SIGNATURES),
+        ] {
+            assert!(
+                !signatures.is_empty(),
+                "{class:?} signatures must not be empty"
+            );
+            for signature in signatures {
+                let body = format!(r#"{{"error":{{"message":"{signature}"}}}}"#);
+                assert_eq!(
+                    failure_from(502, &body).class(),
+                    class,
+                    "signature {signature:?} no longer classifies as {class:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn retry_classification_matches_the_documented_policy() {
         // Recognised outages stay retryable.
         for status in [408, 429, 500, 502, 503] {
