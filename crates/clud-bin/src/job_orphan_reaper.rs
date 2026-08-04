@@ -1116,8 +1116,8 @@ mod imp {
     const MAX_DRAIN_BATCH: usize = 256;
 
     /// Minimum pause between full-host Toolhelp snapshots for one foreground
-    /// session. A scan skipped by this gate only leaves metadata unresolved
-    /// for a later retry; it never authorizes a destructive action.
+    /// session. A deferred scan waits for the next slot; it never authorizes a
+    /// destructive action without metadata.
     const SCAN_BACKOFF_BASE: Duration = Duration::from_millis(50);
     const SCAN_BACKOFF_MAX_MULTIPLIER: u32 = 10;
 
@@ -1208,14 +1208,21 @@ mod imp {
             }
         }
 
+        /// Waits for the next permitted scan slot, returning whether the
+        /// caller was deferred.  Deferral is deliberately not a metadata
+        /// miss: a live process must be observed once its bounded cooldown
+        /// expires, rather than being permanently disconnected from the
+        /// reaping graph.
         fn acquire(&mut self, work_items: usize) -> bool {
             let now = Instant::now();
-            if now < self.next_allowed {
-                return false;
+            let deferred = now < self.next_allowed;
+            if deferred {
+                std::thread::sleep(self.next_allowed - now);
             }
+            let now = Instant::now();
             let multiplier = (1 + (work_items as u32 / 8)).min(SCAN_BACKOFF_MAX_MULTIPLIER);
             self.next_allowed = now + SCAN_BACKOFF_BASE * multiplier;
-            true
+            deferred
         }
     }
 
@@ -1688,7 +1695,6 @@ mod imp {
         telemetry: &'a Arc<Mutex<Telemetry>>,
         scan_backoff: &'a Arc<Mutex<ScanBackoff>>,
         work_items: usize,
-        blocked: bool,
     }
 
     impl<'a> BatchTable<'a> {
@@ -1702,7 +1708,6 @@ mod imp {
                 telemetry,
                 scan_backoff,
                 work_items,
-                blocked: false,
             }
         }
 
@@ -1713,19 +1718,14 @@ mod imp {
         /// microseconds, and unlike the table it cannot be stale — so it stays
         /// per-call rather than being folded into the shared read.
         fn observe(&mut self, pid: u32) -> Option<ProcessMeta> {
-            if self.blocked {
-                return None;
-            }
             if self.table.is_none() {
-                let allowed = self
+                let deferred = self
                     .scan_backoff
                     .lock()
                     .map(|mut gate| gate.acquire(self.work_items))
-                    .unwrap_or(false);
-                if !allowed {
-                    self.blocked = true;
+                    .unwrap_or(true);
+                if deferred {
                     with_telemetry(self.telemetry, |t| t.epoch.host_scans_deferred += 1);
-                    return None;
                 }
             }
             let telemetry = self.telemetry;
@@ -1755,13 +1755,12 @@ mod imp {
             return true;
         }
 
-        let allowed = scan_backoff
+        let deferred = scan_backoff
             .lock()
             .map(|mut gate| gate.acquire(unresolved.len()))
-            .unwrap_or(false);
-        if !allowed {
+            .unwrap_or(true);
+        if deferred {
             with_telemetry(telemetry, |t| t.epoch.host_scans_deferred += 1);
-            return false;
         }
 
         let mut current = snapshot(telemetry);
@@ -2379,12 +2378,12 @@ mod imp {
         #[test]
         fn cooldown_defers_an_immediate_second_host_scan() {
             let mut backoff = ScanBackoff {
-                // Bypass the process-specific initial jitter so this is a
-                // deterministic test of the post-scan cooldown.
+                // Start at the first permitted slot so this is a deterministic
+                // test of the post-scan cooldown.
                 next_allowed: std::time::Instant::now(),
             };
-            assert!(backoff.acquire(1));
             assert!(!backoff.acquire(1));
+            assert!(backoff.acquire(1));
         }
     }
 }
