@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
 import sys
@@ -27,6 +28,51 @@ pytestmark = pytest.mark.integration
 
 
 class TestDaemonManagedSessionFlags:
+    def test_transcript_cross_route_keeps_bridge_in_worker_and_out_of_metadata(
+        self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
+    ) -> None:
+        state_dir = tmp_path / "daemon-state"
+        transcript = tmp_path / "session.transcript"
+        agent_report = tmp_path / "agent-report.json"
+        env = managed_env(mock_env, state_dir)
+        env["ANTHROPIC_API_KEY"] = "ambient-secret-that-must-not-leak"
+
+        result = subprocess.run(
+            [
+                str(clud_binary),
+                "--transcript",
+                str(transcript),
+                "--codex",
+                "--harness",
+                "claude",
+                "--subprocess",
+                "-p",
+                "cross-route-daemon",
+                "--",
+                "--mock-report-file",
+                str(agent_report),
+                "--mock-sleep-ms",
+                "500",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        session_id = read_session_id_from_text(result.stderr)
+        try:
+            report = json.loads(agent_report.read_text(encoding="utf-8"))
+            assert "claude" in report["program"].lower()
+            assert report["env"]["ANTHROPIC_BASE_URL_PRESENT"] is True
+            assert report["env"]["ANTHROPIC_AUTH_TOKEN_PRESENT"] is True
+            assert report["env"]["ANTHROPIC_API_KEY_PRESENT"] is False
+            metadata = json.dumps(session_metadata(state_dir, session_id))
+            assert "ANTHROPIC_AUTH_TOKEN" not in metadata
+            assert "ambient-secret-that-must-not-leak" not in metadata
+        finally:
+            kill_daemon_for_session(state_dir, session_id)
+
     def test_transcript_flag_forces_daemon_and_writes_output(
         self, clud_binary: Path, mock_env: dict[str, str], tmp_path: Path
     ) -> None:

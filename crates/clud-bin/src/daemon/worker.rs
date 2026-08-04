@@ -11,6 +11,7 @@ use base64::Engine;
 use running_process::pty::NativePtyProcess;
 use running_process::{NativeProcess, ProcessConfig, ReadStatus, StderrMode, StdinMode};
 
+use crate::foreground_runtime::ForegroundRuntime;
 use crate::graphics::GraphicsConfig;
 use crate::launch_log;
 use crate::process_identity::{self, ProcessIdentity};
@@ -123,21 +124,37 @@ pub(super) fn run_worker(
         }
     }
 
+    // The worker, rather than the daemon client, owns the bridge lifetime.
+    // Keep this value in the worker scope until the session exits: its
+    // environment is handed only to the harness child and BridgeHandle drops
+    // (closing its listener and discarding its bearer) on every exit path.
+    let launch_runtime = match start_worker_runtime(&spec.plan) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("[clud] failed to start cross-route runtime: {}", err);
+            return 1;
+        }
+    };
+
     let runtime = match spec.kind {
-        SessionKind::Subprocess => match start_subprocess_session(&spec, &shared) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                eprintln!("[clud] failed to start subprocess session: {}", err);
-                return 1;
+        SessionKind::Subprocess => {
+            match start_subprocess_session(&spec, &shared, launch_runtime.env().to_vec()) {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!("[clud] failed to start subprocess session: {}", err);
+                    return 1;
+                }
             }
-        },
-        SessionKind::Pty => match start_pty_session(&spec, &shared) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                eprintln!("[clud] failed to start PTY session: {}", err);
-                return 1;
+        }
+        SessionKind::Pty => {
+            match start_pty_session(&spec, &shared, launch_runtime.env().to_vec()) {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!("[clud] failed to start PTY session: {}", err);
+                    return 1;
+                }
             }
-        },
+        }
     };
 
     shared.set_root_pid(runtime.root_pid());
@@ -212,6 +229,10 @@ pub(super) fn run_worker(
     let _ = persist_snapshot(state_dir, session_id, &shared);
     let _ = fs::remove_file(spec_path(state_dir, session_id));
     0
+}
+
+fn start_worker_runtime(plan: &crate::command::LaunchPlan) -> io::Result<ForegroundRuntime> {
+    ForegroundRuntime::start(plan, child_env()).map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn run_repeat_worker(
@@ -389,11 +410,12 @@ fn run_repeat_once(
 fn start_subprocess_session(
     spec: &WorkerLaunchSpec,
     shared: &Arc<WorkerShared>,
+    env: Vec<(String, String)>,
 ) -> io::Result<SessionRuntime> {
     let process = Arc::new(NativeProcess::new(ProcessConfig {
         command: subprocess::command_spec_for_subprocess(spec.plan.command.clone()),
         cwd: spec.plan.cwd.as_ref().map(PathBuf::from),
-        env: Some(child_env()),
+        env: Some(env),
         capture: true,
         stderr_mode: StderrMode::Stdout,
         // Issue #55: daemon-managed subprocess session — stdio is fully
@@ -460,12 +482,13 @@ fn start_subprocess_session(
 fn start_pty_session(
     spec: &WorkerLaunchSpec,
     shared: &Arc<WorkerShared>,
+    env: Vec<(String, String)>,
 ) -> io::Result<SessionRuntime> {
     let process = Arc::new(
         NativePtyProcess::new(
             spec.plan.command.clone(),
             spec.plan.cwd.clone(),
-            Some(child_env()),
+            Some(env),
             spec.rows,
             spec.cols,
             None,
@@ -801,6 +824,8 @@ use Write as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource};
+    use crate::command::LaunchPlan;
     use crate::daemon::wire_prost::{
         decode_worker_server_line, encode_worker_client_line, DaemonWireFormat,
     };
@@ -808,6 +833,36 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
     use tempfile::TempDir;
+
+    fn cross_route_plan() -> LaunchPlan {
+        LaunchPlan {
+            command: vec!["claude".to_string()],
+            iterations: 1,
+            backend: Backend::Claude,
+            model_provider: Some(ModelProvider::Codex),
+            requested_harness: Some(HarnessSelection::Claude),
+            effective_harness: Some(Backend::Claude),
+            provider_source: Some(PreferenceSource::Cli),
+            harness_source: Some(PreferenceSource::Cli),
+            launch_mode: LaunchMode::Subprocess,
+            cwd: None,
+            graphics: GraphicsConfig::default(),
+            repeat_schedule: None,
+            task_summary: None,
+            loop_markers: None,
+            stream_json_progress: false,
+            codex_model: None,
+        }
+    }
+
+    #[test]
+    fn worker_cross_route_runtime_exposes_bridge_only_to_the_child_environment() {
+        let runtime = start_worker_runtime(&cross_route_plan()).unwrap();
+        let env = runtime.env();
+        assert!(env.iter().any(|(key, _)| key == "ANTHROPIC_BASE_URL"));
+        assert!(env.iter().any(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN"));
+        assert!(!env.iter().any(|(key, _)| key == "ANTHROPIC_API_KEY"));
+    }
 
     fn test_shared(tmp: &TempDir) -> Arc<WorkerShared> {
         let snapshot = SessionSnapshot {
