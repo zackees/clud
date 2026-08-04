@@ -132,6 +132,56 @@ The Rust version of `clud` supports Codex directly. Use `--codex` to switch
 backends for interactive runs, prompt-driven execution, resume flows, and
 detachable sessions.
 
+### Codex through Claude Code (experimental)
+
+To use a Codex model with Claude Code's harness features, opt in explicitly:
+
+```bash
+clud --codex --harness claude
+clud --codex --harness claude --model terra@high
+```
+
+Provider and harness are separate choices. `--harness default` restores the
+provider's native harness for one launch. An explicit session/global choice is
+offered interactively; global choices are stored in `~/.clud/settings.json`.
+When a saved non-default harness is used on a TTY, clud prints a green
+`[clud] Harness override: Claude (global setting)` notice. CLI flags always
+override saved settings.
+
+Use a platform API key by setting `OPENAI_API_KEY` in the launch environment.
+ChatGPT subscription login is experimental and compatibility-sensitive:
+
+```bash
+clud codex-auth login --acknowledge-experimental
+clud codex-auth status
+clud codex-auth logout
+```
+
+The subscription record is clud-owned and never falls back silently to an API
+key. `logout` removes only clud's record, not Codex CLI credentials.
+
+#### Cross-route troubleshooting
+
+- **Claude executable missing:** install Claude Code and ensure `claude` is on
+  PATH. Use `clud --codex --harness default` while fixing the installation.
+- **Unsupported pair:** only Codex provider through Claude is supported. Claude
+  provider through Codex is rejected before launch.
+- **Login expired:** run `clud codex-auth login --acknowledge-experimental`;
+  do not expect an existing subscription record to fall back to an API key.
+- **Callback ports occupied:** free 1455 or 1457, then retry login. The command
+  uses 1455 first and 1457 only as its fallback.
+- **Bridge start or upstream failure:** run `clud --dry-run --codex --harness
+  claude` to inspect the resolved target. Check proxy/firewall rules permit the
+  configured OpenAI endpoint; upstream 4xx errors usually require a credential,
+  model, or request change, while transient 5xx/429 failures are retried only
+  before output begins.
+- **Disable/rollback:** pass `--harness default` or reset the stored harness in
+  `clud settings`. Native `clud`, `clud --claude`, and `clud --codex` launches
+  are unaffected.
+
+Compatibility evidence, security boundaries, and the no-sidecar design live in
+[the Codex-via-Claude architecture document](docs/architecture/codex-via-claude.md).
+
 ### Codex Hook Warnings
 
 On `clud --codex` launches, clud runs a lightweight hook-health check before

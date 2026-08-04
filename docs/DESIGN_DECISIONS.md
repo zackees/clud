@@ -1521,6 +1521,40 @@ from the body and then discarded.
 - **Treat every 429 as non-retryable.** Simpler, and wrong: an ordinary
   throttle is exactly the case retry-with-backoff exists for. The body is what
   separates them.
+
+## DD-037: Embed the Codex-via-Claude bridge and make credentials explicit
+
+**Status:** Accepted
+
+**Context:** The supported cross-route must translate an Anthropic-compatible
+local harness request to the OpenAI Responses API without making installation,
+runtime ownership, or a credential fallback ambiguous. A Go/Node proxy or
+downloaded sidecar would add an executable, updater, separate crash surface,
+and target-runner runtime dependency to a feature that ships inside clud's
+existing Rust artifact.
+
+**Decision:** The bridge is an in-process Rust subsystem, bound per launch to
+an authenticated ephemeral loopback address and owned by `ForegroundRuntime`.
+It performs the protocol translation itself and downloads no external runtime.
+Credentials are an explicit choice: a clud-owned subscription record wins when
+present; only its absence permits `OPENAI_API_KEY`; expiry/error never silently
+changes source. The bridge's environment overlay is child-local and native
+launches do not enter this path.
+
+**Consequences:** Release artifacts remain self-contained and the lifetime is
+one owner/one shutdown path. The stricter credential rule can require a user to
+log in again instead of continuing with a usable API key, but it prevents a
+surprising billing/authentication source change. Rollback remains a single
+`--harness default` launch or settings reset.
+
+**Alternatives rejected:**
+
+- **Go/Node/npm sidecar or downloaded proxy:** adds a runtime and packaging
+  matrix the shipped artifact cannot guarantee.
+- **A shared daemon-owned bridge:** makes listener/bearer lifetime cross
+  sessions and obscures shutdown/credential ownership.
+- **Fallback from an expired subscription to an API key:** may silently change
+  account, billing, and policy for the same user action.
 - **Fail the turn on an in-band failure inside a committed 200.** DD-029's
   no-status-after-first-byte invariant stands. The status cannot change, so the
   fix is to make the failure *visible* — log, banner, and a named SSE error

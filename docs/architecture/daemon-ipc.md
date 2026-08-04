@@ -143,6 +143,13 @@ than 20% above the JSON median for that read-only path.
 
 Forward-compat: `SessionSnapshot` (`types.rs:80`) has `#[serde(default)]` on every non-essential field and `WorkerLaunchSpec.backlog_bytes` is `Option<usize>` (`types.rs:206`) precisely so older daemons can read spec files written by newer clients without crashing. Add fields the same way; do not rename or retag existing variants.
 
+Provider/harness fields inside `WorkerLaunchSpec.plan` follow that same
+additive rule. Their accessors fall back to the legacy backend field, and a
+repeat worker receives the already-resolved values rather than consulting the
+current settings file. The foreground bridge is not an RPC endpoint; see
+[codex-via-claude.md](codex-via-claude.md) for its distinct ownership and
+security boundary.
+
 ## Daemon lifecycle
 
 `run_daemon` (`server.rs:56`):

@@ -42,6 +42,14 @@ The five provider/harness fields are additive and deserialize to `None` for an
 old payload. `LaunchPlan::model_provider()` and `effective_harness()` fall back
 to the legacy `backend`, preserving native-provider behavior.
 
+The compatibility rule applies on every transport boundary: a newer client may
+send these fields to an older daemon/worker only because omission remains a
+valid native launch, and a newer daemon must preserve the legacy fallback when
+it reads an old persisted spec. Repeat jobs pin resolved values in their argv;
+they never re-resolve against a changed settings file. The cross-route ownership
+and rollback contract is documented once in
+[codex-via-claude.md](codex-via-claude.md).
+
 ## Construction pipeline
 
 `build_launch_plan_for_target(args, target, backend_path) -> LaunchPlan` is the

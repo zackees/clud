@@ -2,7 +2,10 @@
 
 Provider/harness metadata travels additively inside each worker's
 `LaunchPlan`; repeat commands pin both resolved choices. See
-[docs/architecture/launch-targets.md](../../../../docs/architecture/launch-targets.md).
+[docs/architecture/codex-via-claude.md](../../../../docs/architecture/codex-via-claude.md)
+for the cross-route ownership boundary and
+[docs/architecture/launch-targets.md](../../../../docs/architecture/launch-targets.md)
+for field-level resolution.
 
 Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns, served over the RPC lanes below:
 

@@ -1,5 +1,9 @@
 # src/
 
+The cross-cutting contract for `clud --codex --harness claude` lives in
+[`docs/architecture/codex-via-claude.md`](../../../docs/architecture/codex-via-claude.md);
+this README only maps the source owners.
+
 Entry point and source tree for the `clud-bin` Rust binary. The binary launches
 a backend agent (`claude` or `codex`) in YOLO mode, optionally through a PTY,
 with first-class support for loop iterations, drag-and-drop, voice input, and a
