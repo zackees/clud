@@ -712,6 +712,11 @@ fn serve_messages(
                     // Committed: the pipeline has already emitted a sanitized
                     // `error` event, so just close the body cleanly.
                     log_pipeline_error(&error, log);
+                    // ...but a drained account still deserves the banner. This
+                    // is the same failure as the pre-commit case; the only
+                    // difference is that a frame had already gone out, which
+                    // changes the status we can send and nothing else.
+                    warn_once_on_terminal_failure(&error);
                     let _ = writer.finish();
                 } else {
                     let _ = write_pipeline_error(stream, &error, log);
