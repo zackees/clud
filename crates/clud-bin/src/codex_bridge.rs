@@ -830,11 +830,14 @@ fn request_phase(body: &[u8]) -> &'static str {
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    messages
+    if messages
         .iter()
         .any(|message| message.get("role").and_then(serde_json::Value::as_str) == Some("assistant"))
-        .then_some("continuation")
-        .unwrap_or("initial")
+    {
+        "continuation"
+    } else {
+        "initial"
+    }
 }
 
 fn write_pipeline_error(
