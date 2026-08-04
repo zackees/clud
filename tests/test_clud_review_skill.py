@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-review" / "SKILL.md"
 FIX = ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-fix" / "SKILL.md"
