@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,33 @@ from ._daemon_helpers import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+def wait_for_ctrl_c_profile(
+    read_metadata: Callable[[], dict], timeout: float = 10.0
+) -> tuple[dict, dict] | None:
+    """Return completed Ctrl-C telemetry, or ``None`` if session GC wins."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            metadata = read_metadata()
+        except FileNotFoundError:
+            return None
+        profile = metadata.get("ctrl_c") or {}
+        if metadata.get("exit_code") == 130 and profile.get("daemon_kill_ms") is not None:
+            return metadata, profile
+        time.sleep(0.1)
+    return None
+
+
+def test_wait_for_ctrl_c_profile_treats_retired_session_as_retryable() -> None:
+    def retired_session() -> dict:
+        raise FileNotFoundError("session metadata retired")
+
+    try:
+        wait_for_ctrl_c_profile(retired_session)
+    except FileNotFoundError:
+        pytest.fail("retired session metadata must make the outer attempt retry")
 
 
 class TestDaemonManagedSessionFlags:
@@ -406,23 +434,15 @@ class TestDaemonManagedSessionFlags:
                     errors.append(f"attempt {attempt}: handoff took {elapsed:.3f}s")
                     continue
 
-                deadline = time.time() + 10.0
-                metadata = session_metadata(state_dir, session_id)
-                profile = metadata.get("ctrl_c") or {}
-                while time.time() < deadline:
-                    metadata = session_metadata(state_dir, session_id)
-                    profile = metadata.get("ctrl_c") or {}
-                    if (
-                        metadata.get("exit_code") == 130
-                        and profile.get("daemon_kill_ms") is not None
-                    ):
-                        break
-                    time.sleep(0.1)
-                else:
-                    errors.append(
-                        f"attempt {attempt}: daemon profile incomplete: {metadata!r}"
+                result = wait_for_ctrl_c_profile(
+                    lambda state_dir=state_dir, session_id=session_id: session_metadata(
+                        state_dir, session_id
                     )
+                )
+                if result is None:
+                    errors.append(f"attempt {attempt}: session retired before profile completed")
                     continue
+                _metadata, profile = result
 
                 assert profile.get("fast_path") is True
                 cli_handoff_ms = profile.get("cli_handoff_ms")
