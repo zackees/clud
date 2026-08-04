@@ -113,7 +113,20 @@ pub struct UpstreamFailure {
     /// Scrubbed reason for logs. Token-shaped runs are redacted, and this never
     /// travels downstream.
     detail: Option<String>,
+    /// The account is out of credits, as opposed to being briefly throttled.
+    /// Both arrive as 429 and the status cannot tell them apart, but only one
+    /// of them is worth waiting out (#774).
+    quota_exhausted: bool,
 }
+
+/// Body signatures that mean "the account is out of credits", not "slow down".
+const QUOTA_SIGNATURES: &[&str] = &[
+    "insufficient_quota",
+    "usage_limit_reached",
+    "billing_hard_limit_reached",
+    "quota_exceeded",
+    "exceeded your current quota",
+];
 
 impl UpstreamFailure {
     pub fn status(&self) -> u16 {
@@ -138,6 +151,27 @@ impl UpstreamFailure {
 
     pub fn resets_in(&self) -> Option<Duration> {
         self.resets_in
+    }
+
+    pub fn quota_exhausted(&self) -> bool {
+        self.quota_exhausted
+    }
+
+    /// The reset window as a duration a person can act on.
+    ///
+    /// `resets in 442242s` is a number nobody can plan around; `resets in 5d
+    /// 2h` tells the user to go do something else. Derived purely from the
+    /// parsed integer, so no upstream text travels with it (#774).
+    pub fn human_reset(&self) -> Option<String> {
+        let total = self.resets_in.or(self.retry_after)?.as_secs();
+        let (days, hours) = (total / 86_400, (total % 86_400) / 3_600);
+        let (minutes, seconds) = ((total % 3_600) / 60, total % 60);
+        Some(match (days, hours, minutes) {
+            (0, 0, 0) => format!("{seconds}s"),
+            (0, 0, _) => format!("{minutes}m {seconds}s"),
+            (0, _, _) => format!("{hours}h {minutes}m"),
+            _ => format!("{days}d {hours}h"),
+        })
     }
 
     pub fn detail(&self) -> Option<&str> {
@@ -196,6 +230,10 @@ impl UpstreamFailure {
         let resets_in = parse_resets_in(body_prefix);
         let detail = error_detail(body_prefix);
         let class = classify(status, body_prefix);
+        let lowered = body_prefix.to_ascii_lowercase();
+        let quota_exhausted = QUOTA_SIGNATURES
+            .iter()
+            .any(|signature| lowered.contains(signature));
         Self {
             status,
             class,
@@ -204,6 +242,7 @@ impl UpstreamFailure {
             retry_after,
             resets_in,
             detail,
+            quota_exhausted,
         }
     }
 }

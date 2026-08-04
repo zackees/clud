@@ -189,6 +189,10 @@ pub struct StreamTranslator {
     output_tokens: u64,
     cached_tokens: u64,
     stop_reason: Option<String>,
+    /// Set when the provider ended the turn with an error. The transport may
+    /// still have been a clean HTTP 200, which is exactly the case the status
+    /// code cannot express (#774).
+    provider_failure: Option<ProviderFailure>,
     /// Shortened tool name -> original, so the client sees what it sent.
     tool_names: HashMap<String, String>,
 }
@@ -212,6 +216,7 @@ impl StreamTranslator {
             output_tokens: 0,
             cached_tokens: 0,
             stop_reason: None,
+            provider_failure: None,
             tool_names: HashMap::new(),
         }
     }
@@ -457,6 +462,12 @@ impl StreamTranslator {
         for index in std::mem::take(&mut self.open_blocks) {
             out.push(content_block_stop_frame(index));
         }
+        // A null payload is our own opaque teardown, not something the provider
+        // said. Only a real provider payload records a classification, so the
+        // caller can tell "the provider failed the turn" from "we gave up".
+        if !upstream.is_null() {
+            self.provider_failure = Some(provider_failure(upstream));
+        }
         out.push(anthropic_frame(
             "error",
             serde_json::json!({
@@ -469,6 +480,12 @@ impl StreamTranslator {
         ));
         self.finished = true;
         out
+    }
+
+    /// The provider's terminal failure class, when the provider ended the turn
+    /// with an error. `None` for a clean turn or a purely local teardown.
+    pub fn provider_failure(&self) -> Option<ProviderFailure> {
+        self.provider_failure
     }
 
     /// Terminate with a sanitized error and no upstream detail.
@@ -763,7 +780,42 @@ fn map_stop_reason(kind: &str, value: &serde_json::Value, saw_tool_call: bool) -
     .to_string()
 }
 
-fn upstream_error_type(value: &serde_json::Value) -> &'static str {
+/// Why the provider terminated the turn, when it terminated it with an error.
+///
+/// The Codex backend reports quota exhaustion as a `response.failed` event
+/// *inside* an HTTP 200 stream, so the status code never sees it. Keeping the
+/// classification lets the bridge answer with a reason instead of relabelling
+/// a billing failure as a generic transport fault (#774).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFailure {
+    /// Throttled. Retrying later is expected to work.
+    RateLimit,
+    /// Out of credits. Retrying cannot help until the account is topped up.
+    Billing,
+    InvalidRequest,
+    ContextLength,
+    /// Recognised as a failure, but not as one of the classes above.
+    Other,
+}
+
+impl ProviderFailure {
+    /// The Anthropic error type this class maps to.
+    pub fn anthropic_error_type(self) -> &'static str {
+        match self {
+            Self::RateLimit => "rate_limit_error",
+            Self::Billing => "billing_error",
+            Self::InvalidRequest | Self::ContextLength => "invalid_request_error",
+            Self::Other => "api_error",
+        }
+    }
+}
+
+/// Classify a `response.failed` / `error` payload.
+///
+/// Reads only `code` and `type`. The provider's free-text `message` is
+/// deliberately not consulted: it can carry account identifiers and key
+/// fragments, and #630 keeps upstream bytes away from the client.
+fn provider_failure(value: &serde_json::Value) -> ProviderFailure {
     let code = value
         .pointer("/response/error/code")
         .or_else(|| value.pointer("/error/code"))
@@ -776,12 +828,16 @@ fn upstream_error_type(value: &serde_json::Value) -> &'static str {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     match (code, kind) {
-        ("cyber_policy", _) | (_, "invalid_request") => "invalid_request_error",
-        ("rate_limit_exceeded", _) => "rate_limit_error",
-        ("insufficient_quota", _) => "billing_error",
-        ("context_length_exceeded", _) => "invalid_request_error",
-        _ => "api_error",
+        ("cyber_policy", _) | (_, "invalid_request") => ProviderFailure::InvalidRequest,
+        ("rate_limit_exceeded", _) => ProviderFailure::RateLimit,
+        ("insufficient_quota", _) => ProviderFailure::Billing,
+        ("context_length_exceeded", _) => ProviderFailure::ContextLength,
+        _ => ProviderFailure::Other,
     }
+}
+
+fn upstream_error_type(value: &serde_json::Value) -> &'static str {
+    provider_failure(value).anthropic_error_type()
 }
 
 fn merge_identity(call: &mut CallState, item: &serde_json::Value) {

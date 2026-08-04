@@ -1450,3 +1450,62 @@ The two previously-dead override seams (`UpstreamTarget::with_model_override`,
 `Pipeline::with_default_model`) now have production callers and carry a
 `ModelSpec` rather than a `String`, so a model and its effort cannot drift
 apart in transit.
+## DD-036: The bridge propagates the failure classification, not the status code
+
+**Context:** zackees/clud#774. A real out-of-credits condition on the Codex
+upstream reached the user as `upstream provider returned status 429` — a string
+naming no cause, no account, no reset, and no remedy. The session retried into
+the wall and went quiet. The user learned the account was exhausted hours later,
+from a different tool.
+
+The upstream had told us everything. The bridge deleted it at five independent
+points, each locally defensible, which together guaranteed no out-of-credits
+condition could ever be reported as one. The narrowest was the worst: the Codex
+backend commonly reports quota exhaustion as a `response.failed` event *inside a
+healthy HTTP 200 SSE stream*. `Pipeline::stream` returned `Ok(())` for that,
+so the transport looked perfect and the turn looked successful. There was no
+log line even with `CLUD_CODEX_BRIDGE_DEBUG=1`, because the debug path was only
+reached from the `Err` arm.
+
+Downstream of that, `anthropic_error_type` re-derived the error type from the
+numeric status. Since a quota exhaustion and a plain throttle are both 429, the
+type was always `rate_limit_error` — `billing_error` was unreachable no matter
+what the provider said. And `complete()` relabelled any aggregated failure as
+`Transport("upstream stream failed")` → `502 api_error`, erasing a
+classification the same call stack had just computed.
+
+**Decision:** The classification is the carried value; the status is derived
+from it, never the reverse.
+
+- `StreamTranslator` records a `ProviderFailure` when the provider ends the turn
+  with an error, and `Pipeline::stream` returns `Err(PipelineError::Provider(..))`
+  even though the transport succeeded. A clean 200 that failed the turn is a
+  failure.
+- `PipelineError::anthropic_error_type()` is consulted before the status-based
+  fallback, so `billing_error` reaches the client on both paths.
+- `UpstreamFailure` gained `quota_exhausted` (body signatures, not the status)
+  and `human_reset()`, because `resets in 442242s` is not a number anyone can
+  plan around and `resets in 5d 2h` is.
+
+**Why capture does not violate #630.** #630 keeps upstream bytes away from the
+client, and that rule is unchanged here. The bug was never that we withheld the
+body — it was that we discarded it *unread*. The body is parsed into typed,
+non-secret fields (a class, an integer reset, an opaque request id) and dropped;
+the client message is synthesized from those. No upstream byte is echoed, and
+`a_quota_failure_in_a_healthy_200_stream_is_reported` asserts that a provider
+message naming an org and a key leaks neither into the frames nor into the
+client message.
+
+**Retry-After is deliberately not emitted for an exhausted quota.** The
+Anthropic SDK honours `retry-after` without an upper bound, so advertising a
+five-day reset would park the harness for five days. A quota failure sends
+`x-should-retry: false` and carries the window in the message, where a person
+reads it; a short throttle advertises the header, capped at
+`MAX_ADVERTISED_RETRY_AFTER` (60s). Past the cap the header is dropped rather
+than clamped — a wrong number is worse than none.
+
+**Consequences:** `PipelineError` has a third variant, so every match over it
+must classify a provider failure by fault: `InvalidRequest`/`ContextLength` are
+ours (400/413), everything else is the upstream's. DD-029 is untouched — once a
+frame is flushed the status is spent, so an in-band failure is still reported as
+an SSE `error` event and the banner, not as a status change.

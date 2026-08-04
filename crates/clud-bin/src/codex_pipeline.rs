@@ -15,7 +15,7 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::codex_model::ModelSpec;
-use crate::codex_sse::{FrameDecoder, StreamTranslator};
+use crate::codex_sse::{FrameDecoder, ProviderFailure, StreamTranslator};
 use crate::codex_translate::{
     default_model_spec, translate_bytes, SystemPlacement, TranslateError, TranslateOptions,
 };
@@ -32,6 +32,11 @@ const CLIENT_CLOSED_REQUEST: u16 = 499;
 pub enum PipelineError {
     Translate(TranslateError),
     Upstream(UpstreamError),
+    /// The provider failed the turn semantically, typically inside an HTTP 200
+    /// stream. Carries the classification so the status, the error type, and
+    /// the message are all derived from *why* it failed rather than from a
+    /// status code that never saw the failure (#774).
+    Provider(ProviderFailure),
 }
 
 impl std::fmt::Display for PipelineError {
@@ -39,6 +44,9 @@ impl std::fmt::Display for PipelineError {
         match self {
             Self::Translate(error) => write!(formatter, "{error}"),
             Self::Upstream(error) => write!(formatter, "{error}"),
+            Self::Provider(failure) => {
+                write!(formatter, "provider failed the turn: {failure:?}")
+            }
         }
     }
 }
@@ -70,6 +78,46 @@ impl PipelineError {
             Self::Upstream(UpstreamError::Cancelled) => CLIENT_CLOSED_REQUEST,
             Self::Upstream(UpstreamError::Downstream(_)) => CLIENT_CLOSED_REQUEST,
             Self::Upstream(UpstreamError::Transport(_)) => 502,
+            // #774: derived from the class, not from a status. A quota
+            // exhaustion arriving inside a 200 has no status of its own, and
+            // relabelling it 502 told the user the gateway broke.
+            Self::Provider(ProviderFailure::RateLimit | ProviderFailure::Billing) => 429,
+            Self::Provider(ProviderFailure::InvalidRequest) => 400,
+            Self::Provider(ProviderFailure::ContextLength) => 413,
+            Self::Provider(ProviderFailure::Other) => 502,
+        }
+    }
+
+    /// The Anthropic error type implied by the *classification* rather than by
+    /// the status, for the cases where the status has already lost the
+    /// distinction. `None` means "fall back to the status mapping".
+    ///
+    /// Without this a quota exhaustion and a plain throttle both arrive as
+    /// `429 rate_limit_error`, and the user retries into a wall for days.
+    pub fn anthropic_error_type(&self) -> Option<&'static str> {
+        match self {
+            Self::Provider(failure) => Some(failure.anthropic_error_type()),
+            Self::Upstream(UpstreamError::Status(failure)) if failure.status() == 429 => {
+                Some(if failure.quota_exhausted() {
+                    "billing_error"
+                } else {
+                    "rate_limit_error"
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether this failure needs the user to do something before anything can
+    /// succeed. These are the only failures worth interrupting someone over.
+    pub fn is_terminal_for_user(&self) -> bool {
+        match self {
+            Self::Provider(ProviderFailure::Billing) => true,
+            Self::Upstream(UpstreamError::Status(failure)) => {
+                failure.quota_exhausted() || matches!(failure.status(), 401 | 403)
+            }
+            Self::Upstream(UpstreamError::Credentials(_)) => true,
+            _ => false,
         }
     }
 
@@ -81,6 +129,9 @@ impl PipelineError {
         match self {
             Self::Upstream(error) => error.failure().map(UpstreamFailure::diagnostic),
             Self::Translate(_) => None,
+            // The class is already the whole diagnostic, and it reaches the log
+            // through `pipeline_error_kind` and the client message.
+            Self::Provider(_) => None,
         }
     }
 
@@ -107,15 +158,40 @@ impl PipelineError {
             // traced upstream and one that cannot. The body never travels: it
             // can carry account identifiers and key fragments.
             Self::Upstream(UpstreamError::Status(failure)) => {
-                let mut message = format!("upstream provider returned status {}", failure.status());
-                if let Some(resets) = failure.resets_in() {
-                    message.push_str(&format!("; rate limit resets in {}s", resets.as_secs()));
+                // #774: name the class first. "status 429" told the user
+                // nothing they could act on, and the two conditions that
+                // produce it need opposite responses.
+                let mut message = if failure.quota_exhausted() {
+                    String::from("upstream account quota exhausted (out of credits)")
+                } else if failure.status() == 429 {
+                    String::from("upstream rate limit reached")
+                } else {
+                    format!("upstream provider returned status {}", failure.status())
+                };
+                if let Some(reset) = failure.human_reset() {
+                    message.push_str(&format!("; resets in {reset}"));
+                }
+                if failure.quota_exhausted() {
+                    message.push_str(" — check your plan usage or switch providers");
                 }
                 if let Some(id) = failure.request_id() {
                     message.push_str(&format!(" (request-id {id})"));
                 }
                 message
             }
+            // Same reasoning, for the failure that never had a status: the
+            // provider ended a 200 stream with an error.
+            Self::Provider(failure) => match failure {
+                ProviderFailure::Billing => "upstream account quota exhausted (out of credits) — check your plan usage or switch providers".to_string(),
+                ProviderFailure::RateLimit => "upstream rate limit reached — retry shortly".to_string(),
+                ProviderFailure::ContextLength => {
+                    "upstream rejected the request: context length exceeded".to_string()
+                }
+                ProviderFailure::InvalidRequest => {
+                    "upstream rejected the request as invalid".to_string()
+                }
+                ProviderFailure::Other => "upstream provider error".to_string(),
+            },
             Self::Upstream(UpstreamError::Transport(_)) => "upstream unreachable".to_string(),
             Self::Upstream(UpstreamError::TooLarge) => {
                 "upstream response exceeded the size budget".to_string()
@@ -344,7 +420,15 @@ impl<C: CredentialSource> Pipeline<C> {
                 for out in translator.finish() {
                     sink(&out).map_err(PipelineError::Upstream)?;
                 }
-                Ok(())
+                // #774: the transport succeeded, but the provider may have
+                // ended the turn with an error inside the 200 stream -- which
+                // is how the Codex backend reports quota exhaustion. Reporting
+                // `Ok` here is what made an out-of-credits turn indistinguishable
+                // from a successful one: HTTP 200, no log line, no message.
+                match translator.provider_failure() {
+                    Some(failure) => Err(PipelineError::Provider(failure)),
+                    None => Ok(()),
+                }
             }
             Err(error) => {
                 // A failure after the first frame cannot change the status, so
@@ -373,11 +457,13 @@ impl<C: CredentialSource> Pipeline<C> {
             aggregator.push_frame(frame);
             Ok(())
         };
+        // A provider failure now arrives as `Err(Provider(..))` from `stream`,
+        // carrying its class. The old code relabelled it
+        // `Transport("upstream stream failed")` here -- a 502 api_error -- which
+        // erased a classification the call stack had already computed (#774).
         self.stream(request_body, message_id, cancel, &mut sink)?;
         if aggregator.errored() {
-            return Err(PipelineError::Upstream(UpstreamError::Transport(
-                "upstream stream failed",
-            )));
+            return Err(PipelineError::Provider(ProviderFailure::Other));
         }
         Ok(aggregator.finish())
     }
@@ -849,7 +935,46 @@ mod tests {
         let error = PipelineError::Upstream(UpstreamError::Status(failure));
         assert_eq!(error.http_status(), 429);
         let message = error.client_message();
-        assert!(message.contains("resets in 3600s"), "{message}");
+        // #774 replaced `resets in 3600s` with a window a person can act on,
+        // and made the message name the class instead of a bare status.
+        assert!(message.contains("resets in 1h 0m"), "{message}");
+        assert!(message.contains("quota exhausted"), "{message}");
+        assert!(message.contains("out of credits"), "{message}");
+        assert!(!message.contains("3600s"), "{message}");
+        // A quota exhaustion is billing, not throttling. Re-deriving the type
+        // from the 429 gave `rate_limit_error` and sent the user to wait.
+        assert_eq!(error.anthropic_error_type(), Some("billing_error"));
+        assert!(error.is_terminal_for_user());
+    }
+
+    /// A plain throttle shares the 429 but needs the opposite advice.
+    #[test]
+    fn a_throttle_is_not_reported_as_a_billing_failure() {
+        let body = r#"{"error":{"code":"rate_limit_exceeded","resets_in_seconds":30}}"#;
+        let failure = UpstreamFailure::from_parts(429, |_| None, body, Duration::from_secs(60));
+        let error = PipelineError::Upstream(UpstreamError::Status(failure));
+        let message = error.client_message();
+        assert!(message.contains("rate limit reached"), "{message}");
+        assert!(!message.contains("out of credits"), "{message}");
+        assert_eq!(error.anthropic_error_type(), Some("rate_limit_error"));
+        assert!(!error.is_terminal_for_user());
+    }
+
+    /// The headline failure: the provider ends a **200** stream with
+    /// `insufficient_quota`. It used to reach the client as HTTP 200 with no
+    /// log line at all, and non-streaming relabelled it `502 api_error`.
+    #[test]
+    fn a_quota_failure_inside_a_200_stream_is_classified_not_swallowed() {
+        let error = PipelineError::Provider(ProviderFailure::Billing);
+        assert_eq!(error.http_status(), 429);
+        assert_eq!(error.anthropic_error_type(), Some("billing_error"));
+        assert!(error.is_terminal_for_user());
+        let message = error.client_message();
+        assert!(message.contains("out of credits"), "{message}");
+        assert!(message.contains("check your plan usage"), "{message}");
+        // The old relabel. If this string ever comes back the classification
+        // has been erased again.
+        assert!(!message.contains("upstream stream failed"), "{message}");
     }
 
     /// The request id is an opaque correlation handle, and it is the difference
@@ -915,6 +1040,81 @@ mod tests {
         assert!(rendered.contains("event: content_block_stop"));
         assert!(rendered.contains("event: error"));
         assert!(rendered.contains("upstream provider error"));
+    }
+
+    /// The reported failure, end to end: a complete, well-formed **HTTP 200**
+    /// SSE stream whose terminal event is `response.failed` with
+    /// `insufficient_quota`. The transport is perfect; the turn is dead.
+    ///
+    /// This used to return `Ok(())` -- HTTP 200, no log line, no message, not
+    /// even with `CLUD_CODEX_BRIDGE_DEBUG=1`. The user found out hours later
+    /// from a different tool.
+    #[test]
+    fn a_quota_failure_in_a_healthy_200_stream_is_reported() {
+        let events = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":",
+            "{\"code\":\"insufficient_quota\",\"message\":\"You exceeded your current quota for org_9, key sk-secret-abc\"}}}\n\n",
+        );
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        )
+        .into_bytes();
+        let server = FakeResponses::start(reply);
+        let mut frames = Vec::new();
+        let error = pipeline(&server.base_url)
+            .stream(
+                br#"{"messages":[{"role":"user","content":"x"}],"stream":true}"#,
+                "msg_quota",
+                &AtomicBool::new(false),
+                &mut |frame| {
+                    frames.push(frame.to_string());
+                    Ok(())
+                },
+            )
+            .expect_err("a provider quota failure must not read as success");
+
+        assert_eq!(error, PipelineError::Provider(ProviderFailure::Billing));
+        assert_eq!(error.http_status(), 429);
+        assert_eq!(error.anthropic_error_type(), Some("billing_error"));
+        assert!(error.is_terminal_for_user());
+        assert!(error.client_message().contains("out of credits"));
+
+        // #630 stands: the provider's message named an org and a key, and
+        // neither reaches the client -- not in the frames, not in the message.
+        let rendered = frames.concat();
+        assert!(rendered.contains("event: error"), "{rendered}");
+        for secret in ["sk-secret-abc", "org_9", "exceeded your current quota"] {
+            assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+            assert!(!error.client_message().contains(secret), "{secret} leaked");
+        }
+    }
+
+    /// Same failure, non-streaming. It used to become
+    /// `Transport("upstream stream failed")` -> `502 api_error`.
+    #[test]
+    fn a_quota_failure_is_not_relabelled_as_transport_when_aggregating() {
+        let events = concat!(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":",
+            "{\"code\":\"insufficient_quota\"}}}\n\n",
+        );
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        )
+        .into_bytes();
+        let server = FakeResponses::start(reply);
+        let error = pipeline(&server.base_url)
+            .complete(
+                br#"{"messages":[{"role":"user","content":"x"}]}"#,
+                "msg_quota_agg",
+                &AtomicBool::new(false),
+            )
+            .expect_err("a provider quota failure must not aggregate into a reply");
+        assert_eq!(error, PipelineError::Provider(ProviderFailure::Billing));
+        assert_eq!(error.http_status(), 429);
     }
 
     #[test]

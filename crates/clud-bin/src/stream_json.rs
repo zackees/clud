@@ -48,9 +48,25 @@ pub fn render_line(line: &str) -> Option<String> {
         "system" => render_system(&value),
         "assistant" => render_assistant(&value),
         "result" => render_result(&value),
+        // #774: an Anthropic-shaped error line used to fall into the catch-all
+        // and vanish, so a turn that died on an out-of-credits 429 printed
+        // nothing at all. It is the one event the user most needs to see.
+        "error" => render_error(&value),
         // `user` events carry tool_result payloads — usually long, often
         // duplicating what the tool_use line already conveyed. Skipped.
         _ => None,
+    }
+}
+
+fn render_error(value: &Value) -> Option<String> {
+    let error = value.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unspecified error");
+    match error.get("type").and_then(Value::as_str) {
+        Some(kind) => Some(format!("[claude] error · {kind} · {message}")),
+        None => Some(format!("[claude] error · {message}")),
     }
 }
 
@@ -354,5 +370,22 @@ mod tests {
     fn assistant_event_with_no_content_is_skipped() {
         let line = r#"{"type":"assistant","message":{"content":[]}}"#;
         assert!(render_line(line).is_none());
+    }
+
+    /// #774: this line is the only user-visible trace of a turn that died on a
+    /// quota exhaustion. It used to fall into the catch-all and vanish.
+    #[test]
+    fn an_error_event_is_rendered_with_its_type_and_message() {
+        let line = r#"{"type":"error","error":{"type":"billing_error","message":"upstream account quota exhausted (out of credits)"}}"#;
+        let rendered = render_line(line).expect("an error line must not be dropped");
+        assert!(rendered.contains("billing_error"), "{rendered}");
+        assert!(rendered.contains("out of credits"), "{rendered}");
+    }
+
+    #[test]
+    fn an_error_event_without_a_type_still_renders_its_message() {
+        let line = r#"{"type":"error","error":{"message":"boom"}}"#;
+        let rendered = render_line(line).expect("an error line must not be dropped");
+        assert!(rendered.contains("boom"), "{rendered}");
     }
 }

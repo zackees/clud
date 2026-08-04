@@ -53,6 +53,10 @@ const DEFAULT_MAX_CONCURRENCY: usize = 1;
 /// rejecting -- a 503 surfaces to the user as a hard API error, whereas a short
 /// wait is invisible -- but an unbounded wait would hang the client instead.
 const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(10);
+/// The longest `Retry-After` worth advertising. The Anthropic SDK honours the
+/// header without an upper bound, so anything past a short throttle is carried
+/// in the message instead of putting the harness to sleep for days (#774).
+const MAX_ADVERTISED_RETRY_AFTER: u64 = 60;
 const ACCEPT_POLL: Duration = Duration::from_millis(5);
 /// Upper bound on a single blocking read. Reads are resumed until their phase
 /// deadline expires; the cap exists so a worker parked on a quiet socket still
@@ -691,8 +695,11 @@ fn serve_messages(
             Err(error) => {
                 if writer.started() {
                     // Committed: the pipeline has already emitted a sanitized
-                    // `error` event, so just close the body cleanly.
+                    // `error` event, so just close the body cleanly. The status
+                    // is spent (DD-029), but the failure is still recorded and
+                    // -- if the user has to act on it -- announced (#774).
                     log_pipeline_error(&error, log);
+                    announce_terminal_failure(&error);
                     let _ = writer.finish();
                 } else {
                     let _ = write_pipeline_error(stream, &error, log);
@@ -751,18 +758,74 @@ fn write_pipeline_error(
     log: Option<&SharedBridgeLog>,
 ) -> io::Result<()> {
     log_pipeline_error(error, log);
+    announce_terminal_failure(error);
     let status = error.http_status();
     let body = serde_json::json!({
         "type": "error",
-        "error": {"type": anthropic_error_type(status), "message": error.client_message()},
+        "error": {
+            // #774: prefer the classification. Re-deriving the type from the
+            // status is what stopped `billing_error` ever reaching a client:
+            // 429 always mapped to `rate_limit_error`.
+            "type": error
+                .anthropic_error_type()
+                .unwrap_or_else(|| anthropic_error_type(status)),
+            "message": error.client_message(),
+        },
     });
-    write_response(
+    write_response_with_headers(
         stream,
         status,
         "application/json",
         body.to_string().as_bytes(),
         false,
+        &retry_advice_headers(error),
     )
+}
+
+/// The retry advice for a failure, as a CRLF-terminated header block.
+///
+/// A quota exhaustion advertises `x-should-retry: false` and deliberately omits
+/// `Retry-After`: the Anthropic SDK sleeps for whatever it is told without
+/// clamping, so a multi-day reset would park the harness for days. The window
+/// travels in the message instead, where a person reads it. A short throttle is
+/// safe to advertise, capped so a hostile value cannot pin the turn open.
+fn retry_advice_headers(error: &PipelineError) -> String {
+    if error.is_terminal_for_user() {
+        return "x-should-retry: false\r\n".to_string();
+    }
+    let PipelineError::Upstream(UpstreamError::Status(failure)) = error else {
+        return String::new();
+    };
+    if failure.status() != 429 {
+        return String::new();
+    }
+    match failure.retry_after().or(failure.resets_in()) {
+        Some(after) if after.as_secs() <= MAX_ADVERTISED_RETRY_AFTER => {
+            format!("Retry-After: {}\r\n", after.as_secs())
+        }
+        _ => String::new(),
+    }
+}
+
+/// Announce a failure the user must act on, once per process.
+///
+/// Everything else the bridge reports is the harness's to render. A quota or
+/// auth exhaustion is different: the session is over until someone does
+/// something, and the harness renders it as an unexplained `error`. Ungated by
+/// any debug variable -- if it needed opting into, it would not be seen (#774).
+fn announce_terminal_failure(error: &PipelineError) {
+    if !error.is_terminal_for_user() {
+        return;
+    }
+    static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    if ANNOUNCED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let rule = "─".repeat(72);
+    eprintln!(
+        "\x07\n[clud] {rule}\n[clud] codex bridge: {}\n[clud] {rule}",
+        error.client_message()
+    );
 }
 
 fn lock_log(log: &SharedBridgeLog) -> std::sync::MutexGuard<'_, BridgeLog> {
@@ -846,6 +909,7 @@ fn pipeline_error_kind(error: &PipelineError) -> &'static str {
     match error {
         PipelineError::Translate(_) => "translate",
         PipelineError::Upstream(error) => upstream_error_kind(error),
+        PipelineError::Provider(_) => "provider",
     }
 }
 
@@ -1126,6 +1190,19 @@ fn write_response(
     body: &[u8],
     head_only: bool,
 ) -> io::Result<()> {
+    write_response_with_headers(stream, status, content_type, body, head_only, "")
+}
+
+/// [`write_response`] plus a caller-supplied, already CRLF-terminated header
+/// block. Used to attach retry advice to a 429 (#774).
+fn write_response_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    extra_headers: &str,
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -1133,6 +1210,8 @@ fn write_response(
         404 => "Not Found",
         408 => "Request Timeout",
         413 => "Payload Too Large",
+        // #774: without this a quota 429 went out as "HTTP/1.1 429 Error".
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         499 => "Client Closed Request",
         502 => "Bad Gateway",
@@ -1142,7 +1221,7 @@ fn write_response(
     };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{extra_headers}Connection: close\r\n\r\n",
         body.len()
     )?;
     if !head_only {
@@ -1185,6 +1264,7 @@ fn resolve_test_upstream_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_sse::ProviderFailure;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::thread;
@@ -1389,6 +1469,83 @@ Connection: close
         for forbidden in [secret, bearer.as_str(), base_url.as_str(), "Authorization"] {
             assert!(!text.contains(forbidden), "leaked {forbidden:?}: {text}");
         }
+    }
+
+    /// #774 on the wire. An out-of-credits 429 previously went out as
+    /// `HTTP/1.1 429 Error` with `rate_limit_error` and a bare status message,
+    /// which told the user to wait out a limit that would not lift.
+    #[test]
+    fn a_quota_429_is_answered_with_a_billing_error_and_no_retry_after() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789SECRET";
+        let body = format!(
+            r#"{{"error":{{"code":"usage_limit_reached","resets_in_seconds":442242,"message":"no credits {secret}"}}}}"#
+        );
+        let reply = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let upstream = FakeResponses::start_with_response(Some(reply));
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        bridge.shutdown().unwrap();
+
+        assert_eq!(status(&response), 429);
+        assert!(response.contains("429 Too Many Requests"), "{response}");
+        assert!(response.contains("billing_error"), "{response}");
+        assert!(response.contains("out of credits"), "{response}");
+        // 442242s is 5d 2h. The raw integer is useless to a human.
+        assert!(response.contains("resets in 5d 2h"), "{response}");
+        // Quota exhaustion must not advertise Retry-After: the SDK honours it
+        // unclamped and would park the harness for five days.
+        assert!(!response.contains("Retry-After"), "{response}");
+        assert!(response.contains("x-should-retry: false"), "{response}");
+        assert!(!response.contains(secret), "leaked: {response}");
+    }
+
+    /// A short throttle is the case where advertising the header is correct.
+    ///
+    /// Asserted directly rather than over a socket: a transient 429 is
+    /// *supposed* to be retried with backoff, so a round trip would be timing
+    /// coupled to the retry budget rather than to the contract under test.
+    #[test]
+    fn retry_advice_distinguishes_a_throttle_from_an_exhausted_quota() {
+        let throttle = PipelineError::Upstream(UpstreamError::Status(UpstreamFailure::from_parts(
+            429,
+            |name| (name == "retry-after").then(|| "12".to_string()),
+            r#"{"error":{"code":"rate_limit_exceeded"}}"#,
+            Duration::from_secs(60),
+        )));
+        assert_eq!(retry_advice_headers(&throttle), "Retry-After: 12\r\n");
+        assert_eq!(throttle.anthropic_error_type(), Some("rate_limit_error"));
+        assert!(!throttle.is_terminal_for_user());
+
+        // Past the advertised ceiling the header is dropped rather than
+        // clamped: a wrong number is worse than none.
+        let long = PipelineError::Upstream(UpstreamError::Status(UpstreamFailure::from_parts(
+            429,
+            |_| None,
+            r#"{"error":{"code":"rate_limit_exceeded","resets_in_seconds":3600}}"#,
+            Duration::from_secs(9_999),
+        )));
+        assert_eq!(retry_advice_headers(&long), "");
+
+        let quota = PipelineError::Upstream(UpstreamError::Status(UpstreamFailure::from_parts(
+            429,
+            |_| None,
+            r#"{"error":{"code":"usage_limit_reached","resets_in_seconds":442242}}"#,
+            Duration::from_secs(60),
+        )));
+        assert_eq!(retry_advice_headers(&quota), "x-should-retry: false\r\n");
+        assert_eq!(quota.anthropic_error_type(), Some("billing_error"));
+
+        // The in-200 provider failure carries no headers of its own, but it is
+        // still terminal and must not invite a retry.
+        let provider = PipelineError::Provider(ProviderFailure::Billing);
+        assert_eq!(retry_advice_headers(&provider), "x-should-retry: false\r\n");
     }
 
     #[test]
