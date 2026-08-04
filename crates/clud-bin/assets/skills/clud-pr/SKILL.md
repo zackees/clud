@@ -10,6 +10,13 @@ triggers:
 ---
 <!-- managed-by: clud -->
 
+## Review-budget handoff
+
+When this workflow invokes `clud-review`, it passes `agent_budget=1` and does
+not request additional review agents for follow-ups or fix rounds. The review
+summary must report `review agents launched: 1`; `agent_budget_exhausted` is a
+normal terminal for a second scheduling attempt, not a reason to retry.
+
 # /clud-pr
 
 Read the user's task, express the bug fix or feature requirement as a failing test first, implement the fix until that test turns green, push it as one PR with no files left behind, then give the user the PR URL. The task may be an issue URL, issue number, PR URL, PR number, or a plain sentence.

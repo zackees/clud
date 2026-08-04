@@ -1,6 +1,6 @@
 ---
 name: clud-review
-description: Pre-push code review gate. Inventories the changed files, groups them by language bucket, dispatches one review pass per non-empty bucket to a matching repo subagent or canned per-language template, and aggregates findings. Discovers .coderabbit.yaml, repo review skills/agents, CLAUDE.md/AGENTS.md guidance, and optionally runs the originating issue's focused test for RED -> GREEN validation. Read-only; called by /clud-fix or /clud-pr before `gh pr create`.
+description: Pre-push code review gate. Inventories changed files, groups them by language bucket, and gives one primary reviewer every non-empty bucket plus all applicable repository rules. An invocation-wide budget of one covers retries and follow-ups. Discovers .coderabbit.yaml, repo review skills/agents, CLAUDE.md/AGENTS.md guidance, and optionally runs the originating issue's focused test for RED -> GREEN validation. Read-only; called by /clud-fix or /clud-pr before `gh pr create`.
 triggers:
   - When the user says "/clud-review" or "/clud-review <commit-range>"
   - When /clud-fix or /clud-pr is about to push a PR and the user wants a pre-flight review (called as a delegated step)
@@ -11,8 +11,8 @@ triggers:
 # /clud-review
 
 Pre-push review gate that inventories the worktree's local diff,
-classifies the changed files by language family, runs one focused
-review per non-empty bucket using the project's actual rules, and
+classifies the changed files by language family, gives one primary
+reviewer every non-empty bucket using the project's actual rules, and
 aggregates findings into a single Markdown table. Optionally runs
 the originating issue's focused test for local RED -> GREEN validation.
 
@@ -28,6 +28,36 @@ it surfaces findings; the caller's existing fix loop turns them GREEN.
 Where the originating issue's focused test is discoverable, the
 review explicitly runs it and reports pass/fail (RED -> GREEN
 validation at the local level).
+
+## Invocation-wide agent budget (non-negotiable)
+
+`agent_budget=1`. A `/clud-review` invocation launches exactly one primary
+reviewer total. This is a cumulative budget, not a concurrency limit: it covers
+every bucket, retry, follow-up, delegated review step, and repository-specialist
+selection. A follow-up is additional context for the already-running reviewer;
+it never starts another review agent.
+
+The primary reviewer receives one prompt containing each non-empty bucket, its
+filtered diff, and all applicable language/path/repository rules. Buckets are
+organizational sections of that prompt, not scheduling units. The reviewer may
+use ordinary read-only tools to inspect the diff but must not delegate review
+work. A request to schedule another reviewer returns
+`agent_budget_exhausted` and does not start it.
+
+Repository review skills and `.claude/agents/*.md` are discovery inputs only:
+their relevant instructions are included in the primary prompt. They never
+trigger automatic subagent execution. An explicit user request may choose one
+named specialist **instead of** the primary reviewer; it still consumes the
+entire budget and launches exactly one agent.
+
+Every result ends with one of:
+
+```text
+review agents launched: 1
+clud-review: clean
+```
+
+or the normal findings/no-rules verdict followed by `review agents launched: 1`.
 
 ## Input
 
@@ -121,7 +151,8 @@ Don't log or persist tokens; rely on the user's existing auth.
    caller decides whether to act on findings.
 2. **Use the repo's rules, not generic ones.** If the repo has a
    `.coderabbit.yaml`, use its settings to bound and prioritize the
-   check. If the repo has review skills or subagents, dispatch to them.
+   check. If the repo has review skills or subagents, incorporate their
+   applicable instructions into the one primary-reviewer prompt.
    If the repo has `CLAUDE.md` / `AGENTS.md`, include the relevant
    sections. Generic feedback only fires as a *fallback* and is
    labeled as such.
@@ -176,10 +207,10 @@ Scan:
 
 - `.claude/agents/*.md`
 
-Read each frontmatter `description`. Include the subagent when it
-matches `/review|code\s*review/i`. Subagents are *executed* (via the
-Agent tool) when a bucket matches them — see "Per-bucket agent
-selection" below.
+Read each frontmatter `description`. Include a matching subagent's relevant
+instructions in the primary-reviewer prompt. Subagents are never executed
+automatically; only an explicitly requested specialist may replace the primary
+reviewer, and that still uses the invocation's entire one-agent budget.
 
 ### Guidance files
 
@@ -206,13 +237,13 @@ DO NOT scan:
 - Third-party submodules.
 - `target/`, `node_modules/`, `dist/`, or any other build artifact.
 
-## File classification and per-language review dispatch
+## File classification and one-reviewer prompt assembly
 
-`/clud-review` does NOT generate one giant cross-language prompt. It
-first inventories the changed files via
+`/clud-review` inventories the changed files via
 `git diff --name-status <base>...HEAD` (fallback:
 `git status --porcelain` when no base is given), groups them by
-language family, and runs one review pass per non-empty bucket.
+language family, and places every non-empty bucket in one primary-reviewer
+prompt.
 
 ### Bucket table
 
@@ -234,17 +265,18 @@ Bucket precedence is top-to-bottom: a file matches the **first** bucket
 whose rule fires. So `Cargo.toml` is `rust` (not `config`), and
 `.github/workflows/foo.yml` is `ci` (not `config`).
 
-### Per-bucket agent selection
+### Rules included for each bucket
 
-For each non-empty bucket, in priority order:
+For each non-empty bucket, include applicable rules in its section of the
+single prompt, in priority order:
 
 1. **Repo subagent match.** Scan `.claude/agents/*.md`. Match any
    agent whose frontmatter `description` mentions the bucket name or
    its primary language tooling (e.g. `rust` / `cargo` / `clippy` →
    rust bucket; `frontend` / `react` / `tsx` / `css` → frontend
    bucket; `cpp` / `c++` / `cmake` → cpp bucket). If a match exists,
-   dispatch the bucket's review to that subagent via the Agent tool
-   with the assembled bucket prompt.
+   include that subagent's instructions in the matching section of the one
+   primary-reviewer prompt. Do not execute it automatically.
 2. **Repo skill match.** Otherwise, look for review skills whose
    frontmatter narrows them to that language. Inline their
    `SKILL.md` into the bucket's prompt as additional rules and use the
@@ -273,9 +305,9 @@ For each non-empty bucket, in priority order:
    - **docs**: link integrity; example correctness; clear voice.
    - **c**, **go**, **other**: brief generic guidance.
 
-### Per-bucket prompt structure
+### One-reviewer prompt structure
 
-Each bucket's assembled prompt is:
+The one primary prompt repeats this section for every non-empty bucket:
 
 ```text
 You are reviewing local changes to <bucket-name> files before they

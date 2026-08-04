@@ -24,6 +24,10 @@ clud. It delegates one-PR work and PR merge work to [[clud-pr]], but it owns the
 issue-level `/goal` lifecycle. Do not invoke or depend on a standalone merge
 skill.
 
+When delegating a pre-push `clud-review`, preserve `agent_budget=1` through
+`clud-pr`. Follow-ups remain inside that reviewer invocation; never fan out a
+new review wave.
+
 For code changes, preserve RED -> GREEN: identify or add the focused failing
 test or executable reproduction first, implement the scoped fix, then rerun that
 focused signal until it passes before broad gates.
