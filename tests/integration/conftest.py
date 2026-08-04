@@ -242,6 +242,17 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
     # Build env with mock dir first on PATH
     env = os.environ.copy()
     env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
+    # Isolate persisted preferences and credentials. The integration contract
+    # assumes Claude is the default provider; inheriting a developer's
+    # ~/.clud/settings.json can silently select Codex instead.
+    home = tmp_path / "home"
+    home.mkdir()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["LOCALAPPDATA"] = str(home / "local-app-data")
+    env["XDG_STATE_HOME"] = str(home / ".local" / "state")
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["CLUD_HOOK_HOME"] = str(home)
     # Prevent any VIRTUAL_ENV interference
     env.pop("VIRTUAL_ENV", None)
 

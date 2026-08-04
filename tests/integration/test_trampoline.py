@@ -7,6 +7,7 @@ ensure Scripts/clud.exe is never locked so pip can overwrite it.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -108,6 +109,18 @@ def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+def _isolated_env(home: Path) -> dict[str, str]:
+    """Keep installed-binary tests independent of host clud preferences."""
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["LOCALAPPDATA"] = str(home / "local-app-data")
+    env["XDG_STATE_HOME"] = str(home / ".local" / "state")
+    env["XDG_CACHE_HOME"] = str(home / ".cache")
+    env["CLUD_HOOK_HOME"] = str(home)
+    return env
+
+
 class TestPipInstallWhileRunning:
     """Verify pip install/uninstall works while clud is running."""
 
@@ -115,6 +128,7 @@ class TestPipInstallWhileRunning:
         """Install clud, launch it (blocking), reinstall while running."""
         python = _venv_python(test_venv)
         clud = _clud_exe(test_venv)
+        env = _isolated_env(test_venv / "home")
 
         # Step 1: Install clud
         result = _pip_install(python, prebuilt_wheel)
@@ -127,6 +141,7 @@ class TestPipInstallWhileRunning:
             capture_output=True,
             text=True,
             timeout=15,
+            env=env,
         )
         assert run_result.returncode == 0, f"clud --dry-run failed: {run_result.stderr}"
         data = json.loads(run_result.stdout)
