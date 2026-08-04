@@ -148,6 +148,35 @@ is the only implementation today, and it has **no fallback chain** — a missing
 `OPENAI_API_KEY` is an error, never a silent downgrade, because #629 requires
 that subscription and platform credentials never substitute for one another.
 
+> **Update (#629):** The preceding API-key-only description records the
+> phase-3 baseline. The current implementation has both sources and follows
+> the explicit selection rules below.
+
+### Credential source selection (current)
+
+`CludSubscriptionCredentials` and `ApiKeyCredentials` are the two production
+sources. An existing `~/.clud/codex-auth.json` subscription record is an
+explicit persisted selection and is used alone. Only when that record is absent
+may `OPENAI_API_KEY` be selected; an expired or invalid record tells the user
+to re-login rather than silently falling back to the API key.
+
+## ChatGPT subscription authentication
+
+Issue #629 adds `clud codex-auth login|status|logout`. It owns exactly one
+credential record, `~/.clud/codex-auth.json`; it never reads, writes, or
+deletes Codex CLI's `~/.codex/auth.json`. Login requires explicit experimental
+acknowledgement and uses ChatGPT authorization-code OAuth with PKCE S256, a
+random state value, and `127.0.0.1:1455/auth/callback` (1457 only as a port
+fallback). The compatibility shape follows the public `openai/codex` client;
+clud neither spawns nor depends on that client.
+
+The record is locked with `fs4`. Refresh re-reads after acquiring the
+cross-process lock, refreshes at most once, and atomically replaces the file.
+Unix writes use mode 0600; Windows files stay under the current user's profile.
+Tokens are excluded from `Debug`, errors, JSON status, bridge logs, and launch
+plans. `status` reports source, safe identity, expiry, and refresh state;
+`logout` removes only this clud-owned record.
+
 ### The retry boundary
 
 The rule is *never replay after downstream-visible output has begun*, and the
@@ -355,4 +384,7 @@ executable. The additive fields make both dimensions explicit:
 - `main.rs`: bootstrap/setup the effective harness and emit dry-run metadata.
 - `codex_bridge.rs` / `foreground_runtime.rs`: phase-2 foreground transport,
   child overlay, spawn seam, and lifetime ownership.
+- `codex_auth.rs`: clud-owned OAuth callback, PKCE, separate credential store,
+  atomic refresh, and `codex-auth` command implementation.
+- `codex_upstream.rs`: explicit subscription/API credential source selection.
 - `daemon/entry.rs`: pin repeat-job provider/harness choices.

@@ -204,6 +204,13 @@ pub struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Manage the experimental ChatGPT-subscription credentials used by the
+    /// Codex-to-Claude bridge. Never forwarded to a backend agent.
+    #[command(name = "codex-auth")]
+    CodexAuth {
+        #[command(subcommand)]
+        subcommand: CodexAuthSubcommand,
+    },
     Loop {
         /// Prompt text, path to a local file, or a GH issue/PR URL.
         task: Option<String>,
@@ -452,6 +459,33 @@ pub enum Command {
         daemon_pid: u32,
         #[arg(long = "spec-file")]
         spec_file: PathBuf,
+    },
+}
+
+/// Subcommands under `clud codex-auth`. See `codex_auth.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum CodexAuthSubcommand {
+    /// Start the experimental ChatGPT subscription sign-in flow.
+    Login {
+        /// Required acknowledgement that subscription compatibility is
+        /// experimental and may change independently of clud.
+        #[arg(long = "acknowledge-experimental")]
+        acknowledge_experimental: bool,
+        /// Do not open a browser automatically; print the URL instead.
+        #[arg(long = "no-browser")]
+        no_browser: bool,
+    },
+    /// Show the clud-managed subscription login state without secrets.
+    Status {
+        /// Emit stable JSON for automation.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Remove only clud-managed subscription credentials.
+    Logout {
+        /// Emit stable JSON for automation.
+        #[arg(long = "json")]
+        json: bool,
     },
 }
 
@@ -821,9 +855,31 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
     const SEPARATOR_OWNING_SUBCOMMANDS: &[&str] = &["tool", "test"];
 
     let subcommands: &[&str] = &[
-        "loop", "up", "rebase", "fix", "wasm", "attach", "kill", "slay", "list", "top", "logs",
-        "log", "gc", "config", "ui", "trash", "tool", "optimize", "daemon", "symbols", "settings",
-        "test", "__daemon", "__worker",
+        "loop",
+        "up",
+        "rebase",
+        "fix",
+        "wasm",
+        "attach",
+        "kill",
+        "slay",
+        "list",
+        "top",
+        "logs",
+        "log",
+        "gc",
+        "config",
+        "ui",
+        "trash",
+        "tool",
+        "optimize",
+        "daemon",
+        "symbols",
+        "settings",
+        "test",
+        "codex-auth",
+        "__daemon",
+        "__worker",
     ];
 
     // Which subcommand we are inside, once one has been seen. `None` means the

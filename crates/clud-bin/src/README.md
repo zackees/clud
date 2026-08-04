@@ -84,6 +84,11 @@ Entry and orchestration:
   narrow observer reports each attempt/backoff to the bridge forensic log. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md)
   and DD-032.
+- `codex_auth.rs` - #629's clud-owned `codex-auth login|status|logout`: browser
+  authorization-code + PKCE callback flow, separate `~/.clud/codex-auth.json`
+  store, safe status claims, locked atomic refresh, and token-redacted
+  diagnostics. See
+  [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md).
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
   one call, plus `MessageAggregator` so a non-streaming request reuses the
   streaming state machine. Owns the downstream status policy — since #764,

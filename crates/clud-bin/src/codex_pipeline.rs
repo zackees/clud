@@ -22,7 +22,7 @@ use crate::codex_translate::{
 };
 use crate::codex_upstream::{
     CredentialSource, FailureClass, UpstreamClient, UpstreamError, UpstreamFailure,
-    CREDENTIALS_EXPIRED,
+    CLUD_CREDENTIALS_EXPIRED, CREDENTIALS_EXPIRED,
 };
 
 /// "Client Closed Request". Not in the RFC status registry, but the
@@ -176,8 +176,10 @@ impl PipelineError {
             // An expired login is the one credential failure with an action
             // attached, so it is worth forwarding verbatim. Every other reason
             // names an environment variable and stays behind the generic text.
-            Self::Upstream(UpstreamError::Credentials(what)) if *what == CREDENTIALS_EXPIRED => {
-                CREDENTIALS_EXPIRED.to_string()
+            Self::Upstream(UpstreamError::Credentials(what))
+                if *what == CREDENTIALS_EXPIRED || *what == CLUD_CREDENTIALS_EXPIRED =>
+            {
+                what.to_string()
             }
             Self::Upstream(UpstreamError::Credentials(_)) => {
                 "the Codex bridge has no upstream credentials".to_string()

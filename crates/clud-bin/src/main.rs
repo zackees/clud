@@ -1,10 +1,10 @@
 use clud::{
-    args, backend, backend_bootstrap, clud_settings, command, config, console_setup, console_title,
-    cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health, job_orphan_reaper,
-    large_file_guard, launch_log, launch_setup, log_event, loop_artifacts, loop_spec, optimize,
-    orphan_reaper, runner, runtime_cache, settings_tui, soldr_activate, startup, symbols,
-    test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui, uv_run_hook_guard,
-    verbose_log, wasm, worktrees,
+    args, backend, backend_bootstrap, clud_settings, codex_auth, command, config, console_setup,
+    console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health,
+    job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event, loop_artifacts,
+    loop_spec, optimize, orphan_reaper, runner, runtime_cache, settings_tui, soldr_activate,
+    startup, symbols, test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui,
+    uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -22,6 +22,13 @@ fn main() {
             std::env::set_var(daemon::ENV_NO_DAEMON, "1");
         }
         std::process::exit(tool_cli::run(subcommand));
+    }
+
+    // #629: credential management is self-contained and must never resolve a
+    // backend, start a daemon, or forward secrets to a harness.
+    if let Some(args::Command::CodexAuth { subcommand }) = &args.command {
+        let interrupted = startup::install_ctrl_c_flag(args.verbose);
+        std::process::exit(codex_auth::run(subcommand, interrupted.as_ref()));
     }
 
     // Install the crash reporter first so a panic during the rest of startup
