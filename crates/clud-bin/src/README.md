@@ -188,9 +188,11 @@ which test tier a change belongs in — lives in
   producer `orphan_reaper` uses; it reports job membership as *unavailable*,
   because there is no Job Object on the `clud slay` / on-exit / daemon-sweep
   path.
-- `reap_log.rs` - reaper accounting (`ReapCounters`) and its buffered,
-  mutations-only per-session JSONL log at
-  `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl` (#673 Phases 0 and 5).
+- `reap_log.rs` - reaper accounting (`ReapCounters`), buffered mutations-only
+  JSONL at `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl`, and a durable
+  five-second `reap-health.json` flight-recorder checkpoint for watchdog-reset
+  forensics. It records host scans and adaptive-backoff deferrals without
+  synchronous per-event logging.
 - `session_registry.rs` - `redb`-backed registry of live `clud` PIDs that caps
   concurrent siblings; `Drop` removes the row, startup GCs dead rows.
 - `gc/` - `clud gc list` / `prune` / `purge` / `all` / `reconcile` CLI handlers and
