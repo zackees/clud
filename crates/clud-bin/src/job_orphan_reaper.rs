@@ -1194,9 +1194,9 @@ mod imp {
     }
 
     /// Adaptive, fail-closed host-snapshot gate. Large completion batches
-    /// extend the cooldown; a process-specific initial offset desynchronizes
-    /// simultaneous foreground agents rather than letting them scan in lock
-    /// step during a churn burst.
+    /// extend the cooldown. The first scan is immediate so a short-lived
+    /// client cannot exit before its identity is recorded; the cooldown then
+    /// prevents simultaneous foreground agents from scanning on every burst.
     struct ScanBackoff {
         next_allowed: Instant,
     }
@@ -1204,8 +1204,7 @@ mod imp {
     impl ScanBackoff {
         fn new() -> Self {
             Self {
-                next_allowed: Instant::now()
-                    + Duration::from_millis((std::process::id() % 50) as u64),
+                next_allowed: Instant::now(),
             }
         }
 
