@@ -54,6 +54,16 @@ pub struct StreamSummary {
     pub request_shape: serde_json::Value,
 }
 
+/// Operator-only diagnostic paired with an in-band invalid request.
+///
+/// Boxing it keeps the hot `PipelineError` result compact while preserving the
+/// bounded, allowlisted failure metadata for the HTTP boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InBandDiagnostic {
+    pub failure: InBandFailure,
+    pub request_shape: serde_json::Value,
+}
+
 /// A provider failure delivered *inside* an otherwise-successful stream.
 ///
 /// The ChatGPT backend commonly reports quota exhaustion this way: HTTP 200,
@@ -64,6 +74,9 @@ pub struct StreamSummary {
 pub struct ProviderFailure {
     pub kind: String,
     pub message: String,
+    /// Operator-only metadata retained from an in-band invalid request. This
+    /// cannot contain an upstream body; [`InBandFailure`] is allowlisted.
+    pub diagnostic: Option<Box<InBandDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +350,7 @@ impl MessageAggregator {
                     self.provider_error = Some(ProviderFailure {
                         kind: string_at(error, "type"),
                         message: string_at(error, "message"),
+                        diagnostic: None,
                     });
                 }
             }
@@ -514,15 +528,28 @@ impl<C: CredentialSource> Pipeline<C> {
             aggregator.push_frame(frame);
             Ok(())
         };
-        self.stream(request_body, message_id, cancel, &mut sink)?;
+        let summary = self.stream(request_body, message_id, cancel, &mut sink)?;
         if aggregator.errored() {
             // Propagate the classification, not a generic transport failure.
             // The old relabel turned every in-band provider error -- including
             // a drained account -- into `502 api_error`.
-            return Err(match aggregator.provider_error() {
-                Some(failure) => PipelineError::Provider(failure.clone()),
-                None => PipelineError::Upstream(UpstreamError::Transport("upstream stream failed")),
-            });
+            let mut failure = aggregator
+                .provider_error()
+                .cloned()
+                .unwrap_or(ProviderFailure {
+                    kind: "api_error".to_string(),
+                    message: "upstream stream failed".to_string(),
+                    diagnostic: None,
+                });
+            if failure.kind == "invalid_request_error" {
+                failure.diagnostic = summary.in_band_failure.map(|failure| {
+                    Box::new(InBandDiagnostic {
+                        failure,
+                        request_shape: summary.request_shape,
+                    })
+                });
+            }
+            return Err(PipelineError::Provider(failure));
         }
         Ok(aggregator.finish())
     }

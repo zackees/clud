@@ -705,6 +705,7 @@ fn serve_messages(
                     let error = PipelineError::Provider(ProviderFailure {
                         kind: "billing_error".to_string(),
                         message: IN_BAND_QUOTA_MESSAGE.to_string(),
+                        diagnostic: None,
                     });
                     log_pipeline_error(&error, log);
                     warn_once_on_terminal_failure(&error);
@@ -736,6 +737,16 @@ fn serve_messages(
             let _ = write_response(stream, 200, "application/json", &rendered, false);
         }
         Err(error) => {
+            if let PipelineError::Provider(failure) = &error {
+                if let Some(diagnostic) = &failure.diagnostic {
+                    log_in_band_failure(
+                        log,
+                        &diagnostic.failure,
+                        request_phase(body),
+                        diagnostic.request_shape.clone(),
+                    );
+                }
+            }
             let _ = write_pipeline_error(stream, &error, log);
         }
     }
@@ -2442,6 +2453,43 @@ Connection: close
                 "log leaked {forbidden:?}: {text}"
             );
         }
+    }
+
+    #[test]
+    fn a_non_streaming_in_band_400_is_logged_and_sanitized() {
+        let upstream_secret = "non-streaming SECRET_UPSTREAM_DETAIL";
+        let failed_event = format!(
+            "event: response.failed\ndata: {{\"type\":\"response.failed\",\"response\":{{\"error\":{{\"type\":\"invalid_request\",\"code\":\"cyber_policy\",\"message\":\"{upstream_secret}\"}},\"request_id\":\"req_non_streaming\"}}}}\n\n"
+        );
+        let failed_reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{failed_event}",
+            failed_event.len()
+        )
+        .into_bytes();
+        let upstream = FakeResponses::start_with_response(Some(failed_reply));
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        bridge.shutdown().unwrap();
+
+        assert_eq!(status(&response), 400, "{response}");
+        assert!(response.contains("provider policy"), "{response}");
+        assert!(!response.contains(upstream_secret), "{response}");
+        let text = std::fs::read_to_string(log_path).unwrap();
+        let event = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|event| event["event"] == "in_band_upstream_failure")
+            .expect("in-band failure event");
+        assert_eq!(event["category"], "policy", "{text}");
+        assert_eq!(event["code"], "cyber_policy", "{text}");
+        assert_eq!(event["request_id"], "req_non_streaming", "{text}");
+        assert!(!text.contains(upstream_secret), "{text}");
     }
 
     #[test]
