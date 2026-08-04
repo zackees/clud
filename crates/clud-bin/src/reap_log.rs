@@ -36,16 +36,24 @@
 //! subtree without emitting a decision per descendant. An identity that
 //! equated them would be arithmetic that cannot hold.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
 
 /// Lines buffered before a flush is due.
 const FLUSH_LINES: usize = 64;
 
 /// Time buffered before a flush is due.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The reaper's crash-surviving checkpoint is deliberately much less frequent
+/// than its buffered event log. It exists for the failure mode where the
+/// process never reaches `Drop` (a watchdog reset), so the exit summary is
+/// unavailable.
+const FLIGHT_RECORDER_INTERVAL: Duration = Duration::from_secs(5);
 
 /// What a reap event did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +125,7 @@ impl ReapEvent {
 }
 
 /// The Phase 0 measurement series plus the decision census.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ReapCounters {
     /// Every `NEW_PROCESS` observation. A standalone denominator that belongs
     /// to neither reconciliation identity.
@@ -176,6 +184,9 @@ pub struct ReapCounters {
     /// `reap.jsonl`; this counter is what makes the total recoverable without
     /// reading any of them.
     pub metadata_misses: u64,
+    /// Full-host table scans deliberately skipped by adaptive backoff. A skip
+    /// only delays metadata collection; it cannot produce a reap decision.
+    pub host_scans_deferred: u64,
 }
 
 impl ReapCounters {
@@ -205,6 +216,7 @@ impl ReapCounters {
         self.peak_known = self.peak_known.max(other.peak_known);
         self.peak_backlog = self.peak_backlog.max(other.peak_backlog);
         self.metadata_misses += other.metadata_misses;
+        self.host_scans_deferred += other.host_scans_deferred;
     }
 
     pub fn observe_sizes(&mut self, known: usize, backlog: usize) {
@@ -270,7 +282,7 @@ impl ReapCounters {
     /// The Phase 0 measurement line, for `--verbose`.
     pub fn measurement_line(&self) -> String {
         format!(
-            "[clud] reaper: ticks={} passes={} env_reads={} peak_known={} peak_backlog={}              metadata_misses={} host_scans={} peak_batch={}",
+            "[clud] reaper: ticks={} passes={} env_reads={} peak_known={} peak_backlog={}              metadata_misses={} host_scans={} host_scans_deferred={} peak_batch={}",
             self.ticks,
             self.reconcile_passes,
             self.env_reads,
@@ -278,8 +290,63 @@ impl ReapCounters {
             self.peak_backlog,
             self.metadata_misses,
             self.host_scans,
+            self.host_scans_deferred,
             self.peak_batch,
         )
+    }
+}
+
+/// A tiny, durable checkpoint kept beside `reap.jsonl`.
+///
+/// Unlike [`ReapLog`], this has one fixed-size JSON payload and syncs at most
+/// once per five seconds. That makes it useful after a watchdog reset without
+/// putting synchronous IO on the per-notification path.
+#[derive(Debug)]
+pub struct ReapFlightRecorder {
+    path: PathBuf,
+    last_write: Instant,
+    disabled: bool,
+}
+
+impl ReapFlightRecorder {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_write: Instant::now() - FLIGHT_RECORDER_INTERVAL,
+            disabled: false,
+        }
+    }
+
+    pub fn checkpoint(&mut self, counters: &ReapCounters) {
+        if self.disabled || self.last_write.elapsed() < FLIGHT_RECORDER_INTERVAL {
+            return;
+        }
+        if self.write(counters).is_err() {
+            self.disabled = true;
+        }
+        self.last_write = Instant::now();
+    }
+
+    fn write(&self, counters: &ReapCounters) -> std::io::Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing parent"))?;
+        fs::create_dir_all(parent)?;
+        let temp = self.path.with_extension("tmp");
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "written_at_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+            "counters": counters,
+        }))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        let mut file = File::create(&temp)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        if self.path.exists() {
+            let _ = fs::remove_file(&self.path);
+        }
+        fs::rename(temp, &self.path)
     }
 }
 
@@ -369,6 +436,17 @@ pub fn session_reap_log_path(
         .join("sessions")
         .join(format!("{session_pid}__{session_start_epoch}"))
         .join("reap.jsonl")
+}
+
+/// A fixed path makes the last known reaper pressure discoverable even when a
+/// session ends in a system reset before its buffered JSONL log is flushed.
+pub fn session_reap_health_path(
+    state_dir: &Path,
+    session_pid: u32,
+    session_start_epoch: u64,
+) -> PathBuf {
+    session_reap_log_path(state_dir, session_pid, session_start_epoch)
+        .with_file_name("reap-health.json")
 }
 
 #[cfg(test)]
@@ -557,6 +635,7 @@ mod tests {
         let line = counters.measurement_line();
         assert!(line.contains("host_scans=120"), "{line}");
         assert!(line.contains("peak_batch=214"), "{line}");
+        assert!(line.contains("host_scans_deferred=0"), "{line}");
     }
 
     /// A session that tracked nothing prints nothing.
@@ -682,5 +761,21 @@ mod tests {
     fn the_log_lives_beside_the_sessions_other_artifacts() {
         let path = session_reap_log_path(Path::new("/state"), 47180, 1_700_000_000);
         assert!(path.ends_with("sessions/47180__1700000000/reap.jsonl"));
+    }
+
+    #[test]
+    fn flight_recorder_persists_counters_for_a_crashed_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("reap-health.json");
+        let mut recorder = ReapFlightRecorder::new(path.clone());
+        recorder.checkpoint(&ReapCounters {
+            host_scans: 12,
+            host_scans_deferred: 9,
+            ..ReapCounters::default()
+        });
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["counters"]["host_scans"], 12);
+        assert_eq!(value["counters"]["host_scans_deferred"], 9);
     }
 }

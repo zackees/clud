@@ -1089,6 +1089,7 @@ mod imp {
         Arc, Mutex,
     };
     use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
 
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
@@ -1120,6 +1121,12 @@ mod imp {
     /// next iteration.
     const MAX_DRAIN_BATCH: usize = 256;
 
+    /// Minimum pause between full-host Toolhelp snapshots for one foreground
+    /// session. A deferred scan waits for the next slot; it never authorizes a
+    /// destructive action without metadata.
+    const SCAN_BACKOFF_BASE: Duration = Duration::from_millis(50);
+    const SCAN_BACKOFF_MAX_MULTIPLIER: u32 = 10;
+
     use super::TrackerProcesses;
 
     /// Milliseconds since the tracker's own start.
@@ -1146,6 +1153,7 @@ mod imp {
         session: ReapCounters,
         epoch: ReapCounters,
         log: Option<ReapLog>,
+        flight_recorder: Option<crate::reap_log::ReapFlightRecorder>,
     }
 
     impl Telemetry {
@@ -1165,6 +1173,13 @@ mod imp {
                 log.record(&event);
             }
         }
+
+        fn checkpoint(&mut self) {
+            let totals = self.totals();
+            if let Some(recorder) = self.flight_recorder.as_mut() {
+                recorder.checkpoint(&totals);
+            }
+        }
     }
 
     fn with_telemetry(telemetry: &Mutex<Telemetry>, f: impl FnOnce(&mut Telemetry)) {
@@ -1182,6 +1197,47 @@ mod imp {
     struct FactsCollector {
         daemon_marker: crate::process_scan::DaemonMarkerCache,
         spare_images: Vec<String>,
+    }
+
+    /// Adaptive, fail-closed host-snapshot gate. Large completion batches
+    /// extend the cooldown. The first scan is immediate so a short-lived
+    /// client cannot exit before its identity is recorded; the cooldown then
+    /// prevents simultaneous foreground agents from scanning on every burst.
+    struct ScanBackoff {
+        next_allowed: Instant,
+    }
+
+    impl ScanBackoff {
+        fn new() -> Self {
+            Self {
+                next_allowed: Instant::now(),
+            }
+        }
+
+        /// Waits for the next permitted scan slot, returning whether the
+        /// caller was deferred.  Deferral is deliberately not a metadata
+        /// miss: a live process must be observed once its bounded cooldown
+        /// expires, rather than being permanently disconnected from the
+        /// reaping graph.
+        fn acquire(&mut self, work_items: usize) -> bool {
+            let now = Instant::now();
+            let deferred = now < self.next_allowed;
+            if deferred {
+                std::thread::sleep(self.next_allowed - now);
+            }
+            let now = Instant::now();
+            let multiplier = (1 + (work_items as u32 / 8)).min(SCAN_BACKOFF_MAX_MULTIPLIER);
+            self.next_allowed = now + SCAN_BACKOFF_BASE * multiplier;
+            deferred
+        }
+    }
+
+    /// The two immutable kernel handles consumed by the listener thread. They
+    /// travel together so adding diagnostics does not keep growing the
+    /// listener's argument list past the project Clippy limit.
+    struct ListenerHandles {
+        port: HANDLE,
+        job_value: usize,
     }
 
     pub struct ForegroundJobTracker {
@@ -1230,8 +1286,10 @@ mod imp {
                 }));
                 let telemetry = Arc::new(Mutex::new(Telemetry {
                     log: session_reap_log(),
+                    flight_recorder: session_reap_flight_recorder(),
                     ..Telemetry::default()
                 }));
+                let scan_backoff = Arc::new(Mutex::new(ScanBackoff::new()));
                 // windows::Win32::Foundation::HANDLE intentionally does not
                 // implement Send because it wraps a raw pointer. The kernel
                 // handle value itself is process-wide and remains owned by
@@ -1251,15 +1309,19 @@ mod imp {
                         let processes = Arc::clone(&processes);
                         let collector = Arc::clone(&collector);
                         let telemetry = Arc::clone(&telemetry);
+                        let scan_backoff = Arc::clone(&scan_backoff);
                         move || {
                             listen(
-                                HANDLE(port_value as *mut c_void),
-                                job_value,
+                                ListenerHandles {
+                                    port: HANDLE(port_value as *mut c_void),
+                                    job_value,
+                                },
                                 stop,
                                 backends,
                                 processes,
                                 collector,
                                 telemetry,
+                                scan_backoff,
                             )
                         }
                     })
@@ -1432,22 +1494,28 @@ mod imp {
     }
 
     fn listen(
-        port: HANDLE,
-        job_value: usize,
+        handles: ListenerHandles,
         stop: Arc<AtomicBool>,
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
         collector: Arc<Mutex<FactsCollector>>,
         telemetry: Arc<Mutex<Telemetry>>,
+        scan_backoff: Arc<Mutex<ScanBackoff>>,
     ) {
         while !stop.load(Ordering::Acquire) {
-            with_telemetry(&telemetry, |t| t.epoch.ticks += 1);
+            with_telemetry(&telemetry, |t| {
+                t.epoch.ticks += 1;
+                t.checkpoint();
+            });
             let (mut message, mut key, mut payload) = (0u32, 0usize, null_mut());
-            if unsafe { GetQueuedCompletionStatus(port, &mut message, &mut key, &mut payload, 200) }
-                .is_err()
+            if unsafe {
+                GetQueuedCompletionStatus(handles.port, &mut message, &mut key, &mut payload, 200)
+            }
+            .is_err()
             {
                 if unsafe { GetLastError().0 } == WAIT_TIMEOUT.0 {
-                    let metadata_complete = retry_unresolved_new_processes(&processes, &telemetry);
+                    let metadata_complete =
+                        retry_unresolved_new_processes(&processes, &telemetry, &scan_backoff);
                     // The completion-port timeout *is* the quiet-period
                     // detector: it fires only when no job notification arrived,
                     // which is exactly the condition provisional-empty
@@ -1458,7 +1526,7 @@ mod imp {
                         &backends,
                         &collector,
                         &telemetry,
-                        job_value,
+                        handles.job_value,
                         metadata_complete,
                     );
                     continue;
@@ -1484,7 +1552,9 @@ mod imp {
             batch.push((message, payload as usize as u32));
             while batch.len() < MAX_DRAIN_BATCH {
                 let (mut m, mut k, mut p) = (0u32, 0usize, null_mut());
-                if unsafe { GetQueuedCompletionStatus(port, &mut m, &mut k, &mut p, 0) }.is_err() {
+                if unsafe { GetQueuedCompletionStatus(handles.port, &mut m, &mut k, &mut p, 0) }
+                    .is_err()
+                {
                     // Either the queue is empty (WAIT_TIMEOUT) or the port is
                     // closing. Both mean "stop draining"; a closing port is
                     // caught by the blocking wait at the top of the loop.
@@ -1499,7 +1569,13 @@ mod imp {
             });
 
             apply_batch(
-                &batch, &processes, &backends, &collector, &telemetry, job_value,
+                &batch,
+                &processes,
+                &backends,
+                &collector,
+                &telemetry,
+                &scan_backoff,
+                handles.job_value,
             );
         }
     }
@@ -1518,9 +1594,10 @@ mod imp {
         backends: &Arc<Mutex<Vec<RegisteredBackend>>>,
         collector: &Arc<Mutex<FactsCollector>>,
         telemetry: &Arc<Mutex<Telemetry>>,
+        scan_backoff: &Arc<Mutex<ScanBackoff>>,
         job_value: usize,
     ) {
-        let mut table = BatchTable::new(telemetry);
+        let mut table = BatchTable::new(telemetry, scan_backoff, batch.len());
 
         for &(message, pid) in batch {
             match message {
@@ -1622,13 +1699,21 @@ mod imp {
     struct BatchTable<'a> {
         table: Option<HashMap<u32, ProcessMeta>>,
         telemetry: &'a Arc<Mutex<Telemetry>>,
+        scan_backoff: &'a Arc<Mutex<ScanBackoff>>,
+        work_items: usize,
     }
 
     impl<'a> BatchTable<'a> {
-        fn new(telemetry: &'a Arc<Mutex<Telemetry>>) -> Self {
+        fn new(
+            telemetry: &'a Arc<Mutex<Telemetry>>,
+            scan_backoff: &'a Arc<Mutex<ScanBackoff>>,
+            work_items: usize,
+        ) -> Self {
             Self {
                 table: None,
                 telemetry,
+                scan_backoff,
+                work_items,
             }
         }
 
@@ -1639,6 +1724,16 @@ mod imp {
         /// microseconds, and unlike the table it cannot be stale — so it stays
         /// per-call rather than being folded into the shared read.
         fn observe(&mut self, pid: u32) -> Option<ProcessMeta> {
+            if self.table.is_none() {
+                let deferred = self
+                    .scan_backoff
+                    .lock()
+                    .map(|mut gate| gate.acquire(self.work_items))
+                    .unwrap_or(true);
+                if deferred {
+                    with_telemetry(self.telemetry, |t| t.epoch.host_scans_deferred += 1);
+                }
+            }
             let telemetry = self.telemetry;
             let table = self.table.get_or_insert_with(|| snapshot(telemetry));
             let mut process = table.get(&pid).cloned()?;
@@ -1650,6 +1745,7 @@ mod imp {
     fn retry_unresolved_new_processes(
         processes: &Mutex<TrackerProcesses>,
         telemetry: &Mutex<Telemetry>,
+        scan_backoff: &Mutex<ScanBackoff>,
     ) -> bool {
         let unresolved = processes
             .lock()
@@ -1663,6 +1759,14 @@ mod imp {
             .unwrap_or_default();
         if unresolved.is_empty() {
             return true;
+        }
+
+        let deferred = scan_backoff
+            .lock()
+            .map(|mut gate| gate.acquire(unresolved.len()))
+            .unwrap_or(true);
+        if deferred {
+            with_telemetry(telemetry, |t| t.epoch.host_scans_deferred += 1);
         }
 
         let mut current = snapshot(telemetry);
@@ -2070,6 +2174,20 @@ mod imp {
         )))
     }
 
+    /// A fixed, durable checkpoint complements the buffered event log. It is
+    /// intentionally separate so a watchdog reset leaves the last counters
+    /// available even though `ReapLog::Drop` never gets a chance to flush.
+    fn session_reap_flight_recorder() -> Option<crate::reap_log::ReapFlightRecorder> {
+        let state_dir = crate::daemon::default_state_dir().ok()?;
+        Some(crate::reap_log::ReapFlightRecorder::new(
+            crate::reap_log::session_reap_health_path(
+                &state_dir,
+                std::process::id(),
+                crate::process_identity::self_start_time(),
+            ),
+        ))
+    }
+
     fn log_decision(decision: &ReapDecision) {
         let Ok(state_dir) = crate::daemon::default_state_dir() else {
             return;
@@ -2259,6 +2377,22 @@ mod imp {
                 1,
                 "the walk still happens, so it must still be counted"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod scan_backoff_tests {
+        use super::ScanBackoff;
+
+        #[test]
+        fn cooldown_defers_an_immediate_second_host_scan() {
+            let mut backoff = ScanBackoff {
+                // Start at the first permitted slot so this is a deterministic
+                // test of the post-scan cooldown.
+                next_allowed: std::time::Instant::now(),
+            };
+            assert!(!backoff.acquire(1));
+            assert!(backoff.acquire(1));
         }
     }
 }
