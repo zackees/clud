@@ -18,6 +18,7 @@ use running_process::broker::protocol::{encode_framed, Frame};
 use running_process::broker::server::local_socket_name;
 use running_process::NativeProcess;
 
+use super::super::activity::DaemonActivity;
 use super::super::client_leases::ClientLeaseRegistry;
 use super::super::gc_service::RegistryMsg;
 use super::super::proc_sampler::ProcSamplerHandle;
@@ -64,6 +65,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
     shutdown_requested: Arc<AtomicBool>,
     proc_sampler: ProcSamplerHandle,
     client_leases: ClientLeaseRegistry,
+    activity: DaemonActivity,
 ) -> Option<FrameLane> {
     if running_process_disabled() {
         return None;
@@ -96,6 +98,7 @@ pub(in crate::daemon) fn spawn_frame_lane(
         shutdown_requested,
         proc_sampler,
         client_leases,
+        activity,
     ) {
         Ok(lane) => Some(lane),
         Err(err) => {
@@ -166,6 +169,7 @@ pub(super) fn start_frame_lane(
     shutdown_requested: Arc<AtomicBool>,
     proc_sampler: ProcSamplerHandle,
     client_leases: ClientLeaseRegistry,
+    activity: DaemonActivity,
 ) -> io::Result<FrameLane> {
     let endpoint = endpoint_for_state_dir(state_dir)?;
     let endpoint_path = endpoint.path.clone();
@@ -209,7 +213,9 @@ pub(super) fn start_frame_lane(
                     let shutdown_requested = Arc::clone(&shutdown_requested);
                     let proc_sampler = proc_sampler.clone();
                     let client_leases = client_leases.clone();
+                    let activity = activity.clone();
                     thread::spawn(move || {
+                        let _connection_guard = activity.start_connection();
                         let mut stream = stream;
                         let _ = serve_connection(
                             &mut stream,

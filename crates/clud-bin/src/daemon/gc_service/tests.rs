@@ -766,7 +766,7 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
         &live_cwds_provider,
         &config,
         &|_| Ok(4 * BYTES_PER_GB),
-        None,
+        PeriodicPurgeContext::default(),
     );
     // The two seeded entries — one worktree, one sibling clone — are both
     // old enough and both under a low-space root, so the tick must dispatch
@@ -829,7 +829,7 @@ fn periodic_tick_keeps_old_worktree_entry_when_free_space_is_healthy() {
         &live_cwds_provider,
         &config,
         &|_| Ok(20 * BYTES_PER_GB),
-        None,
+        PeriodicPurgeContext::default(),
     );
     // Healthy disk → no dispatches expected, so no completions
     // should land.
@@ -926,6 +926,7 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
         &completion_tx,
         &live_cwds_provider,
         None,
+        None,
     );
     // Same #383/#560 hazard as the periodic-purge test: this one discarded
     // the drain count entirely, so a completion that never arrived showed up
@@ -975,6 +976,7 @@ fn periodic_tick_keeps_fresh_extern_repo_entry() {
         &pool_tx,
         &completion_tx,
         &live_cwds_provider,
+        None,
         None,
     );
     let drained = drain_purge_completions(

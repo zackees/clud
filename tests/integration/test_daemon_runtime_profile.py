@@ -126,6 +126,31 @@ def _wait_for_events(
     )
 
 
+def _production_idle_env(
+    mock_env: dict[str, str], state_dir: Path, home: Path, timeout_secs: int
+) -> dict[str, str]:
+    """Isolated production-mode daemon environment with an explicit timeout."""
+    env = mock_env.copy()
+    for name in (
+        "CLUD_DAEMON_TEST_MODE",
+        "CLUD_DAEMON_TEST_MAX_LIFETIME_SECS",
+        "CLUD_DAEMON_TEST_IDLE_TIMEOUT_SECS",
+        "CLUD_DAEMON_TEST_HOST_SCANS",
+    ):
+        env.pop(name, None)
+    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    env["CLUD_EXPERIMENTAL_DAEMON"] = "1"
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    clud_home = home / ".clud"
+    clud_home.mkdir(parents=True)
+    (clud_home / "settings.json").write_text(
+        json.dumps({"daemon": {"idle_timeout_secs": timeout_secs}}),
+        encoding="utf-8",
+    )
+    return env
+
+
 def test_test_daemon_exits_at_hard_max_without_another_request(
     clud_binary: Path,
     mock_env: dict[str, str],
@@ -175,6 +200,105 @@ def test_test_daemon_exits_after_safe_idle_window(
     assert "daemon_test_idle_expired" in {
         event["op"] for event in _events(state_dir)
     }
+
+
+def test_configured_production_idle_timeout_exits_and_next_client_restarts(
+    clud_binary: Path,
+    mock_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
+    first = _start_daemon(clud_binary, env, state_dir)
+
+    _wait_for_identity_exit(first, timeout=8)
+    assert not (state_dir / "daemon.json").exists()
+    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+
+    second = _start_daemon(clud_binary, env, state_dir)
+    assert (int(second["pid"]), int(second["pid_start"])) != (
+        int(first["pid"]),
+        int(first["pid_start"]),
+    )
+    stop = subprocess.run(
+        [str(clud_binary), "daemon", "stop"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert stop.returncode == 0, stop.stderr
+
+
+def test_dashboard_polling_blocks_configured_production_idle_timeout(
+    clud_binary: Path,
+    mock_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
+    info = _start_daemon(clud_binary, env, state_dir)
+    dashboard_port = int(info["dashboard_port"])
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{dashboard_port}/state.json", timeout=2
+        ) as response:
+            assert response.status == 200
+            response.read()
+        assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+        time.sleep(0.2)
+
+    _wait_for_identity_exit(info, timeout=6)
+    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+
+
+def test_detached_worker_blocks_configured_production_idle_timeout(
+    clud_binary: Path,
+    mock_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
+    proc, _session_id = launch_detached(
+        clud_binary,
+        env,
+        "--codex",
+        "-p",
+        "worker-keeps-daemon-alive",
+        "--",
+        "--mock-sleep-ms",
+        "4000",
+    )
+    assert wait_for_exit(proc, timeout=10) == 0
+    info = json.loads((state_dir / "daemon.json").read_text(encoding="utf-8"))
+
+    time.sleep(3)
+    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+    _wait_for_identity_exit(info, timeout=8)
+    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+
+
+def test_zero_production_idle_timeout_remains_disabled(
+    clud_binary: Path,
+    mock_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 0)
+    info = _start_daemon(clud_binary, env, state_dir)
+
+    time.sleep(3)
+    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+    stop = subprocess.run(
+        [str(clud_binary), "daemon", "stop"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert stop.returncode == 0, stop.stderr
 
 
 def test_dashboard_activity_defers_test_idle_expiry(

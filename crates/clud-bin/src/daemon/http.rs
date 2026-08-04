@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server};
 
+use super::activity::DaemonActivity;
 use super::gc_service::{GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT};
 use super::io_helpers::read_json_file;
 use super::paths::{daemon_info_path, sessions_dir};
@@ -514,6 +515,7 @@ pub(super) fn spawn_dashboard(
         telemetry,
         tool_telemetry,
         None,
+        None,
     )
 }
 
@@ -527,6 +529,7 @@ pub(super) fn spawn_dashboard_with_activity(
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
     test_activity: Option<TestRuntimeActivity>,
+    activity: Option<DaemonActivity>,
 ) -> Option<u16> {
     let server = match Server::http("127.0.0.1:0") {
         Ok(s) => s,
@@ -557,6 +560,7 @@ pub(super) fn spawn_dashboard_with_activity(
                     tool_telemetry,
                 },
                 test_activity,
+                activity,
             )
         });
     match res {
@@ -578,8 +582,10 @@ fn run_dashboard_loop(
     live_sessions_provider: LiveSessionsProvider,
     stores: DashboardTelemetryStores,
     test_activity: Option<TestRuntimeActivity>,
+    activity: Option<DaemonActivity>,
 ) {
     for request in server.incoming_requests() {
+        let _connection_guard = activity.as_ref().map(DaemonActivity::start_connection);
         let _activity_guard = test_activity
             .as_ref()
             .map(TestRuntimeActivity::start_request);
