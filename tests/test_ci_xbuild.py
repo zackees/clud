@@ -57,6 +57,11 @@ def test_zigbuild_strategy_uses_the_build_subcommand_interface() -> None:
     assert argv[2:] == ["--workspace", "--bins", "--target", target]
 
 
+def test_release_linux_wheel_avoids_duplicate_zig_flag() -> None:
+    source = (ROOT / "ci" / "xbuild.py").read_text(encoding="utf-8")
+    assert 'args.strategy == "zigbuild" and "--zig" not in subcommand' in source
+
+
 def test_zigbuild_strategy_builds_test_targets_without_running_them() -> None:
     target = "aarch64-unknown-linux-gnu"
     argv = xbuild.cargo_argv(

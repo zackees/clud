@@ -382,7 +382,7 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             subcommand += ["--zig", "--compatibility", "manylinux2014"]
         else:
             subcommand += ["--compatibility", "pypi"]
-    if args.strategy == "zigbuild":
+    if args.strategy == "zigbuild" and "--zig" not in subcommand:
         subcommand.append("--zig")
 
     if run(maturin_argv(subcommand, env=env), env) != 0:
