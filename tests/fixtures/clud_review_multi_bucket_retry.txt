@@ -1,0 +1,17 @@
+# #781 regression transcript: one review invocation, three would-be passes
+
+Invocation: /clud-review HEAD~1..HEAD --issue 781
+Changed buckets: rust, python, docs
+Repository specialist: .claude/agents/rust-review.md
+Follow-up requested: recheck a corrected rust finding
+
+Legacy scheduling (the bug):
+1. Agent(rust-review) for rust bucket
+2. Agent(general) for python bucket
+3. Agent(general) for follow-up rust bucket
+
+Required scheduling:
+1. One primary reviewer receives every non-empty bucket, all applicable rules,
+   and the follow-up context in the same invocation.
+2. The invocation summary is: review agents launched: 1
+3. Any second scheduling attempt returns: agent_budget_exhausted
