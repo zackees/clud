@@ -88,6 +88,9 @@ impl ReapPhase {
 pub struct ReapEvent {
     pub ts_ms: u64,
     pub pid: Option<u32>,
+    /// Immediate parent from the process-topology snapshot. Together with the
+    /// trigger PID this makes every destructive decision attributable.
+    pub parent_pid: Option<u32>,
     pub start_time: Option<u64>,
     pub image_name: Option<String>,
     pub action: ReapAction,
@@ -102,6 +105,7 @@ impl ReapEvent {
         serde_json::json!({
             "ts_ms": self.ts_ms,
             "pid": self.pid,
+            "parent_pid": self.parent_pid,
             "start_time": self.start_time,
             "image_name": self.image_name,
             "action": self.action.as_str(),
@@ -375,6 +379,7 @@ mod tests {
         ReapEvent {
             ts_ms: 1,
             pid: Some(42),
+            parent_pid: Some(7),
             start_time: Some(1_700_000_000),
             image_name: Some("node.exe".into()),
             action,
@@ -622,6 +627,7 @@ mod tests {
         assert_eq!(parsed["phase"], "runtime");
         assert_eq!(parsed["reason"], "leaked_tool_client");
         assert_eq!(parsed["pid"], 42);
+        assert_eq!(parsed["parent_pid"], 7);
         assert_eq!(parsed["image_name"], "node.exe");
     }
 
