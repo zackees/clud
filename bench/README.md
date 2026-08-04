@@ -5,6 +5,9 @@ intentionally exceed the repository's 90-second pytest timeout and must never
 be collected by default CI. See [idle_cpu](idle_cpu/README.md) for the
 idle-session CPU harness used by #542.
 
+The [Codex-via-Claude bridge benchmark](codex_bridge/README.md) measures the
+bounded loopback request path and reports RSS growth for #630.
+
 ## Runbook: real-daemon survival check (Tier 3, #674)
 
 **Never gating.** The reaper's daemon-survival suite is hermetic on purpose —

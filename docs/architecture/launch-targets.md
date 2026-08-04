@@ -172,10 +172,40 @@ clud neither spawns nor depends on that client.
 
 The record is locked with `fs4`. Refresh re-reads after acquiring the
 cross-process lock, refreshes at most once, and atomically replaces the file.
-Unix writes use mode 0600; Windows files stay under the current user's profile.
+Unix writes use mode 0600. Windows applies a protected owner-only DACL before
+the temporary file receives credentials and verifies both that ACE and the
+protected-DACL control flag after replacement; inherited profile ACLs alone
+are not treated as sufficient. Administrators with backup/restore privileges
+remain an operating-system trust boundary.
 Tokens are excluded from `Debug`, errors, JSON status, bridge logs, and launch
 plans. `status` reports source, safe identity, expiry, and refresh state;
 `logout` removes only this clud-owned record.
+
+## Bridge security and resource boundary (#630)
+
+The trust boundary is explicit: CLI/settings choose a `LaunchPlan`; foreground
+runtime turns that plan into a child-only environment; the Claude harness can
+then reach exactly one ephemeral `127.0.0.1` listener using its per-launch
+bearer. The listener translates only the supported Messages routes and creates
+the upstream Responses request itself. It never forwards arbitrary downstream
+headers, the local bearer, ambient Anthropic credentials, or an upstream error
+body. The daemon IPC carries additive plan fields for compatibility, but it
+does not own a bridge for the normal foreground route.
+
+All input and lifetime boundaries are bounded: headers (32 KiB), body (32
+MiB), header/body/frame deadlines, one active worker with a finite admission
+wait, and a kernel backlog rather than unbounded user-space queues. Disconnect,
+cancellation, timeout, bridge drop, and repeated shutdown close sockets and
+join workers idempotently. Fragmentation and malformed SSE sequences are
+deterministically tested. Once a downstream SSE frame is visible, the upstream
+client will not retry, preventing duplicate text or tool calls.
+
+Failure diagnostics are synthesized from allowlisted facts and scrubbed before
+they reach stderr or the bounded failure-only bridge log. Healthy turns create
+no bridge-log file. The opt-in local benchmark is documented at
+[`bench/codex_bridge`](../../bench/codex_bridge/README.md); it measures the
+full local request path and reports RSS growth without a flaky normal-CI
+timing threshold.
 
 ### The retry boundary
 

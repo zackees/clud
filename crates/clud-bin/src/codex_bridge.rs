@@ -1287,6 +1287,7 @@ mod tests {
     use std::net::{SocketAddr, TcpStream};
     use std::thread;
     use std::time::Duration;
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
     /// Read timeout for the test client.
     ///
@@ -1464,6 +1465,20 @@ Connection: close
             .expect("HTTP status")
             .parse()
             .unwrap()
+    }
+
+    /// Best-effort RSS snapshot for the opt-in bridge benchmark. It is a
+    /// reported observation, not a test threshold: host allocators and test
+    /// harnesses make an absolute memory limit flaky across target lanes.
+    fn current_rss_bytes() -> u64 {
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map_or(0, |process| process.memory())
     }
 
     #[test]
@@ -2074,6 +2089,49 @@ Connection: close
             );
             assert!(response.contains("bridged reply"));
         }
+    }
+
+    /// Opt-in, repeatable bridge overhead report for #630. Run this locally
+    /// on a quiet machine; it deliberately has no wall-clock assertion.
+    #[test]
+    #[ignore = "opt-in benchmark; see bench/codex_bridge/README.md"]
+    fn benchmark_loopback_bridge_overhead() {
+        const REQUESTS: usize = 200;
+        let upstream = FakeResponses::start();
+        let mut bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+        let rss_before = current_rss_bytes();
+        let started = Instant::now();
+
+        for _ in 0..REQUESTS {
+            let response = request(
+                addr,
+                &authorized("POST", "/v1/messages", &token, PROBE_BODY),
+            );
+            assert_eq!(
+                status(&response),
+                200,
+                "benchmark request failed: {response}"
+            );
+        }
+        bridge.shutdown().unwrap();
+        let elapsed = started.elapsed();
+        let rss_after = current_rss_bytes();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": "clud.bench.codex_bridge.v1",
+                "requests": REQUESTS,
+                "elapsed_ms": elapsed.as_millis(),
+                "requests_per_second": REQUESTS as f64 / elapsed.as_secs_f64(),
+                "rss_before_bytes": rss_before,
+                "rss_after_bytes": rss_after,
+                "rss_growth_bytes": rss_after.saturating_sub(rss_before),
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+            })
+        );
     }
 
     /// The backstop still exists: once `admission_wait` elapses, a client gets
