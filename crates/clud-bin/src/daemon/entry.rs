@@ -854,12 +854,10 @@ fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<S
         crate::backend::ModelProvider::Codex => command.push("--codex".to_string()),
     }
     command.push("--harness".to_string());
-    command.push(
-        plan.requested_harness
-            .unwrap_or_default()
-            .as_str()
-            .to_string(),
-    );
+    // A repeat is a fresh process. Pin the resolved effective harness rather
+    // than the original preference so a later config/environment change
+    // cannot silently route a recorded cross-route job somewhere else.
+    command.push(plan.effective_harness().executable_name().to_string());
     if args.safe {
         command.push("--safe".to_string());
     }
@@ -1104,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn repeat_command_pins_resolved_provider_and_requested_harness() {
+    fn repeat_command_pins_resolved_provider_and_effective_harness() {
         let args = Args::parse_from_raw(
             [
                 "clud",
