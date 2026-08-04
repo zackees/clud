@@ -20,6 +20,7 @@ use crate::gc::{
 };
 use crate::worktrees;
 
+use super::activity::DaemonActivity;
 use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 
 mod extern_repo;
@@ -177,6 +178,7 @@ pub(super) fn spawn_registry_worker() -> std::io::Result<mpsc::Sender<RegistryMs
 pub(super) fn spawn_registry_worker_for_state(
     state_dir: PathBuf,
     periodic_maintenance_enabled: bool,
+    activity: Option<DaemonActivity>,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let registry = Registry::open_default().map_err(std::io::Error::other)?;
     let tick_cadence = periodic_maintenance_enabled
@@ -188,6 +190,7 @@ pub(super) fn spawn_registry_worker_for_state(
         Arc::new(move || super::sessions::list_live_session_cwds(&state_dir)),
         tick_cadence,
         Some(reconcile_dir),
+        activity,
     )
 }
 
@@ -211,6 +214,7 @@ fn spawn_registry_worker_with_live_cwds(
         live_cwds_provider,
         gc_tick_cadence_from_env(),
         None,
+        None,
     )
 }
 
@@ -219,6 +223,7 @@ fn spawn_registry_worker_with_live_cwds_and_cadence(
     live_cwds_provider: LiveCwdsProvider,
     tick_cadence: Option<Duration>,
     session_state_dir: Option<PathBuf>,
+    activity: Option<DaemonActivity>,
 ) -> std::io::Result<mpsc::Sender<RegistryMsg>> {
     let (tx, rx) = mpsc::channel::<RegistryMsg>();
     let pool_tx = spawn_purge_pool(purge_concurrency_from_env());
@@ -231,9 +236,12 @@ fn spawn_registry_worker_with_live_cwds_and_cadence(
                 rx,
                 completion_tx,
                 pool_tx,
-                tick_cadence,
-                live_cwds_provider,
-                session_state_dir,
+                RegistryWorkerConfig {
+                    tick_cadence,
+                    live_cwds_provider,
+                    session_state_dir,
+                    activity,
+                },
             )
         })?;
     Ok(tx)
@@ -323,18 +331,23 @@ fn parse_bool_setting(raw: Option<&str>, default: bool) -> bool {
     }
 }
 
+struct RegistryWorkerConfig {
+    tick_cadence: Option<Duration>,
+    live_cwds_provider: LiveCwdsProvider,
+    session_state_dir: Option<PathBuf>,
+    activity: Option<DaemonActivity>,
+}
+
 fn run_worker_loop(
     registry: Registry,
     rx: mpsc::Receiver<RegistryMsg>,
     completion_tx: mpsc::Sender<RegistryMsg>,
     pool_tx: mpsc::Sender<PurgeJob>,
-    tick_cadence: Option<Duration>,
-    live_cwds_provider: LiveCwdsProvider,
-    session_state_dir: Option<PathBuf>,
+    config: RegistryWorkerConfig,
 ) {
-    let session_state_dir = session_state_dir.as_deref();
+    let session_state_dir = config.session_state_dir.as_deref();
     let mut watch_service = None;
-    let Some(tick_cadence) = tick_cadence else {
+    let Some(tick_cadence) = config.tick_cadence else {
         while let Ok(msg) = rx.recv() {
             handle_registry_msg(
                 &registry,
@@ -342,7 +355,7 @@ fn run_worker_loop(
                 &completion_tx,
                 &mut watch_service,
                 msg,
-                &live_cwds_provider,
+                &config.live_cwds_provider,
             );
         }
         return;
@@ -359,26 +372,30 @@ fn run_worker_loop(
                     &completion_tx,
                     &mut watch_service,
                     msg,
-                    &live_cwds_provider,
+                    &config.live_cwds_provider,
                 );
                 if Instant::now() >= next_tick {
+                    let _job_guard = config.activity.as_ref().map(DaemonActivity::start_job);
                     run_periodic_purge_tick(
                         &registry,
                         &pool_tx,
                         &completion_tx,
-                        &live_cwds_provider,
+                        &config.live_cwds_provider,
                         session_state_dir,
+                        config.activity.as_ref(),
                     );
                     next_tick = Instant::now() + tick_cadence;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _job_guard = config.activity.as_ref().map(DaemonActivity::start_job);
                 run_periodic_purge_tick(
                     &registry,
                     &pool_tx,
                     &completion_tx,
-                    &live_cwds_provider,
+                    &config.live_cwds_provider,
                     session_state_dir,
+                    config.activity.as_ref(),
                 );
                 next_tick = Instant::now() + tick_cadence;
             }
@@ -459,6 +476,7 @@ fn run_periodic_purge_tick(
     completion_tx: &mpsc::Sender<RegistryMsg>,
     live_cwds_provider: &LiveCwdsProvider,
     session_state_dir: Option<&Path>,
+    activity: Option<&DaemonActivity>,
 ) -> usize {
     let config = GcDiskWatchdogConfig::from_env();
     run_periodic_purge_tick_with_free_space(
@@ -468,7 +486,10 @@ fn run_periodic_purge_tick(
         live_cwds_provider,
         &config,
         &free_space_bytes_for_path,
-        session_state_dir,
+        PeriodicPurgeContext {
+            session_state_dir,
+            activity,
+        },
     )
 }
 
@@ -481,6 +502,12 @@ fn run_periodic_purge_tick(
 /// must know when the purge has finished can wait for exactly that many
 /// completions instead of inferring completion from a quiet interval, which
 /// is timing-dependent and was the source of issue #560's Windows flake.
+#[derive(Default)]
+struct PeriodicPurgeContext<'a> {
+    session_state_dir: Option<&'a Path>,
+    activity: Option<&'a DaemonActivity>,
+}
+
 fn run_periodic_purge_tick_with_free_space<F>(
     registry: &Registry,
     pool_tx: &mpsc::Sender<PurgeJob>,
@@ -488,7 +515,7 @@ fn run_periodic_purge_tick_with_free_space<F>(
     live_cwds_provider: &LiveCwdsProvider,
     disk_config: &GcDiskWatchdogConfig,
     free_space: &F,
-    session_state_dir: Option<&Path>,
+    context: PeriodicPurgeContext<'_>,
 ) -> usize
 where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
@@ -543,7 +570,7 @@ where
     // (crash leftovers) so the 2 s proc sampler and per-list liveness probes
     // stop paying for them forever. Synchronous rename/delete only — never
     // routed through the purge pool, and never terminates a process.
-    if let Some(dir) = session_state_dir {
+    if let Some(dir) = context.session_state_dir {
         match super::sessions::reconcile_session_records(dir) {
             Ok((tombstoned, deleted)) => {
                 if tombstoned > 0 || deleted > 0 {
@@ -567,7 +594,7 @@ where
     // walk the filesystem and can take a while, so they run on a detached
     // background thread rather than blocking this tick loop. They prioritize
     // by disk pressure and system load — see `spawn_maintenance_sweeps`.
-    spawn_maintenance_sweeps(disk_config);
+    spawn_maintenance_sweeps(disk_config, context.activity.cloned());
 
     dispatched
 }
@@ -607,7 +634,7 @@ fn maintenance_action(low_disk: bool, cpu_busy: bool) -> MaintenanceAction {
 /// Issues #509/#510: fan the filesystem sweeps onto a detached thread so a
 /// long walk never blocks the GC tick loop. At most one sweep thread runs at
 /// a time (guarded by [`MAINTENANCE_SWEEP_IN_FLIGHT`]).
-fn spawn_maintenance_sweeps(disk_config: &GcDiskWatchdogConfig) {
+fn spawn_maintenance_sweeps(disk_config: &GcDiskWatchdogConfig, activity: Option<DaemonActivity>) {
     if MAINTENANCE_SWEEP_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -619,6 +646,7 @@ fn spawn_maintenance_sweeps(disk_config: &GcDiskWatchdogConfig) {
     let spawned = std::thread::Builder::new()
         .name("clud-gc-sweep".to_string())
         .spawn(move || {
+            let _job_guard = activity.as_ref().map(DaemonActivity::start_job);
             run_maintenance_sweeps(warn_free_bytes);
             MAINTENANCE_SWEEP_IN_FLIGHT.store(false, Ordering::Release);
         });

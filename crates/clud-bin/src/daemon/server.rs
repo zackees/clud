@@ -15,6 +15,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 use crate::orphan_reaper;
 use crate::win_creation_flags::invisible_helper_creationflags;
 
+use super::activity::{should_idle_shutdown, DaemonActivity};
 use super::client::cleanup_stale_state;
 use super::client_leases::ClientLeaseRegistry;
 use super::daemon_events;
@@ -62,7 +63,11 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // to `~/.clud/state/crashes/`.
     crate::crash_report::install_native("daemon");
     let runtime_config = DaemonRuntimeConfig::from_env();
+    // Settings are startup-only daemon policy: never read the settings file on
+    // the listener's idle path.
+    let production_idle_timeout = production_idle_timeout();
     let daemon_started_at = Instant::now();
+    let activity = DaemonActivity::new(daemon_started_at);
     let test_activity = runtime_config
         .test_mode
         .then(|| TestRuntimeActivity::new(daemon_started_at));
@@ -96,6 +101,10 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 "periodic_maintenance_enabled",
                 json!(runtime_config.periodic_maintenance_enabled),
             ),
+            (
+                "production_idle_timeout_secs",
+                json!(production_idle_timeout.map(|value| value.as_secs())),
+            ),
         ],
     );
 
@@ -121,6 +130,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     let gc_tx = match spawn_registry_worker_for_state(
         state_dir.to_path_buf(),
         runtime_config.periodic_maintenance_enabled,
+        Some(activity.clone()),
     ) {
         Ok(tx) => Some(tx),
         Err(err) => {
@@ -149,6 +159,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         telemetry,
         tool_telemetry,
         test_activity.clone(),
+        Some(activity.clone()),
     );
 
     // Tool installation is deferred until after readiness. `clud tool` self-heals
@@ -217,6 +228,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         Arc::clone(&shutdown_requested),
         proc_sampler.clone(),
         client_leases.clone(),
+        activity.clone(),
     );
 
     // Periodic orphan sweep. Catches CLUD-tagged descendants whose
@@ -255,16 +267,21 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                 let shutdown_requested = Arc::clone(&shutdown_requested);
                 let proc_sampler = proc_sampler.clone();
                 let client_leases = client_leases.clone();
+                let activity = activity.clone();
                 thread::spawn(move || {
+                    let _connection_guard = activity.start_connection();
                     let _activity_guard = activity_guard;
                     let _ = handle_daemon_connection(
                         stream,
-                        &state_dir,
-                        &workers,
-                        gc_tx,
-                        &shutdown_requested,
-                        &proc_sampler,
-                        &client_leases,
+                        &TcpConnectionServices {
+                            state_dir: &state_dir,
+                            workers: &workers,
+                            gc_tx: gc_tx.as_ref(),
+                            shutdown_requested: &shutdown_requested,
+                            proc_sampler: &proc_sampler,
+                            client_leases: &client_leases,
+                            activity: &activity,
+                        },
                     );
                 });
             }
@@ -288,7 +305,9 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                     last_client_lease_prune = now;
                 }
                 let worker_count = workers.lock().expect("workers mutex poisoned").len();
+                let activity_snapshot = activity.snapshot(now);
                 if worker_count > 0 {
+                    activity.note_activity(now);
                     if let Some(activity) = &test_activity {
                         activity.note_activity(now);
                     }
@@ -329,6 +348,35 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
                     shutdown_requested.store(true, Ordering::SeqCst);
                     break;
                 }
+                if !runtime_config.test_mode
+                    && should_idle_shutdown(
+                        production_idle_timeout,
+                        activity_snapshot,
+                        worker_count,
+                        client_leases.len(),
+                    )
+                {
+                    daemon_events::log_event(
+                        state_dir,
+                        "daemon_idle_shutdown",
+                        [
+                            (
+                                "timeout_secs",
+                                json!(production_idle_timeout.map(|value| value.as_secs())),
+                            ),
+                            ("idle_ms", json!(activity_snapshot.idle_for.as_millis())),
+                            ("worker_count", json!(worker_count)),
+                            ("lease_count", json!(client_leases.len())),
+                            (
+                                "active_connections",
+                                json!(activity_snapshot.active_connections),
+                            ),
+                            ("active_jobs", json!(activity_snapshot.active_jobs)),
+                        ],
+                    );
+                    shutdown_requested.store(true, Ordering::SeqCst);
+                    break;
+                }
                 thread::sleep(Duration::from_millis(50));
             }
             Err(err) => {
@@ -350,14 +398,19 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     0
 }
 
+struct TcpConnectionServices<'a> {
+    state_dir: &'a Path,
+    workers: &'a Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
+    gc_tx: Option<&'a mpsc::Sender<RegistryMsg>>,
+    shutdown_requested: &'a Arc<AtomicBool>,
+    proc_sampler: &'a ProcSamplerHandle,
+    client_leases: &'a ClientLeaseRegistry,
+    activity: &'a DaemonActivity,
+}
+
 fn handle_daemon_connection(
     mut stream: TcpStream,
-    state_dir: &Path,
-    workers: &Arc<Mutex<HashMap<String, Arc<NativeProcess>>>>,
-    gc_tx: Option<mpsc::Sender<RegistryMsg>>,
-    shutdown_requested: &Arc<AtomicBool>,
-    proc_sampler: &ProcSamplerHandle,
-    client_leases: &ClientLeaseRegistry,
+    services: &TcpConnectionServices<'_>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -367,7 +420,7 @@ fn handle_daemon_connection(
     let (request, response_format) = decode_daemon_request_line(&line).map_err(wire_error_to_io)?;
     let request_id = daemon_events::request_id();
     daemon_events::log_event(
-        state_dir,
+        services.state_dir,
         "request_received",
         [
             ("request_id", json!(request_id)),
@@ -376,19 +429,24 @@ fn handle_daemon_connection(
         ],
     );
     let started = Instant::now();
+    let _job_guard = matches!(
+        &request,
+        DaemonRequest::Gc { .. } | DaemonRequest::ReapOrphans | DaemonRequest::AdoptKill { .. }
+    )
+    .then(|| services.activity.start_job());
     let response = dispatch_daemon_request_with_id(
-        state_dir,
-        workers,
-        gc_tx.as_ref(),
-        Some(proc_sampler),
-        client_leases,
+        services.state_dir,
+        services.workers,
+        services.gc_tx,
+        Some(services.proc_sampler),
+        services.client_leases,
         request_id,
         request,
     );
     let is_shutdown = matches!(response, DaemonResponse::ShutdownAck { .. });
     let result = write_daemon_response(&mut stream, &response, response_format);
     daemon_events::log_event(
-        state_dir,
+        services.state_dir,
         "request_replied",
         [
             ("request_id", json!(request_id)),
@@ -402,7 +460,7 @@ fn handle_daemon_connection(
     );
     if is_shutdown {
         let _ = stream.shutdown(std::net::Shutdown::Write);
-        shutdown_requested.store(true, Ordering::SeqCst);
+        services.shutdown_requested.store(true, Ordering::SeqCst);
     }
     result
 }
@@ -939,6 +997,18 @@ fn settings_u64(pointer: &str) -> Option<u64> {
         .and_then(serde_json::Value::as_u64)
 }
 
+/// Production idle shutdown remains opt-in in #644. #645 will seed the
+/// conservative default only after its end-to-end safety validation.
+fn production_idle_timeout() -> Option<Duration> {
+    production_idle_timeout_from(settings_u64("/daemon/idle_timeout_secs"))
+}
+
+fn production_idle_timeout_from(configured_secs: Option<u64>) -> Option<Duration> {
+    configured_secs
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+}
+
 /// Resolve the sweep interval: env override first, then settings, then the 60s
 /// default; zero/garbage at either layer is ignored, and the result is clamped
 /// to the floor.
@@ -1352,6 +1422,16 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn production_idle_timeout_is_disabled_until_explicitly_configured() {
+        assert_eq!(production_idle_timeout_from(None), None);
+        assert_eq!(production_idle_timeout_from(Some(0)), None);
+        assert_eq!(
+            production_idle_timeout_from(Some(7)),
+            Some(Duration::from_secs(7))
+        );
+    }
 
     #[test]
     fn orphan_sweep_interval_defaults_and_clamps() {

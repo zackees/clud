@@ -1,3 +1,4 @@
+mod activity;
 mod attach;
 mod client;
 mod client_leases;
