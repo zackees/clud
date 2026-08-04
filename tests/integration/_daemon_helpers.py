@@ -259,7 +259,7 @@ def session_metadata(state_dir: Path, session_id: str, timeout: float = 5.0) -> 
     while True:
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except (PermissionError, json.JSONDecodeError):
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
             if time.time() >= deadline:
                 raise
             time.sleep(0.05)
