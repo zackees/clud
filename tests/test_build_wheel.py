@@ -3,6 +3,32 @@ import zipfile
 from ci import build_wheel
 
 
+def test_windows_soldr_wheel_packages_prebuilt_executables(tmp_path):
+    target_dir = tmp_path / "target"
+    binaries = target_dir / "x86_64-pc-windows-msvc" / "release"
+    binaries.mkdir(parents=True)
+    for name in ("clud", "clud-shim", "clud-block-bad-cmd"):
+        (binaries / f"{name}.exe").write_bytes(f"{name}-binary".encode())
+
+    wheel = build_wheel.build_windows_wheel_from_binaries(
+        target="x86_64-pc-windows-msvc",
+        profile="release",
+        target_dir=target_dir,
+        dist_dir=tmp_path / "dist",
+        version="2.5.1",
+    )
+
+    with zipfile.ZipFile(wheel) as archive:
+        members = set(archive.namelist())
+        assert "clud/__init__.py" in members
+        assert "clud-2.5.1.data/scripts/clud.exe" in members
+        assert "clud-2.5.1.data/scripts/clud-shim.exe" in members
+        assert "clud-2.5.1.data/scripts/clud-block-bad-cmd.exe" in members
+        assert "clud-2.5.1.dist-info/METADATA" in members
+        assert "clud-2.5.1.dist-info/WHEEL" in members
+        assert "clud-2.5.1.dist-info/RECORD" in members
+
+
 def test_linux_release_uses_zigbuild_linker(monkeypatch):
     monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
 

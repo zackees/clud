@@ -330,6 +330,13 @@ def cmd_doctest(args: argparse.Namespace) -> int:
     return run(cargo_argv(["test", "--workspace", "--doc"], args.target, args.strategy), env)
 
 
+def _project_version() -> str:
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as project:
+        return tomllib.load(project)["project"]["version"]
+
+
 def cmd_wheel(args: argparse.Namespace) -> int:
     """Build the wheel into dist/ for this triple.
 
@@ -340,6 +347,24 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     from ci.env import maturin_argv
 
     env = build_env(args.target, args.strategy)
+    if _is_windows(args.target) and args.strategy == "soldr":
+        target_dir = ROOT / "target"
+        profile = "release" if args.profile == "release" else "debug"
+        from ci.build_wheel import build_windows_wheel_from_binaries
+
+        try:
+            wheel = build_windows_wheel_from_binaries(
+                target=args.target,
+                profile=profile,
+                target_dir=target_dir,
+                dist_dir=ROOT / "dist",
+                version=_project_version(),
+            )
+        except RuntimeError as error:
+            print(error, file=sys.stderr)
+            return 1
+        print(f"packaged soldr-built Windows wheel: {wheel}")
+        return 0
     if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
         # `maturin --zig` delegates the final link to cargo-zigbuild's target
         # linker; soldr's fast-linker shim would force host clang/mold, which

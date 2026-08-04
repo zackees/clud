@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
+import hashlib
 import json
 import platform
 import subprocess
@@ -54,6 +56,63 @@ def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[st
     # through soldr fails on Linux because PyO3/maturin only publishes musl
     # Linux release assets.
     return maturin_argv(subcommand, env=env)
+
+
+def build_windows_wheel_from_binaries(
+    *,
+    target: str,
+    profile: str,
+    target_dir: Path,
+    dist_dir: Path,
+    version: str,
+) -> Path:
+    """Package executables already built by soldr into a Windows wheel.
+
+    Maturin's Linux-to-MSVC path brings its own xwin downloader, duplicating
+    the SDK preparation that soldr already owns. The binaries in this wheel
+    have therefore been built exclusively by the preceding soldr invocation.
+    """
+    platform_tag = {"x86_64": "win_amd64", "aarch64": "win_arm64"}[target.split("-", 1)[0]]
+    distribution = f"clud-{version}"
+    wheel = dist_dir / f"{distribution}-py3-none-{platform_tag}.whl"
+    binaries = target_dir / target / profile
+    scripts = []
+    for name in REQUIRED_SCRIPTS:
+        binary = binaries / f"{name}.exe"
+        if not binary.is_file():
+            raise RuntimeError(f"soldr-built Windows executable is missing: {binary}")
+        scripts.append((f"{distribution}.data/scripts/{name}.exe", binary.read_bytes()))
+
+    metadata = (
+        "Metadata-Version: 2.1\n"
+        "Name: clud\n"
+        f"Version: {version}\n"
+        "Summary: Fast Rust CLI for running Claude Code and Codex in YOLO mode\n"
+    ).encode()
+    wheel_metadata = (
+        "Wheel-Version: 1.0\n"
+        "Generator: clud ci.build_wheel\n"
+        "Root-Is-Purelib: false\n"
+        f"Tag: py3-none-{platform_tag}\n"
+    ).encode()
+    package_source = ROOT / "src" / "clud" / "__init__.py"
+    members = [
+        ("clud/__init__.py", package_source.read_bytes()),
+        *scripts,
+        (f"{distribution}.dist-info/METADATA", metadata),
+        (f"{distribution}.dist-info/WHEEL", wheel_metadata),
+    ]
+    records = [
+        f"{name},sha256={base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()},{len(data)}"
+        for name, data in members
+    ]
+    records.append(f"{distribution}.dist-info/RECORD,,")
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members:
+            archive.writestr(name, data)
+        archive.writestr(f"{distribution}.dist-info/RECORD", "\n".join(records) + "\n")
+    return wheel
 
 
 def built_wheels() -> list[Path]:
