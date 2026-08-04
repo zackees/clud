@@ -55,6 +55,9 @@ pub enum SpareReason {
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
     ListeningEndpoint,
+    /// Docker Desktop's interactive UI/backend root. Its WSL runtime children
+    /// inherit this protection through the reaper's subtree pruning.
+    DockerDesktopProcessFamily,
     /// Matched the operator's configured spare-list. Last resort, and data
     /// rather than code — see [`ProcessFacts::spare_listed`].
     ConfiguredSpareList,
@@ -69,6 +72,7 @@ impl SpareReason {
             Self::ForeignTokenOwner => "foreign_token_owner",
             Self::DeclaredDaemon => "declared_daemon",
             Self::ListeningEndpoint => "listening_endpoint",
+            Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
             Self::ConfiguredSpareList => "configured_spare_list",
         }
     }
@@ -259,6 +263,9 @@ pub fn spare_signal(facts: &dyn ProcessFacts, pid: u32, image_name: &str) -> Opt
     if facts.owns_listening_endpoint(pid) == Some(true) {
         return Some(SpareReason::ListeningEndpoint);
     }
+    if is_docker_desktop_family_root(image_name) {
+        return Some(SpareReason::DockerDesktopProcessFamily);
+    }
     if facts.spare_listed(pid, image_name) {
         return Some(SpareReason::ConfiguredSpareList);
     }
@@ -287,6 +294,14 @@ pub fn image_basename(image: &str) -> &str {
 
 pub fn normalized_image(image: &str) -> String {
     image_basename(image).to_ascii_lowercase()
+}
+
+/// True for Docker Desktop's user-session roots, not the ordinary `docker`
+/// client. A spared root prunes its whole descendant tree, retaining the
+/// otherwise-generic WSL runtime components it owns (#773).
+pub fn is_docker_desktop_family_root(image_name: &str) -> bool {
+    let image = normalized_image(image_name);
+    image == "docker desktop.exe" || image.starts_with("com.docker.")
 }
 
 /// Collect OS facts for a bounded candidate set, on whatever platform we are.

@@ -111,7 +111,8 @@ reaper that never saw the process at all also leaves it running.
 | 4 | **Token owner** | process cannot be opened for termination | `euid` differs | services; also cases where the kill would fail anyway |
 | 5 | **Declared daemon** | `RUNNING_PROCESS_IS_DAEMON` | same | **zccache**, **soldr** — everything that opted in |
 | 6 | **Listening endpoint** | `GetExtendedTcpTable` over `AF_INET` **and** `AF_INET6` | `/proc/net/tcp{,6}` + `/proc/net/unix`, matched to `/proc/<pid>/fd` | **sccache**, **FBuildWorker**, language servers |
-| 7 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
+| 7 | **Docker Desktop family** | `Docker Desktop.exe` / `com.docker.*` roots | same | Docker Desktop backend plus its WSL runtime subtree (#773) |
+| 8 | **Configured spare-list** | `CLUD_REAPER_SPARE_IMAGES` | same | operator escape hatch; ships empty |
 
 Cheap and authoritative first, expensive last. 1–4 are one syscall each and no
 memory read, and every PID they rule out is a PID whose environment is never
@@ -136,8 +137,14 @@ its console goes with it, which makes "no console" indistinguishable between a
 detached daemon and an ordinary leaked client. It would over-spare precisely
 when it is consulted.
 
-A whitelist is a **last resort and must be data, not code**. Nothing in clud
-hard-codes an image name.
+A whitelist is a **last resort and must be data, not code**. The one deliberate
+exception is Docker Desktop's narrowly identified product family (#773): its
+backend is user-session scoped and commonly exposes only a Windows named pipe,
+so none of the generic service signals can prove that it and its WSL subtree
+belong to a durable engine. The reaper spares only the official UI/backend
+roots (`Docker Desktop.exe` and `com.docker.*`), then its existing prune rule
+keeps their descendants intact; it does not spare the ordinary `docker.exe`
+client.
 
 ### The cooperative-marker caveat
 
@@ -255,6 +262,9 @@ as fixed while the same symptom kept growing. `reap_log.rs` provides:
   `~/.clud/state/sessions/<pid>__<epoch>/reap.jsonl`. Buffered, never flushed
   per event (#544 found per-op synchronous JSONL flushes to be an idle-CPU cost
   of their own), and nothing at all is written for a pass that changed nothing.
+  Every recorded decision includes timestamp, PID, executable, immediate parent,
+  rule/reason, action, and phase so a later incident can be attributed without
+  inferring process lineage from a partial UI state (#773).
 
 **Metadata misses go to the session log, never the shared one.** A job
 notification for a PID Toolhelp could not resolve before it exited is *expected*

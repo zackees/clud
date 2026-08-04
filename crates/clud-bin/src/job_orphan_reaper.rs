@@ -127,6 +127,7 @@ pub(crate) enum ReapDecisionReason {
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
     ListeningEndpoint,
+    DockerDesktopProcessFamily,
     /// Matched the operator's configured spare-list. Last resort, and data
     /// rather than code — see [`ProcessFacts::spare_listed`].
     ConfiguredSpareList,
@@ -148,6 +149,7 @@ impl ReapDecisionReason {
             Self::SessionLeader => "session_leader",
             Self::ForeignTokenOwner => "foreign_token_owner",
             Self::ListeningEndpoint => "listening_endpoint",
+            Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
             Self::ConfiguredSpareList => "configured_spare_list",
             #[cfg(windows)]
             Self::CandidateIdentityChanged => "candidate_identity_changed",
@@ -162,6 +164,7 @@ pub(crate) struct ReapDecision {
     pub(crate) trigger_image: String,
     pub(crate) trigger_role: ProcessRole,
     pub(crate) candidate_pid: Option<u32>,
+    pub(crate) candidate_parent_pid: Option<u32>,
     pub(crate) candidate_image: Option<String>,
     pub(crate) candidate_start_time: Option<u64>,
     pub(crate) action: DecisionAction,
@@ -190,6 +193,7 @@ impl From<SpareReason> for ReapDecisionReason {
             SpareReason::ForeignTokenOwner => Self::ForeignTokenOwner,
             SpareReason::DeclaredDaemon => Self::DeclaredDaemon,
             SpareReason::ListeningEndpoint => Self::ListeningEndpoint,
+            SpareReason::DockerDesktopProcessFamily => Self::DockerDesktopProcessFamily,
             SpareReason::ConfiguredSpareList => Self::ConfiguredSpareList,
         }
     }
@@ -519,6 +523,7 @@ fn decision(
         trigger_image: trigger.image_name.clone(),
         trigger_role,
         candidate_pid: candidate.map(|process| process.pid),
+        candidate_parent_pid: candidate.map(|process| process.parent_pid),
         candidate_image: candidate.map(|process| process.image_name.clone()),
         candidate_start_time: candidate.map(|process| process.start_time),
         action,
@@ -550,6 +555,7 @@ pub(super) fn decision_log_fields(
         ("trigger_shell_image", json!(decision.trigger_image)),
         ("trigger_role", json!(decision.trigger_role.as_str())),
         ("candidate_root_pid", json!(decision.candidate_pid)),
+        ("candidate_root_parent_pid", json!(decision.candidate_parent_pid)),
         ("candidate_root_image", json!(decision.candidate_image)),
         (
             "candidate_root_start_time",
@@ -1798,6 +1804,7 @@ mod imp {
                 t.record(ReapEvent {
                     ts_ms: now,
                     pid: Some(*pid),
+                    parent_pid: None,
                     start_time: *start_time,
                     image_name: Some(image_name.clone()),
                     action: ReapAction::Abandoned,
@@ -2042,6 +2049,7 @@ mod imp {
             t.record(ReapEvent {
                 ts_ms,
                 pid: decision.candidate_pid,
+                parent_pid: decision.candidate_parent_pid,
                 start_time: decision.candidate_start_time,
                 image_name: decision.candidate_image.clone(),
                 action,
@@ -2097,6 +2105,7 @@ mod imp {
             t.record(ReapEvent {
                 ts_ms,
                 pid: Some(pid),
+                parent_pid: None,
                 start_time: None,
                 image_name: None,
                 // Fails closed: an unresolvable process is never a kill target.
@@ -2391,12 +2400,21 @@ mod lifecycle_tests {
     }
 
     fn fixture(processes: Vec<ProcessMeta>, exited_pid: u32) -> Vec<super::ReapDecision> {
-        plan_shell_exit(
-            &processes,
+        // Match production's complete spare-list construction rather than
+        // testing the planner against a hand-empty map. This keeps product
+        // family protection and its descendant pruning in the Tier 1 table.
+        let facts = super::FactsSnapshot::default();
+        let spares = super::build_spare_list(
+            &facts,
+            processes
+                .iter()
+                .map(|process| (process.pid, process.image_name.clone())),
+        );
+        let graph = super::ProcessGraph::build(
+            processes.iter(),
             &[RegisteredBackend::new(10, "codex.exe", 10)],
-            &HashSet::new(),
-            exited_pid,
-        )
+        );
+        super::plan_shell_exit(&graph, &spares, exited_pid)
     }
 
     fn replay_control(
@@ -2750,6 +2768,43 @@ mod lifecycle_tests {
             signal_for(&facts, 30, "dockerd.exe"),
             Some(ReapDecisionReason::ServiceSession)
         );
+    }
+
+    /// #773: Docker Desktop is a service family even though its Windows UI and
+    /// backend run in the interactive session.  Its WSL runtime children are
+    /// not individually identifiable from their image names, so sparing the
+    /// Docker family root must prune the entire descendant subtree.
+    #[test]
+    fn docker_desktop_family_and_its_wsl_runtime_are_never_reaped() {
+        let decisions = fixture(
+            vec![
+                process(10, 1, "codex.exe", true),
+                process(20, 10, "powershell.exe", false),
+                process(30, 20, "Docker Desktop.exe", true),
+                process(31, 30, "com.docker.backend.exe", true),
+                process(32, 31, "wslhost.exe", true),
+                process(33, 32, "vmmemWSL", true),
+            ],
+            20,
+        );
+
+        assert!(
+            decisions.iter().any(|decision| {
+                decision.candidate_pid == Some(30)
+                    && decision.action == DecisionAction::Spare
+                    && decision.reason == ReapDecisionReason::DockerDesktopProcessFamily
+            }),
+            "Docker Desktop root must be spared with attribution: {decisions:?}"
+        );
+        assert!(
+            decisions
+                .iter()
+                .all(|decision| { !matches!(decision.candidate_pid, Some(31..=33)) }),
+            "a spared Docker root must prune its backend/WSL descendants: {decisions:?}"
+        );
+        assert!(decisions
+            .iter()
+            .all(|decision| decision.action != DecisionAction::Reap));
     }
 
     /// The sccache-shaped case: no marker, no breakaway, but it owns a
