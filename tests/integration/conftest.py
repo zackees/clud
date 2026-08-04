@@ -122,14 +122,17 @@ def _suppress_windows_console_windows():
         _add_windows_create_no_window(kwargs)
         return original_run(*args, **kwargs)
 
-    def popen(*args, **kwargs):
-        kwargs = dict(kwargs)
-        # Issue #55: same fix as `run` above.
-        _add_windows_create_no_window(kwargs)
-        return original_popen(*args, **kwargs)
+    class Popen(original_popen):
+        """Preserve `Popen` as a class for asyncio/Playwright consumers."""
+
+        def __init__(self, *args, **kwargs):
+            kwargs = dict(kwargs)
+            # Issue #55: same fix as `run` above.
+            _add_windows_create_no_window(kwargs)
+            super().__init__(*args, **kwargs)
 
     patch.setattr(subprocess, "run", run)
-    patch.setattr(subprocess, "Popen", popen)
+    patch.setattr(subprocess, "Popen", Popen)
     try:
         yield
     finally:
