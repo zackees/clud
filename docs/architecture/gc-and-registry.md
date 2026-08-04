@@ -15,7 +15,7 @@ subcommand.
 | File | Concern | Ownership | Lifetime |
 |---|---|---|---|
 | `sessions.redb` (POSIX: `$XDG_STATE_HOME/clud/`; Windows: `%LOCALAPPDATA%\clud\`) | Per-launch session cap | File-lock serialized via `sessions.lock` | Opened for ms at startup and again at shutdown; never across the session |
-| `~/.clud/data.redb` | Tracked-entry GC (`agent-*` worktrees, extern repos, sibling temp clones) | Single-owner: the always-on `clud __daemon` process owns it via the in-process `daemon/gc_service.rs` registry-worker thread; everyone else uses JSON-over-TCP | Opened once at daemon startup; lives until the daemon idle-shuts |
+| `~/.clud/data.redb` | Tracked-entry GC (`agent-*` worktrees, extern repos, sibling temp clones) | Single-owner: the `clud __daemon` process owns it via the in-process `daemon/gc_service.rs` registry-worker thread; everyone else uses JSON-over-TCP | Opened once per daemon lifetime; released after safe idle shutdown (900 seconds by default) |
 
 Why two files? The session cap is a *guardrail* — it needs the simplest possible "open, decide,
 close" semantics so a crashed `clud` can never deadlock the next one. The tracked-entry GC is a
@@ -76,7 +76,10 @@ acquires the advisory lock.
 
 ## Clud daemon (single-owner data.redb)
 
-`~/.clud/data.redb` is held by **exactly one process**: the always-on `clud __daemon` subprocess.
+`~/.clud/data.redb` is held by **exactly one process at a time**: the lazily spawned
+`clud __daemon` subprocess. It is not permanently resident: after 900 seconds without
+owned work it exits and releases the database; the next ordinary daemon-using invocation
+brings it back through `ensure_daemon`.
 Issue #135 Phase 1 originally introduced this as a separate `gc_daemon`; [DD-012] folded it
 into the existing session daemon so there's one daemon per user that hosts both `--detach` /
 `attach` / `list` / etc. and the GC registry. The single-owner-of-redb invariant is unchanged —
@@ -111,6 +114,15 @@ race on the TCP bind), **re-probes** under the lock, and only spawns if still ab
 Spawn is `clud __daemon --state-dir <state_dir>` detached via `trampoline::spawn_detached_self`
 with `invisible_helper_creationflags()` on Windows. Caller polls up to 5 seconds for the info
 file plus a successful TCP connect.
+
+### Idle lifetime policy
+
+`~/.clud/settings.json` seeds `daemon.idle_timeout_secs` to `900`. Set a positive value to
+choose a different timeout; set `0` to disable automatic retirement. The value is read at daemon
+startup, not repeatedly on the listener path. Expiry is safe only when all of these are zero:
+daemon workers, foreground-client leases, active TCP/HTTP/broker connections, and background
+maintenance jobs. Each shutdown appends `daemon_idle_shutdown` with the timeout, elapsed idle
+time, and every counter so an unexpected exit can be diagnosed from the event log.
 
 [DD-012]: ../DESIGN_DECISIONS.md#dd-012-one-always-on-daemon-hosts-both-session-ops-and-the-gc-registry
 

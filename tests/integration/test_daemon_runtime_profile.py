@@ -151,6 +151,25 @@ def _production_idle_env(
     return env
 
 
+def _production_default_idle_env(
+    mock_env: dict[str, str], state_dir: Path, home: Path
+) -> dict[str, str]:
+    """Production profile using the seeded 900-second daemon setting."""
+    env = mock_env.copy()
+    for name in (
+        "CLUD_DAEMON_TEST_MODE",
+        "CLUD_DAEMON_TEST_MAX_LIFETIME_SECS",
+        "CLUD_DAEMON_TEST_IDLE_TIMEOUT_SECS",
+        "CLUD_DAEMON_TEST_HOST_SCANS",
+    ):
+        env.pop(name, None)
+    env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
+    env["CLUD_EXPERIMENTAL_DAEMON"] = "1"
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    return env
+
+
 def test_test_daemon_exits_at_hard_max_without_another_request(
     clud_binary: Path,
     mock_env: dict[str, str],
@@ -213,13 +232,48 @@ def test_configured_production_idle_timeout_exits_and_next_client_restarts(
 
     _wait_for_identity_exit(first, timeout=8)
     assert not (state_dir / "daemon.json").exists()
-    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+    shutdown = next(event for event in _events(state_dir) if event["op"] == "daemon_idle_shutdown")
+    assert {
+        "timeout_secs",
+        "idle_ms",
+        "worker_count",
+        "lease_count",
+        "active_connections",
+        "active_jobs",
+    } <= shutdown.keys()
 
     second = _start_daemon(clud_binary, env, state_dir)
     assert (int(second["pid"]), int(second["pid_start"])) != (
         int(first["pid"]),
         int(first["pid_start"]),
     )
+    stop = subprocess.run(
+        [str(clud_binary), "daemon", "stop"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert stop.returncode == 0, stop.stderr
+
+
+def test_production_idle_timeout_defaults_to_fifteen_minutes(
+    clud_binary: Path,
+    mock_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    home = tmp_path / "home"
+    env = _production_default_idle_env(mock_env, state_dir, home)
+    _start_daemon(clud_binary, env, state_dir)
+
+    profile = next(
+        event for event in _events(state_dir) if event["op"] == "daemon_runtime_profile"
+    )
+    assert profile["production_idle_timeout_secs"] == 900
+    settings = json.loads((home / ".clud" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["daemon"]["idle_timeout_secs"] == 900
+
     stop = subprocess.run(
         [str(clud_binary), "daemon", "stop"],
         capture_output=True,
@@ -276,6 +330,44 @@ def test_detached_worker_blocks_configured_production_idle_timeout(
 
     time.sleep(3)
     assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+    _wait_for_identity_exit(info, timeout=8)
+    assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
+
+
+def test_foreground_client_lease_blocks_configured_production_idle_timeout(
+    clud_binary: Path,
+    mock_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "daemon-state"
+    env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
+    client = subprocess.Popen(
+        [
+            str(clud_binary),
+            "--codex",
+            "--subprocess",
+            "-p",
+            "foreground-lease-keeps-daemon-alive",
+            "--",
+            "--mock-sleep-ms",
+            "5000",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
+    )
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and not (state_dir / "daemon.json").is_file():
+        time.sleep(0.05)
+    assert (state_dir / "daemon.json").is_file(), "foreground client never started a daemon"
+    info = json.loads((state_dir / "daemon.json").read_text(encoding="utf-8"))
+
+    # No repeated daemon RPC is sent here. The client lease alone must outlive
+    # the two-second idle setting while the foreground process is active.
+    time.sleep(3)
+    assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
+    assert wait_for_exit(client, timeout=10) == 0
     _wait_for_identity_exit(info, timeout=8)
     assert "daemon_idle_shutdown" in {event["op"] for event in _events(state_dir)}
 

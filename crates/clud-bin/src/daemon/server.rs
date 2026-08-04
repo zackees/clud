@@ -997,8 +997,8 @@ fn settings_u64(pointer: &str) -> Option<u64> {
         .and_then(serde_json::Value::as_u64)
 }
 
-/// Production idle shutdown remains opt-in in #644. #645 will seed the
-/// conservative default only after its end-to-end safety validation.
+/// Settings seed the conservative 900-second production default. Missing,
+/// malformed, or explicitly zero configuration keeps automatic retirement off.
 fn production_idle_timeout() -> Option<Duration> {
     production_idle_timeout_from(settings_u64("/daemon/idle_timeout_secs"))
 }

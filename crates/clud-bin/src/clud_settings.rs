@@ -128,6 +128,11 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
     }
 
     if let Some(daemon) = seed_object_entry(document, "daemon") {
+        // #645: a daemon that has no owned work may retire after fifteen
+        // minutes. Zero remains the documented explicit opt-out.
+        daemon
+            .entry("idle_timeout_secs".to_string())
+            .or_insert(json!(900));
         let proc_sampler = daemon
             .entry("proc_sampler".to_string())
             .or_insert_with(|| json!({}));
@@ -1418,6 +1423,7 @@ mod tests {
         assert_eq!(document["shell"]["disable_powershell"], false);
         assert_eq!(document["hook_health"]["auto_fix_hooks"], true);
         assert_eq!(document["git"]["pr_wait_fail_fast"], false);
+        assert_eq!(document["daemon"]["idle_timeout_secs"], 900);
         assert_eq!(document["daemon"]["proc_sampler"]["interval_ms"], 2_000);
         // #465 AC 1: both orphan-sweep knobs are seeded so an operator can
         // discover them by reading the file, rather than by reading the source.

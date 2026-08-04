@@ -42,6 +42,23 @@ Three processes, one binary. All files in `crates/clud-bin/src/daemon/`.
 
 The hidden subcommands are declared in `crates/clud-bin/src/args.rs` and accept their state-dir / session-id / pid / spec-file as explicit flags rather than env vars, so a stuck worker shows up in `ps` with a self-describing argv.
 
+### Safe idle retirement
+
+The daemon is lazy rather than permanently resident. New settings seed
+`daemon.idle_timeout_secs` to 900 seconds; a user may select another positive duration or set
+it to `0` to leave automatic retirement disabled. Idle retirement is prevented by daemon workers,
+foreground client leases, live dashboard/top polling, active RPC connections (including the broker
+frame lane), and pending maintenance. `ensure_daemon` transparently starts a replacement on the
+next normal invocation after an idle exit.
+
+The daemon owns its HTTP telemetry endpoint only while it is live. An inherited telemetry URL is
+therefore valid while the foreground client holding its lease remains alive; after that client is
+gone, late telemetry delivery is best-effort and a producer must tolerate the endpoint being gone.
+
+This policy deliberately follows authoritative ownership rather than an RPC-only or fixed
+wall-clock timer: foreground work, detached workers, and maintenance can all remain useful without
+continuous requests. Host process discovery and orphan-snapshot consolidation remain owned by #548.
+
 ## Wire protocol
 
 ### Three lanes
