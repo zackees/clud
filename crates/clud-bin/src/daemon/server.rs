@@ -150,6 +150,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
     // is a follow-up once the prototype contract stabilizes.
     let telemetry = TelemetryStore::new();
     let tool_telemetry = ToolTelemetryStore::new();
+    let dashboard_token = crate::dashboard_auth::generate_token();
     let dashboard_port = spawn_dashboard_with_activity(
         state_dir.to_path_buf(),
         gc_tx.clone(),
@@ -158,9 +159,24 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         default_live_sessions_provider(),
         telemetry,
         tool_telemetry,
+        dashboard_token.clone(),
         test_activity.clone(),
         Some(activity.clone()),
     );
+
+    // Workers inherit these private capability values and use them for their
+    // telemetry POSTs. The value is never returned by a dashboard endpoint.
+    if let Some(dashboard_port) = dashboard_port {
+        // SAFETY: daemon startup completes before it spawns worker threads, so
+        // no concurrent environment readers can observe a partial update.
+        unsafe {
+            std::env::set_var(
+                crate::log_event::ENV_DAEMON_HTTP_SERVER,
+                format!("http://127.0.0.1:{dashboard_port}"),
+            );
+            std::env::set_var(crate::log_event::ENV_DAEMON_HTTP_TOKEN, &dashboard_token);
+        }
+    }
 
     // Tool installation is deferred until after readiness. `clud tool` self-heals
     // its requested file inline, so daemon bringup no longer blocks callers
@@ -171,6 +187,7 @@ pub(super) fn run_daemon(state_dir: &Path) -> i32 {
         pid_start: crate::process_identity::self_start_time(),
         port,
         dashboard_port,
+        dashboard_token: dashboard_port.map(|_| dashboard_token),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     if let Err(err) = write_json_file(&daemon_info_path(state_dir), &info) {

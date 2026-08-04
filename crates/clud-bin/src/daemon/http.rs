@@ -9,8 +9,8 @@
 //! - `POST /gc/purge` — body `{id?, kind?}`; delegates to the existing
 //!   `GcOp::Purge` IPC op and returns `{removed, skipped}`.
 //!
-//! Loopback-only, no authentication — matches the trust model of the
-//! existing JSON IPC listener.
+//! Loopback-only with a per-daemon capability: browser requests must target
+//! an allowed Host and present the capability established by `clud ui`.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
@@ -23,6 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server};
+
+use crate::dashboard_auth::{DashboardAccess, COOKIE_NAME};
 
 use super::activity::DaemonActivity;
 use super::gc_service::{GcRequestMsg, RegistryMsg, WORKER_REPLY_TIMEOUT};
@@ -57,6 +59,7 @@ pub fn spawn_dashboard_telemetry_only(
     ipc_port: u16,
     started_at_unix: i64,
     telemetry: TelemetryStore,
+    dashboard_token: String,
 ) -> Option<u16> {
     let live_provider: LiveSessionsProvider = std::sync::Arc::new(Vec::new);
     let tool_telemetry = ToolTelemetryStore::new();
@@ -68,6 +71,7 @@ pub fn spawn_dashboard_telemetry_only(
         live_provider,
         telemetry,
         tool_telemetry,
+        dashboard_token,
     )
 }
 
@@ -497,6 +501,7 @@ pub struct PurgeResponse {
 /// Spawn the dashboard's HTTP listener in a background thread.
 /// Returns the bound port (or `None` if the listener could not be brought
 /// up — logged once and the daemon continues without a dashboard).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_dashboard(
     state_dir: PathBuf,
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
@@ -505,6 +510,7 @@ pub(super) fn spawn_dashboard(
     live_sessions_provider: LiveSessionsProvider,
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
+    dashboard_token: String,
 ) -> Option<u16> {
     spawn_dashboard_with_activity(
         state_dir,
@@ -514,6 +520,7 @@ pub(super) fn spawn_dashboard(
         live_sessions_provider,
         telemetry,
         tool_telemetry,
+        dashboard_token,
         None,
         None,
     )
@@ -528,6 +535,7 @@ pub(super) fn spawn_dashboard_with_activity(
     live_sessions_provider: LiveSessionsProvider,
     telemetry: TelemetryStore,
     tool_telemetry: ToolTelemetryStore,
+    dashboard_token: String,
     test_activity: Option<TestRuntimeActivity>,
     activity: Option<DaemonActivity>,
 ) -> Option<u16> {
@@ -548,8 +556,11 @@ pub(super) fn spawn_dashboard_with_activity(
     let res = thread::Builder::new()
         .name("clud-dashboard-http".to_string())
         .spawn(move || {
+            let access = DashboardAccess::new(dashboard_token);
             run_dashboard_loop(
                 server,
+                port,
+                access,
                 state_dir,
                 gc_tx,
                 ipc_port,
@@ -575,6 +586,8 @@ pub(super) fn spawn_dashboard_with_activity(
 #[allow(clippy::too_many_arguments)]
 fn run_dashboard_loop(
     server: Server,
+    port: u16,
+    access: DashboardAccess,
     state_dir: PathBuf,
     gc_tx: Option<mpsc::Sender<RegistryMsg>>,
     ipc_port: u16,
@@ -592,6 +605,23 @@ fn run_dashboard_loop(
         let method = request.method().clone();
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or(&url).to_string();
+        let host = request_header(&request, "Host");
+        let cookie = request_header(&request, "Cookie");
+        let query_token = query_parameter(&url, "token");
+        if !access.allows_host(host.as_deref(), port)
+            || !access.allows_token(query_token.as_deref(), cookie.as_deref())
+        {
+            respond_json(
+                request,
+                403,
+                json_error_bytes("dashboard capability required").as_slice(),
+            );
+            continue;
+        }
+        if query_token.as_deref() == Some(access.token()) {
+            respond_capability_bootstrap(request, &access, &path);
+            continue;
+        }
         // Telemetry detail route — `/telemetry/by-pid/<u32>`. Matched
         // first so the catch-all SPA fallback below never claims it.
         if method == Method::Get {
@@ -1179,6 +1209,7 @@ pub fn read_dashboard_info(state_dir: &Path) -> io::Result<DashboardInfo> {
         pid: info.pid,
         ipc_port: info.port,
         dashboard_port: info.dashboard_port,
+        dashboard_token: info.dashboard_token,
     })
 }
 
@@ -1188,19 +1219,38 @@ pub struct DashboardInfo {
     pub pid: u32,
     pub ipc_port: u16,
     pub dashboard_port: Option<u16>,
+    pub dashboard_token: Option<String>,
 }
 
-pub fn dashboard_url_from_info(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/")
+pub fn dashboard_url_from_info(port: u16, token: &str) -> String {
+    format!("http://127.0.0.1:{port}/?token={token}")
+}
+
+/// Extract a request header without retaining a reference to `Request`.
+fn request_header(request: &Request, name: &'static str) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(name))
+        .map(|header| header.value.as_str().to_string())
+}
+
+fn query_parameter(url: &str, name: &str) -> Option<String> {
+    url.split_once('?')?.1.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value.to_string())
+    })
 }
 
 /// Fetch `/state.json` from the running dashboard. Used by `clud ui --json`.
-pub fn fetch_state_json(port: u16) -> io::Result<String> {
+pub fn fetch_state_json(port: u16, token: &str) -> io::Result<String> {
     use std::io::Write;
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let req = "GET /state.json HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let req = format!(
+        "GET /state.json HTTP/1.0\r\nHost: localhost:{port}\r\nCookie: {COOKIE_NAME}={token}\r\nConnection: close\r\n\r\n"
+    );
     stream.write_all(req.as_bytes())?;
     stream.flush()?;
     let mut buf = Vec::with_capacity(4096);
@@ -1225,6 +1275,21 @@ fn find_body_start(buf: &[u8]) -> Option<usize> {
 }
 
 // ---------- tiny_http helpers ----------
+
+fn respond_capability_bootstrap(request: Request, access: &DashboardAccess, path: &str) {
+    let location = if path.is_empty() { "/" } else { path };
+    let response = Response::empty(302)
+        .with_header(
+            Header::from_bytes(&b"Location"[..], location.as_bytes())
+                .expect("redirect path is a valid header"),
+        )
+        .with_header(
+            Header::from_bytes(&b"Set-Cookie"[..], access.cookie_header_value().as_bytes())
+                .expect("capability cookie is a valid header"),
+        )
+        .with_header(no_cache_header());
+    let _ = request.respond(response);
+}
 
 fn respond_html(request: Request, status: u16, body: &[u8]) {
     let response = Response::from_data(body.to_vec())

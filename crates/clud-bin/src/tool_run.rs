@@ -33,7 +33,7 @@ use running_process::{
 };
 use serde::Serialize;
 
-use crate::log_event::ENV_DAEMON_HTTP_SERVER;
+use crate::log_event::{ENV_DAEMON_HTTP_SERVER, ENV_DAEMON_HTTP_TOKEN};
 use crate::session_index::{
     allocate_next_id, append_event, unix_millis_now, IndexEvent, SessionContext,
 };
@@ -972,6 +972,7 @@ fn build_child_env(cache_dir: &std::path::Path) -> Vec<(String, String)> {
 #[derive(Debug, Clone)]
 struct ToolTelemetry {
     server: Option<String>,
+    token: Option<String>,
     id: String,
     name: String,
     start_time_ms: u64,
@@ -998,8 +999,12 @@ impl ToolTelemetry {
         let server = std::env::var(ENV_DAEMON_HTTP_SERVER)
             .ok()
             .filter(|value| !value.is_empty());
+        let token = std::env::var(ENV_DAEMON_HTTP_TOKEN)
+            .ok()
+            .filter(|value| !value.is_empty());
         let telemetry = Self {
             server,
+            token,
             id,
             name: name.to_string(),
             start_time_ms,
@@ -1010,6 +1015,9 @@ impl ToolTelemetry {
 
     fn send_start(&self) {
         let Some(server) = self.server.clone() else {
+            return;
+        };
+        let Some(token) = self.token.clone() else {
             return;
         };
         let id = self.id.clone();
@@ -1025,12 +1033,15 @@ impl ToolTelemetry {
                 exit_code: None,
                 stderr_tail: None,
             };
-            post_tool_telemetry(&server, &event);
+            post_tool_telemetry(&server, &token, &event);
         });
     }
 
     fn finish(&self, exit_code: i32, stderr_tail: Option<String>) {
         let Some(server) = self.server.as_ref() else {
+            return;
+        };
+        let Some(token) = self.token.as_ref() else {
             return;
         };
         let stderr_tail = if exit_code == 0 { None } else { stderr_tail };
@@ -1043,11 +1054,11 @@ impl ToolTelemetry {
             exit_code: Some(exit_code),
             stderr_tail: stderr_tail.as_deref(),
         };
-        post_tool_telemetry(server, &event);
+        post_tool_telemetry(server, token, &event);
     }
 }
 
-fn post_tool_telemetry(server: &str, event: &ToolTelemetryEvent<'_>) {
+fn post_tool_telemetry(server: &str, token: &str, event: &ToolTelemetryEvent<'_>) {
     let Ok(body) = serde_json::to_vec(event) else {
         return;
     };
@@ -1057,6 +1068,8 @@ fn post_tool_telemetry(server: &str, event: &ToolTelemetryEvent<'_>) {
         .build()
         .post(&url)
         .set("Content-Type", "application/json")
+        .set("Host", &crate::log_event::dashboard_host_header(server))
+        .set("Cookie", &format!("clud_dashboard_token={token}"))
         .send_bytes(&body);
 }
 

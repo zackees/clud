@@ -24,6 +24,10 @@ use serde::{Deserialize, Serialize};
 /// caller is responsible for exporting it).
 pub const ENV_DAEMON_HTTP_SERVER: &str = "CLUD_DAEMON_HTTP_SERVER";
 
+/// Capability sent with telemetry POSTs. The daemon supplies this only to its
+/// child environment, so third-party pages cannot invoke mutable dashboard routes.
+pub const ENV_DAEMON_HTTP_TOKEN: &str = "CLUD_DAEMON_HTTP_TOKEN";
+
 /// HTTP POST timeout for the logger. Tight on purpose — hook callers
 /// must not block on a stuck daemon.
 const POST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -55,6 +59,18 @@ pub fn run(cmd: &str, fail_on_no_server: bool) -> i32 {
         }
     };
 
+    let token = std::env::var(ENV_DAEMON_HTTP_TOKEN).ok();
+    let token = match token {
+        Some(value) if !value.is_empty() => value,
+        _ => {
+            if fail_on_no_server {
+                eprintln!("[clud log] ${ENV_DAEMON_HTTP_TOKEN} is unset; cannot post telemetry");
+                return 2;
+            }
+            return 0;
+        }
+    };
+
     let payload = build_payload(cmd);
     let url = format!("{}/telemetry/log", server.trim_end_matches('/'));
 
@@ -74,6 +90,8 @@ pub fn run(cmd: &str, fail_on_no_server: bool) -> i32 {
         .build()
         .post(&url)
         .set("Content-Type", "application/json")
+        .set("Host", &dashboard_host_header(&server))
+        .set("Cookie", &format!("clud_dashboard_token={token}"))
         .send_bytes(&body);
 
     match result {
@@ -95,6 +113,14 @@ pub fn run(cmd: &str, fail_on_no_server: bool) -> i32 {
     }
 }
 
+pub(crate) fn dashboard_host_header(server: &str) -> String {
+    server
+        .strip_prefix("http://")
+        .and_then(|value| value.split('/').next())
+        .unwrap_or("localhost")
+        .to_string()
+}
+
 fn build_payload(cmd: &str) -> TelemetryPayload {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -104,7 +130,7 @@ fn build_payload(cmd: &str) -> TelemetryPayload {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let env: BTreeMap<String, String> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("CLUD_"))
+        .filter(|(key, _)| key.starts_with("CLUD_") && key != ENV_DAEMON_HTTP_TOKEN)
         .collect();
     TelemetryPayload {
         parent_pid: parent_pid(),

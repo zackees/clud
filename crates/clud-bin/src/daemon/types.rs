@@ -67,6 +67,11 @@ pub(super) struct DaemonInfo {
     /// without the field, so reads tolerate its absence.
     #[serde(default)]
     pub(super) dashboard_port: Option<u16>,
+    /// Per-daemon capability needed to access the loopback dashboard. This is
+    /// deliberately absent from dashboard responses; it is only persisted in
+    /// the user-private daemon-info file so `clud ui` can bootstrap a browser.
+    #[serde(default)]
+    pub(super) dashboard_token: Option<String>,
     /// Issue #192: the `CARGO_PKG_VERSION` of the binary that launched
     /// this daemon. `ensure_daemon` uses this to detect a stale daemon
     /// after an in-place upgrade and restart it so bug-fix releases (e.g.
