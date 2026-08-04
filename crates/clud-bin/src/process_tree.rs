@@ -135,31 +135,6 @@ impl TopologySnapshot {
         ProcessIdentity::observe_in(&self.system, pid)
     }
 
-    /// Every PID rooted at one of `roots`, including the roots themselves.
-    /// A reaper uses this to turn a spared desktop/service root into a family
-    /// exemption before it tries any separately-selected helper as a root.
-    pub fn subtree_pids(
-        &self,
-        roots: &std::collections::HashSet<u32>,
-    ) -> std::collections::HashSet<u32> {
-        let mut protected = std::collections::HashSet::new();
-        let mut pending: Vec<Pid> = roots.iter().copied().map(Pid::from_u32).collect();
-        while let Some(pid) = pending.pop() {
-            if !protected.insert(pid.as_u32()) {
-                continue;
-            }
-            pending.extend(
-                self.system
-                    .processes()
-                    .iter()
-                    .filter_map(|(child_pid, process)| {
-                        (process.parent() == Some(pid)).then_some(*child_pid)
-                    }),
-            );
-        }
-        protected
-    }
-
     /// [`kill_tree_filtered`] against this snapshot rather than a fresh walk.
     ///
     /// Selection and termination therefore share one view of the process

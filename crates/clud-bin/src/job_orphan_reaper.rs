@@ -127,7 +127,6 @@ pub(crate) enum ReapDecisionReason {
     /// Owns a listening endpoint, so later unrelated invocations discover and
     /// reuse it. This is what a build-cache or language server *is*.
     ListeningEndpoint,
-    InteractiveDesktopApplication,
     DockerDesktopProcessFamily,
     /// Matched the operator's configured spare-list. Last resort, and data
     /// rather than code — see [`ProcessFacts::spare_listed`].
@@ -150,7 +149,6 @@ impl ReapDecisionReason {
             Self::SessionLeader => "session_leader",
             Self::ForeignTokenOwner => "foreign_token_owner",
             Self::ListeningEndpoint => "listening_endpoint",
-            Self::InteractiveDesktopApplication => "interactive_desktop_application",
             Self::DockerDesktopProcessFamily => "docker_desktop_process_family",
             Self::ConfiguredSpareList => "configured_spare_list",
             #[cfg(windows)]
@@ -195,7 +193,6 @@ impl From<SpareReason> for ReapDecisionReason {
             SpareReason::ForeignTokenOwner => Self::ForeignTokenOwner,
             SpareReason::DeclaredDaemon => Self::DeclaredDaemon,
             SpareReason::ListeningEndpoint => Self::ListeningEndpoint,
-            SpareReason::InteractiveDesktopApplication => Self::InteractiveDesktopApplication,
             SpareReason::DockerDesktopProcessFamily => Self::DockerDesktopProcessFamily,
             SpareReason::ConfiguredSpareList => Self::ConfiguredSpareList,
         }
@@ -1995,9 +1992,6 @@ mod imp {
             .map(|(pid, _)| *pid)
             .filter(|pid| listening.contains(pid))
             .collect();
-        snapshot.interactive_desktop_roots = crate::reaper_facts::interactive_desktop_roots(
-            &survivors.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
-        );
 
         snapshot
     }
@@ -2908,46 +2902,6 @@ mod lifecycle_tests {
             signal_for(&facts, 30, "dockerd.exe"),
             Some(ReapDecisionReason::ServiceSession)
         );
-    }
-
-    #[test]
-    fn interactive_desktop_root_prunes_its_versioned_helpers_while_git_is_reaped() {
-        let facts = facts_with(|facts| {
-            facts.interactive_desktop_roots.insert(30);
-        });
-        let processes = [
-            process(10, 1, "codex.exe", true),
-            process(20, 10, "powershell.exe", false),
-            process(30, 20, "sublime_text.exe", true),
-            process(31, 30, "plugin_host-3.8.exe", true),
-            process(32, 30, "crash_handler.exe", true),
-            process(40, 20, "git.exe", true),
-        ];
-        let spares = super::build_spare_list(
-            &facts,
-            processes
-                .iter()
-                .map(|process| (process.pid, process.image_name.clone())),
-        );
-        let graph = super::ProcessGraph::build(
-            processes.iter(),
-            &[RegisteredBackend::new(10, "codex.exe", 10)],
-        );
-        let decisions = super::plan_shell_exit(&graph, &spares, 20);
-
-        assert!(decisions.iter().any(|decision| {
-            decision.candidate_pid == Some(30)
-                && decision.action == DecisionAction::Spare
-                && decision.reason == ReapDecisionReason::InteractiveDesktopApplication
-        }));
-        assert!(decisions
-            .iter()
-            .all(|decision| { !matches!(decision.candidate_pid, Some(31 | 32)) }));
-        assert!(decisions.iter().any(|decision| {
-            decision.candidate_pid == Some(40)
-                && decision.action == DecisionAction::Reap
-                && decision.reason == ReapDecisionReason::LeakedToolClient
-        }));
     }
 
     /// #773: Docker Desktop is a service family even though its Windows UI and
