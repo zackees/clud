@@ -17,6 +17,7 @@ from ._daemon_helpers import (
     launch_detached,
     managed_env,
     pid_is_alive,
+    run_until,
     session_metadata,
     wait_for_exit,
     wait_for_pids_to_exit,
@@ -183,22 +184,22 @@ class TestDaemonSessionHardening:
         )
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
-            result = subprocess.run(
+            # The detached foreground client can exit before the daemon writes
+            # its session record, and removal from `list` is asynchronous (#759).
+            result = run_until(
                 [str(clud_binary), "kill", session_id],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0 and "killed session" in r.stderr,
+                what="session to become killable",
             )
             assert result.returncode == 0
             assert "killed session" in result.stderr
 
-            listed = subprocess.run(
+            listed = run_until(
                 [str(clud_binary), "list"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: session_id not in r.stdout,
+                what="killed session to leave the list",
             )
             assert session_id not in listed.stdout
         finally:
@@ -230,21 +231,21 @@ class TestDaemonSessionHardening:
             "30000",
         )
         try:
-            result = subprocess.run(
+            # Each detached launch returns before its daemon session may be
+            # persisted, so `kill --all` must retry until they are visible (#759).
+            result = run_until(
                 [str(clud_binary), "kill", "--all"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0,
+                what="sessions to become killable",
             )
             assert result.returncode == 0
 
-            listed = subprocess.run(
+            listed = run_until(
                 [str(clud_binary), "list"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: session_id_1 not in r.stdout and session_id_2 not in r.stdout,
+                what="killed sessions to leave the list",
             )
             assert session_id_1 not in listed.stdout
             assert session_id_2 not in listed.stdout
@@ -303,12 +304,16 @@ class TestDaemonSessionHardening:
         )
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
-            listed = subprocess.run(
+            # `list` is a daemon-facing view: poll until this new record lands.
+            listed = run_until(
                 [str(clud_binary), "list"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: (
+                    r.returncode == 0
+                    and "my-task" in r.stdout
+                    and session_id in r.stdout
+                ),
+                what="named session to appear in the list",
             )
             assert listed.returncode == 0
             assert "my-task" in listed.stdout
@@ -366,12 +371,12 @@ class TestDaemonSessionHardening:
         )
         try:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
-            result = subprocess.run(
+            # Name resolution depends on the same asynchronously persisted record.
+            result = run_until(
                 [str(clud_binary), "kill", "kill-by-name"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0 and "killed session" in r.stderr,
+                what="named session to become killable",
             )
             assert result.returncode == 0
             assert "killed session" in result.stderr
@@ -478,12 +483,11 @@ class TestDaemonSessionHardening:
             )
 
             # `clud list` must not show this dead session as running.
-            listed = subprocess.run(
+            listed = run_until(
                 [str(clud_binary), "list"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
+                env,
+                lambda r: r.returncode == 0 and session_id not in r.stdout,
+                what="crashed session to leave the list",
             )
             assert listed.returncode == 0
             assert session_id not in listed.stdout, (
