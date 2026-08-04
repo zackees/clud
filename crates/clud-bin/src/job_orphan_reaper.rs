@@ -1220,6 +1220,14 @@ mod imp {
         }
     }
 
+    /// The two immutable kernel handles consumed by the listener thread. They
+    /// travel together so adding diagnostics does not keep growing the
+    /// listener's argument list past the project Clippy limit.
+    struct ListenerHandles {
+        port: HANDLE,
+        job_value: usize,
+    }
+
     pub struct ForegroundJobTracker {
         job: HANDLE,
         port: HANDLE,
@@ -1292,8 +1300,10 @@ mod imp {
                         let scan_backoff = Arc::clone(&scan_backoff);
                         move || {
                             listen(
-                                HANDLE(port_value as *mut c_void),
-                                job_value,
+                                ListenerHandles {
+                                    port: HANDLE(port_value as *mut c_void),
+                                    job_value,
+                                },
                                 stop,
                                 backends,
                                 processes,
@@ -1472,8 +1482,7 @@ mod imp {
     }
 
     fn listen(
-        port: HANDLE,
-        job_value: usize,
+        handles: ListenerHandles,
         stop: Arc<AtomicBool>,
         backends: Arc<Mutex<Vec<RegisteredBackend>>>,
         processes: Arc<Mutex<TrackerProcesses>>,
@@ -1487,8 +1496,10 @@ mod imp {
                 t.checkpoint();
             });
             let (mut message, mut key, mut payload) = (0u32, 0usize, null_mut());
-            if unsafe { GetQueuedCompletionStatus(port, &mut message, &mut key, &mut payload, 200) }
-                .is_err()
+            if unsafe {
+                GetQueuedCompletionStatus(handles.port, &mut message, &mut key, &mut payload, 200)
+            }
+            .is_err()
             {
                 if unsafe { GetLastError().0 } == WAIT_TIMEOUT.0 {
                     let metadata_complete =
@@ -1503,7 +1514,7 @@ mod imp {
                         &backends,
                         &collector,
                         &telemetry,
-                        job_value,
+                        handles.job_value,
                         metadata_complete,
                     );
                     continue;
@@ -1529,7 +1540,9 @@ mod imp {
             batch.push((message, payload as usize as u32));
             while batch.len() < MAX_DRAIN_BATCH {
                 let (mut m, mut k, mut p) = (0u32, 0usize, null_mut());
-                if unsafe { GetQueuedCompletionStatus(port, &mut m, &mut k, &mut p, 0) }.is_err() {
+                if unsafe { GetQueuedCompletionStatus(handles.port, &mut m, &mut k, &mut p, 0) }
+                    .is_err()
+                {
                     // Either the queue is empty (WAIT_TIMEOUT) or the port is
                     // closing. Both mean "stop draining"; a closing port is
                     // caught by the blocking wait at the top of the loop.
@@ -1550,7 +1563,7 @@ mod imp {
                 &collector,
                 &telemetry,
                 &scan_backoff,
-                job_value,
+                handles.job_value,
             );
         }
     }
