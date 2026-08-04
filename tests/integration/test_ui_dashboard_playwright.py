@@ -118,7 +118,7 @@ class TestUiDashboardShowsLiveSessions:
         state_dir = tmp_path / "state"
         registry_dir = tmp_path / "registry"
         state_dir.mkdir()
-        registry_dir.mkdir()
+        registry_dir.mkdir(exist_ok=True)
         env = _dashboard_env(mock_env, state_dir, registry_dir)
 
         # Copy the binary into a private dir so we don't race the global
