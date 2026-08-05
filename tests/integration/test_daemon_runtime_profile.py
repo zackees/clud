@@ -126,6 +126,18 @@ def _wait_for_events(
     )
 
 
+def _dashboard_state_request(info: dict[str, object]) -> urllib.request.Request:
+    """Build an authenticated request for the daemon's capability dashboard."""
+    dashboard_port = info.get("dashboard_port")
+    dashboard_token = info.get("dashboard_token")
+    assert isinstance(dashboard_port, int), info
+    assert isinstance(dashboard_token, str), info
+    return urllib.request.Request(
+        f"http://127.0.0.1:{dashboard_port}/state.json",
+        headers={"Cookie": f"clud_dashboard_token={dashboard_token}"},
+    )
+
+
 def _production_idle_env(
     mock_env: dict[str, str], state_dir: Path, home: Path, timeout_secs: int
 ) -> dict[str, str]:
@@ -292,13 +304,10 @@ def test_dashboard_polling_blocks_configured_production_idle_timeout(
     state_dir = tmp_path / "daemon-state"
     env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
     info = _start_daemon(clud_binary, env, state_dir)
-    dashboard_port = int(info["dashboard_port"])
 
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{dashboard_port}/state.json", timeout=2
-        ) as response:
+        with urllib.request.urlopen(_dashboard_state_request(info), timeout=2) as response:
             assert response.status == 200
             response.read()
         assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
@@ -403,14 +412,10 @@ def test_dashboard_activity_defers_test_idle_expiry(
     env["CLUD_DAEMON_TEST_MAX_LIFETIME_SECS"] = "20"
     env["CLUD_DAEMON_TEST_IDLE_TIMEOUT_SECS"] = "2"
     info = _start_daemon(clud_binary, env, state_dir)
-    dashboard_port = int(info["dashboard_port"])
 
     polling_deadline = time.monotonic() + 4
     while time.monotonic() < polling_deadline:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{dashboard_port}/state.json",
-            timeout=2,
-        ) as response:
+        with urllib.request.urlopen(_dashboard_state_request(info), timeout=2) as response:
             assert response.status == 200
             response.read()
         assert process_identity_is_alive(
