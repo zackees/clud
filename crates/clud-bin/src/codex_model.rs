@@ -239,6 +239,81 @@ fn looks_like_full_id(value: &str) -> bool {
     value.contains('-') || value.contains('.')
 }
 
+// ---------------------------------------------------------------------------
+// Model picker
+// ---------------------------------------------------------------------------
+
+/// The one row clud can add to Claude Code's `/model` picker.
+///
+/// # Why one row and not three (issue #820)
+///
+/// Read against Claude Code 2.1.212's own picker builder, there are exactly
+/// six sources of rows, and none of them can be made to yield three honest
+/// Codex entries:
+///
+/// 1. The built-in Anthropic lineup, optionally *renamed* by
+///    `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`. Repointing those at
+///    Codex ids is the tier hijacking DD-035 already rejected: it burns the
+///    Anthropic names and lies about what is running.
+/// 2. `ANTHROPIC_CUSTOM_MODEL_OPTION` — read once, as a scalar, and pushed as
+///    a single `{value, label, description}`. There is no indexed, repeated,
+///    or delimited form: the binary contains exactly four names in this
+///    family (`…_OPTION`, `…_OPTION_NAME`, `…_OPTION_DESCRIPTION`,
+///    `…_OPTION_SUPPORTED_CAPABILITIES`), all scalars.
+/// 3. Gateway discovery (`GET /v1/models`), which needs an opt-in
+///    `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, does not run while
+///    non-essential traffic is disabled (clud forces that off), and filters
+///    the response with `/^(claude|anthropic)/i` — dropping every id the
+///    bridge serves. #820 rules it out explicitly, as does DD-035.
+/// 4. `additionalModelOptionsCache` in the user's global config: a cache of
+///    Anthropic's *own* server response, refreshed behind our back. Not an
+///    extension point.
+/// 5. The `availableModels` settings allowlist, which only ever *adds* ids
+///    matching `anthropic.…` or `claude-…`; `gpt-5.6-*` is skipped.
+/// 6. Whatever model is currently selected, which is a row because it is
+///    selected — not a way to advertise one that is not.
+///
+/// So the honest ceiling is one row, and the row's description is the only
+/// place the other two models can be named. `/model <id>` still accepts any
+/// string (a custom `ANTHROPIC_BASE_URL` owns the namespace), so naming them
+/// is enough to make them reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerEntry {
+    /// `ANTHROPIC_CUSTOM_MODEL_OPTION` — sent back verbatim as the request's
+    /// model when the row is chosen, so it must round-trip [`ModelSpec::parse`].
+    pub value: String,
+    /// `ANTHROPIC_CUSTOM_MODEL_OPTION_NAME` — the row's label.
+    pub name: String,
+    /// `ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION` — the catalog, because
+    /// there is no second row to put it in.
+    pub description: String,
+}
+
+/// Build the picker row for a selection.
+pub fn picker_entry(selection: &ModelSpec) -> PickerEntry {
+    let value = selection.display();
+    PickerEntry {
+        name: format!("Codex {value}"),
+        description: picker_description(),
+        value,
+    }
+}
+
+/// Rendered from the catalog and the effort ladder so the row can never
+/// advertise a model or an effort the parser would then reject.
+fn picker_description() -> String {
+    let models = CODEX_MODELS
+        .iter()
+        .map(|model| format!("{} = {} ({})", model.alias, model.id, model.default_effort))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Codex through clud. Claude Code shows one custom row, so switch with \
+         /model <name>: {models}. Append @<effort> to override: {}.",
+        Effort::catalog()
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionError {
     EmptyModel,
@@ -370,6 +445,65 @@ mod tests {
                 "{raw} must round-trip"
             );
         }
+    }
+
+    /// Issue #820: the one row the harness will render has to carry the whole
+    /// catalog, because there is no second row to put the rest in.
+    #[test]
+    fn the_single_picker_row_names_every_selectable_model() {
+        let entry = picker_entry(&ModelSpec::parse("sol").unwrap());
+
+        // The row's value is what `/model` will send, so it must survive the
+        // same parser the bridge resolves requests with.
+        assert_eq!(entry.value, "gpt-5.6-sol");
+        assert_eq!(ModelSpec::parse(&entry.value).unwrap().model, "gpt-5.6-sol");
+        assert!(entry.name.contains("gpt-5.6-sol"), "{}", entry.name);
+
+        // Terra and luna are unreachable from a second row, so the
+        // description is the only place a user can discover them.
+        for model in CODEX_MODELS {
+            assert!(
+                entry.description.contains(model.id),
+                "{} must name {}",
+                entry.description,
+                model.id
+            );
+            assert!(
+                entry.description.contains(model.alias),
+                "{} must name {}",
+                entry.description,
+                model.alias
+            );
+        }
+        for effort in Effort::ALL {
+            assert!(
+                entry.description.contains(effort.as_str()),
+                "{} must name {effort}",
+                entry.description
+            );
+        }
+    }
+
+    /// An `@effort` selection stays on the row verbatim: the value is what the
+    /// harness sends back, so dropping the suffix would silently reset effort
+    /// the moment a user picked their own row out of the picker.
+    #[test]
+    fn the_picker_row_keeps_the_effort_suffix_it_was_launched_with() {
+        let entry = picker_entry(&ModelSpec::parse("luna@xhigh").unwrap());
+        assert_eq!(entry.value, "gpt-5.6-luna@xhigh");
+        assert_eq!(
+            ModelSpec::parse(&entry.value).unwrap(),
+            ModelSpec::parse("luna@xhigh").unwrap()
+        );
+    }
+
+    /// A forward-compatible id has no catalog row, so the label falls back to
+    /// the id rather than inventing a short name for it.
+    #[test]
+    fn an_unknown_full_id_still_produces_a_usable_row() {
+        let entry = picker_entry(&ModelSpec::parse("gpt-5.7-nova@high").unwrap());
+        assert_eq!(entry.value, "gpt-5.7-nova@high");
+        assert!(entry.name.contains("gpt-5.7-nova@high"), "{}", entry.name);
     }
 
     #[test]

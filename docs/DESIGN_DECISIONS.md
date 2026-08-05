@@ -1574,3 +1574,76 @@ surprising billing/authentication source change. Rollback remains a single
   no-status-after-first-byte invariant stands. The status cannot change, so the
   fix is to make the failure *visible* — log, banner, and a named SSE error
   frame — not to pretend the status is still choosable.
+
+## DD-038: The Codex picker gets one honest row, always, carrying the catalog
+
+**Status:** Accepted
+
+**Context:** zackees/clud#820 asked for Sol, Terra, and Luna as three
+independently selectable entries in Claude Code's `/model` picker. DD-035 had
+already delivered `<alias>@<effort>` selection and a *single*
+`ANTHROPIC_CUSTOM_MODEL_OPTION` row, explicitly deferring the full list.
+
+The premise was checked against Claude Code 2.1.212's own picker builder rather
+than assumed. Six sources contribute rows, and none yields three honest Codex
+entries:
+
+1. **The built-in Anthropic lineup**, renameable via
+   `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` — the tier hijacking
+   DD-035 rejected, because it burns the Anthropic names and lies about what
+   is running.
+2. **`ANTHROPIC_CUSTOM_MODEL_OPTION`** — read once, as a scalar, and pushed as
+   one `{value, label, description}`. The binary contains exactly four names
+   in this family (`…_OPTION`, `…_OPTION_NAME`, `…_OPTION_DESCRIPTION`,
+   `…_OPTION_SUPPORTED_CAPABILITIES`), all scalars. There is no indexed,
+   repeated, or delimited form, so it cannot be made to emit a second row.
+3. **Gateway discovery (`GET /v1/models`)** — needs an opt-in
+   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, is skipped while
+   non-essential traffic is disabled (clud forces that off), and filters the
+   response with `/^(claude|anthropic)/i`, dropping every id the bridge
+   serves. Ruled out by #820 and by DD-035.
+4. **`additionalModelOptionsCache`** in the user's global config — a cache of
+   Anthropic's own server response, refreshed behind our back. Not an
+   extension point.
+5. **The `availableModels` settings allowlist** — an allowlist, and it only
+   ever *adds* ids matching `anthropic.…` or `claude-…`; `gpt-5.6-*` is
+   skipped.
+6. **The currently selected model**, which is a row because it is selected —
+   not a way to advertise one that is not.
+
+**Decision:** One row is the honest ceiling, so make that row do all the work.
+`codex_model::picker_entry` owns the row and is rendered from `CODEX_MODELS`
+and `Effort::ALL`, so it can never advertise a model or an effort
+`ModelSpec::parse` would then reject. Two behaviours follow:
+
+- **The description carries the catalog.** It names every alias, wire id, and
+  per-model default effort, plus the effort ladder — because there is no
+  second row to put them in, and `/model <id>` accepts any string once a
+  custom `ANTHROPIC_BASE_URL` owns the namespace, so naming them is enough to
+  make them reachable.
+- **The row is unconditional.** It previously appeared only with an explicit
+  `--model`; an unpinned `clud --codex` therefore showed a picker of
+  Anthropic names, *all* of which quietly ran on `gpt-5.6-terra`. The row now
+  always exists and spells the model that will actually be billed.
+
+**Consequences:** The picker is honest in the default case for the first time,
+and the two models a user did not launch with are discoverable from inside the
+picker instead of only from `--help`. `ANTHROPIC_CUSTOM_MODEL_OPTION` only adds
+a row — it does not change the active model — so an unpinned launch still
+resolves `claude*` ids to the bridge default exactly as before. A user who
+exports any of the three variables keeps their own value (`push_default`).
+
+**Alternatives rejected:**
+
+- **Three rows via any of the six sources above** — impossible without either
+  misrepresenting Codex models as Anthropic ones or turning on the discovery
+  path #820 forbids.
+- **Writing `additionalModelOptionsCache` into `~/.claude.json`.** It would
+  render three rows, and it is a cache the harness owns and overwrites; a
+  clud that edits it is a clud that breaks on the next refresh.
+- **Declaring `ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES`**
+  (`effort`, `xhigh_effort`, `max_effort` are real capability tokens) to light
+  up the native effort control for the Codex row. Tempting and out of scope
+  here: it changes which `output_config.effort` values the harness sends, and
+  DD-035 made a stated-but-unsupported effort a 400. It needs its own issue
+  and its own upstream check, not a rider on a picker-presentation change.

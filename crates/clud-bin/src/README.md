@@ -67,7 +67,11 @@ Entry and orchestration:
   re-confirmed against OpenAI's model guidance in #821). Selection rides the
   model string because that is the one field a custom `ANTHROPIC_BASE_URL`
   gateway is allowed to own, so it cannot be dropped in transit the way
-  `output_config` can (DD-035).
+  `output_config` can (DD-035). Also owns `picker_entry` / `PickerEntry`
+  (#820, DD-038) -- the single `/model` row clud can add, rendered from the
+  same table so it cannot advertise a model or effort the parser rejects.
+  Its doc comment enumerates the six row sources in Claude Code and why none
+  of them yields three Codex entries.
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
   mapping: typed in/out structs, transcript-order-preserving tool loops,
   auth-mode-dependent system placement, reasoning round-trip, and bounded
@@ -105,7 +109,10 @@ Entry and orchestration:
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every
-  runner return path.
+  runner return path. The `ANTHROPIC_CUSTOM_MODEL_OPTION*` overlay is
+  unconditional on the bridge route (#820, DD-038): the harness renders exactly
+  one custom `/model` row, so it always exists and always spells the model that
+  will be billed, even when no `--model` was passed.
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a
