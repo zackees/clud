@@ -147,6 +147,17 @@ REJECTED: list[tuple[str, str, str]] = [
     ("cargo install cargo-xwin", "cargo install cargo-xwin --locked", ".sh"),
     ("cargo install cargo-zigbuild", "cargo install cargo-zigbuild", ".sh"),
     ("pip install ziglang", "pip install ziglang==0.13.0", ".sh"),
+    ("ziglang dependency declaration", '    "ziglang>=0.15.2,<0.16",', ".toml"),
+    (
+        "python module ziglang invocation",
+        'subprocess.run([sys.executable, "-m", "ziglang", "c++"])',
+        ".py",
+    ),
+    (
+        "versioned Python module ziglang invocation",
+        'subprocess.run(["python3.13", "-m", "ziglang", "c++"])',
+        ".py",
+    ),
     ("setup-zig action", "      - uses: goto-bus-stop/setup-zig@v2", ".yml"),
     ("mlugg setup-zig action", "      - uses: mlugg/setup-zig@v1", ".yml"),
     # ---------------------------------------------------------------- #714 --
@@ -373,7 +384,16 @@ ACCEPTED: list[tuple[str, str, str]] = [
     # The marker is read from the original line, so a trailing `//` marker is
     # not itself blanked by the comment scanner before it can be seen.
     ("a Rust trailing-comment marker", 'let t = "cargo xwin"; // cross-lint: allow', ".rs"),
-    ("the ziglang test dependency pin", '    "ziglang>=0.15.2,<0.16",', ".toml"),
+    (
+        "the Zig-free WASM fixture is binary data",
+        "WASM = b'\\x00asm\\x01\\x00\\x00\\x00'",
+        ".py",
+    ),
+    (
+        "the WASM fixture regeneration instruction",
+        "wasm-tools parse tests/fixtures/wasm/hello.wat -o tests/fixtures/wasm/hello.wasm",
+        ".py",
+    ),
     (
         "an install-action for an unrelated tool",
         "      - uses: taiki-e/install-action@v2\n        with:\n          tool: cargo-nextest",
@@ -403,6 +423,13 @@ def test_the_repository_is_currently_clean():
     is a red build. Asserting it separately means a failure names *this* rule
     rather than surfacing as a generic lint exit code."""
     assert main() == 0
+
+
+def test_pyproject_is_scanned_for_ziglang():
+    from ci.banned_cross_tools import _iter_files
+
+    paths = {path.name for path in _iter_files()}
+    assert "pyproject.toml" in paths
 
 
 def test_the_install_action_violation_points_at_the_action_line():

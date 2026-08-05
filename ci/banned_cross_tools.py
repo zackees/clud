@@ -217,6 +217,16 @@ BANNED_INSTALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.MULTILINE,
         ),
     ),
+    (
+        "ziglang dependency declaration",
+        re.compile(r'''["']ziglang(?:[<>=!~^,\w.*+-]+)?["']'''),
+    ),
+    (
+        "python -m ziglang",
+        re.compile(
+            r'''\b(?:python(?:3(?:\.\d+)?)?|sys\.executable)["',\s]+-m["',\s]+ziglang\b'''
+        ),
+    ),
     ("pip install ziglang", re.compile(r"pip3?\s+install\s+[^\n]*\bziglang\b")),
     ("brew install zig", re.compile(r"brew\s+install\s+[^\n]*\bzig(?:lang)?\b")),
     (
@@ -276,8 +286,8 @@ SCAN_DIRS: tuple[str, ...] = (
 )
 
 #: Build / release / install entrypoints that are not under a scanned
-#: directory. Several are extensionless on purpose — these are the `bash build`
-#: style scripts. Listed by path, so a file that does not exist is simply
+#: directory. `pyproject.toml` is registered explicitly because Python dependency
+#: declarations also provision build tools. A file that does not exist is simply
 #: skipped (`.cargo/config.toml` is pre-registered for the day someone adds it,
 #: since a linker override there is a hand-rolled cross toolchain).
 SCAN_FILES: tuple[str, ...] = (
@@ -288,6 +298,7 @@ SCAN_FILES: tuple[str, ...] = (
     "install.sh",
     "install.ps1",
     "publish",
+    "pyproject.toml",
     ".cargo/config.toml",
 )
 

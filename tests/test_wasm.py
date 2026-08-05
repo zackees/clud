@@ -1,11 +1,16 @@
-"""End-to-end unit test for the embedded wasm runtime."""
+"""End-to-end test for the embedded WASM runtime."""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures" / "wasm"
+WASM_FIXTURE = FIXTURE_DIR / "hello.wasm"
+WASM_FIXTURE_SHA256 = "558cb22ebf48846ea261fec0cd1772575d1bc1eded50f0e7f3e959d31b2ab1b4"
 
 
 def _clud_binary() -> str:
@@ -27,56 +32,21 @@ def _clud_binary() -> str:
 CLUD = _clud_binary()
 
 
-def _compile_cpp_to_wasm(source: Path, output: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ziglang",
-            "c++",
-            "-target",
-            "wasm32-freestanding",
-            "-O2",
-            "-nostdlib",
-            "-fno-exceptions",
-            "-fno-rtti",
-            "-Wl,--no-entry",
-            "-Wl,--export=run",
-            "-Wl,--export-memory",
-            "-Wl,--initial-memory=2097152",
-            "-o",
-            str(output),
-            str(source),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+def test_wasm_fixture_is_deterministic_and_zig_free() -> None:
+    """Keep the checked-in binary reviewable from its adjacent WAT source.
+
+    Regenerate with ``wasm-tools parse tests/fixtures/wasm/hello.wat -o
+    tests/fixtures/wasm/hello.wasm`` and update ``WASM_FIXTURE_SHA256``.
+    The fixture must be usable without a Python Zig package or a C/C++ compiler.
+    """
+    assert (FIXTURE_DIR / "hello.wat").is_file()
+    assert WASM_FIXTURE.is_file()
+    assert hashlib.sha256(WASM_FIXTURE.read_bytes()).hexdigest() == WASM_FIXTURE_SHA256
 
 
-def test_wasm_cpp_hello_world(tmp_path: Path) -> None:
-    source = tmp_path / "hello.cpp"
-    output = tmp_path / "hello.wasm"
-    source.write_text(
-        """
-extern "C" __attribute__((import_module("host"), import_name("log")))
-void host_log(const char* ptr, int len);
-
-extern "C" __attribute__((export_name("run")))
-int run() {
-    static const char msg[] = "hello from wasm";
-    host_log(msg, 15);
-    return 0;
-}
-""".strip(),
-        encoding="utf-8",
-    )
-
-    compile_result = _compile_cpp_to_wasm(source, output)
-    assert compile_result.returncode == 0, compile_result.stderr or compile_result.stdout
-
+def test_wasm_hello_world() -> None:
     result = subprocess.run(
-        [CLUD, "wasm", str(output)],
+        [CLUD, "wasm", str(WASM_FIXTURE)],
         capture_output=True,
         text=True,
         timeout=30,

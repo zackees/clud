@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "clud"
-version = "2.5.0"
+version = "2.5.1"
 source = { editable = "." }
 
 [package.dev-dependencies]
@@ -16,14 +16,12 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "ruff" },
-    { name = "ziglang" },
 ]
 test = [
     { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
-    { name = "ziglang" },
 ]
 
 [package.metadata]
@@ -37,14 +35,12 @@ dev = [
     { name = "pytest-cov", specifier = ">=6.0.0" },
     { name = "pytest-timeout", specifier = ">=2.3.0" },
     { name = "ruff", specifier = ">=0.8.0" },
-    { name = "ziglang", specifier = ">=0.15.2,<0.16" },
 ]
 test = [
     { name = "psutil", specifier = ">=5.9" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
     { name = "pytest-timeout", specifier = ">=2.3.0" },
-    { name = "ziglang", specifier = ">=0.15.2,<0.16" },
 ]
 
 [[package]]
