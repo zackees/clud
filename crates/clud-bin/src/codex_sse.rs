@@ -255,6 +255,10 @@ pub struct StreamTranslator {
     /// The bridge reads this into its operator log but never forwards raw
     /// upstream detail to the harness.
     in_band_failure: Option<InBandFailure>,
+    /// Set by every terminal upstream `response.failed` / `error` frame. This
+    /// distinguishes a provider-declared failure from an EOF transport fault
+    /// even for classifications that need no operator diagnostic.
+    in_band_provider_failure: bool,
     /// Set when the stream ended in a drained account or dead credentials --
     /// the two failures a user must act on personally.
     terminal_account_failure: bool,
@@ -281,6 +285,7 @@ impl StreamTranslator {
             stop_reason: None,
             tool_names: HashMap::new(),
             in_band_failure: None,
+            in_band_provider_failure: false,
             terminal_account_failure: false,
         }
     }
@@ -527,6 +532,7 @@ impl StreamTranslator {
             out.push(content_block_stop_frame(index));
         }
         let failure = InBandFailure::from_upstream(upstream);
+        self.in_band_provider_failure = true;
         let kind = upstream_error_type(upstream);
         if kind == "invalid_request_error" {
             self.in_band_failure = Some(failure.clone());
@@ -565,6 +571,11 @@ impl StreamTranslator {
     /// otherwise produces HTTP 200 and no diagnostic anywhere.
     pub fn terminal_account_failure(&self) -> bool {
         self.terminal_account_failure
+    }
+
+    /// Whether an upstream terminal error event was translated.
+    pub fn has_in_band_provider_failure(&self) -> bool {
+        self.in_band_provider_failure
     }
 
     /// Return a redacted error classification for bridge diagnostics.

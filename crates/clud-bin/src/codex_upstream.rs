@@ -404,6 +404,8 @@ pub enum UpstreamError {
     /// Classified transport failure. A fixed string, never the library's
     /// message, which embeds the URL.
     Transport(&'static str),
+    /// The compact endpoint returned a JSON body that does not match its typed contract.
+    CompactMalformed,
     /// The response exceeded the configured byte budget.
     TooLarge,
     /// The overall deadline elapsed.
@@ -424,6 +426,9 @@ impl std::fmt::Display for UpstreamError {
                 write!(formatter, "upstream returned status {}", failure.status)
             }
             Self::Transport(what) => write!(formatter, "upstream transport failure: {what}"),
+            Self::CompactMalformed => {
+                formatter.write_str("upstream compact response was malformed")
+            }
             Self::TooLarge => formatter.write_str("upstream response exceeded the size budget"),
             Self::Timeout => formatter.write_str("upstream request timed out"),
             Self::Cancelled => formatter.write_str("upstream request cancelled"),
@@ -447,7 +452,11 @@ impl UpstreamError {
                 failure.class,
                 FailureClass::Permanent | FailureClass::Exhausted
             ),
-            Self::Credentials(_) | Self::TooLarge | Self::Cancelled | Self::Downstream(_) => false,
+            Self::Credentials(_)
+            | Self::CompactMalformed
+            | Self::TooLarge
+            | Self::Cancelled
+            | Self::Downstream(_) => false,
         }
     }
 
@@ -555,6 +564,11 @@ impl UpstreamTarget {
         } else {
             format!("{trimmed}/v1/responses")
         }
+    }
+
+    /// Absolute URL of the typed Responses compaction endpoint.
+    pub fn compact_url(&self) -> String {
+        format!("{}/compact", self.responses_url())
     }
 }
 
@@ -979,6 +993,66 @@ impl<C: CredentialSource> UpstreamClient<C> {
 
     pub fn credentials(&self) -> &C {
         &self.credentials
+    }
+
+    /// Send a typed non-streaming compaction request with the same credential
+    /// source and header allowlist as an inference request.
+    pub fn compact(
+        &self,
+        body: &[u8],
+        cancel: &AtomicBool,
+    ) -> Result<crate::codex_translate::CompactResponse, UpstreamError> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(UpstreamError::Cancelled);
+        }
+        let target = self.credentials.resolve()?;
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(self.config.connect_timeout)
+            .timeout_read(self.config.read_timeout)
+            .build();
+        let mut request = agent
+            .post(&target.compact_url())
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .set("Authorization", &target.authorization)
+            .set("originator", CODEX_ORIGINATOR)
+            .set("session-id", &self.session_id)
+            .set("thread-id", &self.session_id)
+            .set("x-client-request-id", &self.session_id)
+            .set(
+                "User-Agent",
+                &format!("{CODEX_ORIGINATOR}/{} (clud)", env!("CARGO_PKG_VERSION")),
+            );
+        if let Some(account_id) = target.account_id.as_deref() {
+            request = request.set("ChatGPT-Account-ID", account_id);
+        }
+        for (name, value) in &target.extra_headers {
+            request = request.set(name, value);
+        }
+        let response = match request.send_bytes(body) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, response)) => {
+                return Err(UpstreamError::Status(capture_failure(
+                    status,
+                    response,
+                    self.config.max_retry_delay,
+                )));
+            }
+            Err(ureq::Error::Transport(_)) => {
+                return Err(UpstreamError::Transport("connection failed"));
+            }
+        };
+        let mut body = Vec::new();
+        let mut reader = response
+            .into_reader()
+            .take(self.config.max_response_bytes.saturating_add(1) as u64);
+        reader
+            .read_to_end(&mut body)
+            .map_err(|_| UpstreamError::Transport("read failed"))?;
+        if body.len() > self.config.max_response_bytes {
+            return Err(UpstreamError::TooLarge);
+        }
+        serde_json::from_slice(&body).map_err(|_| UpstreamError::CompactMalformed)
     }
 
     /// Stream one Responses request, handing each chunk to `sink` as it lands.
@@ -1444,6 +1518,39 @@ mod tests {
             let target = UpstreamTarget::new(base, "Bearer x");
             assert_eq!(target.responses_url(), expected, "base {base}");
         }
+    }
+
+    #[test]
+    fn compaction_url_follows_platform_and_subscription_routes() {
+        assert_eq!(
+            UpstreamTarget::new(DEFAULT_BASE_URL, "Bearer x").compact_url(),
+            "https://api.openai.com/v1/responses/compact"
+        );
+        assert_eq!(
+            UpstreamTarget::new(CODEX_BACKEND_BASE_URL, "Bearer x").compact_url(),
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
+    }
+
+    #[test]
+    fn compact_request_uses_the_responses_compact_route_and_json_accept_header() {
+        let body = r#"{"output":[{"type":"compaction","encrypted_content":"summary"}]}"#;
+        let server = FakeUpstream::start(vec![body_response(200, body, &[])]);
+        let client = client(&server.base_url, fast_config());
+        let compact = client
+            .compact(
+                br#"{"model":"gpt-5.6-terra","input":[],"parallel_tool_calls":true,"text":{}}"#,
+                &AtomicBool::new(false),
+            )
+            .expect("compact response");
+        assert!(matches!(
+            compact.output.as_slice(),
+            [crate::codex_translate::InputItem::Compaction { encrypted_content, .. }]
+                if encrypted_content == "summary"
+        ));
+        let request = server.requests().remove(0);
+        assert!(request.starts_with("POST /v1/responses/compact HTTP/1.1"));
+        assert!(request.contains("Accept: application/json"));
     }
 
     #[test]

@@ -27,6 +27,26 @@ use sha2::{Digest, Sha256};
 
 use crate::codex_model::{Effort, ModelSpec, SelectionError};
 
+/// Return the new pending input for a continuation request.
+///
+/// The harness replays its display history every turn, while canonical
+/// Responses history already owns successful turns. A continuation therefore
+/// contributes only its final message; the first request is separately seeded
+/// from [`Translated::request`] so its complete replayed prefix is preserved.
+pub fn pending_input_items_as_values(
+    body: &[u8],
+) -> Result<Vec<serde_json::Value>, TranslateError> {
+    let request: MessagesRequest = serde_json::from_slice(body)
+        .map_err(|error| invalid(format!("could not decode request: {error}")))?;
+    let message = request
+        .messages
+        .last()
+        .ok_or_else(|| invalid("messages must not be empty"))?;
+    let mut items = Vec::new();
+    translate_message(message, &mut items);
+    input_items_as_values(&items)
+}
+
 /// Default upstream model. Codex fetches its catalogue from the server and
 /// hardcodes almost nothing, so this stays a single overridable value rather
 /// than growing into a table that would rot (`gpt-5.4` retires from
@@ -65,6 +85,22 @@ impl std::fmt::Display for TranslateError {
 }
 
 impl std::error::Error for TranslateError {}
+
+/// Serialize translated input as opaque Responses items for canonical history.
+///
+/// Each item is encoded directly from its wire representation, preserving the
+/// per-item ordering required by Responses tool and reasoning transcripts.
+pub fn input_items_as_values(
+    items: &[InputItem],
+) -> Result<Vec<serde_json::Value>, TranslateError> {
+    items
+        .iter()
+        .map(|item| {
+            serde_json::to_value(item)
+                .map_err(|error| invalid(format!("could not encode Responses input: {error}")))
+        })
+        .collect()
+}
 
 fn invalid(what: impl Into<String>) -> TranslateError {
     TranslateError::Invalid(what.into())
@@ -260,7 +296,7 @@ pub struct Thinking {
 // Outgoing: OpenAI Responses
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ResponsesRequest {
     pub model: String,
     pub input: Vec<InputItem>,
@@ -289,11 +325,155 @@ pub struct ResponsesRequest {
     pub service_tier: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CompactRequest {
+    pub model: String,
+    /// Canonical Responses items supplied verbatim by the history store.
+    ///
+    /// Compaction must retain opaque server fields such as generated IDs and
+    /// encrypted reasoning payloads, so this deliberately is not `InputItem`.
+    pub input: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ResponsesTool>>,
+    pub parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Codex sends this object even when no text-specific option is selected.
+    pub text: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CompactResponse {
+    pub output: Vec<InputItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionError {
+    MissingPendingInput,
+    EmptyOutput,
+    MalformedOutput,
+    UnsupportedOutput,
+}
+
+impl std::fmt::Display for CompactionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPendingInput => {
+                formatter.write_str("cannot compact a request without pending input")
+            }
+            Self::EmptyOutput => formatter.write_str("compact response contained no output"),
+            Self::MalformedOutput => formatter.write_str("compact response was malformed"),
+            Self::UnsupportedOutput => {
+                formatter.write_str("compact response contained unsupported output")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompactionError {}
+
+impl ResponsesRequest {
+    /// Builds a non-streaming compaction payload from the typed request input.
+    ///
+    /// This compatibility path separates the final pending item before
+    /// compaction; recovery callers retain opaque entries via
+    /// [`Self::compact_request_for_history`] instead.
+    pub fn compact_request(&self) -> Result<CompactRequest, CompactionError> {
+        let (_, history) = self
+            .input
+            .split_last()
+            .ok_or(CompactionError::MissingPendingInput)?;
+        let input = history
+            .iter()
+            .cloned()
+            .map(|item| serde_json::to_value(item).map_err(|_| CompactionError::MalformedOutput))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CompactRequest {
+            model: self.model.clone(),
+            input,
+            instructions: self.instructions.clone(),
+            tools: self.tools.clone(),
+            parallel_tool_calls: self.parallel_tool_calls.unwrap_or(true),
+            reasoning: self.reasoning.clone(),
+            service_tier: self.service_tier.clone(),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            text: serde_json::json!({}),
+        })
+    }
+
+    /// Rebuilds the inference request from the server's compaction replacement
+    /// and exactly one pending final item. No compaction result can overwrite
+    /// the transcript unless it contains a typed, nonempty compaction item.
+    pub fn retry_with_compaction(&self, compact: CompactResponse) -> Result<Self, CompactionError> {
+        let pending = self
+            .input
+            .last()
+            .cloned()
+            .ok_or(CompactionError::MissingPendingInput)?;
+        let compact = validated_compact_output(compact)?;
+        let mut retry = self.clone();
+        retry.input = compact;
+        retry.input.push(pending);
+        Ok(retry)
+    }
+
+    /// Build the compaction request from the canonical transcript rather than
+    /// the display-oriented Messages replay body.
+    pub fn compact_request_for_history(
+        &self,
+        history: Vec<serde_json::Value>,
+    ) -> Result<CompactRequest, CompactionError> {
+        if history.is_empty() {
+            return Err(CompactionError::MissingPendingInput);
+        }
+        Ok(CompactRequest {
+            model: self.model.clone(),
+            input: history,
+            instructions: self.instructions.clone(),
+            tools: self.tools.clone(),
+            parallel_tool_calls: self.parallel_tool_calls.unwrap_or(true),
+            reasoning: self.reasoning.clone(),
+            service_tier: self.service_tier.clone(),
+            prompt_cache_key: self.prompt_cache_key.clone(),
+            text: serde_json::json!({}),
+        })
+    }
+}
+
+/// Validate compact output once, then preserve its opaque wire form for the
+/// canonical transcript and the recovery request.
+pub fn compact_output_as_values(
+    compact: CompactResponse,
+) -> Result<Vec<serde_json::Value>, CompactionError> {
+    validated_compact_output(compact)?
+        .into_iter()
+        .map(|item| serde_json::to_value(item).map_err(|_| CompactionError::MalformedOutput))
+        .collect()
+}
+
+fn validated_compact_output(compact: CompactResponse) -> Result<Vec<InputItem>, CompactionError> {
+    if compact.output.is_empty() {
+        return Err(CompactionError::EmptyOutput);
+    }
+    if compact.output.iter().any(|item| {
+        !matches!(item, InputItem::Compaction { encrypted_content, .. } if !encrypted_content.is_empty())
+    }) {
+        return Err(CompactionError::UnsupportedOutput);
+    }
+    Ok(compact.output)
+}
+
 /// A Messages `content` array does not map one-to-one onto Responses items: an
 /// assistant turn holding text plus two `tool_use` blocks becomes one message
 /// item and two `function_call` items. Order is preserved because the model
 /// reads the result as a transcript.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Message {
@@ -314,18 +494,28 @@ pub enum InputItem {
         summary: Vec<serde_json::Value>,
         encrypted_content: String,
     },
+    /// Server-produced transcript replacement returned by `/responses/compact`.
+    /// It must travel back unchanged as Responses input on the retry.
+    Compaction {
+        encrypted_content: String,
+        /// Retain the server-issued id and fields introduced after this bridge
+        /// version. Compaction entries are opaque retry input, not a schema the
+        /// bridge is allowed to reconstruct.
+        #[serde(flatten)]
+        extra: serde_json::Map<String, serde_json::Value>,
+    },
 }
 
 /// `function_call_output.output` is untagged upstream: a plain string, or an
 /// array of content parts when the tool returned structured content.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum FunctionCallOutput {
     Text(String),
     Parts(Vec<ContentPart>),
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     InputText { text: String },
@@ -333,7 +523,7 @@ pub enum ContentPart {
     OutputText { text: String },
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ResponsesTool {
     #[serde(rename = "type")]
     pub kind: &'static str,
@@ -344,7 +534,7 @@ pub struct ResponsesTool {
     pub strict: bool,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum ResponsesToolChoice {
     Mode(&'static str),
@@ -355,7 +545,7 @@ pub enum ResponsesToolChoice {
     },
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Reasoning {
     pub effort: &'static str,
 }
@@ -1490,5 +1680,118 @@ mod tests {
         assert!(!wants_stream(br#"{"stream":false}"#));
         assert!(!wants_stream(b"{}"));
         assert!(!wants_stream(b"garbage"));
+    }
+
+    #[test]
+    fn compaction_uses_history_and_retries_with_compaction_then_pending_user_input() {
+        let mut request = ok(json!({
+            "system": "shared instructions",
+            "messages": [
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "earlier answer"},
+                {"role": "user", "content": "pending"}
+            ],
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "auto"}
+        }));
+        request.service_tier = Some("priority".into());
+        request.prompt_cache_key = Some("session-1".into());
+        let compact = request
+            .compact_request()
+            .expect("history and pending input");
+        let body = serde_json::to_value(&compact).unwrap();
+
+        assert_eq!(body["input"].as_array().unwrap().len(), 2);
+        assert_eq!(body["input"][0]["content"][0]["text"], "earlier");
+        assert_eq!(body["instructions"], "shared instructions");
+        assert_eq!(body["tools"][0]["name"], "lookup");
+        assert_eq!(body["parallel_tool_calls"], true);
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["service_tier"], "priority");
+        assert_eq!(body["prompt_cache_key"], "session-1");
+        assert_eq!(body["text"], json!({}));
+        for generation_only in ["stream", "store", "include", "tool_choice"] {
+            assert!(
+                body.get(generation_only).is_none(),
+                "{generation_only} must not compact"
+            );
+        }
+
+        let retry = request
+            .retry_with_compaction(CompactResponse {
+                output: vec![InputItem::Compaction {
+                    encrypted_content: "summary".into(),
+                    extra: serde_json::Map::new(),
+                }],
+            })
+            .expect("compaction output is retry input");
+        assert_eq!(retry.input.len(), 2);
+        assert!(
+            matches!(retry.input[0], InputItem::Compaction { ref encrypted_content, .. } if encrypted_content == "summary")
+        );
+        assert!(
+            matches!(&retry.input[1], InputItem::Message { role, content }
+            if role == "user" && matches!(&content[..], [ContentPart::InputText { text }] if text == "pending"))
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_a_pending_tool_result_continuation() {
+        let request = ok(json!({
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "weather", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "18C"}]}
+            ]
+        }));
+        let compact = request
+            .compact_request()
+            .expect("history and pending tool result");
+        assert_eq!(compact.input.len(), 2);
+        let retry = request
+            .retry_with_compaction(CompactResponse {
+                output: vec![InputItem::Compaction {
+                    encrypted_content: "summary".into(),
+                    extra: serde_json::Map::new(),
+                }],
+            })
+            .expect("compaction output is retry input");
+        assert!(
+            matches!(&retry.input[1], InputItem::FunctionCallOutput { call_id, output }
+            if call_id == "call_1" && matches!(output, FunctionCallOutput::Text(text) if text == "18C"))
+        );
+    }
+
+    #[test]
+    fn invalid_compaction_output_cannot_replace_history() {
+        let request = ok(json!({
+            "messages": [
+                {"role": "user", "content": "earlier"},
+                {"role": "user", "content": "pending"}
+            ]
+        }));
+        for output in [
+            vec![],
+            vec![InputItem::Message {
+                role: "assistant".into(),
+                content: vec![ContentPart::OutputText {
+                    text: "not a compaction".into(),
+                }],
+            }],
+            vec![InputItem::Compaction {
+                encrypted_content: String::new(),
+                extra: serde_json::Map::new(),
+            }],
+        ] {
+            assert!(request
+                .retry_with_compaction(CompactResponse { output })
+                .is_err());
+        }
+        let malformed: Result<CompactResponse, _> =
+            serde_json::from_str(r#"{"output":[{"type":"compaction"}]}"#);
+        assert!(
+            malformed.is_err(),
+            "missing encrypted_content must not deserialize"
+        );
     }
 }
