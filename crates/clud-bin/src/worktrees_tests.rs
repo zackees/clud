@@ -450,9 +450,18 @@ fn decide_stale_dead_lock_still_requires_force_for_dirty_worktree() {
 
 #[test]
 fn locked_hard_age_defaults_to_seven_days() {
-    assert_eq!(locked_hard_age_from_raw(None), days(7));
-    assert_eq!(locked_hard_age_from_raw(Some("3")), days(3));
-    assert_eq!(locked_hard_age_from_raw(Some("not-a-number")), days(7));
+    assert_eq!(
+        worktrees_locked_age::locked_hard_age_from_raw(None),
+        days(7)
+    );
+    assert_eq!(
+        worktrees_locked_age::locked_hard_age_from_raw(Some("3")),
+        days(3)
+    );
+    assert_eq!(
+        worktrees_locked_age::locked_hard_age_from_raw(Some("not-a-number")),
+        days(7)
+    );
 }
 
 fn classified_locked(

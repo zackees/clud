@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Method, Request, Server};
 
 use crate::dashboard_auth::{DashboardAccess, COOKIE_NAME};
 
@@ -38,6 +38,13 @@ use super::types::{
 use crate::ctrl_c_track::{self, CtrlCEvent};
 use crate::launch_log::{self, LaunchRecord};
 use crate::session_registry::LiveSession;
+
+#[path = "http_response.rs"]
+mod http_response;
+use http_response::{
+    find_body_start, json_error_bytes, read_body, respond_capability_bootstrap, respond_html,
+    respond_json, respond_text,
+};
 
 /// Supplier of live session-registry rows. Injected at the dashboard
 /// boundary so production wires in the redb-backed reader while unit
@@ -912,22 +919,9 @@ fn respond_purge_reply(request: Request, reply: GcReply) {
 #[path = "http_dashboard_state.rs"]
 mod http_dashboard_state;
 use http_dashboard_state::{build_dashboard_state, send_gc_op};
-pub fn read_dashboard_port(state_dir: &Path) -> io::Result<Option<u16>> {
-    let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
-    Ok(info.dashboard_port)
-}
-
-/// Re-export the typed info read by the `clud ui` CLI. Kept narrow so the
-/// CLI layer doesn't depend on the (internal) `DaemonInfo` struct.
-pub fn read_dashboard_info(state_dir: &Path) -> io::Result<DashboardInfo> {
-    let info = read_json_file::<DaemonInfo>(&daemon_info_path(state_dir))?;
-    Ok(DashboardInfo {
-        pid: info.pid,
-        ipc_port: info.port,
-        dashboard_port: info.dashboard_port,
-        dashboard_token: info.dashboard_token,
-    })
-}
+#[path = "http_info.rs"]
+mod http_info;
+pub use http_info::{read_dashboard_info, read_dashboard_port};
 
 /// Public view of `daemon.json` used by the `clud ui` CLI.
 #[derive(Debug, Clone)]
@@ -981,87 +975,6 @@ pub fn fetch_state_json(port: u16, token: &str) -> io::Result<String> {
     let body = &buf[body_start..];
     String::from_utf8(body.to_vec())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
-}
-
-fn find_body_start(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
-}
-
-// ---------- tiny_http helpers ----------
-
-fn respond_capability_bootstrap(request: Request, access: &DashboardAccess, path: &str) {
-    let location = if path.is_empty() { "/" } else { path };
-    let response = Response::empty(302)
-        .with_header(
-            Header::from_bytes(&b"Location"[..], location.as_bytes())
-                .expect("redirect path is a valid header"),
-        )
-        .with_header(
-            Header::from_bytes(&b"Set-Cookie"[..], access.cookie_header_value().as_bytes())
-                .expect("capability cookie is a valid header"),
-        )
-        .with_header(no_cache_header());
-    let _ = request.respond(response);
-}
-
-fn respond_html(request: Request, status: u16, body: &[u8]) {
-    let response = Response::from_data(body.to_vec())
-        .with_status_code(status)
-        .with_header(html_content_type())
-        .with_header(no_cache_header());
-    let _ = request.respond(response);
-}
-
-fn respond_json(request: Request, status: u16, body: &[u8]) {
-    let response = Response::from_data(body.to_vec())
-        .with_status_code(status)
-        .with_header(json_content_type())
-        .with_header(no_cache_header());
-    let _ = request.respond(response);
-}
-
-fn respond_text(request: Request, status: u16, body: &[u8]) {
-    let response = Response::from_data(body.to_vec())
-        .with_status_code(status)
-        .with_header(text_content_type())
-        .with_header(no_cache_header());
-    let _ = request.respond(response);
-}
-
-fn html_content_type() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-        .expect("static content-type header")
-}
-
-fn json_content_type() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-        .expect("static content-type header")
-}
-
-fn text_content_type() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
-        .expect("static content-type header")
-}
-
-fn no_cache_header() -> Header {
-    Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).expect("static cache header")
-}
-
-fn read_body(request: &mut Request) -> io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    request
-        .as_reader()
-        .take(MAX_REQUEST_BODY_BYTES as u64)
-        .read_to_end(&mut buf)?;
-    Ok(buf)
-}
-
-fn json_error_bytes(message: &str) -> Vec<u8> {
-    let payload = serde_json::json!({ "error": message });
-    serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"error\":\"unknown\"}".to_vec())
 }
 
 fn current_unix() -> i64 {

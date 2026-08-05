@@ -405,31 +405,13 @@ fn apply_lock_prefix(action: Action, lock_prefix: Option<String>) -> Action {
     }
 }
 
-fn locked_hard_age_from_env() -> Duration {
-    let raw = std::env::var(ENV_GC_LOCKED_HARD_AGE_DAYS).ok();
-    locked_hard_age_from_raw(raw.as_deref())
-}
+#[path = "worktrees_locked_age.rs"]
+mod worktrees_locked_age;
+use worktrees_locked_age::locked_hard_age_from_env;
 
-fn locked_hard_age_from_raw(raw: Option<&str>) -> Duration {
-    let days = raw
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_GC_LOCKED_HARD_AGE_DAYS);
-    let secs = days.saturating_mul(SECS_PER_DAY);
-    Duration::from_secs(secs)
-}
-
-pub(crate) fn fmt_age(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 86_400 {
-        format!("{}d", secs / 86_400)
-    } else if secs >= 3_600 {
-        format!("{}h", secs / 3_600)
-    } else if secs >= 60 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}s", secs)
-    }
-}
+#[path = "worktrees_format.rs"]
+mod worktrees_format;
+pub(crate) use worktrees_format::fmt_age;
 
 fn print_table(rows: &[Classified], _opts: &CleanOptions) {
     println!("Worktrees:");
@@ -1007,42 +989,9 @@ pub fn parse_worktree_porcelain(raw: &str) -> Vec<WorktreeEntry> {
 
 // ---------- duration parser ----------
 
-/// Parse a `--stale-after` value like `1d`, `2h`, `30m`, `45s`.
-///
-/// Accepted units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
-/// The value must be a positive integer. Whitespace around the input is
-/// trimmed. Unit characters are case-insensitive (`30M` == `30m`).
-pub fn parse_duration(raw: &str) -> Result<Duration, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("duration cannot be empty".to_string());
-    }
-    let split_at = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(|| "duration must include a unit like s, m, h, or d".to_string())?;
-    if split_at == 0 {
-        return Err("duration must start with a positive integer".to_string());
-    }
-    let (num_part, unit_part) = trimmed.split_at(split_at);
-    let n: u64 = num_part
-        .parse()
-        .map_err(|_| format!("invalid duration value: {num_part}"))?;
-    if n == 0 {
-        return Err("duration must be greater than zero".to_string());
-    }
-    let unit = unit_part.trim().to_ascii_lowercase();
-    let secs_multiplier: u64 = match unit.as_str() {
-        "s" => 1,
-        "m" => 60,
-        "h" => 60 * 60,
-        "d" => 60 * 60 * 24,
-        _ => return Err(format!("unsupported duration unit: {unit_part}")),
-    };
-    let total_secs = n
-        .checked_mul(secs_multiplier)
-        .ok_or_else(|| "duration is too large".to_string())?;
-    Ok(Duration::from_secs(total_secs))
-}
+#[path = "worktrees_duration.rs"]
+mod worktrees_duration;
+pub use worktrees_duration::parse_duration;
 
 #[cfg(test)]
 #[path = "worktrees_tests.rs"]
