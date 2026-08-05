@@ -2,7 +2,8 @@
 
 use crate::backend::{Backend, ModelProvider};
 use crate::codex_bridge::{BridgeConfig, BridgeError, BridgeHandle};
-use crate::codex_model::ModelSpec;
+use crate::codex_model::{picker_entry, ModelSpec};
+use crate::codex_translate::default_model_spec;
 use crate::command::LaunchPlan;
 use crate::subprocess::ManagedSubprocess;
 use running_process::pty::NativePtyProcess;
@@ -173,19 +174,20 @@ fn apply_cross_route_overlay(
         "ANTHROPIC_AUTH_TOKEN".to_string(),
         bridge.bearer_token().to_string(),
     ));
-    // Put the selection in the harness's model picker. Gateway model
-    // discovery cannot carry it — that path drops every id not prefixed
-    // `claude`/`anthropic`, which is every id the bridge serves — but this
-    // variable is documented to skip validation, so one honest row is
-    // reachable where a discovered list is not.
-    if let Some(selection) = selection {
-        push_default(env, "ANTHROPIC_CUSTOM_MODEL_OPTION", &selection.display());
-        push_default(
-            env,
-            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
-            &format!("Codex {}", selection.display()),
-        );
-    }
+    // Put the selection in the harness's model picker. The harness renders
+    // exactly one custom row (see `codex_model::PickerEntry` for the six row
+    // sources and why none of them yields three), so the row is
+    // unconditional — an unpinned launch would otherwise show only Anthropic
+    // names that quietly run on the bridge's default — and its description
+    // carries the models the row itself cannot name.
+    let entry = picker_entry(&selection.cloned().unwrap_or_else(default_model_spec));
+    push_default(env, "ANTHROPIC_CUSTOM_MODEL_OPTION", &entry.value);
+    push_default(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", &entry.name);
+    push_default(
+        env,
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+        &entry.description,
+    );
     push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
     push_default(
         env,
@@ -320,8 +322,6 @@ mod tests {
             Some("1")
         );
         assert_eq!(lookup(&base, "ANTHROPIC_API_KEY"), Some("ambient-key"));
-        // No selection was made, so no picker entry is invented.
-        assert_eq!(lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"), None);
     }
 
     /// The selection reaches the child as a picker entry. Gateway model
@@ -341,6 +341,44 @@ mod tests {
             lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"),
             Some("Codex gpt-5.6-luna@high")
         );
+    }
+
+    /// Issue #820: all three gpt-5.6 models must be reachable from the picker.
+    ///
+    /// Claude Code renders **one** custom row — `ANTHROPIC_CUSTOM_MODEL_OPTION`
+    /// is a scalar and has no indexed or list form — so the row's description
+    /// is the only place the models the user did *not* launch with can appear.
+    #[test]
+    fn the_picker_row_makes_every_codex_model_discoverable() {
+        let mut plan = plan(ModelProvider::Codex, Backend::Claude);
+        plan.codex_model = Some("sol".to_string());
+        let runtime = ForegroundRuntime::start(&plan, Vec::new()).unwrap();
+        let env = runtime.env();
+        assert_eq!(
+            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"),
+            Some("gpt-5.6-sol")
+        );
+        let description = lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION")
+            .expect("the single custom row must carry the rest of the catalog");
+        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert!(description.contains(id), "{description} must name {id}");
+        }
+    }
+
+    /// Without `--model` the picker used to show no Codex row at all, so every
+    /// visible row was an Anthropic name that quietly ran on the bridge's
+    /// default. The honest row is now unconditional and spells that default.
+    #[test]
+    fn an_unpinned_launch_still_gets_an_honest_default_row() {
+        let runtime =
+            ForegroundRuntime::start(&plan(ModelProvider::Codex, Backend::Claude), Vec::new())
+                .unwrap();
+        let env = runtime.env();
+        assert_eq!(
+            lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION"),
+            Some(crate::codex_translate::DEFAULT_CODEX_MODEL)
+        );
+        assert!(lookup(env, "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION").is_some());
     }
 
     /// A bad selection fails the launch, not the first turn: by the time a

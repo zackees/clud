@@ -870,6 +870,7 @@ pub fn wants_stream(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_model::CODEX_MODELS;
     use serde_json::json;
 
     fn options() -> TranslateOptions {
@@ -1433,6 +1434,53 @@ mod tests {
         }
         assert_eq!(resolved(None), default);
         assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.6-terra");
+    }
+
+    /// Issue #820: every model the picker can name has to reach the wire as
+    /// itself. The row's `value` is exactly what `/model` sends back, so this
+    /// is the other half of the picker contract — a label that resolved to
+    /// some other model would be worse than no label at all.
+    #[test]
+    fn every_picker_reachable_model_translates_to_its_own_wire_model() {
+        for model in CODEX_MODELS {
+            for spelling in [model.alias, model.id] {
+                let out = translate_bytes(
+                    json!({
+                        "model": spelling,
+                        "messages": [{"role": "user", "content": "x"}],
+                    })
+                    .to_string()
+                    .as_bytes(),
+                    &options(),
+                )
+                .unwrap_or_else(|error| panic!("{spelling} must translate: {error}"))
+                .request;
+                assert_eq!(out.model, model.id, "{spelling} must bill {}", model.id);
+                // ... at the model's own default effort, not a global one.
+                assert_eq!(
+                    out.reasoning.unwrap().effort,
+                    model.default_effort.as_str(),
+                    "{spelling}"
+                );
+            }
+
+            // The `@effort` a picker row was launched with survives the round
+            // trip through the picker's own value.
+            let pinned = format!("{}@max", model.id);
+            let out = translate_bytes(
+                json!({
+                    "model": pinned,
+                    "messages": [{"role": "user", "content": "x"}],
+                })
+                .to_string()
+                .as_bytes(),
+                &options(),
+            )
+            .unwrap_or_else(|error| panic!("{pinned} must translate: {error}"))
+            .request;
+            assert_eq!(out.model, model.id);
+            assert_eq!(out.reasoning.unwrap().effort, "max");
+        }
     }
 
     /// A typo must not be quietly billed as the default model.
