@@ -63,15 +63,19 @@ Entry and orchestration:
 - `codex_model.rs` - #752's model + reasoning-effort selection: the gpt-5.6
   alias table (`sol`/`terra`/`luna` -> wire ids, each with its own catalog
   default effort), the `<model>@<effort>` parser, and the `Effort` ladder
-  restricted to what the family accepts (no `minimal`, no `ultra`). Selection
-  rides the model string because that is the one field a custom
-  `ANTHROPIC_BASE_URL` gateway is allowed to own, so it cannot be dropped in
-  transit the way `output_config` can (DD-035).
+  restricted to what the family accepts (no `minimal`, no `ultra` --
+  re-confirmed against OpenAI's model guidance in #821). Selection rides the
+  model string because that is the one field a custom `ANTHROPIC_BASE_URL`
+  gateway is allowed to own, so it cannot be dropped in transit the way
+  `output_config` can (DD-035).
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
   mapping: typed in/out structs, transcript-order-preserving tool loops,
   auth-mode-dependent system placement, reasoning round-trip, and bounded
   reversible identifiers. Translation is **total** -- droppable Anthropic
-  fields are dropped, not rejected (#750, DD-030).
+  fields are dropped, not rejected (#750, DD-030). The carve-out is a stated
+  effort the family does not accept (`output_config.effort`, `@effort`): that
+  is a 400 naming the accepted values, because the only alternative is running
+  the turn at an effort the user never chose (#821, DD-035).
 - `codex_sse.rs` - #627 step 3: `FrameDecoder` (byte-level SSE framing,
   fragmentation/CRLF/heartbeat tolerant) and `StreamTranslator` (Responses
   events -> Anthropic events with monotonic block indices). A tool block never

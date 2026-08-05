@@ -2390,6 +2390,36 @@ Connection: close
         );
     }
 
+    /// `/effort minimal` must fail at the bridge boundary rather than run at
+    /// a different effort (#821).
+    ///
+    /// `minimal` is a real Responses value that gpt-5.6 does not accept, so
+    /// it is the one spelling a user can plausibly type and have silently
+    /// downgraded. Nothing may reach upstream, and the client must be told
+    /// what is accepted.
+    #[test]
+    fn an_unsupported_output_config_effort_is_rejected_before_upstream() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"minimal"},"stream":false}"#,
+            ),
+        );
+
+        assert_eq!(status(&response), 400);
+        assert!(response.contains("minimal"), "{response}");
+        assert!(response.contains("xhigh"), "{response}");
+        assert!(
+            upstream.requests().is_empty(),
+            "a rejected effort must not be billed upstream"
+        );
+    }
+
     /// A launch-time `--model` selection is the default for requests that do
     /// not name one — which is every request the harness sends, since it
     /// sends its own `claude-*` id.
