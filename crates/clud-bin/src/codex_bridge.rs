@@ -2390,6 +2390,30 @@ Connection: close
         );
     }
 
+    /// A request written by a current Claude Code `/effort minimal` control
+    /// must survive the complete HTTP bridge and reach Responses unchanged.
+    #[test]
+    fn a_minimal_output_config_effort_reaches_upstream() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"gpt-5.6-terra","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"minimal"},"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&response), 200);
+
+        let sent = upstream.requests().remove(0);
+        let body = sent.split("\r\n\r\n").nth(1).expect("upstream body");
+        let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
+        assert_eq!(json["model"], "gpt-5.6-terra");
+        assert_eq!(json["reasoning"]["effort"], "minimal");
+    }
+
     /// A launch-time `--model` selection is the default for requests that do
     /// not name one — which is every request the harness sends, since it
     /// sends its own `claude-*` id.

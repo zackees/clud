@@ -1414,11 +1414,9 @@ Three supporting rules:
   `thinking: {"type":"adaptive"}` with *no* budget for ids it does not
   recognize — which is every id the bridge serves. Reading a missing budget as
   an explicit `medium` pinned every request to `medium`.
-- **The ladder no longer emits `minimal` and can now reach `max`.** `minimal`
-  is a real Responses value that **no gpt-5.6 model accepts** (the family
-  starts at `low`), so every small-budget request was being rejected upstream
-  for a reason the user could not see. `max` is supported by all three and was
-  unreachable from any budget.
+- **The ladder preserves `minimal` and can reach `max`.** `minimal` is a
+  documented Responses value supported by the GPT-5.6 family. `max` is also
+  supported by all three models and had been unreachable from any budget.
 
 **Alternatives rejected:**
 

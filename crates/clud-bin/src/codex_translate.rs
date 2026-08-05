@@ -443,16 +443,15 @@ fn base64_decode_urlsafe(value: &str) -> Result<Vec<u8>, ()> {
 /// bridge serves, so treating a missing budget as an explicit `medium` pinned
 /// every request to `medium` regardless of the model.
 ///
-/// Thresholds follow CLIProxyAPI's `ConvertBudgetToLevel` with two
-/// corrections for this model family: the sub-512 band emitted `minimal`,
-/// which **no gpt-5.6 model accepts** (the family starts at `low`), and the
-/// ladder topped out at `xhigh` so `max` — supported by all three — was
-/// unreachable from any budget.
+/// Thresholds follow CLIProxyAPI's `ConvertBudgetToLevel` with one
+/// correction for this model family: the ladder topped out at `xhigh` so
+/// `max` — supported by all three — was unreachable from any budget.
 fn effort_for_budget(budget: i64) -> Option<Effort> {
     match budget {
         i64::MIN..=-1 => None,
         0 => Some(Effort::None),
-        1..=1024 => Some(Effort::Low),
+        1..=512 => Some(Effort::Minimal),
+        513..=1024 => Some(Effort::Low),
         1025..=8192 => Some(Effort::Medium),
         8193..=24576 => Some(Effort::High),
         24577..=49152 => Some(Effort::XHigh),
@@ -1241,12 +1240,10 @@ mod tests {
         assert_eq!(no_tools.tool_choice, None);
     }
 
-    /// The ladder, with the two corrections this family needs: nothing maps
-    /// to `minimal` (unsupported by every gpt-5.6 model, so every small-budget
-    /// request used to be rejected upstream for a reason the user could not
-    /// see), and a large enough budget can reach `max`.
+    /// Known Response API values emitted by the legacy budget ladder are
+    /// preserved, and `max` remains reachable.
     #[test]
-    fn the_budget_ladder_never_emits_minimal_and_can_reach_max() {
+    fn the_budget_ladder_preserves_minimal_and_can_reach_max() {
         let effort = |thinking: serde_json::Value| {
             ok(json!({
                 "messages": [{"role": "user", "content": "x"}],
@@ -1260,8 +1257,8 @@ mod tests {
 
         assert_eq!(effort(json!({"type": "disabled"})), "none");
         assert_eq!(enabled(0), "none");
-        // Was `minimal`, which upstream rejects.
-        assert_eq!(enabled(512), "low");
+        // GPT-5.6 accepts the smallest positive budget's `minimal` mapping.
+        assert_eq!(enabled(512), "minimal");
         assert_eq!(enabled(1024), "low");
         assert_eq!(enabled(8192), "medium");
         assert_eq!(enabled(24576), "high");
@@ -1269,8 +1266,8 @@ mod tests {
         // Was unreachable at any budget.
         assert_eq!(enabled(200_000), "max");
 
-        for budget in [-1, 0, 512, 1024, 8192, 24576, 32768, 200_000, i64::MAX] {
-            assert_ne!(enabled(budget), "minimal", "budget {budget}");
+        for budget in [0, 512, 1024, 8192, 24576, 32768, 200_000, i64::MAX] {
+            assert_ne!(enabled(budget), "ultra", "budget {budget}");
         }
     }
 
@@ -1334,6 +1331,10 @@ mod tests {
         };
 
         assert_eq!(effort("terra", json!({"effort": "xhigh"})), "xhigh");
+        // GPT-5.6 accepts the documented Responses API `minimal` setting.
+        // Until issue #821, parsing rejected it and silently fell through to
+        // terra's medium default instead of forwarding the user's `/effort`.
+        assert_eq!(effort("terra", json!({"effort": "minimal"})), "minimal");
         // The suffix is the channel that cannot be dropped in transit, so it
         // wins when both are present.
         assert_eq!(effort("terra@low", json!({"effort": "xhigh"})), "low");

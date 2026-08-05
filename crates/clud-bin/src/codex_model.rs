@@ -30,19 +30,17 @@
 
 use std::fmt;
 
-/// Reasoning effort, restricted to what the gpt-5.6 family actually accepts.
+/// Reasoning effort, restricted to values the gpt-5.6 family accepts.
 ///
-/// Deliberately **not** the full Responses enum. `minimal` is a valid API
-/// value that no gpt-5.6 model supports — the family starts at `low` — and
-/// the old budget ladder emitted it for small budgets, so every such request
-/// was rejected upstream for a reason the user could not see. `ultra` is a
-/// Codex *product* orchestration mode and was never a `reasoning.effort`
-/// value at all.
+/// `minimal` is a documented Responses API value supported by all gpt-5.6
+/// models. `ultra` is a Codex *product* orchestration mode and was never a
+/// `reasoning.effort` value at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effort {
     /// Reasoning off. Reachable only through `thinking: {"type":"disabled"}`
     /// or an explicit `@none`.
     None,
+    Minimal,
     Low,
     Medium,
     High,
@@ -54,6 +52,7 @@ impl Effort {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -65,8 +64,9 @@ impl Effort {
     /// Every spelling a user can type, in ladder order. Used for parsing and
     /// for the "valid values are ..." half of an error message, so the two can
     /// never drift.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::None,
+        Self::Minimal,
         Self::Low,
         Self::Medium,
         Self::High,
@@ -333,11 +333,12 @@ mod tests {
     }
 
     #[test]
-    fn minimal_is_not_an_accepted_effort() {
-        // No gpt-5.6 model supports it; accepting it here would resurrect the
-        // silent upstream rejection the ladder used to cause.
-        assert!(Effort::parse("minimal").is_none());
-        assert!(ModelSpec::parse("terra@minimal").is_err());
+    fn minimal_is_an_accepted_effort() {
+        assert_eq!(Effort::parse("minimal"), Some(Effort::Minimal));
+        assert_eq!(
+            ModelSpec::parse("terra@minimal").unwrap().effort,
+            Some(Effort::Minimal)
+        );
     }
 
     #[test]
