@@ -28,14 +28,31 @@ the bridge atomically clears that conversation's canonical transcript. The next
 replay therefore seeds fresh canonical history rather than continuing stale
 items.
 
-When a first inference attempt fails in-band with the exact
+When a first inference attempt fails with the exact
 `context_length_exceeded` code **before any Anthropic-visible text, reasoning,
-or tool-call frame**, the bridge performs one bounded recovery cycle: it sends
-only prior canonical history to `/responses/compact`, validates the opaque
-compaction output, atomically replaces canonical history, appends the pending
-current input exactly once, and retries inference once. `response.created` is
-only a protocol envelope and does not count as visible output. No other error
-code recovers; a compact error, malformed compact output, cancellation, a
-second context-full response, or any output before failure stays terminal.
-Recovery suppresses every frame from the failed attempt, so the client receives
-only the retry's single valid response sequence.
+or tool-call frame**, the bridge performs one bounded recovery cycle. The code
+is accepted from either a non-2xx JSON error envelope or an HTTP 200
+`response.failed` SSE event; status codes and free-form messages are not
+signals. The bridge sends only prior canonical history to `/responses/compact`,
+validates the opaque compaction output, atomically replaces canonical history,
+appends the pending current input exactly once, and retries inference once.
+`response.created` is only a protocol envelope and does not count as visible
+output. No other error code recovers; a compact error, malformed compact
+output, cancellation, a second context-full response, or any output before
+failure stays terminal. Recovery suppresses every frame from the failed
+attempt, so the client receives only the retry's single valid response
+sequence.
+
+The authenticated loopback listener also exposes two launch-private lifecycle
+controls for a Claude-side compact/clear hook:
+
+- `POST /_clud/context/compact` compacts the bridge's canonical transcript and
+  replaces it only after a valid opaque response. Empty history is a successful
+  no-op.
+- `POST /_clud/context/clear` clears only this bridge session and performs no
+  upstream inference or compaction request.
+
+Both routes use the same loopback URL and launch-scoped
+`ANTHROPIC_AUTH_TOKEN` already supplied to the child, reject non-empty bodies,
+serialize with normal turns, and return `204` on success. They are not part of
+the public Anthropic Messages surface.

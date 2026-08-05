@@ -138,6 +138,17 @@ impl std::fmt::Display for PipelineError {
 impl std::error::Error for PipelineError {}
 
 impl PipelineError {
+    /// Whether the provider supplied the exact context-window error code.
+    pub fn is_context_length_exceeded(&self) -> bool {
+        match self {
+            Self::Upstream(error) => error.is_context_length_exceeded(),
+            Self::Provider(failure) => failure.diagnostic.as_ref().is_some_and(|diagnostic| {
+                diagnostic.failure.code == Some("context_length_exceeded")
+            }),
+            Self::Translate(_) | Self::Compaction(_) => false,
+        }
+    }
+
     /// Downstream HTTP status for a failure that happens *before* any output.
     ///
     /// Once a frame has been flushed there is no status left to choose, which
@@ -484,6 +495,10 @@ struct AttemptOutcome {
     /// Frames are withheld until output becomes visible. A pre-output failure
     /// can then recover without leaking a first `message_start` or error.
     deferred_frames: Vec<String>,
+    /// A transport-level context failure that happened before any visible
+    /// output. It is retained as a control-flow signal so the pipeline can
+    /// compact and retry without first emitting a misleading error frame.
+    pre_output_failure: Option<UpstreamError>,
 }
 
 fn emit_deferred_frames(
@@ -669,6 +684,32 @@ impl<C: CredentialSource> Pipeline<C> {
             .map_err(PipelineError::Compaction)
     }
 
+    /// Compact the bridge-owned transcript for an explicit lifecycle control
+    /// request. The control request has no Messages body from which to derive
+    /// per-turn options, so it uses the launch's selected model and the same
+    /// stable prompt-cache key as ordinary turns.
+    pub fn compact_canonical_history(
+        &self,
+        history: Vec<serde_json::Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<serde_json::Value>, PipelineError> {
+        let request = ResponsesRequest {
+            model: self.default_model.model.clone(),
+            input: Vec::new(),
+            stream: false,
+            store: false,
+            include: Vec::new(),
+            instructions: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: Some(true),
+            reasoning: None,
+            prompt_cache_key: Some(self.client.session_id().to_string()),
+            service_tier: None,
+        };
+        self.compact_history(&request, history, cancel)
+    }
+
     /// Compatibility helper for callers without canonical history.
     pub fn compact(
         &self,
@@ -794,6 +835,21 @@ impl<C: CredentialSource> Pipeline<C> {
                 }
             }
             Err(error) => {
+                // `delivered` is the commit boundary shared with the
+                // upstream client. It is equivalent to `!visible` here, but
+                // avoids borrowing the frame-forwarding closure while its
+                // error path is still being examined.
+                if !delivered.load(Ordering::Acquire) && error.is_context_length_exceeded() {
+                    return Ok(AttemptOutcome {
+                        terminal_account_failure: false,
+                        in_band_failure: None,
+                        in_band_provider_failure: false,
+                        output_items,
+                        visible,
+                        deferred_frames,
+                        pre_output_failure: Some(error),
+                    });
+                }
                 if !translator.is_finished() {
                     forward(translator.fail_opaque()).map_err(PipelineError::Upstream)?;
                 }
@@ -820,6 +876,7 @@ impl<C: CredentialSource> Pipeline<C> {
             output_items,
             visible,
             deferred_frames,
+            pre_output_failure: None,
         })
     }
 
@@ -850,17 +907,24 @@ impl<C: CredentialSource> Pipeline<C> {
             tool_names.clone(),
         )?;
         let should_recover = !first.visible
-            && matches!(
-                first
-                    .in_band_failure
-                    .as_ref()
-                    .and_then(|failure| failure.code),
-                Some("context_length_exceeded")
-            )
+            && (first
+                .pre_output_failure
+                .as_ref()
+                .is_some_and(UpstreamError::is_context_length_exceeded)
+                || matches!(
+                    first
+                        .in_band_failure
+                        .as_ref()
+                        .and_then(|failure| failure.code),
+                    Some("context_length_exceeded")
+                ))
             && history
                 .as_ref()
                 .is_some_and(|history| !history.snapshot().is_empty());
         if !should_recover {
+            if let Some(error) = first.pre_output_failure {
+                return Err(PipelineError::Upstream(error));
+            }
             emit_deferred_frames(&first.deferred_frames, sink)?;
             if first.in_band_provider_failure {
                 return Ok(StreamSummary {
@@ -909,6 +973,9 @@ impl<C: CredentialSource> Pipeline<C> {
             sink,
             tool_names,
         )?;
+        if let Some(error) = retry.pre_output_failure {
+            return Err(PipelineError::Upstream(error));
+        }
         emit_deferred_frames(&retry.deferred_frames, sink)?;
         if retry.in_band_provider_failure {
             return Ok(StreamSummary {

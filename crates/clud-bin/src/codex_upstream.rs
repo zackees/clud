@@ -117,6 +117,11 @@ pub enum FailureClass {
 pub struct UpstreamFailure {
     status: u16,
     class: FailureClass,
+    /// Exact provider signal that the request exceeded the model context.
+    /// This is deliberately a boolean rather than retained body/code text:
+    /// control flow may use the allowlisted value without carrying upstream
+    /// payloads into logs or errors.
+    context_length_exceeded: bool,
     /// `x-request-id`. Opaque correlation handle, safe to log and to name in a
     /// client-facing message.
     request_id: Option<String>,
@@ -139,6 +144,10 @@ impl UpstreamFailure {
 
     pub fn class(&self) -> FailureClass {
         self.class
+    }
+
+    pub fn is_context_length_exceeded(&self) -> bool {
+        self.context_length_exceeded
     }
 
     pub fn request_id(&self) -> Option<&str> {
@@ -213,9 +222,11 @@ impl UpstreamFailure {
         let resets_in = parse_resets_in(body_prefix);
         let detail = error_detail(body_prefix);
         let class = classify(status, body_prefix);
+        let context_length_exceeded = context_length_exceeded(body_prefix);
         Self {
             status,
             class,
+            context_length_exceeded,
             request_id,
             cf_ray,
             retry_after,
@@ -223,6 +234,16 @@ impl UpstreamFailure {
             detail,
         }
     }
+}
+
+fn context_length_exceeded(body_prefix: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body_prefix) else {
+        return false;
+    };
+    ["/error/code", "/code"].into_iter().any(|pointer| {
+        value.pointer(pointer).and_then(serde_json::Value::as_str)
+            == Some("context_length_exceeded")
+    })
 }
 
 /// Body signatures that mean "this request will never succeed as written".
@@ -440,6 +461,12 @@ impl std::fmt::Display for UpstreamError {
 impl std::error::Error for UpstreamError {}
 
 impl UpstreamError {
+    /// Whether this is the provider's exact context-window signal. Status
+    /// codes and free-form messages are intentionally not accepted here.
+    pub fn is_context_length_exceeded(&self) -> bool {
+        matches!(self, Self::Status(failure) if failure.is_context_length_exceeded())
+    }
+
     /// Whether this failure could plausibly succeed on a fresh attempt.
     ///
     /// Note this is only half the decision: [`UpstreamClient::stream`] also
@@ -1360,7 +1387,9 @@ mod tests {
         let client = client(
             &base_url,
             UpstreamConfig {
-                first_frame_timeout: Some(Duration::from_millis(200)),
+                // Keep ample scheduler/socket setup margin on macOS arm
+                // runners; the fake server still responds after only 80 ms.
+                first_frame_timeout: Some(Duration::from_secs(1)),
                 read_timeout: Duration::from_secs(1),
                 ..fast_config()
             },
@@ -1553,6 +1582,26 @@ mod tests {
     /// Build a failure without a socket, so classification is testable alone.
     fn failure_from(status: u16, body: &str) -> UpstreamFailure {
         UpstreamFailure::from_parts(status, |_| None, body, DEFAULT_MAX_RETRY_DELAY)
+    }
+
+    #[test]
+    fn context_limit_detection_requires_the_exact_machine_code() {
+        assert!(
+            failure_from(400, r#"{"error":{"code":"context_length_exceeded"}}"#)
+                .is_context_length_exceeded()
+        );
+        assert!(
+            failure_from(400, r#"{"code":"context_length_exceeded"}"#).is_context_length_exceeded()
+        );
+        assert!(
+            !failure_from(400, r#"{"error":{"code":"invalid_request"}}"#)
+                .is_context_length_exceeded()
+        );
+        assert!(
+            !failure_from(413, r#"{"error":{"message":"context length exceeded"}}"#)
+                .is_context_length_exceeded()
+        );
+        assert!(!failure_from(400, "not json").is_context_length_exceeded());
     }
 
     fn body_response(status: u16, body: &str, headers: &[(&str, &str)]) -> Vec<u8> {
