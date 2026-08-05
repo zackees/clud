@@ -44,6 +44,10 @@ const DEFAULT_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// token is healthy, whereas a socket that accepts no bytes for five minutes
 /// is not. Phase 3 replaces the fixture frames but keeps this primitive.
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Maximum wait for the first upstream byte. It is deliberately generous:
+/// lengthy model reasoning is healthy, but a timeout here still leaves the
+/// downstream status uncommitted.
+const DEFAULT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(300);
 /// Claude Code issues several requests at once: the foreground turn plus
 /// background side-model calls and any subagents. The bound still exists, but
 /// exceeding it now queues in the listen backlog rather than failing.
@@ -81,6 +85,7 @@ pub struct BridgeConfig {
     pub header_timeout: Duration,
     pub body_timeout: Duration,
     pub stream_idle_timeout: Duration,
+    pub first_frame_timeout: Duration,
     pub max_concurrency: usize,
     pub admission_wait: Duration,
     /// Default model+effort selection, from `--model` on the launch. `None`
@@ -106,6 +111,7 @@ impl Default for BridgeConfig {
             header_timeout: DEFAULT_HEADER_TIMEOUT,
             body_timeout: DEFAULT_BODY_TIMEOUT,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            first_frame_timeout: DEFAULT_FIRST_FRAME_TIMEOUT,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             admission_wait: DEFAULT_ADMISSION_WAIT,
             default_model: None,
@@ -178,6 +184,7 @@ impl fmt::Debug for BridgeConfig {
             .field("header_timeout", &self.header_timeout)
             .field("body_timeout", &self.body_timeout)
             .field("stream_idle_timeout", &self.stream_idle_timeout)
+            .field("first_frame_timeout", &self.first_frame_timeout)
             .field("max_concurrency", &self.max_concurrency)
             .field("admission_wait", &self.admission_wait)
             .field(
@@ -648,7 +655,12 @@ fn build_pipeline(
         )?),
         None => ResolvedCredentials::resolve_default()?,
     };
-    let mut client = UpstreamClient::new(credentials, UpstreamConfig::default());
+    let upstream_config = UpstreamConfig {
+        first_frame_timeout: Some(config.first_frame_timeout),
+        read_timeout: config.stream_idle_timeout,
+        ..UpstreamConfig::default()
+    };
+    let mut client = UpstreamClient::new(credentials, upstream_config);
     if let Some(log) = log.cloned() {
         client = client.with_retry_observer(move |error, attempt, budget, backoff| {
             record_retry(&log, error, attempt, budget, backoff);
@@ -1960,6 +1972,36 @@ Connection: close
         assert!(body.starts_with("event: message_start\ndata:"));
         assert!(body.ends_with("\n\n"));
         assert!(body.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn first_frame_timeout_returns_a_pre_commit_gateway_error() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_url = format!("http://{}", listener.local_addr().unwrap());
+        let upstream = thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                thread::sleep(Duration::from_millis(80));
+            }
+        });
+        let bridge = BridgeHandle::start(
+            BridgeConfig {
+                first_frame_timeout: Duration::from_millis(20),
+                ..BridgeConfig::default()
+            }
+            .with_test_upstream_url(Some(upstream_url)),
+        )
+        .unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+
+        assert_eq!(status(&response), 504);
+        assert!(!response.contains("text/event-stream"));
+        upstream.join().unwrap();
     }
 
     #[test]

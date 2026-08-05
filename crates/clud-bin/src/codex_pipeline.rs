@@ -12,7 +12,7 @@
 //! the state machine that step 3 already fuzzed, rather than adding a second,
 //! separately-wrong mapping for the non-streaming shape.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::codex_model::ModelSpec;
@@ -475,16 +475,23 @@ impl<C: CredentialSource> Pipeline<C> {
 
         let mut decoder = FrameDecoder::new();
         let mut translator = StreamTranslator::new(model, message_id).with_tool_names(tool_names);
+        let delivered = AtomicBool::new(false);
         let mut pump = |chunk: &[u8]| -> Result<(), UpstreamError> {
             for frame in decoder.push(chunk) {
                 for out in translator.push(&frame) {
+                    // Commit before calling the writer: an I/O error may occur
+                    // after it has flushed bytes downstream, where replay would
+                    // duplicate a visible frame.
+                    delivered.store(true, Ordering::Release);
                     sink(&out)?;
                 }
             }
             Ok(())
         };
 
-        let result = self.client.stream(&upstream_body, cancel, &mut pump);
+        let result = self
+            .client
+            .stream_with_commit(&upstream_body, cancel, &mut pump, &delivered);
         match result {
             Ok(_) => {
                 for frame in decoder.finish() {
@@ -753,6 +760,7 @@ mod tests {
             UpstreamConfig {
                 connect_timeout: Duration::from_secs(2),
                 read_timeout: Duration::from_secs(2),
+                first_frame_timeout: Some(Duration::from_secs(2)),
                 overall_timeout: Duration::from_secs(10),
                 retry_delay: Duration::from_millis(10),
                 ..UpstreamConfig::default()

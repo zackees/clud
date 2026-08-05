@@ -27,6 +27,7 @@
 //! rather than carrying the library's message, because those messages embed
 //! the URL and would put the endpoint into logs.
 
+use std::error::Error as _;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -435,16 +436,12 @@ impl UpstreamError {
     /// [`UpstreamError::max_attempts`] for how much budget the failure earns.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport(_) => true,
+            Self::Transport(_) | Self::Timeout => true,
             Self::Status(failure) => !matches!(
                 failure.class,
                 FailureClass::Permanent | FailureClass::Exhausted
             ),
-            Self::Credentials(_)
-            | Self::TooLarge
-            | Self::Timeout
-            | Self::Cancelled
-            | Self::Downstream(_) => false,
+            Self::Credentials(_) | Self::TooLarge | Self::Cancelled | Self::Downstream(_) => false,
         }
     }
 
@@ -454,7 +451,7 @@ impl UpstreamError {
     /// gets whatever its class earns.
     pub fn max_attempts(&self, config: &UpstreamConfig) -> u32 {
         match self {
-            Self::Transport(_) => config.max_attempts.max(1),
+            Self::Transport(_) | Self::Timeout => config.max_attempts.max(1),
             Self::Status(failure) => failure.max_attempts(config),
             _ => 1,
         }
@@ -890,6 +887,10 @@ impl CredentialSource for ResolvedCredentials {
 pub struct UpstreamConfig {
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
+    /// Maximum time to the first upstream byte, while downstream can still
+    /// choose a non-200 status and retry safely. `None` preserves the idle
+    /// read timeout for callers that deliberately do not impose this budget.
+    pub first_frame_timeout: Option<Duration>,
     pub overall_timeout: Duration,
     pub max_response_bytes: usize,
     /// Attempt budget for a recognised transient failure.
@@ -909,6 +910,7 @@ impl Default for UpstreamConfig {
         Self {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             read_timeout: DEFAULT_READ_TIMEOUT,
+            first_frame_timeout: None,
             overall_timeout: DEFAULT_OVERALL_TIMEOUT,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
@@ -985,9 +987,26 @@ impl<C: CredentialSource> UpstreamClient<C> {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(&[u8]) -> Result<(), UpstreamError>,
     ) -> Result<StreamOutcome, UpstreamError> {
+        let delivered = AtomicBool::new(false);
+        let mut legacy_sink = |chunk: &[u8]| {
+            // Preserve the legacy raw-byte commit boundary for direct callers.
+            // The pipeline uses `stream_with_commit` to mark only frames it
+            // has actually made downstream-visible.
+            delivered.store(true, Ordering::Release);
+            sink(chunk)
+        };
+        self.stream_with_commit(body, cancel, &mut legacy_sink, &delivered)
+    }
+
+    pub(crate) fn stream_with_commit(
+        &self,
+        body: &[u8],
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(&[u8]) -> Result<(), UpstreamError>,
+        delivered: &AtomicBool,
+    ) -> Result<StreamOutcome, UpstreamError> {
         let target = self.credentials.resolve()?;
         let deadline = Instant::now() + self.config.overall_timeout;
-        let mut delivered = false;
         let mut attempt = 0_u32;
         let mut slept = Duration::ZERO;
 
@@ -996,7 +1015,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
             if cancel.load(Ordering::Acquire) {
                 return Err(UpstreamError::Cancelled);
             }
-            match self.attempt(&target, body, cancel, deadline, sink, &mut delivered) {
+            match self.attempt(&target, body, cancel, deadline, sink, delivered) {
                 Ok(bytes) => {
                     return Ok(StreamOutcome {
                         attempts: attempt,
@@ -1009,7 +1028,7 @@ impl<C: CredentialSource> UpstreamClient<C> {
                     // retryable the failure looks. Everything below only ever
                     // widens the *pre-commit* window.
                     let budget = error.max_attempts(&self.config);
-                    let retry_allowed = !delivered
+                    let retry_allowed = !delivered.load(Ordering::Acquire)
                         && error.is_retryable()
                         && attempt < budget
                         && Instant::now() < deadline;
@@ -1050,8 +1069,12 @@ impl<C: CredentialSource> UpstreamClient<C> {
         cancel: &AtomicBool,
         deadline: Instant,
         sink: &mut dyn FnMut(&[u8]) -> Result<(), UpstreamError>,
-        delivered: &mut bool,
+        delivered: &AtomicBool,
     ) -> Result<usize, UpstreamError> {
+        let attempt_deadline = self
+            .config
+            .first_frame_timeout
+            .map(|timeout| Instant::now() + timeout);
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(self.config.connect_timeout)
             .timeout_read(self.config.read_timeout)
@@ -1081,7 +1104,12 @@ impl<C: CredentialSource> UpstreamClient<C> {
             request = request.set(name, value);
         }
 
-        let response = match request.send_bytes(body) {
+        let response = match match attempt_deadline {
+            Some(deadline) => request
+                .timeout(deadline.saturating_duration_since(Instant::now()))
+                .send_bytes(body),
+            None => request.send_bytes(body),
+        } {
             Ok(response) => response,
             // The response is *read*, not discarded. Its headers carry the
             // `cf-ray` that distinguishes an edge failure from an application
@@ -1094,26 +1122,46 @@ impl<C: CredentialSource> UpstreamClient<C> {
                     self.config.max_retry_delay,
                 )));
             }
-            Err(ureq::Error::Transport(_)) => {
-                return Err(UpstreamError::Transport("connection failed"));
+            Err(ureq::Error::Transport(error)) => {
+                return Err(
+                    if attempt_deadline.is_some_and(|at| Instant::now() >= at)
+                        && is_timeout_transport(&error)
+                    {
+                        UpstreamError::Timeout
+                    } else {
+                        UpstreamError::Transport("connection failed")
+                    },
+                );
             }
         };
 
         let mut reader = response.into_reader();
+        let first_frame_deadline = attempt_deadline;
         let mut buffer = [0_u8; 8192];
         let mut total = 0_usize;
         loop {
             if cancel.load(Ordering::Acquire) {
                 return Err(UpstreamError::Cancelled);
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline
+                || (!delivered.load(Ordering::Acquire)
+                    && first_frame_deadline.is_some_and(|at| Instant::now() >= at))
+            {
                 return Err(UpstreamError::Timeout);
             }
             let count = match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => count,
                 Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                    return Err(UpstreamError::Transport("read timed out"));
+                    return Err(
+                        if !delivered.load(Ordering::Acquire)
+                            && first_frame_deadline.is_some_and(|at| Instant::now() >= at)
+                        {
+                            UpstreamError::Timeout
+                        } else {
+                            UpstreamError::Transport("read timed out")
+                        },
+                    );
                 }
                 Err(_) => return Err(UpstreamError::Transport("read failed")),
             };
@@ -1121,14 +1169,20 @@ impl<C: CredentialSource> UpstreamClient<C> {
             if total > self.config.max_response_bytes {
                 return Err(UpstreamError::TooLarge);
             }
-            // Set *before* calling the sink: a sink that fails midway has still
-            // potentially written bytes downstream, so the request is committed
-            // either way and must never be replayed.
-            *delivered = true;
+            // The pipeline alone knows whether the chunk became a complete,
+            // downstream-visible frame, so it owns the commit marker.
             sink(&buffer[..count])?;
         }
         Ok(total)
     }
+}
+
+/// Whether ureq wrapped an underlying socket timeout while parsing a response.
+fn is_timeout_transport(error: &ureq::Transport) -> bool {
+    error
+        .source()
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|source| source.kind() == std::io::ErrorKind::TimedOut)
 }
 
 /// Reduce an error response to a classified summary, then drop it.
@@ -1350,6 +1404,7 @@ mod tests {
         UpstreamConfig {
             connect_timeout: Duration::from_secs(2),
             read_timeout: Duration::from_secs(2),
+            first_frame_timeout: None,
             overall_timeout: Duration::from_secs(10),
             retry_delay: Duration::from_millis(10),
             ..UpstreamConfig::default()
@@ -1472,6 +1527,85 @@ mod tests {
         assert_eq!(outcome.attempts, 1);
         assert_eq!(String::from_utf8(seen).unwrap(), payload);
         assert_eq!(outcome.bytes, payload.len());
+    }
+
+    #[test]
+    fn first_frame_timeout_is_pre_commit_and_retryable() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                std::thread::sleep(Duration::from_millis(80));
+                let _ = stream.write_all(&sse_response("data: too late\n\n"));
+            }
+        });
+        let client = client(
+            &base_url,
+            UpstreamConfig {
+                first_frame_timeout: Some(Duration::from_millis(20)),
+                read_timeout: Duration::from_secs(1),
+                max_attempts: 2,
+                retry_delay: Duration::ZERO,
+                ..fast_config()
+            },
+        );
+        let mut seen = Vec::new();
+        let error = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |chunk| {
+                seen.extend_from_slice(chunk);
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert_eq!(error, UpstreamError::Timeout);
+        assert!(
+            seen.is_empty(),
+            "a first-frame timeout must not commit output"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_healthy_first_frame_arriving_within_its_budget_succeeds() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(Duration::from_millis(80));
+            stream
+                .write_all(&sse_response("data: healthy\n\n"))
+                .unwrap();
+        });
+        let client = client(
+            &base_url,
+            UpstreamConfig {
+                first_frame_timeout: Some(Duration::from_millis(200)),
+                read_timeout: Duration::from_secs(1),
+                ..fast_config()
+            },
+        );
+        let mut seen = Vec::new();
+        let outcome = client
+            .stream(b"{}", &AtomicBool::new(false), &mut |chunk| {
+                seen.extend_from_slice(chunk);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(outcome.attempts, 1);
+        assert_eq!(seen, b"data: healthy\n\n");
+        server.join().unwrap();
     }
 
     #[test]
@@ -1676,7 +1810,6 @@ mod tests {
         for error in [
             UpstreamError::Credentials("x"),
             UpstreamError::TooLarge,
-            UpstreamError::Timeout,
             UpstreamError::Cancelled,
             UpstreamError::Downstream("x"),
         ] {
