@@ -473,6 +473,11 @@ class TestDaemonManagedSessionFlags:
     ) -> None:
         state_dir = tmp_path / "daemon-state"
         env = managed_env(mock_env, state_dir)
+        # #333: exercise the Windows runtime-cache relay while this test's
+        # captured pipes and detached daemon make handle inheritance observable.
+        # Without the relay's explicit non-inheritable stdio copies,
+        # subprocess.run() never receives EOF after the background daemon starts.
+        env["CLUD_USE_RUNTIME_CACHE"] = "1"
 
         result = subprocess.run(
             [
