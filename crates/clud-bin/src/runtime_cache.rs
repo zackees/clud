@@ -187,26 +187,30 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 
 /// Re-exec from the cached binary.
 ///
-/// # Known defect on Windows (#333)
+/// # The two branches are not equivalent (#333)
 ///
-/// The two branches below are **not** equivalent, and the difference is
-/// load-bearing rather than cosmetic:
+/// - Unix uses `execv`, which replaces the process image. The PID survives and
+///   nothing is left behind.
+/// - Windows has no `execv`, so it relays: spawn the cached binary, wait, exit
+///   with its code. The PID does **not** survive — the hop leaves a wrapper
+///   process holding the original PID while the real clud runs as its child.
 ///
-/// - Unix uses `execv`, which replaces the process image. The PID survives.
-/// - Windows has no `execv`, so it spawns the cached binary and waits. The
-///   PID does **not** survive: every hop leaves a wrapper process holding the
-///   original PID while the real clud runs as its child.
+/// The surviving wrapper is why [`role_pid_is_load_bearing`] exists: any role
+/// whose PID is recorded by or observed from another process must not hop. The
+/// foreground CLI is not such a role (it stamps descendants with its own
+/// *post*-hop `process::id()`), so it may.
 ///
-/// clud's identity model keys off PIDs everywhere — `daemon.json`,
-/// `handover_registry`, `ProcessIdentity`, originator tags, orphan sparing —
-/// so a wrapper PID is not a harmless extra process. Enabling
-/// `CLUD_USE_RUNTIME_CACHE=1` across the integration suite fails **31 tests**
-/// on Windows; the first is a daemon whose recorded PID is already dead.
+/// # What the relay must not do
 ///
-/// So the hop is not merely "unsoaked" on Windows, it is **known broken**, and
-/// #333's proposal to make it the default cannot proceed there until this is
-/// resolved — by exempting the `__daemon` / `__worker` paths, or by finding a
-/// PID-preserving mechanism. Unix is unaffected.
+/// The wrapper must add nothing but a wait. It used to spawn through
+/// `NativeProcess`, which puts each Windows child in a `KILL_ON_JOB_CLOSE` Job
+/// Object; membership is inherited, so the relayed clud's own detached
+/// `__daemon` joined that job and was terminated when the wrapper exited. That
+/// — not the wrapper PID — was the defect behind the 31 integration failures
+/// measured with `CLUD_USE_RUNTIME_CACHE=1` on Windows: `daemon.json` naming a
+/// PID that was already dead. The spawn now goes through
+/// [`crate::trampoline::relay_child_and_wait`], which adds no containment; see
+/// its doc comment and `tests/runtime_cache_hop_windows.rs`.
 fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
@@ -237,28 +241,7 @@ fn reexec_from_cached_binary(cached: &Path) -> io::Result<()> {
 
     #[cfg(not(unix))]
     {
-        use running_process::{CommandSpec, NativeProcess, ProcessConfig, StderrMode, StdinMode};
-
-        let mut argv = Vec::with_capacity(args.len() + 1);
-        argv.push(cached.as_os_str().to_string_lossy().into_owned());
-        argv.extend(
-            args.into_iter()
-                .map(|arg| arg.to_string_lossy().into_owned()),
-        );
-
-        let process = NativeProcess::new(ProcessConfig {
-            command: CommandSpec::Argv(argv),
-            cwd: None,
-            env: None,
-            capture: false,
-            stderr_mode: StderrMode::Stdout,
-            creationflags: None,
-            create_process_group: false,
-            stdin_mode: StdinMode::Inherit,
-            nice: None,
-        });
-        process.start().map_err(io::Error::other)?;
-        let code = process.wait(None).map_err(io::Error::other)?;
+        let code = crate::trampoline::relay_child_and_wait(cached, &args)?;
         std::process::exit(code);
     }
 }

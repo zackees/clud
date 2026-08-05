@@ -15,10 +15,69 @@
 //!
 //! On Linux/macOS: no-op (Unix allows deleting running binaries).
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
 use crate::runtime_cache;
+
+/// Run `program` with `args` as a **transparent relay child**: same stdio,
+/// same cwd, same environment, no added process containment — then block
+/// until it exits and return its exit code.
+///
+/// This is the spawn half of the runtime-cache hop
+/// ([`runtime_cache::hop_to_runtime_cache_if_enabled`]). Windows has no
+/// `execv`, so the hop cannot replace its own process image the way the Unix
+/// branch does; it has to spawn the cached binary and wait. What it must not
+/// do is *change* anything else about how that binary runs.
+///
+/// # Why raw `std::process::Command` and not `NativeProcess` (#333)
+///
+/// `NativeProcess::start` puts every Windows child in a fresh Job Object with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and drops that job handle when the
+/// wrapper goes away. For a relay that is not an implementation detail, it is
+/// a behavior change with teeth: Job Object membership is *inherited*, so
+/// everything the relayed clud starts joins the same job — including the
+/// processes that are meant to outlive it. The `__daemon` started by
+/// [`spawn_detached_self`] is exactly that. It detaches with
+/// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` and deliberately does **not**
+/// request `CREATE_BREAKAWAY_FROM_JOB`, so it stays a job member; when the
+/// relay exits and the job handle closes, the daemon is terminated with the
+/// rest of the job. The observable symptom is a `daemon.json` naming a PID
+/// that is already dead — the first of the 31 integration failures measured
+/// with `CLUD_USE_RUNTIME_CACHE=1` on Windows and recorded in #333.
+///
+/// A relay must add nothing. This is the same reasoning that exempts
+/// `bin/clud_shim.rs`, and it is why both files sit in `ci/banned_imports.py`'s
+/// exempt set rather than routing through `running_process`.
+///
+/// Covered by `tests/runtime_cache_hop_windows.rs`.
+pub fn relay_child_and_wait(program: &Path, args: &[impl AsRef<OsStr>]) -> std::io::Result<i32> {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+
+    #[cfg(windows)]
+    {
+        // The cached child needs the caller's visible stdio, but its detached
+        // descendants must not inherit the caller's pipe handles. Pass owned
+        // inheritable duplicates explicitly and make the originals
+        // non-inheritable for the CreateProcess call.
+        let [stdin, stdout, stderr] = windows_stdio::duplicate_stdio_for_child()?;
+        command.stdin(stdin).stdout(stdout).stderr(stderr);
+        let _guard = windows_stdio::NonInheritableStdioGuard::install();
+        let status = command.status()?;
+        Ok(status.code().unwrap_or(1))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let status = command.status()?;
+        // A signalled child yields `None`; 1 is the conventional failed
+        // stand-in. Production Unix hopping uses `execv`, but keeping this
+        // helper total also makes its direct integration coverage portable.
+        Ok(status.code().unwrap_or(1))
+    }
+}
 
 /// Spawn the current executable as a detached background process.
 ///
@@ -87,11 +146,71 @@ mod windows_stdio {
     const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
     const STD_ERROR_HANDLE: u32 = -12i32 as u32;
     const INVALID_HANDLE_VALUE: isize = -1;
+    const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 
     extern "system" {
         fn GetStdHandle(n_std_handle: u32) -> isize;
         fn GetHandleInformation(handle: isize, flags: *mut u32) -> i32;
         fn SetHandleInformation(handle: isize, mask: u32, flags: u32) -> i32;
+        fn GetCurrentProcess() -> isize;
+        fn DuplicateHandle(
+            source_process_handle: isize,
+            source_handle: isize,
+            target_process_handle: isize,
+            target_handle: *mut isize,
+            desired_access: u32,
+            inherit_handle: i32,
+            options: u32,
+        ) -> i32;
+    }
+
+    /// Duplicate the three standard handles for the relay's cached child.
+    ///
+    /// The copies deliberately start non-inheritable: `std::process::Command`
+    /// creates the one inheritable copy it needs for each STARTUPINFO standard
+    /// slot. Making these copies inheritable here would also leak them as
+    /// ordinary handles to every descendant. See [`super::relay_child_and_wait`].
+    pub(super) fn duplicate_stdio_for_child() -> std::io::Result<[std::process::Stdio; 3]> {
+        use std::os::windows::io::FromRawHandle;
+
+        let ids = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE];
+        let mut duplicated = Vec::with_capacity(ids.len());
+        for std_id in ids {
+            let source = unsafe { GetStdHandle(std_id) };
+            if source == 0 || source == INVALID_HANDLE_VALUE {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "standard handle unavailable for runtime-cache relay",
+                ));
+            }
+
+            let mut target = 0isize;
+            let copied = unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    source,
+                    GetCurrentProcess(),
+                    &mut target,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if copied == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: DuplicateHandle returned a fresh owned handle. Stdio
+            // takes ownership through File and closes it after CreateProcess.
+            let file = unsafe { std::fs::File::from_raw_handle(target as _) };
+            duplicated.push(std::process::Stdio::from(file));
+        }
+
+        let mut handles = duplicated.into_iter();
+        Ok([
+            handles.next().expect("stdin duplicate exists"),
+            handles.next().expect("stdout duplicate exists"),
+            handles.next().expect("stderr duplicate exists"),
+        ])
     }
 
     pub(super) struct NonInheritableStdioGuard {
