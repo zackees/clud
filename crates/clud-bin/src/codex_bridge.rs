@@ -606,6 +606,40 @@ fn handle_connection(
         .unwrap_or(parsed.path.as_str())
         .to_string();
     match (parsed.method.as_str(), route.as_str()) {
+        ("POST", "/_clud/context/compact") => {
+            let body_deadline = Instant::now() + config.body_timeout;
+            match read_empty_control_body(
+                &mut stream,
+                parsed.body_prefix,
+                parsed.content_length,
+                body_deadline,
+                shutdown,
+            ) {
+                Ok(()) => serve_context_compact(&mut stream, config, shutdown, conversations, log),
+                Err(ABANDON) => {}
+                Err(status) => {
+                    record_rejection(log, status, "context_control_body");
+                    let _ = write_error(&mut stream, status);
+                }
+            }
+        }
+        ("POST", "/_clud/context/clear") => {
+            let body_deadline = Instant::now() + config.body_timeout;
+            match read_empty_control_body(
+                &mut stream,
+                parsed.body_prefix,
+                parsed.content_length,
+                body_deadline,
+                shutdown,
+            ) {
+                Ok(()) => serve_context_clear(&mut stream, conversations),
+                Err(ABANDON) => {}
+                Err(status) => {
+                    record_rejection(log, status, "context_control_body");
+                    let _ = write_error(&mut stream, status);
+                }
+            }
+        }
         ("HEAD", "/v1/messages") => {
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
@@ -664,6 +698,79 @@ fn handle_connection(
             }
             record_rejection(log, 404, "unrouted_request");
             let _ = write_error(&mut stream, 404);
+        }
+    }
+}
+
+fn read_empty_control_body(
+    stream: &mut TcpStream,
+    prefix: Vec<u8>,
+    content_length: usize,
+    deadline: Instant,
+    shutdown: &AtomicBool,
+) -> Result<(), u16> {
+    let body = read_body(stream, prefix, content_length, deadline, shutdown)?;
+    if body.is_empty() {
+        Ok(())
+    } else {
+        Err(400)
+    }
+}
+
+fn serve_context_compact(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    shutdown: &AtomicBool,
+    conversations: &ConversationStore,
+    log: Option<&SharedBridgeLog>,
+) {
+    let operation = conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+        let snapshot = history.snapshot();
+        if snapshot.is_empty() {
+            return Ok(Ok(()));
+        }
+        let pipeline = build_pipeline(config, log).map_err(PipelineError::Upstream);
+        let result = pipeline
+            .and_then(|pipeline| pipeline.compact_canonical_history(snapshot, shutdown))
+            .and_then(|replacement| {
+                history.replace_history(&replacement).map_err(|error| {
+                    PipelineError::Translate(crate::codex_translate::TranslateError::Invalid(
+                        error.to_string(),
+                    ))
+                })
+            });
+        Ok(result)
+    });
+    match operation {
+        Ok(Ok(())) => {
+            let _ = write_response(stream, 204, "application/json", b"", false);
+        }
+        Ok(Err(error)) => {
+            let _ = write_pipeline_error(stream, &error, log);
+        }
+        Err(error) => {
+            let failure = PipelineError::Translate(
+                crate::codex_translate::TranslateError::Invalid(error.to_string()),
+            );
+            let _ = write_pipeline_error(stream, &failure, log);
+        }
+    }
+}
+
+fn serve_context_clear(stream: &mut TcpStream, conversations: &ConversationStore) {
+    let result = conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+        history.clear();
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            let _ = write_response(stream, 204, "application/json", b"", false);
+        }
+        Err(error) => {
+            let failure = PipelineError::Translate(
+                crate::codex_translate::TranslateError::Invalid(error.to_string()),
+            );
+            let _ = write_pipeline_error(stream, &failure, None);
         }
     }
 }
@@ -1354,6 +1461,7 @@ fn write_response_with(
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
@@ -1620,6 +1728,15 @@ Connection: close
         )
     }
 
+    fn context_length_status_response() -> Vec<u8> {
+        let body = r#"{"error":{"type":"invalid_request","code":"context_length_exceeded","message":"too large"}}"#;
+        format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
     fn incomplete_response() -> Vec<u8> {
         response_with_events(
             "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
@@ -1834,6 +1951,111 @@ Connection: close
             let response = request(addr, &authorized(method, path, &token, ""));
             assert_eq!(status(&response), 404, "{method} {path}");
         }
+    }
+
+    #[test]
+    fn transport_context_failure_compacts_and_retries_once() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            None,
+            Some(context_length_status_response()),
+            Some(compact_success_response()),
+            None,
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let first = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+        let continuation = r#"{"model":"claude-x","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"done"},{"role":"user","content":"pending"}],"stream":false}"#;
+        let recovered = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), continuation),
+        );
+        assert_eq!(status(&recovered), 200, "{recovered}");
+        assert!(recovered.contains("bridged reply"), "{recovered}");
+        let requests = upstream.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1"))
+                .count(),
+            1,
+            "{requests:#?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            3,
+            "the transport error must be one bounded recovery cycle: {requests:#?}"
+        );
+    }
+
+    #[test]
+    fn authenticated_context_controls_compact_and_clear_the_bridge_session() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            None,
+            Some(compact_success_response()),
+            None,
+            None,
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+        let first = request(
+            addr,
+            &authorized("POST", "/v1/messages", &token, PROBE_BODY),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let compact = request(
+            addr,
+            &authorized("POST", "/_clud/context/compact", &token, ""),
+        );
+        assert_eq!(status(&compact), 204, "{compact}");
+        let compact_requests = upstream.requests();
+        assert_eq!(
+            compact_requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1"))
+                .count(),
+            1,
+            "{compact_requests:#?}"
+        );
+
+        let wrong = request(
+            addr,
+            &authorized("POST", "/_clud/context/clear", "wrong", ""),
+        );
+        assert_eq!(status(&wrong), 401, "{wrong}");
+        let clear = request(
+            addr,
+            &authorized("POST", "/_clud/context/clear", &token, ""),
+        );
+        assert_eq!(status(&clear), 204, "{clear}");
+        let fresh = request(
+            addr,
+            &authorized(
+                "POST",
+                "/v1/messages",
+                &token,
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"fresh"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&fresh), 200, "{fresh}");
+        let requests = upstream.requests();
+        let post_clear = requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+            .nth(1)
+            .expect("post-clear inference request");
+        assert!(post_clear.contains("fresh"), "{post_clear}");
+        assert!(
+            !post_clear.contains("hi"),
+            "stale pre-clear input leaked: {post_clear}"
+        );
     }
 
     #[test]
