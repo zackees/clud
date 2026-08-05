@@ -1418,7 +1418,19 @@ Three supporting rules:
   is a real Responses value that **no gpt-5.6 model accepts** (the family
   starts at `low`), so every small-budget request was being rejected upstream
   for a reason the user could not see. `max` is supported by all three and was
-  unreachable from any budget.
+  unreachable from any budget. Re-confirmed against OpenAI's model guidance
+  for #821: gpt-5.6 accepts `none`, `low`, `medium`, `high`, `xhigh`, `max`.
+- **A stated-but-unsupported `output_config.effort` is a 400, not a
+  fallthrough (#821).** It originally deferred to the next channel, on the
+  theory that the harness's own field should never fail a turn the user is
+  waiting on. But the channel below it is the model's *default*, so the turn
+  ran at an effort the user never chose and could not observe — `/effort
+  minimal` silently became terra's `medium`. Since `minimal` is a genuine
+  Responses value, it is exactly the spelling a user would expect to work,
+  which makes the silence worst here. Both effort channels now produce the
+  same actionable message naming the accepted values. An *absent* or empty
+  effort still defers: that is the harness declining to send the field, not a
+  user naming a value.
 
 **Alternatives rejected:**
 

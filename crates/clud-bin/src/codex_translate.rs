@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::codex_model::{Effort, ModelSpec};
+use crate::codex_model::{Effort, ModelSpec, SelectionError};
 
 /// Default upstream model. Codex fetches its catalogue from the server and
 /// hardcodes almost nothing, so this stays a single overridable value rather
@@ -481,21 +481,44 @@ fn effort_from_thinking(thinking: Option<&Thinking>) -> Option<Effort> {
 ///    actually stated.
 /// 4. The model's own catalog default.
 ///
-/// An unparseable `output_config.effort` falls through rather than failing:
-/// it is the harness's field, and a value we do not recognize is not a reason
-/// to reject a turn the user is waiting on. An unparseable `@effort` *does*
-/// fail, because the user typed it and needs to know it was wrong.
-fn effort_for(request: &MessagesRequest, spec: &ModelSpec) -> Effort {
-    spec.effort
-        .or_else(|| {
-            request
-                .output_config
-                .as_ref()
-                .and_then(|config| config.effort.as_deref())
-                .and_then(Effort::parse)
-        })
-        .or_else(|| effort_from_thinking(request.thinking.as_ref()))
-        .unwrap_or_else(|| spec.effective_effort())
+/// A *stated but unsupported* `output_config.effort` is a **400, not a
+/// fallback** (#821). It used to fall through to the next channel on the
+/// theory that the harness's own field should never fail a turn, but the
+/// channel below it is the model's default, so the request then ran at an
+/// effort the user did not choose and had no way to observe. `minimal` is the
+/// case that forced this: it is a real Responses value, so `/effort minimal`
+/// looks accepted, but gpt-5.6 accepts only `none`/`low`/`medium`/`high`/
+/// `xhigh`/`max` and the turn silently ran at `medium`. Failing loudly with
+/// the accepted values is the only outcome the user can act on.
+///
+/// An *absent* or empty effort is still "unspecified" and defers, because
+/// that is the harness declining to send the field rather than the user
+/// naming a value.
+fn effort_for(request: &MessagesRequest, spec: &ModelSpec) -> Result<Effort, TranslateError> {
+    if let Some(effort) = spec.effort {
+        return Ok(effort);
+    }
+
+    let stated = request
+        .output_config
+        .as_ref()
+        .and_then(|config| config.effort.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(value) = stated {
+        // Same wording as the `@effort` suffix path, so the two channels
+        // cannot describe the same mistake differently.
+        return Effort::parse(value).ok_or_else(|| {
+            invalid(
+                SelectionError::UnknownEffort {
+                    given: value.to_string(),
+                }
+                .to_string(),
+            )
+        });
+    }
+
+    Ok(effort_from_thinking(request.thinking.as_ref()).unwrap_or_else(|| spec.effective_effort()))
 }
 
 // ---------------------------------------------------------------------------
@@ -802,7 +825,7 @@ pub fn translate_request(
     let tool_choice = tools.as_ref().and(tool_choice);
 
     let selection = resolve_selection(request.model.as_deref(), &options.model)?;
-    let effort = effort_for(request, &selection);
+    let effort = effort_for(request, &selection)?;
 
     Ok(Translated {
         request: ResponsesRequest {
@@ -1337,9 +1360,60 @@ mod tests {
         // The suffix is the channel that cannot be dropped in transit, so it
         // wins when both are present.
         assert_eq!(effort("terra@low", json!({"effort": "xhigh"})), "low");
-        // An effort we do not recognize falls through instead of failing a
-        // turn the user is waiting on.
-        assert_eq!(effort("terra", json!({"effort": "wat"})), "medium");
+    }
+
+    /// An `/effort` value the gpt-5.6 family does not accept must be rejected
+    /// at the bridge boundary, not silently downgraded (#821).
+    ///
+    /// `minimal` is the motivating case: it is a real Responses value, but
+    /// gpt-5.6 supports only `none`/`low`/`medium`/`high`/`xhigh`/`max`. It
+    /// used to fall through to terra's `medium` default, so a user who typed
+    /// `/effort minimal` silently ran at a different effort than they chose.
+    #[test]
+    fn an_unsupported_output_config_effort_is_a_400_not_a_silent_downgrade() {
+        let translate = |model: &str, config: serde_json::Value| {
+            translate_bytes(
+                json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "x"}],
+                    "output_config": config,
+                })
+                .to_string()
+                .as_bytes(),
+                &options(),
+            )
+        };
+
+        // Every effort gpt-5.6 accepts reaches the outgoing payload verbatim.
+        for accepted in ["none", "low", "medium", "high", "xhigh", "max"] {
+            let reasoning = translate("terra", json!({"effort": accepted}))
+                .unwrap_or_else(|error| panic!("{accepted} must translate: {error}"))
+                .request
+                .reasoning
+                .unwrap();
+            assert_eq!(reasoning.effort, accepted);
+        }
+
+        for rejected in ["minimal", "wat", "ultra"] {
+            let error = translate("terra", json!({"effort": rejected}))
+                .expect_err("unsupported effort must not translate");
+            let TranslateError::Invalid(message) = error;
+            // Actionable: names what was wrong and what is accepted.
+            assert!(message.contains(rejected), "{message}");
+            assert!(message.contains("xhigh"), "{message}");
+        }
+
+        // An absent or empty effort is "unspecified", not an error: it must
+        // still defer to the lower-precedence channels.
+        assert_eq!(
+            translate("terra", json!({}))
+                .unwrap()
+                .request
+                .reasoning
+                .unwrap()
+                .effort,
+            "medium"
+        );
     }
 
     #[test]
