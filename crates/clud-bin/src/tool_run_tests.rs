@@ -10,6 +10,14 @@ fn captured_line_restores_delimiter_for_incremental_readers() {
     assert_eq!(output, b"first\n");
 }
 
+fn incremental_output_fixture_filter() -> String {
+    let module_path = module_path!();
+    let (_, test_module_path) = module_path
+        .split_once("::")
+        .expect("module_path! includes the crate name and test module");
+    format!("{test_module_path}::incremental_output_fixture_child")
+}
+
 #[test]
 fn captured_subprocess_output_is_forwardable_before_exit() {
     let executable = std::env::current_exe().unwrap();
@@ -20,7 +28,7 @@ fn captured_subprocess_output_is_forwardable_before_exit() {
             executable.to_string_lossy().into_owned(),
             "--ignored".to_string(),
             "--exact".to_string(),
-            "tool_run::tests::incremental_output_fixture_child".to_string(),
+            incremental_output_fixture_filter(),
             "--nocapture".to_string(),
         ]),
         cwd: None,
