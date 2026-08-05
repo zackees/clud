@@ -946,6 +946,5 @@ fn test_build_up_prompt_publish() {
 #[path = "tests/repeat_schedule.rs"]
 mod repeat_schedule;
 
-#[test]
 #[path = "tests/repeat_execution.rs"]
 mod repeat_execution;

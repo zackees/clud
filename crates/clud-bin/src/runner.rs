@@ -31,7 +31,7 @@ use crate::win_creation_flags;
 mod runner_exit;
 #[path = "runner_terminal.rs"]
 mod runner_terminal;
-use runner_exit::normalize_exit_code;
+pub use runner_execution::run_plan_pty;
 
 /// Merge two optional byte channels into one. Used by `run_plan_pty`
 /// to combine the drag-drop side channel with the Windows console-input

@@ -1,3 +1,6 @@
+use super::merge_extra_rx;
+use super::runner_exit::normalize_exit_code;
+use super::runner_terminal;
 use super::*;
 
 pub(super) fn run_with_inherited_stdio(

@@ -1,5 +1,6 @@
 use super::*;
 
+#[test]
 fn test_loop_repeat_24h_parses() {
     let p = plan(&["clud", "loop", "--repeat", "24h", "task"]);
     assert_eq!(

@@ -1,5 +1,6 @@
 use super::*;
 
+#[test]
 fn test_clean_worktrees_with_dry_run() {
     let args = parse(&["clud", "--clean-worktrees", "--dry-run"]);
     assert!(args.clean_worktrees);

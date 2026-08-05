@@ -918,6 +918,5 @@ fn test_clean_worktrees_with_yes_and_force() {
     assert!(args.force);
 }
 
-#[test]
 #[path = "args_tests/commands.rs"]
 mod commands;
