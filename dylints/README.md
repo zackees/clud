@@ -10,8 +10,8 @@ Run locally:
 
 ```bash
 rustup toolchain install nightly-2026-04-16 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
-soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.1 --locked
-RUSTUP_TOOLCHAIN=nightly-2026-04-16 ZCCACHE_DISABLE=1 soldr --no-cache cargo dylint --all -- --workspace --all-targets
+soldr cargo install cargo-dylint dylint-link --version 6.0.1 --locked
+RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr cargo dylint --all -- --workspace --all-targets
 ```
 
 Dylint 6.0.1 still has one upstream artifact-naming gap: on Ubuntu and
