@@ -57,7 +57,7 @@ pub(super) fn new_session_id() -> String {
     )
 }
 
-fn resolve_api_key_target(
+pub(super) fn resolve_api_key_target(
     api_key: Option<String>,
     base_url: Option<String>,
 ) -> Result<UpstreamTarget, UpstreamError> {
@@ -219,7 +219,7 @@ fn token_expiry(token: &str) -> Option<u64> {
 
 /// Minimal unpadded base64url decoder. A dependency for one claim read would be
 /// a poor trade, and the alphabet is fixed.
-fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+pub(super) fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut buffer = 0_u32;
     let mut bits = 0_u32;
@@ -275,7 +275,7 @@ impl ResolvedCredentials {
         )
     }
 
-    fn resolve_with(
+    pub(super) fn resolve_with(
         subscription: Result<CludSubscriptionCredentials, UpstreamError>,
         api_key: impl FnOnce() -> Result<ApiKeyCredentials, UpstreamError>,
     ) -> Result<Self, UpstreamError> {

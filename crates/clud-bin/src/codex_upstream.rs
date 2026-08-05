@@ -600,6 +600,8 @@ pub trait CredentialSource: Send + Sync {
 
 #[path = "codex_upstream_credentials.rs"]
 mod codex_upstream_credentials;
+#[cfg(test)]
+use codex_upstream_credentials::{base64url_decode, resolve_api_key_target};
 use codex_upstream_credentials::{new_session_id, RetryObserver};
 pub use codex_upstream_credentials::{
     ApiKeyCredentials, CludSubscriptionCredentials, CodexCliCredentials, ResolvedCredentials,
