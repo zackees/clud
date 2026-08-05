@@ -42,13 +42,13 @@ Issues = "https://github.com/zackees/clud/issues"
 # CI exec jobs (.github/actions/setup-exec) sync only this group: they have no
 # Rust toolchain by construction, so cmake and maturin are dead weight there —
 # ~150 MB of wheels downloaded onto the scarcest runners in the pool.
-# `ziglang` stays because tests/test_wasm.py shells out to `python -m ziglang`.
+# The WASM CLI test uses its deterministic checked-in fixture, so the test
+# environment needs no external C/C++ compiler.
 test = [
     "pytest>=8.0.0",
     "pytest-cov>=6.0.0",
     "pytest-timeout>=2.3.0",
     "psutil>=5.9",
-    "ziglang>=0.15.2,<0.16",
 ]
 dev = [
     { include-group = "test" },
