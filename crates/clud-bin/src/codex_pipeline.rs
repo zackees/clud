@@ -15,10 +15,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::codex_history::{ConversationHistory, HistoryError};
 use crate::codex_model::ModelSpec;
 use crate::codex_sse::{FrameDecoder, InBandFailure, StreamTranslator};
 use crate::codex_translate::{
-    default_model_spec, translate_bytes, SystemPlacement, TranslateError, TranslateOptions,
+    default_model_spec, translate_bytes, CompactResponse, CompactionError, ResponsesRequest,
+    SystemPlacement, TranslateError, TranslateOptions,
 };
 use crate::codex_upstream::{
     CredentialSource, FailureClass, UpstreamClient, UpstreamError, UpstreamFailure,
@@ -52,6 +54,40 @@ pub struct StreamSummary {
     /// Field names, item kinds, and counts from the translated Responses
     /// request. It intentionally omits all user/model/tool values.
     pub request_shape: serde_json::Value,
+    /// Complete upstream `response.output_item.done` items in wire order.
+    /// These are canonical Responses transcript entries and must remain opaque.
+    pub output_items: Vec<serde_json::Value>,
+    /// The completed turn reached the client, but could not fit in the bounded
+    /// canonical transcript. The bridge must clear this conversation only after
+    /// committing its downstream reply, so the next replay seeds fresh history.
+    pub history_append_rejected: bool,
+}
+
+impl StreamSummary {
+    /// Clears the canonical transcript after a client-visible capacity rejection.
+    /// This remains in the request's `with_history` closure so no concurrent
+    /// replay can observe stale history after the rejected turn's output commits.
+    pub fn clear_history_after_client_commit(&self, history: &mut ConversationHistory) {
+        if self.history_append_rejected {
+            history.clear();
+        }
+    }
+}
+
+/// A completed non-streaming reply and its canonical-history disposition.
+#[derive(Debug)]
+pub struct Completion {
+    pub message: serde_json::Value,
+    pub history_append_rejected: bool,
+}
+
+impl Completion {
+    /// See [`StreamSummary::clear_history_after_client_commit`].
+    pub fn clear_history_after_client_commit(&self, history: &mut ConversationHistory) {
+        if self.history_append_rejected {
+            history.clear();
+        }
+    }
 }
 
 /// Operator-only diagnostic paired with an in-band invalid request.
@@ -82,6 +118,7 @@ pub struct ProviderFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
     Translate(TranslateError),
+    Compaction(CompactionError),
     Upstream(UpstreamError),
     /// An in-band provider failure, classified rather than flattened.
     Provider(ProviderFailure),
@@ -91,6 +128,7 @@ impl std::fmt::Display for PipelineError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Translate(error) => write!(formatter, "{error}"),
+            Self::Compaction(error) => write!(formatter, "{error}"),
             Self::Upstream(error) => write!(formatter, "{error}"),
             Self::Provider(failure) => write!(formatter, "{}", failure.message),
         }
@@ -110,6 +148,7 @@ impl PipelineError {
             // Translation is total (#750 A1), so the only translate failure
             // left is a request that is not a valid Messages request at all.
             Self::Translate(TranslateError::Invalid(_)) => 400,
+            Self::Compaction(_) => 502,
             Self::Upstream(UpstreamError::Credentials(_)) => 401,
             Self::Upstream(UpstreamError::Status(failure)) => match failure.status() {
                 400 | 401 | 403 | 404 | 413 | 422 | 429 => failure.status(),
@@ -123,6 +162,7 @@ impl PipelineError {
                 "authentication_error" => 401,
                 _ => 502,
             },
+            Self::Upstream(UpstreamError::CompactMalformed) => 502,
             Self::Upstream(UpstreamError::Timeout) => 504,
             // 502 means "the gateway hop failed", so only the failures that
             // really are gateway failures keep it (#764). The three below are
@@ -146,7 +186,7 @@ impl PipelineError {
             Self::Provider(failure) if failure.kind == "billing_error" => {
                 Some(FailureClass::Exhausted)
             }
-            Self::Translate(_) | Self::Provider(_) => None,
+            Self::Translate(_) | Self::Compaction(_) | Self::Provider(_) => None,
         }
     }
 
@@ -157,7 +197,7 @@ impl PipelineError {
                 .failure()
                 .and_then(|failure| failure.retry_after().or_else(|| failure.resets_in()))
                 .map(|hint| hint.as_secs()),
-            Self::Translate(_) | Self::Provider(_) => None,
+            Self::Translate(_) | Self::Compaction(_) | Self::Provider(_) => None,
         }
     }
 
@@ -178,7 +218,7 @@ impl PipelineError {
         match self {
             Self::Upstream(error) => error.failure().map(UpstreamFailure::diagnostic),
             Self::Provider(failure) => Some(format!("in-band provider error: {}", failure.kind)),
-            Self::Translate(_) => None,
+            Self::Translate(_) | Self::Compaction(_) => None,
         }
     }
 
@@ -190,24 +230,22 @@ impl PipelineError {
             // feature, so they are worth surfacing -- that is the difference
             // between "the bridge refused top_k" and an opaque 422.
             Self::Translate(error) => error.to_string(),
+            Self::Compaction(_) => {
+                "upstream compaction response could not safely recover the transcript".to_string()
+            }
             // Already synthesized by the translator from the classification.
             Self::Provider(failure) => failure.message.clone(),
             // An expired login is the one credential failure with an action
             // attached, so it is worth forwarding verbatim. Every other reason
             // names an environment variable and stays behind the generic text.
             Self::Upstream(UpstreamError::Credentials(what))
-                if *what == CREDENTIALS_EXPIRED || *what == CLUD_CREDENTIALS_EXPIRED =>
+                if *what == CLUD_CREDENTIALS_EXPIRED || *what == CREDENTIALS_EXPIRED =>
             {
                 what.to_string()
             }
             Self::Upstream(UpstreamError::Credentials(_)) => {
                 "the Codex bridge has no upstream credentials".to_string()
             }
-            Self::Upstream(UpstreamError::Timeout) => "upstream request timed out".to_string(),
-            // Only the request id crosses over. It is an opaque correlation
-            // handle, and it is the difference between a bug report that can be
-            // traced upstream and one that cannot. The body never travels: it
-            // can carry account identifiers and key fragments.
             Self::Upstream(UpstreamError::Status(failure)) => {
                 // Lead with what happened, not with a number. "status 429"
                 // names no cause, no remedy, and reads identically for an
@@ -230,6 +268,10 @@ impl PipelineError {
                 }
                 message
             }
+            Self::Upstream(UpstreamError::CompactMalformed) => {
+                "upstream compaction response could not safely recover the transcript".to_string()
+            }
+            Self::Upstream(UpstreamError::Timeout) => "upstream request timed out".to_string(),
             Self::Upstream(UpstreamError::Transport(_)) => "upstream unreachable".to_string(),
             Self::Upstream(UpstreamError::TooLarge) => {
                 "upstream response exceeded the size budget".to_string()
@@ -431,6 +473,149 @@ fn string_at_pointer(value: &serde_json::Value, pointer: &str) -> String {
         .to_string()
 }
 
+struct AttemptOutcome {
+    terminal_account_failure: bool,
+    in_band_failure: Option<InBandFailure>,
+    in_band_provider_failure: bool,
+    output_items: Vec<serde_json::Value>,
+    /// `response.created` is merely a protocol envelope. This becomes true
+    /// only when the upstream frame can yield text, reasoning, or a tool call.
+    visible: bool,
+    /// Frames are withheld until output becomes visible. A pre-output failure
+    /// can then recover without leaking a first `message_start` or error.
+    deferred_frames: Vec<String>,
+}
+
+fn emit_deferred_frames(
+    frames: &[String],
+    sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
+) -> Result<(), PipelineError> {
+    for frame in frames {
+        sink(frame).map_err(PipelineError::Upstream)?;
+    }
+    Ok(())
+}
+
+fn history_error(error: HistoryError) -> PipelineError {
+    PipelineError::Translate(TranslateError::Invalid(error.to_string()))
+}
+
+fn record_successful_turn(
+    history: &mut ConversationHistory,
+    pending_input: &[serde_json::Value],
+    output_items: &[serde_json::Value],
+) -> Result<bool, PipelineError> {
+    match history.append_successful_turn(pending_input, output_items) {
+        Ok(()) => Ok(false),
+        Err(HistoryError::HistoryLimit | HistoryError::ItemTooLarge) => Ok(true),
+        Err(error) => Err(history_error(error)),
+    }
+}
+
+fn capture_output_item(
+    frame: &crate::codex_sse::SseFrame,
+    output_items: &mut Vec<serde_json::Value>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&frame.data) else {
+        return;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) == Some("response.output_item.done") {
+        if let Some(item) = value.get("item") {
+            output_items.push(item.clone());
+        }
+    }
+}
+
+fn response_terminated(frame: &crate::codex_sse::SseFrame) -> bool {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(&frame.data)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .as_deref(),
+        Some("response.completed" | "response.incomplete")
+    )
+}
+
+fn anthropic_frames_have_visible_output(frames: &[String]) -> bool {
+    frames.iter().any(|frame| {
+        matches!(
+            frame.lines().next(),
+            Some("event: content_block_start" | "event: content_block_delta")
+        )
+    })
+}
+
+fn append_pending_input(input: &mut Vec<serde_json::Value>, pending_input: &[serde_json::Value]) {
+    input.extend(pending_input.iter().cloned());
+}
+
+fn is_developer_item(item: &serde_json::Value) -> bool {
+    item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+        && item.get("role").and_then(serde_json::Value::as_str) == Some("developer")
+}
+
+/// Replayed Messages history is display state, not a second canonical
+/// transcript. A continuation carries the current developer instruction in
+/// place of the historical one plus only its final pending message.
+fn history_aware_input(
+    history: &[serde_json::Value],
+    translated_input: &[serde_json::Value],
+    pending_input: &[serde_json::Value],
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    if history.is_empty() {
+        return (translated_input.to_vec(), translated_input.to_vec());
+    }
+
+    let mut turn_input = translated_input
+        .iter()
+        .filter(|item| is_developer_item(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    append_pending_input(&mut turn_input, pending_input);
+    let mut upstream_input = history
+        .iter()
+        .filter(|item| !is_developer_item(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    append_pending_input(&mut upstream_input, &turn_input);
+    (upstream_input, turn_input)
+}
+
+fn translated_request_shape(
+    request: &crate::codex_translate::ResponsesRequest,
+) -> serde_json::Value {
+    let input_kinds = request
+        .input
+        .iter()
+        .map(|item| match item {
+            crate::codex_translate::InputItem::Message { .. } => "message",
+            crate::codex_translate::InputItem::FunctionCall { .. } => "function_call",
+            crate::codex_translate::InputItem::FunctionCallOutput { .. } => "function_call_output",
+            crate::codex_translate::InputItem::Reasoning { .. } => "reasoning",
+            crate::codex_translate::InputItem::Compaction { .. } => "compaction",
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "top_level_fields": [
+            "model", "input", "stream", "store", "include", "instructions", "tools",
+            "tool_choice", "parallel_tool_calls", "reasoning", "prompt_cache_key", "service_tier"
+        ],
+        "input_count": request.input.len(),
+        "input_kinds": input_kinds,
+        "tool_count": request.tools.as_ref().map_or(0, Vec::len),
+        "has_instructions": request.instructions.is_some(),
+        "has_tool_choice": request.tool_choice.is_some(),
+        "has_reasoning": request.reasoning.is_some(),
+        "has_prompt_cache_key": request.prompt_cache_key.is_some(),
+        "has_service_tier": request.service_tier.is_some(),
+    })
+}
+
 pub struct Pipeline<C: CredentialSource> {
     client: UpstreamClient<C>,
     default_model: ModelSpec,
@@ -460,6 +645,52 @@ impl<C: CredentialSource> Pipeline<C> {
         self
     }
 
+    /// Build a typed compact request from canonical history, send it through
+    /// the selected credential route, and return the validated opaque
+    /// replacement. The caller atomically replaces its history only after this
+    /// succeeds.
+    fn compact_history(
+        &self,
+        request: &ResponsesRequest,
+        history: Vec<serde_json::Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<serde_json::Value>, PipelineError> {
+        let compact = request
+            .compact_request_for_history(history)
+            .map_err(PipelineError::Compaction)?;
+        let body = serde_json::to_vec(&compact).map_err(|error| {
+            PipelineError::Translate(TranslateError::Invalid(error.to_string()))
+        })?;
+        let response: CompactResponse = self
+            .client
+            .compact(&body, cancel)
+            .map_err(PipelineError::Upstream)?;
+        crate::codex_translate::compact_output_as_values(response)
+            .map_err(PipelineError::Compaction)
+    }
+
+    /// Compatibility helper for callers without canonical history.
+    pub fn compact(
+        &self,
+        request_body: &[u8],
+        cancel: &AtomicBool,
+    ) -> Result<ResponsesRequest, PipelineError> {
+        let (request, _) = self.prepare_request(request_body)?;
+        let compact = request
+            .compact_request()
+            .map_err(PipelineError::Compaction)?;
+        let body = serde_json::to_vec(&compact).map_err(|error| {
+            PipelineError::Translate(TranslateError::Invalid(error.to_string()))
+        })?;
+        let response: CompactResponse = self
+            .client
+            .compact(&body, cancel)
+            .map_err(PipelineError::Upstream)?;
+        request
+            .retry_with_compaction(response)
+            .map_err(PipelineError::Compaction)
+    }
+
     /// Translate, send, and stream the reply as Anthropic SSE frames.
     ///
     /// `sink` sees each frame as it is produced; the caller writes and flushes
@@ -471,56 +702,232 @@ impl<C: CredentialSource> Pipeline<C> {
         cancel: &AtomicBool,
         sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
     ) -> Result<StreamSummary, PipelineError> {
-        let (upstream_body, model, tool_names, request_shape) = self.prepare(request_body)?;
+        self.stream_inner(request_body, message_id, cancel, sink, None)
+    }
 
+    /// As [`Self::stream`], committing the canonical translated input and
+    /// complete opaque upstream output only after a successful turn.
+    pub fn stream_with_history(
+        &self,
+        request_body: &[u8],
+        message_id: &str,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
+        history: &mut ConversationHistory,
+    ) -> Result<StreamSummary, PipelineError> {
+        self.stream_inner(request_body, message_id, cancel, sink, Some(history))
+    }
+
+    fn stream_attempt(
+        &self,
+        request: &ResponsesRequest,
+        upstream_input: Option<&[serde_json::Value]>,
+        message_id: &str,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
+        tool_names: std::collections::HashMap<String, String>,
+    ) -> Result<AttemptOutcome, PipelineError> {
+        let model = request.model.clone();
+        let upstream_body = if let Some(input) = upstream_input {
+            let mut request = serde_json::to_value(request).map_err(|error| {
+                PipelineError::Translate(TranslateError::Invalid(error.to_string()))
+            })?;
+            request["input"] = serde_json::Value::Array(input.to_vec());
+            serde_json::to_vec(&request).map_err(|error| {
+                PipelineError::Translate(TranslateError::Invalid(error.to_string()))
+            })?
+        } else {
+            serde_json::to_vec(request).map_err(|error| {
+                PipelineError::Translate(TranslateError::Invalid(error.to_string()))
+            })?
+        };
         let mut decoder = FrameDecoder::new();
         let mut translator = StreamTranslator::new(model, message_id).with_tool_names(tool_names);
+        let mut output_items = Vec::new();
+        let mut completed = false;
+        let mut visible = false;
+        let mut deferred_frames: Vec<String> = Vec::new();
         let delivered = AtomicBool::new(false);
-        let mut pump = |chunk: &[u8]| -> Result<(), UpstreamError> {
-            for frame in decoder.push(chunk) {
-                for out in translator.push(&frame) {
+        let mut forward = |frames: Vec<String>| -> Result<(), UpstreamError> {
+            if anthropic_frames_have_visible_output(&frames) && !visible {
+                visible = true;
+                for frame in std::mem::take(&mut deferred_frames) {
                     // Commit before calling the writer: an I/O error may occur
                     // after it has flushed bytes downstream, where replay would
                     // duplicate a visible frame.
                     delivered.store(true, Ordering::Release);
-                    sink(&out)?;
+                    sink(&frame)?;
+                }
+            }
+            for frame in frames {
+                if visible {
+                    // See the deferred-frame commit boundary above.
+                    delivered.store(true, Ordering::Release);
+                    sink(&frame)?;
+                } else {
+                    deferred_frames.push(frame);
                 }
             }
             Ok(())
         };
-
-        let result = self
-            .client
-            .stream_with_commit(&upstream_body, cancel, &mut pump, &delivered);
+        let result = {
+            let mut pump = |chunk: &[u8]| -> Result<(), UpstreamError> {
+                for frame in decoder.push(chunk) {
+                    completed |= response_terminated(&frame);
+                    capture_output_item(&frame, &mut output_items);
+                    forward(translator.push(&frame))?;
+                }
+                Ok(())
+            };
+            self.client
+                .stream_with_commit(&upstream_body, cancel, &mut pump, &delivered)
+        };
         match result {
             Ok(_) => {
                 for frame in decoder.finish() {
-                    for out in translator.push(&frame) {
-                        sink(&out).map_err(PipelineError::Upstream)?;
-                    }
+                    completed |= response_terminated(&frame);
+                    capture_output_item(&frame, &mut output_items);
+                    forward(translator.push(&frame)).map_err(PipelineError::Upstream)?;
                 }
-                for out in translator.finish() {
-                    sink(&out).map_err(PipelineError::Upstream)?;
+                if completed {
+                    forward(translator.finish()).map_err(PipelineError::Upstream)?;
                 }
-                Ok(StreamSummary {
-                    terminal_account_failure: translator.terminal_account_failure(),
-                    in_band_failure: translator.in_band_failure().cloned(),
-                    request_shape,
-                })
             }
             Err(error) => {
-                // A failure after the first frame cannot change the status, so
-                // it is reported in-band and the turn is closed cleanly rather
-                // than left hanging.
-                if translator.is_finished() {
-                    return Err(PipelineError::Upstream(error));
+                if !translator.is_finished() {
+                    forward(translator.fail_opaque()).map_err(PipelineError::Upstream)?;
                 }
-                for out in translator.fail_opaque() {
-                    let _ = sink(&out);
-                }
-                Err(PipelineError::Upstream(error))
+                return Err(PipelineError::Upstream(error));
             }
         }
+        let in_band_failure = translator.in_band_failure().cloned();
+        let in_band_provider_failure = translator.has_in_band_provider_failure();
+        let terminal_account_failure = translator.terminal_account_failure();
+        if !completed {
+            if !in_band_provider_failure && !translator.is_finished() {
+                forward(translator.fail_opaque()).map_err(PipelineError::Upstream)?;
+            }
+            if !in_band_provider_failure {
+                return Err(PipelineError::Upstream(UpstreamError::Transport(
+                    "stream ended before a terminal response event",
+                )));
+            }
+        }
+        Ok(AttemptOutcome {
+            terminal_account_failure,
+            in_band_failure,
+            in_band_provider_failure,
+            output_items,
+            visible,
+            deferred_frames,
+        })
+    }
+
+    fn stream_inner(
+        &self,
+        request_body: &[u8],
+        message_id: &str,
+        cancel: &AtomicBool,
+        sink: &mut dyn FnMut(&str) -> Result<(), UpstreamError>,
+        history: Option<&mut ConversationHistory>,
+    ) -> Result<StreamSummary, PipelineError> {
+        let (request, tool_names, request_shape, translated_input) = self.prepare(request_body)?;
+        let pending_input = crate::codex_translate::pending_input_items_as_values(request_body)
+            .map_err(PipelineError::Translate)?;
+        let (mut upstream_input, turn_input) = match history.as_ref() {
+            Some(history) => {
+                history_aware_input(&history.snapshot(), &translated_input, &pending_input)
+            }
+            None => (translated_input.clone(), translated_input),
+        };
+
+        let first = self.stream_attempt(
+            &request,
+            Some(&upstream_input),
+            message_id,
+            cancel,
+            sink,
+            tool_names.clone(),
+        )?;
+        let should_recover = !first.visible
+            && matches!(
+                first
+                    .in_band_failure
+                    .as_ref()
+                    .and_then(|failure| failure.code),
+                Some("context_length_exceeded")
+            )
+            && history
+                .as_ref()
+                .is_some_and(|history| !history.snapshot().is_empty());
+        if !should_recover {
+            emit_deferred_frames(&first.deferred_frames, sink)?;
+            if first.in_band_provider_failure {
+                return Ok(StreamSummary {
+                    terminal_account_failure: first.terminal_account_failure,
+                    in_band_failure: first.in_band_failure,
+                    request_shape,
+                    output_items: Vec::new(),
+                    history_append_rejected: false,
+                });
+            }
+            let history_append_rejected = match history {
+                Some(history) => record_successful_turn(history, &turn_input, &first.output_items)?,
+                None => false,
+            };
+            return Ok(StreamSummary {
+                terminal_account_failure: first.terminal_account_failure,
+                in_band_failure: first.in_band_failure,
+                request_shape,
+                output_items: first.output_items,
+                history_append_rejected,
+            });
+        }
+
+        // The request's first failure produced no Anthropic-visible output. Only
+        // this exact classified code earns one recovery cycle; every compact
+        // endpoint failure and every retry failure returns normally below.
+        let compact_output = self.compact_history(
+            &request,
+            history
+                .as_ref()
+                .expect("guarded by should_recover")
+                .snapshot(),
+            cancel,
+        )?;
+        let history = history.expect("canonical history requires a history store");
+        history
+            .replace_history(&compact_output)
+            .map_err(history_error)?;
+        upstream_input = compact_output;
+        append_pending_input(&mut upstream_input, &turn_input);
+        let retry = self.stream_attempt(
+            &request,
+            Some(&upstream_input),
+            message_id,
+            cancel,
+            sink,
+            tool_names,
+        )?;
+        emit_deferred_frames(&retry.deferred_frames, sink)?;
+        if retry.in_band_provider_failure {
+            return Ok(StreamSummary {
+                terminal_account_failure: retry.terminal_account_failure,
+                in_band_failure: retry.in_band_failure,
+                request_shape,
+                output_items: Vec::new(),
+                history_append_rejected: false,
+            });
+        }
+        let history_append_rejected =
+            record_successful_turn(history, &turn_input, &retry.output_items)?;
+        Ok(StreamSummary {
+            terminal_account_failure: retry.terminal_account_failure,
+            in_band_failure: retry.in_band_failure,
+            request_shape,
+            output_items: retry.output_items,
+            history_append_rejected,
+        })
     }
 
     /// Same path, aggregated into a single Anthropic `Message`.
@@ -530,13 +937,37 @@ impl<C: CredentialSource> Pipeline<C> {
         message_id: &str,
         cancel: &AtomicBool,
     ) -> Result<serde_json::Value, PipelineError> {
+        self.complete_inner(request_body, message_id, cancel, None)
+            .map(|completion| completion.message)
+    }
+
+    /// As [`Self::complete`], recording a completed non-streaming turn.
+    pub fn complete_with_history(
+        &self,
+        request_body: &[u8],
+        message_id: &str,
+        cancel: &AtomicBool,
+        history: &mut ConversationHistory,
+    ) -> Result<Completion, PipelineError> {
+        self.complete_inner(request_body, message_id, cancel, Some(history))
+    }
+
+    fn complete_inner(
+        &self,
+        request_body: &[u8],
+        message_id: &str,
+        cancel: &AtomicBool,
+        history: Option<&mut ConversationHistory>,
+    ) -> Result<Completion, PipelineError> {
         let mut aggregator = MessageAggregator::new();
         let mut sink = |frame: &str| -> Result<(), UpstreamError> {
             aggregator.push_frame(frame);
             Ok(())
         };
-        let summary = self.stream(request_body, message_id, cancel, &mut sink)?;
+        let summary = self.stream_inner(request_body, message_id, cancel, &mut sink, history)?;
         if aggregator.errored() {
+            // A recovered pre-output failure deliberately produces no frames
+            // from the first attempt, so only a retry failure can reach here.
             // Propagate the classification, not a generic transport failure.
             // The old relabel turned every in-band provider error -- including
             // a drained account -- into `502 api_error`.
@@ -558,23 +989,17 @@ impl<C: CredentialSource> Pipeline<C> {
             }
             return Err(PipelineError::Provider(failure));
         }
-        Ok(aggregator.finish())
+        Ok(Completion {
+            message: aggregator.finish(),
+            history_append_rejected: summary.history_append_rejected,
+        })
     }
 
-    /// Translate the request and force streaming upstream.
-    #[allow(clippy::type_complexity)]
-    fn prepare(
+    /// Translate the request and resolve common upstream options.
+    fn prepare_request(
         &self,
         request_body: &[u8],
-    ) -> Result<
-        (
-            Vec<u8>,
-            String,
-            std::collections::HashMap<String, String>,
-            serde_json::Value,
-        ),
-        PipelineError,
-    > {
+    ) -> Result<(ResponsesRequest, std::collections::HashMap<String, String>), PipelineError> {
         let target = self
             .client
             .credentials()
@@ -585,16 +1010,11 @@ impl<C: CredentialSource> Pipeline<C> {
                 .model_override()
                 .cloned()
                 .unwrap_or_else(|| self.default_model.clone()),
-            // The Codex backend expects `instructions` to be Codex's own
-            // prompt, so a foreign system prompt travels as a developer
-            // message there instead. See #750 A3.
             system_placement: if target.uses_codex_backend() {
                 SystemPlacement::DeveloperMessage
             } else {
                 SystemPlacement::Instructions
             },
-            // Codex uses its session id here. Without a stable key every
-            // turn re-pays full input price.
             prompt_cache_key: target
                 .prompt_cache_key()
                 .map(str::to_string)
@@ -603,42 +1023,30 @@ impl<C: CredentialSource> Pipeline<C> {
         };
         let translated =
             translate_bytes(request_body, &options).map_err(PipelineError::Translate)?;
-        let request_shape = translated_request_shape(&translated.request);
-        let model = translated.request.model.clone();
-        let body = serde_json::to_vec(&translated.request).map_err(|error| {
-            PipelineError::Translate(TranslateError::Invalid(error.to_string()))
-        })?;
-        Ok((body, model, translated.tool_names, request_shape))
+        Ok((translated.request, translated.tool_names))
     }
-}
 
-fn translated_request_shape(
-    request: &crate::codex_translate::ResponsesRequest,
-) -> serde_json::Value {
-    let input_kinds = request
-        .input
-        .iter()
-        .map(|item| match item {
-            crate::codex_translate::InputItem::Message { .. } => "message",
-            crate::codex_translate::InputItem::FunctionCall { .. } => "function_call",
-            crate::codex_translate::InputItem::FunctionCallOutput { .. } => "function_call_output",
-            crate::codex_translate::InputItem::Reasoning { .. } => "reasoning",
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({
-        "top_level_fields": [
-            "model", "input", "stream", "store", "include", "instructions", "tools",
-            "tool_choice", "parallel_tool_calls", "reasoning", "prompt_cache_key", "service_tier"
-        ],
-        "input_count": request.input.len(),
-        "input_kinds": input_kinds,
-        "tool_count": request.tools.as_ref().map_or(0, Vec::len),
-        "has_instructions": request.instructions.is_some(),
-        "has_tool_choice": request.tool_choice.is_some(),
-        "has_reasoning": request.reasoning.is_some(),
-        "has_prompt_cache_key": request.prompt_cache_key.is_some(),
-        "has_service_tier": request.service_tier.is_some(),
-    })
+    /// Translate the request before a history-aware caller assembles its
+    /// canonical upstream transcript.
+    #[allow(clippy::type_complexity)]
+    fn prepare(
+        &self,
+        request_body: &[u8],
+    ) -> Result<
+        (
+            ResponsesRequest,
+            std::collections::HashMap<String, String>,
+            serde_json::Value,
+            Vec<serde_json::Value>,
+        ),
+        PipelineError,
+    > {
+        let (request, tool_names) = self.prepare_request(request_body)?;
+        let request_shape = translated_request_shape(&request);
+        let translated_input = crate::codex_translate::input_items_as_values(&request.input)
+            .map_err(PipelineError::Translate)?;
+        Ok((request, tool_names, request_shape, translated_input))
+    }
 }
 
 #[cfg(test)]
@@ -1232,5 +1640,36 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"outpu
             )
             .unwrap_err();
         assert_eq!(error, PipelineError::Upstream(UpstreamError::Cancelled));
+    }
+
+    #[test]
+    fn continuation_replaces_the_prior_developer_instruction() {
+        let history = vec![
+            json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "old instruction"}]}),
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "earlier user"}]}),
+        ];
+        let translated = vec![
+            json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "current instruction"}]}),
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "earlier user"}]}),
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "current user"}]}),
+        ];
+        let pending = vec![
+            json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "current user"}]}),
+        ];
+
+        let (upstream, turn) = history_aware_input(&history, &translated, &pending);
+
+        assert_eq!(turn.len(), 2);
+        assert_eq!(turn[0]["content"][0]["text"], "current instruction");
+        assert_eq!(upstream.len(), 3);
+        assert_eq!(upstream[0]["content"][0]["text"], "earlier user");
+        assert_eq!(upstream[1]["content"][0]["text"], "current instruction");
+        assert_eq!(upstream[2]["content"][0]["text"], "current user");
+        assert!(
+            !serde_json::to_string(&upstream)
+                .expect("serialize upstream transcript")
+                .contains("old instruction"),
+            "a continuation must replace rather than deduplicate developer instructions"
+        );
     }
 }

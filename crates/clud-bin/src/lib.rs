@@ -14,6 +14,7 @@ pub mod capture;
 pub mod clud_settings;
 pub mod codex_auth;
 pub mod codex_bridge;
+pub mod codex_history;
 pub mod codex_hook_normalize;
 pub mod codex_model;
 pub mod codex_pipeline;

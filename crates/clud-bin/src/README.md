@@ -106,6 +106,10 @@ Entry and orchestration:
   streaming state machine. Owns the downstream status policy — since #764,
   `502` means only a genuine gateway failure, and `TooLarge`/`Cancelled`/
   `Downstream` map to `413`/`499`/`499` instead of borrowing it.
+- `codex_history.rs` - bounded, in-memory canonical Responses transcript for
+  the foreground bridge. It commits only newly pending input plus opaque
+  upstream output, evicts at bridge shutdown, and makes validated compaction
+  replacement atomic; see [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
   applies child-local Claude overrides, and tears the listener down on every

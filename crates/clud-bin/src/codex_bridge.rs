@@ -2,6 +2,7 @@
 //! Claude harness (issue #626).
 
 use crate::bridge_log::{unix_ms, BridgeLog};
+use crate::codex_history::{ConversationStore, HistoryLimits, BRIDGE_SESSION_CONVERSATION};
 use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
 use crate::codex_sse::InBandFailure;
@@ -92,6 +93,7 @@ pub struct BridgeConfig {
     /// keeps the built-in default. A request that names its own model still
     /// wins over this.
     default_model: Option<ModelSpec>,
+    history_limits: HistoryLimits,
     log_path: Option<std::path::PathBuf>,
     log_max_bytes: usize,
     test_upstream_url: Option<String>,
@@ -115,6 +117,7 @@ impl Default for BridgeConfig {
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             admission_wait: DEFAULT_ADMISSION_WAIT,
             default_model: None,
+            history_limits: HistoryLimits::default(),
             log_path: default_bridge_log_path(),
             log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
             test_upstream_url: test_upstream_override_from_process(),
@@ -138,6 +141,12 @@ impl BridgeConfig {
     #[cfg(test)]
     fn with_test_upstream_url(mut self, url: Option<String>) -> Self {
         self.test_upstream_url = url;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_history_limits(mut self, limits: HistoryLimits) -> Self {
+        self.history_limits = limits;
         self
     }
 
@@ -191,6 +200,7 @@ impl fmt::Debug for BridgeConfig {
                 "default_model",
                 &self.default_model.as_ref().map(ModelSpec::display),
             )
+            .field("history_limits", &self.history_limits)
             .field(
                 "test_upstream_url",
                 &self.test_upstream_url.as_ref().map(|_| "[redacted]"),
@@ -237,6 +247,7 @@ pub struct BridgeHandle {
     bearer_token: String,
     shutdown: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
+    conversations: ConversationStore,
     connections: ActiveConnections,
     log: Option<SharedBridgeLog>,
     join: Option<JoinHandle<()>>,
@@ -256,6 +267,7 @@ impl BridgeHandle {
         let base_url = format!("http://{socket_addr}");
         let shutdown = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicUsize::new(0));
+        let conversations = ConversationStore::new(config.history_limits);
         let connections = Arc::new(Mutex::new(HashMap::new()));
         let log = config.log_path.clone().map(|path| {
             Arc::new(Mutex::new(BridgeLog::with_max_bytes(
@@ -266,6 +278,7 @@ impl BridgeHandle {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_active = Arc::clone(&active);
+        let thread_conversations = conversations.clone();
         let thread_connections = Arc::clone(&connections);
         let thread_log = log.clone();
         let thread_token = bearer_token.clone();
@@ -279,6 +292,7 @@ impl BridgeHandle {
                     thread_token,
                     thread_shutdown,
                     thread_active,
+                    thread_conversations,
                     thread_connections,
                     thread_log,
                 )
@@ -293,6 +307,7 @@ impl BridgeHandle {
             bearer_token,
             shutdown,
             active,
+            conversations,
             connections,
             log,
             join: Some(join),
@@ -329,6 +344,7 @@ impl BridgeHandle {
             join.join().map_err(|_| BridgeError::Join)?;
         }
         if was_running {
+            self.conversations.clear();
             if let Some(log) = &self.log {
                 let mut log = lock_log(log);
                 log.flush();
@@ -357,12 +373,14 @@ impl Drop for BridgeHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve(
     listener: TcpListener,
     config: BridgeConfig,
     bearer_token: String,
     shutdown: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
+    conversations: ConversationStore,
     connections: ActiveConnections,
     log: Option<SharedBridgeLog>,
 ) {
@@ -423,6 +441,7 @@ fn serve(
                     }
                 }
                 let worker_active = Arc::clone(&active);
+                let worker_conversations = conversations.clone();
                 let worker_connections = Arc::clone(&connections);
                 let worker_shutdown = Arc::clone(&shutdown);
                 let worker_config = config.clone();
@@ -441,6 +460,7 @@ fn serve(
                             &worker_config,
                             &worker_token,
                             &worker_shutdown,
+                            &worker_conversations,
                             worker_log.as_ref(),
                         );
                     }) {
@@ -522,6 +542,7 @@ fn handle_connection(
     config: &BridgeConfig,
     bearer_token: &str,
     shutdown: &AtomicBool,
+    conversations: &ConversationStore,
     log: Option<&SharedBridgeLog>,
 ) {
     #[cfg(test)]
@@ -624,7 +645,15 @@ fn handle_connection(
                 }
             };
             let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
-            serve_messages(&mut stream, config, shutdown, &body, streaming, log);
+            serve_messages(
+                &mut stream,
+                config,
+                shutdown,
+                conversations,
+                &body,
+                streaming,
+                log,
+            );
         }
         _ => {
             if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
@@ -683,6 +712,7 @@ fn serve_messages(
     stream: &mut TcpStream,
     config: &BridgeConfig,
     shutdown: &AtomicBool,
+    conversations: &ConversationStore,
     body: &[u8],
     streaming: bool,
     log: Option<&SharedBridgeLog>,
@@ -699,13 +729,25 @@ fn serve_messages(
 
     if streaming {
         let mut writer = EventStreamWriter::new(stream, config);
-        let mut sink = |frame: &str| -> Result<(), UpstreamError> {
-            writer
-                .write_frame(frame)
-                .map_err(|_| UpstreamError::Downstream("client write failed"))
-        };
-        match pipeline.stream(body, &message_id, shutdown, &mut sink) {
-            Ok(summary) => {
+        let streamed = conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+            let streamed = {
+                let mut sink = |frame: &str| -> Result<(), UpstreamError> {
+                    writer
+                        .write_frame(frame)
+                        .map_err(|_| UpstreamError::Downstream("client write failed"))
+                };
+                pipeline.stream_with_history(body, &message_id, shutdown, &mut sink, history)
+            };
+            if let Ok(summary) = &streamed {
+                if summary.history_append_rejected && writer.started() {
+                    let _ = writer.finish();
+                    summary.clear_history_after_client_commit(history);
+                }
+            }
+            Ok(streamed)
+        });
+        match streamed {
+            Ok(Ok(summary)) => {
                 if let Some(failure) = summary.in_band_failure.as_ref() {
                     log_in_band_failure(log, failure, request_phase(body), summary.request_shape);
                 }
@@ -722,9 +764,11 @@ fn serve_messages(
                     log_pipeline_error(&error, log);
                     warn_once_on_terminal_failure(&error);
                 }
-                let _ = writer.finish();
+                if !summary.history_append_rejected {
+                    let _ = writer.finish();
+                }
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 if writer.started() {
                     // Committed: the pipeline has already emitted a sanitized
                     // `error` event, so just close the body cleanly.
@@ -739,16 +783,29 @@ fn serve_messages(
                     let _ = write_pipeline_error(stream, &error, log);
                 }
             }
+            Err(error) => {
+                let failure = PipelineError::Translate(
+                    crate::codex_translate::TranslateError::Invalid(error.to_string()),
+                );
+                let _ = write_pipeline_error(stream, &failure, log);
+            }
         }
         return;
     }
 
-    match pipeline.complete(body, &message_id, shutdown) {
-        Ok(message) => {
-            let rendered = serde_json::to_vec(&message).unwrap_or_default();
-            let _ = write_response(stream, 200, "application/json", &rendered, false);
-        }
-        Err(error) => {
+    match conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+        let completed = pipeline
+            .complete_with_history(body, &message_id, shutdown, history)
+            .map(|completion| {
+                let rendered = serde_json::to_vec(&completion.message).unwrap_or_default();
+                if write_response(stream, 200, "application/json", &rendered, false).is_ok() {
+                    completion.clear_history_after_client_commit(history);
+                }
+            });
+        Ok(completed)
+    }) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
             if let PipelineError::Provider(failure) = &error {
                 if let Some(diagnostic) = &failure.diagnostic {
                     log_in_band_failure(
@@ -760,6 +817,12 @@ fn serve_messages(
                 }
             }
             let _ = write_pipeline_error(stream, &error, log);
+        }
+        Err(error) => {
+            let failure = PipelineError::Translate(
+                crate::codex_translate::TranslateError::Invalid(error.to_string()),
+            );
+            let _ = write_pipeline_error(stream, &failure, log);
         }
     }
 }
@@ -983,6 +1046,7 @@ fn upstream_error_kind(error: &UpstreamError) -> &'static str {
     match error {
         UpstreamError::Credentials(_) => "credentials",
         UpstreamError::Transport(_) => "transport",
+        UpstreamError::CompactMalformed => "compact_malformed",
         UpstreamError::Status(_) => "status",
         UpstreamError::Timeout => "timeout",
         UpstreamError::TooLarge => "too_large",
@@ -994,6 +1058,7 @@ fn upstream_error_kind(error: &UpstreamError) -> &'static str {
 fn pipeline_error_kind(error: &PipelineError) -> &'static str {
     match error {
         PipelineError::Translate(_) => "translate",
+        PipelineError::Compaction(_) => "compaction",
         PipelineError::Provider(_) => "provider_in_band",
         PipelineError::Upstream(error) => upstream_error_kind(error),
     }
@@ -1538,6 +1603,47 @@ Connection: close
                 let _ = handle.join();
             }
         }
+    }
+
+    fn response_with_events(events: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+            events.len()
+        )
+        .into_bytes()
+    }
+
+    fn context_length_failure_response() -> Vec<u8> {
+        response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"invalid_request\",\"code\":\"context_length_exceeded\"}}}\n\n",
+        )
+    }
+
+    fn incomplete_response() -> Vec<u8> {
+        response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"truncated\"}\n\n\
+             event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+        )
+    }
+
+    fn recovery_success_response() -> Vec<u8> {
+        response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"recovered\"}\n\n\
+             event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_recovered\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}}\n\n\
+             event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+        )
+    }
+
+    fn compact_success_response() -> Vec<u8> {
+        let body = r#"{"output":[{"type":"compaction","id":"cmp_recovered","encrypted_content":"opaque-summary"}]}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
     }
 
     /// Config wired to a fake upstream, so POST /v1/messages exercises the real
@@ -2444,6 +2550,222 @@ Connection: close
         assert_eq!(json["reasoning"]["effort"], "xhigh");
     }
 
+    #[test]
+    fn pre_output_context_failure_compacts_canonical_history_and_retries_once() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            None,
+            Some(context_length_failure_response()),
+            Some(compact_success_response()),
+            Some(recovery_success_response()),
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let first = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_STREAM_BODY,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let second = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"pending"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&second), 200, "{second}");
+        let body = decode_chunked_body(&second);
+        assert_eq!(body.matches("event: message_start").count(), 1, "{body}");
+        assert_eq!(body.matches("recovered").count(), 1, "{body}");
+        assert!(!body.contains("context is too long"), "{body}");
+        assert!(!body.contains("event: error"), "{body}");
+
+        let requests = upstream.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            3,
+            "one initial turn plus exactly two ordinary attempts: {requests:#?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1"))
+                .count(),
+            1,
+            "exactly one compact request: {requests:#?}"
+        );
+        let compact = requests
+            .iter()
+            .find(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1"))
+            .expect("compact request");
+        let compact_body: serde_json::Value =
+            serde_json::from_str(compact.split("\r\n\r\n").nth(1).expect("compact body"))
+                .expect("compact JSON");
+        let compact_text: Vec<_> = compact_body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| {
+                item.pointer("/content")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            })
+            .collect();
+        assert!(compact_text.contains(&"hi"));
+        assert!(!compact_text.contains(&"pending"));
+        let retry = requests
+            .iter()
+            .rfind(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+            .expect("retry request");
+        let retry_body: serde_json::Value =
+            serde_json::from_str(retry.split("\r\n\r\n").nth(1).expect("retry body"))
+                .expect("retry JSON");
+        assert_eq!(retry_body["input"][0]["type"], "compaction");
+        assert_eq!(
+            retry_body["input"][0]["encrypted_content"],
+            "opaque-summary"
+        );
+        assert_eq!(retry_body["input"][1]["content"][0]["text"], "pending");
+    }
+
+    #[test]
+    fn second_context_failure_is_terminal_and_a_later_turn_still_works() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            None,
+            Some(context_length_failure_response()),
+            Some(compact_success_response()),
+            Some(context_length_failure_response()),
+            Some(recovery_success_response()),
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let first = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_STREAM_BODY,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+        let failed = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"pending"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&failed), 200, "{failed}");
+        let failed_body = decode_chunked_body(&failed);
+        assert_eq!(
+            failed_body.matches("event: message_start").count(),
+            1,
+            "{failed_body}"
+        );
+        assert_eq!(
+            failed_body.matches("context is too long").count(),
+            1,
+            "{failed_body}"
+        );
+        assert!(!failed_body.contains("recovered"), "{failed_body}");
+
+        let later = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"independent"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&later), 200, "{later}");
+        assert!(decode_chunked_body(&later).contains("recovered"), "{later}");
+        let requests = upstream.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1"))
+                .count(),
+            1,
+            "the second context failure must not compact again: {requests:#?}"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            4,
+            "one first turn, two bounded attempts, then one independent turn: {requests:#?}"
+        );
+    }
+
+    #[test]
+    fn visible_context_failure_never_compacts_or_retries() {
+        let visible_then_failed = response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\n\
+             event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"invalid_request\",\"code\":\"context_length_exceeded\"}}}\n\n",
+        );
+        let upstream = FakeResponses::start_with_responses(vec![
+            None,
+            Some(visible_then_failed),
+            Some(recovery_success_response()),
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let first = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_STREAM_BODY,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+        let second = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"pending"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&second), 200, "{second}");
+        let body = decode_chunked_body(&second);
+        assert!(body.contains("partial"), "{body}");
+        assert!(body.contains("context is too long"), "{body}");
+        assert!(!body.contains("recovered"), "{body}");
+        let requests = upstream.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .count(),
+            2,
+            "the visible turn must not retry: {requests:#?}"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1")),
+            "the visible turn must not compact: {requests:#?}"
+        );
+    }
+
     /// The reported incident, reproduced at the HTTP layer.
     ///
     /// A drained account previously reached the user as
@@ -2463,7 +2785,12 @@ Connection: close
             failed_event.len()
         )
         .into_bytes();
-        let upstream = FakeResponses::start_with_responses(vec![None, Some(failed_reply)]);
+        let upstream = FakeResponses::start_with_responses(vec![
+            None,
+            Some(failed_reply.clone()),
+            Some(compact_success_response()),
+            Some(failed_reply),
+        ]);
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join("bridge.jsonl");
         let mut bridge =
@@ -2606,6 +2933,289 @@ Connection: close
             1,
             "an exhausted plan was retried"
         );
+    }
+
+    #[test]
+    fn first_replayed_request_seeds_full_history_for_later_continuations() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let first_body = r#"{"model":"claude-x","messages":[{"role":"user","content":"old user"},{"role":"assistant","content":"old assistant"},{"role":"user","content":"first pending"}],"stream":false}"#;
+        let first = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), first_body),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let second_body = r#"{"model":"claude-x","messages":[{"role":"user","content":"old user"},{"role":"assistant","content":"old assistant"},{"role":"user","content":"first pending"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"later pending"}],"stream":false}"#;
+        let second = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), second_body),
+        );
+        assert_eq!(status(&second), 200, "{second}");
+
+        let requests = upstream.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[1]
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("second upstream body"),
+        )
+        .expect("second upstream JSON");
+        let texts: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter_map(|part| part["text"].as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "old user",
+                "old assistant",
+                "first pending",
+                "later pending"
+            ],
+            "the first request must seed its complete translated replay exactly once"
+        );
+    }
+
+    #[test]
+    fn continuation_merges_new_developer_instruction_without_replaying_history() {
+        let upstream = FakeResponses::start();
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let first_body = r#"{"model":"claude-x","system":"first instruction","messages":[{"role":"user","content":"old user"}],"stream":false}"#;
+        assert_eq!(
+            status(&request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), first_body),
+            )),
+            200
+        );
+
+        let second_body = r#"{"model":"claude-x","system":"updated instruction","messages":[{"role":"user","content":"old user"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"new pending"}],"stream":false}"#;
+        assert_eq!(
+            status(&request(
+                bridge.socket_addr(),
+                &authorized("POST", "/v1/messages", bridge.bearer_token(), second_body),
+            )),
+            200
+        );
+
+        let requests = upstream.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[1]
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("second upstream body"),
+        )
+        .expect("second upstream JSON");
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(
+            input.len(),
+            2,
+            "replayed display turns must not be duplicated"
+        );
+        assert_eq!(body["instructions"], "updated instruction");
+        assert_eq!(input[0]["content"][0]["text"], "old user");
+        assert_eq!(input[1]["content"][0]["text"], "new pending");
+    }
+
+    #[test]
+    fn in_band_failure_followed_by_eof_preserves_provider_classification() {
+        let failed = response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit_reached\",\"message\":\"secret account detail\"}}}\n\n",
+        );
+        let upstream = FakeResponses::start_with_response(Some(failed));
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+
+        assert_eq!(status(&response), 429, "{response}");
+        assert!(response.contains("billing_error"), "{response}");
+        assert!(response.contains("quota exhausted"), "{response}");
+        assert!(!response.contains("secret account detail"), "{response}");
+    }
+
+    #[test]
+    fn response_incomplete_is_a_successful_max_tokens_completion() {
+        let upstream = FakeResponses::start_with_response(Some(incomplete_response()));
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let response = request(
+            bridge.socket_addr(),
+            &authorized("POST", "/v1/messages", bridge.bearer_token(), PROBE_BODY),
+        );
+
+        assert_eq!(status(&response), 200, "{response}");
+        let message: serde_json::Value =
+            serde_json::from_str(response.split("\r\n\r\n").nth(1).expect("response body"))
+                .expect("Anthropic message JSON");
+        assert_eq!(message["stop_reason"], "max_tokens");
+        assert_eq!(message["content"][0]["text"], "truncated");
+        assert_eq!(message["usage"]["output_tokens"], 1);
+    }
+
+    #[test]
+    fn non_streaming_capacity_rejection_evicts_stale_history_after_reply() {
+        let upstream = FakeResponses::start();
+        let limits = HistoryLimits {
+            max_conversations: 1,
+            max_items_per_conversation: 1,
+            max_bytes_per_conversation: 1024,
+        };
+        let bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_history_limits(limits)).unwrap();
+        let first = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"stale first"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+        let capacity_rejected = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"stale first"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"capacity turn"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&capacity_rejected), 200, "{capacity_rejected}");
+        let fresh = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"fresh seed"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"later pending"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&fresh), 200, "{fresh}");
+
+        let requests = upstream.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[2]
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("fresh upstream body"),
+        )
+        .expect("fresh upstream JSON");
+        let texts: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter_map(|part| part["text"].as_str())
+            .collect();
+        assert_eq!(texts, vec!["fresh seed", "bridged reply", "later pending"]);
+    }
+
+    #[test]
+    fn streaming_capacity_rejection_evicts_stale_history_after_reply() {
+        let upstream = FakeResponses::start();
+        let limits = HistoryLimits {
+            max_conversations: 1,
+            max_items_per_conversation: 1,
+            max_bytes_per_conversation: 1024,
+        };
+        let bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_history_limits(limits)).unwrap();
+        let first = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"stale first"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+        let capacity_rejected = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"stale first"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"capacity turn"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&capacity_rejected), 200, "{capacity_rejected}");
+        let fresh = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"fresh seed"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"later pending"}],"stream":true}"#,
+            ),
+        );
+        assert_eq!(status(&fresh), 200, "{fresh}");
+
+        let requests = upstream.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[2]
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("fresh upstream body"),
+        )
+        .expect("fresh upstream JSON");
+        let texts: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter_map(|part| part["text"].as_str())
+            .collect();
+        assert_eq!(texts, vec!["fresh seed", "bridged reply", "later pending"]);
+    }
+
+    #[test]
+    fn eof_before_response_completed_is_an_upstream_failure_and_does_not_record_history() {
+        let incomplete = response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\n",
+        );
+        let upstream = FakeResponses::start_with_responses(vec![Some(incomplete), None]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let failed = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"discard me"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&failed), 502, "{failed}");
+        assert!(failed.contains("upstream unreachable"), "{failed}");
+
+        let later = request(
+            bridge.socket_addr(),
+            &authorized(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"keep me"}],"stream":false}"#,
+            ),
+        );
+        assert_eq!(status(&later), 200, "{later}");
+        let requests = upstream.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests[1]
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("later upstream body"),
+        )
+        .expect("later upstream JSON");
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(body["input"][0]["content"][0]["text"], "keep me");
     }
 
     /// A typo must not be silently billed as the default model.
