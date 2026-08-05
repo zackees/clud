@@ -27,6 +27,10 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::Backend;
 
+#[path = "skills_home.rs"]
+mod skills_home;
+use skills_home::home_dir;
+
 const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 
 /// One bundled skill: the directory name and the literal `SKILL.md` body.
@@ -428,23 +432,6 @@ pub fn purge_retired_bundled_skills(home: &Path, retired: &[&'static str]) -> Le
         }
     }
     report
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        if let Some(p) = std::env::var_os("USERPROFILE") {
-            if !p.is_empty() {
-                return Some(PathBuf::from(p));
-            }
-        }
-    }
-    if let Some(p) = std::env::var_os("HOME") {
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

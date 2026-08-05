@@ -35,6 +35,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::time::Instant;
 
+#[path = "console_title_osc.rs"]
+mod console_title_osc;
+
 #[cfg(any(windows, test))]
 const CPU_FLASH_THRESHOLD_PCT: f32 = 70.0;
 /// Fallback RPC cadence, used only when the daemon publishes no snapshot file
@@ -503,141 +506,7 @@ fn set_title(_title: &str) {
 /// The filter survives across `process()` calls: an OSC sequence split
 /// across reads is handled correctly, including ST split between two
 /// chunks.
-pub struct OscTitleStripper {
-    state: OscState,
-    /// Buffered digits between `ESC ]` and `;`. Used to decide swallow
-    /// vs passthrough once the `;` arrives.
-    digits: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OscState {
-    Normal,
-    AfterEsc,
-    InOscNumber,
-    SwallowOscBody,
-    SwallowAfterEsc,
-    PassthroughOscBody,
-    PassthroughAfterEsc,
-}
-
-impl OscTitleStripper {
-    pub fn new() -> Self {
-        Self {
-            state: OscState::Normal,
-            digits: Vec::new(),
-        }
-    }
-
-    /// Process a chunk and return the bytes that should be forwarded
-    /// downstream (terminal stdout, in production).
-    pub fn process(&mut self, chunk: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(chunk.len());
-        for &b in chunk {
-            self.process_byte(b, &mut out);
-        }
-        out
-    }
-
-    fn process_byte(&mut self, b: u8, out: &mut Vec<u8>) {
-        match self.state {
-            OscState::Normal => {
-                if b == 0x1b {
-                    self.state = OscState::AfterEsc;
-                } else {
-                    out.push(b);
-                }
-            }
-            OscState::AfterEsc => match b {
-                b']' => {
-                    self.state = OscState::InOscNumber;
-                    self.digits.clear();
-                }
-                0x1b => {
-                    // ESC ESC: emit the first ESC, stay waiting on the second.
-                    out.push(0x1b);
-                }
-                _ => {
-                    out.push(0x1b);
-                    out.push(b);
-                    self.state = OscState::Normal;
-                }
-            },
-            OscState::InOscNumber => {
-                if b.is_ascii_digit() {
-                    self.digits.push(b);
-                } else if b == b';' {
-                    if self.digits == b"0" || self.digits == b"2" {
-                        self.state = OscState::SwallowOscBody;
-                    } else {
-                        out.push(0x1b);
-                        out.push(b']');
-                        out.extend_from_slice(&self.digits);
-                        out.push(b';');
-                        self.state = OscState::PassthroughOscBody;
-                    }
-                    self.digits.clear();
-                } else if b == 0x07 {
-                    // BEL with empty/numeric body and no `;` — terminator
-                    // for a malformed OSC. Drop quietly; nothing visible
-                    // was set.
-                    self.digits.clear();
-                    self.state = OscState::Normal;
-                } else if b == 0x1b {
-                    // ESC inside the number — could be the start of an
-                    // ST (`ESC \\`). Emit prefix as passthrough so we
-                    // don't lose the sequence on a real terminal.
-                    out.push(0x1b);
-                    out.push(b']');
-                    out.extend_from_slice(&self.digits);
-                    self.digits.clear();
-                    self.state = OscState::PassthroughAfterEsc;
-                } else {
-                    // Non-digit, non-`;` byte. Bogus OSC — flush prefix
-                    // and that byte, switch to passthrough until ST.
-                    out.push(0x1b);
-                    out.push(b']');
-                    out.extend_from_slice(&self.digits);
-                    out.push(b);
-                    self.digits.clear();
-                    self.state = OscState::PassthroughOscBody;
-                }
-            }
-            OscState::SwallowOscBody => match b {
-                0x07 => self.state = OscState::Normal,
-                0x1b => self.state = OscState::SwallowAfterEsc,
-                _ => {}
-            },
-            OscState::SwallowAfterEsc => match b {
-                b'\\' | 0x07 => self.state = OscState::Normal,
-                0x1b => {} // stay
-                _ => self.state = OscState::SwallowOscBody,
-            },
-            OscState::PassthroughOscBody => {
-                out.push(b);
-                match b {
-                    0x07 => self.state = OscState::Normal,
-                    0x1b => self.state = OscState::PassthroughAfterEsc,
-                    _ => {}
-                }
-            }
-            OscState::PassthroughAfterEsc => {
-                out.push(b);
-                if b == b'\\' || b == 0x07 {
-                    self.state = OscState::Normal;
-                } else if b != 0x1b {
-                    self.state = OscState::PassthroughOscBody;
-                }
-            }
-        }
-    }
-}
-
-impl Default for OscTitleStripper {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use console_title_osc::OscTitleStripper;
 
 #[cfg(test)]
 mod tests {
