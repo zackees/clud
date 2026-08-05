@@ -659,7 +659,8 @@ mod tests {
             .find(|t| t.rel_path == "docker/docker_build_soldr.py")
             .expect("soldr stack tool must exist");
         for required_marker in [
-            "ARG SOLDR_VERSION=0.8.28",
+            "ARG SOLDR_VERSION=0.8.33",
+            "def managed_run_command",
             "soldr-v${SOLDR_VERSION}-x86_64-unknown-linux-gnu.tar.zst",
             "soldr-clang-shim cargo-chef crgx",
             "soldr --version",

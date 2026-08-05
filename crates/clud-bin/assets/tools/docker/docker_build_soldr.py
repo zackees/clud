@@ -87,7 +87,7 @@ RUN mkdir -p /target /cargo-home /rustup-home /cargo-chef /root/.soldr /src \
 # Bake soldr into the helper image instead of installing it during the
 # first command. Keep its persistent daemon/cache state in /root/.soldr,
 # which cmd_up mounts as a named volume.
-ARG SOLDR_VERSION=0.8.28
+ARG SOLDR_VERSION=0.8.33
 RUN mkdir -p /opt/soldr-bin \
  && curl -fsSL \
         "https://github.com/zackees/soldr/releases/download/v${SOLDR_VERSION}/soldr-v${SOLDR_VERSION}-x86_64-unknown-linux-gnu.tar.zst" \
@@ -268,6 +268,18 @@ def cmd_up(path: Path) -> int:
     return 0
 
 
+def managed_run_command(cmdline: list[str]) -> list[str]:
+    """Route raw Cargo commands through soldr's managed build front door.
+
+    zackees/soldr#2264 (released in 0.8.33 for zackees/clud#500) makes
+    native compile-capable invocations inherit soldr-toolchain's managed
+    CMake and Ninja bundles. Other commands retain their exact argv.
+    """
+    if cmdline and Path(cmdline[0]).name.lower() in {"cargo", "cargo.exe"}:
+        return ["soldr", "cargo", *cmdline[1:]]
+    return list(cmdline)
+
+
 def cmd_run(path: Path, cmdline: list[str]) -> int:
     if not cmdline:
         sys.stderr.write("run: missing command (use `run -- <cmd...>`)\n")
@@ -275,6 +287,7 @@ def cmd_run(path: Path, cmdline: list[str]) -> int:
     name = _container_name(path)
     # Idempotent up — bring it up if it isn't already running.
     cmd_up(path)
+    cmdline = managed_run_command(cmdline)
     rc = _docker("exec", "-w", "/src", name, *cmdline, check=False).returncode
     return rc
 
