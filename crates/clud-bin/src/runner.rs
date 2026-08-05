@@ -27,6 +27,12 @@ use crate::voice;
 use crate::wedge_watchdog;
 use crate::win_creation_flags;
 
+#[path = "runner_exit.rs"]
+mod runner_exit;
+#[path = "runner_terminal.rs"]
+mod runner_terminal;
+use runner_exit::normalize_exit_code;
+
 /// Merge two optional byte channels into one. Used by `run_plan_pty`
 /// to combine the drag-drop side channel with the Windows console-input
 /// reader (issue #141 follow-up) before handing the result to the
@@ -239,15 +245,6 @@ pub fn resolve_terminal_size(probe: Option<(u16, u16)>) -> (u16, u16) {
     match probe {
         Some((cols, rows)) => (rows, cols),
         None => (24, 200),
-    }
-}
-
-pub fn normalize_exit_code(code: i32) -> i32 {
-    match code {
-        -2 => 130,
-        -9 => 137,
-        -15 => 143,
-        _ => code,
     }
 }
 
@@ -756,7 +753,7 @@ pub fn run_plan_pty(
         );
 
         if let Some(header) = &header {
-            write_terminal_bytes(&header.bytes);
+            runner_terminal::write_terminal_bytes(&header.bytes);
         }
         let header_restore = header.as_ref().map(|header| header.restore_bytes.clone());
         let graphics_resize = header.as_ref().map(|_| plan.graphics.clone());
@@ -820,7 +817,7 @@ pub fn run_plan_pty(
         #[cfg(windows)]
         drop(_console_input_guard);
         if let Some(bytes) = header_restore.as_deref() {
-            write_terminal_bytes(bytes);
+            runner_terminal::write_terminal_bytes(bytes);
         }
         last_exit = normalize_exit_code(exit_code);
         if verbose {
@@ -853,13 +850,6 @@ pub fn run_plan_pty(
     }
 
     last_exit
-}
-
-fn write_terminal_bytes(bytes: &[u8]) {
-    use std::io::Write;
-    let mut out = io::stdout().lock();
-    let _ = out.write_all(bytes);
-    let _ = out.flush();
 }
 
 #[cfg(test)]

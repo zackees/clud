@@ -13,6 +13,17 @@ use crate::dnd::{looks_like_dropped_path, normalize_dropped_path};
 use crate::graphics::GraphicsConfig;
 use crate::verbose_log;
 
+#[path = "session_output.rs"]
+mod session_output;
+use session_output::{redraw_graphics_header_for_resize, run_output_writer};
+#[path = "session_stdin.rs"]
+mod session_stdin;
+use session_stdin::{
+    normalize_interactive_console_stdin_chunk, should_normalize_interactive_console_stdin,
+    should_spawn_byte_stream_stdin_reader, stdin_chunk_requests_interrupt,
+    stdin_source_is_real_stdin,
+};
+
 /// Resize the PTY. On Windows, `running_process::pty::NativePtyProcess::resize_impl`
 /// is a deliberate no-op (see that crate's `pty/mod.rs:730-737`), so reaching
 /// the underlying master's `resize()` directly is the only way to honor a
@@ -667,21 +678,6 @@ where
 /// returning). Shared by the pump's dedicated writer thread and by
 /// unit tests that exercise the coalescing behavior in isolation,
 /// without spinning up a full PTY (issue #538).
-fn run_output_writer<W: std::io::Write>(rx: std::sync::mpsc::Receiver<Vec<u8>>, mut writer: W) {
-    loop {
-        let Ok(mut buf) = rx.recv() else {
-            break;
-        };
-        while let Ok(more) = rx.try_recv() {
-            buf.extend_from_slice(&more);
-        }
-        if !buf.is_empty() {
-            let _ = writer.write_all(&buf);
-            let _ = writer.flush();
-        }
-    }
-}
-
 /// Same as `run_raw_pty_pump_full_verbose`, but takes the destination
 /// writer for filtered child output as a parameter instead of
 /// hardcoding `io::stdout()`. Production callers go through the
@@ -1042,54 +1038,6 @@ where
     })
 }
 
-fn redraw_graphics_header_for_resize(
-    config: &GraphicsConfig,
-    terminal_rows: u16,
-    terminal_cols: u16,
-    verbose: bool,
-) -> u16 {
-    match crate::graphics::render_header(config, terminal_rows, terminal_cols) {
-        Ok(Some(header)) => {
-            use std::io::Write;
-            let mut out = io::stdout().lock();
-            let _ = out.write_all(&header.bytes);
-            let _ = out.flush();
-            header.text_rows
-        }
-        Ok(None) => {
-            use std::io::Write;
-            let restore = crate::graphics::reset_layout_bytes(terminal_rows, true);
-            let mut out = io::stdout().lock();
-            let _ = out.write_all(&restore);
-            let _ = out.flush();
-            terminal_rows
-        }
-        Err(err) => {
-            if verbose {
-                verbose_log::log(format_args!("[clud] graphics: resize redraw failed: {err}"));
-            }
-            use std::io::Write;
-            let restore = crate::graphics::reset_layout_bytes(terminal_rows, true);
-            let mut out = io::stdout().lock();
-            let _ = out.write_all(&restore);
-            let _ = out.flush();
-            terminal_rows
-        }
-    }
-}
-
-fn stdin_source_is_real_stdin<R: 'static>() -> bool {
-    std::any::TypeId::of::<R>() == std::any::TypeId::of::<std::io::Stdin>()
-}
-
-fn should_normalize_interactive_console_stdin(interactive_real_stdin: bool) -> bool {
-    cfg!(windows) && interactive_real_stdin
-}
-
-/// Decide whether the PTY pump should spawn its byte-stream stdin
-/// reader thread (the one that calls `io::stdin().read(...)`).
-///
-/// Issue #188: On Windows with an interactive real-stdin console and an
 /// `extra_rx` already wired, the `console_input::ReadConsoleInputW`
 /// worker is the authoritative source of console bytes — including the
 /// modifier-aware Shift+Enter → `\n` translation. Spawning the
@@ -1102,25 +1050,6 @@ fn should_normalize_interactive_console_stdin(interactive_real_stdin: bool) -> b
 /// Every other configuration — POSIX, piped stdin, no `extra_rx` —
 /// keeps the byte-stream reader so existing behavior (including
 /// `echo "prompt" | clud` and POSIX interactive use) is unchanged.
-fn should_spawn_byte_stream_stdin_reader(interactive_real_stdin: bool, has_extra_rx: bool) -> bool {
-    !(cfg!(windows) && interactive_real_stdin && has_extra_rx)
-}
-
-fn normalize_interactive_console_stdin_chunk(chunk: &mut [u8]) {
-    if !cfg!(windows) {
-        return;
-    }
-    for byte in chunk {
-        if *byte == 0x08 {
-            *byte = 0x7f;
-        }
-    }
-}
-
-fn stdin_chunk_requests_interrupt(chunk: &[u8]) -> bool {
-    chunk.contains(&0x03)
-}
-
 mod bracketed_paste;
 
 pub use bracketed_paste::BracketedPasteNormalizer;

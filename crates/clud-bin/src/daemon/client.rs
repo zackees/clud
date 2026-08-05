@@ -27,6 +27,10 @@ use super::wire_prost::{
 };
 use crate::process_identity::ProcessIdentity;
 
+#[path = "client_compat.rs"]
+mod client_compat;
+use client_compat::is_old_daemon_signature;
+
 pub struct ForegroundClientLease {
     state_dir: PathBuf,
     identity: ProcessIdentity,
@@ -460,15 +464,6 @@ pub(super) fn request_daemon_shutdown(state_dir: &Path) -> io::Result<u32> {
 
     let _ = fs::remove_file(daemon_info_path(state_dir));
     Ok(pid)
-}
-
-fn is_old_daemon_signature(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-    )
 }
 
 fn write_daemon_request(

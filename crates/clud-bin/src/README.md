@@ -152,6 +152,8 @@ Console and terminal:
 - `console_title.rs` - stamps `clud <cwd-name>` once on launch and runs a
   background keeper that re-applies the title when downstream OSC 0/2 sequences
   overwrite it.
+- `console_title_osc.rs` - stream-resumable OSC 0/2 filter used by the PTY
+  output path; re-exported through `console_title` to preserve its call sites.
 - `capture.rs` - server-side terminal emulator (`vt100` + `vte` sticky-mode
   sniffer) that lets the daemon synthesize a repaint when a mid-session client
   attaches.
