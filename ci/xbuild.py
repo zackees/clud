@@ -375,10 +375,16 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         # preceding compile uses the toolchain default, while the manylinux
         # wheel needs a fresh 2.17 link. Isolate this final wheel build.
         env["CARGO_TARGET_DIR"] = str(ROOT / "target" / "release-wheel" / args.target)
+    wheel_target = args.target
+    if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
+        # The version suffix is consumed by the Zig cargo wrapper and selects
+        # the glibc floor. It is intentionally confined to maturin: soldr's
+        # prepare command accepts the canonical Rust triple only.
+        wheel_target = f"{args.target}.2.17"
     subcommand = [
         "build",
         "--target",
-        args.target,
+        wheel_target,
         "--interpreter",
         sys.executable,
         "--out",

@@ -12,7 +12,7 @@ build-backend = "soldr"
 
 [project]
 name = "clud"
-version = "2.5.3"
+version = "2.5.4"
 description = "Fast Rust CLI for running Claude Code and Codex in YOLO mode"
 readme = "README.md"
 requires-python = ">=3.10"
