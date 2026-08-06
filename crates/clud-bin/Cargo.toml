@@ -113,10 +113,10 @@ shell-words = "1.1"
 # block-bad-cmd hook — glob patterns compile to an anchored regex, and
 # `match_mode: "regex"` rules use this directly.
 regex = "1"
+tempfile = "3"
 
 [dev-dependencies]
 serde_yaml = "0.9"
-tempfile = "3"
 # #436: the `RUNNING_PROCESS_FAKE_BACKEND` seam that
 # `fake_backend_seam_overrides_cached_endpoint` exercises lives behind
 # running-process's off-by-default `test-seams` feature (upstream #433 R4).
