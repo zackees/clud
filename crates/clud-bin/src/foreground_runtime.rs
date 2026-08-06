@@ -8,6 +8,7 @@ use crate::command::LaunchPlan;
 use crate::subprocess::ManagedSubprocess;
 use running_process::pty::NativePtyProcess;
 use std::fmt;
+use std::io::Write;
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -39,11 +40,18 @@ pub trait SpawnAdapter<Output> {
 pub struct ForegroundRuntime {
     env: Vec<(String, String)>,
     bridge: Option<BridgeHandle>,
+    claude_settings: Option<ClaudeSettings>,
+}
+
+struct ClaudeSettings {
+    value: String,
+    replaces_user_argument: bool,
+    _temp_file: Option<tempfile::NamedTempFile>,
 }
 
 impl ForegroundRuntime {
     pub fn start(plan: &LaunchPlan, mut env: Vec<(String, String)>) -> Result<Self, BridgeError> {
-        let bridge = if is_codex_via_claude(plan) {
+        let (bridge, claude_settings) = if is_codex_via_claude(plan) {
             // A selection that does not parse fails the launch rather than
             // the first turn: by the time a request is in flight the user has
             // already waited, and the message would arrive wrapped in the
@@ -57,11 +65,16 @@ impl ForegroundRuntime {
             let bridge =
                 BridgeHandle::start(BridgeConfig::default().with_default_model(selection.clone()))?;
             apply_cross_route_overlay(&mut env, &bridge, selection.as_ref());
-            Some(bridge)
+            let settings = merged_context_lifecycle_settings(plan, &bridge)?;
+            (Some(bridge), Some(settings))
         } else {
-            None
+            (None, None)
         };
-        Ok(Self { env, bridge })
+        Ok(Self {
+            env,
+            bridge,
+            claude_settings,
+        })
     }
 
     pub fn env(&self) -> &[(String, String)] {
@@ -92,9 +105,19 @@ impl ForegroundRuntime {
         &self,
         adapter: &Adapter,
         mode: SpawnMode,
-        command: Vec<String>,
+        mut command: Vec<String>,
         cwd: Option<String>,
     ) -> Result<Output, Adapter::Error> {
+        if let Some(settings) = &self.claude_settings {
+            // Claude accepts a single --settings source. Compose an explicit
+            // user source during startup, then replace it here so neither the
+            // user's settings nor the lifecycle hooks can shadow the other.
+            if settings.replaces_user_argument {
+                remove_user_settings_argument(&mut command);
+            }
+            command.insert(1, settings.value.clone());
+            command.insert(1, "--settings".to_string());
+        }
         adapter.spawn(mode, command, cwd, self.env.clone())
     }
 
@@ -194,6 +217,186 @@ fn apply_cross_route_overlay(
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         DEFAULT_DISABLE_NONESSENTIAL_TRAFFIC,
     );
+}
+
+fn context_lifecycle_settings(bridge: &BridgeHandle) -> serde_json::Value {
+    let compact_url = format!("{}/_clud/context/compact", bridge.base_url());
+    let clear_url = format!("{}/_clud/context/clear", bridge.base_url());
+    let hook = |url: String| {
+        serde_json::json!({
+            "type": "http",
+            "url": url,
+            "headers": {
+                "Authorization": "Bearer $ANTHROPIC_AUTH_TOKEN"
+            },
+            "allowedEnvVars": ["ANTHROPIC_AUTH_TOKEN"]
+        })
+    };
+    serde_json::json!({
+        "hooks": {
+            "PreCompact": [{
+                "matcher": "manual|auto",
+                "hooks": [hook(compact_url)]
+            }],
+            "SessionStart": [{
+                "matcher": "clear",
+                "hooks": [hook(clear_url)]
+            }]
+        }
+    })
+}
+
+fn merged_context_lifecycle_settings(
+    plan: &LaunchPlan,
+    bridge: &BridgeHandle,
+) -> Result<ClaudeSettings, BridgeError> {
+    let mut settings = context_lifecycle_settings(bridge);
+    let Some(user_argument) = user_settings_argument(&plan.command)? else {
+        return Ok(ClaudeSettings {
+            value: settings.to_string(),
+            replaces_user_argument: false,
+            _temp_file: None,
+        });
+    };
+    let (mut user_settings, was_inline) = read_user_settings(user_argument, plan.cwd.as_deref())?;
+    let user_root = user_settings.as_object_mut().ok_or_else(|| {
+        BridgeError::Settings("Claude --settings must contain a JSON object".to_string())
+    })?;
+    let user_hooks = user_root
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            BridgeError::Settings("Claude --settings hooks must be a JSON object".to_string())
+        })?;
+    let generated_hooks = settings["hooks"]
+        .as_object_mut()
+        .expect("generated lifecycle hooks are an object");
+    for (event, generated_entries) in generated_hooks {
+        let user_entries = user_hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| {
+                BridgeError::Settings(format!(
+                    "Claude --settings hook event {event} must be a JSON array"
+                ))
+            })?;
+        user_entries.extend(
+            generated_entries
+                .as_array()
+                .expect("generated lifecycle hook event is an array")
+                .iter()
+                .cloned(),
+        );
+    }
+    let serialized = user_settings.to_string();
+    let (value, temp_file) = if was_inline {
+        (serialized, None)
+    } else {
+        let mut file = tempfile::Builder::new()
+            .prefix("clud-claude-settings-")
+            .suffix(".json")
+            .tempfile()
+            .map_err(|error| {
+                BridgeError::Settings(format!(
+                    "failed to create launch-scoped Claude settings: {error}"
+                ))
+            })?;
+        file.write_all(serialized.as_bytes()).map_err(|error| {
+            BridgeError::Settings(format!(
+                "failed to write launch-scoped Claude settings: {error}"
+            ))
+        })?;
+        (file.path().to_string_lossy().into_owned(), Some(file))
+    };
+    Ok(ClaudeSettings {
+        value,
+        replaces_user_argument: true,
+        _temp_file: temp_file,
+    })
+}
+
+fn user_settings_argument(command: &[String]) -> Result<Option<&str>, BridgeError> {
+    let mut found = None;
+    let mut index = 1;
+    while index < command.len() {
+        let argument = &command[index];
+        if argument == "--" {
+            break;
+        }
+        let value = if argument == "--settings" {
+            index += 1;
+            Some(
+                command
+                    .get(index)
+                    .ok_or_else(|| {
+                        BridgeError::Settings("Claude --settings is missing its value".to_string())
+                    })?
+                    .as_str(),
+            )
+        } else {
+            argument.strip_prefix("--settings=")
+        };
+        if let Some(value) = value {
+            if found.replace(value).is_some() {
+                return Err(BridgeError::Settings(
+                    "Claude --settings may only be supplied once".to_string(),
+                ));
+            }
+        }
+        index += 1;
+    }
+    Ok(found)
+}
+
+fn read_user_settings(
+    argument: &str,
+    cwd: Option<&str>,
+) -> Result<(serde_json::Value, bool), BridgeError> {
+    let was_inline = argument.trim_start().starts_with('{');
+    let contents = if was_inline {
+        argument.to_string()
+    } else {
+        let supplied = PathBuf::from(argument);
+        let path = if supplied.is_absolute() {
+            supplied
+        } else {
+            PathBuf::from(cwd.unwrap_or(".")).join(supplied)
+        };
+        std::fs::read_to_string(&path).map_err(|error| {
+            BridgeError::Settings(format!(
+                "failed to read Claude --settings file {}: {error}",
+                path.display()
+            ))
+        })?
+    };
+    serde_json::from_str(&contents)
+        .map(|settings| (settings, was_inline))
+        .map_err(|error| {
+            BridgeError::Settings(format!("failed to parse Claude --settings JSON: {error}"))
+        })
+}
+
+fn remove_user_settings_argument(command: &mut Vec<String>) {
+    let mut index = 1;
+    while index < command.len() {
+        if command[index] == "--" {
+            return;
+        }
+        if command[index] == "--settings" {
+            command.remove(index);
+            if index < command.len() {
+                command.remove(index);
+            }
+            return;
+        }
+        if command[index].starts_with("--settings=") {
+            command.remove(index);
+            return;
+        }
+        index += 1;
+    }
 }
 
 fn push_default(env: &mut Vec<(String, String)>, key: &str, value: &str) {
@@ -444,7 +647,7 @@ mod tests {
     }
 
     type RecordedEnvironment = Vec<(String, String)>;
-    type RecordedSpawn = (SpawnMode, RecordedEnvironment);
+    type RecordedSpawn = (SpawnMode, Vec<String>, RecordedEnvironment);
 
     #[derive(Default)]
     struct RecordingAdapter {
@@ -457,11 +660,11 @@ mod tests {
         fn spawn(
             &self,
             mode: SpawnMode,
-            _command: Vec<String>,
+            command: Vec<String>,
             _cwd: Option<String>,
             env: Vec<(String, String)>,
         ) -> std::io::Result<()> {
-            self.calls.borrow_mut().push((mode, env));
+            self.calls.borrow_mut().push((mode, command, env));
             Ok(())
         }
     }
@@ -483,7 +686,185 @@ mod tests {
         assert_eq!(calls[0].0, SpawnMode::Subprocess);
         assert_eq!(calls[1].0, SpawnMode::Pty);
         assert_eq!(calls[0].1, calls[1].1);
-        assert!(lookup(&calls[0].1, "ANTHROPIC_AUTH_TOKEN").is_some());
+        assert_eq!(calls[0].2, calls[1].2);
+        assert!(lookup(&calls[0].2, "ANTHROPIC_AUTH_TOKEN").is_some());
+    }
+
+    #[test]
+    fn bridge_spawns_register_authenticated_context_lifecycle_hooks() {
+        let runtime =
+            ForegroundRuntime::start(&plan(ModelProvider::Codex, Backend::Claude), Vec::new())
+                .unwrap();
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(
+                &adapter,
+                SpawnMode::Subprocess,
+                vec!["claude".into(), "-p".into(), "hello".into()],
+                None,
+            )
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        let command = &calls[0].1;
+        let settings_index = command
+            .iter()
+            .position(|argument| argument == "--settings")
+            .expect("the bridge launch must register session-local lifecycle hooks");
+        let settings: serde_json::Value = serde_json::from_str(&command[settings_index + 1])
+            .expect("--settings must carry valid inline JSON");
+        let base_url = runtime.base_url().unwrap();
+        assert_eq!(settings["hooks"]["PreCompact"][0]["matcher"], "manual|auto");
+        assert_eq!(
+            settings["hooks"]["PreCompact"][0]["hooks"][0]["url"],
+            format!("{base_url}/_clud/context/compact")
+        );
+        assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "clear");
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["url"],
+            format!("{base_url}/_clud/context/clear")
+        );
+        for event in ["PreCompact", "SessionStart"] {
+            let hook = &settings["hooks"][event][0]["hooks"][0];
+            assert_eq!(hook["type"], "http");
+            assert_eq!(
+                hook["headers"]["Authorization"],
+                "Bearer $ANTHROPIC_AUTH_TOKEN"
+            );
+            assert_eq!(
+                hook["allowedEnvVars"],
+                serde_json::json!(["ANTHROPIC_AUTH_TOKEN"])
+            );
+        }
+        assert!(
+            !command.join(" ").contains(runtime.bearer_token().unwrap()),
+            "the launch-scoped bearer must stay in the environment, not argv"
+        );
+    }
+
+    #[test]
+    fn bridge_merges_inline_user_settings_with_context_lifecycle_hooks() {
+        let mut route = plan(ModelProvider::Codex, Backend::Claude);
+        route.command = vec![
+            "claude".into(),
+            "--settings".into(),
+            serde_json::json!({
+                "permissions": {"defaultMode": "plan"},
+                "hooks": {
+                    "PreCompact": [{
+                        "matcher": "manual",
+                        "hooks": [{"type": "command", "command": "echo user-hook"}]
+                    }]
+                }
+            })
+            .to_string(),
+        ];
+        let runtime = ForegroundRuntime::start(&route, Vec::new()).unwrap();
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(
+                &adapter,
+                SpawnMode::Subprocess,
+                route.command.clone(),
+                route.cwd.clone(),
+            )
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        let command = &calls[0].1;
+        assert_eq!(
+            command
+                .iter()
+                .filter(|argument| argument.as_str() == "--settings")
+                .count(),
+            1
+        );
+        let settings: serde_json::Value = serde_json::from_str(&command[2]).unwrap();
+        assert_eq!(settings["permissions"]["defaultMode"], "plan");
+        assert_eq!(
+            settings["hooks"]["PreCompact"][0]["hooks"][0]["command"],
+            "echo user-hook"
+        );
+        assert_eq!(settings["hooks"]["PreCompact"].as_array().unwrap().len(), 2);
+        assert_eq!(settings["hooks"]["SessionStart"][0]["matcher"], "clear");
+    }
+
+    #[test]
+    fn bridge_merges_file_user_settings_with_context_lifecycle_hooks() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("claude-settings.json");
+        std::fs::write(
+            &settings_path,
+            serde_json::json!({
+                "env": {"USER_SETTING": "preserved"},
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "startup",
+                        "hooks": [{"type": "command", "command": "echo startup"}]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut route = plan(ModelProvider::Codex, Backend::Claude);
+        route.cwd = Some(directory.path().to_string_lossy().into_owned());
+        route.command = vec!["claude".into(), "--settings=claude-settings.json".into()];
+        let runtime = ForegroundRuntime::start(&route, Vec::new()).unwrap();
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(
+                &adapter,
+                SpawnMode::Pty,
+                route.command.clone(),
+                route.cwd.clone(),
+            )
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        let command = &calls[0].1;
+        assert_eq!(command[1], "--settings");
+        assert_eq!(command.len(), 3);
+        let merged_path = PathBuf::from(&command[2]);
+        assert!(merged_path.is_absolute());
+        assert!(!command.join(" ").contains("preserved"));
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&merged_path).unwrap()).unwrap();
+        assert_eq!(settings["env"]["USER_SETTING"], "preserved");
+        assert_eq!(
+            settings["hooks"]["SessionStart"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(settings["hooks"]["PreCompact"][0]["matcher"], "manual|auto");
+        drop(calls);
+        drop(runtime);
+        assert!(!merged_path.exists());
+    }
+
+    #[test]
+    fn bridge_leaves_settings_shaped_positional_arguments_untouched() {
+        let mut route = plan(ModelProvider::Codex, Backend::Claude);
+        route.command = vec![
+            "claude".into(),
+            "--".into(),
+            "--settings".into(),
+            "literal prompt text".into(),
+        ];
+        let runtime = ForegroundRuntime::start(&route, Vec::new()).unwrap();
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Subprocess, route.command.clone(), None)
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        let command = &calls[0].1;
+        assert_eq!(&command[3..], &route.command[1..]);
+        assert_eq!(command[1], "--settings");
+        let generated: serde_json::Value = serde_json::from_str(&command[2]).unwrap();
+        assert_eq!(
+            generated["hooks"]["PreCompact"][0]["matcher"],
+            "manual|auto"
+        );
     }
 
     #[test]

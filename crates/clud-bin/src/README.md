@@ -57,9 +57,9 @@ Entry and orchestration:
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell for
   Codex-provider launches through Claude: ephemeral listener + per-launch
   bearer, bounded parser/workers/timeouts, deterministic Anthropic fixture
-  routes, and joined shutdown. Per-phase header/body deadlines and a per-frame
-  idle timeout, with chunked progressive SSE via `write_event_stream` (#627
-  step 1, DD-028).
+  routes, authenticated context compact/clear lifecycle controls, and joined
+  shutdown. Per-phase header/body deadlines and a per-frame idle timeout, with
+  chunked progressive SSE via `write_event_stream` (#627 step 1, DD-028).
 - `codex_model.rs` - #752's model + reasoning-effort selection: the gpt-5.6
   alias table (`sol`/`terra`/`luna` -> wire ids, each with its own catalog
   default effort), the `<model>@<effort>` parser, and the `Effort` ladder
@@ -112,8 +112,9 @@ Entry and orchestration:
   replacement atomic; see [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
-  applies child-local Claude overrides, and tears the listener down on every
-  runner return path. The `ANTHROPIC_CUSTOM_MODEL_OPTION*` overlay is
+  applies child-local Claude overrides, registers launch-scoped authenticated
+  `PreCompact` and `SessionStart(clear)` HTTP hooks, and tears the listener down
+  on every runner return path. The `ANTHROPIC_CUSTOM_MODEL_OPTION*` overlay is
   unconditional on the bridge route (#820, DD-038): the harness renders exactly
   one custom `/model` row, so it always exists and always spells the model that
   will be billed, even when no `--model` was passed.

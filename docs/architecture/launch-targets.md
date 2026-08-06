@@ -57,6 +57,14 @@ long request timeout/nonessential-traffic tuning only when the user has not set
 those values. No parent-process environment is mutated. The bearer and complete
 base URL are deliberately absent from Debug/error/report surfaces.
 
+For the same launch only, `ForegroundRuntime` adds inline Claude settings that
+merge two authenticated HTTP hooks with the user's existing hooks. `PreCompact`
+(`manual|auto`) compacts bridge-owned canonical history before Claude compacts
+its transcript, while `SessionStart(clear)` clears the bridge after `/clear`.
+The hook URL is launch-local and the authorization header interpolates
+`ANTHROPIC_AUTH_TOKEN` from the child environment, so the bearer does not enter
+argv or the settings JSON.
+
 `codex_bridge.rs` binds only `127.0.0.1:0` and routes authenticated
 `POST`/`HEAD /v1/messages`, with an explicit unsupported 404 for token counting
 and 404 elsewhere. Since #627 step 5 the `POST` handler runs the real pipeline

@@ -44,7 +44,10 @@ attempt, so the client receives only the retry's single valid response
 sequence.
 
 The authenticated loopback listener also exposes two launch-private lifecycle
-controls for a Claude-side compact/clear hook:
+controls. Every bridged Claude launch registers session-local HTTP hooks through
+inline `--settings`: `PreCompact` (manual or automatic) calls compact before
+Claude mutates its transcript, and `SessionStart(clear)` clears the bridge after
+Claude starts the fresh session:
 
 - `POST /_clud/context/compact` compacts the bridge's canonical transcript and
   replaces it only after a valid opaque response. Empty history is a successful
@@ -53,6 +56,8 @@ controls for a Claude-side compact/clear hook:
   upstream inference or compaction request.
 
 Both routes use the same loopback URL and launch-scoped
-`ANTHROPIC_AUTH_TOKEN` already supplied to the child, reject non-empty bodies,
-serialize with normal turns, and return `204` on success. They are not part of
-the public Anthropic Messages surface.
+`ANTHROPIC_AUTH_TOKEN` already supplied to the child. The generated settings
+interpolate the bearer from the environment, so it never appears in argv.
+Routes accept either an empty direct-control body or the exact matching Claude
+lifecycle JSON, serialize with normal turns, and return `204` on success. They
+are not part of the public Anthropic Messages surface.

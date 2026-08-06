@@ -219,6 +219,9 @@ pub enum BridgeError {
     /// The launch named a model or effort that does not parse. Carries the
     /// selector's own message, which names the valid values.
     Model(String),
+    /// The launch supplied Claude settings that could not be composed with
+    /// the bridge's session-local lifecycle hooks.
+    Settings(String),
 }
 
 impl fmt::Display for BridgeError {
@@ -231,6 +234,7 @@ impl fmt::Display for BridgeError {
             Self::Spawn(error) => write!(formatter, "failed to start bridge worker: {error}"),
             Self::Join => formatter.write_str("bridge worker panicked during shutdown"),
             Self::Model(error) => write!(formatter, "{error}"),
+            Self::Settings(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -608,12 +612,13 @@ fn handle_connection(
     match (parsed.method.as_str(), route.as_str()) {
         ("POST", "/_clud/context/compact") => {
             let body_deadline = Instant::now() + config.body_timeout;
-            match read_empty_control_body(
+            match read_context_control_body(
                 &mut stream,
                 parsed.body_prefix,
                 parsed.content_length,
                 body_deadline,
                 shutdown,
+                ContextControl::Compact,
             ) {
                 Ok(()) => serve_context_compact(&mut stream, config, shutdown, conversations, log),
                 Err(ABANDON) => {}
@@ -625,12 +630,13 @@ fn handle_connection(
         }
         ("POST", "/_clud/context/clear") => {
             let body_deadline = Instant::now() + config.body_timeout;
-            match read_empty_control_body(
+            match read_context_control_body(
                 &mut stream,
                 parsed.body_prefix,
                 parsed.content_length,
                 body_deadline,
                 shutdown,
+                ContextControl::Clear,
             ) {
                 Ok(()) => serve_context_clear(&mut stream, conversations),
                 Err(ABANDON) => {}
@@ -702,19 +708,45 @@ fn handle_connection(
     }
 }
 
-fn read_empty_control_body(
+#[derive(Clone, Copy)]
+enum ContextControl {
+    Compact,
+    Clear,
+}
+
+fn read_context_control_body(
     stream: &mut TcpStream,
     prefix: Vec<u8>,
     content_length: usize,
     deadline: Instant,
     shutdown: &AtomicBool,
+    control: ContextControl,
 ) -> Result<(), u16> {
     let body = read_body(stream, prefix, content_length, deadline, shutdown)?;
     if body.is_empty() {
-        Ok(())
-    } else {
-        Err(400)
+        return Ok(());
     }
+    let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| 400_u16)?;
+    let matches_lifecycle_event = match control {
+        ContextControl::Compact => {
+            value
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str)
+                == Some("PreCompact")
+                && matches!(
+                    value.get("trigger").and_then(serde_json::Value::as_str),
+                    Some("manual" | "auto")
+                )
+        }
+        ContextControl::Clear => {
+            value
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str)
+                == Some("SessionStart")
+                && value.get("source").and_then(serde_json::Value::as_str) == Some("clear")
+        }
+    };
+    matches_lifecycle_event.then_some(()).ok_or(400_u16)
 }
 
 fn serve_context_compact(
@@ -1994,7 +2026,7 @@ Connection: close
     }
 
     #[test]
-    fn authenticated_context_controls_compact_and_clear_the_bridge_session() {
+    fn authenticated_lifecycle_hook_payloads_compact_and_clear_the_bridge_session() {
         let upstream = FakeResponses::start_with_responses(vec![
             None,
             Some(compact_success_response()),
@@ -2010,9 +2042,25 @@ Connection: close
         );
         assert_eq!(status(&first), 200, "{first}");
 
+        let mismatched = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact",
+                &token,
+                r#"{"hook_event_name":"SessionStart","source":"clear"}"#,
+            ),
+        );
+        assert_eq!(status(&mismatched), 400, "{mismatched}");
+
         let compact = request(
             addr,
-            &authorized("POST", "/_clud/context/compact", &token, ""),
+            &authorized(
+                "POST",
+                "/_clud/context/compact",
+                &token,
+                r#"{"hook_event_name":"PreCompact","trigger":"manual"}"#,
+            ),
         );
         assert_eq!(status(&compact), 204, "{compact}");
         let compact_requests = upstream.requests();
@@ -2032,7 +2080,12 @@ Connection: close
         assert_eq!(status(&wrong), 401, "{wrong}");
         let clear = request(
             addr,
-            &authorized("POST", "/_clud/context/clear", &token, ""),
+            &authorized(
+                "POST",
+                "/_clud/context/clear",
+                &token,
+                r#"{"hook_event_name":"SessionStart","source":"clear"}"#,
+            ),
         );
         assert_eq!(status(&clear), 204, "{clear}");
         let fresh = request(
