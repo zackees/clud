@@ -3156,7 +3156,10 @@ mod tests {
         }
         let start = Instant::now();
         let _ = eval_with_rules(&command, &rules);
-        assert!(start.elapsed() < Duration::from_millis(500));
+        // This is a regression guard against unbounded recursion, not a
+        // microbenchmark.  The previous 500 ms ceiling flakes on loaded
+        // Intel macOS CI runners while the full unit suite completes quickly.
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
