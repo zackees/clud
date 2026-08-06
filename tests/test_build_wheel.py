@@ -15,18 +15,18 @@ def test_windows_soldr_wheel_packages_prebuilt_executables(tmp_path):
         profile="release",
         target_dir=target_dir,
         dist_dir=tmp_path / "dist",
-        version="2.5.2",
+        version="2.5.3",
     )
 
     with zipfile.ZipFile(wheel) as archive:
         members = set(archive.namelist())
         assert "clud/__init__.py" in members
-        assert "clud-2.5.2.data/scripts/clud.exe" in members
-        assert "clud-2.5.2.data/scripts/clud-shim.exe" in members
-        assert "clud-2.5.2.data/scripts/clud-block-bad-cmd.exe" in members
-        assert "clud-2.5.2.dist-info/METADATA" in members
-        assert "clud-2.5.2.dist-info/WHEEL" in members
-        assert "clud-2.5.2.dist-info/RECORD" in members
+        assert "clud-2.5.3.data/scripts/clud.exe" in members
+        assert "clud-2.5.3.data/scripts/clud-shim.exe" in members
+        assert "clud-2.5.3.data/scripts/clud-block-bad-cmd.exe" in members
+        assert "clud-2.5.3.dist-info/METADATA" in members
+        assert "clud-2.5.3.dist-info/WHEEL" in members
+        assert "clud-2.5.3.dist-info/RECORD" in members
 
 
 def test_linux_release_uses_zigbuild_linker(monkeypatch):

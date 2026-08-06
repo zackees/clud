@@ -62,6 +62,11 @@ def test_release_linux_wheel_avoids_duplicate_zig_flag() -> None:
     assert 'args.strategy == "zigbuild" and "--zig" not in subcommand' in source
 
 
+def test_release_linux_wheel_uses_an_isolated_target_dir() -> None:
+    source = (ROOT / "ci" / "xbuild.py").read_text(encoding="utf-8")
+    assert 'ROOT / "target" / "release-wheel" / args.target' in source
+
+
 def test_zigbuild_strategy_builds_test_targets_without_running_them() -> None:
     target = "aarch64-unknown-linux-gnu"
     argv = xbuild.cargo_argv(

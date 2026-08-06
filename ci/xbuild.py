@@ -340,9 +340,9 @@ def _project_version() -> str:
 def cmd_wheel(args: argparse.Namespace) -> int:
     """Build the wheel into dist/ for this triple.
 
-    maturin is invoked with `--target` so it reuses the same `target/<triple>/`
-    directory the compile step already populated, rather than relinking from a
-    cold graph.
+    Maturin normally reuses the same `target/<triple>/` directory the compile
+    step populated. Release GNU Linux wheels are the exception: their
+    manylinux link must not reuse a host-default glibc artifact.
     """
     from ci.env import maturin_argv
 
@@ -371,6 +371,10 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         # cannot see zig's Linux C++ runtime during a manylinux build. Mirrors
         # ci/build_wheel.py:24-31, which this path replaces.
         env["SOLDR_LINKER"] = "default"
+        # The link cache key does not include the requested glibc floor. The
+        # preceding compile uses the toolchain default, while the manylinux
+        # wheel needs a fresh 2.17 link. Isolate this final wheel build.
+        env["CARGO_TARGET_DIR"] = str(ROOT / "target" / "release-wheel" / args.target)
     subcommand = [
         "build",
         "--target",
