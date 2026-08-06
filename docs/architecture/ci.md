@@ -385,6 +385,40 @@ Requirement: nothing builds `--release` except the release pipeline.
 - `--zig --compatibility manylinux2014` (`ci/build_wheel.py:48-51`) stays on the
   release path only; CI dev wheels are plain `--profile dev`.
 
+### The manylinux glibc floor is `--compatibility`, not `--target`
+
+`ci/xbuild.py::manylinux_wheel_env` owns this and is the only place that should.
+Three traps, all of which shipped a red release run before being understood:
+
+1. **The floor cannot be spelled on `--target`.** `cargo zigbuild` accepts
+   `x86_64-unknown-linux-gnu.2.17`; maturin does not — it hands `--target`
+   straight to `target-lexicon`, which rejects the suffix as an unknown triple.
+   maturin *derives* `<triple>.2.17` itself from the manylinux platform tag and
+   passes that to zig, so `--compatibility manylinux2014 --zig` is the entire
+   mechanism. Neither does `soldr prepare` take the suffix (soldr#2139 is on
+   `main`, not in the pinned 0.8.30).
+2. **`soldr prepare`'s exports outrank zig's.** cargo-zigbuild installs its
+   2.17-floored `cc`/`c++`/`ar`/`ranlib` shims and the linker with
+   `add_env_if_missing`, which also consults the ambient environment. Because
+   `soldr prepare` exports `CC_<triple>`, `CARGO_TARGET_<T>_LINKER` and friends
+   for the compile and test steps, the wheel build silently split its
+   toolchain — Rust at 2.17, the whisper.cpp C/C++ at soldr's default — and the
+   audit rejected it for `GLIBC_2.25/2.27/2.28`. The fix is to drop those
+   variables for the wheel build, which is safe only because no `*-sys` crate
+   needs the prepared sysroot on Linux (`cpal` is cfg'd off there).
+3. **Only the cross lanes get a zig on PATH.** cargo-zigbuild resolves zig as
+   `which(python3) -m ziglang` then `which(zig)`. On the native `x86_64` lane
+   `python3` is the hosted-tool interpreter (no `ziglang`) and `soldr prepare`
+   is skipped, so the release wheel died with "Failed to find zig" while the
+   ARM lane sailed past it. `CARGO_ZIGBUILD_PYTHON_PATH=sys.executable` names
+   the venv interpreter that does have `ziglang` (via the `maturin[zig]` dev
+   dep), uniformly on every lane.
+
+None of this is exercised by `ci.yml` — `_build-target.yml` refuses
+`profile: release` outside Auto Release — so the release wheel path is only
+ever proven by a real tag. Treat `manylinux_wheel_env`'s unit tests in
+`tests/test_ci_xbuild.py` as the standing contract.
+
 ## Deduplicated checks
 
 | Check | Before | After |
