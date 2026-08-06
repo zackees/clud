@@ -31,19 +31,41 @@ use crate::codex_model::{Effort, ModelSpec, SelectionError};
 ///
 /// The harness replays its display history every turn, while canonical
 /// Responses history already owns successful turns. A continuation therefore
-/// contributes only its final message; the first request is separately seeded
-/// from [`Translated::request`] so its complete replayed prefix is preserved.
+/// contributes the complete message suffix after its final assistant turn.
+/// That suffix is normally one user message, but Claude Code persists large
+/// parallel tool batches as consecutive user messages with one result apiece.
+/// Keeping only `messages.last()` silently drops every earlier result and
+/// leaves canonical `function_call` items unmatched upstream (#839).
+///
+/// A request with no assistant turn retains the legacy final-message fallback.
+/// The first request is separately seeded from [`Translated::request`], so
+/// this fallback matters only to compatibility clients continuing an already
+/// populated bridge history without replaying an assistant message.
 pub fn pending_input_items_as_values(
     body: &[u8],
 ) -> Result<Vec<serde_json::Value>, TranslateError> {
     let request: MessagesRequest = serde_json::from_slice(body)
         .map_err(|error| invalid(format!("could not decode request: {error}")))?;
-    let message = request
+    let last = request
         .messages
-        .last()
+        .len()
+        .checked_sub(1)
         .ok_or_else(|| invalid("messages must not be empty"))?;
+    let pending_start = request
+        .messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+        .map_or(last, |assistant| {
+            if assistant < last {
+                assistant + 1
+            } else {
+                last
+            }
+        });
     let mut items = Vec::new();
-    translate_message(message, &mut items);
+    for message in &request.messages[pending_start..] {
+        translate_message(message, &mut items);
+    }
     input_items_as_values(&items)
 }
 
@@ -1728,6 +1750,99 @@ mod tests {
         assert!(!wants_stream(br#"{"stream":false}"#));
         assert!(!wants_stream(b"{}"));
         assert!(!wants_stream(b"garbage"));
+    }
+
+    #[test]
+    fn pending_input_keeps_every_result_from_a_split_parallel_batch() {
+        for count in [2_usize, 7, 8] {
+            let calls = (0..count)
+                .map(|index| {
+                    json!({
+                        "type": "tool_use",
+                        "id": format!("call_{index}"),
+                        "name": "Bash",
+                        "input": {"command": format!("probe-{index}")},
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut messages = vec![
+                json!({"role": "user", "content": "inspect"}),
+                json!({"role": "assistant", "content": calls}),
+            ];
+            messages.extend((0..count).map(|index| {
+                json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": format!("call_{index}"),
+                        "content": format!("result-{index}"),
+                    }],
+                })
+            }));
+            let body = json!({"messages": messages}).to_string();
+
+            let pending = pending_input_items_as_values(body.as_bytes()).unwrap();
+            assert_eq!(pending.len(), count, "parallel batch size {count}");
+            for (index, item) in pending.iter().enumerate() {
+                assert_eq!(item["type"], "function_call_output");
+                assert_eq!(item["call_id"], format!("call_{index}"));
+                assert_eq!(item["output"], format!("result-{index}"));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_input_keeps_multiple_results_in_one_message() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "inspect"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call_0", "name": "Bash", "input": {}},
+                    {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_0", "content": "zero"},
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "one"},
+                ]},
+            ]
+        })
+        .to_string();
+
+        let pending = pending_input_items_as_values(body.as_bytes()).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0]["call_id"], "call_0");
+        assert_eq!(pending[1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn pending_input_without_an_assistant_keeps_the_final_message_fallback() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "replayed"},
+                {"role": "user", "content": "pending"},
+            ]
+        })
+        .to_string();
+
+        let pending = pending_input_items_as_values(body.as_bytes()).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["content"][0]["text"], "pending");
+    }
+
+    #[test]
+    fn pending_input_keeps_a_final_assistant_prefill() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "Complete this sentence"},
+                {"role": "assistant", "content": "The answer is"},
+            ]
+        })
+        .to_string();
+
+        let pending = pending_input_items_as_values(body.as_bytes()).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["role"], "assistant");
+        assert_eq!(pending[0]["content"][0]["text"], "The answer is");
     }
 
     #[test]
