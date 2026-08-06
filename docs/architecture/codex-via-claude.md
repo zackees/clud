@@ -10,10 +10,13 @@ rollback boundary.
 ## Conversation state and compaction
 
 The bridge owns an in-memory canonical Responses transcript for its lifetime.
-It is keyed by the bridge-session fallback identity because the current Messages
-surface supplies no conversation identifier. State is evicted when the bridge
-stops and is bounded to 32 conversations, 16,384 items, and 64 MiB per
-conversation; no transcript is persisted to disk.
+When Claude supplies `X-Claude-Code-Session-Id`, the main foreground turn is
+keyed by that session and each `x-claude-code-agent-id` is isolated beneath the
+same session. The identifiers are hashed before entering the map; the parent
+agent header is provenance only and never selects history. Clients without
+these headers use the bridge-session fallback identity. State is evicted when
+the bridge stops and is bounded to 32 conversations, 16,384 items, and 64 MiB
+per conversation; no transcript is persisted to disk.
 
 A Messages request is a display/replay view, not the canonical transcript.
 After a successful turn, the bridge appends only that logical turn's newly
@@ -52,8 +55,8 @@ clears the bridge after Claude starts the fresh session:
 - `POST /_clud/context/compact` compacts the bridge's canonical transcript and
   replaces it only after a valid opaque response. Empty history is a successful
   no-op.
-- `POST /_clud/context/clear` clears only this bridge session and performs no
-  upstream inference or compaction request.
+- `POST /_clud/context/clear` clears the addressed Claude session and all of its
+  agent descendants, then performs no upstream inference or compaction request.
 
 Both routes use the same loopback URL and launch-scoped
 `ANTHROPIC_AUTH_TOKEN` already supplied to the child. The generated settings

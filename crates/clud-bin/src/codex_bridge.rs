@@ -2,7 +2,7 @@
 //! Claude harness (issue #626).
 
 use crate::bridge_log::{unix_ms, BridgeLog};
-use crate::codex_history::{ConversationStore, HistoryLimits, BRIDGE_SESSION_CONVERSATION};
+use crate::codex_history::{ConversationKey, ConversationStore, HistoryLimits};
 use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
 use crate::codex_sse::InBandFailure;
@@ -598,6 +598,8 @@ fn handle_connection(
         let _ = write_error(&mut stream, 401);
         return;
     }
+    let conversation_key =
+        ConversationKey::from_headers(parsed.session_id.as_deref(), parsed.agent_id.as_deref());
 
     // Route on the path alone. Claude Code sends `POST /v1/messages?beta=true`,
     // so matching the raw request target 404s a request that is perfectly
@@ -620,7 +622,14 @@ fn handle_connection(
                 shutdown,
                 ContextControl::Compact,
             ) {
-                Ok(()) => serve_context_compact(&mut stream, config, shutdown, conversations, log),
+                Ok(body_key) => serve_context_compact(
+                    &mut stream,
+                    config,
+                    shutdown,
+                    conversations,
+                    log,
+                    body_key.unwrap_or_else(|| conversation_key.clone()),
+                ),
                 Err(ABANDON) => {}
                 Err(status) => {
                     record_rejection(log, status, "context_control_body");
@@ -638,7 +647,11 @@ fn handle_connection(
                 shutdown,
                 ContextControl::Clear,
             ) {
-                Ok(()) => serve_context_clear(&mut stream, conversations),
+                Ok(body_key) => serve_context_clear(
+                    &mut stream,
+                    conversations,
+                    body_key.unwrap_or_else(|| conversation_key.clone()),
+                ),
                 Err(ABANDON) => {}
                 Err(status) => {
                     record_rejection(log, status, "context_control_body");
@@ -692,6 +705,7 @@ fn handle_connection(
                 conversations,
                 &body,
                 streaming,
+                &conversation_key,
                 log,
             );
         }
@@ -721,10 +735,10 @@ fn read_context_control_body(
     deadline: Instant,
     shutdown: &AtomicBool,
     control: ContextControl,
-) -> Result<(), u16> {
+) -> Result<Option<ConversationKey>, u16> {
     let body = read_body(stream, prefix, content_length, deadline, shutdown)?;
     if body.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| 400_u16)?;
     let matches_lifecycle_event = match control {
@@ -746,7 +760,13 @@ fn read_context_control_body(
                 && value.get("source").and_then(serde_json::Value::as_str) == Some("clear")
         }
     };
-    matches_lifecycle_event.then_some(()).ok_or(400_u16)
+    if !matches_lifecycle_event {
+        return Err(400);
+    }
+    let session_id = value.get("session_id").and_then(serde_json::Value::as_str);
+    let agent_id = value.get("agent_id").and_then(serde_json::Value::as_str);
+    Ok((session_id.is_some() || agent_id.is_some())
+        .then(|| ConversationKey::from_headers(session_id, agent_id)))
 }
 
 fn serve_context_compact(
@@ -755,8 +775,9 @@ fn serve_context_compact(
     shutdown: &AtomicBool,
     conversations: &ConversationStore,
     log: Option<&SharedBridgeLog>,
+    conversation_key: ConversationKey,
 ) {
-    let operation = conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+    let operation = conversations.with_history(&conversation_key.id, |history| {
         let snapshot = history.snapshot();
         if snapshot.is_empty() {
             return Ok(Ok(()));
@@ -789,11 +810,13 @@ fn serve_context_compact(
     }
 }
 
-fn serve_context_clear(stream: &mut TcpStream, conversations: &ConversationStore) {
-    let result = conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
-        history.clear();
-        Ok(())
-    });
+fn serve_context_clear(
+    stream: &mut TcpStream,
+    conversations: &ConversationStore,
+    conversation_key: ConversationKey,
+) {
+    conversations.clear_session(&conversation_key.session_prefix);
+    let result = Ok::<(), crate::codex_history::HistoryError>(());
     match result {
         Ok(()) => {
             let _ = write_response(stream, 204, "application/json", b"", false);
@@ -847,6 +870,7 @@ fn build_pipeline(
 /// has emitted a frame the response is committed, so a later failure is
 /// reported in-band by the translator's own `error` event (already appended by
 /// the pipeline) and the chunked body is simply terminated.
+#[allow(clippy::too_many_arguments)]
 fn serve_messages(
     stream: &mut TcpStream,
     config: &BridgeConfig,
@@ -854,6 +878,7 @@ fn serve_messages(
     conversations: &ConversationStore,
     body: &[u8],
     streaming: bool,
+    conversation_key: &ConversationKey,
     log: Option<&SharedBridgeLog>,
 ) {
     let pipeline = match build_pipeline(config, log) {
@@ -868,7 +893,7 @@ fn serve_messages(
 
     if streaming {
         let mut writer = EventStreamWriter::new(stream, config);
-        let streamed = conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+        let streamed = conversations.with_history(&conversation_key.id, |history| {
             let streamed = {
                 let mut sink = |frame: &str| -> Result<(), UpstreamError> {
                     writer
@@ -932,7 +957,7 @@ fn serve_messages(
         return;
     }
 
-    match conversations.with_history(BRIDGE_SESSION_CONVERSATION, |history| {
+    match conversations.with_history(&conversation_key.id, |history| {
         let completed = pipeline
             .complete_with_history(body, &message_id, shutdown, history)
             .map(|completion| {
@@ -1245,6 +1270,8 @@ struct ParsedRequest {
     method: String,
     path: String,
     authorization: Option<String>,
+    session_id: Option<String>,
+    agent_id: Option<String>,
     content_length: usize,
     body_prefix: Vec<u8>,
 }
@@ -1295,12 +1322,20 @@ fn read_headers(
         return Err(400);
     }
     let mut authorization = None;
+    let mut session_id = None;
+    let mut agent_id = None;
     let mut content_length = 0_usize;
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(400_u16)?;
         let value = value.trim();
         if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("x-claude-code-session-id") {
+            session_id = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("x-claude-code-agent-id") {
+            agent_id = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("x-claude-code-parent-agent-id") {
+            // The parent is provenance, not the child's history identity.
         } else if name.eq_ignore_ascii_case("content-length") {
             content_length = value.parse().map_err(|_| 400_u16)?;
         }
@@ -1309,6 +1344,8 @@ fn read_headers(
         method,
         path,
         authorization,
+        session_id,
+        agent_id,
         content_length,
         body_prefix: buffer[header_end..].to_vec(),
     })
@@ -1593,6 +1630,23 @@ mod tests {
         )
     }
 
+    fn authorized_with_headers(
+        method: &str,
+        path: &str,
+        token: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> String {
+        let extra = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     /// A Responses-shaped fake. Phase 2's seam passed an Anthropic body
     /// straight through, so the end-to-end tests proved transport and auth but
     /// nothing about translation; this one speaks the upstream protocol and
@@ -1782,6 +1836,16 @@ Connection: close
             "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
              event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"recovered\"}\n\n\
              event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_recovered\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}}\n\n\
+             event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+        )
+    }
+
+    fn function_call_response() -> Vec<u8> {
+        response_with_events(
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
+             event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_parent\",\"name\":\"Workflow\"}}\n\n\
+             event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{}\"}\n\n\
+             event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_parent\",\"name\":\"Workflow\",\"arguments\":\"{}\"}}\n\n\
              event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
         )
     }
@@ -2912,6 +2976,60 @@ Connection: close
             "opaque-summary"
         );
         assert_eq!(retry_body["input"][1]["content"][0]["text"], "pending");
+    }
+
+    #[test]
+    fn workflow_child_does_not_replay_parent_function_call() {
+        let upstream =
+            FakeResponses::start_with_responses(vec![Some(function_call_response()), None]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let session = [("X-Claude-Code-Session-Id", "session-parent-child")];
+        let parent = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_BODY,
+                &session,
+            ),
+        );
+        assert_eq!(status(&parent), 200, "{parent}");
+
+        let mut child_headers = session.to_vec();
+        child_headers.push(("x-claude-code-agent-id", "agent-child"));
+        let child = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"child"}],"stream":false}"#,
+                &child_headers,
+            ),
+        );
+        assert_eq!(status(&child), 200, "{child}");
+
+        let requests = upstream.requests();
+        let child_body: serde_json::Value = serde_json::from_str(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .nth(1)
+                .expect("child upstream request")
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("child request body"),
+        )
+        .expect("child JSON body");
+        assert!(
+            !child_body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "function_call"),
+            "child replayed the parent function call: {child_body}"
+        );
     }
 
     #[test]
