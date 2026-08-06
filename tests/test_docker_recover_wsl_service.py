@@ -173,7 +173,7 @@ def test_the_elevated_command_is_scoped_to_kill_and_start(mod):
     argv = mod.elevated_restart_command(4242)
     joined = " ".join(argv)
 
-    assert "taskkill /F /PID 4242" in joined, "must target the validated PID only"
+    assert "running-process --terminate-tree 4242" in joined
     assert "sc.exe start WslService" in joined
     assert "-Verb RunAs" in joined, "elevation must be a visible UAC prompt"
 

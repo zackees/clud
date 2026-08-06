@@ -34,6 +34,11 @@ ALLOWED_PATTERNS: list[str] = [
     r"process::exit",
 ]
 
+# Product Python tools must delegate process-tree cleanup to running-process.
+# These shell commands have divergent platform semantics and bypass its
+# containment, verification, and diagnostic contract.
+BANNED_PLATFORM_TREE_KILL_RE = re.compile(r"\b(?:taskkill|pkill|killall)\b", re.IGNORECASE)
+
 COMMAND_BUILDER_MARKER = "running-process: command-builder"
 COMMAND_IMPORT_RE = re.compile(r"^use std::process::Command;\s*(?://.*)?$")
 COMMAND_BUILDER_RE = re.compile(
@@ -180,6 +185,19 @@ def scan_file(path: Path) -> list[tuple[int, str, str]]:
     return violations
 
 
+def scan_platform_tree_kills(path: Path) -> list[tuple[int, str]]:
+    """Return product Python uses of platform-specific tree-kill commands."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [
+        (number, line.strip())
+        for number, line in enumerate(lines, start=1)
+        if BANNED_PLATFORM_TREE_KILL_RE.search(line)
+    ]
+
+
 def main() -> int:
     # Scan all .rs files in crates/ (not testbins/ — mocks can use std::process)
     crates_dir = ROOT / "crates"
@@ -274,6 +292,16 @@ def main() -> int:
         for line_num, line, reason in violations:
             rel = path.relative_to(ROOT)
             print(f"{rel}:{line_num}: BANNED — {reason}", file=sys.stderr)
+            print(f"  {line}", file=sys.stderr)
+            total_violations += 1
+
+    for path in sorted(crates_dir.rglob("*.py")):
+        for line_num, line in scan_platform_tree_kills(path):
+            rel = path.relative_to(ROOT)
+            print(
+                f"{rel}:{line_num}: BANNED — use running-process cross-platform tree cleanup",
+                file=sys.stderr,
+            )
             print(f"  {line}", file=sys.stderr)
             total_violations += 1
 

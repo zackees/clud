@@ -89,6 +89,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import typing
 from collections.abc import Mapping
@@ -122,6 +124,7 @@ WINDOWS_GUARD_PARENT_WAIT_SECONDS = 60.0
 WINDOWS_GUARD_STARTUP_SECONDS = 300.0
 WINDOWS_GUARD_CLI_SECONDS = 40.0
 WINDOWS_GUARD_CLI_TERMINATE_SECONDS = 1.0
+WINDOWS_GUARD_LOG_MAX_BYTES = 1024 * 1024
 WINDOWS_GUARD_EMPTY_SAMPLES = 3
 WINDOWS_GUARD_MONITOR_INTERVAL = 5.0
 AUTHORITATIVE_WINDOWS_DOCKER_PROCESSES = {
@@ -1423,6 +1426,12 @@ def _launch_windows_docker_desktop(executable: str) -> tuple[bool, str]:
     return True, f"direct Docker Desktop launch started {executable} (daemon marker set)"
 
 
+def _windows_docker_desktop_log_path(log_dir: Path | None = None) -> Path:
+    """Return the durable, bounded log location for the guarded CLI launch."""
+    directory = log_dir or Path(tempfile.gettempdir(), "clud", "docker-recover")
+    return directory / "docker-desktop-start.log"
+
+
 def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
     """Start a declared-daemon parent that owns Docker's CLI launch subtree."""
     flags = WINDOWS_DETACHED_PROCESS | WINDOWS_CREATE_NEW_PROCESS_GROUP
@@ -1440,39 +1449,109 @@ def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
         )
     except OSError as exc:
         return False, f"Docker Desktop daemon guard launch failed: {exc}"
-    return True, "Docker Desktop daemon guard started (daemon marker set)"
+    return (
+        True,
+        "Docker Desktop daemon guard started (daemon marker set; CLI diagnostics: "
+        f"{_windows_docker_desktop_log_path()})",
+    )
+
+
+def _write_bounded_diagnostic_log(stream, path: Path) -> None:
+    """Drain one stream incrementally while retaining only its newest 1 MiB.
+
+    The reader is deliberately a daemon thread: Docker descendants can retain
+    the inherited pipe after the `running-process` supervisor exits, so joining
+    it indefinitely would recreate the inherited-handle wedge this guard avoids.
+    """
+    retained = 0
+    try:
+        with path.open("wb") as log:
+            while chunk := stream.read(8192):
+                if len(chunk) > WINDOWS_GUARD_LOG_MAX_BYTES:
+                    chunk = chunk[-WINDOWS_GUARD_LOG_MAX_BYTES :]
+                if retained + len(chunk) > WINDOWS_GUARD_LOG_MAX_BYTES:
+                    log.seek(0)
+                    log.truncate()
+                    retained = 0
+                log.write(chunk)
+                log.flush()
+                retained += len(chunk)
+    except OSError:
+        # Diagnostics must not alter the recovery path. The supervisor still
+        # owns the launch tree and the caller retains its hard wall-clock bound.
+        return
 
 
 def _run_windows_desktop_cli(
-    *, timeout: float
+    *, timeout: float, log_dir: Path | None = None
 ) -> subprocess.CompletedProcess | None:
-    """Run Desktop's CLI without pipes that daemon descendants can inherit."""
+    """Run Desktop's CLI through running-process with streamed diagnostics.
+
+    `running-process --wall-clock-timeout` owns the required CLI-phase
+    deadline and tree cleanup on every platform. Its merged output is drained
+    incrementally to a bounded durable log.
+    """
     command = ["docker", "desktop", "start"]
+    log_path = _windows_docker_desktop_log_path(log_dir)
+    log_directory = log_path.parent
+    try:
+        log_directory.mkdir(parents=True, exist_ok=True)
+        # Fail before launch rather than silently discarding the only useful
+        # startup diagnostics when the detached guard cannot create its log.
+        log_path.touch(exist_ok=True)
+    except OSError:
+        return None
+
+    supervised_command = [
+        "running-process",
+        "--no-auto-stack-dumping",
+        "--wall-clock-timeout",
+        str(timeout),
+        "--",
+        *command,
+    ]
     try:
         process = subprocess.Popen(
-            command,
+            supervised_command,
             env=_declared_daemon_environment(),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             close_fds=True,
             creationflags=WINDOWS_CREATE_NEW_PROCESS_GROUP,
         )
     except OSError:
         return None
+
+    stream = getattr(process, "stdout", None)
+    reader = None
+    if stream is not None:
+        reader = threading.Thread(
+            target=_write_bounded_diagnostic_log,
+            args=(stream, log_path),
+            name="clud-docker-desktop-output",
+            daemon=True,
+        )
+        reader.start()
     try:
         returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # The blessed supervisor normally exits after its own wall-clock tree
+        # cleanup. This is only a defensive wrapper cleanup, never a platform
+        # command or a direct Docker-tree fallback.
         try:
             process.kill()
             process.wait(timeout=WINDOWS_GUARD_CLI_TERMINATE_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired):
             pass
         return None
     except OSError:
         return None
+    finally:
+        if reader is not None:
+            # Give ordinary short-lived CLI output a chance to reach the log,
+            # without ever waiting on a descendant-held pipe handle.
+            reader.join(timeout=0.1)
     return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
 
 
@@ -1831,11 +1910,13 @@ def elevated_restart_command(pid: int) -> list[str]:
     """PowerShell argv for the scoped elevated operation.
 
     Pure so the *shape* of the privileged command is asserted in tests: exactly
-    one `taskkill` against the validated PID and one `sc start`, with a visible
+    one blessed cross-platform tree termination against the validated PID and one `sc start`, with a visible
     UAC prompt (`-Verb RunAs`). Nothing here may grow a `wsl --unregister`, a
     `Remove-Item`, or a diskpart call — that is what the test guards.
     """
-    inner = f"taskkill /F /PID {int(pid)}; sc.exe start {WSL_SERVICE}"
+    inner = (
+        f"running-process --terminate-tree {int(pid)} && sc.exe start {WSL_SERVICE}"
+    )
     return [
         "powershell.exe",
         "-NoProfile",

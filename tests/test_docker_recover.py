@@ -519,6 +519,7 @@ def test_windows_guard_is_detached_declared_daemon_and_self_invokes(dr, monkeypa
     assert captured["creationflags"] & dr.WINDOWS_DETACHED_PROCESS
     assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
     assert "daemon guard" in detail
+    assert "docker-desktop-start.log" in detail
 
 
 def test_windows_guard_owns_cli_tree_until_docker_exits(dr, monkeypatch):
@@ -635,10 +636,61 @@ def test_windows_guard_cli_budget_leaves_direct_observation_time(dr, monkeypatch
     assert clock["now"] < dr.WINDOWS_GUARD_PARENT_WAIT_SECONDS
 
 
+def test_windows_desktop_cli_uses_running_process_and_streams_to_bounded_log(
+    dr, monkeypatch, tmp_path
+):
+    captured = {}
+
+    class StartedCli:
+        stdout = io.BytesIO(b"starting Docker Desktop\n")
+
+        def wait(self, *, timeout):
+            captured["wait_timeout"] = timeout
+            return 0
+
+    def popen(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return StartedCli()
+
+    monkeypatch.setattr(dr.subprocess, "Popen", popen)
+
+    result = dr._run_windows_desktop_cli(timeout=7.0, log_dir=tmp_path)
+
+    assert result is not None
+    assert captured["command"] == [
+        "running-process",
+        "--no-auto-stack-dumping",
+        "--wall-clock-timeout",
+        "7.0",
+        "--",
+        "docker",
+        "desktop",
+        "start",
+    ]
+    assert captured["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert captured["stdin"] is dr.subprocess.DEVNULL
+    assert captured["stdout"] is dr.subprocess.PIPE
+    assert captured["stderr"] is dr.subprocess.STDOUT
+    assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert captured["wait_timeout"] == 7.0
+    assert (tmp_path / "docker-desktop-start.log").read_bytes() == b"starting Docker Desktop\n"
+
+
+def test_windows_desktop_cli_diagnostic_log_keeps_only_bounded_tail(dr, tmp_path, monkeypatch):
+    monkeypatch.setattr(dr, "WINDOWS_GUARD_LOG_MAX_BYTES", 8)
+    log_path = tmp_path / "docker-desktop-start.log"
+
+    dr._write_bounded_diagnostic_log(io.BytesIO(b"abcdefghij"), log_path)
+
+    assert log_path.read_bytes() == b"cdefghij"
+
+
 def test_windows_desktop_cli_timeout_never_drains_inherited_pipes(dr, monkeypatch):
     events = []
 
     class HungCli:
+        pid = 4242
         waits = 0
 
         def wait(self, *, timeout):
@@ -663,13 +715,21 @@ def test_windows_desktop_cli_timeout_never_drains_inherited_pipes(dr, monkeypatc
         return HungCli()
 
     monkeypatch.setattr(dr.subprocess, "Popen", popen)
-
     assert dr._run_windows_desktop_cli(timeout=7.0) is None
-    assert events[0][1] == ["docker", "desktop", "start"]
+    assert events[0][1] == [
+        "running-process",
+        "--no-auto-stack-dumping",
+        "--wall-clock-timeout",
+        "7.0",
+        "--",
+        "docker",
+        "desktop",
+        "start",
+    ]
     assert events[0][2]["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
     assert events[0][2]["stdin"] is dr.subprocess.DEVNULL
-    assert events[0][2]["stdout"] is dr.subprocess.DEVNULL
-    assert events[0][2]["stderr"] is dr.subprocess.DEVNULL
+    assert events[0][2]["stdout"] is dr.subprocess.PIPE
+    assert events[0][2]["stderr"] is dr.subprocess.STDOUT
     assert events[1:] == [
         ("wait", 7.0),
         ("kill",),
