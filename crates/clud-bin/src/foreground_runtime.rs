@@ -46,7 +46,7 @@ pub struct ForegroundRuntime {
 struct ClaudeSettings {
     value: String,
     replaces_user_argument: bool,
-    _temp_file: Option<tempfile::NamedTempFile>,
+    _temp_file: tempfile::NamedTempFile,
 }
 
 impl ForegroundRuntime {
@@ -252,13 +252,9 @@ fn merged_context_lifecycle_settings(
 ) -> Result<ClaudeSettings, BridgeError> {
     let mut settings = context_lifecycle_settings(bridge);
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
-        return Ok(ClaudeSettings {
-            value: settings.to_string(),
-            replaces_user_argument: false,
-            _temp_file: None,
-        });
+        return write_launch_scoped_settings(settings, false);
     };
-    let (mut user_settings, was_inline) = read_user_settings(user_argument, plan.cwd.as_deref())?;
+    let mut user_settings = read_user_settings(user_argument, plan.cwd.as_deref())?;
     let user_root = user_settings.as_object_mut().ok_or_else(|| {
         BridgeError::Settings("Claude --settings must contain a JSON object".to_string())
     })?;
@@ -290,30 +286,33 @@ fn merged_context_lifecycle_settings(
                 .cloned(),
         );
     }
-    let serialized = user_settings.to_string();
-    let (value, temp_file) = if was_inline {
-        (serialized, None)
-    } else {
-        let mut file = tempfile::Builder::new()
-            .prefix("clud-claude-settings-")
-            .suffix(".json")
-            .tempfile()
-            .map_err(|error| {
-                BridgeError::Settings(format!(
-                    "failed to create launch-scoped Claude settings: {error}"
-                ))
-            })?;
-        file.write_all(serialized.as_bytes()).map_err(|error| {
+    write_launch_scoped_settings(user_settings, true)
+}
+
+fn write_launch_scoped_settings(
+    settings: serde_json::Value,
+    replaces_user_argument: bool,
+) -> Result<ClaudeSettings, BridgeError> {
+    let mut file = tempfile::Builder::new()
+        .prefix("clud-claude-settings-")
+        .suffix(".json")
+        .tempfile()
+        .map_err(|error| {
+            BridgeError::Settings(format!(
+                "failed to create launch-scoped Claude settings: {error}"
+            ))
+        })?;
+    file.write_all(settings.to_string().as_bytes())
+        .map_err(|error| {
             BridgeError::Settings(format!(
                 "failed to write launch-scoped Claude settings: {error}"
             ))
         })?;
-        (file.path().to_string_lossy().into_owned(), Some(file))
-    };
+    let value = file.path().to_string_lossy().into_owned();
     Ok(ClaudeSettings {
         value,
-        replaces_user_argument: true,
-        _temp_file: temp_file,
+        replaces_user_argument,
+        _temp_file: file,
     })
 }
 
@@ -350,12 +349,8 @@ fn user_settings_argument(command: &[String]) -> Result<Option<&str>, BridgeErro
     Ok(found)
 }
 
-fn read_user_settings(
-    argument: &str,
-    cwd: Option<&str>,
-) -> Result<(serde_json::Value, bool), BridgeError> {
-    let was_inline = argument.trim_start().starts_with('{');
-    let contents = if was_inline {
+fn read_user_settings(argument: &str, cwd: Option<&str>) -> Result<serde_json::Value, BridgeError> {
+    let contents = if argument.trim_start().starts_with('{') {
         argument.to_string()
     } else {
         let supplied = PathBuf::from(argument);
@@ -371,11 +366,9 @@ fn read_user_settings(
             ))
         })?
     };
-    serde_json::from_str(&contents)
-        .map(|settings| (settings, was_inline))
-        .map_err(|error| {
-            BridgeError::Settings(format!("failed to parse Claude --settings JSON: {error}"))
-        })
+    serde_json::from_str(&contents).map_err(|error| {
+        BridgeError::Settings(format!("failed to parse Claude --settings JSON: {error}"))
+    })
 }
 
 fn remove_user_settings_argument(command: &mut Vec<String>) {
@@ -711,8 +704,12 @@ mod tests {
             .iter()
             .position(|argument| argument == "--settings")
             .expect("the bridge launch must register session-local lifecycle hooks");
-        let settings: serde_json::Value = serde_json::from_str(&command[settings_index + 1])
-            .expect("--settings must carry valid inline JSON");
+        let settings_path = PathBuf::from(&command[settings_index + 1]);
+        assert!(settings_path.is_absolute());
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings_path).expect("the settings file must remain live"),
+        )
+        .expect("--settings must point to valid JSON");
         let base_url = runtime.base_url().unwrap();
         assert_eq!(settings["hooks"]["PreCompact"][0]["matcher"], "manual|auto");
         assert_eq!(
@@ -739,6 +736,10 @@ mod tests {
         assert!(
             !command.join(" ").contains(runtime.bearer_token().unwrap()),
             "the launch-scoped bearer must stay in the environment, not argv"
+        );
+        assert!(
+            !command.join(" ").contains(base_url),
+            "the launch-private bridge URL must stay out of argv"
         );
     }
 
@@ -779,7 +780,12 @@ mod tests {
                 .count(),
             1
         );
-        let settings: serde_json::Value = serde_json::from_str(&command[2]).unwrap();
+        let merged_path = PathBuf::from(&command[2]);
+        assert!(merged_path.is_absolute());
+        assert!(!command.join(" ").contains("echo user-hook"));
+        assert!(!command.join(" ").contains(runtime.base_url().unwrap()));
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(merged_path).unwrap()).unwrap();
         assert_eq!(settings["permissions"]["defaultMode"], "plan");
         assert_eq!(
             settings["hooks"]["PreCompact"][0]["hooks"][0]["command"],
@@ -860,7 +866,8 @@ mod tests {
         let command = &calls[0].1;
         assert_eq!(&command[3..], &route.command[1..]);
         assert_eq!(command[1], "--settings");
-        let generated: serde_json::Value = serde_json::from_str(&command[2]).unwrap();
+        let generated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&command[2]).unwrap()).unwrap();
         assert_eq!(
             generated["hooks"]["PreCompact"][0]["matcher"],
             "manual|auto"

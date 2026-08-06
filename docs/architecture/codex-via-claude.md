@@ -45,9 +45,9 @@ sequence.
 
 The authenticated loopback listener also exposes two launch-private lifecycle
 controls. Every bridged Claude launch registers session-local HTTP hooks through
-inline `--settings`: `PreCompact` (manual or automatic) calls compact before
-Claude mutates its transcript, and `SessionStart(clear)` clears the bridge after
-Claude starts the fresh session:
+a protected temporary `--settings` file: `PreCompact` (manual or automatic)
+calls compact before Claude mutates its transcript, and `SessionStart(clear)`
+clears the bridge after Claude starts the fresh session:
 
 - `POST /_clud/context/compact` compacts the bridge's canonical transcript and
   replaces it only after a valid opaque response. Empty history is a successful
