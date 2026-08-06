@@ -12,11 +12,59 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Deterministic identity for a Messages client that provides no conversation
 /// identity. A bridge is owned by one foreground harness session, so this
 /// fallback is stable for that bridge's lifetime and is evicted at shutdown.
 pub const BRIDGE_SESSION_CONVERSATION: &str = "bridge-session";
+
+/// A bounded, non-sensitive key for one Claude session and (when present) one
+/// sub-agent. Raw Claude identifiers never enter the history map or logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationKey {
+    pub id: String,
+    pub session_prefix: String,
+}
+
+impl ConversationKey {
+    pub fn from_headers(session_id: Option<&str>, agent_id: Option<&str>) -> Self {
+        match session_id {
+            Some(session_id) if !session_id.is_empty() => {
+                let prefix = format!("session-{}-", digest(session_id));
+                let id = match agent_id.filter(|agent| !agent.is_empty()) {
+                    Some(agent_id) => format!("{prefix}agent-{}", digest(agent_id)),
+                    None => format!("{prefix}main"),
+                };
+                Self {
+                    id,
+                    session_prefix: prefix,
+                }
+            }
+            _ => match agent_id.filter(|agent| !agent.is_empty()) {
+                Some(agent_id) => Self {
+                    id: format!("{BRIDGE_SESSION_CONVERSATION}-agent-{}", digest(agent_id)),
+                    session_prefix: format!("{BRIDGE_SESSION_CONVERSATION}-"),
+                },
+                None => Self {
+                    id: BRIDGE_SESSION_CONVERSATION.to_string(),
+                    session_prefix: BRIDGE_SESSION_CONVERSATION.to_string(),
+                },
+            },
+        }
+    }
+}
+
+fn digest(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 const DEFAULT_MAX_CONVERSATIONS: usize = 32;
 const DEFAULT_MAX_ITEMS_PER_CONVERSATION: usize = 16_384;
@@ -117,6 +165,11 @@ impl ConversationStore {
     /// Evict all history at the bridge session boundary.
     pub fn clear(&self) {
         lock(&self.conversations).clear();
+    }
+
+    /// Evict every child key belonging to one Claude session.
+    pub fn clear_session(&self, session_prefix: &str) {
+        lock(&self.conversations).retain(|key, _| !key.starts_with(session_prefix));
     }
 
     #[cfg(test)]
@@ -283,6 +336,53 @@ mod tests {
         object.insert("type".into(), Value::String(kind.into()));
         object.extend(fields.as_object().unwrap().clone());
         Value::Object(object)
+    }
+
+    #[test]
+    fn claude_identity_keys_isolate_agents_without_retaining_raw_ids() {
+        let main = ConversationKey::from_headers(Some("session-raw-123456"), None);
+        let child =
+            ConversationKey::from_headers(Some("session-raw-123456"), Some("agent-raw-abcdef"));
+        let sibling =
+            ConversationKey::from_headers(Some("session-raw-123456"), Some("agent-raw-123456"));
+        let other_session =
+            ConversationKey::from_headers(Some("session-other-654321"), Some("agent-raw-abcdef"));
+        assert_ne!(main.id, child.id);
+        assert_ne!(child.id, sibling.id);
+        assert_ne!(child.id, other_session.id);
+        for raw in ["session-raw-123456", "agent-raw-abcdef", "agent-raw-123456"] {
+            assert!(!child.id.contains(raw));
+        }
+        assert!(child.id.len() <= 128);
+    }
+
+    #[test]
+    fn clearing_a_session_evicts_all_agent_descendants_only() {
+        let store = ConversationStore::default();
+        let session_a = ConversationKey::from_headers(Some("session-a"), None);
+        let child_a = ConversationKey::from_headers(Some("session-a"), Some("agent-a"));
+        let child_b = ConversationKey::from_headers(Some("session-b"), Some("agent-b"));
+        for key in [&session_a, &child_a, &child_b] {
+            store
+                .with_history(&key.id, |history| {
+                    history.append_successful_turn(&[item("message", serde_json::json!({}))], &[])
+                })
+                .unwrap();
+        }
+        store.clear_session(&session_a.session_prefix);
+        assert_eq!(store.conversation_count(), 1);
+        assert!(
+            store
+                .with_history(&child_b.id, |history| Ok(history.snapshot().len()))
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            store
+                .with_history(&child_a.id, |history| Ok(history.snapshot().len()))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
