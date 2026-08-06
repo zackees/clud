@@ -170,10 +170,11 @@ def test_the_elevated_command_is_scoped_to_kill_and_start(mod):
     place that could violate that — a test on its shape is worth more than a
     comment saying we won't.
     """
-    argv = mod.elevated_restart_command(4242)
+    argv = mod.elevated_restart_command(4242, running_process=r"C:\bin\running-process.exe")
     joined = " ".join(argv)
 
-    assert "running-process --terminate-tree 4242" in joined
+    assert r"--terminate-tree 4242" in joined
+    assert r"C:\bin\running-process.exe" in joined
     assert "sc.exe start WslService" in joined
     assert "-Verb RunAs" in joined, "elevation must be a visible UAC prompt"
 
@@ -191,6 +192,40 @@ def test_the_elevated_command_rejects_a_non_integer_pid(mod):
     `int()` is what stops a crafted value from becoming extra commands."""
     with pytest.raises((ValueError, TypeError)):
         mod.elevated_restart_command("4242; shutdown /r")
+
+
+def test_the_elevated_command_embeds_an_absolute_running_process_path(mod, monkeypatch):
+    """The elevated shell runs as Administrator, whose PATH is not the user's.
+
+    running-process installs into a user venv or ~/.local/bin, neither of which
+    an elevated cmd.exe generally carries. A bare name would not resolve there,
+    and `&&` would then skip the `sc start` this whole operation exists to do.
+    """
+    monkeypatch.setattr(
+        mod.shutil, "which", lambda name: r"C:\venv\Scripts\running-process.exe"
+    )
+    joined = " ".join(mod.elevated_restart_command(4242))
+
+    assert r"C:\venv\Scripts\running-process.exe" in joined
+    assert "'running-process" not in joined, "must not rely on elevated PATH lookup"
+
+
+def test_recovery_refuses_before_prompting_when_running_process_is_missing(
+    mod, monkeypatch
+):
+    """An approved UAC prompt that then fails is worse than an upfront refusal."""
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("must not prompt for elevation")
+
+    monkeypatch.setattr(mod, "_run", fail)
+
+    ok, message = mod._elevated_wsl_service_restart(4242)
+
+    assert ok is False
+    assert "running-process" in message
+    assert "left untouched" in message
 
 
 # ------------------------------------------------------ end-to-end routing --

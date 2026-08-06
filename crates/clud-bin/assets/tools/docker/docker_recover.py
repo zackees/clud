@@ -1906,17 +1906,53 @@ def recover_wsl_service() -> tuple[bool, list[str]]:
     return running, details
 
 
-def elevated_restart_command(pid: int) -> list[str]:
+class RunningProcessUnavailable(RuntimeError):
+    """The running-process CLI could not be resolved for the elevated step."""
+
+
+def _resolve_running_process_binary(resolver=None) -> str | None:
+    """Absolute path to the running-process CLI, or None when unresolvable.
+
+    Resolution happens here, in the *invoking* user's PATH, because the
+    elevated step runs as Administrator — whose PATH does not generally carry
+    the user venv or `~/.local/bin` that running-process installs into. A bare
+    command name would simply not be found there, and `&&` would then skip the
+    `sc start` that is the whole point of the operation.
+    """
+    # Bound at call time, not as a default: a def-time default would capture
+    # the original `shutil.which` and ignore any later substitution.
+    found = (resolver or shutil.which)("running-process")
+    return str(Path(found).resolve()) if found else None
+
+
+def elevated_restart_command(
+    pid: int, *, running_process: str | None = None
+) -> list[str]:
     """PowerShell argv for the scoped elevated operation.
 
-    Pure so the *shape* of the privileged command is asserted in tests: exactly
-    one blessed cross-platform tree termination against the validated PID and one `sc start`, with a visible
-    UAC prompt (`-Verb RunAs`). Nothing here may grow a `wsl --unregister`, a
-    `Remove-Item`, or a diskpart call — that is what the test guards.
+    Shape-only so the blast radius is asserted in tests: exactly one blessed
+    cross-platform tree termination against the validated PID and one
+    `sc start`, with a visible UAC prompt (`-Verb RunAs`). Nothing here may
+    grow a `wsl --unregister`, a `Remove-Item`, or a diskpart call — that is
+    what the test guards.
+
+    Raises `RunningProcessUnavailable` rather than emitting a command that
+    would fail after the operator has already approved elevation.
     """
-    inner = (
-        f"running-process --terminate-tree {int(pid)} && sc.exe start {WSL_SERVICE}"
-    )
+    validated = int(pid)
+    binary = running_process or _resolve_running_process_binary()
+    if binary is None:
+        raise RunningProcessUnavailable(
+            "running-process CLI not found on PATH — cannot terminate the "
+            f"process holding {WSL_SERVICE}"
+        )
+    if "'" in binary:
+        # The path is embedded in a single-quoted PowerShell argument; a quote
+        # would break out of it. Refuse rather than build a malformed command.
+        raise RunningProcessUnavailable(
+            f"running-process path contains a quote and cannot be elevated safely: {binary}"
+        )
+    inner = f'"{binary}" --terminate-tree {validated} && sc.exe start {WSL_SERVICE}'
     return [
         "powershell.exe",
         "-NoProfile",
@@ -1929,7 +1965,14 @@ def elevated_restart_command(pid: int) -> list[str]:
 
 def _elevated_wsl_service_restart(pid: int) -> tuple[bool, str]:
     """Run the scoped terminate-and-start under a visible UAC prompt."""
-    result = _run(elevated_restart_command(pid), timeout=120.0)
+    try:
+        command = elevated_restart_command(pid)
+    except RunningProcessUnavailable as exc:
+        # Fail before prompting. A UAC dialog the operator approves only for
+        # cmd.exe to fail on an unresolvable binary — leaving the service
+        # stopped — is strictly worse than saying so up front.
+        return False, f"{exc} — WSL was left untouched"
+    result = _run(command, timeout=120.0)
     if result is None:
         return False, "elevated recovery could not be launched (or timed out)"
     if result.returncode != 0:
