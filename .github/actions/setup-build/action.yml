@@ -143,16 +143,15 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # NB: soldr's `<triple>.<glibc>` floor spelling (soldr#2139) is NOT
-        # usable here yet. It exists on soldr `main` but is absent from the
-        # pinned 0.8.30, which rejects it outright:
-        #
-        #   soldr build --target `aarch64-unknown-linux-gnu.2.17`:
-        #     not a known alias or Rust triple. Did you mean `all`?
-        #
-        # The dev wheel therefore opts out of the manylinux audit instead --
-        # see ci/xbuild.py. Revisit once a soldr release carries the floor;
-        # tracked as Ask 2 on zackees/soldr#2211.
+        # NB: this prep is for the compile and test steps only -- it has no
+        # say in the shipped wheel's glibc floor. The variables it exports
+        # (CC_<triple>, CARGO_TARGET_<T>_LINKER, ...) are the same ones
+        # cargo-zigbuild installs its 2.17 shims into, and cargo-zigbuild
+        # yields to whatever is already set, so `ci/xbuild.py` drops them for
+        # the release wheel build and lets zig own that link end to end.
+        # Neither soldr's `<triple>.<glibc>` spelling (soldr#2139, absent from
+        # the pinned 0.8.30) nor maturin's `--target` can carry the floor;
+        # `--compatibility manylinux2014 --zig` is what does.
         "${SOLDR_BINARY:-soldr}" prepare \
           --target "${{ inputs.target }}" \
           --github-env "$GITHUB_ENV"

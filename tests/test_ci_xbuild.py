@@ -63,9 +63,71 @@ def test_release_linux_wheel_avoids_duplicate_zig_flag() -> None:
 
 
 def test_release_linux_wheel_uses_an_isolated_target_dir() -> None:
+    env = xbuild.manylinux_wheel_env("aarch64-unknown-linux-gnu", {})
+    assert env["CARGO_TARGET_DIR"] == str(
+        ROOT / "target" / "release-wheel" / "aarch64-unknown-linux-gnu"
+    )
+    assert env["SOLDR_LINKER"] == "default"
+
+
+def test_release_linux_wheel_keeps_the_glibc_floor_off_the_target_triple() -> None:
+    """maturin parses `--target` with target-lexicon; a `.2.17` suffix is fatal.
+
+    The floor comes from `--compatibility manylinux2014 --zig`, which maturin
+    turns into the zig target `<triple>.2.17` itself.
+    """
     source = (ROOT / "ci" / "xbuild.py").read_text(encoding="utf-8")
-    assert 'ROOT / "target" / "release-wheel" / args.target' in source
-    assert 'wheel_target = f"{args.target}.2.17"' in source
+    assert "wheel_target" not in source
+    assert 'subcommand += ["--zig", "--compatibility", "manylinux2014"]' in source
+
+
+def test_release_linux_wheel_lets_zig_own_the_c_toolchain() -> None:
+    """`soldr prepare` exports the same variables cargo-zigbuild sets.
+
+    cargo-zigbuild installs its shims with `add_env_if_missing`, so anything
+    left here silently wins and the C objects miss the 2.17 floor -- which is
+    exactly how the wheel failed the manylinux audit.
+    """
+    target = "aarch64-unknown-linux-gnu"
+    prepared = {
+        "CC_aarch64_unknown_linux_gnu": "/soldr/linux-cross/cc",
+        "CXX_aarch64_unknown_linux_gnu": "/soldr/linux-cross/cxx",
+        "AR_aarch64_unknown_linux_gnu": "/soldr/linux-cross/ar",
+        "RANLIB_aarch64_unknown_linux_gnu": "/soldr/linux-cross/ranlib",
+        "CC_aarch64-unknown-linux-gnu": "/soldr/linux-cross/cc",
+        "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "/soldr/linux-cross/linker",
+        "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C link-self-contained=no",
+        "CARGO_ENCODED_RUSTFLAGS": "-Clink-self-contained=no",
+        "CC": "clang",
+        "TARGET_CC": "clang",
+        "KEEP_ME": "yes",
+    }
+    env = xbuild.manylinux_wheel_env(target, prepared)
+
+    for key in prepared:
+        if key != "KEEP_ME":
+            assert key not in env, f"{key} must not survive into the manylinux build"
+    assert env["KEEP_ME"] == "yes"
+    # The caller's dict is untouched.
+    assert prepared["CC_aarch64_unknown_linux_gnu"] == "/soldr/linux-cross/cc"
+
+
+def test_release_linux_wheel_names_the_interpreter_that_has_ziglang() -> None:
+    """cargo-zigbuild probes `which(python3) -m ziglang`, then `which(zig)`.
+
+    On the native x86_64 lane neither resolves -- `python3` is the hosted-tool
+    interpreter and `soldr prepare`, which puts a zig on PATH, is skipped --
+    so the release wheel died with "Failed to find zig".
+    """
+    import sys
+
+    env = xbuild.manylinux_wheel_env("x86_64-unknown-linux-gnu", {})
+    assert env["CARGO_ZIGBUILD_PYTHON_PATH"] == sys.executable
+
+
+def test_release_linux_wheel_does_not_bake_in_the_builder_cpu() -> None:
+    env = xbuild.manylinux_wheel_env("x86_64-unknown-linux-gnu", {})
+    assert env["GGML_NATIVE"] == "OFF"
 
 
 def test_zigbuild_strategy_builds_test_targets_without_running_them() -> None:

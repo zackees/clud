@@ -337,6 +337,99 @@ def _project_version() -> str:
         return tomllib.load(project)["project"]["version"]
 
 
+#: Toolchain variables `soldr prepare` exports per target, in both the
+#: hyphenated and underscored spellings cc-rs accepts.
+_TARGET_TOOL_VARS = (
+    "CC",
+    "CXX",
+    "AR",
+    "RANLIB",
+    "LD",
+    "LDFLAGS",
+)
+
+#: Unscoped equivalents. cc-rs consults these after the target-scoped names,
+#: so leaving one set would put a non-zig compiler back in the loop.
+_GLOBAL_TOOL_VARS = (
+    "CC",
+    "CXX",
+    "AR",
+    "RANLIB",
+    "TARGET_CC",
+    "TARGET_CXX",
+    "TARGET_AR",
+    "TARGET_RANLIB",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+)
+
+
+def manylinux_wheel_env(target: str, env: dict[str, str]) -> dict[str, str]:
+    """Give zig sole ownership of a release `*-unknown-linux-gnu` wheel build.
+
+    `--compatibility manylinux2014 --zig` is the whole glibc-floor mechanism:
+    maturin turns the platform tag into the zig target `<triple>.2.17`
+    (maturin src/compile.rs:743-751) and installs zig `cc`/`c++`/`ar`/`ranlib`
+    shims plus the linker, so every object -- Rust *and* the whisper.cpp
+    C/C++ that dominates this build -- is produced against that floor. Do not
+    spell the floor on `--target`: maturin hands the triple straight to
+    target-lexicon (src/target/mod.rs:282-291) with no suffix stripping, and
+    `x86_64-unknown-linux-gnu.2.17` is rejected as an unknown triple. Only
+    bare `cargo zigbuild` accepts that spelling.
+
+    The shims are installed with `add_env_if_missing` (cargo-zigbuild
+    src/zig.rs:850-861), which also consults the ambient environment -- so an
+    already-exported `CC_<triple>` silently wins and zig never sees the C
+    code. `soldr prepare` exports exactly those variables in
+    .github/actions/setup-build, which split the toolchain: Rust linked at
+    2.17 while the C objects kept soldr's default floor, and the audit
+    rejected the wheel with
+
+        Your library is not manylinux_2_17 ... too-recent versioned symbols:
+        ["libm.so.6 offending versions: GLIBC_2.27",
+         "libc.so.6 offending versions: GLIBC_2.28, GLIBC_2.25, GLIBC_2.27"]
+
+    Dropping them is safe because nothing in this workspace needs the prepared
+    sysroot for a Linux target: the only pkg-config consumer is `alsa-sys`,
+    and `cpal` is cfg'd off on Linux (crates/clud-bin/Cargo.toml:166), so zig
+    supplies the entire C toolchain by itself.
+    """
+    env = env.copy()
+    scoped = {target, target.replace("-", "_")}
+    cargo_target = f"CARGO_TARGET_{target.upper().replace('-', '_')}"
+    drop = {f"{name}_{suffix}" for name in _TARGET_TOOL_VARS for suffix in scoped}
+    drop |= {f"{cargo_target}_{name}" for name in ("LINKER", "RUSTFLAGS", "RUNNER")}
+    drop |= set(_GLOBAL_TOOL_VARS)
+    for key in drop:
+        env.pop(key, None)
+
+    # cargo-zigbuild resolves zig as `which(python3) -m ziglang`, falling back
+    # to `which(zig)` (src/zig.rs:2088-2096). Neither holds on the native
+    # x86_64 lane: `python3` is the hosted-tool interpreter, which has no
+    # `ziglang`, and no zig is on PATH there because `soldr prepare` -- which
+    # puts one there -- is skipped for the native strategy. That lane died
+    # with "Failed to find zig". `ziglang` is in this venv via the
+    # `maturin[zig]` dev dep, so name the interpreter that actually has it.
+    # The generated cc/ar shims re-enter the lookup in their own processes and
+    # inherit this, so it covers the C compilation too.
+    env["CARGO_ZIGBUILD_PYTHON_PATH"] = sys.executable
+
+    # soldr's fast-linker shim would force host clang/mold, which cannot see
+    # zig's Linux C++ runtime. Mirrors ci/build_wheel.py:24-31.
+    env["SOLDR_LINKER"] = "default"
+
+    # The link cache key does not include the requested glibc floor. The
+    # preceding compile uses the toolchain default, while the manylinux wheel
+    # needs a fresh 2.17 link. Isolate this final wheel build.
+    env["CARGO_TARGET_DIR"] = str(ROOT / "target" / "release-wheel" / target)
+
+    # A shipped wheel runs on machines that are not this runner. `-march=native`
+    # is the ggml default, and the native x86_64 lane is the one build in the
+    # matrix that does not already turn it off via whisper_env().
+    env["GGML_NATIVE"] = "OFF"
+    return env
+
+
 def cmd_wheel(args: argparse.Namespace) -> int:
     """Build the wheel into dist/ for this triple.
 
@@ -366,25 +459,11 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         print(f"packaged soldr-built Windows wheel: {wheel}")
         return 0
     if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
-        # `maturin --zig` delegates the final link to cargo-zigbuild's target
-        # linker; soldr's fast-linker shim would force host clang/mold, which
-        # cannot see zig's Linux C++ runtime during a manylinux build. Mirrors
-        # ci/build_wheel.py:24-31, which this path replaces.
-        env["SOLDR_LINKER"] = "default"
-        # The link cache key does not include the requested glibc floor. The
-        # preceding compile uses the toolchain default, while the manylinux
-        # wheel needs a fresh 2.17 link. Isolate this final wheel build.
-        env["CARGO_TARGET_DIR"] = str(ROOT / "target" / "release-wheel" / args.target)
-    wheel_target = args.target
-    if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
-        # The version suffix is consumed by the Zig cargo wrapper and selects
-        # the glibc floor. It is intentionally confined to maturin: soldr's
-        # prepare command accepts the canonical Rust triple only.
-        wheel_target = f"{args.target}.2.17"
+        env = manylinux_wheel_env(args.target, env)
     subcommand = [
         "build",
         "--target",
-        wheel_target,
+        args.target,
         "--interpreter",
         sys.executable,
         "--out",
