@@ -14,6 +14,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use std::{collections::BTreeMap, collections::HashMap};
 
 use crate::codex_history::{ConversationHistory, HistoryError};
 use crate::codex_model::ModelSpec;
@@ -115,11 +116,28 @@ pub struct ProviderFailure {
     pub diagnostic: Option<Box<InBandDiagnostic>>,
 }
 
+/// Sanitized description of an invalid canonical continuation assembled by
+/// the bridge before it reaches the upstream Responses endpoint.
+///
+/// Only fixed item kinds and counts are retained. Function-call identifiers,
+/// tool payloads, and Messages content are deliberately absent so this value
+/// can be written to the always-on forensic log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuationInvariantFailure {
+    pub input_count: usize,
+    pub input_kinds: BTreeMap<&'static str, usize>,
+    pub function_call_count: usize,
+    pub function_call_output_count: usize,
+    pub unmatched_call_count: usize,
+    pub source: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
     Translate(TranslateError),
     Compaction(CompactionError),
     Upstream(UpstreamError),
+    ContinuationInvariant(Box<ContinuationInvariantFailure>),
     /// An in-band provider failure, classified rather than flattened.
     Provider(ProviderFailure),
 }
@@ -130,6 +148,11 @@ impl std::fmt::Display for PipelineError {
             Self::Translate(error) => write!(formatter, "{error}"),
             Self::Compaction(error) => write!(formatter, "{error}"),
             Self::Upstream(error) => write!(formatter, "{error}"),
+            Self::ContinuationInvariant(failure) => write!(
+                formatter,
+                "invalid canonical continuation: {} function call(s) have no tool output",
+                failure.unmatched_call_count
+            ),
             Self::Provider(failure) => write!(formatter, "{}", failure.message),
         }
     }
@@ -145,7 +168,7 @@ impl PipelineError {
             Self::Provider(failure) => failure.diagnostic.as_ref().is_some_and(|diagnostic| {
                 diagnostic.failure.code == Some("context_length_exceeded")
             }),
-            Self::Translate(_) | Self::Compaction(_) => false,
+            Self::Translate(_) | Self::Compaction(_) | Self::ContinuationInvariant(_) => false,
         }
     }
 
@@ -159,6 +182,7 @@ impl PipelineError {
             // Translation is total (#750 A1), so the only translate failure
             // left is a request that is not a valid Messages request at all.
             Self::Translate(TranslateError::Invalid(_)) => 400,
+            Self::ContinuationInvariant(_) => 400,
             Self::Compaction(_) => 502,
             Self::Upstream(UpstreamError::Credentials(_)) => 401,
             Self::Upstream(UpstreamError::Status(failure)) => match failure.status() {
@@ -197,7 +221,10 @@ impl PipelineError {
             Self::Provider(failure) if failure.kind == "billing_error" => {
                 Some(FailureClass::Exhausted)
             }
-            Self::Translate(_) | Self::Compaction(_) | Self::Provider(_) => None,
+            Self::Translate(_)
+            | Self::Compaction(_)
+            | Self::ContinuationInvariant(_)
+            | Self::Provider(_) => None,
         }
     }
 
@@ -208,7 +235,10 @@ impl PipelineError {
                 .failure()
                 .and_then(|failure| failure.retry_after().or_else(|| failure.resets_in()))
                 .map(|hint| hint.as_secs()),
-            Self::Translate(_) | Self::Compaction(_) | Self::Provider(_) => None,
+            Self::Translate(_)
+            | Self::Compaction(_)
+            | Self::ContinuationInvariant(_)
+            | Self::Provider(_) => None,
         }
     }
 
@@ -229,7 +259,7 @@ impl PipelineError {
         match self {
             Self::Upstream(error) => error.failure().map(UpstreamFailure::diagnostic),
             Self::Provider(failure) => Some(format!("in-band provider error: {}", failure.kind)),
-            Self::Translate(_) | Self::Compaction(_) => None,
+            Self::Translate(_) | Self::Compaction(_) | Self::ContinuationInvariant(_) => None,
         }
     }
 
@@ -241,6 +271,10 @@ impl PipelineError {
             // feature, so they are worth surfacing -- that is the difference
             // between "the bridge refused top_k" and an opaque 422.
             Self::Translate(error) => error.to_string(),
+            Self::ContinuationInvariant(failure) => format!(
+                "invalid tool continuation: {} function call(s) have no tool output",
+                failure.unmatched_call_count
+            ),
             Self::Compaction(_) => {
                 "upstream compaction response could not safely recover the transcript".to_string()
             }
@@ -574,9 +608,92 @@ fn is_developer_item(item: &serde_json::Value) -> bool {
         && item.get("role").and_then(serde_json::Value::as_str) == Some("developer")
 }
 
+fn response_item_kind(item: &serde_json::Value) -> &'static str {
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("message") => "message",
+        Some("function_call") => "function_call",
+        Some("function_call_output") => "function_call_output",
+        Some("reasoning") => "reasoning",
+        Some("compaction") => "compaction",
+        _ => "other",
+    }
+}
+
+fn call_id(item: &serde_json::Value) -> Option<&str> {
+    item.get("call_id").and_then(serde_json::Value::as_str)
+}
+
+/// Reject a continuation the Responses API cannot accept before spending a
+/// network request on it. The scan retains call ids only in this stack frame;
+/// the returned failure contains fixed categories and counts exclusively.
+fn validate_continuation_input(
+    upstream_input: &[serde_json::Value],
+    translated_input: &[serde_json::Value],
+) -> Result<(), PipelineError> {
+    let mut input_kinds = BTreeMap::new();
+    let mut unresolved = HashMap::<&str, usize>::new();
+    let mut unidentified_calls = 0_usize;
+    let mut function_call_count = 0;
+    let mut function_call_output_count = 0;
+
+    for item in upstream_input {
+        *input_kinds.entry(response_item_kind(item)).or_insert(0) += 1;
+        match response_item_kind(item) {
+            "function_call" => {
+                function_call_count += 1;
+                if let Some(id) = call_id(item) {
+                    *unresolved.entry(id).or_insert(0) += 1;
+                } else {
+                    unidentified_calls += 1;
+                }
+            }
+            "function_call_output" => {
+                function_call_output_count += 1;
+                if let Some(id) = call_id(item) {
+                    let should_remove = unresolved.get_mut(id).is_some_and(|remaining| {
+                        *remaining = remaining.saturating_sub(1);
+                        *remaining == 0
+                    });
+                    if should_remove {
+                        unresolved.remove(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let unmatched_call_count = unresolved.values().sum::<usize>() + unidentified_calls;
+    if unmatched_call_count == 0 {
+        return Ok(());
+    }
+
+    let source = if unidentified_calls == 0
+        && unresolved.keys().any(|missing_id| {
+            translated_input.iter().any(|item| {
+                response_item_kind(item) == "function_call_output"
+                    && call_id(item) == Some(*missing_id)
+            })
+        }) {
+        "pending_input_extraction"
+    } else {
+        "canonical_history"
+    };
+    Err(PipelineError::ContinuationInvariant(Box::new(
+        ContinuationInvariantFailure {
+            input_count: upstream_input.len(),
+            input_kinds,
+            function_call_count,
+            function_call_output_count,
+            unmatched_call_count,
+            source,
+        },
+    )))
+}
+
 /// Replayed Messages history is display state, not a second canonical
 /// transcript. A continuation carries the current developer instruction in
-/// place of the historical one plus only its final pending message.
+/// place of the historical one plus its complete pending message suffix.
 fn history_aware_input(
     history: &[serde_json::Value],
     translated_input: &[serde_json::Value],
@@ -893,7 +1010,10 @@ impl<C: CredentialSource> Pipeline<C> {
             .map_err(PipelineError::Translate)?;
         let (mut upstream_input, turn_input) = match history.as_ref() {
             Some(history) => {
-                history_aware_input(&history.snapshot(), &translated_input, &pending_input)
+                let assembled =
+                    history_aware_input(&history.snapshot(), &translated_input, &pending_input);
+                validate_continuation_input(&assembled.0, &translated_input)?;
+                assembled
             }
             None => (translated_input.clone(), translated_input),
         };

@@ -24,6 +24,15 @@ pending input, followed by verbatim `response.output_item.done` output. It
 does not re-append the historical `messages` array that the harness resends on
 every call. Server output is retained as opaque JSON, preserving generated
 item IDs, encrypted reasoning content, and forward-compatible unknown fields.
+The pending input is the complete Messages suffix after the final assistant
+turn, not merely `messages.last()`: Claude Code may represent one parallel tool
+batch as consecutive user messages with one `tool_result` apiece. A terminal
+assistant prefill remains pending for compatibility. Before an
+inference request reaches upstream, the bridge verifies that the assembled
+canonical input has an output for every function call. A mismatch returns a
+local 400 and records only conversation scope plus fixed item kinds/counts in
+the failure log; call IDs, tool payloads, Messages content, and raw Claude
+identity headers remain absent.
 Failed or partial turns are never committed. If a completed turn's input and
 output cannot fit the per-conversation item or byte limit, the client still
 receives that completed reply; only after its downstream response is committed,

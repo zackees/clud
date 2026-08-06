@@ -933,6 +933,7 @@ fn serve_messages(
                 }
             }
             Ok(Err(error)) => {
+                log_continuation_invariant(&error, conversation_key, log);
                 if writer.started() {
                     // Committed: the pipeline has already emitted a sanitized
                     // `error` event, so just close the body cleanly.
@@ -970,6 +971,7 @@ fn serve_messages(
     }) {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
+            log_continuation_invariant(&error, conversation_key, log);
             if let PipelineError::Provider(failure) = &error {
                 if let Some(diagnostic) = &failure.diagnostic {
                     log_in_band_failure(
@@ -1044,6 +1046,34 @@ fn log_pipeline_error(error: &PipelineError, log: Option<&SharedBridgeLog>) {
         if let Some(diagnostic) = error.upstream_diagnostic() {
             eprintln!("[clud] codex bridge: upstream {diagnostic}");
         }
+    }
+}
+
+fn log_continuation_invariant(
+    error: &PipelineError,
+    conversation_key: &ConversationKey,
+    log: Option<&SharedBridgeLog>,
+) {
+    let PipelineError::ContinuationInvariant(failure) = error else {
+        return;
+    };
+    let event = serde_json::json!({
+        "ts_ms": unix_ms(),
+        "event": "continuation_invariant_failure",
+        "downstream_status": 400,
+        "conversation_scope": conversation_key.scope(),
+        "input_count": failure.input_count,
+        "input_kinds": failure.input_kinds,
+        "function_call_count": failure.function_call_count,
+        "function_call_output_count": failure.function_call_output_count,
+        "unmatched_call_count": failure.unmatched_call_count,
+        "source": failure.source,
+    });
+    if let Some(log) = log {
+        lock_log(log).record(event.clone());
+    }
+    if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
+        eprintln!("[clud] codex bridge: {event}");
     }
 }
 
@@ -1223,6 +1253,7 @@ fn pipeline_error_kind(error: &PipelineError) -> &'static str {
     match error {
         PipelineError::Translate(_) => "translate",
         PipelineError::Compaction(_) => "compaction",
+        PipelineError::ContinuationInvariant(_) => "continuation_invariant",
         PipelineError::Provider(_) => "provider_in_band",
         PipelineError::Upstream(error) => upstream_error_kind(error),
     }
@@ -1848,6 +1879,59 @@ Connection: close
              event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_parent\",\"name\":\"Workflow\",\"arguments\":\"{}\"}}\n\n\
              event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
         )
+    }
+
+    fn parallel_function_call_response(count: usize) -> Vec<u8> {
+        let mut events =
+            String::from("event: response.created\ndata: {\"type\":\"response.created\"}\n\n");
+        for index in 0..count {
+            events.push_str(&format!(
+                "event: response.output_item.added\ndata: {{\"type\":\"response.output_item.added\",\"output_index\":{index},\"item\":{{\"type\":\"function_call\",\"call_id\":\"call_{index}\",\"name\":\"Bash\"}}}}\n\n\
+                 event: response.function_call_arguments.delta\ndata: {{\"type\":\"response.function_call_arguments.delta\",\"output_index\":{index},\"delta\":\"{{}}\"}}\n\n\
+                 event: response.output_item.done\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":{index},\"item\":{{\"type\":\"function_call\",\"call_id\":\"call_{index}\",\"name\":\"Bash\",\"arguments\":\"{{}}\"}}}}\n\n"
+            ));
+        }
+        events.push_str(
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":8}}}\n\n",
+        );
+        response_with_events(&events)
+    }
+
+    fn split_parallel_result_body(count: usize, include_every_result: bool) -> String {
+        let calls = (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "tool_use",
+                    "id": format!("call_{index}"),
+                    "name": "Bash",
+                    "input": {},
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut messages = vec![
+            serde_json::json!({"role": "user", "content": "inspect"}),
+            serde_json::json!({"role": "assistant", "content": calls}),
+        ];
+        if include_every_result {
+            messages.extend((0..count).map(|index| {
+                serde_json::json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": format!("call_{index}"),
+                        "content": format!("result-{index}"),
+                    }],
+                })
+            }));
+        } else {
+            messages.push(serde_json::json!({"role": "user", "content": "missing results"}));
+        }
+        serde_json::json!({
+            "model": "claude-x",
+            "messages": messages,
+            "stream": false,
+        })
+        .to_string()
     }
 
     fn compact_success_response() -> Vec<u8> {
@@ -3030,6 +3114,138 @@ Connection: close
                 .any(|item| item["type"] == "function_call"),
             "child replayed the parent function call: {child_body}"
         );
+    }
+
+    #[test]
+    fn agent_continuation_preserves_eight_split_parallel_tool_results() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            Some(parallel_function_call_response(8)),
+            None,
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let headers = [
+            ("X-Claude-Code-Session-Id", "session-parallel"),
+            ("x-claude-code-agent-id", "agent-parallel"),
+        ];
+        let first = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_BODY,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let continuation = split_parallel_result_body(8, true);
+        let second = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                &continuation,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&second), 200, "{second}");
+
+        let requests = upstream.requests();
+        let body: serde_json::Value = serde_json::from_str(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+                .nth(1)
+                .expect("continuation upstream request")
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("continuation request body"),
+        )
+        .expect("continuation JSON");
+        let input = body["input"].as_array().unwrap();
+        let calls = input
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect::<Vec<_>>();
+        let outputs = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 8, "all calls must remain canonical: {body}");
+        assert_eq!(outputs.len(), 8, "all results must reach upstream: {body}");
+        for index in 0..8 {
+            assert_eq!(calls[index]["call_id"], format!("call_{index}"));
+            assert_eq!(outputs[index]["call_id"], format!("call_{index}"));
+        }
+    }
+
+    #[test]
+    fn unmatched_parallel_call_is_rejected_locally_with_safe_diagnostics() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            Some(parallel_function_call_response(2)),
+            None,
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bridge.jsonl");
+        let mut bridge =
+            BridgeHandle::start(bridged_config(&upstream).with_log_path(log_path.clone())).unwrap();
+        let headers = [
+            ("X-Claude-Code-Session-Id", "secret-session-id"),
+            ("x-claude-code-agent-id", "secret-agent-id"),
+        ];
+        let first = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                PROBE_BODY,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let malformed = split_parallel_result_body(2, false);
+        let second = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                bridge.bearer_token(),
+                &malformed,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&second), 400, "{second}");
+        bridge.shutdown().unwrap();
+
+        let upstream_requests = upstream
+            .requests()
+            .into_iter()
+            .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+            .count();
+        assert_eq!(
+            upstream_requests, 1,
+            "invalid continuation reached upstream"
+        );
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            log.contains(r#""event":"continuation_invariant_failure""#),
+            "{log}"
+        );
+        assert!(log.contains(r#""unmatched_call_count":2"#), "{log}");
+        assert!(log.contains(r#""conversation_scope":"agent""#), "{log}");
+        for forbidden in [
+            "call_0",
+            "call_1",
+            "secret-session-id",
+            "secret-agent-id",
+            "missing results",
+        ] {
+            assert!(!log.contains(forbidden), "leaked {forbidden:?}: {log}");
+        }
     }
 
     #[test]

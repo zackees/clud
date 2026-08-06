@@ -53,6 +53,17 @@ impl ConversationKey {
             },
         }
     }
+
+    /// Fixed, non-sensitive scope label for forensic diagnostics.
+    pub fn scope(&self) -> &'static str {
+        if self.id == BRIDGE_SESSION_CONVERSATION {
+            "fallback"
+        } else if self.id.contains("-agent-") {
+            "agent"
+        } else {
+            "main"
+        }
+    }
 }
 
 fn digest(value: &str) -> String {
@@ -350,6 +361,13 @@ mod tests {
         assert_ne!(main.id, child.id);
         assert_ne!(child.id, sibling.id);
         assert_ne!(child.id, other_session.id);
+        assert_eq!(main.scope(), "main");
+        assert_eq!(child.scope(), "agent");
+        assert_eq!(sibling.scope(), "agent");
+        assert_eq!(
+            ConversationKey::from_headers(None, None).scope(),
+            "fallback"
+        );
         for raw in ["session-raw-123456", "agent-raw-abcdef", "agent-raw-123456"] {
             assert!(!child.id.contains(raw));
         }
