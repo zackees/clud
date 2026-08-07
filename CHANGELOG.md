@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- The Windows wheel now ships `clud-cmd-scan.exe`. 2.5.5's hook rollout
+  migrated `~/.claude/settings.json` PreToolUse configs to the renamed
+  `clud-cmd-scan` binary, but the hand-packed win_amd64 wheel only carried the
+  three pre-rename executables — every Bash hook call on Windows errored
+  `clud-cmd-scan: command not found` and the bad-cmd scan was silently off.
+  `REQUIRED_SCRIPTS` (the single list the Windows packer and both wheel/install
+  verifiers iterate) gains the binary, and a new guardrail test reads
+  `NEW_COMMAND` out of `block_bad_cmd_rollout.rs` and asserts the rollout's
+  target is always a shipped script, so the next binary rename cannot repeat
+  this. Affected 2.5.5 Windows installs can meanwhile set the hook command
+  back to `clud-block-bad-cmd`. See zackees/clud#862.
+- Doc-tests run again. The `Doc tests` step in `_build-target.yml` was keyed
+  on `strategy == 'native'`, which no lane passes since the all-soldr matrix
+  (#859), and it is the only doc-test runner in CI — coverage had silently
+  dropped to zero. The step is now keyed on the x86_64 Linux triple, and
+  `test_doc_tests_run_on_a_live_matrix_triple` asserts the condition names a
+  triple that exists in the matrix. The dead-keyed `soldr-cook` dependency
+  prebuild is replaced with an explicit `none` (a cook before `soldr prepare`
+  fingerprints against the wrong toolchain env; re-enabling means cooking
+  after prepare), and the retired `zigbuild` vocabulary is swept:
+  `Strategy` literal, `maturin[zig]`/`ziglang` in the dev deps, and
+  `build_wheel.py`'s vestigial zig-era `SOLDR_LINKER` override.
+  See zackees/clud#863.
 - `clud` no longer prints `[clud] updated /clud-pr` and `[clud] updated
   /clud-issue` on every single launch. Two skill installers used to embed two
   forked copies of those skills from two different source trees and both wrote

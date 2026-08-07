@@ -9,7 +9,7 @@ inputs:
     description: Rust target triple this job will build.
     required: true
   strategy:
-    description: 'native | zigbuild | soldr'
+    description: 'native | soldr'
     required: true
   profile:
     description: 'dev | release. Keeps the dependency cook aligned with the real build.'
@@ -96,20 +96,18 @@ runs:
         preserve-source-mtimes: true
         solo-toolchain-cache: true
         cache-key-suffix: build-${{ inputs.target }}
-        # Cross lanes skip the dependency cook: setup-soldr runs before the
-        # target SDK/toolchain is prepared below, so a cook here would compile
-        # host artifacts that the foreign target cannot reuse. The first
-        # windows-msvc validation run proved the failure mode: six minutes of
-        # release-profile cooking followed by 393 dev-profile misses (0% reuse).
-        #
-        # A blanket 'none' sat here as a workaround for zackees/soldr#1880
-        # (hydrate restored build-script binaries without the executable bit,
-        # so cargo died with "Permission denied (os error 13)" on a rotating,
-        # arbitrary crate). Fixed upstream by soldr#1889 and soldr#1914,
-        # shipped in v0.8.25/v0.8.26 -- both below the version pinned above.
-        # Validated on ubuntu-24.04-arm, the platform in the original report:
-        # an exact-match hydrate of 8854 files now runs cleanly.
-        prebuild-deps: ${{ inputs.strategy == 'native' && 'soldr-cook' || 'none' }}
+        # No dependency cook on any lane. The cook used to run on the one
+        # `native` lane, but #859 moved every lane to the soldr strategy, so
+        # the old `strategy == 'native' && 'soldr-cook'` key matched nothing
+        # (#863). It cannot simply be re-keyed to soldr: this step runs
+        # BEFORE `Prepare cross toolchain` below exports the blessed
+        # glibc-2.17 toolchain env, so a cook here compiles against the host
+        # env and its artifacts fingerprint against different linker/CC
+        # settings than the real build — 100% wasted work. Re-enabling means
+        # cooking AFTER prepare (a standalone `soldr cook` step, or a
+        # setup-soldr input that defers the cook); measured cost of not
+        # cooking is ~4 min extra on the linux-x64 build lane.
+        prebuild-deps: none
         prebuild-deps-flags: ${{ inputs.profile == 'release' && '--release' || '' }}
 
     # soldr's blessed cross-compile bootstrap -- one invocation shape for every

@@ -309,20 +309,25 @@ def test_install_script_uses_wheel_with_legacy_fallback() -> None:
     assert "command -v python3" in text
 
 
-def test_ci_setup_soldr_only_cooks_reusable_native_dependencies() -> None:
-    """Cross builds must not pay for a host-profile dependency cook.
+def test_ci_setup_soldr_never_cooks_before_the_toolchain_is_prepared() -> None:
+    """The dependency cook runs inside the setup-soldr step, which executes
+    BEFORE `soldr prepare` exports the blessed toolchain env — so any cook at
+    that point compiles against the host env and its artifacts fingerprint
+    against different linker/CC settings than the real build. The first PR
+    validation run spent six minutes doing exactly that and then reported 393
+    misses with a 0% hit rate.
 
-    setup-soldr runs before `soldr prepare` provisions the foreign SDK. A cook
-    in a zigbuild/soldr lane therefore produces host artifacts that the target
-    build cannot reuse. The first PR validation run spent six minutes doing
-    exactly that and then reported 393 misses with a 0% hit rate.
+    Since #859 no lane is `native`, so the old conditional key matched
+    nothing anyway (#863) — the honest state is a plain `none`. Re-enabling
+    the cook requires cooking AFTER prepare; a conditional keyed on any
+    strategy here is either dead or wrong, which is why this asserts the
+    literal.
     """
     setup_workflows = _setup_soldr_sources()
     assert setup_workflows
 
-    expected = "prebuild-deps: ${{ inputs.strategy == 'native' && 'soldr-cook' || 'none' }}"
     build_setup = ROOT / ".github" / "actions" / "setup-build" / "action.yml"
-    assert expected in build_setup.read_text(encoding="utf-8")
+    assert "prebuild-deps: none" in build_setup.read_text(encoding="utf-8")
     for path in setup_workflows:
         text = path.read_text(encoding="utf-8")
         assert "prebuild-deps: soldr-cook" not in text

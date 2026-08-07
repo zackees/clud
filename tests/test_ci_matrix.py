@@ -193,6 +193,37 @@ def test_release_matrix_uses_the_same_strategies_as_ci():
     assert strategies(build_matrix(selected("full"))) == strategies(release_matrix())
 
 
+def test_doc_tests_run_on_a_live_matrix_triple():
+    """#863: doc-tests were silently disabled when #859 retired the `native`
+    strategy — the step's `if:` keyed on `strategy == 'native'`, which no lane
+    passes, and it is the ONLY doc-test runner in CI (they produce no harness
+    binary, so they cannot ride in the exec bundle).
+
+    Pin the key to something the matrix can actually satisfy: the condition
+    must name a target triple, that triple must exist in TARGETS, and no
+    strategy comparison may guard the step.
+    """
+    build_target = CI_YML.parent / "_build-target.yml"
+    text = build_target.read_text(encoding="utf-8")
+    step = re.search(
+        r"- name: Doc tests\n\s+if: \$\{\{ (.+?) \}\}", text, re.DOTALL
+    )
+    assert step, "_build-target.yml has no conditional Doc tests step"
+    condition = step.group(1)
+
+    assert "strategy" not in condition, (
+        "doc-tests must not key on the strategy — that is how #863 silently "
+        f"disabled them: {condition}"
+    )
+    named = re.search(r"inputs\.target == '([^']+)'", condition)
+    assert named, f"doc-test condition must pin a target triple: {condition}"
+    live = {target.triple for target in TARGETS}
+    assert named.group(1) in live, (
+        f"doc-tests keyed on {named.group(1)}, which is not in the matrix — "
+        "they would never run"
+    )
+
+
 def test_ci_yml_covers_exactly_the_targets_table():
     """ci.yml spells out one build/test job pair per triple; keep them in sync.
 
