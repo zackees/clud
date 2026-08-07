@@ -9,7 +9,9 @@ use crate::graphics::GraphicsConfig;
 use crate::loop_spec::{done_marker_contract, git_root_from};
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
-use super::prompts::{build_fix_prompt, build_up_prompt, push_prompt, REBASE_PROMPT};
+use super::prompts::{
+    build_do_prompt, build_fix_prompt, build_up_prompt, push_prompt, REBASE_PROMPT,
+};
 use super::types::{LaunchPlan, LoopMarkers, RepeatSchedule};
 
 const CODEX_PROJECT_DOC_FALLBACK_KEY: &str = "project_doc_fallback_filenames";
@@ -27,6 +29,7 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
                 | Some(Command::Up { .. })
                 | Some(Command::Rebase)
                 | Some(Command::Fix { .. })
+                | Some(Command::Do { .. })
         )
 }
 
@@ -282,6 +285,10 @@ fn build_launch_plan_for_target_at(
         }
         Some(Command::Fix { url }) => {
             let prompt = build_fix_prompt(url.as_deref());
+            push_prompt(&mut cmd, backend, prompt);
+        }
+        Some(Command::Do { url }) => {
+            let prompt = build_do_prompt(url);
             push_prompt(&mut cmd, backend, prompt);
         }
         Some(Command::Wasm { .. }) => {

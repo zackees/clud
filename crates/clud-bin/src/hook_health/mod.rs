@@ -57,6 +57,7 @@ pub fn should_check_launch(args: &Args, launch_target: ResolvedLaunchTarget) -> 
             | Some(CliCommand::Up { .. })
             | Some(CliCommand::Rebase)
             | Some(CliCommand::Fix { .. })
+            | Some(CliCommand::Do { .. })
     )
 }
 
