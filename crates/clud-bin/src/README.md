@@ -19,7 +19,7 @@ the integration tests.
 ## Subdirectories
 
 - [command/](command/README.md) - `LaunchPlan` construction: backend argv
-  assembly, YOLO/safe injection, `loop`/`up`/`rebase`/`fix` prompt synthesis,
+  assembly, YOLO/safe injection, `loop`/`up`/`rebase`/`fix`/`do` prompt synthesis,
   `--repeat` schedule parsing, DONE/BLOCKED contract.
 - [daemon/](daemon/README.md) - long-lived session manager for `--detach` /
   `attach` / `list` / `kill` / `logs` / `--repeat`: TCP JSON IPC, per-session
@@ -131,7 +131,7 @@ Entry and orchestration:
 CLI surface and backend resolution:
 
 - `args.rs` - `clap` `Args` and `Command` definitions; passthrough for unknown
-  flags; subcommand definitions for `loop`, `up`, `rebase`, `fix`, `gc`, etc.
+  flags; subcommand definitions for `loop`, `up`, `rebase`, `fix`, `do`, `gc`, etc.
 - `backend.rs` - concrete `Backend`, independent `ModelProvider` /
   `HarnessSelection` resolution, `LaunchMode`, PATH lookup, and backend-path
   resolution. See `docs/architecture/launch-targets.md`.

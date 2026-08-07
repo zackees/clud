@@ -1,6 +1,6 @@
 # command/
 
-Builds the `LaunchPlan` that downstream runners execute: effective-harness-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring, and Claude `stream-json` progress injection for subprocess-mode loops.
+Builds the `LaunchPlan` that downstream runners execute: effective-harness-specific argv assembly (`claude` vs `codex`), YOLO/safe-mode injection, subcommand-driven prompt construction (`loop`, `up`, `rebase`, `fix`, `do`), `--repeat` schedule parsing, DONE/BLOCKED marker contract wiring, and Claude `stream-json` progress injection for subprocess-mode loops.
 
 The `LaunchPlan` contract (construction pipeline, consumers, `--dry-run` JSON) is documented at [docs/architecture/launch-plan.md](../../../../docs/architecture/launch-plan.md); the DONE/BLOCKED contract and `--repeat` no-overlap scheduler at [docs/architecture/loop-subsystem.md](../../../../docs/architecture/loop-subsystem.md).
 Provider/harness resolution happens before construction and is documented at

@@ -505,6 +505,17 @@ fn test_fix_with_url() {
 }
 
 #[test]
+fn test_do_subcommand() {
+    let args = parse(&["clud", "do", "https://github.com/zackees/clud/issues/866"]);
+    match args.command {
+        Some(Command::Do { ref url }) => {
+            assert_eq!(url, "https://github.com/zackees/clud/issues/866");
+        }
+        _ => panic!("expected Do subcommand"),
+    }
+}
+
+#[test]
 fn test_wasm_subcommand() {
     let args = parse(&["clud", "wasm", "guest.wasm"]);
     match args.command {
