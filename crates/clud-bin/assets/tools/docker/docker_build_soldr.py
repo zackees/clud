@@ -87,7 +87,7 @@ RUN mkdir -p /target /cargo-home /rustup-home /cargo-chef /root/.soldr /src \
 # Bake soldr into the helper image instead of installing it during the
 # first command. Keep its persistent daemon/cache state in /root/.soldr,
 # which cmd_up mounts as a named volume.
-ARG SOLDR_VERSION=0.8.33
+ARG SOLDR_VERSION=0.8.40
 RUN mkdir -p /opt/soldr-bin \
  && curl -fsSL \
         "https://github.com/zackees/soldr/releases/download/v${SOLDR_VERSION}/soldr-v${SOLDR_VERSION}-x86_64-unknown-linux-gnu.tar.zst" \
