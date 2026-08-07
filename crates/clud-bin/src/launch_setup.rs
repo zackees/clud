@@ -712,7 +712,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
-        assert!(home.path().join(".codex/skills/clud-issue/SKILL.md").exists()); // skill-source-lint: allow (asserts install state, not a writer)
+        let codex_skill = ".codex/skills/clud-issue/SKILL.md"; // skill-source-lint: allow (asserts install state, not a writer)
+        assert!(home.path().join(codex_skill).exists());
         assert!(!home.path().join(".agents").exists());
         assert!(!home.path().join(".claude/skills").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
@@ -745,7 +746,8 @@ mod tests {
         // used to run here too, rewriting these same files from a second
         // registry on every launch.
         assert_eq!(report.ran, vec!["bundled-skills"]);
-        assert!(home.path().join(".claude/skills/clud-issue/SKILL.md").exists()); // skill-source-lint: allow (asserts install state, not a writer)
+        let claude_skill = ".claude/skills/clud-issue/SKILL.md"; // skill-source-lint: allow (asserts install state, not a writer)
+        assert!(home.path().join(claude_skill).exists());
         assert!(!home.path().join(".agents").exists());
         // Launch setup does not install bundled tools. Foreground startup,
         // daemon startup, and `clud tool run` own that path. `.clud/` is
