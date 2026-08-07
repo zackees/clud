@@ -341,96 +341,50 @@ def _project_version() -> str:
         return tomllib.load(project)["project"]["version"]
 
 
-#: Toolchain variables `soldr prepare` exports per target, in both the
-#: hyphenated and underscored spellings cc-rs accepts.
-_TARGET_TOOL_VARS = (
-    "CC",
-    "CXX",
-    "AR",
-    "RANLIB",
-    "LD",
-    "LDFLAGS",
-)
-
-#: Unscoped equivalents. cc-rs consults these after the target-scoped names,
-#: so leaving one set would put a non-zig compiler back in the loop.
-_GLOBAL_TOOL_VARS = (
-    "CC",
-    "CXX",
-    "AR",
-    "RANLIB",
-    "TARGET_CC",
-    "TARGET_CXX",
-    "TARGET_AR",
-    "TARGET_RANLIB",
-    "RUSTFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-)
+#: Rustc flags that link the C++ and unwind runtimes statically into clud's
+#: binary. In CARGO_ENCODED_RUSTFLAGS each is one NUL/US-delimited token.
+_STATIC_CXX_RUSTFLAGS = ("-Clink-arg=-static-libstdc++", "-Clink-arg=-static-libgcc")
 
 
-def manylinux_wheel_env(target: str, env: dict[str, str]) -> dict[str, str]:
-    """Give zig sole ownership of a release `*-unknown-linux-gnu` wheel build.
+def static_cxx_runtime_env(target: str, env: dict[str, str]) -> dict[str, str]:
+    """Bundle the C++ runtime so a manylinux wheel carries no external libstdc++.
 
-    `--compatibility manylinux2014 --zig` is the whole glibc-floor mechanism:
-    maturin turns the platform tag into the zig target `<triple>.2.17`
-    (maturin src/compile.rs:743-751) and installs zig `cc`/`c++`/`ar`/`ranlib`
-    shims plus the linker, so every object -- Rust *and* the whisper.cpp
-    C/C++ that dominates this build -- is produced against that floor. Do not
-    spell the floor on `--target`: maturin hands the triple straight to
-    target-lexicon (src/target/mod.rs:282-291) with no suffix stripping, and
-    `x86_64-unknown-linux-gnu.2.17` is rejected as an unknown triple. Only
-    bare `cargo zigbuild` accepts that spelling.
+    soldr's blessed catalogue GNU toolchain (soldr#2238) pins the *glibc* floor
+    at 2.17 via its sysroot, so libc/libm/libpthread symbols audit clean. It
+    does not, however, pin the *C++* runtime: the catalogue compiler is
+    gcc-13.3.0, whose libstdc++.so.6 exports GLIBCXX_3.4.20-3.4.29 and
+    CXXABI_1.3.9 -- far newer than manylinux_2_17 permits. whisper.cpp's C++
+    (which dominates this build) links against it, so the wheel failed the audit
+    with, e.g.:
 
-    The shims are installed with `add_env_if_missing` (cargo-zigbuild
-    src/zig.rs:850-861), which also consults the ambient environment -- so an
-    already-exported `CC_<triple>` silently wins and zig never sees the C
-    code. `soldr prepare` exports exactly those variables in
-    .github/actions/setup-build, which split the toolchain: Rust linked at
-    2.17 while the C objects kept soldr's default floor, and the audit
-    rejected the wheel with
+        not manylinux_2_17 ... too-recent versioned symbols:
+        ["libstdc++.so.6 offending symbols: _ZSt28__throw_bad_array_new_lengthv
+          @GLIBCXX_3.4.29, _ZdlPvm@CXXABI_1.3.9, ..."]
 
-        Your library is not manylinux_2_17 ... too-recent versioned symbols:
-        ["libm.so.6 offending versions: GLIBC_2.27",
-         "libc.so.6 offending versions: GLIBC_2.28, GLIBC_2.25, GLIBC_2.27"]
+    `-static-libstdc++`/`-static-libgcc` link the C++ standard library and the
+    GCC unwind runtime *into* clud's binary (maturin `bindings = "bin"`), so
+    those versioned symbols become internal and only glibc -- pinned 2.17 --
+    is imported dynamically. This is the blessed-path replacement for the old
+    `maturin --zig`, which bundled an old C++ runtime the same way.
 
-    Dropping them is safe because nothing in this workspace needs the prepared
-    sysroot for a Linux target: the only pkg-config consumer is `alsa-sys`,
-    and `cpal` is cfg'd off on Linux (crates/clud-bin/Cargo.toml:166), so zig
-    supplies the entire C toolchain by itself.
+    soldr enforcing this floor itself is tracked upstream (see soldr#2299); the
+    static-link decision is legitimately clud's since whisper.cpp is clud's
+    dependency. Applied by appending to soldr's exported
+    CARGO_ENCODED_RUSTFLAGS so the sysroot flags it set are preserved.
     """
     env = env.copy()
-    scoped = {target, target.replace("-", "_")}
-    cargo_target = f"CARGO_TARGET_{target.upper().replace('-', '_')}"
-    drop = {f"{name}_{suffix}" for name in _TARGET_TOOL_VARS for suffix in scoped}
-    drop |= {f"{cargo_target}_{name}" for name in ("LINKER", "RUSTFLAGS", "RUNNER")}
-    drop |= set(_GLOBAL_TOOL_VARS)
-    for key in drop:
-        env.pop(key, None)
-
-    # cargo-zigbuild resolves zig as `which(python3) -m ziglang`, falling back
-    # to `which(zig)` (src/zig.rs:2088-2096). Neither holds on the native
-    # x86_64 lane: `python3` is the hosted-tool interpreter, which has no
-    # `ziglang`, and no zig is on PATH there because `soldr prepare` -- which
-    # puts one there -- is skipped for the native strategy. That lane died
-    # with "Failed to find zig". `ziglang` is in this venv via the
-    # `maturin[zig]` dev dep, so name the interpreter that actually has it.
-    # The generated cc/ar shims re-enter the lookup in their own processes and
-    # inherit this, so it covers the C compilation too.
-    env["CARGO_ZIGBUILD_PYTHON_PATH"] = sys.executable
-
-    # soldr's fast-linker shim would force host clang/mold, which cannot see
-    # zig's Linux C++ runtime. Mirrors ci/build_wheel.py:24-31.
-    env["SOLDR_LINKER"] = "default"
-
-    # The link cache key does not include the requested glibc floor. The
-    # preceding compile uses the toolchain default, while the manylinux wheel
-    # needs a fresh 2.17 link. Isolate this final wheel build.
-    env["CARGO_TARGET_DIR"] = str(ROOT / "target" / "release-wheel" / target)
-
-    # A shipped wheel runs on machines that are not this runner. `-march=native`
-    # is the ggml default, and the native x86_64 lane is the one build in the
-    # matrix that does not already turn it off via whisper_env().
-    env["GGML_NATIVE"] = "OFF"
+    encoded = env.get("CARGO_ENCODED_RUSTFLAGS")
+    if encoded is not None:
+        parts = [part for part in encoded.split("\x1f") if part]
+        parts += _STATIC_CXX_RUSTFLAGS
+        env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(parts)
+    else:
+        key = f"CARGO_TARGET_{target.upper().replace('-', '_')}_RUSTFLAGS"
+        existing = env.get(key, "")
+        spelled = " ".join(
+            flag.replace("-Clink-arg=", "-C link-arg=") for flag in _STATIC_CXX_RUSTFLAGS
+        )
+        env[key] = " ".join(filter(None, (existing, spelled)))
     return env
 
 
@@ -462,6 +416,9 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             return 1
         print(f"packaged soldr-built Windows wheel: {wheel}")
         return 0
+    if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
+        # Bundle the C++ runtime so the manylinux_2_17 audit sees only glibc.
+        env = static_cxx_runtime_env(args.target, env)
     subcommand = [
         "build",
         "--target",
