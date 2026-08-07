@@ -10,7 +10,8 @@ use crate::loop_spec::{done_marker_contract, git_root_from};
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
 use super::prompts::{
-    build_do_prompt, build_fix_prompt, build_up_prompt, push_prompt, REBASE_PROMPT,
+    build_do_prompt, build_fix_prompt, build_up_prompt, push_prompt, push_prompt_interactive,
+    REBASE_PROMPT,
 };
 use super::types::{LaunchPlan, LoopMarkers, RepeatSchedule};
 
@@ -288,8 +289,12 @@ fn build_launch_plan_for_target_at(
             push_prompt(&mut cmd, backend, prompt);
         }
         Some(Command::Do { url }) => {
+            // `do` runs the `/goal` contract, which drives a long interactive
+            // Stop-hook loop. Headless `-p` mode buffers its single final
+            // response and shows nothing until the whole goal completes, so the
+            // terminal looks halted. Seed an interactive session instead.
             let prompt = build_do_prompt(url);
-            push_prompt(&mut cmd, backend, prompt);
+            push_prompt_interactive(&mut cmd, prompt);
         }
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")

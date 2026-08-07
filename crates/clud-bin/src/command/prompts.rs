@@ -83,6 +83,19 @@ pub(super) fn push_prompt(cmd: &mut Vec<String>, backend: Backend, prompt: Strin
     }
 }
 
+/// Seed an *interactive* session with `prompt` instead of running it headless.
+///
+/// `push_prompt` uses claude's `-p/--print` mode, which runs the prompt as a
+/// single non-interactive shot and buffers everything until it finishes. That
+/// is wrong for `/goal`-style contracts that drive a long Stop-hook loop: the
+/// terminal shows nothing for minutes and looks halted (the `clud do` "nothing
+/// happened" report). Claude treats a bare positional `[prompt]` as the opening
+/// message of an interactive session, so we simply omit `-p`. Codex already
+/// takes the prompt positionally, so it is unchanged.
+pub(super) fn push_prompt_interactive(cmd: &mut Vec<String>, prompt: String) {
+    cmd.push(prompt);
+}
+
 pub(super) fn build_up_prompt(message: Option<&str>, publish: bool) -> String {
     let mut prompt = UP_PROMPT.to_string();
 

@@ -575,7 +575,9 @@ fn test_fix_with_non_github_url() {
 #[test]
 fn test_do_command_resolves_goal_prompt() {
     let p = plan(&["clud", "do", "https://github.com/zackees/clud/issues/866"]);
-    let prompt = prompt_from_plan(&p);
+    // `do` seeds an interactive session, so the prompt is the trailing
+    // positional (no `-p`), same shape as codex.
+    let prompt = last_arg(&p);
     assert!(prompt.starts_with("/goal "));
     assert!(prompt.contains("https://github.com/zackees/clud/issues/866"));
     assert!(!prompt.contains("{url}"));
@@ -853,6 +855,32 @@ fn test_claude_plain_prompt_does_not_inject_stream_json() {
         p.command
     );
     assert!(!p.stream_json_progress);
+}
+
+#[test]
+fn test_claude_do_launches_interactively_without_print_flag() {
+    // Regression for the `clud do` "nothing happened / halts" report: `do`
+    // runs the `/goal` contract, which drives a long interactive Stop-hook
+    // loop. Headless `-p` mode buffers its single final response and shows
+    // nothing until the whole goal completes, so it must seed an *interactive*
+    // session (bare positional prompt, no `-p`) instead.
+    let p = plan(&["clud", "do", "https://github.com/o/r/issues/1"]);
+    assert!(
+        !p.command.iter().any(|a| a == "-p"),
+        "clud do must NOT run headless `-p`; cmd={:?}",
+        p.command
+    );
+    assert!(
+        !p.stream_json_progress,
+        "interactive do renders the live TUI; it must not use the stream-json renderer"
+    );
+    // The `/goal` prompt body is still the trailing positional and is intact.
+    let last = p.command.last().expect("cmd is non-empty");
+    assert!(
+        last.starts_with("/goal ") && last.contains("https://github.com/o/r/issues/1"),
+        "command[-1] must be the /goal prompt seed; got {last:?} (cmd={:?})",
+        p.command
+    );
 }
 
 #[test]
