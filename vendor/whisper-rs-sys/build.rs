@@ -404,12 +404,44 @@ fn linux_zig_cxx_toolchain(target: &str) -> bool {
         return false;
     }
 
+    // The C++ ABI is decided by the *compiler*, not the linker wrapper.
     // cargo-zigbuild uses Zig's C++ runtime on Linux; those objects carry
-    // std::__1 symbols, so linking libstdc++ leaves whisper.cpp unresolved.
+    // std::__1 symbols, so linking libstdc++ leaves whisper.cpp unresolved —
+    // hence the zig markers below imply `-lc++`.
+    //
+    // clud#858: soldr's blessed-linux runs cargo-zigbuild only as the *linker*
+    // while substituting a GNU `aarch64-conda-linux-gnu-g++` as the compiler.
+    // Those objects are libstdc++, but `CARGO_ZIGBUILD_RUSTC_VERSION` is still
+    // set, so this used to mis-select `-lc++` and fail linking (the GNU
+    // toolchain ships libstdc++, not libc++). When the resolved C++ compiler
+    // is a GNU driver, force stdc++ regardless of the zigbuild markers.
+    if cxx_is_gnu_driver(target) {
+        return false;
+    }
+
     env::var_os("CARGO_ZIGBUILD_RUSTC_VERSION").is_some()
         || env::var_os("ZIG_COMMAND").is_some()
         || env_value_mentions_zigcxx("CXX")
         || env_value_mentions_zigcxx(&target_env_key("CXX", target))
+}
+
+/// True when the effective C++ compiler is a GNU driver (`gcc`/`g++`), whose
+/// objects use libstdc++. clang/zig drivers are excluded so a real
+/// cargo-zigbuild (libc++) build is unaffected.
+fn cxx_is_gnu_driver(target: &str) -> bool {
+    for key in ["CXX".to_string(), target_env_key("CXX", target)] {
+        let Some(value) = env::var_os(&key) else {
+            continue;
+        };
+        let value = value.to_string_lossy().to_ascii_lowercase();
+        if value.contains("clang") || value.contains("zig") {
+            continue;
+        }
+        if value.contains("g++") || value.contains("gcc") {
+            return true;
+        }
+    }
+    false
 }
 
 fn target_env_key(prefix: &str, target: &str) -> String {
