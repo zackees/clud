@@ -83,7 +83,7 @@ pub struct Args {
     #[arg(long = "allow-plan-mode")]
     pub allow_plan_mode: bool,
 
-    #[arg(long = "dry-run")]
+    #[arg(long = "dry-run", global = true)]
     pub dry_run: bool,
 
     #[arg(long = "detach", conflicts_with = "dry_run")]
@@ -239,6 +239,10 @@ pub enum Command {
     Rebase,
     Fix {
         url: Option<String>,
+    },
+    /// Read a URL and implement it end-to-end under the `/goal` contract.
+    Do {
+        url: String,
     },
     Wasm {
         module: String,
@@ -859,6 +863,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "up",
         "rebase",
         "fix",
+        "do",
         "wasm",
         "attach",
         "kill",

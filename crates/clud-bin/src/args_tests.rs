@@ -505,6 +505,29 @@ fn test_fix_with_url() {
 }
 
 #[test]
+fn test_do_with_url() {
+    let args = parse(&["clud", "do", "https://github.com/user/repo/issues/866"]);
+    match args.command {
+        Some(Command::Do { ref url }) => {
+            assert_eq!(url, "https://github.com/user/repo/issues/866");
+        }
+        _ => panic!("expected Do subcommand"),
+    }
+}
+
+#[test]
+fn test_do_with_dry_run() {
+    let args = parse(&[
+        "clud",
+        "do",
+        "--dry-run",
+        "https://github.com/user/repo/issues/866",
+    ]);
+    assert!(args.dry_run);
+    assert!(matches!(args.command, Some(Command::Do { .. })));
+}
+
+#[test]
 fn test_wasm_subcommand() {
     let args = parse(&["clud", "wasm", "guest.wasm"]);
     match args.command {
