@@ -35,6 +35,7 @@ pub mod dnd;
 pub mod foreground_runtime;
 pub mod gc;
 pub mod graphics;
+pub mod grind;
 pub mod hook_health;
 pub mod job_orphan_reaper;
 pub mod large_file_guard;

@@ -407,6 +407,10 @@ Quick lookup, which file owns a given subcommand:
   in `daemon/` (dispatched from `daemon::handle_special_command`).
 - `clud gc list` / `prune` / `purge` / `all` / `reconcile` -> `gc/cli.rs` (CLI handlers) talking to
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
+- `clud grind [url]` -> `grind.rs` resolves the repo's `origin` remote to its
+  forge issues page (GitHub `<repo>/issues`, GitLab `<repo>/-/issues`), prints
+  the green notice, then rewrites the command to `Do { url }` in `main.rs` so
+  the shared `/goal` launch path runs. An explicit URL is passed through verbatim.
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.

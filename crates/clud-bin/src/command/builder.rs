@@ -299,6 +299,12 @@ fn build_launch_plan_for_target_at(
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")
         }
+        Some(Command::Grind { .. }) => {
+            // `grind` is rewritten to `Do` in main before the launch plan is
+            // built (it resolves the repo's issues URL and prints the notice),
+            // so it never reaches the builder. Treated as a no-op for match
+            // exhaustiveness.
+        }
         Some(Command::CodexAuth { .. })
         | Some(Command::Attach { .. })
         | Some(Command::Kill { .. })

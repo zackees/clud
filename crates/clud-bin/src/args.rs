@@ -244,6 +244,15 @@ pub enum Command {
     Do {
         url: String,
     },
+    /// Grind the current repo's issues page under the /goal contract.
+    ///
+    /// With no argument, resolves the `origin` remote and maps it to the
+    /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`
+    /// for GitLab); errors if the remote is neither. An explicit URL is
+    /// used verbatim, exactly like `clud do <url>`.
+    Grind {
+        url: Option<String>,
+    },
     Wasm {
         module: String,
         #[arg(long = "invoke", default_value = "run")]
@@ -864,6 +873,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "rebase",
         "fix",
         "do",
+        "grind",
         "wasm",
         "attach",
         "kill",
