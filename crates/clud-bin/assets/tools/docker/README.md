@@ -37,7 +37,7 @@ clud tool run docker/docker_recover.py disk                        # report stor
 
 ## Design
 
-See [`docs/architecture/docker-build-tools.md`](../../../../docs/architecture/docker-build-tools.md) for the volume contract, the path-conversion table (cmd.exe vs MSYS Git Bash vs PowerShell vs WSL2), and the mtime troubleshooting matrix. See `skills/clud-docker-linux-build/SKILL.md` for the agent-facing entry point.
+See [`docs/architecture/docker-build-tools.md`](../../../../docs/architecture/docker-build-tools.md) for the volume contract, the path-conversion table (cmd.exe vs MSYS Git Bash vs PowerShell vs WSL2), and the mtime troubleshooting matrix. See `crates/clud-bin/assets/skills/clud-docker-linux-build/SKILL.md` for the agent-facing entry point.
 
 ## Origin
 

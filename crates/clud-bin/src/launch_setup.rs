@@ -14,7 +14,7 @@ use crossterm::terminal;
 use crate::args::Args;
 use crate::backend::{Backend, HarnessSelection, ModelProvider};
 use crate::preference::{ChoiceOption, ChoiceSelector};
-use crate::{codex_hook_normalize, skill_install, skills};
+use crate::{codex_hook_normalize, skills};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchSetupScope {
@@ -341,27 +341,6 @@ impl HarnessSetupAction for BundledSkillsAction {
     }
 }
 
-struct ClaudeDriftSkillsAction;
-
-impl HarnessSetupAction for ClaudeDriftSkillsAction {
-    fn name(&self) -> &'static str {
-        "claude-drift-skills"
-    }
-
-    fn backend(&self) -> Backend {
-        Backend::Claude
-    }
-
-    fn supports(&self, scope: LaunchSetupScope) -> bool {
-        matches!(scope, LaunchSetupScope::Global)
-    }
-
-    fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
-        skill_install::ensure_installed_at(ctx.home);
-        Ok(())
-    }
-}
-
 struct CodexHookNormalizeAction;
 
 impl HarnessSetupAction for CodexHookNormalizeAction {
@@ -396,8 +375,13 @@ pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
     // foreground startup and daemon startup, not as part of this
     // launch-setup pipeline. `clud tool run` also self-heals inline so
     // first-run hooks bypass NotFound. The launch setup actions here are
-    // limited to backend-specific skills, drift tracking, and codex hook
-    // normalization.
+    // limited to backend-specific skills and codex hook normalization.
+    //
+    // #847: there is exactly one bundled-skill installer. A second action
+    // used to write the same `~/.claude/skills/` files from a separate
+    // registry, so each pass classified the other's output as drift and
+    // rewrote it — reporting `updated` on every launch and silently
+    // reverting the newer copies. One writer, one source of truth.
     vec![
         Box::new(BundledSkillsAction {
             backend: Backend::Claude,
@@ -405,7 +389,6 @@ pub fn setup_actions() -> Vec<Box<dyn HarnessSetupAction>> {
         Box::new(BundledSkillsAction {
             backend: Backend::Codex,
         }),
-        Box::new(ClaudeDriftSkillsAction),
         Box::new(CodexHookNormalizeAction),
     ]
 }
@@ -694,7 +677,7 @@ mod tests {
 
         assert!(report.ran.is_empty());
         assert!(!home.path().join(".agents").exists());
-        assert!(!home.path().join(".claude/skills").exists());
+        assert!(!home.path().join(".claude/skills").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         assert!(!home.path().join(".clud").exists());
     }
 
@@ -720,9 +703,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
-        assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
+        assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         assert!(!home.path().join(".agents").exists());
-        assert!(!home.path().join(".claude/skills").exists());
+        assert!(!home.path().join(".claude/skills").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
         assert!(hooks.contains(r#""timeout": 30"#), "{hooks}");
         assert!(home.path().join(".clud/settings.json").exists());
@@ -749,8 +732,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.ran, vec!["bundled-skills", "claude-drift-skills"]);
-        assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists());
+        // #847: one skill installer, so one action. `claude-drift-skills`
+        // used to run here too, rewriting these same files from a second
+        // registry on every launch.
+        assert_eq!(report.ran, vec!["bundled-skills"]);
+        assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         assert!(!home.path().join(".agents").exists());
         // Launch setup does not install bundled tools. Foreground startup,
         // daemon startup, and `clud tool run` own that path. `.clud/` is

@@ -10,33 +10,49 @@ written under `~/.codex/skills/`, mirroring Claude's layout (gated on
 `~/.codex` existing). Clud-managed copies that an older build wrote to
 `~/.agents/skills/` are purged best-effort during Codex global setup.
 
+## One Source Of Truth
+
+There is exactly **one** skill source tree and **one** installer:
+
+- Source tree: `crates/clud-bin/assets/skills/<name>/SKILL.md`
+- Installer: `crates/clud-bin/src/skills.rs`
+
+This is load-bearing, not incidental. clud previously had a second registry
+(`skill_install.rs`) reading a second tree at the repo root, and both wrote the
+same `~/.claude/skills/` files during the same startup. Each pass compared the
+file on disk against *its own* embedded copy, classified the other's output as
+drift, and rewrote it — so every launch printed `updated /clud-pr` and
+`updated /clud-issue`, the newer `assets/` bodies were silently reverted to
+older root copies, and Codex ended up with different content than Claude.
+
+Neither installer was wrong in isolation; nothing enforced that they owned
+disjoint names. Full rationale in
+[DD-039](../DESIGN_DECISIONS.md#dd-039-bundled-skills-have-exactly-one-source-of-truth).
+
+`ci/banned_skill_sources.py` (run by `bash lint`) enforces the invariant:
+
+1. Skill bodies may only be `include_str!`'d from `assets/skills/`.
+2. Only `skills.rs` / `skills_home.rs` may build a backend skills path.
+3. No second skill source tree at the repo root.
+
+Rule 1 alone would have caught the original bug. A line-scoped
+`skill-source-lint: allow` marker exempts prose and test assertions that name
+these shapes without being writers; `rg 'skill-source-lint: allow'` lists every
+escape in the tree.
+
 ## Component Map
 
 | Component | Path | Role |
 |---|---|---|
-| Multi-backend installer | `crates/clud-bin/src/skills.rs` | Installs selected-backend skills only when the target file is missing. |
-| Claude drift installer | `crates/clud-bin/src/skill_install.rs` | Installs Claude-owned top-level skills and overwrites on semantic divergence. |
-| Multi-backend source tree | `crates/clud-bin/assets/skills/<name>/` | Holds `SKILL.md` plus contributor `README.md` files consumed by `skills.rs`. |
-| Top-level source tree | `skills/<name>/SKILL.md` | Holds skills consumed by `skill_install.rs`. |
-| `BUNDLED_SKILLS` | `skills.rs`, `skill_install.rs` | Compile-time `include_str!` registries with different element types and source trees. |
-| `PURGED_SKILLS` | `skill_install.rs` | Retired Claude-only skill names safely removed from managed installs. |
-| Launch setup gate | `launch_setup.rs` | Selects session-only vs global setup and dispatches selected-backend setup actions. |
+| Installer | `crates/clud-bin/src/skills.rs` | Installs selected-backend skills; skips existing files so user edits survive. |
+| Source tree | `crates/clud-bin/assets/skills/<name>/` | Holds `SKILL.md` plus contributor `README.md` files. The only source of skill bodies. |
+| `BUNDLED_SKILLS` | `skills.rs` | Compile-time `include_str!` registry of every shipped skill. |
+| `PURGED_BUNDLED_SKILLS` | `skills.rs` | Retired names swept from *every* backend's skills dir. |
+| Home resolution | `crates/clud-bin/src/skills_home.rs` | Resolves the user home dir that `skills.rs` joins onto. |
+| Launch setup gate | `launch_setup.rs` | Selects session-only vs global setup and dispatches setup actions. |
+| Source lint | `ci/banned_skill_sources.py` | Fails `bash lint` if a second tree or installer appears. |
 
-## Why Two Installers
-
-The two installers are an interim historical reality, not a designed-in split.
-`skill_install.rs` predates `skills.rs` and was kept when the broader
-multi-backend expander landed.
-
-| Concern | `skills.rs` | `skill_install.rs` |
-|---|---|---|
-| Backends targeted | Selected backend during global setup; Claude plus Codex today | Claude global setup only |
-| Source tree | `crates/clud-bin/assets/skills/` | Top-level `skills/` |
-| Existing file behavior | Skip, preserving user edits | Compare modulo whitespace; overwrite semantic divergence |
-| Bundled skills | `clud-issue`, `clud-issue-triage`, `clud-pr`, `clud-fix`, `clud-tag-release`, `clud-docker-rust-app-dev`, `clud-windows-trash`, `clud-extern-repos`, `clud-improve` | `clud-pr`, `clud-fix`, `clud-issue`, `clud-windows-trash`, `clud-extern-repos` |
-| Retired purge list | `PURGED_BUNDLED_SKILLS` (`clud-loop`), plus stale clud-managed copies under `~/.agents/skills/` | `PURGED_SKILLS` (currently empty) |
-
-Both flows are non-fatal. A failure logs a `[clud] note: ...` line and launch
+Installation is non-fatal. A failure logs a `[clud] note: ...` line and launch
 continues.
 
 ## Global Setup Flow
@@ -49,71 +65,48 @@ one-shot prompt launches default to session-only. Bare interactive launches can
 opt into global setup; choosing global persists that preference, while choosing
 session-only remains per-launch.
 
-When global setup is selected:
+When global setup is selected, `skills::ensure_installed_for_backend()` runs
+for the selected backend — a single pass, which is what keeps the steady state
+silent:
 
-1. `skills::ensure_installed_for_backend()` runs for the selected backend. For
-   Codex, it first purges stale clud-managed `~/.agents/skills/` copies and
-   then writes missing skills to `~/.codex/skills/`. Either backend also sweeps
-   `PURGED_BUNDLED_SKILLS` out of *every* backend's skills dir, so a skill
-   retired while the user was on Codex still goes away for a Claude-only user.
-2. `skill_install::ensure_installed()` runs only for Claude global setup. It
-   installs or updates the Claude-owned skills and then walks `PURGED_SKILLS`,
-   removing retired managed skill directories.
-
-## Source-Tree Divergence
-
-| Skill | `assets/skills/` (`skills.rs`) | top-level `skills/` (`skill_install.rs`) |
-|---|---|---|
-| `clud-issue` | yes | yes |
-| `clud-pr` | yes | yes |
-| `clud-fix` | yes | yes |
-| `clud-issue-triage` | yes | no |
-| `clud-tag-release` | yes | no |
-| `clud-docker-rust-app-dev` | yes | no |
-| `clud-windows-trash` | yes | yes |
-| `clud-extern-repos` | yes | yes |
-| `clud-pr-merge` | retired into `clud-pr` merge mode | purged |
-
-`clud-pr-merge` was folded into `clud-pr` as PR merge mode. The old standalone
-name remains in `PURGED_SKILLS` so managed installs do not linger.
+- For Codex it first purges stale clud-managed `~/.agents/skills/` copies, then
+  writes missing skills to `~/.codex/skills/`.
+- Either backend sweeps `PURGED_BUNDLED_SKILLS` out of *every* backend's skills
+  dir, so a skill retired while the user was on Codex still goes away for a
+  Claude-only user.
+- Existing files are left alone, so user edits survive upgrades.
 
 ## Adding Or Retiring A Skill
 
-1. Choose the installer. Multi-backend coverage requires `skills.rs`;
-   drift-on-divergence semantics require `skill_install.rs`.
-2. Add the `SKILL.md` source file with YAML frontmatter and the
-   `<!-- managed-by: clud -->` marker.
-3. Register the file in the relevant `BUNDLED_SKILLS` constant.
-4. Link contributor docs from `crates/clud-bin/assets/skills/README.md` when
-   the skill lives under `assets/skills/`.
-5. If a skill is merged or removed after it may have been installed, delete its
-   bundle entry and add the old name to `PURGED_SKILLS`. Purge code deletes
-   only managed skill directories.
-6. Run `bash lint` and `bash test`. Bundle tests assert non-empty content,
-   unique names, the managed marker, and the RED -> GREEN code-change rule.
+1. Add `crates/clud-bin/assets/skills/<name>/SKILL.md` with YAML frontmatter
+   and the `<!-- managed-by: clud -->` marker. There is no second tree to
+   choose between, and putting the file anywhere else fails `bash lint`.
+2. Register it in `BUNDLED_SKILLS` in `skills.rs`.
+3. Link contributor docs from `crates/clud-bin/assets/skills/README.md`.
+4. To retire a skill after users may have installed it, delete its bundle entry
+   *and* add the old name to `PURGED_BUNDLED_SKILLS`. Removing the entry alone
+   stops new installs but leaves every existing copy in place. Purge deletes
+   only directories whose `SKILL.md` still carries `managed-by: clud`.
+5. Run `bash lint` and `bash test`. Bundle tests assert non-empty content,
+   unique names, valid frontmatter, the managed marker, and the
+   RED -> GREEN code-change rule.
 
 ## Key Types / Constants
 
 - `BundledSkill` (`skills.rs`): public struct with `name` and `skill_md`.
-- `Skill` (`skill_install.rs`): private struct with `name` and `content`.
-- `SKILL_BACKENDS` (`skills.rs`): selected backend install gates and target
+- `SKILL_BACKENDS` (`skills.rs`): per-backend install gates and target
   directories. Codex uses `.codex` as both the gate and the skills root
   (`~/.codex/skills/`), mirroring Claude.
 - `InstallReport` and `LegacyPurgeReport` (`skills.rs`): setup and stale
   cleanup summaries.
-- `PURGED_SKILLS` (`skill_install.rs`): retired Claude-only names. Removal
-  only proceeds when `SKILL.md` still contains `managed-by: clud`.
-
-## Consolidation Plan
-
-The dual installer remains interim state. One small consolidation has landed:
-`/clud-pr-merge` is now `/clud-pr` PR merge mode, and the old standalone name
-is purged from managed Claude installs. Future work should collapse the
-remaining duplication into a single installer with a single source tree while
-preserving Codex coverage, Claude drift detection, and safe retirement.
+- `PURGED_BUNDLED_SKILLS` (`skills.rs`): retired names. Deliberately an
+  explicit list rather than "sweep anything not in `BUNDLED_SKILLS`" — an
+  orphan sweep would delete still-used skills installed by a since-removed
+  bundler, and would delete newer skills whenever an older binary ran.
+  Retirement is a decision, not an inference.
 
 ## See Also
 
 - `../../crates/clud-bin/assets/skills/README.md`
 - `launch-setup.md`
-- `../DESIGN_DECISIONS.md` (DD-008)
+- `../DESIGN_DECISIONS.md` (DD-008, DD-039)

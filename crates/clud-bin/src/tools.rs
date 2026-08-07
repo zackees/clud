@@ -24,7 +24,7 @@ use std::time::Duration;
 
 /// Literal marker that distinguishes clud-managed tool files from
 /// user-authored ones. Mirrors the same string used by
-/// [`crate::skill_install`]; future cross-cutting tooling can grep for one
+/// [`crate::skills`]; future cross-cutting tooling can grep for one
 /// literal across both registries.
 pub const MANAGED_BY_CLUD_MARKER: &str = "managed-by: clud";
 

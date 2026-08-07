@@ -1,6 +1,6 @@
 //! Auto-installer for the bundled `clud`-managed Python tools.
 //!
-//! Mirrors the [`skill_install`] module, applied to a parallel
+//! Mirrors the [`skills`](crate::skills) module, applied to a parallel
 //! [`BUNDLED_TOOLS`](crate::tools::BUNDLED_TOOLS) registry. Each tool is a
 //! self-contained `uv run` script (PEP 723 inline metadata) that gets
 //! materialized to `~/.clud/tools/<rel_path>` on `clud` startup.
@@ -122,12 +122,10 @@ fn classify(path: &Path, embedded: &str) -> Existing {
     }
 }
 
-/// Whitespace-tolerant equality. Same shape as
-/// [`skill_install::normalize`](crate::skill_install) — collapses runs of
-/// whitespace (incl. CRLF vs LF differences) into single spaces and trims
-/// the ends. The two `normalize` helpers are deliberately duplicated rather
-/// than shared via a common module so the install pipelines stay
-/// independent.
+/// Whitespace-tolerant equality: collapses runs of whitespace (incl. CRLF
+/// vs LF differences) into single spaces and trims the ends. Kept local to
+/// this module so the tool-install pipeline stays independent of the
+/// bundled-skill one in [`skills`](crate::skills).
 fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

@@ -1647,3 +1647,87 @@ exports any of the three variables keeps their own value (`push_default`).
   here: it changes which `output_config.effort` values the harness sends, and
   DD-035 made a stated-but-unsupported effort a 400. It needs its own issue
   and its own upstream check, not a rider on a picker-presentation change.
+
+## DD-039: Bundled skills have exactly one source of truth
+
+**Status:** Accepted
+
+**Context:** clud shipped **two** bundled-skill registries, each with its own
+installer, both writing `~/.claude/skills/<name>/SKILL.md`:
+
+| | Registry A | Registry B (retired) |
+| --- | --- | --- |
+| Constant | `BUNDLED_SKILLS` in `src/skills.rs` | `BUNDLED_SKILLS` in `src/skill_install.rs` |
+| Source tree | `crates/clud-bin/assets/skills/` (18) | **mixed** — 7 from `assets/skills/`, 5 from root `skills/` (12) |
+| Launch action | `BundledSkillsAction` (ran 1st) | `ClaudeDriftSkillsAction` (ran 2nd) |
+| Backends | Claude **and** Codex | Claude only |
+
+Both ran as Global-scope actions in the same startup sequence, so A wrote and
+B overwrote. Each installer compared the file on disk against *its own*
+embedded copy, classified the other's output as drift, and rewrote it. Every
+launch printed `updated /clud-pr` and `updated /clud-issue`.
+
+Neither installer was wrong in isolation. Both were internally consistent and
+individually correct — nothing enforced that the two registries owned disjoint
+names. That is precisely why the bug survived review and CI: there was no
+single artifact anyone could look at and see the conflict.
+
+Three consequences, of which the log noise was the least important:
+
+1. **Stale content silently won.** B ran last, so root copies landed on disk.
+   `assets/skills/clud-pr/SKILL.md` (updated 2026-08-03) was overwritten every
+   launch by a root copy last touched 2026-06-18. The commit
+   `fix(skills): refresh stale bundled skills and retire dead ones (#756)`
+   never reached a single user.
+2. **Codex and Claude diverged.** A installed to both `~/.claude` and
+   `~/.codex`; B only overwrote `~/.claude`. Same skill, two backends,
+   different bodies.
+3. **`updated` became meaningless.** Firing unconditionally every launch made
+   a genuine drift repair — the message's actual purpose — indistinguishable
+   from noise.
+
+**Decision:** Bundled skills have exactly one source of truth:
+`crates/clud-bin/assets/skills/`, installed by `src/skills.rs`. The root
+`skills/` tree and `src/skill_install.rs` are deleted.
+
+`skills.rs` survives because it is strictly more capable: 18 skills vs 12,
+multi-backend vs Claude-only, an explicit retirement mechanism
+(`PURGED_BUNDLED_SKILLS`) that sweeps every backend, and it was already the
+registry CLAUDE.md documented.
+
+Enforcement is `ci/banned_skill_sources.py`, run by `bash lint`:
+
+1. Skill bodies may only be `include_str!`'d from `assets/skills/`.
+2. Only `skills.rs` / `skills_home.rs` may build a backend skills path.
+3. No second skill source tree at the repo root.
+
+Rule 1 alone would have caught the original bug.
+
+**Alternatives considered:**
+
+- **Keep both, add a disjointness test.** Rejected: it legitimizes two
+  installers and only catches *name* collisions, not the divergent bodies that
+  caused the visible damage. The duplication is the defect, not a symptom.
+- **A dylint.** Rejected on two grounds. Practically, dylint is Linux-only
+  nightly and **skipped on PRs**, so drift would merge and be reported hours
+  later on `main`. Substantively, these are not Rust-semantic questions —
+  "which directory does this path literal point at" and "does a directory
+  exist at the repo root" are text and filesystem facts, and the latter no
+  Rust lint can answer at all. A compile-free scan is the right tool, matching
+  `banned_imports.py` and `banned_cross_tools.py`.
+- **Rust unit tests asserting registry/dir agreement.** Dropped as not
+  load-bearing once rule 1 exists. Can be added later if wanted.
+
+**Consequences:** `clud-pr-merge` lived only in registry B with no `assets/`
+copy, so it had to be migrated *before* B could be deleted — done as a
+separate additive PR (#848) so the deletion was provably safe rather than
+trusted. Codex gained `clud-pr-merge`, which it never received. Users on
+`clud-pr` / `clud-issue` move to the newer `assets/` bodies, which is the
+content that was always intended to ship.
+
+The root copies did carry sections the assets copies lack, and those were
+checked rather than assumed: `clud-pr`'s *Meta Tracking Issue Mode* is
+superseded by `clud-fix`'s Meta/Parent/Burn-Down workflow, and `clud-issue`'s
+*What counts as a blocking question* was deliberately replaced by "resolve the
+open questions yourself / **Open questions**". Both are superseded, not
+missing, so nothing was ported.
