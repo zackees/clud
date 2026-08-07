@@ -58,7 +58,7 @@ jobs:
       - name: Sync
         run: uv sync --frozen --group dev --no-install-project --python 3.11
       - name: Setup soldr
-        uses: zackees/setup-soldr@v0.9.66
+        uses: zackees/setup-soldr@v0
         env:
           SOLDR_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

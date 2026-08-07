@@ -141,7 +141,11 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         # not part of this Linux-hosted toolchain. Whisper builds static libs,
         # so a static-library probe validates the compiler without those tools.
         env["CMAKE_TRY_COMPILE_TARGET_TYPE"] = "STATIC_LIBRARY"
-    elif strategy == "zigbuild":
+    elif "linux" in target:
+        # Blessed soldr Linux prep (and the legacy zigbuild path) cross to a
+        # Linux target from a Linux host; CMake still needs the target OS named.
+        # soldr's catalogue toolchain supplies the pinned glibc-2.17 sysroot and
+        # compiler, so no host headers/libraries leak into the artifact.
         env["CMAKE_SYSTEM_NAME"] = "Linux"
 
     if _is_windows(target):
@@ -458,8 +462,6 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             return 1
         print(f"packaged soldr-built Windows wheel: {wheel}")
         return 0
-    if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
-        env = manylinux_wheel_env(args.target, env)
     subcommand = [
         "build",
         "--target",
@@ -473,31 +475,23 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         subcommand += ["--profile", "dev"]
         if args.target.endswith("-unknown-linux-gnu"):
             # Dev wheels are CI artifacts, not distributables, and must not be
-            # audited for manylinux compliance.
-            #
-            # maturin audits by default on Linux even with no --compatibility
-            # flag. The release path opts into manylinux2014 explicitly and
-            # pairs it with --zig, which is what actually supplies the 2.17
-            # floor -- maturin hands the glibc version down to zigbuild. Dev
-            # passes neither, so it inherited the audit without the mechanism
-            # that satisfies it, and once the blessed Linux prep started
-            # linking at zig's default floor the wheel step died with:
-            #
-            #   Error ensuring manylinux_2_17 compliance ... too-recent
-            #   versioned symbols: ["libm.so.6 offending versions: GLIBC_2.27"]
-            #
-            # This wheel is only ever installed on the exec runner for the same
-            # triple, whose glibc is far newer, so the property being asserted
-            # is one nothing downstream consumes. Release keeps its audit.
+            # audited for manylinux compliance. maturin audits by default on
+            # Linux even with no --compatibility flag; --compatibility linux
+            # opts out. The release path below asserts the floor properly.
             subcommand += ["--compatibility", "linux"]
     else:
         subcommand.append("--release")
         if args.target.endswith("-unknown-linux-gnu"):
-            subcommand += ["--zig", "--compatibility", "manylinux2014"]
+            # No --zig. soldr's blessed catalogue GNU toolchain
+            # (gcc-13.3.0-glibc-2.17-1, soldr#2238) is prepared by `soldr
+            # prepare --target <triple>` in setup-build and supplies the pinned
+            # glibc-2.17 floor for every object -- Rust and the whisper.cpp
+            # C/C++ alike -- so maturin's manylinux2014 audit passes without
+            # zig. This replaces the `maturin --zig` path and the env-scrub
+            # denylist it required. See docs/architecture/ci.md and soldr#2299.
+            subcommand += ["--compatibility", "manylinux2014"]
         else:
             subcommand += ["--compatibility", "pypi"]
-    if args.strategy == "zigbuild" and "--zig" not in subcommand:
-        subcommand.append("--zig")
 
     if run(maturin_argv(subcommand, env=env), env) != 0:
         return 1

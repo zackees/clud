@@ -78,7 +78,7 @@ runs:
     # cache-key-suffix is the target triple: the cache is now fragmented only
     # by what actually changes the artifacts, not by job type.
     - name: Setup soldr
-      uses: zackees/setup-soldr@v0.9.66
+      uses: zackees/setup-soldr@v0
       env:
         # Must be exported for THIS step, not just declared as an input:
         # setup-soldr's managed-tool lookups read it from the environment. A
