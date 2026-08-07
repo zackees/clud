@@ -4,17 +4,16 @@ Every cargo/maturin invocation in `.github/workflows/_build-target.yml` goes
 through here, so the per-strategy environment lives in one testable place
 instead of being smeared across YAML `if:` conditions.
 
-Three strategies:
-
-    native    the build host's own triple (x86_64-unknown-linux-gnu)
-    zigbuild  cargo-zigbuild -- Linux -> *-unknown-linux-gnu
-    soldr     `soldr build`  -- Linux -> *-pc-windows-msvc and -> *-apple-darwin
+One strategy now: `soldr`. Since soldr#2299 every target -- Apple, Windows-MSVC,
+and Linux (via the catalogue GNU toolchain gcc-13.3.0-glibc-2.17-1, soldr#2238)
+-- crosses through soldr's blessed surface. The `native`/`zigbuild` enum values
+remain inert pending removal; zig is banned for every target by
+`ci/banned_cross_tools.py`.
 
 `soldr` is the blessed surface (soldr docs/CROSS_COMPILE.md): `soldr prepare`
 provisions the sysroot in .github/actions/setup-build and exports the
 target-scoped Cargo/cc-rs/linker env, then `soldr build --target <triple>`
-links against it. The legacy xwin / zigbuild-at-Apple passthroughs documented
-there are deliberately unused, and `ci/banned_cross_tools.py` enforces that.
+links against it.
 
 Only the link-producing `build` verb goes through `soldr build`. clippy, `cargo
 test --no-run` and maturin stay on the plain cargo front door: `soldr prepare`
@@ -229,36 +228,27 @@ def is_soldr_owned(target: str) -> bool:
 def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
     """Return the cargo argv for this strategy.
 
-    clippy is deliberately NOT routed through cargo-zigbuild: it does not link,
-    so it needs the target sysroot only for `cfg` resolution, which plain
-    `cargo clippy --target` already provides.
+    clippy is deliberately NOT routed through the blessed `soldr build` surface:
+    it does not link, so it needs the target sysroot only for `cfg` resolution,
+    which plain `cargo clippy --target` already provides on the env `soldr
+    prepare` exported.
     """
     verb = subcommand[0]
     if strategy == "zigbuild" and is_soldr_owned(target):
-        # #637: the matrix assigns `soldr` to every Apple/MSVC triple, and
-        # `tests/test_ci_matrix.py` pins that. But the strategy is not what
-        # runs the compiler -- this function is -- so pinning the matrix value
-        # alone left the alternate command path reachable by a one-word edit.
-        # Refuse structurally instead, so the invariant does not depend on
-        # anyone remembering it.
+        # Every clud triple is soldr-owned (Apple, MSVC, and Linux since
+        # soldr#2299), so this covers every real target -- the strategy is not
+        # what runs the compiler, this function is, so refuse structurally here
+        # rather than relying on the matrix value alone. zig is not used for any
+        # target; `ci/banned_cross_tools.py` bans it everywhere.
         raise ValueError(
-            f"{target} must cross through soldr's blessed surface, not "
-            "cargo-zigbuild. soldr owns the Apple/MSVC toolchain "
-            "(`soldr prepare` / `soldr build`); Zig is correct for "
-            "*-unknown-linux-* only. See docs/architecture/ci.md."
+            f"{target} must cross through soldr's blessed surface "
+            "(`soldr prepare` / `soldr build`), not the zig cross wrapper, "
+            "which is banned for every target. See docs/architecture/ci.md."
         )
     if strategy == "soldr" and verb == "build":
         # The blessed cross surface. Everything else under this strategy rides
         # on the env `soldr prepare` exported -- see the module docstring.
         return ["soldr", "build", *subcommand[1:], "--target", target]
-    if strategy == "zigbuild" and verb == "build":
-        return [PACKAGE_MANAGER, "zigbuild", *subcommand[1:], "--target", target]
-    if strategy == "zigbuild" and verb == "test":
-        # This wrapper is a build subcommand, not a transparent replacement
-        # for the test subcommand. Building `--tests` produces the same harness
-        # executables without trying to run foreign-architecture binaries.
-        options = [arg for arg in subcommand[1:] if arg != "--no-run"]
-        return [PACKAGE_MANAGER, "zigbuild", "--tests", *options, "--target", target]
     return ["cargo", *subcommand, "--target", target]
 
 
@@ -372,7 +362,7 @@ def static_cxx_runtime_env(target: str, env: dict[str, str]) -> dict[str, str]:
     GCC unwind runtime *into* clud's binary (maturin `bindings = "bin"`), so
     those versioned symbols become internal and only glibc -- pinned 2.17 --
     is imported dynamically. This is the blessed-path replacement for the old
-    `maturin --zig`, which bundled an old C++ runtime the same way.
+    zig-based wheel build, which bundled an old C++ runtime the same way.
 
     soldr enforcing this floor itself is tracked upstream (see soldr#2299); the
     static-link decision is legitimately clud's since whisper.cpp is clud's

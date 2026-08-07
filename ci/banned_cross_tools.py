@@ -140,11 +140,12 @@ BANNED_ALWAYS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     ("Cross.toml", re.compile(r"\bCross\.toml\b")),
-)
-
-#: Correct for `*-unknown-linux-*`, wrong for the triples soldr owns. Only
-#: flagged when a soldr-owned triple appears on the same line.
-BANNED_AT_SOLDR_TARGET: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Zig — banned at EVERY target (soldr#2299). soldr 0.8.40's catalogue GNU
+    # toolchain replaced zig for `*-unknown-linux-gnu` and the manylinux wheel,
+    # which was zig's last legitimate use in this repo, so the invocation rules
+    # move from "flag only next to an Apple/MSVC triple" to unconditional. The
+    # acquisition rules in BANNED_INSTALLS were already unconditional; this
+    # closes the matching invocation hole so nothing zig can slip back in.
     ("cargo zigbuild", re.compile(r"""\bcargo["',\s-]+zigbuild\b""")),
     ("zig cc / zig c++ / zig build", re.compile(r"""\bzig["',\s]+(?:cc|c\+\+|build)\b""")),
     ("maturin --zig", re.compile(r"--zig\b")),
@@ -592,23 +593,11 @@ def scan_text(text: str, suffix: str = ".py") -> list[tuple[int, str, str]]:
                         number,
                         tool,
                         f"drives `{tool}`, which has no supported target here; "
-                        "soldr owns Apple/MSVC cross builds — use `soldr build "
-                        f"--target {named}` (see docs/architecture/ci.md)",
+                        "soldr owns cross-toolchain acquisition for every target "
+                        "(Apple, MSVC, and Linux since soldr#2299) — use `soldr "
+                        f"build --target {named}` (see docs/architecture/ci.md)",
                     )
                 )
-
-        if target:
-            for tool, pattern in BANNED_AT_SOLDR_TARGET:
-                if pattern.search(line):
-                    violations.append(
-                        (
-                            number,
-                            tool,
-                            f"drives `{tool}` at `{target.group(0)}`; soldr owns "
-                            "Apple/MSVC cross builds — use `soldr build --target "
-                            f"{target.group(0)}` (see docs/architecture/ci.md)",
-                        )
-                    )
 
     # Sorted and de-duplicated: two spellings of the same rule matching the
     # same line should read as one finding.
@@ -634,8 +623,8 @@ def main() -> int:
     if total:
         print(
             f"\n{total} banned cross-compiler usage(s) found. "
-            "Apple and Windows-MSVC targets must go through soldr's blessed "
-            "cross surface; Zig remains correct for *-unknown-linux-* only.",
+            "Every target — Apple, Windows-MSVC, and Linux — must go through "
+            "soldr's blessed cross surface; zig is banned everywhere (soldr#2299).",
             file=sys.stderr,
         )
         return 1

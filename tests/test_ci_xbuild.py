@@ -52,7 +52,7 @@ def test_soldr_setup_installs_target_for_plain_cargo_verbs() -> None:
 
 def test_gnu_linux_build_routes_through_the_blessed_soldr_surface() -> None:
     """soldr#2299: GNU/Linux is soldr-owned now, so its linking build goes
-    through `soldr build`, not cargo-zigbuild."""
+    through `soldr build`, never the zig cross."""
     target = "aarch64-unknown-linux-gnu"
     argv = xbuild.cargo_argv(["build", "--workspace", "--bins"], target, "soldr")
     assert argv == ["soldr", "build", "--workspace", "--bins", "--target", target]
@@ -70,13 +70,13 @@ def test_gnu_linux_zigbuild_is_refused() -> None:
 
 def test_release_linux_wheel_builds_without_zig() -> None:
     """The release GNU wheel links through soldr's blessed catalogue toolchain,
-    not `maturin --zig`. The glibc-2.17 floor comes from `soldr prepare`'s
+    not the old zig path. The glibc-2.17 floor comes from `soldr prepare`'s
     catalogue sysroot; maturin just tags the wheel manylinux2014. soldr#2299.
     """
     source = (ROOT / "ci" / "xbuild.py").read_text(encoding="utf-8")
     assert 'subcommand += ["--compatibility", "manylinux2014"]' in source
-    assert 'subcommand += ["--zig"' not in source
-    assert 'subcommand.append("--zig")' not in source
+    assert 'subcommand += ["--zig"' not in source  # cross-lint: allow
+    assert 'subcommand.append("--zig")' not in source  # cross-lint: allow
     assert "CARGO_ZIGBUILD_PYTHON_PATH" not in source
 
 

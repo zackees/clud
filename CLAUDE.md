@@ -167,19 +167,18 @@ Things that bite:
   covers linux-gnu and `cargo_argv` refuses zigbuild for it too. clud no longer
   invokes zig anywhere. The manylinux_2_17 C++ floor is met by linking
   libstdc++ statically (`WHISPER_LINK_CXX_STATIC`, `vendor/whisper-rs-sys/build.rs`).
-  Tightening `banned_cross_tools.py` to forbid zig for linux-gnu and removing the
-  now-dead `native`/`zigbuild` strategy scaffolding are tracked as follow-ups
-  under soldr#2299; the text-scan lint below still *documents* the historical
-  target-aware shape.
-  `ci/banned_cross_tools.py` enforces it under `bash lint` and CI's static job;
-  `ci/xbuild.py::cargo_argv` additionally *raises* on the zigbuild+Apple/MSVC
-  combination, because the text scan cannot follow a target held in a variable.
+  `ci/banned_cross_tools.py` enforces the ban under `bash lint` and CI's static
+  job; `ci/xbuild.py::cargo_argv` additionally *raises* on a zigbuild strategy
+  for any soldr-owned triple (which is now every clud triple), because the text
+  scan cannot follow a target held in a variable.
   Two rule classes, and the distinction is the thing to get right when editing
-  it: **unconditional** (`cargo xwin`, the bare `xwin` CLI, `XWIN_*`,
-  `osxcross`, `cross build`, `Cross.toml` — MSVC/Apple-only by construction, so
-  no target makes them legal and `--target $TARGET` does not hide them) versus
-  **conditional on a soldr-owned triple** (`cargo zigbuild`, `maturin --zig`,
-  `zig cc` — correct for Linux). Installs are matched against the whole file, so
+  it: **unconditional** — flagged wherever they appear, no target consulted:
+  `cargo xwin`, the bare `xwin` CLI, `XWIN_*`, `osxcross`, `cross build`,
+  `Cross.toml`, **and now every zig invocation** (`cargo zigbuild`, `maturin
+  --zig`, `zig cc` — banned at every target since soldr#2299, because soldr's
+  catalogue toolchain replaced zig's last Linux use) — versus
+  **conditional on a soldr-owned triple** — now only the hand-rolled
+  `[target.<triple>] linker =` TOML rule. Installs are matched against the whole file, so
   a `taiki-e/install-action` step with `tool: cargo-xwin` two lines below is
   caught, and an install suppresses the invocation rules on its own line so one
   mistake is not counted twice. Scope: `.github/`, `ci/`, `bench/`, `crates/`,
