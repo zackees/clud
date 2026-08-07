@@ -1,10 +1,10 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, codex_auth, command, config, console_setup,
-    console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, hook_health,
-    job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event, loop_artifacts,
-    loop_spec, optimize, orphan_reaper, runner, runtime_cache, settings_tui, soldr_activate,
-    startup, symbols, test_runtime, tool_cli, tool_install, tools, trampoline, trash, ui,
-    uv_run_hook_guard, verbose_log, wasm, worktrees,
+    console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, grind,
+    hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
+    loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache, settings_tui,
+    soldr_activate, startup, symbols, test_runtime, tool_cli, tool_install, tools, trampoline,
+    trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -342,6 +342,26 @@ fn main() {
             command::repeat_implies_no_done_warning(repeat.as_deref(), *no_done, done.as_deref())
         {
             eprintln!("{}", msg);
+        }
+    }
+
+    // `clud grind` resolves the current repo's issues page from the `origin`
+    // remote (GitHub `<repo>/issues`, GitLab `<repo>/-/issues`), prints a green
+    // notice, then rewrites itself to `clud do <issues-url>` so the rest of the
+    // launch flow (interactive `/goal` seeding, daemon, dry-run) is reused
+    // unchanged. An explicit URL argument is passed through verbatim.
+    if let Some(args::Command::Grind { url }) = args.command.clone() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match grind::resolve_grind_target(&cwd, url.as_deref()) {
+            Ok(issues_url) => {
+                let color = std::io::IsTerminal::is_terminal(&io::stderr());
+                eprintln!("{}", grind::grind_notice(&issues_url, color));
+                args.command = Some(args::Command::Do { url: issues_url });
+            }
+            Err(error) => {
+                eprintln!("[clud] error: {error}");
+                std::process::exit(2);
+            }
         }
     }
 

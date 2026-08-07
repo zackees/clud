@@ -516,6 +516,29 @@ fn test_do_subcommand() {
 }
 
 #[test]
+fn test_grind_subcommand_without_url() {
+    let args = parse(&["clud", "grind"]);
+    match args.command {
+        Some(Command::Grind { ref url }) => assert!(url.is_none()),
+        _ => panic!("expected Grind subcommand"),
+    }
+}
+
+#[test]
+fn test_grind_subcommand_with_url() {
+    let args = parse(&["clud", "grind", "https://github.com/zackees/clud/issues"]);
+    match args.command {
+        Some(Command::Grind { ref url }) => {
+            assert_eq!(
+                url.as_deref(),
+                Some("https://github.com/zackees/clud/issues")
+            );
+        }
+        _ => panic!("expected Grind subcommand"),
+    }
+}
+
+#[test]
 fn test_wasm_subcommand() {
     let args = parse(&["clud", "wasm", "guest.wasm"]);
     match args.command {
