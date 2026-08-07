@@ -16,7 +16,11 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-Strategy = Literal["native", "zigbuild", "soldr"]
+# `zigbuild` is gone: the strategy was retired when soldr took ownership of
+# the Linux cross (#859); `ci/xbuild.py::cargo_argv` refuses it structurally.
+# `native` remains only as xbuild's local-development default — no CI lane
+# uses it (#863).
+Strategy = Literal["native", "soldr"]
 Tier = Literal["core", "full"]
 
 FULL_TIER_LABEL = "ci:full"

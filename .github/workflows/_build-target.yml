@@ -16,7 +16,7 @@ on:
         type: string
         default: ubuntu-24.04
       strategy:
-        description: 'native | zigbuild | soldr'
+        description: 'native | soldr'
         required: false
         type: string
         default: native
@@ -120,9 +120,13 @@ jobs:
       # Doc-tests were covered by the old `cargo test --workspace`
       # (ci/test.py:137) but produce no harness binary, so they cannot ride
       # along in the bundle. They are architecture-independent, so running them
-      # once on the native host triple is full coverage, not a reduction.
+      # once on the host-arch x86_64 Linux triple is full coverage, not a
+      # reduction. Keyed on the TRIPLE, not the strategy: #859 moved every
+      # lane to the soldr strategy and a `strategy == 'native'` key silently
+      # stopped running doc-tests anywhere (#863).
+      # `test_doc_tests_run_on_a_live_matrix_triple` pins this key.
       - name: Doc tests
-        if: ${{ inputs.bundle && inputs.strategy == 'native' && runner.os == 'Linux' }}
+        if: ${{ inputs.bundle && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Build wheel

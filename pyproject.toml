@@ -53,7 +53,10 @@ test = [
 dev = [
     { include-group = "test" },
     "cmake>=3.26",
-    "maturin[zig]>=1.7,<2",
+    # No [zig] extra: zig is retired from every lane (#859/#863) — the extra
+    # only pulled ~50 MB of ziglang into each dev venv for a flag nothing
+    # passes anymore.
+    "maturin>=1.7,<2",
     "ruff>=0.8.0",
 ]
 # soldr is intentionally NOT a Python dev dep — install it via ./install

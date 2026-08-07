@@ -20,17 +20,15 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 BuildMode = Literal["dev", "release"]
-REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd")
-
-
-def build_environment(mode: BuildMode, env: dict[str, str]) -> dict[str, str]:
-    if mode == "release" and platform.system() == "Linux":
-        env = env.copy()
-        # maturin --zig delegates final linking to cargo-zigbuild's target
-        # linker. setup-soldr's fast linker shim forces host clang/mold, which
-        # cannot see Zig's Linux C++ runtime during manylinux wheel builds.
-        env["SOLDR_LINKER"] = "default"
-    return env
+# Every binary a shipped wheel must carry. This tuple is the single list the
+# Windows wheel packer, the wheel verifier, and the installed-scripts verifier
+# all iterate — extending the crate's `[[bin]]` set without extending this
+# ships a wheel missing the new binary ON WINDOWS ONLY, because the manylinux
+# wheels are maturin-built (all bins) while Windows wheels are hand-packed
+# from exactly this list. That is how 2.5.5 shipped a hook rollout pointing
+# configs at `clud-cmd-scan` while the win_amd64 wheel didn't contain it
+# (#862). `test_hook_rollout_target_is_a_shipped_script` pins the invariant.
+REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd", "clud-cmd-scan")
 
 
 def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[str]:
@@ -262,7 +260,7 @@ def verify_wheel_scripts(wheel: Path) -> int:
 def run_build(mode: BuildMode) -> int:
     from ci.env import build_env
 
-    env = build_environment(mode, build_env())
+    env = build_env()
     DIST.mkdir(parents=True, exist_ok=True)
     before = wheel_snapshot()
     cmd = build_command(mode, env=env)
