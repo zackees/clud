@@ -7,7 +7,7 @@
 # the same commit as every `setup-soldr` version under `.github/` and
 # `./install`'s default —
 # `tests/test_packaging_metadata.py` asserts they agree. See DD-020.
-requires = ["soldr==0.8.30"]
+requires = ["soldr==0.8.40"]
 build-backend = "soldr"
 
 [project]
