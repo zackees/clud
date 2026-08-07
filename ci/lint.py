@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from ci.banned_cross_tools import main as check_banned_cross_tools
     from ci.banned_imports import main as check_banned_imports
+    from ci.banned_skill_sources import main as check_banned_skill_sources
 
     # Ordered cheapest-first so the common failure reds out soonest: ruff is a
     # pure-Python scan (~1s), the two banned-* scans are source greps, and only
@@ -58,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
     # .github/ and ci/), so it belongs in the platform-independent half that CI
     # runs once rather than per triple.
     if check_banned_cross_tools() != 0:
+        return 1
+    # #847: bundled skills have exactly one source of truth. Another source
+    # grep, same tier as the two above — no toolchain, no compile.
+    if check_banned_skill_sources() != 0:
         return 1
     # setup-soldr's cargo shim can otherwise omit repository discovery for
     # `.rustfmt.toml` on some runner/architecture combinations. Pin the

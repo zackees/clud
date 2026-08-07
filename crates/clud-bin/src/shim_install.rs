@@ -13,7 +13,7 @@
 //! changes that live outside `crates/clud-bin`. The extraction surface
 //! here is the contract the bundling layer plugs into.
 //!
-//! Mirrors the bundled-skill installer pattern in `skill_install.rs`:
+//! Mirrors the bundled-skill installer pattern in `skills.rs`:
 //! managed copies carry the `# managed-by: clud` marker so user-edited
 //! files are preserved across upgrades.
 
