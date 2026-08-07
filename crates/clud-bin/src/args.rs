@@ -87,7 +87,7 @@ pub struct Args {
     #[arg(long = "allow-plan-mode")]
     pub allow_plan_mode: bool,
 
-    #[arg(long = "dry-run")]
+    #[arg(long = "dry-run", global = true)]
     pub dry_run: bool,
 
     #[arg(long = "detach", conflicts_with = "dry_run")]
