@@ -211,12 +211,19 @@ def build_env(target: str, strategy: str) -> dict[str, str]:
 
 
 def is_soldr_owned(target: str) -> bool:
-    """Does soldr own this triple's cross toolchain end to end? (#637)
+    """Does soldr own this triple's cross toolchain end to end? (#637, soldr#2299)
 
-    Apple and Windows-MSVC targets do. Linux does not — Zig is the supported
-    cross there, and for the manylinux wheel.
+    Apple, Windows-MSVC, and now GNU/Linux all do. soldr 0.8.39's catalogue GNU
+    toolchain (gcc-13.3.0-glibc-2.17-1, soldr#2238) replaced zig for
+    *-unknown-linux-gnu preparation and the manylinux wheel, so zig is no longer
+    the supported Linux cross -- routing a linux-gnu build through zigbuild is
+    now refused in cargo_argv, exactly as for Apple/MSVC.
     """
-    return target.endswith("-apple-darwin") or target.endswith("-pc-windows-msvc")
+    return (
+        target.endswith("-apple-darwin")
+        or target.endswith("-pc-windows-msvc")
+        or target.endswith("-unknown-linux-gnu")
+    )
 
 
 def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:

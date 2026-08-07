@@ -422,8 +422,7 @@ fn static_cxx_lib_search_dir(target: &str, stdlib: &str) -> Option<String> {
     // A resolved archive is an absolute path; an unresolved lookup echoes the
     // bare filename. Only trust an existing, parented path.
     if path.is_absolute() && path.exists() {
-        path.parent()
-            .map(|dir| dir.to_string_lossy().into_owned())
+        path.parent().map(|dir| dir.to_string_lossy().into_owned())
     } else {
         None
     }

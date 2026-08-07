@@ -50,11 +50,22 @@ def test_soldr_setup_installs_target_for_plain_cargo_verbs() -> None:
     assert text.index(prepare) < text.index(install)
 
 
-def test_zigbuild_strategy_uses_the_build_subcommand_interface() -> None:
+def test_gnu_linux_build_routes_through_the_blessed_soldr_surface() -> None:
+    """soldr#2299: GNU/Linux is soldr-owned now, so its linking build goes
+    through `soldr build`, not cargo-zigbuild."""
     target = "aarch64-unknown-linux-gnu"
-    argv = xbuild.cargo_argv(["build", "--workspace", "--bins"], target, "zigbuild")
-    assert argv[:2] == [xbuild.PACKAGE_MANAGER, "zigbuild"]
-    assert argv[2:] == ["--workspace", "--bins", "--target", target]
+    argv = xbuild.cargo_argv(["build", "--workspace", "--bins"], target, "soldr")
+    assert argv == ["soldr", "build", "--workspace", "--bins", "--target", target]
+
+
+def test_gnu_linux_zigbuild_is_refused() -> None:
+    """Routing a GNU/Linux build through zigbuild is refused structurally, the
+    same guard that protects Apple/MSVC (#637)."""
+    import pytest
+
+    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+        with pytest.raises(ValueError, match="soldr"):
+            xbuild.cargo_argv(["build"], target, "zigbuild")
 
 
 def test_release_linux_wheel_builds_without_zig() -> None:
@@ -96,15 +107,12 @@ def test_static_cxx_runtime_env_falls_back_to_target_rustflags() -> None:
     assert "-C link-arg=-static-libgcc" in value
 
 
-def test_zigbuild_strategy_builds_test_targets_without_running_them() -> None:
+def test_gnu_linux_test_verb_stays_on_prepared_cargo() -> None:
+    """Non-linking verbs ride the plain cargo front door on the env `soldr
+    prepare` exported -- same as Apple/MSVC under the soldr strategy."""
     target = "aarch64-unknown-linux-gnu"
-    argv = xbuild.cargo_argv(
-        ["test", "--workspace", "--no-run", "--message-format=json"],
-        target,
-        "zigbuild",
-    )
-    assert argv[:3] == [xbuild.PACKAGE_MANAGER, "zigbuild", "--tests"]
-    assert argv[3:] == ["--workspace", "--message-format=json", "--target", target]
+    argv = xbuild.cargo_argv(["test", "--workspace", "--no-run"], target, "soldr")
+    assert argv == ["cargo", "test", "--workspace", "--no-run", "--target", target]
 
 
 def test_darwin_soldr_env_forwards_the_prepared_sdk_to_cmake() -> None:
@@ -241,7 +249,7 @@ def test_msvc_exceptions_are_enabled_only_for_windows_soldr() -> None:
     other_strategies = (
         ("x86_64-pc-windows-msvc", "native"),
         ("aarch64-apple-darwin", "soldr"),
-        ("aarch64-unknown-linux-gnu", "zigbuild"),
+        ("aarch64-unknown-linux-gnu", "soldr"),
     )
     for target, strategy in other_strategies:
         env = xbuild.whisper_env(target, strategy, {"CXXFLAGS": "-g0"})

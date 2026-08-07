@@ -272,8 +272,11 @@ def test_soldr_versions_move_in_lockstep() -> None:
         + ". Bump every site in the same commit — see DD-020."
     )
 
+    # The setup-soldr *action* floats on the major tag (v0): it is stable and
+    # decoupled from the soldr *tool* version, which is what the lockstep above
+    # enforces. All refs must still agree with each other.
     action_pins = {ref for _, ref, _ in steps}
-    assert action_pins == {"v0.9.66"}, (
+    assert action_pins == {"v0"}, (
         f"setup-soldr action refs disagree: {sorted(action_pins)}"
     )
 

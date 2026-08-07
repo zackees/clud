@@ -99,7 +99,7 @@ jobs:
     with:
       target: x86_64-unknown-linux-gnu
       runs-on: ubuntu-24.04
-      strategy: native
+      strategy: soldr
       clippy: true
 
   test-linux-x64:
@@ -183,7 +183,7 @@ jobs:
     with:
       target: aarch64-unknown-linux-gnu
       runs-on: ubuntu-24.04
-      strategy: zigbuild
+      strategy: soldr
       clippy: false
 
   test-linux-arm:
