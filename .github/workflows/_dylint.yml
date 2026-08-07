@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - uses: zackees/setup-soldr@v0.9.66
+      - uses: zackees/setup-soldr@v0
         with:
           version: 0.8.40
           cache: true

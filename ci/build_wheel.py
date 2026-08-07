@@ -48,7 +48,12 @@ def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[st
     else:
         subcommand.append("--release")
         if platform.system() == "Linux":
-            subcommand.extend(["--zig", "--compatibility", "manylinux2014"])
+            # Local, non-shipping wheel: no zig (banned everywhere, soldr#2299).
+            # The manylinux_2_17 release wheel is produced by CI's blessed path
+            # (ci/xbuild.py: soldr's catalogue toolchain + static libstdc++);
+            # a bare local build cannot meet that floor, so tag it `linux` and
+            # skip the audit rather than claim a floor it did not enforce.
+            subcommand.extend(["--compatibility", "linux"])
         else:
             subcommand.extend(["--compatibility", "pypi"])
     # Use the dev-venv maturin via `python -m maturin`. setup-soldr shims keep

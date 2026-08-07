@@ -143,13 +143,19 @@ def test_cross_argv_never_routes_apple_or_msvc_through_a_banned_tool():
                 )
 
 
-def test_linux_targets_keep_the_supported_zig_cross_path():
-    """The counterweight. A rule that also broke Linux would be reverted, so
-    prove the Zig path is still reachable where it is correct."""
-    from ci.xbuild import cargo_argv
+def test_gnu_linux_is_now_soldr_owned_and_refuses_zig():
+    """soldr#2299 reversal: soldr 0.8.39's catalogue GNU toolchain replaced zig
+    for *-unknown-linux-gnu, so routing a GNU/Linux build through zigbuild is
+    refused, exactly as for Apple/MSVC. (Was the zig-stays-for-Linux counter-
+    weight to #637.)"""
+    from ci.xbuild import cargo_argv, is_soldr_owned
 
-    argv = cargo_argv(["build"], "aarch64-unknown-linux-gnu", "zigbuild")
-    assert "zigbuild" in argv, f"Linux zig cross must survive the #637 lint: {argv}"
+    assert is_soldr_owned("x86_64-unknown-linux-gnu")
+    assert is_soldr_owned("aarch64-unknown-linux-gnu")
+    with pytest.raises(ValueError, match="soldr"):
+        cargo_argv(["build"], "aarch64-unknown-linux-gnu", "zigbuild")
+    # The blessed surface is what a GNU/Linux build uses now.
+    assert cargo_argv(["build"], "x86_64-unknown-linux-gnu", "soldr")[:2] == ["soldr", "build"]
 
 
 def test_test_matrix_always_uses_native_runners():

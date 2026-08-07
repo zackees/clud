@@ -235,6 +235,29 @@ REJECTED: list[tuple[str, str, str]] = [
         '[target.x86_64-apple-darwin]\nrustflags = ["-C", "x"]\nlinker = "clang"',
         ".toml",
     ),
+    # soldr#2299: zig is banned at EVERY target, including Linux. These were
+    # accepted before the catalogue GNU toolchain replaced zig.
+    (
+        "cargo zigbuild for a linux target",
+        "cargo zigbuild --target aarch64-unknown-linux-gnu",
+        ".sh",
+    ),
+    (
+        "maturin --zig for the manylinux wheel",
+        "maturin build --zig --compatibility manylinux2014 "
+        "--target x86_64-unknown-linux-gnu",
+        ".sh",
+    ),
+    (
+        "cargo zigbuild argv assembled in Python",
+        'return ["cargo", "zigbuild", *subcommand[1:], "--target", target]',
+        ".py",
+    ),
+    (
+        "zig prose without the marker",
+        "`cargo zigbuild` was the legacy Linux cross.",
+        ".py",
+    ),
     # A URL is a string, not a comment. Truncating the line at `//` would hide
     # a real reference to the tool.
     (
@@ -278,23 +301,9 @@ ACCEPTED: list[tuple[str, str, str]] = [
         'return ["soldr", "build", *subcommand[1:], "--target", target]',
         ".py",
     ),
-    # Zig is the supported cross for Linux and must stay untouched.
-    (
-        "zigbuild for linux arm",
-        "cargo zigbuild --target aarch64-unknown-linux-gnu",
-        ".sh",
-    ),
-    (
-        "maturin --zig for the manylinux wheel",
-        "maturin build --zig --compatibility manylinux2014 "
-        "--target x86_64-unknown-linux-gnu",
-        ".sh",
-    ),
-    (
-        "zigbuild argv assembled in Python for a linux target",
-        'return [PACKAGE_MANAGER, "zigbuild", *subcommand[1:], "--target", target]',
-        ".py",
-    ),
+    # soldr#2299: zig is banned at EVERY target now, so the former "zig is the
+    # supported Linux cross" accepted cases moved to REJECTED. The bare enum
+    # value still names no tool, so it stays accepted.
     (
         "the matrix strategy name alone names no target",
         "      strategy: zigbuild",
@@ -307,14 +316,14 @@ ACCEPTED: list[tuple[str, str, str]] = [
         "# never run `cargo xwin build --target x86_64-pc-windows-msvc` here",
         ".py",
     ),
-    # Wildcard prose alone is no longer enough for the unconditional rules
-    # (#714): `cargo xwin` is a violation wherever it appears, target or not,
-    # and a docstring is prose no comment-stripper can see. Such a line must
-    # carry the marker — which is the honest trade, since the alternative is a
-    # rule that cannot distinguish documentation from a regression.
+    # Wildcard prose alone is not enough for the unconditional rules (#714,
+    # soldr#2299): a banned tool name is a violation wherever it appears, target
+    # or not, and a docstring is prose no comment-stripper can see. Such a line
+    # must carry the marker — the honest trade, since the alternative is a rule
+    # that cannot distinguish documentation from a regression.
     (
-        "docstring prose naming a conditional tool at a wildcard target",
-        "`cargo zigbuild --target *-apple-darwin` is a legacy passthrough.",
+        "docstring prose naming zig with the marker",
+        "`cargo zigbuild` was the legacy Linux cross. (cross-lint: allow)",
         ".py",
     ),
     (
@@ -459,12 +468,14 @@ def test_the_install_action_violation_points_at_the_action_line():
 
 def test_the_install_window_does_not_pair_distant_lines():
     """An unbounded match would pair an install-action step at the top of a
-    workflow with an unrelated mention hundreds of lines below, which reads as
-    a false accusation against whoever wrote the step.
+    workflow with an unrelated mention far below, which reads as a false
+    accusation against whoever wrote the step.
 
-    Spelled with `cargo-zigbuild` deliberately: `cargo-xwin` is *also* caught
-    by the unconditional invocation rule, so a cargo-xwin fixture here would
-    pass whether or not the window bound existed.
+    Since soldr#2299 every taiki-e install target (`cargo-xwin`,
+    `cargo-zigbuild`) is *also* caught by an unconditional invocation rule, so
+    the distant `tool:` line is flagged on its own -- that is expected. What
+    this test pins is narrower: the flag must come from the invocation rule on
+    the tool line, NOT from the install rule reaching down the window.
     """
     text = "\n".join(
         [
@@ -473,7 +484,10 @@ def test_the_install_window_does_not_pair_distant_lines():
             "          tool: cargo-zigbuild",
         ]
     )
-    assert not scan_text(text, ".yml")
+    findings = scan_text(text, ".yml")
+    assert not any(
+        tool.startswith("taiki-e/install-action") for _, tool, _ in findings
+    ), f"install rule over-reached the window: {findings}"
 
 
 def test_an_install_line_reports_the_install_not_also_the_invocation():

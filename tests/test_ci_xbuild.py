@@ -50,95 +50,69 @@ def test_soldr_setup_installs_target_for_plain_cargo_verbs() -> None:
     assert text.index(prepare) < text.index(install)
 
 
-def test_zigbuild_strategy_uses_the_build_subcommand_interface() -> None:
+def test_gnu_linux_build_routes_through_the_blessed_soldr_surface() -> None:
+    """soldr#2299: GNU/Linux is soldr-owned now, so its linking build goes
+    through `soldr build`, never the zig cross."""
     target = "aarch64-unknown-linux-gnu"
-    argv = xbuild.cargo_argv(["build", "--workspace", "--bins"], target, "zigbuild")
-    assert argv[:2] == [xbuild.PACKAGE_MANAGER, "zigbuild"]
-    assert argv[2:] == ["--workspace", "--bins", "--target", target]
+    argv = xbuild.cargo_argv(["build", "--workspace", "--bins"], target, "soldr")
+    assert argv == ["soldr", "build", "--workspace", "--bins", "--target", target]
 
 
-def test_release_linux_wheel_avoids_duplicate_zig_flag() -> None:
-    source = (ROOT / "ci" / "xbuild.py").read_text(encoding="utf-8")
-    assert 'args.strategy == "zigbuild" and "--zig" not in subcommand' in source
+def test_gnu_linux_zigbuild_is_refused() -> None:
+    """Routing a GNU/Linux build through zigbuild is refused structurally, the
+    same guard that protects Apple/MSVC (#637)."""
+    import pytest
+
+    for target in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+        with pytest.raises(ValueError, match="soldr"):
+            xbuild.cargo_argv(["build"], target, "zigbuild")
 
 
-def test_release_linux_wheel_uses_an_isolated_target_dir() -> None:
-    env = xbuild.manylinux_wheel_env("aarch64-unknown-linux-gnu", {})
-    assert env["CARGO_TARGET_DIR"] == str(
-        ROOT / "target" / "release-wheel" / "aarch64-unknown-linux-gnu"
-    )
-    assert env["SOLDR_LINKER"] == "default"
-
-
-def test_release_linux_wheel_keeps_the_glibc_floor_off_the_target_triple() -> None:
-    """maturin parses `--target` with target-lexicon; a `.2.17` suffix is fatal.
-
-    The floor comes from `--compatibility manylinux2014 --zig`, which maturin
-    turns into the zig target `<triple>.2.17` itself.
+def test_release_linux_wheel_builds_without_zig() -> None:
+    """The release GNU wheel links through soldr's blessed catalogue toolchain,
+    not the old zig path. The glibc-2.17 floor comes from `soldr prepare`'s
+    catalogue sysroot; maturin just tags the wheel manylinux2014. soldr#2299.
     """
     source = (ROOT / "ci" / "xbuild.py").read_text(encoding="utf-8")
-    assert "wheel_target" not in source
-    assert 'subcommand += ["--zig", "--compatibility", "manylinux2014"]' in source
+    assert 'subcommand += ["--compatibility", "manylinux2014"]' in source
+    assert 'subcommand += ["--zig"' not in source  # cross-lint: allow
+    assert 'subcommand.append("--zig")' not in source  # cross-lint: allow
+    assert "CARGO_ZIGBUILD_PYTHON_PATH" not in source
 
 
-def test_release_linux_wheel_lets_zig_own_the_c_toolchain() -> None:
-    """`soldr prepare` exports the same variables cargo-zigbuild sets.
-
-    cargo-zigbuild installs its shims with `add_env_if_missing`, so anything
-    left here silently wins and the C objects miss the 2.17 floor -- which is
-    exactly how the wheel failed the manylinux audit.
+def test_static_cxx_runtime_env_appends_to_encoded_rustflags() -> None:
+    """gcc-13's libstdc++ is too new for manylinux_2_17, so the C++ runtime is
+    linked statically. The flags append to soldr's exported
+    CARGO_ENCODED_RUSTFLAGS so its sysroot flags survive.
     """
-    target = "aarch64-unknown-linux-gnu"
-    prepared = {
-        "CC_aarch64_unknown_linux_gnu": "/soldr/linux-cross/cc",
-        "CXX_aarch64_unknown_linux_gnu": "/soldr/linux-cross/cxx",
-        "AR_aarch64_unknown_linux_gnu": "/soldr/linux-cross/ar",
-        "RANLIB_aarch64_unknown_linux_gnu": "/soldr/linux-cross/ranlib",
-        "CC_aarch64-unknown-linux-gnu": "/soldr/linux-cross/cc",
-        "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "/soldr/linux-cross/linker",
-        "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS": "-C link-self-contained=no",
-        "CARGO_ENCODED_RUSTFLAGS": "-Clink-self-contained=no",
-        "CC": "clang",
-        "TARGET_CC": "clang",
-        "KEEP_ME": "yes",
-    }
-    env = xbuild.manylinux_wheel_env(target, prepared)
-
-    for key in prepared:
-        if key != "KEEP_ME":
-            assert key not in env, f"{key} must not survive into the manylinux build"
-    assert env["KEEP_ME"] == "yes"
+    prepared = {"CARGO_ENCODED_RUSTFLAGS": "-Clink-arg=--sysroot=/soldr/sysroot"}
+    env = xbuild.static_cxx_runtime_env("x86_64-unknown-linux-gnu", prepared)
+    parts = env["CARGO_ENCODED_RUSTFLAGS"].split("\x1f")
+    assert "-Clink-arg=--sysroot=/soldr/sysroot" in parts, "soldr's sysroot flag must survive"
+    assert "-Clink-arg=-static-libstdc++" in parts
+    assert "-Clink-arg=-static-libgcc" in parts
+    # The load-bearing half: whisper-rs-sys links stdc++ statically.
+    assert env["WHISPER_LINK_CXX_STATIC"] == "1"
     # The caller's dict is untouched.
-    assert prepared["CC_aarch64_unknown_linux_gnu"] == "/soldr/linux-cross/cc"
+    assert prepared["CARGO_ENCODED_RUSTFLAGS"] == "-Clink-arg=--sysroot=/soldr/sysroot"
 
 
-def test_release_linux_wheel_names_the_interpreter_that_has_ziglang() -> None:
-    """cargo-zigbuild probes `which(python3) -m ziglang`, then `which(zig)`.
-
-    On the native x86_64 lane neither resolves -- `python3` is the hosted-tool
-    interpreter and `soldr prepare`, which puts a zig on PATH, is skipped --
-    so the release wheel died with "Failed to find zig".
+def test_static_cxx_runtime_env_falls_back_to_target_rustflags() -> None:
+    """With no encoded rustflags set, the flags land on the target-scoped
+    RUSTFLAGS in spelled `-C link-arg=` form.
     """
-    import sys
-
-    env = xbuild.manylinux_wheel_env("x86_64-unknown-linux-gnu", {})
-    assert env["CARGO_ZIGBUILD_PYTHON_PATH"] == sys.executable
-
-
-def test_release_linux_wheel_does_not_bake_in_the_builder_cpu() -> None:
-    env = xbuild.manylinux_wheel_env("x86_64-unknown-linux-gnu", {})
-    assert env["GGML_NATIVE"] == "OFF"
+    env = xbuild.static_cxx_runtime_env("x86_64-unknown-linux-gnu", {})
+    value = env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"]
+    assert "-C link-arg=-static-libstdc++" in value
+    assert "-C link-arg=-static-libgcc" in value
 
 
-def test_zigbuild_strategy_builds_test_targets_without_running_them() -> None:
+def test_gnu_linux_test_verb_stays_on_prepared_cargo() -> None:
+    """Non-linking verbs ride the plain cargo front door on the env `soldr
+    prepare` exported -- same as Apple/MSVC under the soldr strategy."""
     target = "aarch64-unknown-linux-gnu"
-    argv = xbuild.cargo_argv(
-        ["test", "--workspace", "--no-run", "--message-format=json"],
-        target,
-        "zigbuild",
-    )
-    assert argv[:3] == [xbuild.PACKAGE_MANAGER, "zigbuild", "--tests"]
-    assert argv[3:] == ["--workspace", "--message-format=json", "--target", target]
+    argv = xbuild.cargo_argv(["test", "--workspace", "--no-run"], target, "soldr")
+    assert argv == ["cargo", "test", "--workspace", "--no-run", "--target", target]
 
 
 def test_darwin_soldr_env_forwards_the_prepared_sdk_to_cmake() -> None:
@@ -275,7 +249,7 @@ def test_msvc_exceptions_are_enabled_only_for_windows_soldr() -> None:
     other_strategies = (
         ("x86_64-pc-windows-msvc", "native"),
         ("aarch64-apple-darwin", "soldr"),
-        ("aarch64-unknown-linux-gnu", "zigbuild"),
+        ("aarch64-unknown-linux-gnu", "soldr"),
     )
     for target, strategy in other_strategies:
         env = xbuild.whisper_env(target, strategy, {"CXXFLAGS": "-g0"})
