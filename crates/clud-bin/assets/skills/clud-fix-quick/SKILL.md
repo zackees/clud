@@ -1,6 +1,6 @@
 ---
 name: clud-fix-quick
-description: Local-first speed mode. Edits in place on the current branch, runs lint + targeted test + /clud-review on source-code changes only, skips all three for docs/config/SKILL.md. Pushes direct; falls back to PR + admin-merge without waiting for CI when the branch is protected. Sibling of /clud-fix; trades rigor for iteration speed.
+description: Local-first speed mode. Edits in place on the current branch, runs lint + targeted test + /clud-review on source-code changes only, skips all three for docs/config/SKILL.md. Pushes direct; falls back to PR + admin-merge without waiting for CI when the branch is protected. Trades rigor for iteration speed; escalate to /goal when the change is large or risky.
 triggers:
   - When the user says "/clud-fix-quick <issue-or-task>"
   - When the user asks to "quickly fix" / "just push" / "iterate fast" / "speed mode"
@@ -11,7 +11,7 @@ triggers:
 
 # /clud-fix-quick
 
-Speed-mode sibling of [[clud-fix]]. Edits files in place on the current
+Speed mode for small, well-understood changes. Edits files in place on the current
 branch (no disposable worktree), runs the smallest set of gates that
 still catches regressions, then pushes — directly when the branch
 allows, or via a PR that gets admin-merged immediately when the branch
@@ -20,8 +20,9 @@ GREEN signal that the change works; this skill delegates the RED ->
 GREEN cycle to that focused test rather than running a full ritual,
 trading some rigor for iteration speed.
 
-Not a replacement for `/clud-fix` — that's the right tool when the
-change matters or when the user wants paper trail through CI. Use
+Not a replacement for `/goal` — lock in a deliverable and drive to it
+when the change matters or when the user wants a paper trail through
+CI. Use
 `/clud-fix-quick` when you already know what to change and want it on
 main / your branch in seconds.
 
@@ -38,8 +39,8 @@ main / your branch in seconds.
   - `--no-test` skips the targeted test (use even more sparingly —
     only for changes that genuinely have no exercisable test).
 
-For multi-forge inputs, the same forge-recognition rules from
-[[clud-fix]] / [[clud-pr]] / [[clud-do]] apply — read the URL prefix
+For multi-forge inputs, the same forge-recognition rules used
+elsewhere apply — read the URL prefix
 or infer from `git remote get-url origin` for bare-number inputs.
 
 ## Hard Rules
@@ -79,8 +80,8 @@ or infer from `git remote get-url origin` for bare-number inputs.
    Lint failure blocks the push.
 
 4. **`/clud-review` runs on source-code changes only.** Skip for
-   docs/config/SKILL.md/markdown. When it runs, use the same
-   delegated-mode contract as `/clud-fix` does — [[clud-review]]
+   docs/config/SKILL.md/markdown. When it runs, use
+   [[clud-review]]'s delegated-mode contract — it
    returns structured findings and the agent decides whether to
    address CRITICAL/HIGH ones before pushing. MEDIUM/LOW are
    advisory.
@@ -98,9 +99,8 @@ or infer from `git remote get-url origin` for bare-number inputs.
    the local gates that already passed (lint + targeted test +
    `/clud-review`).
 
-7. **Never `--no-verify`, never skip hooks.** Same as [[clud-fix]] and
-   [[clud-pr]]. Hook failures are real signals; fix them, don't
-   bypass them.
+7. **Never `--no-verify`, never skip hooks.** Hook failures are real
+   signals; fix them, don't bypass them.
 
 8. **No force-push.** If the local branch has diverged from the
    remote, surface the divergence and stop. Speed mode doesn't mean
@@ -119,7 +119,7 @@ triggers all three source gates).
 | `Cargo.toml`, `pyproject.toml`, `package.json` | source-adjacent | yes (cargo check / pip check / npm install --dry-run) | yes (touched crate's tests) | yes |
 | `.md`, `.txt`, `.rst`, `.adoc` | docs | no | no | no |
 | `.yaml`, `.yml`, `.toml`, `.json`, `.ini` (NOT package manifests) | config | no | no | no |
-| `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `README.md` | docs (skill/guidance) | no — but RUN the bundled-skill guardrail tests (`skills::` and `skill_install::`) if any `crates/clud-bin/assets/skills/*/SKILL.md` was touched | bundled-skill guardrails | no |
+| `SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `README.md` | docs (skill/guidance) | no — but RUN the bundled-skill guardrail tests (`skills::`) if any `crates/clud-bin/assets/skills/*/SKILL.md` was touched | bundled-skill guardrails | no |
 | `.github/workflows/*.yml`, `.github/instructions/*.md` | CI / instructions | no | no | no |
 | everything else | other | no | no | no |
 
@@ -166,8 +166,8 @@ For code changes specifically, the targeted-test step IS the
 RED -> GREEN signal: identify or write the smallest test that
 exercises the change (RED before the edit if one didn't exist),
 make the change, then rerun that focused test until it passes
-(GREEN). The full-suite version of RED -> GREEN belongs to
-[[clud-fix]]; this skill's targeted-only variant trades coverage
+(GREEN). The full-suite version of RED -> GREEN belongs to a
+`/goal`-driven run; this skill's targeted-only variant trades coverage
 breadth for iteration speed.
 
 ## Failure Modes To Avoid
@@ -178,7 +178,7 @@ breadth for iteration speed.
   defeats the purpose of running them at all.
 - **Calling a SKILL.md change "docs" and skipping the bundled-skill
   guardrails.** A SKILL.md edit IS a guardrail-tested change — run
-  `soldr cargo test -p clud --lib skills::` and `skill_install::`.
+  `soldr cargo test -p clud --lib skills::`.
 - **Force-pushing the current branch to win a race with another
   contributor.** If your push is rejected for non-fast-forward
   reasons unrelated to branch protection, that's a real conflict;
@@ -191,32 +191,30 @@ breadth for iteration speed.
   source gates.
 - **Falling back to the full test suite when no targeted test
   exists.** Print the documented notice and continue; if the change
-  is risky enough that "no test" feels wrong, use [[clud-fix]]
+  is risky enough that "no test" feels wrong, use `/goal`
   instead.
 
 ## When NOT to use
 
-- **The change is large or risky.** Use [[clud-fix]] (full rigor:
-  worktree, RED -> GREEN, full suite, CI).
-- **The change touches code paths you don't fully understand.** Use
-  [[clud-fix]]'s investigation-report branch first.
+- **The change is large or risky.** Use `/goal` — lock in the
+  deliverable and drive to it with full rigor (worktree,
+  RED -> GREEN, full suite, CI).
+- **The change touches code paths you don't fully understand.**
+  Investigate first under `/goal`.
 - **You're not the sole author of the current feature branch.** Use
-  [[clud-pr]] (creates a fresh disposable worktree, opens a PR for
-  review).
+  `/goal` and ship through a PR on a fresh disposable worktree so the
+  work gets reviewed.
 - **You're on a third-party repo where admin-merge isn't allowed.**
-  Use [[clud-pr]] (lets CI do its job; merges only after green).
-- **You need to drive an existing open PR to merge.** Use [[clud-pr]]
-  PR Drive Mode (#395).
+  Use `/goal` and let CI do its job; merge only after green.
+- **You need to drive an existing open PR to merge.** Use `/goal`
+  with the merge as the locked-in deliverable.
 
 ## Related
 
-- [[clud-fix]] — the rigor sibling. Use when the change matters or
-  when the user wants the paper trail of full CI + a separate
-  worktree.
-- [[clud-pr]] — handles the PR + worktree path; also owns PR Drive
-  Mode for actively driving open PRs to merge.
+- `/goal` — locks in a deliverable and blocks stopping until it's
+  met. The escalation path whenever this skill's speed tradeoffs are
+  the wrong call.
 - [[clud-review]] — invoked on source-code changes by Hard Rule 4
   and Workflow step 7.
-- [[clud-do]] — could route to `/clud-fix-quick` when the user's
-  invocation hints at speed mode (out of scope for this skill's
-  introduction; potential follow-up).
+- [[clud-git]] — worktree / branch / process-audit playbook when a
+  push or teardown gets messy.

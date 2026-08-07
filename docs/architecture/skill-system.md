@@ -1,6 +1,6 @@
 # Skill System
 
-Skills are slash-command playbooks (`/clud-pr`, `/clud-issue`, etc.) that ship
+Skills are slash-command playbooks (`/clud-issue`, `/clud-review`, etc.) that ship
 embedded inside the `clud` binary as compile-time string assets. Persistent
 skill installation happens only during global launch setup. Session-only
 launches do not write agent setup files.
@@ -44,7 +44,7 @@ escape in the tree.
 
 | Component | Path | Role |
 |---|---|---|
-| Installer | `crates/clud-bin/src/skills.rs` | Installs selected-backend skills; skips existing files so user edits survive. |
+| Installer | `crates/clud-bin/src/skills.rs` | Installs selected-backend skills; refreshes stale clud-managed copies, never touches user-owned ones. |
 | Source tree | `crates/clud-bin/assets/skills/<name>/` | Holds `SKILL.md` plus contributor `README.md` files. The only source of skill bodies. |
 | `BUNDLED_SKILLS` | `skills.rs` | Compile-time `include_str!` registry of every shipped skill. |
 | `PURGED_BUNDLED_SKILLS` | `skills.rs` | Retired names swept from *every* backend's skills dir. |
@@ -74,7 +74,27 @@ silent:
 - Either backend sweeps `PURGED_BUNDLED_SKILLS` out of *every* backend's skills
   dir, so a skill retired while the user was on Codex still goes away for a
   Claude-only user.
-- Existing files are left alone, so user edits survive upgrades.
+
+## Install Contract
+
+`install_to` classifies each `<name>/SKILL.md` into one of four states, and
+only one of them writes to an existing file:
+
+| On-disk state | Action | Report field |
+|---|---|---|
+| Missing | Write the embedded copy | `installed` |
+| Marker stripped (user-owned) | Never touched — deleting `managed-by: clud` is how a user claims a copy | `skipped_existing` |
+| Marker present, semantically stale | Overwrite with the embedded copy | `refreshed` |
+| Current (modulo whitespace) | **No write at all** | `skipped_existing` |
+
+Comparison collapses whitespace runs (`normalize()`), so an LF-vs-CRLF
+difference is not a change — the deliberate price is that a whitespace-only
+edit to a bundled skill does not propagate to installed homes
+([DD-040](../DESIGN_DECISIONS.md#dd-040-clud-pr-clud-fix-clud-do-and-clud-pr-merge-are-retired-in-favor-of-goal)).
+`BundledSkillsAction` announces `[clud] updated /<name>` only for `refreshed`
+entries; `installed` and `skipped_existing` are silent, so a repeat launch
+prints nothing. `real_bundle_install_is_idempotent` and
+`line_ending_drift_is_not_a_refresh` (in `skills_tests.rs`) pin both halves.
 
 ## Adding Or Retiring A Skill
 
@@ -109,4 +129,5 @@ silent:
 
 - `../../crates/clud-bin/assets/skills/README.md`
 - `launch-setup.md`
-- `../DESIGN_DECISIONS.md` (DD-008, DD-039)
+- `../DESIGN_DECISIONS.md` (DD-008, DD-039, DD-040 — the retirement of
+  `clud-pr`, `clud-fix`, `clud-do`, `clud-pr-merge` in favor of `/goal`)

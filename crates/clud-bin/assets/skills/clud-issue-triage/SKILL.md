@@ -15,7 +15,7 @@ Triage GitHub issues for closeable resolution and un-addressed CodeRabbit follow
 1. **Bias toward caution on closing.** Default action is *leave open*. Only close when the resolution is unambiguous: a merged PR landed code on the default branch and that code clearly satisfies the issue's acceptance criteria. When in doubt, don't close.
 2. **File follow-ups without asking.** Un-addressed CodeRabbit comments → file a new follow-up issue immediately, no user prompt. At the end, hand the user the list of follow-ups you filed.
 3. **Bulk mode = main scans, sub-agents triage in parallel git worktrees.** The main agent never does per-issue triage in bulk mode. It enumerates and filters the candidate set, then dispatches one sub-agent per issue in a single tool-use block. Each sub-agent runs in its own `.claude/worktrees/triage-<num>/`.
-4. **Nothing left in the repo when done.** Every worktree gets `git worktree remove`'d after its sub-agent finishes. Same `.gitignore` gate and stale-worktree rules as `/clud-pr`.
+4. **Nothing left in the repo when done.** Every worktree gets `git worktree remove`'d after its sub-agent finishes. Same `.gitignore` gate and stale-worktree rules as [[clud-git]].
 
 ## Forge support
 
@@ -107,7 +107,7 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 3. **If already CLOSED** → don't re-close. But still run step 6 (CodeRabbit follow-ups) against any linked PRs, then report.
 4. **Find resolving PRs.** Scan `closedByPullRequestsReferences`, the timeline `cross-referenced` events, and `gh search prs "Closes #<num>" OR "Fixes #<num>" OR "Resolves #<num>" --repo <owner>/<repo>`. For each candidate:
    - `gh pr view <pr> --json state,merged,mergeCommit,baseRefName,files`.
-   - Confirm `merged == true` AND `baseRefName == <default-branch>` (else the code didn't reach main — see `/clud-pr` step 3).
+   - Confirm `merged == true` AND `baseRefName == <default-branch>` (else the code didn't reach main — a stack-base merge doesn't count).
    - Read the diff (`gh pr diff <pr>`) and confirm it actually implements the issue's acceptance criteria. Don't trust the PR title or "Closes #" mention alone.
 5. **Decide closure.** Bias toward caution:
    - Resolved unambiguously (merged + on default branch + diff matches criteria) → `gh issue close <num> --comment "Resolved by #<pr>. Verified: <one-line evidence>."`
@@ -130,7 +130,7 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
    - `all` → `gh issue list --state open --limit 1000 --json number,title,labels,createdAt,updatedAt`.
 2. **Filter (main agent, fast pass).** Drop issues that are obviously not triage candidates: anything labeled `discussion`, `meta`, `roadmap`, `wontfix`, `duplicate`, `question`; anything updated in the last 24h (active conversation); anything with zero linked PRs/cross-references. The remainder is the work set.
 3. **Set the goal.** With `<N>` candidates known, invoke `/goal Triage <N> candidate issues; for each: close if unambiguously resolved or file CodeRabbit follow-ups, then report aggregate Closed/Follow-ups counts and tear down every worktree.` so the harness Stop hook blocks until the aggregate report is emitted and every worktree is gone. If the filtered set is empty, report that and clear the goal — do not set it.
-4. **Stale-worktree prompt + .gitignore gate.** Same as `/clud-pr`'s **Worktree workspace** section. Confirm `.gitignore` covers `.claude/`. Ask the user about deleting any stale `.claude/worktrees/triage-*` older than 24h before starting.
+4. **Stale-worktree prompt + .gitignore gate.** Same as [[clud-git]]'s **Worktree creation playbook**. Confirm `.gitignore` covers `.claude/`. Ask the user about deleting any stale `.claude/worktrees/triage-*` older than 24h before starting.
 5. **Plan worktrees.** One worktree per issue: `.claude/worktrees/triage-<num>/`. Branch off `origin/<default>` (read-only — these worktrees only inspect, they don't commit code). `git fetch origin && git worktree add --detach .claude/worktrees/triage-<num> origin/<default>` for each.
 6. **Dispatch sub-agents in parallel.** Single tool-use block, one Agent call per issue. Each sub-agent gets:
    - The issue number and URL
@@ -158,5 +158,5 @@ When this skill files a follow-up issue for a bug fix or feature implementation,
 ## When NOT to use this
 
 - The user wants to file a brand-new issue → `/clud-issue` instead.
-- The user wants to implement an issue → `/clud-pr` instead.
+- The user wants to implement an issue → `/goal` instead.
 - The repo's issue tracker is mostly used for discussion (not work tracking) — closing rules don't apply cleanly.
