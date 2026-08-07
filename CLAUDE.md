@@ -161,8 +161,16 @@ Things that bite:
 - **soldr owns Apple/MSVC cross builds (#637, #714).** Never invoke or install
   `cargo xwin`, `cargo zigbuild`, `zig cc`, `cross` or `osxcross` for a
   `*-apple-darwin` / `*-pc-windows-msvc` target — use `soldr prepare` /
-  `soldr build`. Zig stays correct for `*-unknown-linux-*` and the manylinux
-  wheel, so the rule is target-aware, not a blanket ban.
+  `soldr build`. As of soldr 0.8.40, soldr **also owns `*-unknown-linux-gnu`**:
+  its catalogue GNU toolchain (`gcc-13.3.0-glibc-2.17-1`, soldr#2238) replaced
+  zig for Linux and the manylinux wheel, so `ci/xbuild.py::is_soldr_owned`
+  covers linux-gnu and `cargo_argv` refuses zigbuild for it too. clud no longer
+  invokes zig anywhere. The manylinux_2_17 C++ floor is met by linking
+  libstdc++ statically (`WHISPER_LINK_CXX_STATIC`, `vendor/whisper-rs-sys/build.rs`).
+  Tightening `banned_cross_tools.py` to forbid zig for linux-gnu and removing the
+  now-dead `native`/`zigbuild` strategy scaffolding are tracked as follow-ups
+  under soldr#2299; the text-scan lint below still *documents* the historical
+  target-aware shape.
   `ci/banned_cross_tools.py` enforces it under `bash lint` and CI's static job;
   `ci/xbuild.py::cargo_argv` additionally *raises* on the zigbuild+Apple/MSVC
   combination, because the text scan cannot follow a target held in a variable.
