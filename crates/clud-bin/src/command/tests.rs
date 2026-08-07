@@ -2,7 +2,9 @@ use super::builder::{
     build_launch_plan, build_launch_plan_at, build_launch_plan_for_target, next_run_at_millis,
     parse_repeat_interval, plan_mode_suppression_notice, repeat_implies_no_done_warning,
 };
-use super::prompts::{build_fix_prompt, build_up_prompt, is_github_url, FIX_PROMPT};
+use super::prompts::{
+    build_do_prompt, build_fix_prompt, build_up_prompt, is_github_url, FIX_PROMPT,
+};
 use super::types::LaunchPlan;
 use crate::args::Args;
 use crate::backend::{
@@ -571,6 +573,16 @@ fn test_fix_with_non_github_url() {
 }
 
 #[test]
+fn test_do_launches_goal_prompt() {
+    let p = plan(&["clud", "do", "https://github.com/user/repo/issues/866"]);
+    let prompt = prompt_from_plan(&p);
+    assert!(prompt.starts_with("/goal "));
+    assert!(prompt.contains("https://github.com/user/repo/issues/866"));
+    assert!(!prompt.contains("{url}"));
+    assert!(prompt.contains("closed by a PR"));
+}
+
+#[test]
 fn test_loop_command() {
     let p = plan(&["clud", "loop", "--loop-count", "5", "do stuff"]);
     assert_eq!(p.iterations, 5);
@@ -906,6 +918,14 @@ fn test_build_fix_prompt_github_url() {
     let prompt = build_fix_prompt(Some("https://github.com/user/repo/actions/runs/999"));
     assert!(prompt.contains("runs/999"));
     assert!(prompt.contains("gh run view"));
+}
+
+#[test]
+fn test_build_do_prompt_substitutes_url() {
+    let prompt = build_do_prompt("https://github.com/user/repo/issues/866");
+    assert!(prompt.starts_with("/goal "));
+    assert!(prompt.contains("https://github.com/user/repo/issues/866"));
+    assert!(!prompt.contains("{url}"));
 }
 
 #[test]

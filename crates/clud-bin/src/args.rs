@@ -240,6 +240,10 @@ pub enum Command {
     Fix {
         url: Option<String>,
     },
+    /// Read a URL and implement it end-to-end under the `/goal` contract.
+    Do {
+        url: String,
+    },
     Wasm {
         module: String,
         #[arg(long = "invoke", default_value = "run")]
@@ -859,6 +863,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "up",
         "rebase",
         "fix",
+        "do",
         "wasm",
         "attach",
         "kill",
