@@ -7,13 +7,13 @@
 //! Untracked files and entries with an unusable cached size (racily-clean /
 //! never-stat'd, recorded as size 0) are left to the pass-2 walker top-up.
 //!
-//! Private items of the parent module (`is_whitelisted_source`, `VENDOR_DIRS`,
+//! Private items of the parent module (`is_whitelisted_source`, `is_pruned_dir_name`,
 //! `SIZE_THRESHOLD`, `LargeFile`) are visible here because a child module can
 //! see its ancestors' private items.
 
 use std::path::{Path, PathBuf};
 
-use super::{is_whitelisted_source, LargeFile, SIZE_THRESHOLD, VENDOR_DIRS};
+use super::{is_pruned_dir_name, is_whitelisted_source, LargeFile, SIZE_THRESHOLD};
 
 /// Outcome of the index pass, split so pass 2 knows exactly what to top up.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -105,15 +105,19 @@ pub(super) fn index_pass(root: &Path) -> Result<IndexPassOutput, IndexPassError>
     Ok(classify_entries(entries))
 }
 
-/// Whether any path component is a conventional vendor/deps directory — the
-/// same names the walker prunes, applied here so a committed `vendor/` tree
-/// does not dominate the tracked report.
-fn is_in_vendor_dir(path: &Path) -> bool {
+/// Whether any path component is a pruned directory — vendored third-party
+/// source or generated build output, the same names the walker prunes, applied
+/// here so a committed `vendor/` or `dist/` tree does not dominate the tracked
+/// report.
+///
+/// Matching any component is equivalent to the walker's basename match: pruning
+/// a directory there stops descent into its entire subtree.
+fn is_in_pruned_dir(path: &Path) -> bool {
     path.components().any(|component| {
         component
             .as_os_str()
             .to_str()
-            .is_some_and(|name| VENDOR_DIRS.contains(&name))
+            .is_some_and(is_pruned_dir_name)
     })
 }
 
@@ -122,7 +126,7 @@ fn is_in_vendor_dir(path: &Path) -> bool {
 pub(super) fn classify_entries(entries: impl Iterator<Item = (PathBuf, u32)>) -> IndexPassOutput {
     let mut out = IndexPassOutput::default();
     for (path, size) in entries {
-        if !is_whitelisted_source(&path) || is_in_vendor_dir(&path) {
+        if !is_whitelisted_source(&path) || is_in_pruned_dir(&path) {
             continue;
         }
         if size == 0 {
@@ -167,6 +171,63 @@ mod tests {
         assert_eq!(qual, vec![p("src/big.rs")]);
         assert_eq!(out.qualifying[0].size, u64::from(big));
         assert_eq!(out.needs_verification, vec![p("src/racy.rs")]);
+    }
+
+    /// Issue #846: a bundled GitHub Action commits multi-MB `ncc` output, so
+    /// gitignore never hides it and only a name prune can. The dotted variant
+    /// matters here specifically — unlike the walker, this pass has no
+    /// hidden-file filter, so `.dist/` reaches `classify_entries` directly.
+    #[test]
+    fn classify_ignores_generated_dist_output() {
+        let big = SIZE_THRESHOLD as u32 + 1;
+        let entries = vec![
+            (p("dist/main.js"), big),
+            (p("cook/dist/post.js"), big),
+            (p(".dist/main.js"), big),
+            (p("a/.dist/nested/deep.js"), big),
+        ];
+        let out = classify_entries(entries.into_iter());
+        assert!(
+            out.qualifying.is_empty(),
+            "generated output must not be reported: {:?}",
+            out.qualifying
+        );
+        assert!(out.needs_verification.is_empty());
+    }
+
+    /// The over-pruning guard: `dist` is only special as a whole path
+    /// component. Hand-written source must survive a name that merely
+    /// contains or resembles it, otherwise the fix silences real findings.
+    #[test]
+    fn classify_still_reports_handwritten_source_near_dist() {
+        let big = SIZE_THRESHOLD as u32 + 1;
+        let entries = vec![
+            (p("src/main.js"), big),
+            (p("src/dist_helper.js"), big),
+            (p("src/redistribute/mod.rs"), big),
+            (p("distributed/node.rs"), big),
+        ];
+        let out = classify_entries(entries.into_iter());
+        let qual: Vec<_> = out.qualifying.iter().map(|f| f.rel_path.clone()).collect();
+        assert_eq!(
+            qual,
+            vec![
+                p("src/main.js"),
+                p("src/dist_helper.js"),
+                p("src/redistribute/mod.rs"),
+                p("distributed/node.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn pruned_dir_name_ignores_one_leading_dot() {
+        for name in ["dist", ".dist", "vendor", ".vendor", "node_modules"] {
+            assert!(is_pruned_dir_name(name), "{name} must prune");
+        }
+        for name in ["dist_helper", "distributed", "src", "..dist", "di st"] {
+            assert!(!is_pruned_dir_name(name), "{name} must not prune");
+        }
     }
 
     #[test]

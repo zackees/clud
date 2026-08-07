@@ -559,4 +559,30 @@ mod tests {
             assert_eq!(on_disk, skill.content);
         }
     }
+
+    // Issue #847, phase 1 exit criterion: `skills.rs` must ship every skill
+    // this legacy installer ships, so phase 2 can delete this module without
+    // silently dropping one. `clud-pr-merge` was the sole gap — it lived only
+    // here, sourced from the root `skills/` tree, with no `assets/` copy.
+    //
+    // This test is deliberately scoped to *names*: the two registries may hold
+    // different bodies for the same skill (that divergence is the bug #847
+    // fixes), but a name present here and absent there would mean deletion
+    // loses a shipping skill outright.
+    #[test]
+    fn skills_rs_ships_every_skill_this_legacy_installer_ships() {
+        let successor: Vec<&str> = crate::skills::BUNDLED_SKILLS
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        let missing: Vec<&str> = BUNDLED_SKILLS
+            .iter()
+            .map(|s| s.name)
+            .filter(|name| !successor.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "skills.rs is missing {missing:?} — deleting skill_install.rs would drop these"
+        );
+    }
 }
