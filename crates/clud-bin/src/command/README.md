@@ -11,7 +11,7 @@ Provider/harness resolution happens before construction and is documented at
 - `mod.rs` — module facade; re-exports the resolved-target production builder, the native compatibility builder, supporting helpers, and the `LaunchPlan` / `LoopMarkers` / `RepeatSchedule` types.
 - `builder.rs` — core `build_launch_plan_for_target` orchestrator, the native `build_launch_plan` compatibility wrapper, and repeat/task helpers. Also owns the `--disallowedTools` policy: `bridge_suppresses_plan_mode` strips `EnterPlanMode` on every Codex-provider / Claude-harness launch (the model can otherwise enter plan mode unprompted — see [DD-033](../../../../docs/DESIGN_DECISIONS.md#dd-033-plan-mode-is-disabled-unconditionally-on-the-codex-to-claude-bridge)), `--unattended` / `clud loop` additionally strip `AskUserQuestion`, and `plan_mode_suppression_notice` emits the green TTY-only override hint.
 - `loop_task.rs` — resolves the `clud loop` positional (GH issue/PR URL, `#42` shortform, file path, or literal) into prompt text, with `gh`-backed cache under `.clud/loop/`.
-- `prompts.rs` — static prompt templates (`FIX_PROMPT`, `GITHUB_FIX_TEMPLATE`, `REBASE_PROMPT`, `UP_PROMPT`) and the backend-aware `push_prompt`, `build_up_prompt`, `build_fix_prompt` builders.
+- `prompts.rs` — static prompt templates (`FIX_PROMPT`, `GITHUB_FIX_TEMPLATE`, `DO_GOAL_TEMPLATE`, `REBASE_PROMPT`, `UP_PROMPT`) and the backend-aware `push_prompt`, `build_up_prompt`, `build_fix_prompt`, `build_do_prompt` builders.
 - `types.rs` — `LaunchPlan`, `LoopMarkers`, `RepeatSchedule` serde structs that flow into `--dry-run` JSON and into daemon job records.
 - `tests.rs` — 60+ unit tests covering yolo/safe, codex `exec`/`resume`, loop contract injection, stream-json placement before `-p`, `--repeat` parsing edge cases, and scheduler no-overlap invariants.
 
@@ -29,6 +29,7 @@ Provider/harness resolution happens before construction and is documented at
 - `push_prompt(cmd, backend, prompt)` — `prompts.rs`
 - `build_up_prompt(message, publish) -> String` — `prompts.rs`
 - `build_fix_prompt(url) -> String` — `prompts.rs`
+- `build_do_prompt(url) -> String` — `prompts.rs`
 - `struct LaunchPlan` — executable argv plus provider/harness metadata, launch mode, repeat state, task summary, markers, and stream-json state
 - `struct LoopMarkers { done_path, blocked_path }`
 - `struct RepeatSchedule { interval_secs }`
