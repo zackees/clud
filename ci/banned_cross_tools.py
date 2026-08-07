@@ -279,7 +279,6 @@ SCAN_DIRS: tuple[str, ...] = (
     "bench",
     "crates",
     "dylints",
-    "skills",
     "testbins",
     "tests",
     ".claude/hooks",

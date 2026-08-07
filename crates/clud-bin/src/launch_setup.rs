@@ -336,7 +336,16 @@ impl HarnessSetupAction for BundledSkillsAction {
     }
 
     fn run(&self, ctx: &mut SetupContext<'_>) -> Result<(), SetupError> {
-        let _ = skills::ensure_installed_for_backend_at(ctx.home, self.backend)?;
+        // Only a genuine refresh is announced. `installed` is silent (a first
+        // install is not news) and `skipped_existing` is the steady state. If
+        // this line shows up on a launch that changed nothing, the comparison
+        // in `skills::install_to` is wrong — that was issue #844.
+        if let Some((_, report)) = skills::ensure_installed_for_backend_at(ctx.home, self.backend)?
+        {
+            for name in &report.refreshed {
+                let _ = writeln!(ctx.out, "\x1b[32m[clud] updated /{name}\x1b[0m");
+            }
+        }
         Ok(())
     }
 }
@@ -703,7 +712,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.ran, vec!["bundled-skills", "codex-hook-normalize"]);
-        assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists()); // skill-source-lint: allow (asserts install state, not a writer)
+        let codex_skill = ".codex/skills/clud-issue/SKILL.md"; // skill-source-lint: allow (asserts install state, not a writer)
+        assert!(home.path().join(codex_skill).exists());
         assert!(!home.path().join(".agents").exists());
         assert!(!home.path().join(".claude/skills").exists()); // skill-source-lint: allow (asserts install state, not a writer)
         let hooks = fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
@@ -732,11 +742,12 @@ mod tests {
         )
         .unwrap();
 
-        // #847: one skill installer, so one action. `claude-drift-skills`
+        // #844/#847: one skill installer, so one action. `claude-drift-skills`
         // used to run here too, rewriting these same files from a second
         // registry on every launch.
         assert_eq!(report.ran, vec!["bundled-skills"]);
-        assert!(home.path().join(".claude/skills/clud-pr/SKILL.md").exists()); // skill-source-lint: allow (asserts install state, not a writer)
+        let claude_skill = ".claude/skills/clud-issue/SKILL.md"; // skill-source-lint: allow (asserts install state, not a writer)
+        assert!(home.path().join(claude_skill).exists());
         assert!(!home.path().join(".agents").exists());
         // Launch setup does not install bundled tools. Foreground startup,
         // daemon startup, and `clud tool run` own that path. `.clud/` is

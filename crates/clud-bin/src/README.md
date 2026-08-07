@@ -303,15 +303,17 @@ Platform glue:
 
 Skills and hooks:
 
-- `skills.rs` - bundles slash-command skills via `include_str!` and installs
-  them during global launch setup for the selected backend (`.claude/skills/`,
-  Codex `.codex/skills/` gated on `.codex`) only when the backend home already
-  exists; never overwrites existing files; purges stale clud-managed copies
-  from `.agents/skills/`.
-- `skill_install.rs` - Claude global-setup installer for the `clud-*` skill
-  set; compares embedded vs installed `SKILL.md` modulo whitespace and
-  overwrites divergent copies; purges retired managed skills from
-  `PURGED_SKILLS`.
+- `skills.rs` - the only skill installer, over the only skill source tree
+  (`assets/skills/`). Bundles slash-command skills via `include_str!` and
+  installs them during global launch setup for the selected backend
+  (`.claude/skills/`, Codex `.codex/skills/` gated on `.codex`) only when the
+  backend home already exists. Writes a missing file; never touches a file the
+  user has taken ownership of (`managed-by: clud` marker stripped); refreshes a
+  clud-managed copy that diverges from the bundle modulo whitespace; writes
+  nothing when the installed copy is current. Purges stale clud-managed copies
+  from `.agents/skills/` and retired names in `PURGED_BUNDLED_SKILLS` from every
+  backend's skills dir. See
+  [DD-039](../../../docs/DESIGN_DECISIONS.md#dd-039-single-skill-installer-over-a-single-source-tree).
 - `hook_health/` - `PreToolUse` hook parity diagnostics and `--fix-hooks`
   remediation.
 - `block_bad_cmd_rollout.rs` - startup health/migration for the native
@@ -420,7 +422,7 @@ Subsystems that span multiple files have their own topic docs under
 - **Daemon IPC** (everything under `daemon/`) -> [docs/architecture/daemon-ipc.md](../../../docs/architecture/daemon-ipc.md)
 - **Session lifecycle** (`session`, `console_*`, `capture`, `dnd` injection,
   `voice` hooks) -> [docs/architecture/session-lifecycle.md](../../../docs/architecture/session-lifecycle.md)
-- **Skill system** (`skills`, `skill_install`, `assets/skills/`) -> [docs/architecture/skill-system.md](../../../docs/architecture/skill-system.md)
+- **Skill system** (`skills`, `assets/skills/`) -> [docs/architecture/skill-system.md](../../../docs/architecture/skill-system.md)
 - **Launch setup** (`launch_setup`, selected-backend persistent setup) -> [docs/architecture/launch-setup.md](../../../docs/architecture/launch-setup.md)
 - **GC and registry** (`gc`, `daemon/gc_service`, `session_registry`,
   `worktrees`) -> [docs/architecture/gc-and-registry.md](../../../docs/architecture/gc-and-registry.md)

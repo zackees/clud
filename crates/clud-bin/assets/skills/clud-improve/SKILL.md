@@ -20,7 +20,7 @@ Three hard rules:
 
 ## Code Change Rule
 
-This skill does not change code; it files an improvement request against `zackees/clud`. If the resulting work is a bug fix or feature, that downstream PR must follow RED -> GREEN via `/clud-pr`: a focused failing test before the implementation that turns it green.
+This skill does not change code; it files an improvement request against `zackees/clud`. If the resulting work is a bug fix or feature, that downstream PR must follow RED -> GREEN via `/goal`: a focused failing test before the implementation that turns it green.
 
 ## Workflow
 

@@ -105,7 +105,7 @@ Decisions are numbered for stable cross-references (e.g. `DD-005`). Numbers are 
 
 **Consequences:**
 - `command/` carries `if backend == Backend::Claude { … } else { … }` branches; concentrated, easy to audit.
-- The skill system needs to handle two install targets, which complicates [DD-008](#dd-008-dual-skill-installer-skillsrs-vs-skill_installrs-interim-state).
+- The skill system needs to handle two install targets; the single installer that serves both is [DD-039](#dd-039-bundled-skills-have-exactly-one-source-of-truth).
 
 ---
 
@@ -191,6 +191,8 @@ The separate session-cap registry (`sessions.redb`) keeps file-lock-based serial
 ---
 
 ## DD-008: Dual skill installer (`skills.rs` vs `skill_install.rs`) — interim state
+
+**Status:** Superseded by [DD-039](#dd-039-bundled-skills-have-exactly-one-source-of-truth) and [DD-040](#dd-040-clud-pr-clud-fix-clud-do-and-clud-pr-merge-are-retired-in-favor-of-goal). The body below is kept as history; `skill_install.rs` and the top-level `skills/` tree no longer exist.
 
 **Context:** Skills are slash-commands (`/clud-pr`, `/clud-issue`, etc.) bundled into the `clud` binary via `include_str!` and installed into the user's backend home(s) during global launch setup. Session-only launches do not write persistent skill files. Two installer implementations exist in the codebase today:
 
@@ -341,7 +343,7 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 
 ## DD-013: Codex skills install to `~/.codex/skills/`, mirror of Claude
 
-**Context:** Clud bundles `SKILL.md` playbooks for `/clud-pr`, `/clud-issue`, etc. inside the binary and writes them to per-backend user directories during global setup. PR #243 (closing issue #241) moved the Codex install target from `~/.codex/skills/` to `~/.agents/skills/`, on the belief that Codex had adopted a shared cross-vendor `~/.agents/` convention. In practice, Codex CLI loads skills from `~/.codex/skills/` and never consulted `~/.agents/skills/`. The visible symptom: `clud --codex -p "/clud-pr <issue>"` did not resolve `/clud-pr` even though the SKILL.md was installed — Codex never looked at the file. Reported in #289; meta burn-down at #299.
+**Context:** Clud bundles `SKILL.md` playbooks for `/clud-issue`, `/clud-review`, etc. inside the binary and writes them to per-backend user directories during global setup. PR #243 (closing issue #241) moved the Codex install target from `~/.codex/skills/` to `~/.agents/skills/`, on the belief that Codex had adopted a shared cross-vendor `~/.agents/` convention. In practice, Codex CLI loads skills from `~/.codex/skills/` and never consulted `~/.agents/skills/`. The visible symptom: `clud --codex -p "/clud-issue <issue>"` did not resolve `/clud-issue` even though the SKILL.md was installed — Codex never looked at the file. Reported in #289; meta burn-down at #299.
 
 **Decision:** Codex skills install to `~/.codex/skills/<name>/SKILL.md`, the same layout Claude uses at `~/.claude/skills/<name>/SKILL.md`. Existing clud-managed copies under `~/.agents/skills/` are purged best-effort on first Codex global setup after upgrade (`purge_stale_agents_skills` in `skills.rs`). The purge applies the same conservative rules as the prior `~/.codex/skills/` purge: only delete a `SKILL.md` that contains the `managed-by: clud` marker and lives under a currently bundled skill name; leave unrelated files and user-authored skills alone.
 
@@ -356,13 +358,13 @@ This supersedes the "separate GC daemon" half of [DD-006](#dd-006--cluddataredb-
 
 | Approach | Why not |
 |---|---|
-| Keep installing to `~/.agents/skills/` and add runtime slash-command expansion inside `push_prompt` (intercept `/clud-pr ...` and inline the SKILL.md body before passing to `codex exec`) | Doubles the surface area (install path + runtime translation), tightly couples `command/prompts.rs` to skill discovery, and gives nothing for interactive Codex users. The install-to-the-right-place approach is strictly simpler. |
+| Keep installing to `~/.agents/skills/` and add runtime slash-command expansion inside `push_prompt` (intercept `/clud-issue ...` and inline the SKILL.md body before passing to `codex exec`) | Doubles the surface area (install path + runtime translation), tightly couples `command/prompts.rs` to skill discovery, and gives nothing for interactive Codex users. The install-to-the-right-place approach is strictly simpler. |
 | Install to both `~/.codex/skills/` and `~/.agents/skills/` | Two copies on disk drift apart over time when users edit one. No real consumer of `~/.agents/skills/` has been identified. Add a second target only when a real need surfaces. |
 | Install to `~/.codex/prompts/<name>.md` (Codex's documented custom-prompts location) | Requires a different format (plain markdown, no YAML frontmatter, no trigger metadata) and loses skill semantics. Worth revisiting separately if Codex's skill loader ever changes. |
 
 **Consequences:**
 
-- `clud --codex -p "/clud-pr 123"` works end-to-end on first global setup after upgrade.
+- `clud --codex -p "/clud-issue 123"` works end-to-end on first global setup after upgrade.
 - Users currently holding clud-managed copies under `~/.agents/skills/` see them removed on the next Codex global setup. User-authored content under that path is preserved.
 - `SKILL_BACKENDS` Codex entry now sets `skills_home_subdir: None`. The `skills_home_subdir` field remains on `SkillBackend` for future backends that need it; a unit test (`skills_dir_honors_skills_home_subdir_override`) keeps that contract exercised.
 - Reverses the install-path decision made in #241/#243 but retains the symmetric one-time cleanup behavior, just pointed at the other directory.
@@ -1730,4 +1732,53 @@ checked rather than assumed: `clud-pr`'s *Meta Tracking Issue Mode* is
 superseded by `clud-fix`'s Meta/Parent/Burn-Down workflow, and `clud-issue`'s
 *What counts as a blocking question* was deliberately replaced by "resolve the
 open questions yourself / **Open questions**". Both are superseded, not
-missing, so nothing was ported.
+missing, so nothing was ported. *(Amended by [DD-040](#dd-040-clud-pr-clud-fix-clud-do-and-clud-pr-merge-are-retired-in-favor-of-goal): the
+`clud-issue` decision-discipline content was subsequently judged complementary
+rather than superseded, and ported into the assets copy.)*
+
+---
+
+## DD-040: clud-pr, clud-fix, clud-do and clud-pr-merge are retired in favor of /goal
+
+**Status:** Accepted. Builds on [DD-039](#dd-039-bundled-skills-have-exactly-one-source-of-truth); partially reverses #848 (which migrated `clud-pr-merge` into `skills.rs` to preserve it).
+
+**Context:** zackees/clud#844. With DD-039's consolidation landed, the
+question remained what to do with the four orchestration skills. Their core
+loop — lock a deliverable in, drive to it, refuse to stop early — is what the
+harness's `/goal` Stop-hook command does natively. Keeping them meant
+maintaining three long playbooks (plus `clud-pr-merge` as a fourth) that
+re-implement a built-in, and the two largest (`clud-pr`, `clud-fix`) were the
+most cross-referenced skills in the tree.
+
+**Decision:**
+
+- `clud-pr`, `clud-fix`, `clud-do` and `clud-pr-merge` are deleted from
+  `assets/skills/` and added to `PURGED_BUNDLED_SKILLS`, which sweeps **every**
+  backend's skills dir on next launch (the deleted `PURGED_SKILLS` only ever
+  swept `~/.claude`). A user-owned copy (marker stripped) is preserved.
+- Surviving skills route orchestration to `/goal`, the worktree/process-audit
+  playbook to `clud-git` (which inherits the Windows teardown guardrail test),
+  and review delegation to `clud-review`.
+- The root-fork `clud-issue` content that DD-039 classed as superseded was
+  re-audited and found **complementary**, not superseded — the question
+  budget, `## Decisions` issue-body section, blocking-question taxonomy,
+  face-value reading, and `--repo` flags are ported into the assets copy.
+- `install_to` compares modulo whitespace (`normalize()`, ported from the
+  deleted module) so an LF-vs-CRLF difference is not a change, and
+  `BundledSkillsAction` announces `[clud] updated /<name>` only for entries in
+  the report's `refreshed` list. A current install performs no write at all;
+  `real_bundle_install_is_idempotent` and `line_ending_drift_is_not_a_refresh`
+  pin both properties.
+
+**Consequences:**
+
+- **A capability is lost, not migrated:** PR Drive Mode (driving an open PR
+  through CI failures, review comments and merge conflicts to merge) has no
+  `/goal` equivalent. Restoring it means writing a new skill, not reverting
+  this change.
+- **A whitespace-only edit to a bundled `SKILL.md` no longer propagates** to
+  installed homes — the deliberate price of not re-creating #844 on CRLF
+  checkouts.
+- The four names may be re-introduced later; doing so means removing them from
+  `PURGED_BUNDLED_SKILLS` in the same commit that re-adds the bundle entries
+  (`retired_skills_are_not_also_bundled` enforces the disjointness).

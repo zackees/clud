@@ -1,19 +1,19 @@
 ---
 name: clud-git
-description: Worktree, branch, process-audit, and quarantine playbook extracted from /clud-pr so /clud-fix-quick and other skills can reuse it. Use this when the user asks for worktree cleanup, stale-branch teardown, or a process audit on a leftover dir.
+description: Worktree, branch, process-audit, and quarantine playbook. Single source of truth reusable by /clud-fix-quick, /clud-issue-triage, and /goal runs. Use this when the user asks for worktree cleanup, stale-branch teardown, or a process audit on a leftover dir.
 triggers:
   - When the user asks to clean up worktrees, leftover .claude/worktrees/ directories, or stale feature branches
   - When the user reports "shells appear stuck" or worktree removal failing with file-lock errors on Windows
   - When the user invokes "/clud-git"
-  - When another skill needs the worktree-create + teardown + audit playbook (delegated from /clud-pr, /clud-fix-quick, /clud-do)
+  - When another skill needs the worktree-create + teardown + audit playbook (delegated from /clud-fix-quick, /clud-issue-triage, or a /goal run)
 ---
 <!-- managed-by: clud -->
 
 # /clud-git
 
-Single source of truth for the worktree / branch / process-audit / quarantine playbook. Today the same procedure is duplicated as prose inside `/clud-pr`'s Worktree Workspace section; this skill extracts it so `/clud-fix-quick`, `/clud-do`, and any future skill can delegate without copying.
+Single source of truth for the worktree / branch / process-audit / quarantine playbook. `/clud-fix-quick`, `/clud-issue-triage`, a `/goal` run, and any future skill delegate here instead of copying the procedure as prose.
 
-The three hard rules from `/clud-pr` carry over verbatim — this skill exists to centralize them, not to relax them.
+The three hard rules below are non-negotiable — this skill exists to centralize them, not to relax them.
 
 ## Three hard rules
 
@@ -37,7 +37,7 @@ The three hard rules from `/clud-pr` carry over verbatim — this skill exists t
    - **Unix**: `lsof +D .claude/worktrees/<name>` or `fuser -m .claude/worktrees/<name>`.
 3. **Stop only specific abandoned holders.** Never kill unrelated processes. If the holder is the agent's own shell session (cwd anchored), cd to an absolute path outside the worktree first.
 4. **`git worktree remove --force`.** Pass `--force` only after the audit shows no useful holders. If it still fails with "Access is denied" / "device or resource busy", fall through to step 5.
-5. **`clud trash` quarantine fallback.** `clud trash .claude/worktrees/<name>` moves the path to `~/.clud/trash/<timestamp>/` for the daemon's GC sweeper to reap when handles release. This is the documented fallback — see `/clud-pr` for the precedent.
+5. **`clud trash` quarantine fallback.** `clud trash .claude/worktrees/<name>` moves the path to `~/.clud/trash/<timestamp>/` for the daemon's GC sweeper to reap when handles release. This is the documented fallback — see [[clud-windows-trash]] for the file-lock case.
 6. **`git worktree prune`** + verify `git worktree list` no longer mentions the path.
 7. **Delete the local branch** if it was created for the worktree: `git branch -D <branch>` for already-merged work; `git branch -d` for non-merged (which will refuse and force you to confirm).
 
@@ -60,7 +60,7 @@ When the user reports "my shell appears stuck" or `git` commands hang on a Windo
 
 ## Delegation contract
 
-When called from `/clud-pr`, `/clud-fix-quick`, `/clud-do`, or any other skill:
+When called from `/clud-fix-quick`, `/clud-issue-triage`, or any other skill:
 
 - The caller provides the `<branch>` / `<short-name>` and the operation (create / teardown / audit).
 - This skill executes the playbook and returns structured evidence: what was created, what was torn down, what was quarantined, what processes were stopped.
@@ -72,19 +72,17 @@ When called from `/clud-pr`, `/clud-fix-quick`, `/clud-do`, or any other skill:
 1. **`.gitignore` gate before creating worktrees inside the repo.**
 2. **Process audit before destructive removal.**
 3. **`clud trash` is the documented Windows fallback, not `rm -rf` retry loops.**
-4. **RED -> GREEN** for any code edits made inside a worktree (same as `/clud-pr`).
+4. **RED -> GREEN** for any code edits made inside a worktree.
 5. **Never kill unrelated processes** during a stale-holder cleanup.
 6. **Cd to absolute path** before running git commands when shell behavior gets weird.
 7. **Delete merged branches after squash-merge** so the local branch list doesn't accumulate.
 
 ## When NOT to use this
 
-- The caller wants to ship a PR — that's `/clud-pr`'s job (which uses this skill internally).
-- The caller wants to drive an existing open PR to merge — `/clud-pr` PR Drive Mode.
+- The caller wants to ship a PR, or drive an existing open PR to merge — that's a `/goal` run (which delegates here for the worktree mechanics).
 - The caller wants to investigate or design — this skill is mechanical; design discussion is the parent skill's responsibility.
 
 ## Related
 
-- `/clud-pr` SKILL.md — original source of the worktree playbook; will delegate here once skill-to-skill calls are wired.
 - `clud trash` subcommand — quarantines paths under `~/.clud/trash/<timestamp>/` for daemon GC.
-- `/clud-fix-quick` — speed-mode skill that wants the same worktree teardown without the full `/clud-pr` ceremony.
+- `/clud-fix-quick` — speed-mode skill that wants the same worktree teardown without the full PR ceremony.

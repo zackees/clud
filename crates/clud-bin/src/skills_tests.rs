@@ -153,6 +153,64 @@ fn idempotent_second_pass_is_a_noop() {
     assert_eq!(second.skipped_existing, vec!["alpha", "beta"]);
 }
 
+/// The regression test for #844. `idempotent_second_pass_is_a_noop` above
+/// proves the *algorithm* is idempotent using synthetic skills; this proves
+/// the *shipped bundle* is, which is where the bug actually lived. A body
+/// that fails to round-trip through write-then-read — missing marker, or
+/// on-disk bytes that don't compare equal to `skill_md` — makes every launch
+/// rewrite the file and print a green `[clud] updated /<name>` that changed
+/// nothing. That ran for months against real users.
+#[test]
+fn real_bundle_install_is_idempotent() {
+    let dir = tempdir().unwrap();
+
+    let first = install_to(dir.path(), BUNDLED_SKILLS).unwrap();
+    assert_eq!(first.installed.len(), BUNDLED_SKILLS.len());
+    assert!(first.refreshed.is_empty());
+
+    let second = install_to(dir.path(), BUNDLED_SKILLS).unwrap();
+    assert!(
+        second.installed.is_empty(),
+        "reinstalled on second pass: {:?}",
+        second.installed
+    );
+    assert!(
+        second.refreshed.is_empty(),
+        "second pass reported a refresh with nothing changed: {:?}",
+        second.refreshed
+    );
+    assert_eq!(second.skipped_existing.len(), BUNDLED_SKILLS.len());
+}
+
+/// A CRLF-vs-LF difference is not a real change. Without the whitespace
+/// tolerance in `install_to`, a home whose checkout or editor rewrote line
+/// endings would be "refreshed" on every single launch — the same
+/// user-visible symptom as #844, from a different cause.
+#[test]
+fn line_ending_drift_is_not_a_refresh() {
+    let dir = tempdir().unwrap();
+    let skills = fake_skills();
+    install_to(dir.path(), &skills).unwrap();
+
+    let path = dir.path().join("alpha/SKILL.md");
+    let crlf = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace('\n', "\r\n");
+    std::fs::write(&path, &crlf).unwrap();
+
+    let report = install_to(dir.path(), &skills).unwrap();
+    assert!(
+        report.refreshed.is_empty(),
+        "line-ending drift was treated as a real change: {:?}",
+        report.refreshed
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        crlf,
+        "a no-op pass must not rewrite the file"
+    );
+}
+
 #[test]
 fn creates_missing_parent_dirs() {
     let dir = tempdir().unwrap();
@@ -205,8 +263,8 @@ fn bundled_includes_all_known_skills() {
     let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
     assert!(names.contains(&"clud-issue"));
     assert!(names.contains(&"clud-issue-triage"));
-    assert!(names.contains(&"clud-pr"));
-    assert!(names.contains(&"clud-fix"));
+    assert!(names.contains(&"clud-fix-quick"));
+    assert!(names.contains(&"clud-review"));
     assert!(names.contains(&"clud-tag-release"));
     assert!(names.contains(&"clud-docker-rust-app-dev"));
     assert!(names.contains(&"clud-windows-trash"));
@@ -276,28 +334,31 @@ fn clud_improve_files_concrete_reports_without_generic_prompt() {
     }
 }
 
+/// The worktree-teardown guarantees this pins used to live in `clud-pr`.
+/// That skill was retired (superseded by the harness `/goal` hook), and
+/// `clud-git` is now the single source of truth for the worktree / branch /
+/// process-audit playbook — so the guardrail follows the playbook rather
+/// than retiring with its old host. The failure this prevents is real and
+/// Windows-specific: a blind `rm -rf` retry loop papers over a process
+/// holding a file open instead of identifying and stopping it.
 #[test]
-fn clud_pr_teardown_requires_process_audit() {
+fn clud_git_teardown_requires_process_audit() {
     let skill = BUNDLED_SKILLS
         .iter()
-        .find(|skill| skill.name == "clud-pr")
-        .expect("clud-pr must be bundled")
+        .find(|skill| skill.name == "clud-git")
+        .expect("clud-git must be bundled")
         .skill_md;
 
     for required in [
-        "audit live processes before removing the worktree",
-        "stop only that exact process tree before cleanup",
-        "do not use a blind `rm -rf` retry loop",
+        "Process audit before destructive removal.",
+        "Never blind-loop `rm -rf`.",
+        "clud trash",
     ] {
         assert!(
             skill.contains(required),
-            "clud-pr skill missing process-audit teardown guidance: {required}"
+            "clud-git skill missing process-audit teardown guidance: {required}"
         );
     }
-    assert!(
-        !skill.contains("Follow the **Tear down** retry pattern"),
-        "clud-pr skill must not recommend blind retry teardown"
-    );
 }
 
 #[test]
@@ -369,54 +430,40 @@ fn purge_is_idempotent_and_quiet_when_nothing_is_installed() {
     assert!(report.failed.is_empty());
 }
 
+/// `clud-pr`, `clud-fix`, `clud-do` and `clud-pr-merge` were retired because
+/// the harness `/goal` Stop hook does their orchestration natively. They stay
+/// in the purge list so upgrades clean the copies already sitting in user
+/// homes — dropping a name from here would strand it there forever, which is
+/// the leak [`PURGED_BUNDLED_SKILLS`] exists to close.
+///
+/// `clud-pr-merge` is the one that needs the explicit pin: it was never in
+/// [`BUNDLED_SKILLS`], only in the deleted `skill_install.rs` registry, so
+/// nothing else in this file would notice it going missing.
 #[test]
-fn clud_fix_skill_owns_issue_goal_and_meta_burndown() {
-    let skill = BUNDLED_SKILLS
-        .iter()
-        .find(|skill| skill.name == "clud-fix")
-        .expect("clud-fix must be bundled")
-        .skill_md;
-
-    for required in [
-        "/goal $clud-fix <issue-or-issue-url>",
-        "Complete meta issue #N",
-        "every child issue closed/validated",
-        "parent checklist updated",
-        "parent issue closed",
-        ".clud/fix/<owner>__<repo>__issue-<num>.json",
-        "Delegated `clud-pr` work must not invoke a nested `/goal`",
-        "Claude And Codex Parity",
-    ] {
+fn goal_superseded_skills_stay_retired() {
+    for retired in ["clud-pr", "clud-fix", "clud-do", "clud-pr-merge"] {
         assert!(
-            skill.contains(required),
-            "clud-fix skill missing required orchestration guidance: {required}"
+            PURGED_BUNDLED_SKILLS.contains(&retired),
+            "{retired} must stay in the purge list so upgrades clean old homes"
         );
     }
-
-    // clud-pr-merge was retired then brought back; clud-fix may now
-    // reference it again as a delegation target. No assertion either
-    // way — both shapes are valid.
 }
 
+/// Two entries with the same `name` would race to write the same
+/// `<name>/SKILL.md`, and which one won would depend on registry order.
+/// Ported from the deleted `skill_install.rs`, which was the only registry
+/// that checked this.
 #[test]
-fn clud_pr_skill_supports_delegated_mode_without_nested_goal() {
-    let skill = BUNDLED_SKILLS
-        .iter()
-        .find(|skill| skill.name == "clud-pr")
-        .expect("clud-pr must be bundled")
-        .skill_md;
-
-    for required in [
-        "Delegated Mode",
-        "Do not invoke `/goal`",
-        "When called by [[clud-fix]], do not set or replace `/goal`",
-        "Return structured evidence",
-    ] {
-        assert!(
-            skill.contains(required),
-            "clud-pr skill missing delegated-mode guidance: {required}"
-        );
-    }
+fn bundled_skill_names_are_unique() {
+    let mut names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
+    names.sort_unstable();
+    let before = names.len();
+    names.dedup();
+    assert_eq!(
+        before,
+        names.len(),
+        "duplicate skill name in BUNDLED_SKILLS"
+    );
 }
 
 #[test]
@@ -497,8 +544,14 @@ fn codex_root_installs_to_codex_skills_dir() {
         codex.0.skills_dir(home.path()),
         home.path().join(".codex/skills")
     );
-    assert!(home.path().join(".codex/skills/clud-pr/SKILL.md").exists());
-    assert!(!home.path().join(".agents/skills/clud-pr/SKILL.md").exists());
+    assert!(home
+        .path()
+        .join(".codex/skills/clud-issue/SKILL.md")
+        .exists());
+    assert!(!home
+        .path()
+        .join(".agents/skills/clud-issue/SKILL.md")
+        .exists());
 }
 
 #[test]
@@ -510,7 +563,7 @@ fn codex_install_writes_bundled_skill_bodies_byte_for_byte() {
         .unwrap()
         .expect("codex backend should be active");
 
-    for skill_name in ["clud-pr", "clud-fix"] {
+    for skill_name in ["clud-issue", "clud-review"] {
         let expected = BUNDLED_SKILLS
             .iter()
             .find(|s| s.name == skill_name)
@@ -599,16 +652,18 @@ fn stale_agents_purge_is_idempotent() {
 #[test]
 fn codex_install_preserves_user_edited_skill_at_new_path() {
     let home = tempdir().unwrap();
-    let clud_pr_dir = home.path().join(".codex/skills/clud-pr");
-    std::fs::create_dir_all(&clud_pr_dir).unwrap();
-    std::fs::write(clud_pr_dir.join("SKILL.md"), "USER EDIT\n").unwrap();
+    // Must name a *currently bundled* skill. Pointed at a retired name this
+    // test passes vacuously — nothing would have written there anyway.
+    let skill_dir = home.path().join(".codex/skills/clud-issue");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "USER EDIT\n").unwrap();
 
     ensure_installed_for_backend_at(home.path(), Backend::Codex)
         .unwrap()
         .expect("codex backend should be active");
 
     assert_eq!(
-        std::fs::read_to_string(clud_pr_dir.join("SKILL.md")).unwrap(),
+        std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
         "USER EDIT\n",
         "existing user content under ~/.codex/skills/ must not be overwritten"
     );
@@ -619,7 +674,7 @@ fn codex_install_preserves_user_edited_skill_at_new_path() {
 fn codex_install_purges_stale_agents_skills() {
     let home = tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
-    let stale = home.path().join(".agents/skills/clud-pr");
+    let stale = home.path().join(".agents/skills/clud-issue");
     std::fs::create_dir_all(&stale).unwrap();
     std::fs::write(stale.join("SKILL.md"), "<!-- managed-by: clud -->\nstale\n").unwrap();
 

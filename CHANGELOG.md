@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- `clud` no longer prints `[clud] updated /clud-pr` and `[clud] updated
+  /clud-issue` on every single launch. Two skill installers used to embed two
+  forked copies of those skills from two different source trees and both wrote
+  `~/.claude/skills/<name>/SKILL.md`, so each launch overwrote the other's bytes
+  and reported an update that changed nothing. Worse, Claude got one fork and
+  Codex the other, so multi-forge support (#396) and PR Drive Mode (#395) never
+  reached Claude users. There is now one installer (`src/skills.rs`) over one
+  source tree (`crates/clud-bin/assets/skills/`); `src/skill_install.rs` and the
+  top-level `skills/` tree are removed. `[clud] updated /<name>` prints only
+  when the installed copy genuinely diverges from the bundled one, and a
+  current install performs no write at all. Comparison is modulo whitespace, so
+  a CRLF-vs-LF checkout is not treated as a change. See zackees/clud#844 and
+  DD-039.
+- The `clud-pr`, `clud-fix`, `clud-do` and `clud-pr-merge` skills are retired.
+  Their orchestration — lock in a deliverable and block stopping until it is
+  met — is what the harness's `/goal` Stop-hook command now does natively.
+  Existing installs are cleaned out of every backend's skills dir on the next
+  launch; a copy you took ownership of (the `managed-by: clud` marker removed)
+  is left alone. They may be restored later.
 - The cross-toolchain linter (`ci/banned_cross_tools.py`) now actually enforces
   what it documents. `cargo xwin`, the bare `xwin` CLI, `XWIN_*` env vars,
   `osxcross` and `cross` are banned **unconditionally** — they are MSVC- or
@@ -14,7 +33,7 @@
   `brew`, `apt`/`dnf`/`apk`/`choco`, `houseabsolute/actions-rust-cross`,
   `cross-rs/cross`, `tpoechtrager/osxcross` and hand-rolled `[target.*] linker =`
   overrides. Scope widens from `.github/` + `ci/` (48 files) to `bench/`,
-  `crates/`, `dylints/`, `skills/`, `testbins/`, `tests/`, `.claude/hooks/`,
+  `crates/`, `dylints/`, `testbins/`, `tests/`, `.claude/hooks/`,
   Rust sources, Dockerfiles and the root entrypoints the old list missed
   (`install.sh`, `install.ps1`, `publish`) — 302 files. Prose that a
   comment-stripper cannot see can opt out with a line-scoped

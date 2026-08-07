@@ -7,10 +7,18 @@
 //! (`.claude`, `.codex`, …) and the path under the user's home where its
 //! skills live.
 //!
+//! This is the *only* skill installer, over the single source tree
+//! `crates/clud-bin/assets/skills/`. It used to share the job with a second
+//! module (`skill_install.rs`) that embedded a parallel top-level `skills/`
+//! tree; the two forked, wrote the same paths with different bytes, and fought
+//! on every launch. See DD-039.
+//!
 //! We install only into a backend whose home subdir already exists — that way
 //! users who only run one CLI don't get the other CLIs' skill directories
-//! created in their home. Existing skill files are never overwritten, so user
-//! edits survive. Codex reads skills from `~/.codex/skills/`, mirroring
+//! created in their home. A skill file the user has taken ownership of (the
+//! `managed-by: clud` marker removed) is never overwritten, so user edits
+//! survive; a clud-managed copy that has gone stale is refreshed in place.
+//! Codex reads skills from `~/.codex/skills/`, mirroring
 //! Claude's `~/.claude/skills/` layout. Clud-managed copies that an older
 //! build wrote to `~/.agents/skills/` are purged best-effort during Codex
 //! global setup.
@@ -51,20 +59,8 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         skill_md: include_str!("../assets/skills/clud-issue-triage/SKILL.md"),
     },
     BundledSkill {
-        name: "clud-pr",
-        skill_md: include_str!("../assets/skills/clud-pr/SKILL.md"),
-    },
-    BundledSkill {
-        name: "clud-fix",
-        skill_md: include_str!("../assets/skills/clud-fix/SKILL.md"),
-    },
-    BundledSkill {
         name: "clud-fix-quick",
         skill_md: include_str!("../assets/skills/clud-fix-quick/SKILL.md"),
-    },
-    BundledSkill {
-        name: "clud-do",
-        skill_md: include_str!("../assets/skills/clud-do/SKILL.md"),
     },
     BundledSkill {
         name: "clud-review",
@@ -114,10 +110,6 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "clud-docker-recover",
         skill_md: include_str!("../assets/skills/clud-docker-recover/SKILL.md"),
     },
-    BundledSkill {
-        name: "clud-pr-merge",
-        skill_md: include_str!("../assets/skills/clud-pr-merge/SKILL.md"),
-    },
 ];
 
 /// Bundled skills that have been retired. Entries stay here after the
@@ -136,13 +128,30 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// dropped from `assets/skills/`, but every home that installed it still has
 /// it — the exact leak this list exists to close.
 ///
+/// `clud-pr`, `clud-fix`, `clud-do` and `clud-pr-merge` were retired together:
+/// their orchestration (lock a deliverable in, then drive to it) is what the
+/// harness's `/goal` Stop hook now does natively, so the skills were three
+/// long playbooks re-implementing a built-in. `clud-pr-merge` goes with them
+/// because it only ever existed as `clud-pr`'s merge phase. They may be
+/// restored later; until then this list is what removes them from homes that
+/// already installed them. Note `clud-pr` and `clud-issue` were also the two
+/// skills forked across the old dual source trees, so their removal is what
+/// finally makes one name mean one file.
+///
 /// This is deliberately an explicit list rather than "sweep any clud-managed
 /// skill dir not in [`BUNDLED_SKILLS`]". An orphan sweep looks tempting and is
 /// destructive: skills such as `coding-standards` and `verification-loop` were
 /// installed by a since-removed bundler (62a26e4), still carry the marker, and
 /// are still in daily use. A sweep would also delete newer skills whenever an
 /// older clud binary ran. Retirement is a decision, not an inference.
-pub const PURGED_BUNDLED_SKILLS: &[&str] = &["clud-loop", "clud-docker-rust-app"];
+pub const PURGED_BUNDLED_SKILLS: &[&str] = &[
+    "clud-loop",
+    "clud-docker-rust-app",
+    "clud-pr",
+    "clud-fix",
+    "clud-do",
+    "clud-pr-merge",
+];
 
 /// One CLI backend that consumes `SKILL.md` files. Adding support for a
 /// new tool is a one-line append to [`SKILL_BACKENDS`] — the on-disk layout
@@ -313,8 +322,19 @@ pub fn active_backends(home: &Path) -> Vec<&'static SkillBackend> {
         .collect()
 }
 
-/// Install the given skills into `base/<name>/SKILL.md`. Writes only when
-/// the target file is missing.
+/// Install the given skills into `base/<name>/SKILL.md`.
+///
+/// Four states per skill, and only the third one writes to an existing file:
+/// - **Missing** — write the embedded copy, report `installed`.
+/// - **User-owned** (the `managed-by: clud` marker was stripped, or the file
+///   was hand-authored) — never touched, reported `skipped_existing`.
+/// - **Ours and semantically stale** — overwrite, reported `refreshed`. The
+///   caller is what surfaces this to the user; see `launch_setup.rs`.
+/// - **Ours and current** — no write at all, reported `skipped_existing`.
+///   Equality is modulo whitespace, so line-ending drift is not a change.
+///
+/// The no-write-when-current arm is load-bearing: it is what makes a repeat
+/// launch a total no-op. `real_bundle_install_is_idempotent` pins it.
 pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport, InstallError> {
     let mut report = InstallReport::default();
     for skill in skills {
@@ -332,8 +352,11 @@ pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport,
             Ok(existing) if !existing.contains(MANAGED_BY_CLUD_MARKER) => {
                 report.skipped_existing.push(skill.name);
             }
-            // Ours, and current.
-            Ok(existing) if existing == skill.skill_md => {
+            // Ours, and current. Compared modulo whitespace so a checkout or
+            // editor that rewrote LF to CRLF does not read as a real change —
+            // otherwise every launch on such a home rewrites the file and
+            // reports an update that changed nothing.
+            Ok(existing) if normalize(&existing) == normalize(skill.skill_md) => {
                 report.skipped_existing.push(skill.name);
             }
             // Ours, and stale. Without this arm an edit to a bundled skill
@@ -346,6 +369,17 @@ pub fn install_to(base: &Path, skills: &[BundledSkill]) -> Result<InstallReport,
         }
     }
     Ok(report)
+}
+
+/// Whitespace-tolerant equality. Collapses runs of whitespace (including a
+/// CRLF-vs-LF difference) into single spaces and trims the ends, so `"a  b\r\n"`
+/// and `"a b"` compare equal.
+///
+/// Deliberately not shared with `tool_install.rs`'s identical helper: the two
+/// answer different questions (skill bodies vs. tool scripts) and coupling them
+/// would mean a tuning change for one silently retargets the other.
+fn normalize(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Remove stale clud-managed skill copies from `~/.agents/skills/`.

@@ -37,14 +37,13 @@ crates/                    → see crates/README.md
       skills/              → see crates/clud-bin/assets/skills/README.md
         clud-issue/        → see .../clud-issue/README.md
         clud-issue-triage/ → see .../clud-issue-triage/README.md
-        clud-pr/           → see .../clud-pr/README.md
         clud-tag-release/  → see .../clud-tag-release/README.md
 testbins/                  → see testbins/README.md
   mock-agent/              → see testbins/mock-agent/README.md
     src/                   → see testbins/mock-agent/src/README.md
 docs/                      → see docs/README.md
   ARCHITECTURE.md          # index of subsystem topic docs
-  DESIGN_DECISIONS.md      # ADR-style records (DD-001 … DD-022)
+  DESIGN_DECISIONS.md      # ADR-style records (DD-001 … DD-039)
   architecture/            # one file per cross-cutting subsystem
 src/clud/__init__.py       # Minimal Python package (version shim only)
 ci/                        # CI scripts (env, build, lint, test)
@@ -105,7 +104,7 @@ Several features have a "single source of truth" registry that must be updated a
   3. **`subcommands: &[&str]` array in `args.rs::split_known_unknown` (~line 611)** — *gotcha*: a hardcoded list the unknown-flag-passthrough splitter uses; a missing entry routes your subcommand's argv to the backend agent as passthrough instead of dispatching it, and you get errors from the wrong layer (e.g., the backend complaining about your `--cmd` flag). Also extend `value_flags` / `bool_flags` arrays in the same function if your subcommand introduces new flags.
   4. **`SEPARATOR_OWNING_SUBCOMMANDS` in the same function** — *only* if your subcommand declares a `trailing_var_arg` argument taking a raw command after `--`. *Gotcha*: omitting it fails **silently**, not loudly — clud swallows everything after `--` as backend passthrough and your subcommand sees an empty argument vector, which reads as "the user passed no command". It was a single-valued constant while `tool run` was the only such parser; `test run` (#407) made it a list.
 
-- **New bundled skill** (`crates/clud-bin/assets/skills/*/SKILL.md`) → `BUNDLED_SKILLS` registry in `crates/clud-bin/src/skills.rs`; frontmatter must parse via a real YAML parser. Guardrail tests: `soldr cargo test -p clud --lib skills::`. *Gotcha*: `assets/skills/` is the **only** source of truth, and `skills.rs` the only installer. clud used to have a second registry (`skill_install.rs`) with its own source tree at the repo root; both wrote the same `~/.claude/skills/` files, so each launch classified the other's output as drift, printed `updated /<name>`, and silently reverted the newer bodies ([DD-039](docs/DESIGN_DECISIONS.md#dd-039-bundled-skills-have-exactly-one-source-of-truth)). Do not add a second installer or a second skill tree — `ci/banned_skill_sources.py` fails `bash lint` if you do.
+- **New bundled skill** (`crates/clud-bin/assets/skills/*/SKILL.md`) → `BUNDLED_SKILLS` registry in `crates/clud-bin/src/skills.rs`; frontmatter must parse via a real YAML parser. Guardrail tests: `soldr cargo test -p clud --lib skills::`. *Gotcha*: `assets/skills/` is the **only** source of truth, and `skills.rs` the only installer. clud used to have a second registry (`skill_install.rs`) with its own source tree at the repo root; both wrote the same `~/.claude/skills/` files, so each launch classified the other's output as drift, printed `updated /<name>`, and silently reverted the newer bodies ([DD-039](docs/DESIGN_DECISIONS.md#dd-039-bundled-skills-have-exactly-one-source-of-truth)). Do not add a second installer or a second skill tree — `ci/banned_skill_sources.py` fails `bash lint` if you do. When retiring a skill after users may have installed it, delete the asset dir, remove the bundle entry, and add its old name to `PURGED_BUNDLED_SKILLS` in the same file ([DD-040](docs/DESIGN_DECISIONS.md#dd-040-clud-pr-clud-fix-clud-do-and-clud-pr-merge-are-retired-in-favor-of-goal)); the purge only deletes a `SKILL.md` that still carries the `managed-by: clud` marker, and it sweeps every backend's skills dir, not just `~/.claude`.
 
 - **New bundled tool / hook** (`crates/clud-bin/assets/tools/<group>/*.py`) → `BUNDLED_TOOLS` array in `crates/clud-bin/src/tools.rs` with `include_str!` of the asset. Add a `bundled_includes_<tool>` guardrail test mirroring the existing ones (e.g. `bundled_includes_pr_merge_watch`, `bundled_includes_telemetry_hook`) so a future rename or removal doesn't silently break consumers. When retiring a managed bundled tool after users may have installed it, remove the bundle entry and add its old relative path to `PURGED_TOOLS` in `crates/clud-bin/src/tool_install.rs`; the purge only deletes files that still carry the `managed-by: clud` marker.
 
@@ -176,7 +175,7 @@ Things that bite:
   a `taiki-e/install-action` step with `tool: cargo-xwin` two lines below is
   caught, and an install suppresses the invocation rules on its own line so one
   mistake is not counted twice. Scope: `.github/`, `ci/`, `bench/`, `crates/`,
-  `dylints/`, `skills/`, `testbins/`, `tests/`, `.claude/hooks/`, the root
+  `dylints/`, `testbins/`, `tests/`, `.claude/hooks/`, the root
   entrypoints and `.cargo/config.toml` (`vendor/` is deliberately out).
   *Gotcha*: prose that explains the ban must not trip it — the scanner strips
   `#`, and `//` + `/* */` in Rust, and conditional rules still require a

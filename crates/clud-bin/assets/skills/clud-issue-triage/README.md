@@ -4,7 +4,7 @@ Bundled skill that triages GitHub issues for the user - closing only issues that
 
 ## Files
 
-- `SKILL.md` - Frontmatter (`name`, `description`, `triggers`) plus the playbook the agent loads when the skill fires: single-issue and bulk workflows, failure modes, and when to defer to `/clud-issue` or `/clud-pr`.
+- `SKILL.md` - Frontmatter (`name`, `description`, `triggers`) plus the playbook the agent loads when the skill fires: single-issue and bulk workflows, failure modes, and when to defer to `/clud-issue` or `/goal`.
 
 ## How it ships
 

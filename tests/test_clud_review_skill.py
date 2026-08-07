@@ -4,8 +4,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-review" / "SKILL.md"
-FIX = ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-fix" / "SKILL.md"
-PR = ROOT / "crates" / "clud-bin" / "assets" / "skills" / "clud-pr" / "SKILL.md"
 TRANSCRIPT = ROOT / "tests" / "fixtures" / "clud_review_multi_bucket_retry.txt"
 
 
@@ -21,5 +19,6 @@ def test_multi_bucket_retry_review_has_one_invocation_wide_agent_budget() -> Non
     assert "one primary reviewer" in body
     assert "dispatch the bucket's review to that subagent" not in body
     assert "Subagents are *executed*" not in body
-    assert "agent_budget=1" in FIX.read_text(encoding="utf-8")
-    assert "agent_budget=1" in PR.read_text(encoding="utf-8")
+    # The caller-side half of this contract used to be asserted against
+    # clud-fix and clud-pr. Both were retired in favour of the harness /goal
+    # hook, so clud-review is now the sole owner of the budget rule.
