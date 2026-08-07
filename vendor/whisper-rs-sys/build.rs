@@ -9,6 +9,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
     let target = env::var("TARGET").unwrap();
@@ -30,12 +31,18 @@ fn main() {
     // the release GNU wheel). See clud soldr#2299.
     println!("cargo:rerun-if-env-changed=WHISPER_LINK_CXX_STATIC");
     if let Some(cpp_stdlib) = get_cpp_link_stdlib(&target) {
-        let kind = if env::var_os("WHISPER_LINK_CXX_STATIC").is_some() {
-            "static"
+        if env::var_os("WHISPER_LINK_CXX_STATIC").is_some() {
+            // rustc's `static=` lookup only searches its own -L paths, not the
+            // compiler's internal lib/gcc/<triple>/<ver>/ dir where a catalogue
+            // toolchain keeps libstdc++.a. Ask the compiler for the archive and
+            // put its directory on the search path (version-agnostic).
+            if let Some(dir) = static_cxx_lib_search_dir(&target, cpp_stdlib) {
+                println!("cargo:rustc-link-search=native={}", dir);
+            }
+            println!("cargo:rustc-link-lib=static={}", cpp_stdlib);
         } else {
-            "dylib"
-        };
-        println!("cargo:rustc-link-lib={}={}", kind, cpp_stdlib);
+            println!("cargo:rustc-link-lib=dylib={}", cpp_stdlib);
+        }
     }
     // Link macOS Accelerate framework for matrix calculations
     if target.contains("apple") {
@@ -393,6 +400,33 @@ fn main() {
 
     // for whatever reason this file is generated during build and triggers cargo complaining
     _ = std::fs::remove_file("bindings/javascript/package.json");
+}
+
+/// Directory containing the static C++ runtime archive (e.g. `libstdc++.a`),
+/// resolved by asking the compiler `-print-file-name=lib<name>.a`. Returns
+/// None if the compiler cannot be run or the archive is not found (the driver
+/// echoes the bare filename back when it has no absolute path for it).
+fn static_cxx_lib_search_dir(target: &str, stdlib: &str) -> Option<String> {
+    let compiler = env::var(target_env_key("CXX", target))
+        .or_else(|_| env::var("CXX"))
+        .or_else(|_| env::var(target_env_key("CC", target)))
+        .or_else(|_| env::var("CC"))
+        .ok()?;
+    let archive = format!("lib{}.a", stdlib);
+    let output = Command::new(compiler)
+        .arg(format!("-print-file-name={}", archive))
+        .output()
+        .ok()?;
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(path.trim());
+    // A resolved archive is an absolute path; an unresolved lookup echoes the
+    // bare filename. Only trust an existing, parented path.
+    if path.is_absolute() && path.exists() {
+        path.parent()
+            .map(|dir| dir.to_string_lossy().into_owned())
+    } else {
+        None
+    }
 }
 
 // From https://github.com/alexcrichton/cc-rs/blob/fba7feded71ee4f63cfe885673ead6d7b4f2f454/src/lib.rs#L2462
