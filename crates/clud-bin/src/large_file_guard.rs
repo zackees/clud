@@ -111,6 +111,36 @@ const VENDOR_DIRS: &[&str] = &[
     "node_modules",
 ];
 
+/// Conventional directory names holding generated build output (issue #846).
+///
+/// Distinct from [`VENDOR_DIRS`]: that list is third-party source we did not
+/// write, whereas a bundle is *our* source after a bundler ate it. Same
+/// treatment — unrefactorable, so never worth flagging — for a different
+/// reason, so the lists stay separate rather than one growing a second meaning.
+///
+/// Normally build output is gitignored and never reaches us. A JS GitHub
+/// Action breaks that assumption structurally: the platform loads the action
+/// from a committed bundle, so `dist/` is tracked and multiple MB of `ncc`
+/// output otherwise dominates a report whose whole point is hand-written code.
+///
+/// Deliberately narrow. `build`, `out`, and `target` are *not* here: `build/`
+/// in particular holds hand-written scripts in some repos, and pruning a name
+/// means never warning about anything beneath it again. That trade wants its
+/// own decision rather than riding along with the unambiguous case.
+const BUILD_OUTPUT_DIRS: &[&str] = &["dist"];
+
+/// Whether a single directory name should be pruned from the scan.
+///
+/// One leading dot is ignored so `.dist` needs no separate entry. The walker
+/// already skips hidden directories via `standard_filters`, but the index pass
+/// (the fast path, and the one that runs first on git repos) has no
+/// hidden-file check at all — a tracked `.dist/main.js` reaches
+/// `classify_entries` directly, so the dot handling is load-bearing there.
+fn is_pruned_dir_name(name: &str) -> bool {
+    let base = name.strip_prefix('.').unwrap_or(name);
+    VENDOR_DIRS.contains(&base) || BUILD_OUTPUT_DIRS.contains(&base)
+}
+
 /// A single file that crossed the size threshold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LargeFile {
@@ -280,10 +310,11 @@ fn is_pruned_nested_git(root: &Path, e: &DirEntry) -> bool {
         return true;
     }
     // Pruned if the directory's basename is a conventional vendor / deps
-    // directory. Repos that commit `cargo vendor` / `go vendor` / similar
-    // trees would otherwise dominate the report with third-party LOC.
+    // directory, or generated build output. Repos that commit `cargo vendor` /
+    // `go vendor` trees, or a bundled action's `dist/`, would otherwise
+    // dominate the report with code nobody can refactor.
     if let Some(name) = e.path().file_name().and_then(|s| s.to_str()) {
-        if VENDOR_DIRS.contains(&name) {
+        if is_pruned_dir_name(name) {
             return true;
         }
     }
@@ -475,6 +506,33 @@ mod tests {
         let report = collect(dir.path(), DEADLINE);
         assert!(report.files.is_empty(), "got: {:?}", report.files);
         assert_eq!(report.total_qualifying, 0);
+    }
+
+    /// Issue #846: the walker half of the dist prune. Mirrors the reported
+    /// case in zackees/setup-soldr, where a bundled GitHub Action commits
+    /// `dist/main.js` and `cook/dist/main.js` because the platform loads the
+    /// action from the bundle — so gitignore never hides them.
+    #[test]
+    fn dist_dirs_pruned_by_name() {
+        let dir = fixture();
+        for f in &["dist/main.js", "cook/dist/main.js", "a/b/dist/deep.js"] {
+            write_file(dir.path(), f, 100 * 1024);
+        }
+        let report = collect(dir.path(), DEADLINE);
+        assert!(report.files.is_empty(), "got: {:?}", report.files);
+        assert_eq!(report.total_qualifying, 0);
+    }
+
+    /// Names that merely resemble `dist` are ordinary source. Without this the
+    /// prune could silently widen and suppress the findings it exists to show.
+    #[test]
+    fn dist_lookalike_dirs_are_not_pruned() {
+        let dir = fixture();
+        for f in &["distributed/node.rs", "src/dist_helper.js"] {
+            write_file(dir.path(), f, 100 * 1024);
+        }
+        let report = collect(dir.path(), DEADLINE);
+        assert_eq!(report.total_qualifying, 2, "got: {:?}", report.files);
     }
 
     #[test]
