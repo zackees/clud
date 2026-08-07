@@ -80,6 +80,8 @@ def test_static_cxx_runtime_env_appends_to_encoded_rustflags() -> None:
     assert "-Clink-arg=--sysroot=/soldr/sysroot" in parts, "soldr's sysroot flag must survive"
     assert "-Clink-arg=-static-libstdc++" in parts
     assert "-Clink-arg=-static-libgcc" in parts
+    # The load-bearing half: whisper-rs-sys links stdc++ statically.
+    assert env["WHISPER_LINK_CXX_STATIC"] == "1"
     # The caller's dict is untouched.
     assert prepared["CARGO_ENCODED_RUSTFLAGS"] == "-Clink-arg=--sysroot=/soldr/sysroot"
 

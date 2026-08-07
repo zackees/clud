@@ -19,9 +19,23 @@ fn main() {
         "cargo:rerun-if-env-changed={}",
         target_env_key("CXX", &target)
     );
-    // Link C++ standard library
+    // Link C++ standard library.
+    //
+    // Default is a dynamic link. For a manylinux_2_17 wheel built with soldr's
+    // catalogue gcc-13 toolchain, a *dynamic* libstdc++ pulls in
+    // GLIBCXX_3.4.29 / CXXABI_1.3.9 symbols the audit rejects, and
+    // `-static-libstdc++` cannot override an explicit dylib link directive.
+    // WHISPER_LINK_CXX_STATIC=1 switches to a static link so those symbols are
+    // resolved from libstdc++.a into the binary (clud ci/xbuild.py sets it for
+    // the release GNU wheel). See clud soldr#2299.
+    println!("cargo:rerun-if-env-changed=WHISPER_LINK_CXX_STATIC");
     if let Some(cpp_stdlib) = get_cpp_link_stdlib(&target) {
-        println!("cargo:rustc-link-lib=dylib={}", cpp_stdlib);
+        let kind = if env::var_os("WHISPER_LINK_CXX_STATIC").is_some() {
+            "static"
+        } else {
+            "dylib"
+        };
+        println!("cargo:rustc-link-lib={}={}", kind, cpp_stdlib);
     }
     // Link macOS Accelerate framework for matrix calculations
     if target.contains("apple") {

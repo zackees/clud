@@ -371,8 +371,16 @@ def static_cxx_runtime_env(target: str, env: dict[str, str]) -> dict[str, str]:
     static-link decision is legitimately clud's since whisper.cpp is clud's
     dependency. Applied by appending to soldr's exported
     CARGO_ENCODED_RUSTFLAGS so the sysroot flags it set are preserved.
+
+    WHISPER_LINK_CXX_STATIC is the load-bearing half: whisper-rs-sys otherwise
+    emits `cargo:rustc-link-lib=dylib=stdc++`, an explicit dynamic link that
+    `-static-libstdc++` (a driver flag for the *implicit* libstdc++) cannot
+    override. The env var flips that directive to `static=stdc++`
+    (vendor/whisper-rs-sys/build.rs). `-static-libgcc` still bundles the GCC
+    unwind runtime, which is added implicitly.
     """
     env = env.copy()
+    env["WHISPER_LINK_CXX_STATIC"] = "1"
     encoded = env.get("CARGO_ENCODED_RUSTFLAGS")
     if encoded is not None:
         parts = [part for part in encoded.split("\x1f") if part]
