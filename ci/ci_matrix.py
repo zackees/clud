@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-Strategy = Literal["native", "zigbuild", "soldr"]
+Strategy = Literal["native", "soldr"]
 Tier = Literal["core", "full"]
 
 FULL_TIER_LABEL = "ci:full"
@@ -43,10 +43,15 @@ class Target:
 
 
 TARGETS: tuple[Target, ...] = (
-    Target("x86_64-unknown-linux-gnu", "ubuntu-24.04", "native", "core", "wheels-linux-x86"),
+    # x86_64 Linux builds on an x86_64 Linux host, but still crosses through
+    # soldr's blessed surface: `soldr prepare` provisions the glibc-2.17 conda
+    # toolchain that gives the release wheel its manylinux2014 floor. The old
+    # "native" strategy had no floor mechanism of its own and leaned on
+    # `maturin --zig`; soldr owns the whole environment now (#858).
+    Target("x86_64-unknown-linux-gnu", "ubuntu-24.04", "soldr", "core", "wheels-linux-x86"),
     Target("x86_64-pc-windows-msvc", "windows-2025", "soldr", "core", "wheels-windows-x86"),
     Target("aarch64-apple-darwin", "macos-15", "soldr", "core", "wheels-macos-arm"),
-    Target("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm", "zigbuild", "full", "wheels-linux-arm"),
+    Target("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm", "soldr", "full", "wheels-linux-arm"),
     # whisper-rs is cfg-excluded on this triple (crates/clud-bin/Cargo.toml:149),
     # so there is no C++/CMake to cross at all -- the cheapest cross in the set.
     Target("aarch64-pc-windows-msvc", "windows-11-arm", "soldr", "full", "wheels-windows-arm"),

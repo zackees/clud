@@ -158,20 +158,27 @@ Things that bite:
   `build-backend = "soldr"`, so `uv run` syncs the project and triggers a full
   PEP 517 maturin build. Use `$VENV_PY` (exported by both composite actions),
   which is what `lint` already does locally.
-- **soldr owns Apple/MSVC cross builds (#637, #714).** Never invoke or install
-  `cargo xwin`, `cargo zigbuild`, `zig cc`, `cross` or `osxcross` for a
-  `*-apple-darwin` / `*-pc-windows-msvc` target — use `soldr prepare` /
-  `soldr build`. Zig stays correct for `*-unknown-linux-*` and the manylinux
-  wheel, so the rule is target-aware, not a blanket ban.
-  `ci/banned_cross_tools.py` enforces it under `bash lint` and CI's static job;
-  `ci/xbuild.py::cargo_argv` additionally *raises* on the zigbuild+Apple/MSVC
-  combination, because the text scan cannot follow a target held in a variable.
-  Two rule classes, and the distinction is the thing to get right when editing
-  it: **unconditional** (`cargo xwin`, the bare `xwin` CLI, `XWIN_*`,
-  `osxcross`, `cross build`, `Cross.toml` — MSVC/Apple-only by construction, so
-  no target makes them legal and `--target $TARGET` does not hide them) versus
-  **conditional on a soldr-owned triple** (`cargo zigbuild`, `maturin --zig`,
-  `zig cc` — correct for Linux). Installs are matched against the whole file, so
+- **soldr owns every cross build (#637, #714, #858).** Never invoke or install
+  `cargo xwin`, `cargo zigbuild`, `zig cc`, `cross` or `osxcross` for any
+  shipped triple — use `soldr prepare` / `soldr build`. Zig was retired from
+  the `*-unknown-linux-*` lanes and the manylinux wheel in #858: soldr ≥
+  0.8.40's blessed-linux dispatch provisions the glibc-2.17 conda toolchain
+  that IS the manylinux2014 floor, and layering cargo-zigbuild over its
+  exports split the C++ runtime (`ld: cannot find -lc++`), which killed every
+  2.5.2–2.5.4 release.
+  `ci/banned_cross_tools.py` enforces the tool ban under `bash lint` and CI's
+  static job; `ci/xbuild.py::cargo_argv` additionally *raises* on the retired
+  `zigbuild` strategy for ANY target, because the text scan cannot follow a
+  target held in a variable. Two rule classes in the text lint, and the
+  distinction is the thing to get right when editing it: **unconditional**
+  (`cargo xwin`, the bare `xwin` CLI, `XWIN_*`, `osxcross`, `cross build`,
+  `Cross.toml` — MSVC/Apple-only by construction, so no target makes them
+  legal and `--target $TARGET` does not hide them) versus **conditional on a
+  soldr-owned triple** (`cargo zigbuild`, `maturin --zig`, `zig cc` — these
+  remain conditional in the scanner even though no lane uses them anymore;
+  the structural refusal in `cargo_argv` plus the matrix pin in
+  `tests/test_ci_matrix.py` are what keep them out of the Linux lanes).
+  Installs are matched against the whole file, so
   a `taiki-e/install-action` step with `tool: cargo-xwin` two lines below is
   caught, and an install suppresses the invocation rules on its own line so one
   mistake is not counted twice. Scope: `.github/`, `ci/`, `bench/`, `crates/`,

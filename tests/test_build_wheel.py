@@ -29,28 +29,21 @@ def test_windows_soldr_wheel_packages_prebuilt_executables(tmp_path):
         assert "clud-2.5.4.dist-info/RECORD" in members
 
 
-def test_linux_release_uses_zigbuild_linker(monkeypatch):
+def test_local_linux_release_wheel_never_claims_a_manylinux_floor(monkeypatch):
+    """#858: zig is retired, so a local release wheel links the HOST glibc.
+
+    It must be tagged `linux` (non-distributable) — claiming manylinux2014
+    without the soldr blessed toolchain doing the link would ship a lie, and
+    passing `--zig` would fail outright now that ziglang is out of the venv.
+    """
     monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
 
-    env = build_wheel.build_environment("release", {"SOLDR_LINKER": "fast"})
+    cmd = build_wheel.build_command("release")
 
-    assert env["SOLDR_LINKER"] == "default"
-
-
-def test_linux_dev_keeps_existing_linker(monkeypatch):
-    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Linux")
-
-    env = build_wheel.build_environment("dev", {"SOLDR_LINKER": "fast"})
-
-    assert env["SOLDR_LINKER"] == "fast"
-
-
-def test_non_linux_release_keeps_existing_linker(monkeypatch):
-    monkeypatch.setattr(build_wheel.platform, "system", lambda: "Darwin")
-
-    env = build_wheel.build_environment("release", {"SOLDR_LINKER": "fast"})
-
-    assert env["SOLDR_LINKER"] == "fast"
+    assert "--zig" not in cmd
+    assert "manylinux2014" not in cmd
+    compat = cmd[cmd.index("--compatibility") + 1]
+    assert compat == "linux"
 
 
 def test_verify_windows_wheel_scripts_uses_target_not_host(monkeypatch, tmp_path):

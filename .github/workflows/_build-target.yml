@@ -16,7 +16,7 @@ on:
         type: string
         default: ubuntu-24.04
       strategy:
-        description: 'native | zigbuild | soldr'
+        description: 'native | soldr'
         required: false
         type: string
         default: native
@@ -96,10 +96,10 @@ jobs:
           soldr-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Every cargo/maturin invocation goes through ci/xbuild.py so the
-      # per-strategy environment (zig wrappers, the SDKROOT/CMake plumbing on
-      # top of what `soldr prepare` exported, the whisper-rs-sys host-cfg
-      # workarounds documented in docs/architecture/ci.md) lives in one
-      # testable place instead of being smeared across YAML.
+      # per-strategy environment (the SDKROOT/CMake plumbing on top of what
+      # `soldr prepare` exported, the whisper-rs-sys host-cfg workarounds
+      # documented in docs/architecture/ci.md) lives in one testable place
+      # instead of being smeared across YAML.
       #
       # `$VENV_PY` rather than `uv run`: pyproject.toml:1-3 sets
       # build-backend = "soldr", so `uv run` syncs the project and triggers a
@@ -120,9 +120,12 @@ jobs:
       # Doc-tests were covered by the old `cargo test --workspace`
       # (ci/test.py:137) but produce no harness binary, so they cannot ride
       # along in the bundle. They are architecture-independent, so running them
-      # once on the native host triple is full coverage, not a reduction.
+      # once on the host-arch x86_64 Linux triple is full coverage, not a
+      # reduction. Keyed on the triple, not the strategy: #858 moved this lane
+      # to the soldr strategy (for the glibc floor), and a strategy==native key
+      # would have silently stopped running doc-tests anywhere.
       - name: Doc tests
-        if: ${{ inputs.bundle && inputs.strategy == 'native' && runner.os == 'Linux' }}
+        if: ${{ inputs.bundle && inputs.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' }}
         run: '"$VENV_PY" -m ci.xbuild doctest --target ${{ inputs.target }} --strategy ${{ inputs.strategy }}'
 
       - name: Build wheel

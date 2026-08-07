@@ -23,16 +23,6 @@ BuildMode = Literal["dev", "release"]
 REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd")
 
 
-def build_environment(mode: BuildMode, env: dict[str, str]) -> dict[str, str]:
-    if mode == "release" and platform.system() == "Linux":
-        env = env.copy()
-        # maturin --zig delegates final linking to cargo-zigbuild's target
-        # linker. setup-soldr's fast linker shim forces host clang/mold, which
-        # cannot see Zig's Linux C++ runtime during manylinux wheel builds.
-        env["SOLDR_LINKER"] = "default"
-    return env
-
-
 def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[str]:
     from ci.env import maturin_argv
 
@@ -48,7 +38,13 @@ def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[st
     else:
         subcommand.append("--release")
         if platform.system() == "Linux":
-            subcommand.extend(["--zig", "--compatibility", "manylinux2014"])
+            # A local release wheel links against the HOST glibc — this venv
+            # has no zig (retired, #858) and no soldr blessed-linux toolchain,
+            # so it cannot honestly claim a manylinux floor. Tag it `linux`
+            # (non-distributable). Distributable manylinux2014 wheels come
+            # from CI, where `soldr prepare` supplies the glibc-2.17 toolchain
+            # and ci/xbuild.py runs the audit.
+            subcommand.extend(["--compatibility", "linux"])
         else:
             subcommand.extend(["--compatibility", "pypi"])
     # Use the dev-venv maturin via `python -m maturin`. setup-soldr shims keep
@@ -257,7 +253,7 @@ def verify_wheel_scripts(wheel: Path) -> int:
 def run_build(mode: BuildMode) -> int:
     from ci.env import build_env
 
-    env = build_environment(mode, build_env())
+    env = build_env()
     DIST.mkdir(parents=True, exist_ok=True)
     before = wheel_snapshot()
     cmd = build_command(mode, env=env)

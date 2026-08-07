@@ -99,7 +99,9 @@ jobs:
     with:
       target: x86_64-unknown-linux-gnu
       runs-on: ubuntu-24.04
-      strategy: native
+      # soldr even on the same-arch lane: `soldr prepare` supplies the
+      # glibc-2.17 toolchain that is the release wheel's manylinux floor (#858).
+      strategy: soldr
       clippy: true
 
   test-linux-x64:
@@ -183,7 +185,7 @@ jobs:
     with:
       target: aarch64-unknown-linux-gnu
       runs-on: ubuntu-24.04
-      strategy: zigbuild
+      strategy: soldr
       clippy: false
 
   test-linux-arm:

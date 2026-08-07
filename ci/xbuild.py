@@ -4,17 +4,22 @@ Every cargo/maturin invocation in `.github/workflows/_build-target.yml` goes
 through here, so the per-strategy environment lives in one testable place
 instead of being smeared across YAML `if:` conditions.
 
-Three strategies:
+Two strategies:
 
-    native    the build host's own triple (x86_64-unknown-linux-gnu)
-    zigbuild  cargo-zigbuild -- Linux -> *-unknown-linux-gnu
-    soldr     `soldr build`  -- Linux -> *-pc-windows-msvc and -> *-apple-darwin
+    native    the build host's own triple, host toolchain, no floor guarantees
+    soldr     `soldr build` -- every shipped triple: *-pc-windows-msvc,
+              *-apple-darwin, and *-unknown-linux-gnu (dispatch=blessed-linux,
+              which supplies the glibc-2.17 conda toolchain that IS the
+              release wheel's manylinux2014 floor)
 
 `soldr` is the blessed surface (soldr docs/CROSS_COMPILE.md): `soldr prepare`
 provisions the sysroot in .github/actions/setup-build and exports the
 target-scoped Cargo/cc-rs/linker env, then `soldr build --target <triple>`
-links against it. The legacy xwin / zigbuild-at-Apple passthroughs documented
-there are deliberately unused, and `ci/banned_cross_tools.py` enforces that.
+links against it. The legacy xwin / zigbuild passthroughs documented there are
+deliberately unused, and `ci/banned_cross_tools.py` enforces that. The
+`zigbuild` strategy (cargo-zigbuild for Linux) was retired in #858: soldr >=
+0.8.40 owns the Linux cross too, and layering zig on top split the C++ runtime
+(`ld: cannot find -lc++`), killing every 2.5.2-2.5.4 release.
 
 Only the link-producing `build` verb goes through `soldr build`. clippy, `cargo
 test --no-run` and maturin stay on the plain cargo front door: `soldr prepare`
@@ -141,7 +146,10 @@ def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, st
         # not part of this Linux-hosted toolchain. Whisper builds static libs,
         # so a static-library probe validates the compiler without those tools.
         env["CMAKE_TRY_COMPILE_TARGET_TYPE"] = "STATIC_LIBRARY"
-    elif strategy == "zigbuild":
+    elif target.endswith("-unknown-linux-gnu") and strategy == "soldr":
+        # Linux cross (and the same-arch x86_64 lane, which also runs the
+        # soldr strategy for its glibc-2.17 floor). CMake must not probe the
+        # host toolchain when the aarch64 conda GCC is doing the compile.
         env["CMAKE_SYSTEM_NAME"] = "Linux"
 
     if _is_windows(target):
@@ -198,56 +206,35 @@ def build_env(target: str, strategy: str) -> dict[str, str]:
     # Fresh-checkout CI has no prior incremental state to reuse; incremental
     # only costs compile time and target/ size here.
     env.setdefault("CARGO_INCREMENTAL", "0")
-    if strategy == "zigbuild":
-        # cargo-zigbuild delegates linking to zig; soldr's fast-linker shim
-        # would otherwise force host clang/mold, which cannot see zig's
-        # cross sysroot. Same reasoning as ci/build_wheel.py:24-31.
-        env["SOLDR_LINKER"] = "default"
     return env
-
-
-def is_soldr_owned(target: str) -> bool:
-    """Does soldr own this triple's cross toolchain end to end? (#637)
-
-    Apple and Windows-MSVC targets do. Linux does not — Zig is the supported
-    cross there, and for the manylinux wheel.
-    """
-    return target.endswith("-apple-darwin") or target.endswith("-pc-windows-msvc")
 
 
 def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
     """Return the cargo argv for this strategy.
 
-    clippy is deliberately NOT routed through cargo-zigbuild: it does not link,
-    so it needs the target sysroot only for `cfg` resolution, which plain
+    clippy stays on plain cargo under every strategy: it does not link, so it
+    needs the target sysroot only for `cfg` resolution, which
     `cargo clippy --target` already provides.
     """
     verb = subcommand[0]
-    if strategy == "zigbuild" and is_soldr_owned(target):
-        # #637: the matrix assigns `soldr` to every Apple/MSVC triple, and
-        # `tests/test_ci_matrix.py` pins that. But the strategy is not what
-        # runs the compiler -- this function is -- so pinning the matrix value
-        # alone left the alternate command path reachable by a one-word edit.
-        # Refuse structurally instead, so the invariant does not depend on
-        # anyone remembering it.
+    if strategy == "zigbuild":
+        # #858: retired. Every cross -- Apple, MSVC, *and* Linux -- goes
+        # through soldr's blessed surface now. soldr >= 0.8.40's blessed-linux
+        # prepare exports a glibc-2.17 conda GCC toolchain, and layering
+        # cargo-zigbuild on top split the runtime: the whisper-rs-sys build
+        # script detected zig and emitted `-lc++` while prepare's GCC did the
+        # link, which has no LLVM libc++ -- every 2.5.2-2.5.4 release died on
+        # `ld: cannot find -lc++`. Refuse structurally so the retired path
+        # cannot come back through a one-word matrix edit.
         raise ValueError(
-            f"{target} must cross through soldr's blessed surface, not "
-            "cargo-zigbuild. soldr owns the Apple/MSVC toolchain "
-            "(`soldr prepare` / `soldr build`); Zig is correct for "
-            "*-unknown-linux-* only. See docs/architecture/ci.md."
+            f"the zigbuild strategy is retired; {target} crosses through "
+            "soldr's blessed surface (`soldr prepare` / `soldr build`). "
+            "See docs/architecture/ci.md and #858."
         )
     if strategy == "soldr" and verb == "build":
         # The blessed cross surface. Everything else under this strategy rides
         # on the env `soldr prepare` exported -- see the module docstring.
         return ["soldr", "build", *subcommand[1:], "--target", target]
-    if strategy == "zigbuild" and verb == "build":
-        return [PACKAGE_MANAGER, "zigbuild", *subcommand[1:], "--target", target]
-    if strategy == "zigbuild" and verb == "test":
-        # This wrapper is a build subcommand, not a transparent replacement
-        # for the test subcommand. Building `--tests` produces the same harness
-        # executables without trying to run foreign-architecture binaries.
-        options = [arg for arg in subcommand[1:] if arg != "--no-run"]
-        return [PACKAGE_MANAGER, "zigbuild", "--tests", *options, "--target", target]
     return ["cargo", *subcommand, "--target", target]
 
 
@@ -337,105 +324,16 @@ def _project_version() -> str:
         return tomllib.load(project)["project"]["version"]
 
 
-#: Toolchain variables `soldr prepare` exports per target, in both the
-#: hyphenated and underscored spellings cc-rs accepts.
-_TARGET_TOOL_VARS = (
-    "CC",
-    "CXX",
-    "AR",
-    "RANLIB",
-    "LD",
-    "LDFLAGS",
-)
-
-#: Unscoped equivalents. cc-rs consults these after the target-scoped names,
-#: so leaving one set would put a non-zig compiler back in the loop.
-_GLOBAL_TOOL_VARS = (
-    "CC",
-    "CXX",
-    "AR",
-    "RANLIB",
-    "TARGET_CC",
-    "TARGET_CXX",
-    "TARGET_AR",
-    "TARGET_RANLIB",
-    "RUSTFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-)
-
-
-def manylinux_wheel_env(target: str, env: dict[str, str]) -> dict[str, str]:
-    """Give zig sole ownership of a release `*-unknown-linux-gnu` wheel build.
-
-    `--compatibility manylinux2014 --zig` is the whole glibc-floor mechanism:
-    maturin turns the platform tag into the zig target `<triple>.2.17`
-    (maturin src/compile.rs:743-751) and installs zig `cc`/`c++`/`ar`/`ranlib`
-    shims plus the linker, so every object -- Rust *and* the whisper.cpp
-    C/C++ that dominates this build -- is produced against that floor. Do not
-    spell the floor on `--target`: maturin hands the triple straight to
-    target-lexicon (src/target/mod.rs:282-291) with no suffix stripping, and
-    `x86_64-unknown-linux-gnu.2.17` is rejected as an unknown triple. Only
-    bare `cargo zigbuild` accepts that spelling.
-
-    The shims are installed with `add_env_if_missing` (cargo-zigbuild
-    src/zig.rs:850-861), which also consults the ambient environment -- so an
-    already-exported `CC_<triple>` silently wins and zig never sees the C
-    code. `soldr prepare` exports exactly those variables in
-    .github/actions/setup-build, which split the toolchain: Rust linked at
-    2.17 while the C objects kept soldr's default floor, and the audit
-    rejected the wheel with
-
-        Your library is not manylinux_2_17 ... too-recent versioned symbols:
-        ["libm.so.6 offending versions: GLIBC_2.27",
-         "libc.so.6 offending versions: GLIBC_2.28, GLIBC_2.25, GLIBC_2.27"]
-
-    Dropping them is safe because nothing in this workspace needs the prepared
-    sysroot for a Linux target: the only pkg-config consumer is `alsa-sys`,
-    and `cpal` is cfg'd off on Linux (crates/clud-bin/Cargo.toml:166), so zig
-    supplies the entire C toolchain by itself.
-    """
-    env = env.copy()
-    scoped = {target, target.replace("-", "_")}
-    cargo_target = f"CARGO_TARGET_{target.upper().replace('-', '_')}"
-    drop = {f"{name}_{suffix}" for name in _TARGET_TOOL_VARS for suffix in scoped}
-    drop |= {f"{cargo_target}_{name}" for name in ("LINKER", "RUSTFLAGS", "RUNNER")}
-    drop |= set(_GLOBAL_TOOL_VARS)
-    for key in drop:
-        env.pop(key, None)
-
-    # cargo-zigbuild resolves zig as `which(python3) -m ziglang`, falling back
-    # to `which(zig)` (src/zig.rs:2088-2096). Neither holds on the native
-    # x86_64 lane: `python3` is the hosted-tool interpreter, which has no
-    # `ziglang`, and no zig is on PATH there because `soldr prepare` -- which
-    # puts one there -- is skipped for the native strategy. That lane died
-    # with "Failed to find zig". `ziglang` is in this venv via the
-    # `maturin[zig]` dev dep, so name the interpreter that actually has it.
-    # The generated cc/ar shims re-enter the lookup in their own processes and
-    # inherit this, so it covers the C compilation too.
-    env["CARGO_ZIGBUILD_PYTHON_PATH"] = sys.executable
-
-    # soldr's fast-linker shim would force host clang/mold, which cannot see
-    # zig's Linux C++ runtime. Mirrors ci/build_wheel.py:24-31.
-    env["SOLDR_LINKER"] = "default"
-
-    # The link cache key does not include the requested glibc floor. The
-    # preceding compile uses the toolchain default, while the manylinux wheel
-    # needs a fresh 2.17 link. Isolate this final wheel build.
-    env["CARGO_TARGET_DIR"] = str(ROOT / "target" / "release-wheel" / target)
-
-    # A shipped wheel runs on machines that are not this runner. `-march=native`
-    # is the ggml default, and the native x86_64 lane is the one build in the
-    # matrix that does not already turn it off via whisper_env().
-    env["GGML_NATIVE"] = "OFF"
-    return env
-
-
 def cmd_wheel(args: argparse.Namespace) -> int:
     """Build the wheel into dist/ for this triple.
 
-    Maturin normally reuses the same `target/<triple>/` directory the compile
-    step populated. Release GNU Linux wheels are the exception: their
-    manylinux link must not reuse a host-default glibc artifact.
+    Maturin reuses the same `target/<triple>/` directory the compile step
+    populated. On release GNU Linux lanes that reuse is now sound: the compile
+    already linked through soldr's glibc-2.17 conda toolchain (exported by
+    `soldr prepare`, dispatch=blessed-linux), so the artifact maturin picks up
+    is the manylinux2014-floor artifact -- there is no second toolchain and no
+    zig re-link (#858). maturin's role on Linux is packaging plus the
+    manylinux audit, which verifies the floor rather than supplying it.
     """
     from ci.env import maturin_argv
 
@@ -458,8 +356,6 @@ def cmd_wheel(args: argparse.Namespace) -> int:
             return 1
         print(f"packaged soldr-built Windows wheel: {wheel}")
         return 0
-    if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
-        env = manylinux_wheel_env(args.target, env)
     subcommand = [
         "build",
         "--target",
@@ -473,31 +369,21 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         subcommand += ["--profile", "dev"]
         if args.target.endswith("-unknown-linux-gnu"):
             # Dev wheels are CI artifacts, not distributables, and must not be
-            # audited for manylinux compliance.
-            #
-            # maturin audits by default on Linux even with no --compatibility
-            # flag. The release path opts into manylinux2014 explicitly and
-            # pairs it with --zig, which is what actually supplies the 2.17
-            # floor -- maturin hands the glibc version down to zigbuild. Dev
-            # passes neither, so it inherited the audit without the mechanism
-            # that satisfies it, and once the blessed Linux prep started
-            # linking at zig's default floor the wheel step died with:
-            #
-            #   Error ensuring manylinux_2_17 compliance ... too-recent
-            #   versioned symbols: ["libm.so.6 offending versions: GLIBC_2.27"]
-            #
-            # This wheel is only ever installed on the exec runner for the same
-            # triple, whose glibc is far newer, so the property being asserted
-            # is one nothing downstream consumes. Release keeps its audit.
+            # audited for manylinux compliance: maturin audits by default on
+            # Linux even with no --compatibility flag, and this wheel is only
+            # ever installed on the exec runner for the same triple, whose
+            # glibc is far newer. Release keeps its audit below.
             subcommand += ["--compatibility", "linux"]
     else:
         subcommand.append("--release")
         if args.target.endswith("-unknown-linux-gnu"):
-            subcommand += ["--zig", "--compatibility", "manylinux2014"]
+            # The 2.17 floor itself comes from soldr's conda toolchain doing
+            # the link (gcc-13.3.0-glibc-2.17); this flag makes maturin's
+            # audit enforce that floor on the finished artifact and stamp the
+            # manylinux2014 platform tag. No --zig: zig is retired (#858).
+            subcommand += ["--compatibility", "manylinux2014"]
         else:
             subcommand += ["--compatibility", "pypi"]
-    if args.strategy == "zigbuild" and "--zig" not in subcommand:
-        subcommand.append("--zig")
 
     if run(maturin_argv(subcommand, env=env), env) != 0:
         return 1
@@ -522,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--target", required=True)
-        p.add_argument("--strategy", default="native", choices=("native", "zigbuild", "soldr"))
+        p.add_argument("--strategy", default="native", choices=("native", "soldr"))
         p.add_argument("--profile", default="dev", choices=("dev", "release"))
 
     clippy = sub.add_parser("clippy")

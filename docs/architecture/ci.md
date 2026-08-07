@@ -120,27 +120,35 @@ binary), so it is not a factor.
 
 | Triple | Strategy | Notes |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | **native** | the build host; also the clippy/dylint host |
+| `x86_64-unknown-linux-gnu` | **`soldr build`** | the build host and the clippy/dylint host, yet still crossed through soldr's blessed surface: `soldr prepare` (dispatch=blessed-linux) provisions a gcc-13.3.0-glibc-2.17 conda toolchain, and that toolchain — not the runner's own gcc — is what gives the release wheel its manylinux2014 floor (#858). |
 | `aarch64-pc-windows-msvc` | **`soldr build`** | The crate manifest already excludes `whisper-rs` on this target, so there is no C++ and no CMake. `soldr prepare` provisions the catalogued ARM64 MSVC CRT/SDK and the clang shim that `ring` requires. |
 | `x86_64-pc-windows-msvc` | **`soldr build`** + forced whisper config | The blessed soldr path provisions the MSVC CRT/SDK and LLVM toolchain. `clang-cl`/`lld-link` drive whisper's CMake; two host-vs-target `cfg!` bugs in the vendored build script are worked around from the environment, not patched (see below). |
 | `aarch64-apple-darwin`, `x86_64-apple-darwin` | **`soldr build` + target-shaped Apple SDK** | `soldr prepare` fetches the matching SDK and exports `SDKROOT`; there is no repo secret/variable and no native-builder fallback. |
-| `aarch64-unknown-linux-gnu` | **`cargo-zigbuild`** | cleanest cross. `vendor/whisper-rs-sys/build.rs:395-429` already detects a zig C++ toolchain and switches `stdc++`→`c++`, but `:403-405` early-returns on non-Linux targets — this path is Linux→Linux, so it is exactly the case that code was written for. CMake needs `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64`, injectable through the existing `CMAKE_*` env passthrough at `build.rs:298-306`. |
+| `aarch64-unknown-linux-gnu` | **`soldr build`** | same blessed-linux dispatch as the x86_64 lane: `soldr prepare` provisions the aarch64 conda GCC and exports it (`CC_<triple>`, `CARGO_TARGET_<T>_LINKER`, …). CMake needs `CMAKE_SYSTEM_NAME=Linux` so it does not probe the host toolchain — `ci/xbuild.py::whisper_env` injects it through the existing `CMAKE_*` env passthrough at `build.rs:298-306`. |
 
-### Invariant: soldr owns Apple and Windows-MSVC cross builds
+### Invariant: soldr owns the cross toolchain — every triple
 
 **No workflow, build helper or release script may install or invoke a cross
-compiler directly for a `*-apple-darwin` or `*-pc-windows-msvc` target.** That
+compiler directly for any shipped triple.** That
 means no `cargo xwin`, no `cargo-xwin`, no `cargo zigbuild` / `cargo-zigbuild`,
 no `maturin --zig`, no `zig cc`, no `cross`, no `osxcross`, and no hand-rolled
 install of any of them. `soldr prepare --target <triple>` provisions the
 toolchain and `soldr build --target <triple>` links against it. Nothing else.
 
-**Zig stays correct for Linux.** `aarch64-unknown-linux-gnu` crosses through
-`cargo-zigbuild`, and the manylinux wheel links through `maturin --zig`. The
-rule is target-aware, not a blanket ban — a rule that broke the Linux lanes
-would be reverted within a day.
+**Zig is retired everywhere (#858).** This rule used to be target-aware:
+`aarch64-unknown-linux-gnu` crossed through `cargo-zigbuild` and the manylinux
+wheel linked through `maturin --zig`, on the theory that zig was the cleanest
+Linux cross. soldr ≥ 0.8.40 broke that theory: its blessed-linux `prepare`
+dispatch provisions a gcc-13.3.0-glibc-2.17 conda toolchain and exports it
+(`CC_<triple>`, `CARGO_TARGET_<T>_LINKER`, …) — that toolchain *is* the
+manylinux2014 floor now. Layering cargo-zigbuild on top split the C++ runtime:
+the vendored `whisper-rs-sys` build script detected zig and emitted `-lc++`
+while soldr's conda GCC (which has no LLVM libc++) did the link, and every
+2.5.2–2.5.4 auto-release died on the aarch64 lane with
+`ld: cannot find -lc++`. One toolchain owns compile and link, end to end, on
+every lane.
 
-`cargo xwin` and `cargo zigbuild --target *-apple-darwin` remain *technically*
+`cargo xwin` and `cargo zigbuild` remain *technically*
 reachable, and soldr's own `docs/CROSS_COMPILE.md` documents them as legacy
 passthroughs. That is the whole reason this is written down: the fast path and
 the slow path are one word apart in a YAML file.
@@ -150,7 +158,7 @@ Three things enforce it, because no one of them is sufficient:
 | Guard | Catches | Blind to |
 | --- | --- | --- |
 | `ci/banned_cross_tools.py` (runs in `bash lint` and CI's static job) | a literal command in YAML, Python, shell, PowerShell, TOML, Rust or a Dockerfile — including the argv-list form `["cargo", "xwin", ...]` and multi-line install steps | a *conditional* tool at a target held in a variable |
-| `ci/xbuild.py::cargo_argv` raises on `zigbuild` + an Apple/MSVC triple | the dispatch itself, whatever the target's provenance | a caller that bypasses `cargo_argv` |
+| `ci/xbuild.py::cargo_argv` raises on the `zigbuild` strategy outright — the strategy is retired, not conditionally routed | the dispatch itself, whatever the target's provenance; a one-word matrix edit cannot resurrect the path | a caller that bypasses `cargo_argv` |
 | `tests/test_ci_matrix.py` | every matrix triple's `strategy`, and the argv `cargo_argv` actually returns for it | a command path outside the matrix |
 
 The linter's failure names the file, line, rejected tool, the target family, and
@@ -181,7 +189,12 @@ table is split:
   argv list), because it is an ordinary English word: unanchored, `name: cross
   build matrix` and `let msg = "cross build failed";` both fail the lint.
 - **Conditional on a soldr-owned target** — `cargo zigbuild`, `maturin --zig`,
-  `zig cc`. Correct for `*-unknown-linux-*`, rejected at Apple/MSVC.
+  `zig cc`. Historically correct for `*-unknown-linux-*`, rejected at
+  Apple/MSVC. The rule class is retained in the scanner even though #858
+  retired zig from the Linux lanes too: the conditional rules require a
+  literal triple on the line, so they were never the guard that keeps zig out
+  of the Linux lanes — the structural refusal in `ci/xbuild.py::cargo_argv`
+  and the matrix pin in `tests/test_ci_matrix.py` are.
 - **Installs**, at any target, matched against the whole file rather than line
   by line so the GitHub Actions shape (`taiki-e/install-action` with
   `tool: cargo-xwin` two lines below) is caught. Also `cargo binstall`, `brew`,
@@ -217,8 +230,10 @@ test install install.sh install.ps1 publish` and `.cargo/config.toml` — 302
 files as of this writing. `crates/` covers the product source and not just the
 asset scripts under it: clud shells out to build commands, so a `cargo xwin` in
 Rust is a real vector. `vendor/` stays out — third-party source we do not
-author, where `whisper-rs-sys/build.rs` legitimately reasons about zig's C++
-runtime for the Linux lanes. `.claude/hooks` rather than `.claude` because the
+author, where `whisper-rs-sys/build.rs` legitimately reasons about toolchains
+we no longer invoke — including the zig-detection branch whose `-lc++`
+emission is exactly what #858 retired zig to avoid. `.claude/hooks` rather
+than `.claude` because the
 latter also holds `worktrees/`, an ignored second checkout.
 
 **Escape hatch.** Comments are stripped so prose explaining the ban stays legal.
@@ -310,10 +325,12 @@ only by *target triple*, which is the minimum possible:
 - `setup-soldr` with `cache-key-suffix: build-<triple>`. Six namespaces total,
   down from twelve, and each is now written by exactly one job per run rather
   than raced by three.
-- The native lane runs `soldr-cook` with flags matching the requested profile.
-  Cross lanes skip the cook because setup happens before their target SDK is
-  prepared; a host cook cannot be reused by a foreign target. Their per-triple
-  build caches still persist the real target artifacts.
+- No lane runs `soldr-cook` anymore: the cook is keyed on `strategy: native`
+  in `setup-build`, and #858 moved the last native lane (x86_64 Linux) to the
+  soldr strategy for its glibc floor. The cook cannot run before
+  `soldr prepare` provisions the lane's toolchain, and a host cook cannot be
+  reused by a prepared target. The per-triple build caches still persist the
+  real target artifacts.
 - All six build jobs run the same runner image (`ubuntu-24.04`), so host-side
   artifacts — proc-macro crates, build scripts, `protox`/`prost-build` — have
   identical fingerprints across targets. They are still stored per-triple, but
@@ -382,41 +399,40 @@ Requirement: nothing builds `--release` except the release pipeline.
 - The 24 deleted leaf workflows each carried a `build-mode: [dev, release]`
   dispatch choice — six user-reachable paths to a release build outside the
   release pipeline. Deleting them closes that surface.
-- `--zig --compatibility manylinux2014` (`ci/build_wheel.py:48-51`) stays on the
-  release path only; CI dev wheels are plain `--profile dev`.
+- `--compatibility manylinux2014` (`ci/xbuild.py::cmd_wheel`) stays on the
+  release path only; CI dev wheels are plain `--profile dev`, and a *local*
+  Linux release wheel (`ci/build_wheel.py`) is tagged `linux` —
+  non-distributable, because the local venv has no soldr blessed-linux
+  toolchain and cannot honestly claim a floor.
 
-### The manylinux glibc floor is `--compatibility`, not `--target`
+### The manylinux glibc floor is `soldr prepare`'s toolchain, not a maturin flag
 
-`ci/xbuild.py::manylinux_wheel_env` owns this and is the only place that should.
-Three traps, all of which shipped a red release run before being understood:
+The floor has exactly one supplier: `soldr prepare` (dispatch=blessed-linux,
+soldr ≥ 0.8.40) provisions a gcc-13.3.0-glibc-2.17 conda toolchain and exports
+it (`CC_<triple>`, `CXX_<triple>`, `CARGO_TARGET_<T>_LINKER`, …) before any
+compile. Every object — Rust *and* the whisper.cpp C/C++ that dominates the
+build — is produced and linked against that 2.17 floor, in the same
+`target/<triple>/` directory the compile and test steps use. There is no
+second toolchain, no re-link, and no per-wheel environment surgery.
 
-1. **The floor cannot be spelled on `--target`.** `cargo zigbuild` accepts
-   `x86_64-unknown-linux-gnu.2.17`; maturin does not — it hands `--target`
-   straight to `target-lexicon`, which rejects the suffix as an unknown triple.
-   maturin *derives* `<triple>.2.17` itself from the manylinux platform tag and
-   passes that to zig, so `--compatibility manylinux2014 --zig` is the entire
-   mechanism. Neither does `soldr prepare` take the suffix (soldr#2139 is on
-   `main`, not in the pinned 0.8.30).
-2. **`soldr prepare`'s exports outrank zig's.** cargo-zigbuild installs its
-   2.17-floored `cc`/`c++`/`ar`/`ranlib` shims and the linker with
-   `add_env_if_missing`, which also consults the ambient environment. Because
-   `soldr prepare` exports `CC_<triple>`, `CARGO_TARGET_<T>_LINKER` and friends
-   for the compile and test steps, the wheel build silently split its
-   toolchain — Rust at 2.17, the whisper.cpp C/C++ at soldr's default — and the
-   audit rejected it for `GLIBC_2.25/2.27/2.28`. The fix is to drop those
-   variables for the wheel build, which is safe only because no `*-sys` crate
-   needs the prepared sysroot on Linux (`cpal` is cfg'd off there).
-3. **Only the cross lanes get a zig on PATH.** cargo-zigbuild resolves zig as
-   `which(python3) -m ziglang` then `which(zig)`. On the native `x86_64` lane
-   `python3` is the hosted-tool interpreter (no `ziglang`) and `soldr prepare`
-   is skipped, so the release wheel died with "Failed to find zig" while the
-   ARM lane sailed past it. `CARGO_ZIGBUILD_PYTHON_PATH=sys.executable` names
-   the venv interpreter that does have `ziglang` (via the `maturin[zig]` dev
-   dep), uniformly on every lane.
+maturin's `--compatibility manylinux2014` is therefore an **audit plus a
+platform tag**, not the floor's supplier: it verifies the finished artifact
+carries no versioned symbol newer than glibc 2.17 and stamps the manylinux2014
+tag. If soldr's toolchain regresses, the audit is what turns the release red.
+
+Why it is this way (#858): the previous design layered `maturin --zig` /
+cargo-zigbuild on top of soldr's exports to supply the floor, and needed a
+`manylinux_wheel_env` helper to drop `soldr prepare`'s variables so zig's
+shims could win, plus a separate `CARGO_TARGET_DIR` for the re-link. Two
+toolchains meant a split C++ runtime: the vendored `whisper-rs-sys` build
+script detected zig and emitted `-lc++` while soldr's conda GCC (no LLVM
+libc++) did the link, and releases 2.5.2–2.5.4 all died on the aarch64 lane
+with `ld: cannot find -lc++`. Retiring zig collapsed the wheel build to "reuse
+the compiled artifact, package it, audit it".
 
 None of this is exercised by `ci.yml` — `_build-target.yml` refuses
 `profile: release` outside Auto Release — so the release wheel path is only
-ever proven by a real tag. Treat `manylinux_wheel_env`'s unit tests in
+ever proven by a real tag. Treat `cmd_wheel`'s unit tests in
 `tests/test_ci_xbuild.py` as the standing contract.
 
 ## Deduplicated checks
@@ -526,10 +542,10 @@ another.
 
 Not fixed here, recorded so they are not rediscovered:
 
-- **Cross-lane cold starts.** The native lane can reuse `soldr-cook`, but cross
-  lanes prepare their SDK after setup-soldr and deliberately skip a host-only
-  cook. A miss in the per-triple target/build cache still means compiling the
-  foreign dependency graph once.
+- **Cold starts.** Every lane prepares its toolchain after setup-soldr and
+  deliberately skips a host-only cook (since #858 there is no native lane
+  left to run one). A miss in the per-triple target/build cache still means
+  compiling the dependency graph once.
 - **The 10 GB per-repo Actions cache quota.** Six per-triple `target/` caches
   plus the dylint cache plus the venv caches plausibly exceed it, and eviction
   is silent — `restore-keys` simply miss and the job rebuilds cold.

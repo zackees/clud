@@ -9,7 +9,7 @@ inputs:
     description: Rust target triple this job will build.
     required: true
   strategy:
-    description: 'native | zigbuild | soldr'
+    description: 'native | soldr'
     required: true
   profile:
     description: 'dev | release. Keeps the dependency cook aligned with the real build.'
@@ -143,15 +143,14 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # NB: this prep is for the compile and test steps only -- it has no
-        # say in the shipped wheel's glibc floor. The variables it exports
-        # (CC_<triple>, CARGO_TARGET_<T>_LINKER, ...) are the same ones
-        # cargo-zigbuild installs its 2.17 shims into, and cargo-zigbuild
-        # yields to whatever is already set, so `ci/xbuild.py` drops them for
-        # the release wheel build and lets zig own that link end to end.
-        # Neither soldr's `<triple>.<glibc>` spelling (soldr#2139, absent from
-        # the pinned 0.8.30) nor maturin's `--target` can carry the floor;
-        # `--compatibility manylinux2014 --zig` is what does.
+        # NB: on Linux targets this prep IS the shipped wheel's glibc floor:
+        # soldr >= 0.8.40's blessed-linux dispatch provisions a
+        # gcc-13.3.0-glibc-2.17 conda toolchain and exports it
+        # (CC_<triple>, CARGO_TARGET_<T>_LINKER, ...), so every object and
+        # the final link are produced against manylinux2014's 2.17 floor.
+        # maturin's `--compatibility manylinux2014` audit then verifies that
+        # floor rather than supplying it. Zig / cargo-zigbuild are retired
+        # (#858) -- layering them over these exports split the C++ runtime.
         "${SOLDR_BINARY:-soldr}" prepare \
           --target "${{ inputs.target }}" \
           --github-env "$GITHUB_ENV"

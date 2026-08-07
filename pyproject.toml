@@ -53,7 +53,9 @@ test = [
 dev = [
     { include-group = "test" },
     "cmake>=3.26",
-    "maturin[zig]>=1.7,<2",
+    # No [zig] extra: zig was retired from every lane in #858 — soldr's
+    # blessed-linux toolchain supplies the manylinux floor now.
+    "maturin>=1.7,<2",
     "ruff>=0.8.0",
 ]
 # soldr is intentionally NOT a Python dev dep — install it via ./install

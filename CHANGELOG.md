@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- The auto-release aarch64 Linux lane works again — releases 2.5.2 through
+  2.5.4 all died there with `ld: cannot find -lc++` — by retiring Zig from the
+  build system entirely: soldr now owns every cross lane, including both
+  `*-unknown-linux-gnu` lanes (even same-arch x86_64). The root cause was two
+  toolchains sharing one link: soldr ≥ 0.8.40's blessed-linux `soldr prepare`
+  exports a gcc-13.3.0-glibc-2.17 conda toolchain, and layering cargo-zigbuild
+  on top split the C++ runtime — the vendored whisper-rs-sys build script
+  detected zig and emitted `-lc++` while soldr's conda GCC (no LLVM libc++)
+  did the link. The manylinux2014 floor now comes from soldr's glibc-2.17
+  toolchain itself; maturin's `--compatibility manylinux2014` audits and tags
+  the wheel rather than supplying the floor. Local Linux release wheels
+  (`bash build --release`) are tagged `linux` (non-distributable), since a dev
+  venv has no blessed toolchain and cannot honestly claim a floor. The
+  `zigbuild` strategy is structurally refused in `ci/xbuild.py`, and
+  `ziglang` / `maturin[zig]` are dropped from the dev dependencies. See
+  zackees/clud#858.
 - `clud` no longer prints `[clud] updated /clud-pr` and `[clud] updated
   /clud-issue` on every single launch. Two skill installers used to embed two
   forked copies of those skills from two different source trees and both wrote

@@ -82,25 +82,22 @@ def test_every_target_cross_compiles_on_linux():
     assert all(entry["runs-on"] == "ubuntu-24.04" for entry in include)
 
 
-def test_darwin_and_windows_use_the_soldr_blessed_cross_path():
+def test_every_target_uses_the_soldr_blessed_cross_path():
     """The legacy passthrough in soldr's docs/CROSS_COMPILE.md is
     `cargo xwin` / `cargo zigbuild`; (cross-lint: allow — named on purpose)
-    `soldr build` is the blessed surface. Pinning this here keeps a future
-    edit from silently regressing to a hand-installed cross wrapper."""
+    `soldr build` is the blessed surface for EVERY triple since #858 —
+    blessed-linux dispatch supplies the glibc-2.17 manylinux floor, so even
+    the same-arch x86_64 lane crosses through soldr. Pinning this here keeps
+    a future edit from silently regressing to a hand-installed wrapper or to
+    a floorless native build."""
     include = build_matrix(selected("full"))["include"]
-    crossed = [
-        entry
-        for entry in include
-        if "apple" in entry["target"] or "windows" in entry["target"]
-    ]
-    assert len(crossed) == 4
-    assert all(entry["strategy"] == "soldr" for entry in crossed)
+    assert len(include) == len(TARGETS)
+    assert all(entry["strategy"] == "soldr" for entry in include)
 
 
-def test_no_target_uses_a_hand_installed_cross_wrapper_for_msvc_or_darwin():
+def test_no_target_uses_a_hand_installed_cross_wrapper():
     for target in TARGETS:
-        if "windows" in target.triple or "apple" in target.triple:
-            assert target.strategy == "soldr", target.triple
+        assert target.strategy == "soldr", target.triple
 
 
 def test_cross_argv_never_routes_apple_or_msvc_through_a_banned_tool():
@@ -120,20 +117,19 @@ def test_cross_argv_never_routes_apple_or_msvc_through_a_banned_tool():
     from ci.xbuild import cargo_argv
 
     banned = ("xwin", "zigbuild", "zig", "cross", "osxcross")  # cross-lint: allow
-    soldr_owned = [t for t in TARGETS if "apple" in t.triple or "windows" in t.triple]
-    assert soldr_owned, "matrix has no crossed targets; this test would be vacuous"
+    assert TARGETS, "matrix has no targets; this test would be vacuous"
 
-    for target in soldr_owned:
+    for target in TARGETS:
         # Not just the strategy the matrix assigns today: a future edit could
         # change it, and the point is that no strategy may reach a banned tool
-        # for these triples.
+        # for ANY triple — Linux included, since #858 retired zigbuild.
         for strategy in ("native", "zigbuild", "soldr"):
             for subcommand in (["build"], ["test", "--no-run"], ["clippy"]):
                 if strategy == "zigbuild":
                     # Refused outright rather than silently producing a working
                     # zigbuild argv. Returning something safe would let the
                     # misconfiguration sit in the matrix unnoticed.
-                    with pytest.raises(ValueError, match="soldr"):
+                    with pytest.raises(ValueError, match=r"retired|soldr"):
                         cargo_argv(subcommand, target.triple, strategy)
                     continue
                 argv = cargo_argv(subcommand, target.triple, strategy)
@@ -141,15 +137,6 @@ def test_cross_argv_never_routes_apple_or_msvc_through_a_banned_tool():
                     f"{target.triple} / {strategy} / {subcommand[0]} produced "
                     f"{argv}, which drives a banned cross tool"
                 )
-
-
-def test_linux_targets_keep_the_supported_zig_cross_path():
-    """The counterweight. A rule that also broke Linux would be reverted, so
-    prove the Zig path is still reachable where it is correct."""
-    from ci.xbuild import cargo_argv
-
-    argv = cargo_argv(["build"], "aarch64-unknown-linux-gnu", "zigbuild")
-    assert "zigbuild" in argv, f"Linux zig cross must survive the #637 lint: {argv}"
 
 
 def test_test_matrix_always_uses_native_runners():
