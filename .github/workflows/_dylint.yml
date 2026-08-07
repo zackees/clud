@@ -38,7 +38,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - uses: zackees/setup-soldr@v0
         with:
-          version: 0.8.39
+          version: 0.8.40
           cache: true
           toolchain: 1.94.1
           cache-key-suffix: dylint

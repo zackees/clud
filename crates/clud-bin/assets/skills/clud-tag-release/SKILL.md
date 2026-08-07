@@ -20,7 +20,7 @@ Tag a release the way `zackees/zccache` does it: the tag is the trigger, the wor
 
 ## Code Change Rule
 
-This skill should not implement fixes or features. If the release is blocked by a code bug or missing feature, stop and send the user to `/clud-pr`; that work must use RED -> GREEN before this tag-release flow resumes.
+This skill should not implement fixes or features. If the release is blocked by a code bug or missing feature, stop and send the user to `/goal`; that work must use RED -> GREEN before this tag-release flow resumes.
 
 ## Workflow
 

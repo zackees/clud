@@ -33,7 +33,7 @@ inputs:
       other setup-soldr version. The backend and these shims share one daemon
       socket, and mixing protocol versions resets the connection (#580).
     required: false
-    default: "0.8.39"
+    default: "0.8.40"
 
 runs:
   using: composite

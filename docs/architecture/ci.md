@@ -211,7 +211,7 @@ Emacs page break) made the original and stripped line lists differ in length,
 and `bash lint` died with a `ValueError` traceback instead of printing a
 finding.
 
-**Scope.** `.github/`, `ci/`, `bench/`, `crates/`, `dylints/`, `skills/`,
+**Scope.** `.github/`, `ci/`, `bench/`, `crates/`, `dylints/`,
 `testbins/`, `tests/`, `.claude/hooks/`, plus the root entrypoints `build lint
 test install install.sh install.ps1 publish` and `.cargo/config.toml` — 302
 files as of this writing. `crates/` covers the product source and not just the

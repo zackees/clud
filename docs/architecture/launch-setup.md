@@ -82,7 +82,6 @@ Global setup runs only the effective harness's registered actions:
 | Effective harness | Action | Persistent paths |
 |---|---|---|
 | Claude | bundled skills | `~/.claude/skills/` |
-| Claude | Claude drift skills | `~/.claude/skills/` |
 | Codex | bundled skills | `~/.codex/skills/` gated by `~/.codex`; stale clud-managed `~/.agents/skills/` copies are purged |
 | Codex | hook timeout normalization | `~/.codex/hooks.json` and `~/.clud/settings.lock` / `settings.json` |
 | All | persisted global setup preference | `~/.clud/settings.lock` / `settings.json` |

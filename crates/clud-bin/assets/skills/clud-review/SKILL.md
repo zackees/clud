@@ -1,9 +1,9 @@
 ---
 name: clud-review
-description: Pre-push code review gate. Inventories changed files, groups them by language bucket, and gives one primary reviewer every non-empty bucket plus all applicable repository rules. An invocation-wide budget of one covers retries and follow-ups. Discovers .coderabbit.yaml, repo review skills/agents, CLAUDE.md/AGENTS.md guidance, and optionally runs the originating issue's focused test for RED -> GREEN validation. Read-only; called by /clud-fix or /clud-pr before `gh pr create`.
+description: Pre-push code review gate. Inventories changed files, groups them by language bucket, and gives one primary reviewer every non-empty bucket plus all applicable repository rules. An invocation-wide budget of one covers retries and follow-ups. Discovers .coderabbit.yaml, repo review skills/agents, CLAUDE.md/AGENTS.md guidance, and optionally runs the originating issue's focused test for RED -> GREEN validation. Read-only; run standalone, or called by /clud-fix-quick or a /goal run before `gh pr create`.
 triggers:
   - When the user says "/clud-review" or "/clud-review <commit-range>"
-  - When /clud-fix or /clud-pr is about to push a PR and the user wants a pre-flight review (called as a delegated step)
+  - When a caller is about to push a PR and wants a pre-flight review (called as a delegated step)
   - When the user says "review this before pushing" with an active worktree
 ---
 <!-- managed-by: clud -->
@@ -20,7 +20,7 @@ the originating issue's focused test for local RED -> GREEN validation.
 could be summoned at every push — same content they'd see, same rules
 they'd apply, returned in seconds instead of days.
 
-For code changes, the caller ([[clud-fix]] / [[clud-pr]]) preserves
+For code changes, the caller preserves
 RED -> GREEN: identify or add the focused failing test/repro first,
 implement the scoped change, then rerun that focused signal until it
 passes before broad gates. `/clud-review` ITSELF never edits code —
@@ -62,9 +62,8 @@ or the normal findings/no-rules verdict followed by `review agents launched: 1`.
 ## Input
 
 - **Bare** `/clud-review` — review `git diff origin/main...HEAD` from
-  the current working directory. The intended invocation point: a
-  `/clud-fix` or `/clud-pr` agent runs this as the last step before
-  `gh pr create`.
+  the current working directory. The intended invocation point: the
+  parent agent invokes this as the last step before `gh pr create`.
 - **`/clud-review <commit-range>`** — review the specified range
   (e.g. `HEAD~3..HEAD`).
 - **`/clud-review --issue <N>`** — explicit issue number for the
@@ -362,7 +361,7 @@ verdict is `clud-review: clean`. If no bucket had any applicable rules
 
 ## Issue-test discovery and execution
 
-If `/clud-review` was invoked from `/clud-fix` or `/clud-pr` (or from a
+If `/clud-review` was invoked from a parent workflow (or from a
 worktree whose branch name encodes an issue number), it additionally
 tries to find a focused test that **covers the originating issue** and
 run it. Intent: RED -> GREEN validation at the local level — before
@@ -436,7 +435,7 @@ existing lint/test step.
 ### Bare `/clud-review`
 
 Reviews `git diff origin/main...HEAD` from the current working
-directory. The intended use: a `/clud-fix` or `/clud-pr` agent
+directory. The intended use: the parent agent
 invokes this as the last step before `gh pr create`. If findings are
 non-empty (CRITICAL or HIGH), the caller should fix them and
 re-review before pushing.
@@ -446,10 +445,10 @@ re-review before pushing.
 Reviews the specified range (e.g. `HEAD~3..HEAD`). Useful for
 reviewing a specific subset of work without pushing.
 
-### Delegated from `/clud-fix` or `/clud-pr`
+### Delegated from a parent workflow
 
-The two parent skills already have a "lint and test" step before push.
-`/clud-review` slots in between "tests pass" and `gh pr create`:
+A parent workflow with a "lint and test" step before push slots
+`/clud-review` in between "tests pass" and `gh pr create`:
 
 ```text
 6. Lint and test.
@@ -459,10 +458,6 @@ The two parent skills already have a "lint and test" step before push.
     and stop (not clean after 3 cycles).
 7. Clean tree gate.
 ```
-
-Wiring `/clud-review` into `/clud-fix` and `/clud-pr` is OUT OF SCOPE
-for this skill's introduction — that's a follow-up PR. The SKILL.md
-documents the delegated mode for forward compatibility.
 
 ## Generated prompt structure
 
@@ -503,8 +498,8 @@ buckets" combines results into the user-visible output.
 ## When Not To Use This
 
 - The user wants a post-PR / post-merge review of someone else's work
-  — that's [[clud-pr]] PR triage mode (look for CodeRabbit findings on
-  the existing PR) plus the user's own judgment.
+  — look for CodeRabbit findings on the existing PR, plus the user's
+  own judgment.
 - The user wants to file new issues from CodeRabbit findings on an
   already-merged PR — that's [[clud-issue-triage]].
 - The user wants the FULL test suite run — that's `bash test` or the

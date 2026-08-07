@@ -21,7 +21,7 @@ Place each dependent checkout at `<current-repo>/.extern-repos/<repo-name>/`. On
 
 Before cloning, verify `.extern-repos/` is ignored by the current repo. If it is not ignored, ask before adding the ignore entry and refuse to create an unignored clone.
 
-Create feature branches in the dependent repo with the same short-name style as clud-pr, for example `feat/<short-name>`.
+Create feature branches in the dependent repo using the `feat/<short-name>` convention.
 
 ## Coordination
 
