@@ -54,7 +54,11 @@ use running_process::{
 pub struct ManagedSubprocess(ManagedSubprocessInner);
 
 enum ManagedSubprocessInner {
-    Native(NativeProcess),
+    // Boxed: `NativeProcess` grew to ~350 bytes in running-process 4.9.0, and
+    // an unboxed variant here trips `clippy::large_enum_variant` against the
+    // much smaller `Suspended` variant. The box keeps the enum small; match
+    // arms auto-deref through it unchanged.
+    Native(Box<NativeProcess>),
     #[cfg(windows)]
     Suspended(SuspendedSubprocess),
 }
@@ -117,7 +121,7 @@ impl ManagedSubprocess {
             nice: None,
         });
         process.start().map_err(|error| error.to_string())?;
-        Ok(Self(ManagedSubprocessInner::Native(process)))
+        Ok(Self(ManagedSubprocessInner::Native(Box::new(process))))
     }
 
     pub fn pid(&self) -> Option<u32> {
