@@ -6,17 +6,17 @@
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
-## Covenant For Humanity
+## Built in support for running codex on the claude harness:
 
-*The token is not debris, not novelty, not signal without consequence. It is ore
-awaiting intention, and intention is the furnace by which the digital alchemist
-sifts value from noise. When the artifact is true, it does not merely answer; it
-extends what a person may become. The lesser practitioner seeks output, but the
-digital alchemist seeks transformation. The measure is not volume, but whether
-the work carries consciousness across a threshold.*
+`clud --codex --harness claude`
 
-Read the full [Affirmations Of Covenants](docs/AFFIRMATIONS_OF_COVENANTS.md)
-guiding this software intention.
+## A /goal tuned for one task: solve it and push and merge the PR
+
+`clud do github.com/zackess/isssu/123`
+
+## Grind down your bug list starting with the easy one
+
+`clud grind`
 
 [![CI](https://github.com/zackees/clud/actions/workflows/ci.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/ci.yml)
 [![Auto Release](https://github.com/zackees/clud/actions/workflows/auto-release.yml/badge.svg)](https://github.com/zackees/clud/actions/workflows/auto-release.yml)
