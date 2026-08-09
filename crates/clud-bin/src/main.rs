@@ -10,8 +10,30 @@ use clud::{
 use std::io::{self, IsTerminal, Read, Write};
 
 fn main() {
-    let mut args = args::Args::parse_with_passthrough();
+    run(parse_args());
+}
 
+#[cfg(windows)]
+fn parse_args() -> args::Args {
+    // Clap builds the complete nested command tree while parsing argv. Keep
+    // only that work off Windows' small default main-thread stack so adding a
+    // maintenance command cannot make even `clud --help` overflow, while the
+    // rest of clud remains on the process main thread for console/OLE APIs.
+    std::thread::Builder::new()
+        .name("clud-arg-parser".to_string())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(args::Args::parse_with_passthrough)
+        .expect("spawn clud argument parser")
+        .join()
+        .expect("clud argument parser panicked")
+}
+
+#[cfg(not(windows))]
+fn parse_args() -> args::Args {
+    args::Args::parse_with_passthrough()
+}
+
+fn run(mut args: args::Args) {
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as
