@@ -201,6 +201,7 @@ fn backend_prompt_launch_plan(
         resume: None,
         claude: launch_target.model_provider == ModelProvider::Claude,
         codex: launch_target.model_provider == ModelProvider::Codex,
+        deepseek: launch_target.model_provider == ModelProvider::DeepSeek,
         harness: Some(launch_target.requested_harness),
         subprocess: true,
         pty: false,
@@ -255,8 +256,15 @@ mod tests {
     #[test]
     fn fix_hooks_prompt_uses_the_resolved_cross_route_harness() {
         let args = args(&["clud", "--codex", "--harness", "claude", "--fix-hooks"]);
-        let target =
-            resolve_launch_target(args.claude, args.codex, args.harness, None, None).unwrap();
+        let target = resolve_launch_target(
+            args.claude,
+            args.codex,
+            args.deepseek,
+            args.harness,
+            None,
+            None,
+        )
+        .unwrap();
 
         let plan = backend_prompt_launch_plan(&args, target, "repair hooks".to_string(), "claude");
 
@@ -274,6 +282,7 @@ mod tests {
         let target = resolve_launch_target(
             args.claude,
             args.codex,
+            args.deepseek,
             args.harness,
             Some(ModelProvider::Codex),
             Some(HarnessSelection::Claude),
@@ -293,7 +302,14 @@ mod tests {
     fn fix_hooks_rejects_the_unsupported_reverse_cross_route() {
         let args = args(&["clud", "--claude", "--harness", "codex", "--fix-hooks"]);
         assert_eq!(
-            resolve_launch_target(args.claude, args.codex, args.harness, None, None),
+            resolve_launch_target(
+                args.claude,
+                args.codex,
+                args.deepseek,
+                args.harness,
+                None,
+                None,
+            ),
             Err(LaunchTargetError::ClaudeViaCodexUnsupported)
         );
     }

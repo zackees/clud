@@ -387,8 +387,15 @@ fn save_settings_transaction_at(
     }
 
     let launch = global_launch_preferences_from_document(&document);
-    let target = resolve_launch_target(false, false, None, launch.model_provider, launch.harness)
-        .map_err(SettingsError::InvalidLaunchTarget)?;
+    let target = resolve_launch_target(
+        false,
+        false,
+        false,
+        None,
+        launch.model_provider,
+        launch.harness,
+    )
+    .map_err(SettingsError::InvalidLaunchTarget)?;
     if let Some(scope) = setup_scope {
         set_launch_setup_scope(&mut document, target.effective_harness, scope);
     }

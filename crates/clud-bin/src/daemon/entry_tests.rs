@@ -151,6 +151,7 @@ fn transcript_forces_centralized_daemon() {
         resume: None,
         claude: false,
         codex: false,
+        deepseek: false,
         harness: None,
         subprocess: false,
         pty: false,
@@ -207,12 +208,43 @@ fn repeat_command_pins_resolved_provider_and_effective_harness() {
         .map(str::to_string)
         .collect(),
     );
-    let target =
-        crate::backend::resolve_launch_target(args.claude, args.codex, args.harness, None, None)
-            .unwrap();
+    let target = crate::backend::resolve_launch_target(
+        args.claude,
+        args.codex,
+        args.deepseek,
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
     let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
     let command = build_repeat_once_command(&args, &plan).unwrap();
     assert!(command.windows(1).any(|part| part == ["--codex"]));
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--harness", "claude"]));
+}
+
+#[test]
+fn repeat_command_preserves_deepseek_provider() {
+    let args = Args::parse_from_raw(
+        ["clud", "--deepseek", "loop", "--repeat", "1h", "task"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    let target = crate::backend::resolve_launch_target(
+        args.claude,
+        args.codex,
+        args.deepseek,
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    assert!(command.windows(1).any(|part| part == ["--deepseek"]));
     assert!(command
         .windows(2)
         .any(|part| part == ["--harness", "claude"]));

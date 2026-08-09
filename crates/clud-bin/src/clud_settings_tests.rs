@@ -193,6 +193,30 @@ fn round_trips_harness_preference_and_reads_old_settings() {
 }
 
 #[test]
+fn deepseek_model_provider_round_trips_through_settings() {
+    let home = tempdir().unwrap();
+
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            model_provider: Some(ModelProvider::DeepSeek),
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        load_global_launch_preferences_at(home.path())
+            .unwrap()
+            .model_provider,
+        Some(ModelProvider::DeepSeek)
+    );
+    let json: Value =
+        serde_json::from_str(&fs::read_to_string(settings_path_at(home.path())).unwrap()).unwrap();
+    assert_eq!(json["backend"]["default"], "deepseek");
+}
+
+#[test]
 fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
     let home = tempdir().unwrap();
     let path = settings_path_at(home.path());

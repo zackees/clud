@@ -25,11 +25,15 @@ pub struct Args {
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<Option<String>>,
 
-    #[arg(long = "claude", conflicts_with = "codex")]
+    #[arg(long = "claude", conflicts_with_all = ["codex", "deepseek"])]
     pub claude: bool,
 
-    #[arg(long = "codex", conflicts_with = "claude")]
+    #[arg(long = "codex", conflicts_with_all = ["claude", "deepseek"])]
     pub codex: bool,
+
+    /// Use DeepSeek's Anthropic-compatible API through the Claude harness.
+    #[arg(long = "deepseek", conflicts_with_all = ["claude", "codex"])]
+    pub deepseek: bool,
 
     /// Select the agent harness independently from the model provider.
     #[arg(long = "harness", value_enum)]
@@ -820,6 +824,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--continue",
         "--claude",
         "--codex",
+        "--deepseek",
         "--subprocess",
         "--pty",
         "--safe",

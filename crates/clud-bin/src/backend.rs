@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub enum ModelProvider {
     Claude,
     Codex,
+    #[serde(rename = "deepseek")]
+    DeepSeek,
 }
 
 impl ModelProvider {
@@ -16,6 +18,7 @@ impl ModelProvider {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::DeepSeek => "deepseek",
         }
     }
 
@@ -23,13 +26,14 @@ impl ModelProvider {
         match value.to_ascii_lowercase().as_str() {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "deepseek" => Some(Self::DeepSeek),
             _ => None,
         }
     }
 
     pub fn native_harness(self) -> Backend {
         match self {
-            Self::Claude => Backend::Claude,
+            Self::Claude | Self::DeepSeek => Backend::Claude,
             Self::Codex => Backend::Codex,
         }
     }
@@ -116,6 +120,8 @@ pub struct ResolvedLaunchTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchTargetError {
     ClaudeViaCodexUnsupported,
+    DeepSeekViaCodexUnsupported,
+    DeepSeekModelUnsupported,
 }
 
 impl std::fmt::Display for LaunchTargetError {
@@ -124,6 +130,14 @@ impl std::fmt::Display for LaunchTargetError {
             Self::ClaudeViaCodexUnsupported => write!(
                 f,
                 "unsupported launch target: Claude provider cannot use the Codex harness"
+            ),
+            Self::DeepSeekViaCodexUnsupported => write!(
+                f,
+                "unsupported launch target: DeepSeek provider requires the Claude harness"
+            ),
+            Self::DeepSeekModelUnsupported => write!(
+                f,
+                "unsupported launch option: DeepSeek uses its fixed provider profile and does not accept --model"
             ),
         }
     }
@@ -231,11 +245,14 @@ pub fn resolve_backend_with_default(
 pub fn resolve_launch_target(
     claude: bool,
     codex: bool,
+    deepseek: bool,
     cli_harness: Option<HarnessSelection>,
     global_provider: Option<ModelProvider>,
     global_harness: Option<HarnessSelection>,
 ) -> Result<ResolvedLaunchTarget, LaunchTargetError> {
-    let (model_provider, provider_source) = if codex {
+    let (model_provider, provider_source) = if deepseek {
+        (ModelProvider::DeepSeek, PreferenceSource::Cli)
+    } else if codex {
         (ModelProvider::Codex, PreferenceSource::Cli)
     } else if claude {
         (ModelProvider::Claude, PreferenceSource::Cli)
@@ -253,8 +270,12 @@ pub fn resolve_launch_target(
         (HarnessSelection::Default, PreferenceSource::BuiltInDefault)
     };
     let effective_harness = requested_harness.resolve(model_provider);
-    if model_provider == ModelProvider::Claude && effective_harness == Backend::Codex {
-        return Err(LaunchTargetError::ClaudeViaCodexUnsupported);
+    if effective_harness == Backend::Codex {
+        match model_provider {
+            ModelProvider::Claude => return Err(LaunchTargetError::ClaudeViaCodexUnsupported),
+            ModelProvider::DeepSeek => return Err(LaunchTargetError::DeepSeekViaCodexUnsupported),
+            ModelProvider::Codex => {}
+        }
     }
 
     Ok(ResolvedLaunchTarget {
@@ -264,6 +285,17 @@ pub fn resolve_launch_target(
         provider_source,
         harness_source,
     })
+}
+
+/// Validate options whose meaning depends on the resolved model provider.
+pub fn validate_provider_options(
+    target: ResolvedLaunchTarget,
+    model: Option<&str>,
+) -> Result<(), LaunchTargetError> {
+    if target.model_provider == ModelProvider::DeepSeek && model.is_some() {
+        return Err(LaunchTargetError::DeepSeekModelUnsupported);
+    }
+    Ok(())
 }
 
 pub fn saved_harness_override_notice(
@@ -406,14 +438,16 @@ mod tests {
     #[test]
     fn launch_target_precedence_is_independent_per_dimension() {
         let cli_providers = [
-            (false, false, None),
-            (true, false, Some(ModelProvider::Claude)),
-            (false, true, Some(ModelProvider::Codex)),
+            (false, false, false, None),
+            (true, false, false, Some(ModelProvider::Claude)),
+            (false, true, false, Some(ModelProvider::Codex)),
+            (false, false, true, Some(ModelProvider::DeepSeek)),
         ];
         let global_providers = [
             None,
             Some(ModelProvider::Claude),
             Some(ModelProvider::Codex),
+            Some(ModelProvider::DeepSeek),
         ];
         let harnesses = [
             None,
@@ -422,7 +456,7 @@ mod tests {
             Some(HarnessSelection::Codex),
         ];
 
-        for (claude, codex, cli_provider) in cli_providers {
+        for (claude, codex, deepseek, cli_provider) in cli_providers {
             for global_provider in global_providers {
                 for cli_harness in harnesses {
                     for global_harness in harnesses {
@@ -449,6 +483,7 @@ mod tests {
                         let result = resolve_launch_target(
                             claude,
                             codex,
+                            deepseek,
                             cli_harness,
                             global_provider,
                             global_harness,
@@ -459,6 +494,15 @@ mod tests {
                             assert_eq!(
                                 result,
                                 Err(LaunchTargetError::ClaudeViaCodexUnsupported),
+                                "cli_provider={cli_provider:?}, global_provider={global_provider:?}, \
+                                 cli_harness={cli_harness:?}, global_harness={global_harness:?}"
+                            );
+                            continue;
+                        }
+                        if provider == ModelProvider::DeepSeek && effective == Backend::Codex {
+                            assert_eq!(
+                                result,
+                                Err(LaunchTargetError::DeepSeekViaCodexUnsupported),
                                 "cli_provider={cli_provider:?}, global_provider={global_provider:?}, \
                                  cli_harness={cli_harness:?}, global_harness={global_harness:?}"
                             );
@@ -487,12 +531,23 @@ mod tests {
             HarnessSelection::Default.resolve(ModelProvider::Codex),
             Backend::Codex
         );
+        assert_eq!(
+            HarnessSelection::Default.resolve(ModelProvider::DeepSeek),
+            Backend::Claude
+        );
     }
 
     #[test]
     fn unsupported_cross_route_is_an_error() {
-        let error = resolve_launch_target(true, false, Some(HarnessSelection::Codex), None, None)
-            .unwrap_err();
+        let error = resolve_launch_target(
+            true,
+            false,
+            false,
+            Some(HarnessSelection::Codex),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error, LaunchTargetError::ClaudeViaCodexUnsupported);
         assert_eq!(
             error.to_string(),
@@ -501,8 +556,30 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_rejects_the_codex_harness_and_model_override() {
+        let target = resolve_launch_target(
+            false,
+            false,
+            true,
+            Some(HarnessSelection::Codex),
+            None,
+            None,
+        );
+        assert_eq!(target, Err(LaunchTargetError::DeepSeekViaCodexUnsupported));
+
+        let target = resolve_launch_target(false, false, true, None, None, None).unwrap();
+        assert_eq!(target.effective_harness, Backend::Claude);
+        assert_eq!(
+            validate_provider_options(target, Some("anything")),
+            Err(LaunchTargetError::DeepSeekModelUnsupported)
+        );
+        assert_eq!(validate_provider_options(target, None), Ok(()));
+    }
+
+    #[test]
     fn saved_non_default_harness_notice_is_green_and_tty_only() {
         let target = resolve_launch_target(
+            false,
             false,
             false,
             None,
@@ -520,6 +597,7 @@ mod tests {
         let saved_default = resolve_launch_target(
             false,
             false,
+            false,
             None,
             Some(ModelProvider::Codex),
             Some(HarnessSelection::Default),
@@ -530,8 +608,15 @@ mod tests {
             None
         );
 
-        let cli_override =
-            resolve_launch_target(false, true, Some(HarnessSelection::Claude), None, None).unwrap();
+        let cli_override = resolve_launch_target(
+            false,
+            true,
+            false,
+            Some(HarnessSelection::Claude),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             saved_harness_override_notice(cli_override, true, false),
             None

@@ -112,6 +112,13 @@ mod tests {
                 PreferenceSource::GlobalSetting,
                 PreferenceSource::GlobalSetting,
             ),
+            (
+                ModelProvider::DeepSeek,
+                HarnessSelection::Default,
+                Backend::Claude,
+                PreferenceSource::Cli,
+                PreferenceSource::BuiltInDefault,
+            ),
         ];
 
         for (provider, requested, effective, provider_source, harness_source) in cases {

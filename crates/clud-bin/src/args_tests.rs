@@ -37,6 +37,18 @@ fn test_codex_backend() {
     let args = parse(&["clud", "--codex"]);
     assert!(args.codex);
     assert!(!args.claude);
+    assert!(!args.deepseek);
+}
+
+#[test]
+fn test_deepseek_backend_is_known_and_conflicts_with_other_providers() {
+    let args = parse(&["clud", "--deepseek"]);
+    assert!(args.deepseek);
+    assert!(!args.claude);
+    assert!(!args.codex);
+    assert!(args.passthrough.is_empty());
+    assert!(Args::try_parse_from(["clud", "--deepseek", "--claude"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--deepseek", "--codex"]).is_err());
 }
 
 #[test]

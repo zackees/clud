@@ -13,6 +13,7 @@ fn launch_hook_gate_follows_effective_harness_not_provider_flag() {
     let claude_harness = crate::backend::resolve_launch_target(
         false,
         true,
+        false,
         Some(crate::backend::HarnessSelection::Claude),
         None,
         None,
@@ -22,6 +23,7 @@ fn launch_hook_gate_follows_effective_harness_not_provider_flag() {
 
     let bare_args = Args::parse_from(["clud"]);
     let saved_codex = crate::backend::resolve_launch_target(
+        false,
         false,
         false,
         None,

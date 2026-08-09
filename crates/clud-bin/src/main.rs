@@ -274,6 +274,7 @@ fn main() {
     let launch_target = match backend::resolve_launch_target(
         args.claude,
         args.codex,
+        args.deepseek,
         args.harness,
         global_launch_preferences.model_provider,
         global_launch_preferences.harness,
@@ -284,6 +285,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
 
     // Issue #112: explicit hook-parity remediation path. This flag resets the
     // sticky opt-out, applies deterministic repairs, and asks the selected
@@ -567,7 +572,8 @@ fn main() {
         }
     };
     if persist_prompted_global_selection {
-        let explicit_provider = (args.claude || args.codex).then_some(launch_target.model_provider);
+        let explicit_provider =
+            (args.claude || args.codex || args.deepseek).then_some(launch_target.model_provider);
         if let Err(error) = clud_settings::save_global_launch_preferences(
             explicit_provider,
             args.harness,

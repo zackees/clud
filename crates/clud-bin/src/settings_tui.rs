@@ -19,7 +19,7 @@ use crate::backend::{HarnessSelection, ModelProvider};
 use crate::clud_settings;
 use crate::preference::{ChoiceOption, ChoiceSelector};
 
-const MODEL_OPTIONS: [ChoiceOption<ModelProvider>; 2] = [
+const MODEL_OPTIONS: [ChoiceOption<ModelProvider>; 3] = [
     ChoiceOption {
         value: ModelProvider::Claude,
         label: "claude",
@@ -28,6 +28,11 @@ const MODEL_OPTIONS: [ChoiceOption<ModelProvider>; 2] = [
     ChoiceOption {
         value: ModelProvider::Codex,
         label: "codex",
+        note: "",
+    },
+    ChoiceOption {
+        value: ModelProvider::DeepSeek,
+        label: "deepseek",
         note: "",
     },
 ];
@@ -107,7 +112,7 @@ fn setting_items() -> Vec<SettingItem> {
         SettingItem {
             key: "backend.default",
             label: "Default model provider",
-            note: "Used when neither --claude nor --codex is supplied.",
+            note: "Used when neither --claude, --codex, nor --deepseek is supplied.",
             value: SettingValue::ModelProvider(
                 launch.model_provider.unwrap_or(ModelProvider::Claude),
             ),
@@ -501,6 +506,8 @@ mod tests {
         let mut model = SettingValue::ModelProvider(ModelProvider::Claude);
         model.cycle();
         assert_eq!(model, SettingValue::ModelProvider(ModelProvider::Codex));
+        model.cycle();
+        assert_eq!(model, SettingValue::ModelProvider(ModelProvider::DeepSeek));
         model.cycle();
         assert_eq!(model, SettingValue::ModelProvider(ModelProvider::Claude));
 
