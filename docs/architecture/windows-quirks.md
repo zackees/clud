@@ -2,7 +2,7 @@
 
 This doc is the inventory of every place `clud` has Windows-specific code,
 with the symptom each piece solves and the `file:line` where it lives. There
-are twelve such carve-outs today: a self-rename trampoline so `pip install`
+are eleven such carve-outs today: a self-rename trampoline so `pip install`
 can overwrite a running `clud.exe`, the BatBadBat `.cmd`/`.bat` rewrite
 mandated by Rust 1.77+, an RAII guard for `ENABLE_VIRTUAL_TERMINAL_INPUT`, a
 small policy adapter over running-process's native `ReadConsoleInputW`
@@ -10,13 +10,15 @@ translator, a console-title keeper that re-stamps `clud <cwd>` when child TUIs
 overwrite it, an OLE `IDropTarget` adapter so dragging a file onto the
 console window actually drops paths into the prompt, `CREATE_NO_WINDOW` for
 daemon-helper subprocesses that would otherwise flash a conhost window, a
-`whisper-rs` carve-out on `aarch64-pc-windows-msvc` where the sys-crate
-doesn't build, a Ctrl+C descendant-tree teardown that reaps orphaned backend
-grandchildren without tripping cmd.exe's batch-job prompt, a Codex
-`PreToolUse` hook diagnostic for batch wrappers that do not propagate
-`$LASTEXITCODE`, and a Claude Code hook stdin diagnostic for the Windows
-pipe/TTY bug cluster. All eleven degrade to no-ops (or different mechanisms
-entirely) on POSIX.
+Ctrl+C descendant-tree teardown that reaps orphaned backend grandchildren
+without tripping cmd.exe's batch-job prompt, a Codex `PreToolUse` hook
+diagnostic for batch wrappers that do not propagate `$LASTEXITCODE`, a
+Claude Code hook stdin diagnostic for the Windows pipe/TTY bug cluster, and
+foreground tool-shell lifecycle tracking. All eleven degrade to no-ops (or
+different mechanisms entirely) on POSIX. (The former `whisper-rs` ARM
+carve-out was removed along with the `whisper-rs` dependency entirely —
+voice transcription is stubbed on every platform now; see
+`crates/clud-bin/src/voice/README.md`.)
 
 ## Why so many?
 
@@ -303,34 +305,7 @@ the codebase stays portable.
   `CREATE_NEW_PROCESS_GROUP`. Returning `None` (rather than `Some(0)`)
   lets `running-process-core`'s "no override" short-circuit stay intact.
 
-### (h) `whisper-rs` ARM carve-out
-
-- **Symptom**: `whisper-rs-sys`'s vendored C++ source does not compile on
-  `aarch64-pc-windows-msvc`. Shipping that dep unconditionally would
-  break the entire Windows ARM build of `clud`.
-
-- **Solution**: The `whisper-rs` dep is target-gated in `Cargo.toml`. In
-  `voice/worker.rs` the `WhisperContextHandle` type alias resolves to
-  `WhisperContext` on supported targets and to `()` on Windows ARM; the
-  real `transcribe_audio` (which loads the model and runs the Whisper
-  inference) is `#[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]`,
-  and a stub at `:153` returns a descriptive error explaining the
-  platform limitation. The test-bypass path
-  (`CLUD_VOICE_TEST_TRANSCRIPT`) is preserved on both branches so the F3
-  state-machine tests still run on Windows ARM. Mic capture, cue
-  playback, the F3 push-to-talk state machine, and downsampling all ship
-  unchanged on every target — the carve-out is scoped to the
-  transcription call only.
-
-- **File**: `crates/clud-bin/src/voice/worker.rs:9` (target-gated
-  `use whisper_rs`); `:18`–`:21` (`WhisperContextHandle` alias); `:80`
-  (real `transcribe_audio`); `:153` (Windows ARM stub).
-
-- **POSIX behavior**: Same as Windows x86_64 — the real `transcribe_audio`
-  is compiled. Only `aarch64-pc-windows-msvc` is carved out; Linux ARM
-  and macOS ARM build `whisper-rs` normally.
-
-### (i) `process_tree::kill_tree` for Ctrl+C backend-tree reap
+### (h) `process_tree::kill_tree` for Ctrl+C backend-tree reap
 
 - **Symptom**: User hits Ctrl+C in a subprocess-mode backend session and
   the prompt takes several seconds to come back; in the meantime an
@@ -370,7 +345,7 @@ the codebase stays portable.
   `sh -c 'sleep 30'` to mirror the `clud → cmd → child` shape and
   asserts the parent is reaped within 5 s.
 
-### (j) Codex hook batch wrappers need `$LASTEXITCODE`
+### (i) Codex hook batch wrappers need `$LASTEXITCODE`
 
 - **Symptom**: `clud --codex` prints:
 
@@ -400,7 +375,7 @@ the codebase stays portable.
 - **POSIX behavior**: No-op. The scanner returns immediately unless
   `cfg!(target_os = "windows")` is true.
 
-### (k) Claude Code hook stdin EOF/TTY bug cluster
+### (j) Claude Code hook stdin EOF/TTY bug cluster
 
 - **Symptom**: Claude Code hooks on Windows can hang until their hook timeout
   when the hook script does an unbounded read such as
@@ -452,7 +427,7 @@ the codebase stays portable.
   `cfg!(target_os = "windows")` is true, and POSIX hook subprocesses receive
   normal pipe EOF semantics from Claude Code.
 
-### (l) Foreground tool-shell lifecycle tracking
+### (k) Foreground tool-shell lifecycle tracking
 
 - **Symptom**: The original #569 foreground Job listener treated every
   `cmd.exe`, PowerShell, or Bash process at every depth as a tool shell. When a

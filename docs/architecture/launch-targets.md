@@ -411,6 +411,110 @@ executable. The additive fields make both dimensions explicit:
 }
 ```
 
+## DeepSeek: direct Claude-child provider, not a bridge (#874-#881)
+
+`clud --deepseek` selects `ModelProvider::DeepSeek`. Its only supported
+harness is Claude — `--deepseek --harness codex` is rejected before
+bootstrap, the same way `--claude --harness codex` is — and it does not
+accept `--model`: the initial integration ships one fixed, documented model
+profile rather than passthrough configuration. Both rejections happen in
+`backend::resolve_launch_target` / `backend::validate_provider_options`
+before any launch work is accepted.
+
+This is deliberately **not** a Codex-style bridge. There is no local HTTP
+listener, no request translation, no `BridgeHandle`. DeepSeek publishes an
+Anthropic-compatible endpoint directly, so `ForegroundRuntime::start` routes
+it straight to a child-only environment overlay — `is_deepseek_via_claude`
+and `is_codex_via_claude` are separate, mutually exclusive branches of the
+same dispatch, and only one of Claude, native Codex, the Codex-to-Claude
+bridge, or the DeepSeek direct route applies to any given launch (see the
+routing-matrix test in `foreground_runtime.rs`).
+
+### Credential trust boundary
+
+Exactly one API key is stored, in the OS-native encrypted credential vault:
+Windows Credential Manager (direct `Advapi32`/`CredWriteW` calls — lowercase
+in the `#[link]` attribute, since xwin's vendored SDK used for the
+cross-compiled CI build normalizes lib filenames to lowercase and a
+case-sensitive host linker cannot find `Advapi32.lib`), macOS Keychain, and
+Linux Secret Service, both via the `keyring` crate pinned at `=3.6.3`. Linux
+uses the `async-secret-service` feature (zbus, pure Rust) rather than
+`sync-secret-service`, which would pull in `dbus-secret-service` and require
+the system `libdbus` C library at build time — a real dependency this
+project does not want.
+
+`clud deepseek-auth login|status|logout` manage that one record.
+`deepseek_auth::SecretStore` is the injectable boundary (`get`/`set`/
+`delete`); production uses `NativeSecretStore`, and every test — including
+`ForegroundRuntime`'s routing tests — injects an in-memory fake, so normal
+automated test runs never touch a real vault. The raw key is never written
+to clud JSON settings, argv, a `LaunchPlan`, daemon/worker IPC, dry-run
+output, status output, logs, or `Debug` output; `deepseek-auth status`
+reports only configured/not-configured state.
+
+### Launch-time preflight
+
+Before any foreground, detached, detachable, or repeat-loop DeepSeek launch
+is accepted, `main.rs` calls `deepseek_auth::preflight_native`. Two pure,
+unit-tested predicates decide the shape of that check:
+
+- `launch_needs_preflight(provider, dry_run)` — false for every non-DeepSeek
+  provider and for `--dry-run`, which makes zero vault calls.
+- `launch_is_interactive(args, stdin_is_terminal, stderr_is_terminal)` —
+  true only for a genuine interactive foreground launch: both streams are a
+  real tty, no noninteractive-prompt flag (`-p`, `loop`, `up`, `rebase`,
+  `fix`, `do`), not `--detach`/`--detachable`, not a `--repeat` loop.
+
+A missing key may be entered via hidden terminal input only when
+`launch_is_interactive` is true. Every other case — noninteractive,
+detached, detachable, repeat — fails immediately with the exact
+`clud deepseek-auth login` instruction rather than hanging on a prompt
+nobody can answer.
+
+### Child environment overlay
+
+At the `ForegroundRuntime` spawn boundary, the initiating process's own
+preflight has already guaranteed the key exists, so `apply_deepseek_overlay`
+reads it from the vault a second time — directly in the process that is
+about to spawn the child, foreground or worker — and builds a DeepSeek-only
+overlay for the Claude child: the documented Anthropic-compatible endpoint,
+auth token, and the fixed primary/fast model, effort, and compaction values
+from DeepSeek's own integration page (including the literal
+`deepseek-v4-pro[1m]` spelling, confirmed against that page directly — see
+issue #874's comment thread). Every conflicting inherited Anthropic/profile
+variable is removed **unconditionally** case-insensitively first — not
+gated on OS the way the pre-existing Codex cross-route overlay's comparison
+is (`env_key_eq`, which mirrors real per-platform env-var uniqueness
+semantics and is intentionally case-sensitive on Unix). DeepSeek's removal
+is a secret-hygiene guarantee, not an OS-semantics match, so it must hold
+the same way on every platform — a distinction caught only by running the
+overlay test through the `clud-docker-linux-build` container, where the
+platform-gated comparison silently no-ops.
+
+The overlay is child-local: the parent process's environment is never
+mutated, and `ForegroundRuntime`'s `Debug` impl exposes only
+`bridge_active`/`environment_entries` — never environment contents — so the
+token cannot leak through a crash report or log line that `Debug`-prints
+the runtime.
+
+### What crosses the daemon/worker boundary
+
+Only `model_provider` and harness metadata — the same additive `LaunchPlan`
+fields Codex already uses. `LaunchPlan` has no field that could carry a
+credential, so there is nothing for daemon IPC to leak structurally; the
+wire round-trip test in `daemon/wire_prost/tests.rs` proves
+`ModelProvider::DeepSeek` survives encode/decode and that the encoded
+payload contains no secret-shaped value. A daemon-spawned worker retrieves
+the key itself, the same way the foreground path does, by calling
+`ForegroundRuntime::start` locally in the worker process — never through
+the daemon.
+
+### Out of scope
+
+Arbitrary DeepSeek model configuration (only the one fixed profile above is
+supported) and Codex OAuth credential migration are both explicitly out of
+scope for this integration; see issue #874's decisions.
+
 ## Ownership
 
 - `backend.rs`: typed dimensions, precedence, validation, notice policy.
@@ -426,3 +530,8 @@ executable. The additive fields make both dimensions explicit:
   atomic refresh, and `codex-auth` command implementation.
 - `codex_upstream.rs`: explicit subscription/API credential source selection.
 - `daemon/entry.rs`: pin repeat-job provider/harness choices.
+- `deepseek_auth.rs`: injectable `SecretStore`, native-vault adapter,
+  `deepseek-auth` command implementation, and launch-time preflight
+  (`preflight_native`, `launch_needs_preflight`, `launch_is_interactive`).
+- `foreground_runtime.rs`: DeepSeek routing (`is_deepseek_via_claude`,
+  `apply_deepseek_overlay`) alongside the Codex bridge routing above.
