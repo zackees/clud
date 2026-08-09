@@ -254,6 +254,7 @@ pub fn run() -> i32 {
     // block the hook itself — fall back to the documented off default.
     let pr_wait_fail_fast_enabled =
         crate::clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false);
+    let rust_use_soldr = config.rust.use_soldr;
     let evaluation = evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         &payload.command,
         Some(&payload.cwd),
@@ -263,6 +264,7 @@ pub fn run() -> i32 {
         shell_dialect_for_tool(&payload.tool_name),
         repo_root.as_deref(),
         pr_wait_fail_fast_enabled,
+        rust_use_soldr,
     );
     for message in &evaluation.log_messages {
         append_log(message);
@@ -497,7 +499,8 @@ fn evaluate_command_with_policy_dialect_and_repo_root(
         bad_pipelines,
         dialect,
         repo_root,
-        true,
+        true, // pr_wait_fail_fast_enabled
+        true, // rust_use_soldr — default blocking for tests/legacy callers
     )
 }
 
@@ -515,6 +518,7 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
     dialect: ShellDialect,
     repo_root: Option<&Path>,
     pr_wait_fail_fast_enabled: bool,
+    rust_use_soldr: bool,
 ) -> CommandEvaluation {
     let context = EvaluationContext {
         cwd,
@@ -523,6 +527,7 @@ fn evaluate_command_with_policy_dialect_repo_root_and_pr_wait_gate(
         bad_pipelines,
         repo_root,
         pr_wait_fail_fast_enabled,
+        rust_use_soldr,
     };
     let mut evaluation = CommandEvaluation::default();
     evaluate_command_into(command_text, &context, dialect, 0, &mut evaluation);
@@ -536,6 +541,11 @@ struct EvaluationContext<'a> {
     bad_pipelines: &'a [BadPipelineRule],
     repo_root: Option<&'a Path>,
     pr_wait_fail_fast_enabled: bool,
+    /// When false (`.clud/settings.local.json` sets `rust.use_soldr = false`),
+    /// the hook skips built-in blocking of bare `cargo`/`rustc`/`rustfmt` etc.
+    /// because soldr is deliberately disabled on this machine. Defaults to
+    /// `true` (blocking) when the config can't be read. (zackees/clud#841)
+    rust_use_soldr: bool,
 }
 
 fn evaluate_command_into(
@@ -642,7 +652,7 @@ fn evaluate_command_into(
             return;
         }
 
-        if contains_str(LEGACY_RUST_TRAMPOLINES, &first) {
+        if context.rust_use_soldr && contains_str(LEGACY_RUST_TRAMPOLINES, &first) {
             evaluation.reason = Some(format!(
                 "Use `soldr {} ...` instead of legacy `{}`. The root Rust trampolines bypass soldr's toolchain selection.",
                 first.trim_start_matches('_'),
@@ -658,7 +668,7 @@ fn evaluate_command_into(
         if first == "uv" && words.len() > 1 && words[1] == "run" {
             if let Some(tool) = resolve_uv_run_tool(&words) {
                 let tool_bare = program_name(&tool);
-                if contains_str(LEGACY_RUST_TRAMPOLINES, &tool_bare) {
+                if context.rust_use_soldr && contains_str(LEGACY_RUST_TRAMPOLINES, &tool_bare) {
                     evaluation.reason = Some(format!(
                         "Use `soldr {} ...` instead of legacy `{}`. The root Rust trampolines bypass soldr's toolchain selection.",
                         tool_bare.trim_start_matches('_'),
@@ -666,7 +676,7 @@ fn evaluate_command_into(
                     ));
                     return;
                 }
-                if contains_str(RUST_TOOLS, &tool_bare) {
+                if context.rust_use_soldr && contains_str(RUST_TOOLS, &tool_bare) {
                     evaluation.reason = Some(format!(
                         "Use `soldr {tool_bare} ...` instead of `uv run {tool} ...`. `uv run <rust-tool>` bypasses soldr's toolchain selection."
                     ));
@@ -702,7 +712,7 @@ fn evaluate_command_into(
             continue;
         }
 
-        if contains_str(RUST_TOOLS, &first) {
+        if context.rust_use_soldr && contains_str(RUST_TOOLS, &first) {
             evaluation.reason = Some(format!(
                 "Use `soldr {first} ...` instead of bare `{first}`. soldr resolves the pinned rustup-managed toolchain and avoids GNU/Chocolatey shims."
             ));
@@ -2476,7 +2486,8 @@ mod tests {
             &[],
             ShellDialect::Posix,
             None,
-            false,
+            false, // pr_wait_fail_fast_enabled
+            true,  // rust_use_soldr
         );
         assert!(
             evaluation.reason.is_none(),
@@ -2497,7 +2508,8 @@ mod tests {
             &[],
             ShellDialect::Posix,
             None,
-            true,
+            true, // pr_wait_fail_fast_enabled
+            true, // rust_use_soldr
         );
         let reason = evaluation
             .reason
