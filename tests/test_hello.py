@@ -400,6 +400,43 @@ def test_dry_run_codex() -> None:
     assert data["harness_source"] == "built_in_default"
 
 
+def test_dry_run_deepseek() -> None:
+    result = _run("--dry-run", "--deepseek", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["backend"] == "claude"
+    assert data["model_provider"] == "deepseek"
+    assert data["requested_harness"] == "default"
+    assert data["effective_harness"] == "claude"
+    assert data["provider_source"] == "cli"
+    # --dry-run must never touch the native credential vault: this isolated
+    # HOME has no stored key, and a vault read/prompt would either hang on
+    # stdin (killed by _run's timeout) or surface a vault error instead of a
+    # clean dry-run JSON payload.
+    assert "sk-" not in result.stdout
+    assert "sk-" not in result.stderr
+
+
+def test_dry_run_deepseek_rejects_codex_harness() -> None:
+    result = _run("--dry-run", "--deepseek", "--harness", "codex", "-p", "hello")
+    assert result.returncode == 2
+    assert "deepseek" in result.stderr.lower()
+    assert "claude harness" in result.stderr.lower()
+
+
+def test_dry_run_deepseek_rejects_model_override() -> None:
+    result = _run("--dry-run", "--deepseek", "--model", "opus", "-p", "hello")
+    assert result.returncode == 2
+    assert "--model" in result.stderr
+
+
+def test_dry_run_deepseek_conflicts_with_claude_and_codex_flags() -> None:
+    for other in ("--claude", "--codex"):
+        result = _run("--dry-run", "--deepseek", other, "-p", "hello")
+        assert result.returncode != 0
+        assert result.stdout == ""
+
+
 def test_dry_run_reports_independent_provider_and_harness() -> None:
     result = _run(
         "--dry-run",

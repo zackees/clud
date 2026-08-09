@@ -199,6 +199,33 @@ fn daemon_create_roundtrip_preserves_resolved_launch_metadata() {
     );
 }
 
+/// Issue #881: only provider/harness metadata may cross the daemon wire --
+/// the DeepSeek credential never does, because `LaunchPlan` has no field
+/// that could carry it. This proves `ModelProvider::DeepSeek` itself
+/// round-trips through the same wire protocol Codex already uses, and that
+/// the encoded payload carries no secret-shaped value.
+#[test]
+fn daemon_create_roundtrip_preserves_deepseek_provider_with_no_secret_on_the_wire() {
+    let mut spec = sample_launch_spec();
+    spec.plan.model_provider = Some(ModelProvider::DeepSeek);
+    spec.plan.requested_harness = Some(HarnessSelection::Default);
+    spec.plan.effective_harness = Some(Backend::Claude);
+    let request = DaemonRequest::Create {
+        spec: Box::new(spec),
+    };
+    let line = encode_daemon_request_line(&request, DaemonWireFormat::Prost).unwrap();
+    let encoded = String::from_utf8(line).unwrap();
+    assert!(!encoded.contains("sk-"), "encoded wire payload: {encoded}");
+
+    let (decoded, format) = decode_daemon_request_line(&encoded).unwrap();
+    assert_eq!(format, DaemonWireFormat::Prost);
+    let DaemonRequest::Create { spec } = decoded else {
+        panic!("expected create request");
+    };
+    assert_eq!(spec.plan.model_provider, Some(ModelProvider::DeepSeek));
+    assert_eq!(spec.plan.effective_harness, Some(Backend::Claude));
+}
+
 #[test]
 fn pre_625_daemon_repeat_fixture_defaults_launch_metadata() {
     let request: DaemonRequest = serde_json::from_str(
