@@ -34,25 +34,34 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
         )
 }
 
-/// True when this launch is the Codex-provider / Claude-harness bridge and the
-/// user has not opted back in with `--allow-plan-mode`.
-///
-/// On that bridge the model is a Codex model driving the Claude harness, and
-/// the harness offers it an `EnterPlanMode` tool whose description instructs it
-/// to reach for plan mode *proactively* on any non-trivial implementation ask.
-/// The result is unrequested planning sessions in the middle of ordinary
-/// questions, so plan mode is stripped here regardless of `--unattended` — the
-/// interactive case is precisely where it was biting.
+/// True when this launch routes a non-Claude model provider through the Claude
+/// harness. Codex and DeepSeek both fit this pattern: the model driving the
+/// harness is not Claude, and the harness offers it an `EnterPlanMode` tool
+/// whose description instructs it to reach for plan mode *proactively* on any
+/// non-trivial implementation ask. The result is unrequested planning sessions
+/// in the middle of ordinary questions, so plan mode is stripped here
+/// regardless of `--unattended` — the interactive case is precisely where it
+/// was biting.
 ///
 /// Deliberately narrow: a plain `clud` (Claude provider, Claude harness) keeps
 /// plan mode, and `AskUserQuestion` is never touched by this rule.
+fn is_non_claude_claude_harness_bridge(target: ResolvedLaunchTarget) -> bool {
+    matches!(
+        target.model_provider,
+        ModelProvider::Codex | ModelProvider::DeepSeek
+    ) && matches!(target.effective_harness, Backend::Claude)
+}
+
+/// True when this is the Codex-provider / Claude-harness bridge specifically.
+/// Codex allows exactly one Claude process, so the `Task` tool (which creates
+/// subagents) is stripped for Codex only — DeepSeek doesn't share that limit.
 fn is_codex_claude_bridge(target: ResolvedLaunchTarget) -> bool {
     matches!(target.model_provider, ModelProvider::Codex)
         && matches!(target.effective_harness, Backend::Claude)
 }
 
 pub fn bridge_suppresses_plan_mode(args: &Args, target: ResolvedLaunchTarget) -> bool {
-    !args.allow_plan_mode && is_codex_claude_bridge(target)
+    !args.allow_plan_mode && is_non_claude_claude_harness_bridge(target)
 }
 
 /// Green, stderr, TTY-only notice announcing the [`bridge_suppresses_plan_mode`]
@@ -70,7 +79,7 @@ pub fn plan_mode_suppression_notice(
         return None;
     }
     Some(
-        "\x1b[32m[clud] Plan mode disabled on the Codex->Claude bridge \
+        "\x1b[32m[clud] Plan mode disabled on the non-Claude bridge \
          (the model can otherwise enter it unprompted). \
          Override with --allow-plan-mode\x1b[0m"
             .to_string(),

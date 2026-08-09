@@ -126,6 +126,16 @@ fn bridge_target() -> ResolvedLaunchTarget {
     }
 }
 
+fn deepseek_bridge_target() -> ResolvedLaunchTarget {
+    ResolvedLaunchTarget {
+        model_provider: ModelProvider::DeepSeek,
+        requested_harness: HarnessSelection::Claude,
+        effective_harness: Backend::Claude,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    }
+}
+
 #[test]
 fn test_bridge_disallows_plan_mode_even_when_interactive() {
     // The reported bug: an ordinary interactive question on this bridge turned
@@ -179,9 +189,43 @@ fn test_allow_plan_mode_does_not_re_enable_it_for_unattended_runs() {
 
 #[test]
 fn test_plain_claude_keeps_plan_mode_interactively() {
-    // Narrow rule: only the Codex->Claude bridge is affected.
+    // Narrow rule: only non-Claude providers routing through the Claude harness
+    // (Codex, DeepSeek) are affected.
     let p = plan(&["clud"]);
     assert!(!p.command.iter().any(|a| a.starts_with("--disallowedTools")));
+}
+
+#[test]
+fn test_deepseek_bridge_disallows_plan_mode() {
+    // DeepSeek models driving the Claude harness self-invoke EnterPlanMode
+    // the same way Codex models do (zackees/clud#841 follow-up).
+    // Unlike Codex, DeepSeek keeps `Task` — only `EnterPlanMode` is stripped.
+    let args = parse(&["clud"]);
+    let p = build_launch_plan_for_target(&args, deepseek_bridge_target(), "claude");
+    let disallowed = p
+        .command
+        .iter()
+        .find(|a| a.starts_with("--disallowedTools"))
+        .map(|a| a.as_str())
+        .unwrap_or("");
+    assert!(
+        disallowed.contains("EnterPlanMode"),
+        "expected EnterPlanMode disallowed, got: {disallowed:?}"
+    );
+    assert!(
+        !disallowed.contains("Task"),
+        "Task should not be disallowed for DeepSeek, got: {disallowed:?}"
+    );
+}
+
+#[test]
+fn test_allow_plan_mode_restores_plan_mode_on_deepseek_bridge() {
+    let args = parse(&["clud", "--allow-plan-mode"]);
+    let p = build_launch_plan_for_target(&args, deepseek_bridge_target(), "claude");
+    assert!(!p
+        .command
+        .iter()
+        .any(|a| a.contains("EnterPlanMode") && a.starts_with("--disallowedTools")));
 }
 
 #[test]
