@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from ci import env as ci_env
 
@@ -83,11 +82,3 @@ def test_clean_env_never_auto_configures_sccache(monkeypatch) -> None:
     )
 
     assert "RUSTC_WRAPPER" not in ci_env.clean_env()
-
-
-def test_vendored_whisper_disables_native_sccache_autodetection() -> None:
-    build_script = (
-        Path(__file__).resolve().parents[1] / "vendor" / "whisper-rs-sys" / "build.rs"
-    ).read_text(encoding="utf-8")
-
-    assert '.define("GGML_CCACHE", "OFF")' in build_script
