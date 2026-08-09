@@ -50,7 +50,20 @@ struct ClaudeSettings {
 }
 
 impl ForegroundRuntime {
-    pub fn start(plan: &LaunchPlan, mut env: Vec<(String, String)>) -> Result<Self, BridgeError> {
+    pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
+        let store = crate::deepseek_auth::NativeSecretStore::new()
+            .map_err(|_| BridgeError::DeepSeekCredentials)?;
+        Self::start_with_secret_store(plan, env, &store)
+    }
+
+    /// Routing core, seamed on the secret-store dependency so tests can
+    /// exercise the DeepSeek direct route without touching the host's real
+    /// native credential vault. `start` is the sole production entry point.
+    fn start_with_secret_store(
+        plan: &LaunchPlan,
+        mut env: Vec<(String, String)>,
+        store: &dyn crate::deepseek_auth::SecretStore,
+    ) -> Result<Self, BridgeError> {
         let (bridge, claude_settings) = if is_codex_via_claude(plan) {
             // A selection that does not parse fails the launch rather than
             // the first turn: by the time a request is in flight the user has
@@ -68,9 +81,8 @@ impl ForegroundRuntime {
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings))
         } else if is_deepseek_via_claude(plan) {
-            let store = crate::deepseek_auth::NativeSecretStore::new()
-                .map_err(|_| BridgeError::DeepSeekCredentials)?;
-            let secret = crate::deepseek_auth::SecretStore::get(&store)
+            let secret = store
+                .get()
                 .map_err(|_| BridgeError::DeepSeekCredentials)?
                 .ok_or(BridgeError::DeepSeekCredentials)?;
             apply_deepseek_overlay(&mut env, &secret);
@@ -533,6 +545,22 @@ mod tests {
     use std::cell::RefCell;
     use std::net::TcpStream;
 
+    /// Injectable fake so routing tests never touch the host's real native
+    /// credential vault.
+    struct FakeSecretStore(Option<String>);
+
+    impl crate::deepseek_auth::SecretStore for FakeSecretStore {
+        fn get(&self) -> Result<Option<String>, crate::deepseek_auth::SecretStoreError> {
+            Ok(self.0.clone())
+        }
+        fn set(&self, _secret: &str) -> Result<(), crate::deepseek_auth::SecretStoreError> {
+            unreachable!("routing tests never write to the store")
+        }
+        fn delete(&self) -> Result<(), crate::deepseek_auth::SecretStoreError> {
+            unreachable!("routing tests never write to the store")
+        }
+    }
+
     fn plan(provider: ModelProvider, harness: Backend) -> LaunchPlan {
         LaunchPlan {
             command: vec![harness.executable_name().to_string()],
@@ -717,6 +745,70 @@ mod tests {
             assert_eq!(runtime.env(), base);
             assert!(!runtime.has_bridge());
         }
+    }
+
+    /// Issue #880: every route `ForegroundRuntime::start` can resolve to,
+    /// exercised through the one dispatch point rather than the overlay
+    /// helpers in isolation. DeepSeek must never create a `BridgeHandle` --
+    /// its route is the direct child-overlay path, not the loopback bridge.
+    #[test]
+    fn every_provider_harness_route_gets_exactly_the_expected_bridge_state() {
+        let base = vec![("UNRELATED".to_string(), "kept".to_string())];
+        let store = FakeSecretStore(Some("ds-routing-secret".to_string()));
+
+        let native_claude = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Claude, Backend::Claude),
+            base.clone(),
+            &store,
+        )
+        .unwrap();
+        assert!(!native_claude.has_bridge());
+        assert_eq!(native_claude.env(), base);
+
+        let native_codex = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Codex, Backend::Codex),
+            base.clone(),
+            &store,
+        )
+        .unwrap();
+        assert!(!native_codex.has_bridge());
+        assert_eq!(native_codex.env(), base);
+
+        let codex_bridge = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Codex, Backend::Claude),
+            base.clone(),
+            &store,
+        )
+        .unwrap();
+        assert!(codex_bridge.has_bridge());
+
+        let deepseek_direct = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::DeepSeek, Backend::Claude),
+            base.clone(),
+            &store,
+        )
+        .unwrap();
+        assert!(
+            !deepseek_direct.has_bridge(),
+            "DeepSeek must route directly, never through BridgeHandle"
+        );
+        assert_eq!(
+            lookup(deepseek_direct.env(), "ANTHROPIC_AUTH_TOKEN"),
+            Some("ds-routing-secret")
+        );
+        assert_eq!(lookup(deepseek_direct.env(), "UNRELATED"), Some("kept"));
+    }
+
+    #[test]
+    fn deepseek_route_without_a_stored_credential_fails_the_launch() {
+        let store = FakeSecretStore(None);
+        let error = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::DeepSeek, Backend::Claude),
+            Vec::new(),
+            &store,
+        )
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::DeepSeekCredentials));
     }
 
     #[cfg(windows)]
