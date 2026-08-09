@@ -77,6 +77,7 @@ running-process = { version = "4.9.0", default-features = false, features = ["te
 interprocess = "2"
 icy_sixel = "0.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+zeroize = "1"
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -170,6 +171,14 @@ rodio = { version = "0.21", default-features = false, features = ["playback"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 signal-hook = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Issue #877: Keychain-backed DeepSeek API-key storage.
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Issue #877: Secret Service-backed storage; deliberately excludes kernel keyutils.
+keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Issue #79 (Part A) — Windows IDropTarget COM registration on the console

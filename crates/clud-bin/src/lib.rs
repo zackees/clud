@@ -31,6 +31,7 @@ pub mod crash_report;
 pub mod ctrl_c_track;
 pub mod daemon;
 pub mod dashboard_auth;
+pub mod deepseek_auth;
 pub mod dnd;
 pub mod foreground_runtime;
 pub mod gc;

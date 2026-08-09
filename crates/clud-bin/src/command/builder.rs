@@ -306,6 +306,7 @@ fn build_launch_plan_for_target_at(
             // exhaustiveness.
         }
         Some(Command::CodexAuth { .. })
+        | Some(Command::DeepseekAuth { .. })
         | Some(Command::Attach { .. })
         | Some(Command::Kill { .. })
         | Some(Command::Slay)

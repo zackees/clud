@@ -1,7 +1,7 @@
 use clud::{
     args, backend, backend_bootstrap, clud_settings, codex_auth, command, config, console_setup,
-    console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics, grind,
-    hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
+    console_title, cpu_banner, crash_report, ctrl_c_track, daemon, deepseek_auth, gc, graphics,
+    grind, hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
     loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache, settings_tui,
     soldr_activate, startup, symbols, test_runtime, tool_cli, tool_install, tools, trampoline,
     trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
@@ -29,6 +29,12 @@ fn main() {
     if let Some(args::Command::CodexAuth { subcommand }) = &args.command {
         let interrupted = startup::install_ctrl_c_flag(args.verbose);
         std::process::exit(codex_auth::run(subcommand, interrupted.as_ref()));
+    }
+
+    // DeepSeek credentials are self-contained and must never resolve a
+    // backend, start a daemon, or forward an API key to a harness.
+    if let Some(args::Command::DeepseekAuth { subcommand }) = &args.command {
+        std::process::exit(deepseek_auth::run(subcommand));
     }
 
     // Install the crash reporter first so a panic during the rest of startup

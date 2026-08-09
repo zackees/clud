@@ -215,6 +215,13 @@ pub enum Command {
         #[command(subcommand)]
         subcommand: CodexAuthSubcommand,
     },
+    /// Manage the DeepSeek API key in its native OS credential vault. Never
+    /// forwarded to a backend agent.
+    #[command(name = "deepseek-auth")]
+    DeepseekAuth {
+        #[command(subcommand)]
+        subcommand: DeepseekAuthSubcommand,
+    },
     Loop {
         /// Prompt text, path to a local file, or a GH issue/PR URL.
         task: Option<String>,
@@ -499,6 +506,25 @@ pub enum CodexAuthSubcommand {
         json: bool,
     },
     /// Remove only clud-managed subscription credentials.
+    Logout {
+        /// Emit stable JSON for automation.
+        #[arg(long = "json")]
+        json: bool,
+    },
+}
+
+/// Subcommands under `clud deepseek-auth`. See `deepseek_auth.rs`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeepseekAuthSubcommand {
+    /// Prompt for and store the DeepSeek API key in the native credential vault.
+    Login,
+    /// Report whether a DeepSeek API key is available without revealing it.
+    Status {
+        /// Emit stable JSON for automation.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Remove the clud-managed DeepSeek API key from the native credential vault.
     Logout {
         /// Emit stable JSON for automation.
         #[arg(long = "json")]
@@ -898,6 +924,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "settings",
         "test",
         "codex-auth",
+        "deepseek-auth",
         "__daemon",
         "__worker",
     ];
