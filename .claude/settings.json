@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .claude/hooks/check-soldr.py"
+            "command": "clud-cmd-scan"
           }
         ]
       }
