@@ -178,7 +178,11 @@ keyring = { version = "=3.6.3", default-features = false, features = ["apple-nat
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 # Issue #877: Secret Service-backed storage; deliberately excludes kernel keyutils.
-keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+# async-secret-service (not sync-secret-service) so the backend is zbus, a pure-Rust
+# D-Bus client -- sync-secret-service pulls in dbus-secret-service -> libdbus-sys,
+# which needs the system libdbus C library and its headers at build time. async-io
+# gives zbus a runtime without pulling in all of tokio.
+keyring = { version = "=3.6.3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Issue #79 (Part A) — Windows IDropTarget COM registration on the console

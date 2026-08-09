@@ -101,7 +101,11 @@ mod windows_vault {
         user_name: *mut u16,
     }
 
-    #[link(name = "Advapi32")]
+    // Lowercase: xwin's vendored SDK (used by the cross-compiled CI build)
+    // normalizes lib filenames to lowercase, and lld-link on a case-sensitive
+    // host filesystem fails to find "Advapi32.lib". Native MSVC builds on
+    // Windows work with either case since NTFS is case-insensitive.
+    #[link(name = "advapi32")]
     unsafe extern "system" {
         fn CredReadW(
             target: *const u16,
