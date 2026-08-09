@@ -94,6 +94,33 @@ fn codex_auth_status_is_a_registered_command() {
 }
 
 #[test]
+fn deepseek_auth_subcommands_are_registered() {
+    let args = Args::try_parse_from(["clud", "deepseek-auth", "status", "--json"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::DeepseekAuth {
+            subcommand: DeepseekAuthSubcommand::Status { json: true }
+        })
+    ));
+
+    let args = Args::try_parse_from(["clud", "deepseek-auth", "login"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::DeepseekAuth {
+            subcommand: DeepseekAuthSubcommand::Login
+        })
+    ));
+
+    let args = Args::try_parse_from(["clud", "deepseek-auth", "logout"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::DeepseekAuth {
+            subcommand: DeepseekAuthSubcommand::Logout { json: false }
+        })
+    ));
+}
+
+#[test]
 fn test_model_flag() {
     let args = parse(&["clud", "--model", "opus"]);
     assert_eq!(args.model.as_deref(), Some("opus"));

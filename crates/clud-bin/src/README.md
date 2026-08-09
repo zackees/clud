@@ -101,6 +101,9 @@ Entry and orchestration:
   store, safe status claims, locked atomic refresh, and token-redacted
   diagnostics. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md).
+- `deepseek_auth.rs` - #877's `deepseek-auth login|status|logout` credential
+  commands: hidden terminal input, OS-native credential vault adapter, injectable
+  in-memory test store, and secret-free status/error surfaces.
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
   one call, plus `MessageAggregator` so a non-streaming request reuses the
   streaming state machine. Owns the downstream status policy — since #764,
