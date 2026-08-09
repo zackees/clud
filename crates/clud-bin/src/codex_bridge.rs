@@ -222,6 +222,8 @@ pub enum BridgeError {
     /// The launch supplied Claude settings that could not be composed with
     /// the bridge's session-local lifecycle hooks.
     Settings(String),
+    /// DeepSeek credentials could not be read at the child-spawn boundary.
+    DeepSeekCredentials,
 }
 
 impl fmt::Display for BridgeError {
@@ -235,6 +237,8 @@ impl fmt::Display for BridgeError {
             Self::Join => formatter.write_str("bridge worker panicked during shutdown"),
             Self::Model(error) => write!(formatter, "{error}"),
             Self::Settings(error) => write!(formatter, "{error}"),
+            Self::DeepSeekCredentials => formatter
+                .write_str("DeepSeek credentials are unavailable at the child-spawn boundary"),
         }
     }
 }
