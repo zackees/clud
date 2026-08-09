@@ -13,10 +13,9 @@ integration-test}), each of which is a *from-source native build*:
 | `_unit-test.yml` | `cargo clippy --workspace --all-targets` (1) + `cargo build -p clud -p mock-agent` + `cargo test --workspace --no-run` (1) |
 | `_integration-test.yml` | `cargo build -p clud -p mock-agent` + `maturin build` dev wheel (1) |
 
-So per push: **~12–18 full workspace compiles**, each including the vendored
-`whisper.cpp` C++ tree (`vendor/whisper-rs-sys/build.rs:194` drives a full CMake
-project), spread across **12 mutually invisible cache namespaces** — every job
-pays its own cold-cache tax and none of them warms another. Four of the six
+So per push: **~12–18 full workspace compiles**, spread across **12 mutually
+invisible cache namespaces** — every job pays its own cold-cache tax and none
+of them warms another. Four of the six
 platforms are macOS/Windows runners, which are the scarcest and slowest in the
 pool, so the fan-out converts directly into queue depth.
 
@@ -67,10 +66,9 @@ Three structural claims, in the order they matter:
 1. **One build per triple, not three.** `clippy --all-targets`, the workspace
    binaries, the `cargo test --no-run` harness binaries, and the dev wheel are
    produced in *one job with one `target/` directory*. They already share
-   ~95% of their compilation graph (every dependency rlib, including the
-   whisper C++ static libs); today that graph is recompiled on three separate
-   machines. This is the single largest win and it requires no
-   cross-compilation at all.
+   ~95% of their compilation graph (every dependency rlib); today that graph
+   is recompiled on three separate machines. This is the single largest win
+   and it requires no cross-compilation at all.
 2. **The build host is always Linux.**
    Linux runners are the cheapest and least contended, and — critically — all
    targets then share one runner class, so cache behaviour is uniform.
@@ -112,19 +110,22 @@ Two trigger-level notes:
 
 ## Cross-compilation, per triple, honestly
 
-The workspace's cross-compile surface is small but not empty. Only **three**
-crates compile native code (`Cargo.lock`): `ring` and `blake3` (both `cc`,
-routine to cross), and `whisper-rs-sys` (`bindgen` + a full CMake project).
+The workspace's cross-compile surface is small. Two crates compile native code
+(`Cargo.lock`): `ring` and `blake3` (both `cc`, routine to cross).
 `crates/clud-bin/build.rs` is pure Rust (`protox` + `prost-build`, no `protoc`
-binary), so it is not a factor.
+binary), so it is not a factor. `whisper-rs-sys` (`bindgen` + a full CMake
+project) used to be the third and by far the most cross-compile-hostile —
+but `whisper-rs` was removed entirely (voice transcription is stubbed; see
+`crates/clud-bin/src/voice/README.md`) after its vendored CMake build
+repeatedly broke Windows host builds.
 
 | Triple | Strategy | Notes |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | **native** | the build host; also the clippy/dylint host |
-| `aarch64-pc-windows-msvc` | **`soldr build`** | The crate manifest already excludes `whisper-rs` on this target, so there is no C++ and no CMake. `soldr prepare` provisions the catalogued ARM64 MSVC CRT/SDK and the clang shim that `ring` requires. |
-| `x86_64-pc-windows-msvc` | **`soldr build`** + forced whisper config | The blessed soldr path provisions the MSVC CRT/SDK and LLVM toolchain. `clang-cl`/`lld-link` drive whisper's CMake; two host-vs-target `cfg!` bugs in the vendored build script are worked around from the environment, not patched (see below). |
+| `aarch64-pc-windows-msvc` | **`soldr build`** | `soldr prepare` provisions the catalogued ARM64 MSVC CRT/SDK and the clang shim that `ring` requires. |
+| `x86_64-pc-windows-msvc` | **`soldr build`** | The blessed soldr path provisions the MSVC CRT/SDK and LLVM toolchain. |
 | `aarch64-apple-darwin`, `x86_64-apple-darwin` | **`soldr build` + target-shaped Apple SDK** | `soldr prepare` fetches the matching SDK and exports `SDKROOT`; there is no repo secret/variable and no native-builder fallback. |
-| `aarch64-unknown-linux-gnu` | **`cargo-zigbuild`** | cleanest cross. `vendor/whisper-rs-sys/build.rs:395-429` already detects a zig C++ toolchain and switches `stdc++`→`c++`, but `:403-405` early-returns on non-Linux targets — this path is Linux→Linux, so it is exactly the case that code was written for. CMake needs `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64`, injectable through the existing `CMAKE_*` env passthrough at `build.rs:298-306`. |
+| `aarch64-unknown-linux-gnu` | **`cargo-zigbuild`** | cleanest cross. |
 
 ### Invariant: soldr owns Apple and Windows-MSVC cross builds
 
@@ -256,31 +257,6 @@ be said from the workflow runs: the crossed Apple lanes complete in ~5 minutes
 and the MSVC lane in ~20–26, all on `ubuntu-24.04`, with native runners doing
 no compilation at all. Anyone wanting a genuine comparison should take it from
 soldr's own benchmarks rather than from a temporary regression here.
-
-### The two `whisper-rs-sys` host-cfg bugs
-
-`vendor/whisper-rs-sys/build.rs` uses `cfg!(target_os = ...)` inside the build
-script, which evaluates against the **host**, not the target. Two of these bite:
-
-- `build.rs:212-215` — `cfg!(target_os = "windows")` gates `/utf-8` and
-  `cargo:rustc-link-lib=advapi32`. Cross-compiling Linux→windows-msvc silently
-  drops `advapi32` and the link fails on undefined symbols.
-- `build.rs:342` — `cfg!(target_os = "macos")` gates linking `ggml-blas`. On a
-  Linux→darwin cross, CMake still *builds* `ggml-blas` (Apple BLAS defaults ON,
-  `ggml/CMakeLists.txt:92-95`) but the build script never emits the link flag.
-
-Both are fixable without touching vendored source:
-
-- windows: add `-C link-arg=advapi32.lib` via `RUSTFLAGS` for the two
-  windows-msvc targets.
-- darwin: force `GGML_BLAS=OFF` through the `GGML_*`/`CMAKE_*` env passthrough
-  (`build.rs:298-306`), which sidesteps the missing `ggml-blas` link flag.
-
-Also set `WHISPER_DONT_GENERATE_BINDINGS=1` on all cross targets: `build.rs:127-129`
-then uses the checked-in `src/bindings.rs` instead of running bindgen against
-target headers we do not have. (`build.rs:169-182` already falls back to those
-bindings on bindgen failure, so this only makes the existing behaviour
-deterministic.)
 
 ### macOS: SDK provisioning
 
