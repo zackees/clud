@@ -852,6 +852,7 @@ fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<S
     match plan.model_provider() {
         crate::backend::ModelProvider::Claude => command.push("--claude".to_string()),
         crate::backend::ModelProvider::Codex => command.push("--codex".to_string()),
+        crate::backend::ModelProvider::DeepSeek => command.push("--deepseek".to_string()),
     }
     command.push("--harness".to_string());
     // A repeat is a fresh process. Pin the resolved effective harness rather
