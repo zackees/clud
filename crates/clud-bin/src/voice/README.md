@@ -1,6 +1,6 @@
 # voice/
 
-F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is held, plays start/stop cues, transcribes via a bundled `whisper-rs` worker thread, and writes the transcript back into the backend PTY at the user's cursor. Microphone capture uses `cpal` on Windows and macOS and `arecord` (alsa-utils) on Linux; transcription is stubbed on `aarch64-pc-windows-msvc` where `whisper-rs-sys` does not build.
+F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is held, plays start/stop cues, and writes the transcript back into the backend PTY at the user's cursor. Microphone capture uses `cpal` on Windows and macOS and `arecord` (alsa-utils) on Linux. Transcription is stubbed on every platform: `whisper-rs` was removed after its vendored C++ CMake build (`whisper-rs-sys`) repeatedly broke Windows host builds (stale CMake generator cache colliding with plain `cargo build`); `worker.rs::transcribe_audio` always returns an "unavailable" error outside the `CLUD_VOICE_TEST_TRANSCRIPT` bypass.
 
 ## Files
 
@@ -11,8 +11,8 @@ F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is he
 - `audio.rs` — sample-rate constants, VAD thresholds, mono downmix + linear resample to 16 kHz, silence/speech detection.
 - `cues.rs` — `play_cue(CueTone::Start|Stop)`: short sine-wave beep via `rodio` (BEL fallback on Linux).
 - `linux_capture.rs` — Linux-only `arecord` subprocess wrapper that streams S16_LE PCM into a shared sample buffer.
-- `model.rs` — Whisper model resolution, SHA-256-pinned auto-download to per-OS cache dir, background download thread.
-- `worker.rs` — `VoiceWorker` thread: lazy-loads `WhisperContext`, runs transcription, sends `WorkerEvent::Transcript|Error`.
+- `model.rs` — model resolution, SHA-256-pinned auto-download to per-OS cache dir, background download thread. Kept for a future transcription backend; unrelated to the whisper-rs removal (no C++/CMake dependency).
+- `worker.rs` — `VoiceWorker` thread: hands audio to `transcribe_audio`, which is a stub (see module header), sends `WorkerEvent::Transcript|Error`.
 
 ## Key items
 
@@ -33,10 +33,9 @@ F3 push-to-talk voice mode (issue #13). Captures microphone audio while F3 is he
 - `resolve_if_available`: `model.rs:53`
 - `ensure_downloaded_in_background`: `model.rs:72`
 - `default_cache_path`, `MODEL_FILENAME`, `MODEL_SHA256`: `model.rs:42`, `model.rs:26`, `model.rs:34`
-- `VoiceWorker::spawn` / `request_transcription` / `try_recv`: `worker.rs:41`, `worker.rs:68`, `worker.rs:74`
-- `WorkerEvent` enum: `worker.rs:29`
-- `transcribe_audio` (Whisper) and Windows-ARM stub: `worker.rs:80`, `worker.rs:153`
-- `missing_model_message`: `worker.rs:167`
+- `VoiceWorker::spawn` / `request_transcription` / `try_recv`: `worker.rs:23`, `worker.rs:48`, `worker.rs:54`
+- `WorkerEvent` enum: `worker.rs:11`
+- `transcribe_audio` (stub) and `missing_model_message`: `worker.rs:65`, `worker.rs:72`
 
 ## Used by
 

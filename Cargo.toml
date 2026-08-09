@@ -31,16 +31,11 @@ debug = "line-tables-only"
 
 # Optimize third-party crates at opt-level=1 in dev. Our own crates stay
 # at the cargo-default opt-level=0 for fast incremental rebuilds; deps
-# (regex / running-process / tokio / whisper-rs internals) are paid for
-# once on cold compile and then cached, so the per-iteration cost is
-# negligible while runtime performance in dev tests is meaningfully
-# better.
+# (regex / running-process / tokio) are paid for once on cold compile and
+# then cached, so the per-iteration cost is negligible while runtime
+# performance in dev tests is meaningfully better.
 [profile.dev.package."*"]
 opt-level = 1
 
 [profile.release]
 debug = "line-tables-only"
-
-[patch.crates-io]
-whisper-rs = { path = "vendor/whisper-rs" }
-whisper-rs-sys = { path = "vendor/whisper-rs-sys" }

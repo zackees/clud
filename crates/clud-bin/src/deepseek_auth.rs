@@ -11,7 +11,9 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 use zeroize::Zeroizing;
 
-use crate::args::DeepseekAuthSubcommand;
+use crate::args::{Args, Command, DeepseekAuthSubcommand};
+use crate::backend::ModelProvider;
+use crate::command;
 
 #[cfg(not(windows))]
 const SERVICE_NAME: &str = "clud.deepseek";
@@ -233,6 +235,82 @@ impl SecretStore for NativeSecretStore {
     }
 }
 
+/// Sanitized failure from launch-time credential preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightError {
+    Missing,
+    Unavailable,
+    Cancelled,
+}
+
+impl fmt::Display for PreflightError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str(
+                "DeepSeek credentials are not configured; run `clud deepseek-auth login`",
+            ),
+            Self::Unavailable => formatter
+                .write_str("the native credential vault is unavailable; retry after unlocking it"),
+            Self::Cancelled => formatter.write_str("DeepSeek credential entry was cancelled"),
+        }
+    }
+}
+
+/// Whether a launch needs credential preflight at all. False for every
+/// non-DeepSeek provider and for `--dry-run`, which must make zero vault calls.
+pub fn launch_needs_preflight(provider: ModelProvider, dry_run: bool) -> bool {
+    provider == ModelProvider::DeepSeek && !dry_run
+}
+
+/// Whether a DeepSeek launch may prompt for a missing key. Takes the terminal
+/// checks as parameters (rather than calling `IsTerminal` itself) so the
+/// decision is unit-testable without a real tty.
+pub fn launch_is_interactive(
+    args: &Args,
+    stdin_is_terminal: bool,
+    stderr_is_terminal: bool,
+) -> bool {
+    let repeat = matches!(
+        &args.command,
+        Some(Command::Loop {
+            repeat: Some(_),
+            ..
+        })
+    );
+    stdin_is_terminal
+        && stderr_is_terminal
+        && !command::has_noninteractive_prompt(args)
+        && !args.detach
+        && !args.detachable
+        && !repeat
+}
+
+/// Preflight the native vault immediately before accepting a DeepSeek launch.
+/// A missing key may be entered only for a truly interactive foreground launch.
+pub fn preflight_native(interactive: bool) -> Result<(), PreflightError> {
+    let store = NativeSecretStore::new().map_err(|_| PreflightError::Unavailable)?;
+    preflight_with(&store, interactive, prompt_secret)
+}
+
+fn preflight_with(
+    store: &dyn SecretStore,
+    interactive: bool,
+    read_secret: impl FnOnce() -> Result<String, ()>,
+) -> Result<(), PreflightError> {
+    match store.get().map_err(|_| PreflightError::Unavailable)? {
+        Some(_) => Ok(()),
+        None if !interactive => Err(PreflightError::Missing),
+        None => {
+            let secret = read_secret()
+                .ok()
+                .filter(|secret| !secret.trim().is_empty())
+                .map(Zeroizing::new)
+                .ok_or(PreflightError::Cancelled)?;
+            store.set(&secret).map_err(|_| PreflightError::Unavailable)
+        }
+    }
+}
+
 pub fn run(subcommand: &DeepseekAuthSubcommand) -> i32 {
     let store = match NativeSecretStore::new() {
         Ok(store) => store,
@@ -451,6 +529,93 @@ mod tests {
             2
         );
         assert_eq!(store.get().unwrap(), None);
+    }
+
+    fn parse(argv: &[&str]) -> Args {
+        Args::parse_from_raw(argv.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn preflight_is_needed_only_for_deepseek_and_never_for_dry_run() {
+        assert!(launch_needs_preflight(ModelProvider::DeepSeek, false));
+        assert!(!launch_needs_preflight(ModelProvider::DeepSeek, true));
+        assert!(!launch_needs_preflight(ModelProvider::Claude, false));
+        assert!(!launch_needs_preflight(ModelProvider::Codex, false));
+    }
+
+    #[test]
+    fn interactive_launch_requires_a_real_tty_on_both_streams() {
+        let args = parse(&["clud", "--deepseek"]);
+        assert!(launch_is_interactive(&args, true, true));
+        assert!(!launch_is_interactive(&args, false, true));
+        assert!(!launch_is_interactive(&args, true, false));
+    }
+
+    #[test]
+    fn detached_and_detachable_launches_are_never_interactive() {
+        let detach = parse(&["clud", "--deepseek", "--detach"]);
+        assert!(!launch_is_interactive(&detach, true, true));
+
+        let detachable = parse(&["clud", "--deepseek", "--detachable"]);
+        assert!(!launch_is_interactive(&detachable, true, true));
+    }
+
+    #[test]
+    fn repeat_loop_launches_are_never_interactive() {
+        let args = parse(&["clud", "--deepseek", "loop", "--repeat", "1h", "task"]);
+        assert!(!launch_is_interactive(&args, true, true));
+    }
+
+    #[test]
+    fn noninteractive_prompt_flags_disable_interactive_preflight() {
+        let args = parse(&["clud", "--deepseek", "-p", "do the thing"]);
+        assert!(!launch_is_interactive(&args, true, true));
+    }
+
+    #[test]
+    fn preflight_prompts_only_for_interactive_missing_credentials() {
+        let store = InMemorySecretStore::default();
+        assert_eq!(
+            preflight_with(&store, false, || unreachable!()),
+            Err(PreflightError::Missing)
+        );
+        assert_eq!(
+            preflight_with(&store, true, || Ok("ds-test-secret".to_string())),
+            Ok(())
+        );
+        assert_eq!(store.get().unwrap().as_deref(), Some("ds-test-secret"));
+        assert_eq!(preflight_with(&store, false, || unreachable!()), Ok(()));
+    }
+
+    #[test]
+    fn preflight_noninteractive_missing_credentials_never_reads_input() {
+        let store = InMemorySecretStore::default();
+        assert_eq!(
+            preflight_with(&store, false, || unreachable!()),
+            Err(PreflightError::Missing)
+        );
+    }
+
+    #[test]
+    fn preflight_interactive_cancelled_entry_leaves_the_vault_untouched() {
+        let store = InMemorySecretStore::default();
+        assert_eq!(
+            preflight_with(&store, true, || Err(())),
+            Err(PreflightError::Cancelled)
+        );
+        assert_eq!(store.get().unwrap(), None);
+    }
+
+    #[test]
+    fn preflight_unavailable_vault_is_sanitized() {
+        let store = InMemorySecretStore {
+            unavailable: true,
+            ..InMemorySecretStore::default()
+        };
+        assert_eq!(
+            preflight_with(&store, false, || unreachable!()),
+            Err(PreflightError::Unavailable)
+        );
     }
 
     #[test]

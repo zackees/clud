@@ -398,6 +398,20 @@ fn run(mut args: args::Args) {
         }
     }
 
+    // #878: credentials must exist before any foreground or daemon-backed
+    // DeepSeek work is accepted. Dry-runs intentionally remain vault-free.
+    if deepseek_auth::launch_needs_preflight(launch_target.model_provider, args.dry_run) {
+        let interactive = deepseek_auth::launch_is_interactive(
+            &args,
+            io::stdin().is_terminal(),
+            io::stderr().is_terminal(),
+        );
+        if let Err(error) = deepseek_auth::preflight_native(interactive) {
+            eprintln!("deepseek: {error}");
+            std::process::exit(2);
+        }
+    }
+
     let interrupted = startup::install_ctrl_c_flag(args.verbose);
     if let Some(exit_code) = daemon::handle_special_command(&args, interrupted.as_ref()) {
         flush_ctrl_c_exit_event(ctrl_c_track::InvocationKind::Attach, exit_code);

@@ -165,8 +165,11 @@ Things that bite:
   its catalogue GNU toolchain (`gcc-13.3.0-glibc-2.17-1`, soldr#2238) replaced
   zig for Linux and the manylinux wheel, so `ci/xbuild.py::is_soldr_owned`
   covers linux-gnu and `cargo_argv` refuses zigbuild for it too. clud no longer
-  invokes zig anywhere. The manylinux_2_17 C++ floor is met by linking
-  libstdc++ statically (`WHISPER_LINK_CXX_STATIC`, `vendor/whisper-rs-sys/build.rs`).
+  invokes zig anywhere. `ci/xbuild.py` still sets `WHISPER_LINK_CXX_STATIC` and
+  appends static-libstdc++ RUSTFLAGS for the manylinux_2_17 C++ floor, a
+  mechanism whisper-rs-sys needed; it is currently inert (whisper-rs was
+  removed — see `crates/clud-bin/src/voice/README.md`) but harmless to leave,
+  since no remaining dependency emits a dynamic libstdc++ link directive.
   `ci/banned_cross_tools.py` enforces the ban under `bash lint` and CI's static
   job; `ci/xbuild.py::cargo_argv` additionally *raises* on a zigbuild strategy
   for any soldr-owned triple (which is now every clud triple), because the text
