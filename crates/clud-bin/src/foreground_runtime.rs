@@ -67,6 +67,14 @@ impl ForegroundRuntime {
             apply_cross_route_overlay(&mut env, &bridge, selection.as_ref());
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings))
+        } else if is_deepseek_via_claude(plan) {
+            let store = crate::deepseek_auth::NativeSecretStore::new()
+                .map_err(|_| BridgeError::DeepSeekCredentials)?;
+            let secret = crate::deepseek_auth::SecretStore::get(&store)
+                .map_err(|_| BridgeError::DeepSeekCredentials)?
+                .ok_or(BridgeError::DeepSeekCredentials)?;
+            apply_deepseek_overlay(&mut env, &secret);
+            (None, None)
         } else {
             (None, None)
         };
@@ -173,6 +181,70 @@ pub fn with_foreground_runtime<ResultValue>(
 
 fn is_codex_via_claude(plan: &LaunchPlan) -> bool {
     plan.model_provider() == ModelProvider::Codex && plan.effective_harness() == Backend::Claude
+}
+
+fn is_deepseek_via_claude(plan: &LaunchPlan) -> bool {
+    plan.model_provider() == ModelProvider::DeepSeek && plan.effective_harness() == Backend::Claude
+}
+
+fn apply_deepseek_overlay(env: &mut Vec<(String, String)>, secret: &str) {
+    // Unconditionally case-insensitive (unlike `env_key_eq`, which mirrors
+    // real per-OS env-var uniqueness semantics for the Codex overlay above):
+    // this is a security guarantee against leaking an ambient Anthropic key
+    // into the DeepSeek child, not an OS-semantics match, and it must hold
+    // the same way on every platform.
+    const CONFLICTING: &[&str] = &[
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    ];
+    env.retain(|(key, _)| {
+        !CONFLICTING
+            .iter()
+            .any(|candidate| key.eq_ignore_ascii_case(candidate))
+            && !key
+                .to_ascii_uppercase()
+                .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
+    });
+    env.extend([
+        (
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://api.deepseek.com/anthropic".to_string(),
+        ),
+        ("ANTHROPIC_AUTH_TOKEN".to_string(), secret.to_string()),
+        (
+            "ANTHROPIC_MODEL".to_string(),
+            "deepseek-v4-pro[1m]".to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            "deepseek-v4-pro[1m]".to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+            "deepseek-v4-pro[1m]".to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            "deepseek-v4-flash".to_string(),
+        ),
+        (
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            "deepseek-v4-flash".to_string(),
+        ),
+        ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
+        (
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+            "786432".to_string(),
+        ),
+    ]);
 }
 
 fn apply_cross_route_overlay(
@@ -591,6 +663,46 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_overlay_replaces_conflicting_profile_values_without_parent_mutation() {
+        let base = vec![
+            ("anthropic_api_key".to_string(), "ambient-key".to_string()),
+            ("ANTHROPIC_MODEL".to_string(), "ambient-model".to_string()),
+            (
+                "ANTHROPIC_CUSTOM_MODEL_OPTION".to_string(),
+                "ambient-picker".to_string(),
+            ),
+            ("UNCHANGED".to_string(), "yes".to_string()),
+        ];
+        let mut child = base.clone();
+        apply_deepseek_overlay(&mut child, "ds-test-secret");
+
+        assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
+        assert_eq!(lookup(&child, "anthropic_api_key"), None);
+        assert_eq!(lookup(&child, "ANTHROPIC_CUSTOM_MODEL_OPTION"), None);
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_BASE_URL"),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_AUTH_TOKEN"),
+            Some("ds-test-secret")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_MODEL"),
+            Some("deepseek-v4-pro[1m]")
+        );
+        assert_eq!(
+            lookup(&child, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            lookup(&child, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            Some("786432")
+        );
+        assert_eq!(lookup(&base, "anthropic_api_key"), Some("ambient-key"));
+    }
+
+    #[test]
     fn native_routes_receive_the_original_environment_byte_for_byte() {
         let base = vec![
             ("ANTHROPIC_BASE_URL".to_string(), "user-url".to_string()),
@@ -681,6 +793,34 @@ mod tests {
         assert_eq!(calls[0].1, calls[1].1);
         assert_eq!(calls[0].2, calls[1].2);
         assert!(lookup(&calls[0].2, "ANTHROPIC_AUTH_TOKEN").is_some());
+    }
+
+    #[test]
+    fn deepseek_subprocess_and_pty_receive_the_same_secret_child_overlay() {
+        let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
+        apply_deepseek_overlay(&mut env, "ds-test-secret");
+        let runtime = ForegroundRuntime {
+            env,
+            bridge: None,
+            claude_settings: None,
+        };
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Subprocess, vec!["claude".into()], None)
+            .unwrap();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Pty, vec!["claude".into()], None)
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2, calls[1].2);
+        assert_eq!(
+            lookup(&calls[0].2, "ANTHROPIC_AUTH_TOKEN"),
+            Some("ds-test-secret")
+        );
+        assert_eq!(lookup(&calls[0].2, "ANTHROPIC_API_KEY"), None);
+        assert!(!runtime.has_bridge());
     }
 
     #[test]
