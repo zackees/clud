@@ -318,12 +318,15 @@ pub fn normalized_image(image: &str) -> String {
     image_basename(image).to_ascii_lowercase()
 }
 
-/// True for Docker Desktop's user-session roots, not the ordinary `docker`
-/// client. A spared root prunes its whole descendant tree, retaining the
-/// otherwise-generic WSL runtime components it owns (#773).
+/// True for the Docker Desktop family: the interactive UI, the backend
+/// service, and the CLI client. A spared root prunes its whole descendant
+/// tree, retaining the otherwise-generic WSL runtime components it owns
+/// (#773). The CLI (`docker.exe`) is included because killing a mid-flight
+/// `docker build` or `docker compose` tears down containers and volumes
+/// that outlive the tool shell that launched them.
 pub fn is_docker_desktop_family_root(image_name: &str) -> bool {
     let image = normalized_image(image_name);
-    image == "docker desktop.exe" || image.starts_with("com.docker.")
+    image == "docker desktop.exe" || image.starts_with("com.docker.") || image == "docker.exe"
 }
 
 /// Collect OS facts for a bounded candidate set, on whatever platform we are.
