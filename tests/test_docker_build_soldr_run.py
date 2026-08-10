@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = (
     Path(__file__).resolve().parents[1]
@@ -56,4 +57,28 @@ def test_non_cargo_commands_are_unchanged() -> None:
         "soldr",
         "cargo",
         "test",
+    ]
+
+
+def test_run_uses_running_process_with_inherited_output(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_module()
+    observed: list[tuple[list[str], dict]] = []
+
+    monkeypatch.setattr(module, "cmd_up", lambda _path: 0)
+
+    def fake_run(argv: list[str], **kwargs):
+        observed.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout=None, stderr=None)
+
+    monkeypatch.setattr(module.RunningProcess, "run", fake_run)
+
+    name = module._container_name(tmp_path)
+    assert module.cmd_run(tmp_path, ["sh", "-c", "work"]) == 0
+    assert observed == [
+        (
+            ["docker", "exec", "-w", "/src", name, "sh", "-c", "work"],
+            {"check": False, "capture_output": False, "text": True},
+        )
     ]

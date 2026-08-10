@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from ci.banned_imports import COMMAND_BUILDER_MARKER, is_allowed, scan_file
+from ci.banned_imports import (
+    COMMAND_BUILDER_MARKER,
+    is_allowed,
+    scan_file,
+    scan_python_file,
+)
 
 
 def test_marked_command_builder_is_allowed() -> None:
@@ -91,3 +96,21 @@ command.spawn()?;
     )
     violations = scan_file(source)
     assert any("hand std::process::Command" in reason for _, _, reason in violations)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import subprocess\n",
+        "from subprocess import run\n",
+        "subprocess.run(['tool'])\n",
+        "subprocess.Popen(['tool'])\n",
+    ],
+)
+def test_python_subprocess_is_banned_in_product_tools(
+    tmp_path: Path, source: str
+) -> None:
+    path = tmp_path / "tool.py"
+    path.write_text(source, encoding="utf-8")
+    violations = scan_python_file(path)
+    assert violations

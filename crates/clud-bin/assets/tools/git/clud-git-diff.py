@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "pywebview>=5.3",
+#   "running-process==4.10.1",
 # ]
 # ///
 # managed-by: clud
@@ -26,11 +27,11 @@ from __future__ import annotations
 import html
 import json
 import re
-import subprocess
 import sys
 from dataclasses import dataclass, field
 
 import webview
+from running_process import RunningProcess
 
 
 # ---------- diff parsing ----------
@@ -52,7 +53,7 @@ class FileDiff:
 
 
 def get_diff(rev_left: str, rev_right: str) -> str:
-    result = subprocess.run(  # noqa: S603, S607
+    result = RunningProcess.run(
         ["git", "diff", "--no-color", f"{rev_left}..{rev_right}"],
         capture_output=True,
         text=True,

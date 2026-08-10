@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = [
+#   "running-process==4.10.1",
+# ]
 # ///
 # managed-by: clud
 """pr_merge_watch.py — fail-fast PR-check waiter for clud.
@@ -34,13 +36,14 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
+
+from running_process import RunningProcess
 
 EXIT_GREEN = 0
 EXIT_REQUIRED_FAIL = 1
@@ -62,7 +65,7 @@ def _utc_text(value: datetime) -> str:
 
 
 def _watch_root() -> Path:
-    result = subprocess.run(
+    result = RunningProcess.run(
         ["git", "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
@@ -176,7 +179,7 @@ class GhResult:
 
 def gh(*args: str, check: bool = False) -> GhResult:
     """Run gh with the supplied args; return the captured outcome."""
-    res = subprocess.run(["gh", *args], capture_output=True, text=True)
+    res = RunningProcess.run(["gh", *args], capture_output=True, text=True)
     if check and res.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)} failed: {res.stderr.strip()}")
     return GhResult(res.returncode, res.stdout, res.stderr)
