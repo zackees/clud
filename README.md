@@ -399,6 +399,16 @@ Detects linting and test tools in your repo, runs them, and fixes failures in a 
 clud fix
 ```
 
+## `clud do <url>` — Implement to a Merged PR
+
+Launches the agent with the `/goal` implementation contract after substituting
+the supplied URL into the prompt.
+
+```bash
+clud do https://github.com/zackees/clud/issues/866
+clud do --dry-run https://github.com/zackees/clud/issues/866
+```
+
 ## `clud up` — Ship It
 
 Runs lint, test, cleanup, then commits.

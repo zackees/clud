@@ -87,7 +87,7 @@ pub struct Args {
     #[arg(long = "allow-plan-mode")]
     pub allow_plan_mode: bool,
 
-    #[arg(long = "dry-run")]
+    #[arg(long = "dry-run", global = true)]
     pub dry_run: bool,
 
     #[arg(long = "detach", conflicts_with = "dry_run")]
@@ -251,11 +251,11 @@ pub enum Command {
     Fix {
         url: Option<String>,
     },
-    /// Read a URL and implement it end-to-end under the /goal contract.
+    /// Read a URL and implement it end-to-end under the `/goal` contract.
     Do {
         url: String,
     },
-    /// Grind the current repo's issues page under the /loop contract.
+    /// Grind the current repo's issues page under the `/loop` contract.
     ///
     /// With no argument, resolves the `origin` remote and maps it to the
     /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`

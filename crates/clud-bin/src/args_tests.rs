@@ -578,6 +578,18 @@ fn test_grind_subcommand_with_url() {
 }
 
 #[test]
+fn test_do_with_dry_run() {
+    let args = parse(&[
+        "clud",
+        "do",
+        "--dry-run",
+        "https://github.com/zackees/clud/issues/866",
+    ]);
+    assert!(args.dry_run);
+    assert!(matches!(args.command, Some(Command::Do { .. })));
+}
+
+#[test]
 fn test_wasm_subcommand() {
     let args = parse(&["clud", "wasm", "guest.wasm"]);
     match args.command {

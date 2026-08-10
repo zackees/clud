@@ -104,6 +104,7 @@ fn test_gc_prune_kind_filter() {
                     dry_run,
                     ref kind_pos,
                     ref kind,
+                    ..
                 }),
         }) => {
             assert!(!dry_run);
@@ -149,6 +150,7 @@ fn test_gc_purge_dry_run_yes_kind() {
                     yes,
                     ref kind_pos,
                     ref kind,
+                    ..
                 }),
         }) => {
             assert!(dry_run);
@@ -229,6 +231,7 @@ fn test_gc_all_defaults_to_prune() {
                     purge,
                     dry_run,
                     yes,
+                    ..
                 }),
         }) => {
             assert!(!purge);
@@ -249,6 +252,7 @@ fn test_gc_all_purge_yes() {
                     purge,
                     dry_run,
                     yes,
+                    ..
                 }),
         }) => {
             assert!(purge);
