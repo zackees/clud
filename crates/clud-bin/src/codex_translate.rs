@@ -1082,7 +1082,7 @@ pub fn wants_stream(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex_model::CODEX_MODELS;
+    use crate::codex_model::codex_models;
     use serde_json::json;
 
     fn options() -> TranslateOptions {
@@ -1654,8 +1654,9 @@ mod tests {
     /// some other model would be worse than no label at all.
     #[test]
     fn every_picker_reachable_model_translates_to_its_own_wire_model() {
-        for model in CODEX_MODELS {
-            for spelling in [model.alias, model.id] {
+        for model in codex_models() {
+            let alias = model.legacy_aliases.first().copied().unwrap();
+            for spelling in [alias, model.wire_id] {
                 let out = translate_bytes(
                     json!({
                         "model": spelling,
@@ -1667,18 +1668,22 @@ mod tests {
                 )
                 .unwrap_or_else(|error| panic!("{spelling} must translate: {error}"))
                 .request;
-                assert_eq!(out.model, model.id, "{spelling} must bill {}", model.id);
+                assert_eq!(
+                    out.model, model.wire_id,
+                    "{spelling} must bill {}",
+                    model.wire_id
+                );
                 // ... at the model's own default effort, not a global one.
                 assert_eq!(
                     out.reasoning.unwrap().effort,
-                    model.default_effort.as_str(),
+                    model.default_effort.unwrap().as_str(),
                     "{spelling}"
                 );
             }
 
             // The `@effort` a picker row was launched with survives the round
             // trip through the picker's own value.
-            let pinned = format!("{}@max", model.id);
+            let pinned = format!("{}@max", model.wire_id);
             let out = translate_bytes(
                 json!({
                     "model": pinned,
@@ -1690,7 +1695,7 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("{pinned} must translate: {error}"))
             .request;
-            assert_eq!(out.model, model.id);
+            assert_eq!(out.model, model.wire_id);
             assert_eq!(out.reasoning.unwrap().effort, "max");
         }
     }

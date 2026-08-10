@@ -17,6 +17,7 @@ pub struct LaunchPlan {
     pub command: Vec<String>,           // argv: command[0] is the backend exe
     pub iterations: u32,                // 1 for one-shot; >1 for `clud loop`
     pub backend: Backend,               // Claude | Codex
+    pub routing_mode: RoutingMode,      // Direct | Unified provider routing
     pub model_provider: Option<ModelProvider>,
     pub requested_harness: Option<HarnessSelection>,
     pub effective_harness: Option<Backend>,
@@ -28,6 +29,8 @@ pub struct LaunchPlan {
     pub task_summary: Option<String>,   // short label for session name
     pub loop_markers: Option<LoopMarkers>,       // DONE/BLOCKED absolute paths
     pub stream_json_progress: bool,     // claude subprocess-mode loop only
+    pub codex_model: Option<String>,    // legacy bridge compatibility field
+    pub model_selection: Option<ResolvedModelSelection>, // normalized provider/model/effort/context
 }
 ```
 
@@ -38,9 +41,10 @@ daemon's `WorkerLaunchSpec` (`crates/clud-bin/src/daemon/types.rs`).
 `--dry-run` instead emits a stable, user-facing JSON projection built from the
 same plan.
 
-The five provider/harness fields are additive and deserialize to `None` for an
-old payload. `LaunchPlan::model_provider()` and `effective_harness()` fall back
-to the legacy `backend`, preserving native-provider behavior.
+The provider/harness and model-selection fields are additive. Old optional
+fields deserialize to `None`; `routing_mode` defaults to `Direct`.
+`LaunchPlan::model_provider()` and `effective_harness()` fall back to the
+legacy `backend`, preserving native-provider behavior.
 
 The compatibility rule applies on every transport boundary: a newer client may
 send these fields to an older daemon/worker only because omission remains a

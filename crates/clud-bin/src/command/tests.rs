@@ -10,6 +10,7 @@ use super::types::LaunchPlan;
 use crate::args::Args;
 use crate::backend::{
     Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource, ResolvedLaunchTarget,
+    RoutingMode,
 };
 use crate::clud_settings::DEFAULT_CODEX_GITHUB_PLUGIN_CONFIG_OVERRIDE;
 
@@ -78,6 +79,35 @@ fn test_prompt_with_yolo() {
 }
 
 #[test]
+fn explicit_run_is_the_same_launch_as_bare_clud() {
+    for (bare_argv, run_argv) in [
+        (vec!["clud"], vec!["clud", "run"]),
+        (
+            vec!["clud", "--prompt", "hello"],
+            vec!["clud", "--prompt", "hello", "run"],
+        ),
+        (
+            vec!["clud", "--message", "hello"],
+            vec!["clud", "--message", "hello", "run"],
+        ),
+        (
+            vec!["clud", "--continue"],
+            vec!["clud", "--continue", "run"],
+        ),
+        (
+            vec!["clud", "--resume=session-id"],
+            vec!["clud", "--resume=session-id", "run"],
+        ),
+    ] {
+        let bare = plan(&bare_argv);
+        let explicit = plan(&run_argv);
+        assert_eq!(explicit.command, bare.command, "{run_argv:?}");
+        assert_eq!(explicit.iterations, bare.iterations, "{run_argv:?}");
+        assert_eq!(explicit.routing_mode, bare.routing_mode, "{run_argv:?}");
+    }
+}
+
+#[test]
 fn test_loop_automatically_disallows_interactive_tools() {
     let p = plan(&["clud", "loop", "fix the build"]);
     assert!(p
@@ -103,6 +133,7 @@ fn test_repeat_loop_automatically_disallows_interactive_tools() {
 fn test_loop_under_codex_provider_claude_harness_disallows_interactive_tools() {
     let args = parse(&["clud", "loop", "fix the build"]);
     let target = ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
         model_provider: ModelProvider::Codex,
         requested_harness: HarnessSelection::Claude,
         effective_harness: Backend::Claude,
@@ -119,6 +150,7 @@ fn test_loop_under_codex_provider_claude_harness_disallows_interactive_tools() {
 /// `clud --codex --harness claude`, interactive, no `--unattended`.
 fn bridge_target() -> ResolvedLaunchTarget {
     ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
         model_provider: ModelProvider::Codex,
         requested_harness: HarnessSelection::Claude,
         effective_harness: Backend::Claude,
@@ -129,6 +161,7 @@ fn bridge_target() -> ResolvedLaunchTarget {
 
 fn deepseek_bridge_target() -> ResolvedLaunchTarget {
     ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
         model_provider: ModelProvider::DeepSeek,
         requested_harness: HarnessSelection::Claude,
         effective_harness: Backend::Claude,
@@ -246,6 +279,58 @@ fn test_bridge_expands_a_short_model_name_in_argv_and_on_the_plan() {
     let model_index = p.command.iter().position(|a| a == "--model").unwrap();
     assert_eq!(p.command[model_index + 1], "gpt-5.6-terra@high");
     assert_eq!(p.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
+    assert!(!p.command.iter().any(|arg| arg == "--effort"));
+}
+
+#[test]
+fn model_less_bridge_effort_pins_the_reviewed_default_model() {
+    let args = parse(&["clud", "--effort", "high"]);
+    let plan = build_launch_plan_for_target(&args, bridge_target(), "claude");
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--model", "gpt-5.6-terra@high"]));
+    assert!(!plan.command.iter().any(|arg| arg == "--effort"));
+    assert_eq!(plan.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
+}
+
+#[test]
+fn native_codex_receives_normalized_model_and_effort_as_separate_settings() {
+    let args = parse(&[
+        "clud",
+        "--codex",
+        "--model",
+        "terra@high",
+        "--effort",
+        "high",
+    ]);
+    let target =
+        crate::backend::resolve_launch_target(false, true, false, None, None, None).unwrap();
+    let plan = build_launch_plan_for_target(&args, target, "codex");
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["-m", "gpt-5.6-terra"]));
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["-c", "model_reasoning_effort=\"high\""]));
+}
+
+#[test]
+fn native_claude_receives_effort_as_a_session_flag() {
+    let args = parse(&["clud", "--claude", "--model", "opus", "--effort", "high"]);
+    let target =
+        crate::backend::resolve_launch_target(true, false, false, None, None, None).unwrap();
+    let plan = build_launch_plan_for_target(&args, target, "claude");
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--model", "opus"]));
+    assert!(plan
+        .command
+        .windows(2)
+        .any(|pair| pair == ["--effort", "high"]));
 }
 
 /// An id we do not know is forwarded untouched — the alias table gives short

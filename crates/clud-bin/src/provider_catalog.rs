@@ -1,0 +1,769 @@
+//! Provider-neutral model registry and launch-selection normalization.
+//!
+//! Clud CLI/settings IDs, Claude gateway discovery IDs, and provider wire IDs
+//! are distinct namespaces. This module is the only mapping authority among
+//! them; direct launches and the unified gateway consume the same rows.
+
+use serde::{Deserialize, Serialize};
+
+use crate::backend::ModelProvider;
+
+/// Provider-neutral launch effort. Individual providers decide which values
+/// they accept and how they translate them at their wire boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    None,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl EffortLevel {
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim().to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
+    }
+
+    pub(crate) fn catalog() -> String {
+        Self::ALL
+            .iter()
+            .map(|effort| effort.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl std::fmt::Display for EffortLevel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+const ALL_CODEX_EFFORTS: &[EffortLevel] = &[
+    EffortLevel::None,
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::XHigh,
+    EffortLevel::Max,
+];
+const ANTHROPIC_EFFORTS: &[EffortLevel] = &[
+    EffortLevel::Low,
+    EffortLevel::Medium,
+    EffortLevel::High,
+    EffortLevel::XHigh,
+    EffortLevel::Max,
+];
+const AUTO_CONTEXT: &[&str] = &["auto"];
+const AUTO_OR_1M_CONTEXT: &[&str] = &["auto", "1m"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogModel {
+    pub cli_id: &'static str,
+    pub provider: ModelProvider,
+    pub wire_id: &'static str,
+    pub discovery_id: Option<&'static str>,
+    pub display_name: &'static str,
+    pub legacy_aliases: &'static [&'static str],
+    pub supported_efforts: &'static [EffortLevel],
+    pub supported_context_windows: &'static [&'static str],
+    pub default_effort: Option<EffortLevel>,
+    pub default_context_window: Option<&'static str>,
+}
+
+pub const MODELS: &[CatalogModel] = &[
+    CatalogModel {
+        cli_id: "codex-sol",
+        provider: ModelProvider::Codex,
+        wire_id: "gpt-5.6-sol",
+        discovery_id: Some("clud-claude-codex-sol"),
+        display_name: "Codex Sol (OpenAI)",
+        legacy_aliases: &["sol"],
+        supported_efforts: ALL_CODEX_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: Some(EffortLevel::Low),
+        default_context_window: None,
+    },
+    CatalogModel {
+        cli_id: "codex-terra",
+        provider: ModelProvider::Codex,
+        wire_id: "gpt-5.6-terra",
+        discovery_id: Some("clud-claude-codex-terra"),
+        display_name: "Codex Terra (OpenAI)",
+        legacy_aliases: &["terra"],
+        supported_efforts: ALL_CODEX_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: Some(EffortLevel::Medium),
+        default_context_window: None,
+    },
+    CatalogModel {
+        cli_id: "codex-luna",
+        provider: ModelProvider::Codex,
+        wire_id: "gpt-5.6-luna",
+        discovery_id: Some("clud-claude-codex-luna"),
+        display_name: "Codex Luna (OpenAI)",
+        legacy_aliases: &["luna"],
+        supported_efforts: ALL_CODEX_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: Some(EffortLevel::Medium),
+        default_context_window: None,
+    },
+    CatalogModel {
+        cli_id: "deepseek-v4-pro",
+        provider: ModelProvider::DeepSeek,
+        wire_id: "deepseek-v4-pro[1m]",
+        discovery_id: Some("clud-claude-deepseek-v4-pro"),
+        display_name: "DeepSeek V4 Pro",
+        legacy_aliases: &["deepseek-v4-pro[1m]"],
+        supported_efforts: ANTHROPIC_EFFORTS,
+        supported_context_windows: AUTO_OR_1M_CONTEXT,
+        default_effort: Some(EffortLevel::Max),
+        default_context_window: Some("1m"),
+    },
+    CatalogModel {
+        cli_id: "deepseek-v4-flash",
+        provider: ModelProvider::DeepSeek,
+        wire_id: "deepseek-v4-flash",
+        discovery_id: Some("clud-claude-deepseek-v4-flash"),
+        display_name: "DeepSeek V4 Flash",
+        legacy_aliases: &[],
+        supported_efforts: ANTHROPIC_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: None,
+        default_context_window: None,
+    },
+    // Claude tier aliases are compatibility rows. Versioned Claude inventory
+    // can be added without changing the stable provider-qualified grammar.
+    CatalogModel {
+        cli_id: "claude-opus",
+        provider: ModelProvider::Claude,
+        wire_id: "opus",
+        discovery_id: None,
+        display_name: "Claude Opus",
+        legacy_aliases: &["opus"],
+        supported_efforts: ANTHROPIC_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: None,
+        default_context_window: None,
+    },
+    CatalogModel {
+        cli_id: "claude-sonnet",
+        provider: ModelProvider::Claude,
+        wire_id: "sonnet",
+        discovery_id: None,
+        display_name: "Claude Sonnet",
+        legacy_aliases: &["sonnet"],
+        supported_efforts: ANTHROPIC_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: None,
+        default_context_window: None,
+    },
+    CatalogModel {
+        cli_id: "claude-haiku",
+        provider: ModelProvider::Claude,
+        wire_id: "haiku",
+        discovery_id: None,
+        display_name: "Claude Haiku",
+        legacy_aliases: &["haiku"],
+        supported_efforts: ANTHROPIC_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: None,
+        default_context_window: None,
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionSource {
+    Cli,
+    LegacyModelSuffix,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedModelSelection {
+    pub provider: ModelProvider,
+    /// Stable clud CLI/settings identifier, e.g. `codex-terra`.
+    pub model: Option<String>,
+    /// Provider-native request identifier. Never a credential.
+    pub wire_model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<EffortLevel>,
+    #[serde(default)]
+    pub context_window: Option<String>,
+    #[serde(default)]
+    pub model_source: Option<SelectionSource>,
+    #[serde(default)]
+    pub effort_source: Option<SelectionSource>,
+    #[serde(default)]
+    pub context_window_source: Option<SelectionSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionError {
+    UnknownModel(String),
+    ProviderConflict {
+        provider: ModelProvider,
+        model: String,
+        model_provider: ModelProvider,
+    },
+    InvalidEffort(String),
+    InvalidContextWindow(String),
+    UnsupportedEffort {
+        model: String,
+        effort: String,
+    },
+    UnsupportedContextWindow {
+        model: String,
+        context_window: String,
+    },
+    ContextRequiresModel {
+        provider: ModelProvider,
+        context_window: String,
+    },
+    ConflictingEffort {
+        legacy: String,
+        explicit: String,
+    },
+    ConflictingContextWindow {
+        legacy: String,
+        explicit: String,
+    },
+}
+
+impl std::fmt::Display for SelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownModel(model) => write!(f, "unknown model '{model}'"),
+            Self::ProviderConflict {
+                provider,
+                model,
+                model_provider,
+            } => write!(
+                f,
+                "model '{model}' belongs to provider '{model_provider}', but the explicit provider is '{provider}'"
+            ),
+            Self::InvalidEffort(effort) => write!(f, "invalid reasoning effort '{effort}'"),
+            Self::InvalidContextWindow(value) => {
+                write!(f, "invalid context window '{value}'; expected auto or 1m")
+            }
+            Self::UnsupportedEffort { model, effort } => {
+                write!(f, "model '{model}' does not support effort '{effort}'")
+            }
+            Self::UnsupportedContextWindow {
+                model,
+                context_window,
+            } => write!(
+                f,
+                "model '{model}' does not support context window '{context_window}'"
+            ),
+            Self::ContextRequiresModel {
+                provider,
+                context_window,
+            } => write!(
+                f,
+                "provider '{provider}' requires --model when --context-window is '{context_window}'"
+            ),
+            Self::ConflictingEffort { legacy, explicit } => write!(
+                f,
+                "model suffix selected effort '{legacy}', but --effort selected '{explicit}'"
+            ),
+            Self::ConflictingContextWindow { legacy, explicit } => write!(
+                f,
+                "model suffix selected context window '{legacy}', but --context-window selected '{explicit}'"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SelectionError {}
+
+fn catalog_match(value: &str) -> Option<CatalogModel> {
+    MODELS.iter().copied().find(|entry| {
+        entry.cli_id.eq_ignore_ascii_case(value)
+            || entry.wire_id.eq_ignore_ascii_case(value)
+            || entry
+                .discovery_id
+                .is_some_and(|id| id.eq_ignore_ascii_case(value))
+            || entry
+                .legacy_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(value))
+    })
+}
+
+fn split_effort_suffix(raw: &str) -> (&str, Option<&str>) {
+    raw.rsplit_once('@').map_or((raw, None), |(model, effort)| {
+        (model.trim(), Some(effort.trim()))
+    })
+}
+
+fn split_context_suffix(raw: &str) -> (&str, Option<&str>) {
+    raw.strip_suffix("[1m]")
+        .map_or((raw, None), |model| (model, Some("1m")))
+}
+
+fn inferred_provider_from_wire(value: &str) -> Option<ModelProvider> {
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("claude-") {
+        Some(ModelProvider::Claude)
+    } else if lower.starts_with("gpt-") || lower.starts_with("codex-") {
+        Some(ModelProvider::Codex)
+    } else if lower.starts_with("deepseek-") {
+        Some(ModelProvider::DeepSeek)
+    } else {
+        None
+    }
+}
+
+fn provider_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
+    match provider {
+        ModelProvider::Codex => ALL_CODEX_EFFORTS,
+        ModelProvider::Claude | ModelProvider::DeepSeek => ANTHROPIC_EFFORTS,
+    }
+}
+
+fn provider_context_windows(provider: ModelProvider) -> &'static [&'static str] {
+    match provider {
+        ModelProvider::Claude | ModelProvider::Codex => AUTO_CONTEXT,
+        ModelProvider::DeepSeek => AUTO_OR_1M_CONTEXT,
+    }
+}
+
+fn validate_capabilities(
+    label: &str,
+    efforts: &[EffortLevel],
+    contexts: &[&str],
+    effort: Option<EffortLevel>,
+    context: Option<&str>,
+) -> Result<(), SelectionError> {
+    if let Some(value) = effort {
+        if !efforts.contains(&value) {
+            return Err(SelectionError::UnsupportedEffort {
+                model: label.to_string(),
+                effort: value.as_str().to_string(),
+            });
+        }
+    }
+    if let Some(value) = context {
+        if !contexts.contains(&value) {
+            return Err(SelectionError::UnsupportedContextWindow {
+                model: label.to_string(),
+                context_window: value.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Infer a provider from a registered CLI/alias/wire ID or an unambiguous
+/// provider wire prefix. Compound compatibility suffixes are ignored.
+pub fn infer_provider(model: &str) -> Option<ModelProvider> {
+    let (without_effort, _) = split_effort_suffix(model.trim());
+    let (base, _) = split_context_suffix(without_effort);
+    catalog_match(base)
+        .map(|entry| entry.provider)
+        .or_else(|| inferred_provider_from_wire(base))
+}
+
+/// Normalize compatibility spellings at the CLI boundary. `None` preserves a
+/// provider's existing reviewed default/profile.
+pub fn resolve(
+    requested_provider: Option<ModelProvider>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    context_window: Option<&str>,
+) -> Result<Option<ResolvedModelSelection>, SelectionError> {
+    let explicit_effort = effort
+        .map(|value| {
+            EffortLevel::parse(value)
+                .ok_or_else(|| SelectionError::InvalidEffort(value.to_string()))
+        })
+        .transpose()?;
+    let explicit_context = context_window
+        .map(|value| value.trim().to_ascii_lowercase())
+        .map(|value| match value.as_str() {
+            "auto" | "1m" => Ok(value),
+            _ => Err(SelectionError::InvalidContextWindow(value)),
+        })
+        .transpose()?;
+
+    let Some(raw_model) = model.map(str::trim) else {
+        let Some(provider) = requested_provider else {
+            return Ok(None);
+        };
+        if explicit_effort.is_none() && explicit_context.is_none() {
+            return Ok(None);
+        }
+        validate_capabilities(
+            provider.as_str(),
+            provider_efforts(provider),
+            provider_context_windows(provider),
+            explicit_effort,
+            explicit_context.as_deref(),
+        )?;
+        if provider == ModelProvider::DeepSeek && explicit_context.as_deref() == Some("auto") {
+            return Err(SelectionError::ContextRequiresModel {
+                provider,
+                context_window: "auto".to_string(),
+            });
+        }
+        return Ok(Some(ResolvedModelSelection {
+            provider,
+            model: None,
+            wire_model: None,
+            effort: explicit_effort,
+            context_window: explicit_context,
+            model_source: None,
+            effort_source: explicit_effort.map(|_| SelectionSource::Cli),
+            context_window_source: context_window.map(|_| SelectionSource::Cli),
+        }));
+    };
+
+    let (without_effort, legacy_effort_raw) = split_effort_suffix(raw_model);
+    let legacy_effort = legacy_effort_raw
+        .map(|value| {
+            EffortLevel::parse(value)
+                .ok_or_else(|| SelectionError::InvalidEffort(value.to_string()))
+        })
+        .transpose()?;
+    let (base_model, legacy_context_raw) = split_context_suffix(without_effort);
+    let legacy_context = legacy_context_raw.map(str::to_string);
+
+    let catalog = catalog_match(base_model).or_else(|| catalog_match(without_effort));
+    let inferred_provider = catalog
+        .map(|entry| entry.provider)
+        .or_else(|| inferred_provider_from_wire(base_model));
+    if let (Some(provider), Some(model_provider)) = (requested_provider, inferred_provider) {
+        if provider != model_provider {
+            return Err(SelectionError::ProviderConflict {
+                provider,
+                model: raw_model.to_string(),
+                model_provider,
+            });
+        }
+    }
+    if catalog.is_none()
+        && inferred_provider.is_none()
+        && requested_provider == Some(ModelProvider::Codex)
+        && !base_model.contains('-')
+        && !base_model.contains('.')
+    {
+        return Err(SelectionError::UnknownModel(base_model.to_string()));
+    }
+    let model_provider = inferred_provider
+        .or(requested_provider)
+        .ok_or_else(|| SelectionError::UnknownModel(base_model.to_string()))?;
+
+    if let (Some(legacy), Some(explicit)) = (legacy_effort, explicit_effort) {
+        if legacy != explicit {
+            return Err(SelectionError::ConflictingEffort {
+                legacy: legacy.as_str().to_string(),
+                explicit: explicit.as_str().to_string(),
+            });
+        }
+    }
+    if let (Some(legacy), Some(explicit)) = (legacy_context.as_deref(), explicit_context.as_deref())
+    {
+        if legacy != explicit {
+            return Err(SelectionError::ConflictingContextWindow {
+                legacy: legacy.to_string(),
+                explicit: explicit.to_string(),
+            });
+        }
+    }
+
+    let effective_effort = explicit_effort.or(legacy_effort);
+    let effective_context = explicit_context.or(legacy_context);
+    let (label, efforts, contexts) = catalog.map_or_else(
+        || {
+            (
+                base_model,
+                provider_efforts(model_provider),
+                provider_context_windows(model_provider),
+            )
+        },
+        |entry| {
+            (
+                entry.cli_id,
+                entry.supported_efforts,
+                entry.supported_context_windows,
+            )
+        },
+    );
+    validate_capabilities(
+        label,
+        efforts,
+        contexts,
+        effective_effort,
+        effective_context.as_deref(),
+    )?;
+
+    let mut wire_model =
+        catalog.map_or_else(|| base_model.to_string(), |entry| entry.wire_id.to_string());
+    if model_provider == ModelProvider::DeepSeek {
+        match effective_context.as_deref() {
+            Some("auto") => {
+                wire_model = wire_model
+                    .strip_suffix("[1m]")
+                    .unwrap_or(&wire_model)
+                    .to_string();
+            }
+            Some("1m") if !wire_model.ends_with("[1m]") => wire_model.push_str("[1m]"),
+            _ => {}
+        }
+    }
+
+    Ok(Some(ResolvedModelSelection {
+        provider: model_provider,
+        model: Some(
+            catalog.map_or_else(|| base_model.to_string(), |entry| entry.cli_id.to_string()),
+        ),
+        wire_model: Some(wire_model),
+        effort: effective_effort,
+        context_window: effective_context,
+        model_source: Some(SelectionSource::Cli),
+        effort_source: explicit_effort
+            .map(|_| SelectionSource::Cli)
+            .or_else(|| legacy_effort.map(|_| SelectionSource::LegacyModelSuffix)),
+        context_window_source: context_window
+            .map(|_| SelectionSource::Cli)
+            .or_else(|| legacy_context_raw.map(|_| SelectionSource::LegacyModelSuffix)),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_codex_model_infers_provider_and_keeps_effort_independent() {
+        let selection = resolve(None, Some("codex-terra"), Some("high"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.provider, ModelProvider::Codex);
+        assert_eq!(selection.wire_model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(selection.effort, Some(EffortLevel::High));
+        assert_eq!(selection.effort_source, Some(SelectionSource::Cli));
+    }
+
+    #[test]
+    fn conflicting_provider_fails_before_launch() {
+        assert!(matches!(
+            resolve(Some(ModelProvider::DeepSeek), Some("codex-sol"), None, None),
+            Err(SelectionError::ProviderConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn claude_prefixed_compatibility_ids_are_not_claimed_by_codex() {
+        let selection = resolve(None, Some("claude-opus"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.provider, ModelProvider::Claude);
+        assert_eq!(selection.model.as_deref(), Some("claude-opus"));
+        assert_eq!(selection.wire_model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn equal_legacy_and_explicit_effort_values_coalesce() {
+        let selection = resolve(
+            Some(ModelProvider::Codex),
+            Some("terra@high"),
+            Some("high"),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.effort, Some(EffortLevel::High));
+        assert_eq!(selection.effort_source, Some(SelectionSource::Cli));
+    }
+
+    #[test]
+    fn conflicting_legacy_and_explicit_effort_values_fail() {
+        assert!(matches!(
+            resolve(
+                Some(ModelProvider::Codex),
+                Some("terra@low"),
+                Some("high"),
+                None,
+            ),
+            Err(SelectionError::ConflictingEffort { .. })
+        ));
+    }
+
+    #[test]
+    fn deepseek_wire_context_suffix_normalizes_to_an_independent_field() {
+        let selection = resolve(
+            Some(ModelProvider::DeepSeek),
+            Some("deepseek-v4-pro[1m]"),
+            Some("max"),
+            Some("1m"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro[1m]"));
+        assert_eq!(selection.context_window.as_deref(), Some("1m"));
+    }
+
+    #[test]
+    fn effort_without_an_explicit_model_is_still_normalized() {
+        let selection = resolve(Some(ModelProvider::Codex), None, Some("high"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.provider, ModelProvider::Codex);
+        assert_eq!(selection.effort, Some(EffortLevel::High));
+    }
+
+    #[test]
+    fn unknown_future_codex_wire_id_remains_reachable_without_rewriting() {
+        let selection = resolve(Some(ModelProvider::Codex), Some("gpt-5.7-nova"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("gpt-5.7-nova"));
+        assert_eq!(selection.wire_model.as_deref(), Some("gpt-5.7-nova"));
+
+        let repeated = resolve(
+            Some(ModelProvider::Codex),
+            selection.wire_model.as_deref(),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(repeated.model, selection.model);
+        assert_eq!(repeated.wire_model, selection.wire_model);
+    }
+
+    #[test]
+    fn explicit_provider_keeps_unknown_custom_wire_ids_lossless() {
+        let selection = resolve(
+            Some(ModelProvider::Claude),
+            Some("My-Gateway-Model"),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("My-Gateway-Model"));
+        assert_eq!(selection.wire_model.as_deref(), Some("My-Gateway-Model"));
+
+        let repeated = resolve(
+            Some(ModelProvider::Claude),
+            selection.wire_model.as_deref(),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(repeated.wire_model, selection.wire_model);
+    }
+
+    #[test]
+    fn marker_shaped_custom_wire_id_is_not_decoded() {
+        let selection = resolve(
+            Some(ModelProvider::Claude),
+            Some("claude-wire-special"),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("claude-wire-special"));
+        assert_eq!(selection.wire_model.as_deref(), Some("claude-wire-special"));
+    }
+
+    #[test]
+    fn bare_unknown_codex_alias_is_rejected_but_full_ids_remain_reachable() {
+        assert!(matches!(
+            resolve(Some(ModelProvider::Codex), Some("tera"), None, None),
+            Err(SelectionError::UnknownModel(model)) if model == "tera"
+        ));
+        assert!(resolve(
+            Some(ModelProvider::Codex),
+            Some("my-gateway-model"),
+            None,
+            None
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn discovery_ids_round_trip_through_the_same_catalog_rows() {
+        for entry in MODELS.iter().filter(|entry| entry.discovery_id.is_some()) {
+            let selection = resolve(None, entry.discovery_id, None, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(selection.provider, entry.provider);
+            assert_eq!(selection.model.as_deref(), Some(entry.cli_id));
+            assert_eq!(selection.wire_model.as_deref(), Some(entry.wire_id));
+        }
+    }
+
+    #[test]
+    fn model_less_modifiers_are_validated_against_the_provider_profile() {
+        assert!(matches!(
+            resolve(Some(ModelProvider::DeepSeek), None, Some("none"), None),
+            Err(SelectionError::UnsupportedEffort { .. })
+        ));
+        assert!(matches!(
+            resolve(Some(ModelProvider::Claude), None, None, Some("1m")),
+            Err(SelectionError::UnsupportedContextWindow { .. })
+        ));
+        assert!(matches!(
+            resolve(Some(ModelProvider::DeepSeek), None, None, Some("auto")),
+            Err(SelectionError::ContextRequiresModel { .. })
+        ));
+    }
+
+    #[test]
+    fn explicit_deepseek_auto_context_removes_the_legacy_wire_suffix() {
+        let selection = resolve(
+            Some(ModelProvider::DeepSeek),
+            Some("deepseek-v4-pro"),
+            None,
+            Some("auto"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn discovery_ids_are_unique_and_reserved() {
+        let ids: Vec<&str> = MODELS
+            .iter()
+            .filter_map(|entry| entry.discovery_id)
+            .collect();
+        assert!(ids.iter().all(|id| id.starts_with("clud-claude-")));
+        let mut deduped = ids.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), ids.len());
+    }
+}

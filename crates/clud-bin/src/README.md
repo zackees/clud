@@ -60,16 +60,16 @@ Entry and orchestration:
   routes, authenticated context compact/clear lifecycle controls, and joined
   shutdown. Per-phase header/body deadlines and a per-frame idle timeout, with
   chunked progressive SSE via `write_event_stream` (#627 step 1, DD-028).
-- `codex_model.rs` - #752's model + reasoning-effort selection: the gpt-5.6
-  alias table (`sol`/`terra`/`luna` -> wire ids, each with its own catalog
-  default effort), the `<model>@<effort>` parser, and the `Effort` ladder
+- `codex_model.rs` - #752's Codex compatibility view over the shared provider
+  catalog: the `sol`/`terra`/`luna` aliases and per-model defaults, the
+  `<model>@<effort>` parser, and the provider-neutral `Effort` ladder
   restricted to what the family accepts (no `minimal`, no `ultra` --
   re-confirmed against OpenAI's model guidance in #821). Selection rides the
   model string because that is the one field a custom `ANTHROPIC_BASE_URL`
   gateway is allowed to own, so it cannot be dropped in transit the way
   `output_config` can (DD-035). Also owns `picker_entry` / `PickerEntry`
   (#820, DD-038) -- the single `/model` row clud can add, rendered from the
-  same table so it cannot advertise a model or effort the parser rejects.
+  shared registry so it cannot advertise a model or effort the parser rejects.
   Its doc comment enumerates the six row sources in Claude Code and why none
   of them yields three Codex entries.
 - `codex_translate.rs` - pure Anthropic Messages -> OpenAI Responses request
@@ -136,8 +136,13 @@ CLI surface and backend resolution:
 - `args.rs` - `clap` `Args` and `Command` definitions; passthrough for unknown
   flags; subcommand definitions for `loop`, `up`, `rebase`, `fix`, `do`, `gc`, etc.
 - `backend.rs` - concrete `Backend`, independent `ModelProvider` /
-  `HarnessSelection` resolution, `LaunchMode`, PATH lookup, and backend-path
-  resolution. See `docs/architecture/launch-targets.md`.
+  `HarnessSelection` resolution, provider `RoutingMode`, process `LaunchMode`,
+  PATH lookup, and backend-path resolution. See
+  `docs/architecture/launch-targets.md` and
+  `docs/architecture/provider-selection.md`.
+- `provider_catalog.rs` - the single registry mapping stable clud model IDs,
+  gateway discovery IDs, provider wire IDs, compatibility aliases, and
+  independent effort/context capability metadata.
 - `preference.rs` - shared pure typed-choice state machine used by launch
   scope and global settings selectors.
 - `subprocess.rs` - single decision point for the Windows `.cmd`/`.bat`

@@ -127,6 +127,80 @@ fn test_model_flag() {
 }
 
 #[test]
+fn provider_neutral_selection_flags_are_owned_before_the_separator() {
+    let args = parse(&[
+        "clud",
+        "--provider",
+        "codex",
+        "--model",
+        "codex-terra",
+        "--effort",
+        "high",
+        "--context-window",
+        "1m",
+        "run",
+    ]);
+    assert_eq!(args.provider, Some(crate::backend::ModelProvider::Codex));
+    assert_eq!(args.model.as_deref(), Some("codex-terra"));
+    assert_eq!(args.effort.as_deref(), Some("high"));
+    assert_eq!(args.context_window.as_deref(), Some("1m"));
+    assert!(matches!(args.command, Some(Command::Run)));
+    assert!(args.passthrough.is_empty());
+}
+
+#[test]
+fn generic_provider_is_an_explicit_cli_provider() {
+    let args = parse(&["clud", "--provider", "deepseek"]);
+    assert_eq!(
+        args.explicit_model_provider(),
+        Some(crate::backend::ModelProvider::DeepSeek)
+    );
+}
+
+#[test]
+fn explicit_run_normalizes_to_the_commandless_launch_shape() {
+    let mut args = parse(&["clud", "--prompt", "hello", "run"]);
+    assert!(matches!(args.command, Some(Command::Run)));
+    args.normalize_explicit_run();
+    assert!(args.command.is_none());
+    assert_eq!(args.prompt.as_deref(), Some("hello"));
+}
+
+#[test]
+fn unified_and_generic_mode_aliases_normalize_identically() {
+    let unified = parse(&["clud", "--unified", "run"]);
+    let generic = parse(&["clud", "--mode", "unified", "run"]);
+    assert_eq!(unified.routing_mode(), crate::backend::RoutingMode::Unified);
+    assert_eq!(generic.routing_mode(), crate::backend::RoutingMode::Unified);
+    assert!(unified.explicit_model_provider().is_none());
+    assert!(generic.explicit_model_provider().is_none());
+}
+
+#[test]
+fn unified_mode_rejects_a_direct_provider_prefix() {
+    let argv = ["clud", "--unified", "--codex"];
+    assert!(Args::try_parse_from(argv).is_err());
+}
+
+#[test]
+fn unified_tokens_remain_backend_passthrough_after_separator() {
+    let args = parse(&["clud", "--", "--unified", "--mode", "unified"]);
+    assert_eq!(args.routing_mode(), crate::backend::RoutingMode::Direct);
+    assert_eq!(args.passthrough, ["--unified", "--mode", "unified"]);
+}
+
+#[test]
+fn claimed_selection_flags_remain_backend_passthrough_after_separator() {
+    let args = parse(&["clud", "--", "--effort", "high", "--provider", "codex"]);
+    assert!(args.effort.is_none());
+    assert!(args.provider.is_none());
+    assert_eq!(
+        args.passthrough,
+        ["--effort", "high", "--provider", "codex"]
+    );
+}
+
+#[test]
 fn test_subprocess_flag() {
     let args = parse(&["clud", "--subprocess"]);
     assert!(args.subprocess);

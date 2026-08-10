@@ -478,10 +478,11 @@ preflight has already guaranteed the key exists, so `apply_deepseek_overlay`
 reads it from the vault a second time — directly in the process that is
 about to spawn the child, foreground or worker — and builds a DeepSeek-only
 overlay for the Claude child: the documented Anthropic-compatible endpoint,
-auth token, and the fixed primary/fast model, effort, and compaction values
-from DeepSeek's own integration page (including the literal
-`deepseek-v4-pro[1m]` spelling, confirmed against that page directly — see
-issue #874's comment thread). Every conflicting inherited Anthropic/profile
+auth token, and the resolved model, effort, and context profile. The reviewed
+default remains `deepseek-v4-pro[1m]` with max effort; explicit Pro/Flash and
+auto/1m selections are applied as documented in
+[provider selection](provider-selection.md). The 1m compaction threshold is
+emitted only for a 1m wire profile. Every conflicting inherited Anthropic/profile
 variable is removed **unconditionally** case-insensitively first — not
 gated on OS the way the pre-existing Codex cross-route overlay's comparison
 is (`env_key_eq`, which mirrors real per-platform env-var uniqueness
@@ -499,21 +500,22 @@ the runtime.
 
 ### What crosses the daemon/worker boundary
 
-Only `model_provider` and harness metadata — the same additive `LaunchPlan`
-fields Codex already uses. `LaunchPlan` has no field that could carry a
-credential, so there is nothing for daemon IPC to leak structurally; the
-wire round-trip test in `daemon/wire_prost/tests.rs` proves
-`ModelProvider::DeepSeek` survives encode/decode and that the encoded
-payload contains no secret-shaped value. A daemon-spawned worker retrieves
-the key itself, the same way the foreground path does, by calling
+Only typed provider/harness metadata and the normalized model selection
+(model and wire IDs, effort, context, and sources) cross in `LaunchPlan`.
+`LaunchPlan` has no field that could carry a credential, so there is nothing
+for daemon IPC to leak structurally; the wire round-trip test in
+`daemon/wire_prost/tests.rs` proves `ModelProvider::DeepSeek` and its selection
+survive encode/decode and that the encoded payload contains no secret-shaped
+value. A daemon-spawned worker retrieves the key itself, the same way the
+foreground path does, by calling
 `ForegroundRuntime::start` locally in the worker process — never through
 the daemon.
 
 ### Out of scope
 
-Arbitrary DeepSeek model configuration (only the one fixed profile above is
-supported) and Codex OAuth credential migration are both explicitly out of
-scope for this integration; see issue #874's decisions.
+Uncatalogued DeepSeek capabilities and Codex OAuth credential migration remain
+out of scope; see issue #874's decisions and the provider-selection catalog for
+the supported DeepSeek profiles.
 
 ## Ownership
 

@@ -1,13 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-use crate::backend::{Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource};
+use crate::backend::{
+    Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource, RoutingMode,
+};
 use crate::graphics::GraphicsConfig;
+use crate::provider_catalog::ResolvedModelSelection;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchPlan {
     pub command: Vec<String>,
     pub iterations: u32,
     pub backend: Backend,
+    #[serde(default)]
+    pub routing_mode: RoutingMode,
     /// Additive provider/harness metadata. `None` means a pre-#625 payload;
     /// consumers must fall back to the legacy `backend` field.
     #[serde(default)]
@@ -44,6 +49,9 @@ pub struct LaunchPlan {
     /// bridge the same value, and so `--dry-run` can show it.
     #[serde(default)]
     pub codex_model: Option<String>,
+    /// Additive normalized selection. Older daemon payloads retain `codex_model`.
+    #[serde(default)]
+    pub model_selection: Option<ResolvedModelSelection>,
 }
 
 impl LaunchPlan {
@@ -72,6 +80,7 @@ mod tests {
             command: vec![effective.executable_name().to_string()],
             iterations: 1,
             backend: effective,
+            routing_mode: RoutingMode::Direct,
             model_provider: Some(provider),
             requested_harness: Some(requested),
             effective_harness: Some(effective),
@@ -85,6 +94,7 @@ mod tests {
             loop_markers: None,
             stream_json_progress: false,
             codex_model: None,
+            model_selection: None,
         }
     }
 

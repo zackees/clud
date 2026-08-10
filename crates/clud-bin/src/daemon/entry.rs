@@ -849,10 +849,14 @@ fn prepare_transcript_path(path: &Path) -> io::Result<PathBuf> {
 fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<String>> {
     let exe = std::env::current_exe()?;
     let mut command = vec![exe.to_string_lossy().to_string()];
-    match plan.model_provider() {
-        crate::backend::ModelProvider::Claude => command.push("--claude".to_string()),
-        crate::backend::ModelProvider::Codex => command.push("--codex".to_string()),
-        crate::backend::ModelProvider::DeepSeek => command.push("--deepseek".to_string()),
+    if plan.routing_mode == crate::backend::RoutingMode::Unified {
+        command.push("--unified".to_string());
+    } else {
+        match plan.model_provider() {
+            crate::backend::ModelProvider::Claude => command.push("--claude".to_string()),
+            crate::backend::ModelProvider::Codex => command.push("--codex".to_string()),
+            crate::backend::ModelProvider::DeepSeek => command.push("--deepseek".to_string()),
+        }
     }
     command.push("--harness".to_string());
     // A repeat is a fresh process. Pin the resolved effective harness rather
@@ -871,9 +875,28 @@ fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<S
     if args.verbose {
         command.push("--verbose".to_string());
     }
-    if let Some(model) = args.model.as_deref() {
+    let normalized = plan.model_selection.as_ref();
+    if let Some(model) = normalized
+        .and_then(|selection| selection.wire_model.as_deref())
+        .or(args.model.as_deref())
+    {
         command.push("--model".to_string());
         command.push(model.to_string());
+    }
+    if let Some(effort) = normalized
+        .and_then(|selection| selection.effort)
+        .map(|effort| effort.as_str())
+        .or(args.effort.as_deref())
+    {
+        command.push("--effort".to_string());
+        command.push(effort.to_string());
+    }
+    if let Some(context_window) = normalized
+        .and_then(|selection| selection.context_window.as_deref())
+        .or(args.context_window.as_deref())
+    {
+        command.push("--context-window".to_string());
+        command.push(context_window.to_string());
     }
     command.push("loop".to_string());
     if let Some(Command::Loop {

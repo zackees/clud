@@ -1,7 +1,7 @@
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use crate::backend::HarnessSelection;
+use crate::backend::{HarnessSelection, ModelProvider, RoutingMode};
 use crate::graphics::GraphicsMode;
 
 /// Fast CLI for running Claude Code and Codex in YOLO mode.
@@ -35,6 +35,18 @@ pub struct Args {
     #[arg(long = "deepseek", conflicts_with_all = ["claude", "codex"])]
     pub deepseek: bool,
 
+    /// Select a provider using the generic script-friendly spelling.
+    #[arg(long = "provider", value_enum, conflicts_with_all = ["claude", "codex", "deepseek"])]
+    pub provider: Option<ModelProvider>,
+
+    /// Route configured providers through one Claude model picker.
+    #[arg(long = "unified", conflicts_with_all = ["claude", "codex", "deepseek", "provider", "mode"])]
+    pub unified: bool,
+
+    /// Generic spelling for the launch routing mode.
+    #[arg(long = "mode", value_parser = ["unified"], conflicts_with_all = ["claude", "codex", "deepseek", "provider", "unified"])]
+    pub mode: Option<String>,
+
     /// Select the agent harness independently from the model provider.
     #[arg(long = "harness", value_enum)]
     pub harness: Option<HarnessSelection>,
@@ -59,6 +71,14 @@ pub struct Args {
 
     #[arg(long = "model")]
     pub model: Option<String>,
+
+    /// Reasoning effort, kept independent from the selected model.
+    #[arg(long = "effort")]
+    pub effort: Option<String>,
+
+    /// Requested context window (for example `1m`) where the selected model supports it.
+    #[arg(long = "context-window")]
+    pub context_window: Option<String>,
 
     #[arg(long = "safe")]
     pub safe: bool,
@@ -206,8 +226,44 @@ pub struct Args {
     pub codex_config_overrides: Vec<String>,
 }
 
+impl Args {
+    /// Return only provider intent that came from the command line. Model
+    /// inference and saved defaults are resolved later so source metadata does
+    /// not accidentally label `--provider` as a global setting.
+    pub fn explicit_model_provider(&self) -> Option<ModelProvider> {
+        if self.deepseek {
+            Some(ModelProvider::DeepSeek)
+        } else if self.codex {
+            Some(ModelProvider::Codex)
+        } else if self.claude {
+            Some(ModelProvider::Claude)
+        } else {
+            self.provider
+        }
+    }
+
+    pub fn routing_mode(&self) -> RoutingMode {
+        if self.unified || self.mode.as_deref() == Some("unified") {
+            RoutingMode::Unified
+        } else {
+            RoutingMode::Direct
+        }
+    }
+
+    /// `run` is an explicit spelling of the historical command-less launch.
+    /// Erase it before orchestration so every bare-launch gate (stdin, setup,
+    /// warnings, daemon dispatch, and command construction) sees one shape.
+    pub fn normalize_explicit_run(&mut self) {
+        if matches!(self.command, Some(Command::Run)) {
+            self.command = None;
+        }
+    }
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Explicit compatibility spelling for a normal backend launch.
+    Run,
     /// Manage the experimental ChatGPT-subscription credentials used by the
     /// Codex-to-Claude bridge. Never forwarded to a backend agent.
     #[command(name = "codex-auth")]
@@ -841,6 +897,10 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--message",
         "--resume",
         "--model",
+        "--provider",
+        "--mode",
+        "--effort",
+        "--context-window",
         "--harness",
         "--name",
         "--transcript",
@@ -865,6 +925,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--claude",
         "--codex",
         "--deepseek",
+        "--unified",
         "--subprocess",
         "--pty",
         "--safe",
@@ -939,6 +1000,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "test",
         "codex-auth",
         "deepseek-auth",
+        "run",
         "__daemon",
         "__worker",
     ];

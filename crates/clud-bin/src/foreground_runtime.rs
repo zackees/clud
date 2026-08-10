@@ -85,7 +85,7 @@ impl ForegroundRuntime {
                 .get()
                 .map_err(|_| BridgeError::DeepSeekCredentials)?
                 .ok_or(BridgeError::DeepSeekCredentials)?;
-            apply_deepseek_overlay(&mut env, &secret);
+            apply_deepseek_overlay(&mut env, &secret, plan.model_selection.as_ref());
             (None, None)
         } else {
             (None, None)
@@ -199,7 +199,11 @@ fn is_deepseek_via_claude(plan: &LaunchPlan) -> bool {
     plan.model_provider() == ModelProvider::DeepSeek && plan.effective_harness() == Backend::Claude
 }
 
-fn apply_deepseek_overlay(env: &mut Vec<(String, String)>, secret: &str) {
+fn apply_deepseek_overlay(
+    env: &mut Vec<(String, String)>,
+    secret: &str,
+    selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
+) {
     // Unconditionally case-insensitive (unlike `env_key_eq`, which mirrors
     // real per-OS env-var uniqueness semantics for the Codex overlay above):
     // this is a security guarantee against leaking an ambient Anthropic key
@@ -225,23 +229,27 @@ fn apply_deepseek_overlay(env: &mut Vec<(String, String)>, secret: &str) {
                 .to_ascii_uppercase()
                 .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
     });
+    let model = selection
+        .and_then(|selection| selection.wire_model.as_deref())
+        .unwrap_or("deepseek-v4-pro[1m]");
+    let effort = selection
+        .and_then(|selection| selection.effort)
+        .unwrap_or(crate::provider_catalog::EffortLevel::Max)
+        .as_str();
     env.extend([
         (
             "ANTHROPIC_BASE_URL".to_string(),
             "https://api.deepseek.com/anthropic".to_string(),
         ),
         ("ANTHROPIC_AUTH_TOKEN".to_string(), secret.to_string()),
-        (
-            "ANTHROPIC_MODEL".to_string(),
-            "deepseek-v4-pro[1m]".to_string(),
-        ),
+        ("ANTHROPIC_MODEL".to_string(), model.to_string()),
         (
             "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-            "deepseek-v4-pro[1m]".to_string(),
+            model.to_string(),
         ),
         (
             "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-            "deepseek-v4-pro[1m]".to_string(),
+            model.to_string(),
         ),
         (
             "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
@@ -251,12 +259,14 @@ fn apply_deepseek_overlay(env: &mut Vec<(String, String)>, secret: &str) {
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
             "deepseek-v4-flash".to_string(),
         ),
-        ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
-        (
+        ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort.to_string()),
+    ]);
+    if model.ends_with("[1m]") {
+        env.push((
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
             "786432".to_string(),
-        ),
-    ]);
+        ));
+    }
 }
 
 fn apply_cross_route_overlay(
@@ -566,6 +576,7 @@ mod tests {
             command: vec![harness.executable_name().to_string()],
             iterations: 1,
             backend: harness,
+            routing_mode: crate::backend::RoutingMode::Direct,
             model_provider: Some(provider),
             requested_harness: Some(match harness {
                 Backend::Claude => HarnessSelection::Claude,
@@ -582,6 +593,7 @@ mod tests {
             loop_markers: None,
             stream_json_progress: false,
             codex_model: None,
+            model_selection: None,
         }
     }
 
@@ -702,7 +714,7 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_deepseek_overlay(&mut child, "ds-test-secret");
+        apply_deepseek_overlay(&mut child, "ds-test-secret", None);
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "anthropic_api_key"), None);
@@ -728,6 +740,23 @@ mod tests {
             Some("786432")
         );
         assert_eq!(lookup(&base, "anthropic_api_key"), Some("ambient-key"));
+    }
+
+    #[test]
+    fn deepseek_overlay_applies_explicit_model_context_and_effort() {
+        let selection = crate::provider_catalog::resolve(
+            Some(ModelProvider::DeepSeek),
+            Some("deepseek-v4-pro"),
+            Some("high"),
+            Some("auto"),
+        )
+        .unwrap()
+        .unwrap();
+        let mut env = Vec::new();
+        apply_deepseek_overlay(&mut env, "ds-test-secret", Some(&selection));
+        assert_eq!(lookup(&env, "ANTHROPIC_MODEL"), Some("deepseek-v4-pro"));
+        assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), Some("high"));
+        assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
     }
 
     #[test]
@@ -890,7 +919,7 @@ mod tests {
     #[test]
     fn deepseek_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_deepseek_overlay(&mut env, "ds-test-secret");
+        apply_deepseek_overlay(&mut env, "ds-test-secret", None);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,

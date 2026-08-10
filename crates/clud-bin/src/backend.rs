@@ -4,13 +4,36 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 /// Model API/provider selected by the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
+#[value(rename_all = "lower")]
 pub enum ModelProvider {
     Claude,
     Codex,
     #[serde(rename = "deepseek")]
     DeepSeek,
+}
+
+/// Whether one provider owns the launch or the Claude harness routes among
+/// several providers through the launch-scoped gateway.
+///
+/// This is deliberately separate from [`ModelProvider`] and from
+/// [`LaunchMode`] (subprocess versus PTY).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingMode {
+    #[default]
+    Direct,
+    Unified,
+}
+
+impl RoutingMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Unified => "unified",
+        }
+    }
 }
 
 impl ModelProvider {
@@ -110,6 +133,7 @@ impl PreferenceSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedLaunchTarget {
+    pub routing_mode: RoutingMode,
     pub model_provider: ModelProvider,
     pub requested_harness: HarnessSelection,
     pub effective_harness: Backend,
@@ -121,7 +145,7 @@ pub struct ResolvedLaunchTarget {
 pub enum LaunchTargetError {
     ClaudeViaCodexUnsupported,
     DeepSeekViaCodexUnsupported,
-    DeepSeekModelUnsupported,
+    UnifiedViaCodexUnsupported,
 }
 
 impl std::fmt::Display for LaunchTargetError {
@@ -135,9 +159,9 @@ impl std::fmt::Display for LaunchTargetError {
                 f,
                 "unsupported launch target: DeepSeek provider requires the Claude harness"
             ),
-            Self::DeepSeekModelUnsupported => write!(
+            Self::UnifiedViaCodexUnsupported => write!(
                 f,
-                "unsupported launch option: DeepSeek uses its fixed provider profile and does not accept --model"
+                "unsupported launch target: unified routing requires the Claude harness"
             ),
         }
     }
@@ -250,12 +274,69 @@ pub fn resolve_launch_target(
     global_provider: Option<ModelProvider>,
     global_harness: Option<HarnessSelection>,
 ) -> Result<ResolvedLaunchTarget, LaunchTargetError> {
-    let (model_provider, provider_source) = if deepseek {
-        (ModelProvider::DeepSeek, PreferenceSource::Cli)
+    let cli_provider = if deepseek {
+        Some(ModelProvider::DeepSeek)
     } else if codex {
-        (ModelProvider::Codex, PreferenceSource::Cli)
+        Some(ModelProvider::Codex)
     } else if claude {
-        (ModelProvider::Claude, PreferenceSource::Cli)
+        Some(ModelProvider::Claude)
+    } else {
+        None
+    };
+    resolve_launch_target_with_provider(cli_provider, cli_harness, global_provider, global_harness)
+}
+
+/// Resolve a launch target from already-normalized CLI provider intent.
+///
+/// This is the provider-neutral entry point used by `--provider` and by a
+/// qualified `--model` that infers its provider. The boolean wrapper above is
+/// retained for existing callers and compatibility tests.
+pub fn resolve_launch_target_with_provider(
+    cli_provider: Option<ModelProvider>,
+    cli_harness: Option<HarnessSelection>,
+    global_provider: Option<ModelProvider>,
+    global_harness: Option<HarnessSelection>,
+) -> Result<ResolvedLaunchTarget, LaunchTargetError> {
+    resolve_routed_launch_target(
+        RoutingMode::Direct,
+        cli_provider,
+        cli_harness,
+        global_provider,
+        global_harness,
+    )
+}
+
+pub fn resolve_routed_launch_target(
+    routing_mode: RoutingMode,
+    cli_provider: Option<ModelProvider>,
+    cli_harness: Option<HarnessSelection>,
+    global_provider: Option<ModelProvider>,
+    global_harness: Option<HarnessSelection>,
+) -> Result<ResolvedLaunchTarget, LaunchTargetError> {
+    if routing_mode == RoutingMode::Unified {
+        let requested_harness = cli_harness.unwrap_or(HarnessSelection::Default);
+        if requested_harness == HarnessSelection::Codex {
+            return Err(LaunchTargetError::UnifiedViaCodexUnsupported);
+        }
+        return Ok(ResolvedLaunchTarget {
+            routing_mode,
+            model_provider: cli_provider.unwrap_or(ModelProvider::Claude),
+            requested_harness,
+            effective_harness: Backend::Claude,
+            provider_source: if cli_provider.is_some() {
+                PreferenceSource::Cli
+            } else {
+                PreferenceSource::BuiltInDefault
+            },
+            harness_source: if cli_harness.is_some() {
+                PreferenceSource::Cli
+            } else {
+                PreferenceSource::BuiltInDefault
+            },
+        });
+    }
+    let (model_provider, provider_source) = if let Some(provider) = cli_provider {
+        (provider, PreferenceSource::Cli)
     } else if let Some(provider) = global_provider {
         (provider, PreferenceSource::GlobalSetting)
     } else {
@@ -279,6 +360,7 @@ pub fn resolve_launch_target(
     }
 
     Ok(ResolvedLaunchTarget {
+        routing_mode,
         model_provider,
         requested_harness,
         effective_harness,
@@ -289,12 +371,9 @@ pub fn resolve_launch_target(
 
 /// Validate options whose meaning depends on the resolved model provider.
 pub fn validate_provider_options(
-    target: ResolvedLaunchTarget,
-    model: Option<&str>,
+    _target: ResolvedLaunchTarget,
+    _model: Option<&str>,
 ) -> Result<(), LaunchTargetError> {
-    if target.model_provider == ModelProvider::DeepSeek && model.is_some() {
-        return Err(LaunchTargetError::DeepSeekModelUnsupported);
-    }
     Ok(())
 }
 
@@ -556,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_rejects_the_codex_harness_and_model_override() {
+    fn deepseek_rejects_the_codex_harness_but_accepts_a_qualified_model() {
         let target = resolve_launch_target(
             false,
             false,
@@ -570,10 +649,54 @@ mod tests {
         let target = resolve_launch_target(false, false, true, None, None, None).unwrap();
         assert_eq!(target.effective_harness, Backend::Claude);
         assert_eq!(
-            validate_provider_options(target, Some("anything")),
-            Err(LaunchTargetError::DeepSeekModelUnsupported)
+            validate_provider_options(target, Some("deepseek-v4-pro")),
+            Ok(())
         );
         assert_eq!(validate_provider_options(target, None), Ok(()));
+    }
+
+    #[test]
+    fn normalized_cli_provider_keeps_cli_source_metadata() {
+        let target = resolve_launch_target_with_provider(
+            Some(ModelProvider::Codex),
+            None,
+            Some(ModelProvider::Claude),
+            None,
+        )
+        .unwrap();
+        assert_eq!(target.model_provider, ModelProvider::Codex);
+        assert_eq!(target.provider_source, PreferenceSource::Cli);
+    }
+
+    #[test]
+    fn unified_routing_uses_claude_harness_without_importing_saved_preferences() {
+        let target = resolve_routed_launch_target(
+            RoutingMode::Unified,
+            Some(ModelProvider::Codex),
+            None,
+            Some(ModelProvider::DeepSeek),
+            Some(HarnessSelection::Codex),
+        )
+        .unwrap();
+        assert_eq!(target.routing_mode, RoutingMode::Unified);
+        assert_eq!(target.model_provider, ModelProvider::Codex);
+        assert_eq!(target.effective_harness, Backend::Claude);
+        assert_eq!(target.provider_source, PreferenceSource::Cli);
+        assert_eq!(target.harness_source, PreferenceSource::BuiltInDefault);
+    }
+
+    #[test]
+    fn unified_routing_rejects_an_explicit_codex_harness() {
+        assert_eq!(
+            resolve_routed_launch_target(
+                RoutingMode::Unified,
+                None,
+                Some(HarnessSelection::Codex),
+                None,
+                None,
+            ),
+            Err(LaunchTargetError::UnifiedViaCodexUnsupported)
+        );
     }
 
     #[test]
