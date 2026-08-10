@@ -3,7 +3,8 @@ use super::builder::{
     parse_repeat_interval, plan_mode_suppression_notice, repeat_implies_no_done_warning,
 };
 use super::prompts::{
-    build_do_prompt, build_fix_prompt, build_up_prompt, is_github_url, FIX_PROMPT,
+    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, is_github_url,
+    FIX_PROMPT,
 };
 use super::types::LaunchPlan;
 use crate::args::Args;
@@ -633,6 +634,40 @@ fn test_build_do_prompt_substitutes_url() {
     assert!(prompt.starts_with("/goal "));
     assert!(prompt.contains("https://example.com/thing"));
     assert!(!prompt.contains("{url}"));
+}
+
+#[test]
+fn test_build_grind_prompt_substitutes_url() {
+    let prompt = build_grind_prompt("https://example.com/repo/issues");
+    assert!(prompt.starts_with("/loop "));
+    assert!(prompt.contains("https://example.com/repo/issues"));
+    assert!(!prompt.contains("{url}"));
+}
+
+#[test]
+fn test_grind_command_uses_loop_contract() {
+    let p = plan(&["clud", "grind", "https://github.com/zackees/clud/issues"]);
+    let prompt = prompt_from_plan(&p);
+    assert!(
+        prompt.starts_with("/loop "),
+        "grind prompt must start with /loop; got: {prompt:?}"
+    );
+    assert!(
+        prompt.contains("https://github.com/zackees/clud/issues"),
+        "grind prompt must contain the URL; got: {prompt:?}"
+    );
+    assert!(
+        prompt.contains(".clud/loop/DONE") || prompt.contains(".clud\\loop\\DONE"),
+        "grind prompt missing DONE marker path: {prompt}"
+    );
+    assert!(
+        prompt.contains(".clud/loop/BLOCKED") || prompt.contains(".clud\\loop\\BLOCKED"),
+        "grind prompt missing BLOCKED marker path: {prompt}"
+    );
+    assert!(
+        p.loop_markers.is_some(),
+        "grind must set loop_markers (DONE/BLOCKED paths)"
+    );
 }
 
 #[test]

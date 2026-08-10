@@ -138,6 +138,19 @@ pub(super) fn build_do_prompt(url: &str) -> String {
     DO_GOAL_TEMPLATE.replace("{url}", url)
 }
 
+pub(super) const GRIND_LOOP_TEMPLATE: &str = "\
+/loop look at {url} and select the next issue and then perform the task. \
+agent iteration is done when (a) the task is satisfied when the issue is \
+complete via a PR that is pushed, verified and merged (b) no files are left \
+behind (c) the local repo is rebased back to origin main (d) no files left \
+behind, NO CHEATING. Bias your action to fixing recent outstanding PRs by \
+fixing them up and moving them forward as sometimes the loop iteration will \
+end before the PRs are done. Loop terminates when all issues are done.";
+
+pub(super) fn build_grind_prompt(url: &str) -> String {
+    GRIND_LOOP_TEMPLATE.replace("{url}", url)
+}
+
 pub(super) fn build_fix_prompt(url: Option<&str>) -> String {
     match url {
         Some(u) if is_github_url(u) => GITHUB_FIX_TEMPLATE

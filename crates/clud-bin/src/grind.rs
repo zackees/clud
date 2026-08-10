@@ -1,5 +1,5 @@
 //! `clud grind` — derive the current repo's issues page and grind it under
-//! the `/goal` contract.
+//! the `/loop` contract.
 //!
 //! `clud grind` with no argument resolves the git `origin` remote, maps it to
 //! the forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues` for
@@ -100,7 +100,7 @@ pub fn git_remote_url(cwd: &Path) -> Option<String> {
     }
 }
 
-/// Resolve the URL `clud grind` hands to the `/goal` contract.
+/// Resolve the URL `clud grind` hands to the `/loop` contract.
 ///
 /// An explicit `url` is returned verbatim (parity with `clud do`). Otherwise
 /// the `origin` remote in `cwd` is mapped to its issues page. `Err` carries a

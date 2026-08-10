@@ -10,8 +10,8 @@ use crate::loop_spec::{done_marker_contract, git_root_from};
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
 use super::prompts::{
-    build_do_prompt, build_fix_prompt, build_up_prompt, push_prompt, push_prompt_interactive,
-    REBASE_PROMPT,
+    build_do_prompt, build_fix_prompt, build_grind_prompt, build_up_prompt, push_prompt,
+    push_prompt_interactive, REBASE_PROMPT,
 };
 use super::types::{LaunchPlan, LoopMarkers, RepeatSchedule};
 
@@ -308,11 +308,26 @@ fn build_launch_plan_for_target_at(
         Some(Command::Wasm { .. }) => {
             unreachable!("wasm execution is handled directly in main")
         }
-        Some(Command::Grind { .. }) => {
-            // `grind` is rewritten to `Do` in main before the launch plan is
-            // built (it resolves the repo's issues URL and prints the notice),
-            // so it never reaches the builder. Treated as a no-op for match
-            // exhaustiveness.
+        Some(Command::Grind { url }) => {
+            // `grind` uses the `/loop` contract with DONE/BLOCKED markers so
+            // each completed issue triggers re-invocation. When all issues are
+            // done the agent writes BLOCKED and the loop terminates.
+            let url = url.as_deref().unwrap_or("");
+            let git_root = git_root_from(cwd);
+            let marker_paths = resolve_marker_paths(cwd, &git_root, None);
+            let prompt_text = build_grind_prompt(url);
+            let final_prompt = format!(
+                "{}{}",
+                prompt_text,
+                done_marker_contract(&marker_paths.done, &marker_paths.blocked)
+            );
+            task_summary = Some(format!("grind {url}"));
+            loop_markers = Some(LoopMarkers {
+                done_path: marker_paths.done.to_string_lossy().to_string(),
+                blocked_path: marker_paths.blocked.to_string_lossy().to_string(),
+            });
+            iterations = 200; // high ceiling — loop terminates via BLOCKED
+            push_prompt(&mut cmd, backend, final_prompt);
         }
         Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })

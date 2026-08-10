@@ -255,7 +255,7 @@ pub enum Command {
     Do {
         url: String,
     },
-    /// Grind the current repo's issues page under the /goal contract.
+    /// Grind the current repo's issues page under the /loop contract.
     ///
     /// With no argument, resolves the `origin` remote and maps it to the
     /// forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues`
@@ -763,6 +763,10 @@ pub enum GcSubcommand {
         /// Preview the removal plan without touching anything.
         #[arg(long = "dry-run")]
         dry_run: bool,
+        /// Only affect entries created longer ago than this duration
+        /// (e.g. `2d`, `48h`). Overrides the per-kind default prune window.
+        #[arg(long = "older-than", value_name = "DURATION")]
+        older_than: Option<String>,
         /// Managed kind to prune (e.g. `worktree`, `uv-cache`, `trash`),
         /// or `all` for every managed kind (issue #506).
         #[arg(value_name = "KIND", conflicts_with = "kind")]
@@ -780,6 +784,10 @@ pub enum GcSubcommand {
         /// Skip the interactive confirmation prompt.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
+        /// Only affect entries created longer ago than this duration
+        /// (e.g. `2d`, `48h`). Without it, purge removes every entry.
+        #[arg(long = "older-than", value_name = "DURATION")]
+        older_than: Option<String>,
         /// Managed kind to purge (e.g. `worktree`, `uv-cache`, `trash`),
         /// or `all` for every managed kind (issue #506).
         #[arg(value_name = "KIND", conflicts_with = "kind")]
@@ -799,6 +807,10 @@ pub enum GcSubcommand {
         /// Required with `--purge`.
         #[arg(long = "yes", short = 'y')]
         yes: bool,
+        /// Only affect entries created longer ago than this duration
+        /// (e.g. `2d`, `48h`).
+        #[arg(long = "older-than", value_name = "DURATION")]
+        older_than: Option<String>,
     },
     /// Walk `.claude/worktrees/` in the current repo and insert any
     /// previously-untracked worktree directories.
@@ -840,6 +852,8 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--repeat",
         "--daemon-state-dir",
         "--stale-after",
+        // Issue: `clud gc prune/purge --older-than <dur>` value arg.
+        "--older-than",
         "--daemon",
         "--state-dir",
         // Issue #469: `clud log --cmd "..."` arg.

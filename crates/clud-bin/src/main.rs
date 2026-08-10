@@ -380,16 +380,17 @@ fn run(mut args: args::Args) {
 
     // `clud grind` resolves the current repo's issues page from the `origin`
     // remote (GitHub `<repo>/issues`, GitLab `<repo>/-/issues`), prints a green
-    // notice, then rewrites itself to `clud do <issues-url>` so the rest of the
-    // launch flow (interactive `/goal` seeding, daemon, dry-run) is reused
-    // unchanged. An explicit URL argument is passed through verbatim.
+    // notice, then seeds a `/loop` contract that iterates issue-by-issue with
+    // DONE/BLOCKED markers. An explicit URL argument is passed through verbatim.
     if let Some(args::Command::Grind { url }) = args.command.clone() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match grind::resolve_grind_target(&cwd, url.as_deref()) {
             Ok(issues_url) => {
                 let color = std::io::IsTerminal::is_terminal(&io::stderr());
                 eprintln!("{}", grind::grind_notice(&issues_url, color));
-                args.command = Some(args::Command::Do { url: issues_url });
+                args.command = Some(args::Command::Grind {
+                    url: Some(issues_url),
+                });
             }
             Err(error) => {
                 eprintln!("[clud] error: {error}");
