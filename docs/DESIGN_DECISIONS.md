@@ -1782,3 +1782,39 @@ most cross-referenced skills in the tree.
 - The four names may be re-introduced later; doing so means removing them from
   `PURGED_BUNDLED_SKILLS` in the same commit that re-adds the bundle entries
   (`retired_skills_are_not_also_bundled` enforces the disjointness).
+
+---
+
+## DD-041: Unified routing is a mode, and model identity has one provider-neutral registry
+
+**Status:** Accepted
+
+**Context:** Issues #898-#901 add a Claude-harness session that can route to
+Claude, Codex, and DeepSeek. Before that gateway, clud exposed provider flags,
+an independent harness choice, a Codex-only model parser, DeepSeek constants in
+the foreground runtime, and a `LaunchMode` type that already meant subprocess
+versus PTY. Treating unified as another provider or adding another catalog
+would conflate identity and freeze incompatible public state.
+
+**Decision:** `RoutingMode::{Direct, Unified}` is independent from
+`ModelProvider::{Claude, Codex, DeepSeek}`, `HarnessSelection`, and the existing
+process `LaunchMode`. `provider_catalog.rs` is the single authority mapping
+stable clud CLI/settings IDs, gateway discovery IDs, provider wire IDs,
+compatibility aliases, and effort/context capabilities. Compound legacy inputs
+normalize into separate typed fields before bootstrap. `LaunchPlan` carries the
+normalized selection additively with source metadata and no credentials.
+
+The compatibility grammar remains first-class: bare `clud`, permanent provider
+flags, provider-before-action composition, and unknown harness passthrough all
+remain supported. `run`, `--provider`, `--effort`, and `--context-window` are
+owned by clud before `--` and can still be passed literally after it. Unknown
+future provider wire IDs remain reachable and are stored byte-for-byte beside
+their typed provider identity.
+
+**Consequences:** Direct launches and the unified gateway cannot drift into
+different model maps. A provider/model conflict or conflicting legacy/explicit
+modifier fails before credentials or paid requests. Repeats pin the normalized
+selection instead of re-reading settings. During the dependency-ordered #901
+burn-down, unified grammar and wire state may land before the gateway; until
+the gateway is enabled, a non-dry unified launch fails locally rather than
+silently acting like direct Claude.

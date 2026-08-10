@@ -131,7 +131,7 @@ fn marker(selected: bool) -> &'static str {
 
 pub fn should_prompt_for_scope(args: &Args, interactive_terminal: bool) -> bool {
     interactive_terminal
-        && (args.claude || args.codex || args.deepseek || args.harness.is_some())
+        && (args.explicit_model_provider().is_some() || args.harness.is_some())
         && !args.dry_run
         && args.prompt.is_none()
         && args.message.is_none()
@@ -169,7 +169,7 @@ pub fn scope_for_launch_selection(
     configured_default_harness: Option<HarnessSelection>,
     selected_harness: HarnessSelection,
 ) -> Option<LaunchSetupScope> {
-    let explicit_provider_changed = (args.claude || args.codex || args.deepseek)
+    let explicit_provider_changed = args.explicit_model_provider().is_some()
         && configured_default_provider.is_some_and(|provider| provider != selected_provider);
     let explicit_harness_changed = args.harness.is_some()
         && configured_default_harness.unwrap_or_default() != selected_harness;
@@ -183,7 +183,7 @@ pub fn scope_for_launch_selection(
 
 pub fn should_persist_prompted_default_backend(args: &Args, scope: LaunchSetupScope) -> bool {
     !args.dry_run
-        && (args.claude || args.codex || args.deepseek || args.harness.is_some())
+        && (args.explicit_model_provider().is_some() || args.harness.is_some())
         && matches!(scope, LaunchSetupScope::Global)
 }
 
@@ -523,6 +523,10 @@ mod tests {
     #[test]
     fn prompt_scope_only_for_interactive_bare_launches() {
         assert!(should_prompt_for_scope(&parse(&["clud", "--codex"]), true));
+        assert!(should_prompt_for_scope(
+            &parse(&["clud", "--provider", "codex"]),
+            true
+        ));
         assert!(should_prompt_for_scope(&parse(&["clud", "--claude"]), true));
         assert!(should_prompt_for_scope(
             &parse(&["clud", "--deepseek"]),
@@ -580,6 +584,27 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn generic_provider_that_differs_from_stored_default_prompts_again() {
+        let args = parse(&["clud", "--provider", "codex"]);
+        assert_eq!(
+            scope_for_launch_selection(
+                &args,
+                true,
+                Some(LaunchSetupScope::Global),
+                Some(ModelProvider::Claude),
+                ModelProvider::Codex,
+                None,
+                HarnessSelection::Default,
+            ),
+            None
+        );
+        assert!(should_persist_prompted_default_backend(
+            &args,
+            LaunchSetupScope::Global
+        ));
     }
 
     #[test]

@@ -6,6 +6,9 @@ Provider/harness metadata travels additively inside each worker's
 for the cross-route ownership boundary and
 [docs/architecture/launch-targets.md](../../../../docs/architecture/launch-targets.md)
 for field-level resolution.
+Normalized model/effort/context fields and unified-mode repeat reconstruction
+are owned by
+[docs/architecture/provider-selection.md](../../../../docs/architecture/provider-selection.md).
 
 Always-on background service for every `clud` invocation (issue #135). One long-lived daemon process per user owns two distinct concerns, served over the RPC lanes below:
 

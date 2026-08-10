@@ -7,6 +7,7 @@ use crate::backend::{
 use crate::codex_model::ModelSpec;
 use crate::graphics::GraphicsConfig;
 use crate::loop_spec::{done_marker_contract, git_root_from};
+use crate::provider_catalog;
 
 use super::loop_task::{resolve_loop_task, resolve_marker_paths};
 use super::prompts::{
@@ -46,17 +47,20 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
 /// Deliberately narrow: a plain `clud` (Claude provider, Claude harness) keeps
 /// plan mode, and `AskUserQuestion` is never touched by this rule.
 fn is_non_claude_claude_harness_bridge(target: ResolvedLaunchTarget) -> bool {
-    matches!(
-        target.model_provider,
-        ModelProvider::Codex | ModelProvider::DeepSeek
-    ) && matches!(target.effective_harness, Backend::Claude)
+    target.routing_mode == crate::backend::RoutingMode::Direct
+        && matches!(
+            target.model_provider,
+            ModelProvider::Codex | ModelProvider::DeepSeek
+        )
+        && matches!(target.effective_harness, Backend::Claude)
 }
 
 /// True when this is the Codex-provider / Claude-harness bridge specifically.
 /// Codex allows exactly one Claude process, so the `Task` tool (which creates
 /// subagents) is stripped for Codex only — DeepSeek doesn't share that limit.
 fn is_codex_claude_bridge(target: ResolvedLaunchTarget) -> bool {
-    matches!(target.model_provider, ModelProvider::Codex)
+    target.routing_mode == crate::backend::RoutingMode::Direct
+        && matches!(target.model_provider, ModelProvider::Codex)
         && matches!(target.effective_harness, Backend::Claude)
 }
 
@@ -88,6 +92,7 @@ pub fn plan_mode_suppression_notice(
 
 pub fn build_launch_plan(args: &Args, backend: Backend, backend_path: &str) -> LaunchPlan {
     let target = ResolvedLaunchTarget {
+        routing_mode: crate::backend::RoutingMode::Direct,
         model_provider: backend.as_model_provider(),
         requested_harness: HarnessSelection::Default,
         effective_harness: backend,
@@ -114,6 +119,7 @@ pub(crate) fn build_launch_plan_at(
     cwd: &Path,
 ) -> LaunchPlan {
     let target = ResolvedLaunchTarget {
+        routing_mode: crate::backend::RoutingMode::Direct,
         model_provider: backend.as_model_provider(),
         requested_harness: HarnessSelection::Default,
         effective_harness: backend,
@@ -134,6 +140,14 @@ fn build_launch_plan_for_target_at(
     let mut iterations = 1u32;
     let mut repeat_schedule: Option<RepeatSchedule> = None;
     let mut task_summary: Option<String> = None;
+    let model_selection = provider_catalog::resolve(
+        Some(target.model_provider),
+        args.model.as_deref(),
+        args.effort.as_deref(),
+        args.context_window.as_deref(),
+    )
+    .ok()
+    .flatten();
 
     let codex_uses_exec = matches!(backend, Backend::Codex) && has_noninteractive_prompt(args);
     let codex_uses_resume = matches!(backend, Backend::Codex)
@@ -150,6 +164,13 @@ fn build_launch_plan_for_target_at(
                 cmd.push("-c".to_string());
                 cmd.push(fallback_config.to_string());
             }
+        }
+        if let Some(effort) = model_selection
+            .as_ref()
+            .and_then(|selection| selection.effort)
+        {
+            cmd.push("-c".to_string());
+            cmd.push(format!("model_reasoning_effort=\"{}\"", effort.as_str()));
         }
     }
 
@@ -214,9 +235,16 @@ fn build_launch_plan_for_target_at(
     // gateway the owner of the model namespace: the harness passes the string
     // through without validating it. An id that does not parse is left alone
     // and rejected by the bridge, which owns the error message.
-    let codex_model = codex_model_selection(args, target);
-    if let Some(ref model) = args.model {
-        let emitted = codex_model.clone().unwrap_or_else(|| model.clone());
+    let codex_model = codex_model_selection(args, target, model_selection.as_ref());
+    let emitted_model = codex_model.clone().or_else(|| {
+        args.model.as_ref().map(|model| {
+            model_selection
+                .as_ref()
+                .and_then(|selection| selection.wire_model.clone())
+                .unwrap_or_else(|| model.clone())
+        })
+    });
+    if let Some(emitted) = emitted_model {
         match backend {
             Backend::Claude => {
                 cmd.push("--model".to_string());
@@ -226,6 +254,25 @@ fn build_launch_plan_for_target_at(
                 cmd.push("-m".to_string());
                 cmd.push(emitted);
             }
+        }
+    }
+    // Direct Codex-via-Claude already carries effort in the bridge-owned
+    // `<wire-model>@<effort>` compatibility spelling. Passing Claude's
+    // `--effort` as well would mutate harness session state and change the
+    // established direct-route contract. Native Claude, DeepSeek's
+    // Anthropic-compatible route, and future unified sessions use the harness
+    // effort field directly.
+    if matches!(backend, Backend::Claude)
+        && !(target.routing_mode == crate::backend::RoutingMode::Direct
+            && target.model_provider == ModelProvider::Codex)
+    {
+        if let Some(effort) = model_selection
+            .as_ref()
+            .and_then(|selection| selection.effort)
+            .filter(|effort| *effort != crate::provider_catalog::EffortLevel::None)
+        {
+            cmd.push("--effort".to_string());
+            cmd.push(effort.as_str().to_string());
         }
     }
 
@@ -350,7 +397,7 @@ fn build_launch_plan_for_target_at(
         | Some(Command::Daemon { .. })
         | Some(Command::InternalDaemon { .. })
         | Some(Command::InternalWorker { .. }) => {}
-        None => {
+        Some(Command::Run) | None => {
             if let Some(ref prompt) = args.prompt {
                 push_prompt(&mut cmd, backend, prompt.clone());
             }
@@ -432,6 +479,7 @@ fn build_launch_plan_for_target_at(
         command: cmd,
         iterations,
         backend,
+        routing_mode: target.routing_mode,
         model_provider: Some(target.model_provider),
         requested_harness: Some(target.requested_harness),
         effective_harness: Some(target.effective_harness),
@@ -448,18 +496,37 @@ fn build_launch_plan_for_target_at(
         loop_markers,
         stream_json_progress,
         codex_model,
+        model_selection,
     }
 }
 
 /// Canonicalize `--model` for a Codex-provider / Claude-harness launch.
 ///
-/// `None` when this is not that cross-route, when no model was given, or when
-/// the value does not parse — the bridge owns rejection, so a parse failure
-/// here means "leave the string alone", not "substitute a default".
-fn codex_model_selection(args: &Args, target: ResolvedLaunchTarget) -> Option<String> {
+/// `None` when this is not that cross-route or neither model nor effort was
+/// selected. Model-less effort pins the bridge's reviewed Terra default. A
+/// parse failure remains bridge-owned and does not substitute another model.
+fn codex_model_selection(
+    args: &Args,
+    target: ResolvedLaunchTarget,
+    selection: Option<&provider_catalog::ResolvedModelSelection>,
+) -> Option<String> {
     if target.model_provider != ModelProvider::Codex || target.effective_harness != Backend::Claude
     {
         return None;
+    }
+    if let Some(selection) = selection {
+        let mut value = selection.wire_model.clone().or_else(|| {
+            selection.effort.map(|_| {
+                ModelSpec::parse("terra")
+                    .expect("the provider catalog must retain the Terra compatibility alias")
+                    .model
+            })
+        })?;
+        if let Some(effort) = selection.effort {
+            value.push('@');
+            value.push_str(effort.as_str());
+        }
+        return Some(value);
     }
     let requested = args.model.as_deref()?;
     ModelSpec::parse(requested).ok().map(|spec| spec.display())

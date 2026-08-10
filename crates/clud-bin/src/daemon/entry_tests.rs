@@ -145,6 +145,11 @@ fn repeat_jobs_always_subprocess() {
 #[test]
 fn transcript_forces_centralized_daemon() {
     let args = Args {
+        provider: None,
+        unified: false,
+        mode: None,
+        effort: None,
+        context_window: None,
         prompt: Some("hi".into()),
         message: None,
         continue_session: false,
@@ -248,4 +253,134 @@ fn repeat_command_preserves_deepseek_provider() {
     assert!(command
         .windows(2)
         .any(|part| part == ["--harness", "claude"]));
+}
+
+#[test]
+fn repeat_command_preserves_unified_routing_without_a_direct_provider_flag() {
+    let args = Args::parse_from_raw(
+        ["clud", "--unified", "loop", "--repeat", "1h", "task"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    let target = crate::backend::resolve_routed_launch_target(
+        args.routing_mode(),
+        None,
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    assert!(command.windows(1).any(|part| part == ["--unified"]));
+    assert!(!command
+        .iter()
+        .any(|part| { matches!(part.as_str(), "--claude" | "--codex" | "--deepseek") }));
+}
+
+#[test]
+fn repeat_command_pins_the_normalized_model_effort_and_context() {
+    let args = Args::parse_from_raw(
+        [
+            "clud",
+            "--deepseek",
+            "--model",
+            "deepseek-v4-pro[1m]",
+            "--effort",
+            "max",
+            "loop",
+            "--repeat",
+            "1h",
+            "task",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    );
+    let target = crate::backend::resolve_launch_target(
+        args.claude,
+        args.codex,
+        args.deepseek,
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--model", "deepseek-v4-pro[1m]"]));
+    assert!(command.windows(2).any(|part| part == ["--effort", "max"]));
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--context-window", "1m"]));
+}
+
+#[test]
+fn repeat_command_preserves_an_unknown_future_wire_model() {
+    let args = Args::parse_from_raw(
+        [
+            "clud",
+            "--codex",
+            "--model",
+            "gpt-5.7-nova",
+            "loop",
+            "--repeat",
+            "1h",
+            "task",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    );
+    let target = crate::backend::resolve_launch_target(
+        args.claude,
+        args.codex,
+        args.deepseek,
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "codex");
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    let model_index = command.iter().position(|part| part == "--model").unwrap();
+    let repeated = crate::provider_catalog::resolve(
+        Some(crate::backend::ModelProvider::Codex),
+        Some(&command[model_index + 1]),
+        None,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(repeated.model.as_deref(), Some("gpt-5.7-nova"));
+    assert_eq!(repeated.wire_model.as_deref(), Some("gpt-5.7-nova"));
+}
+
+#[test]
+fn repeat_command_preserves_mixed_case_and_marker_shaped_custom_models() {
+    for model in ["My-Gateway-Model", "claude-wire-special"] {
+        let args = Args::parse_from_raw(
+            [
+                "clud", "--claude", "--model", model, "loop", "--repeat", "1h", "task",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+        let target = crate::backend::resolve_launch_target(
+            args.claude,
+            args.codex,
+            args.deepseek,
+            args.harness,
+            None,
+            None,
+        )
+        .unwrap();
+        let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+        let command = build_repeat_once_command(&args, &plan).unwrap();
+        assert!(command.windows(2).any(|part| part == ["--model", model]));
+    }
 }

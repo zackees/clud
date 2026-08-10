@@ -1,5 +1,7 @@
 use super::*;
-use crate::backend::{Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource};
+use crate::backend::{
+    Backend, HarnessSelection, LaunchMode, ModelProvider, PreferenceSource, RoutingMode,
+};
 use crate::command::LaunchPlan;
 use crate::daemon::types::SessionKind;
 use crate::graphics::GraphicsConfig;
@@ -14,6 +16,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             command: vec!["claude".to_string()],
             iterations: 1,
             backend: Backend::Claude,
+            routing_mode: RoutingMode::Direct,
             model_provider: Some(ModelProvider::Codex),
             requested_harness: Some(HarnessSelection::Claude),
             effective_harness: Some(Backend::Claude),
@@ -27,6 +30,7 @@ fn sample_launch_spec() -> WorkerLaunchSpec {
             loop_markers: None,
             stream_json_progress: false,
             codex_model: None,
+            model_selection: None,
         },
         kind: SessionKind::Subprocess,
         name: Some("sample".to_string()),
@@ -253,6 +257,7 @@ fn pre_625_daemon_repeat_fixture_defaults_launch_metadata() {
         panic!("expected create request");
     };
     assert_eq!(spec.plan.model_provider, None);
+    assert_eq!(spec.plan.routing_mode, RoutingMode::Direct);
     assert_eq!(spec.plan.requested_harness, None);
     assert_eq!(spec.plan.effective_harness, None);
     assert_eq!(spec.plan.provider_source, None);

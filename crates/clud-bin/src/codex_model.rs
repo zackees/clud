@@ -30,123 +30,37 @@
 
 use std::fmt;
 
-/// Reasoning effort, restricted to what the gpt-5.6 family actually accepts.
-///
-/// Deliberately **not** the full Responses enum. `minimal` is a valid API
-/// value that no gpt-5.6 model supports — the family starts at `low` — and
-/// the old budget ladder emitted it for small budgets, so every such request
-/// was rejected upstream for a reason the user could not see. `ultra` is a
-/// Codex *product* orchestration mode and was never a `reasoning.effort`
-/// value at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Effort {
-    /// Reasoning off. Reachable only through `thinking: {"type":"disabled"}`
-    /// or an explicit `@none`.
-    None,
-    Low,
-    Medium,
-    High,
-    XHigh,
-    Max,
+pub use crate::provider_catalog::EffortLevel as Effort;
+use crate::provider_catalog::{CatalogModel, MODELS};
+
+/// The Codex view of the provider-neutral model registry.
+pub fn codex_models() -> impl Iterator<Item = CatalogModel> {
+    MODELS
+        .iter()
+        .copied()
+        .filter(|model| model.provider == crate::backend::ModelProvider::Codex)
 }
-
-impl Effort {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
-            Self::Max => "max",
-        }
-    }
-
-    /// Every spelling a user can type, in ladder order. Used for parsing and
-    /// for the "valid values are ..." half of an error message, so the two can
-    /// never drift.
-    pub const ALL: [Self; 6] = [
-        Self::None,
-        Self::Low,
-        Self::Medium,
-        Self::High,
-        Self::XHigh,
-        Self::Max,
-    ];
-
-    pub fn parse(value: &str) -> Option<Self> {
-        let value = value.trim().to_ascii_lowercase();
-        Self::ALL
-            .into_iter()
-            .find(|effort| effort.as_str() == value)
-    }
-
-    fn catalog() -> String {
-        Self::ALL
-            .iter()
-            .map(|effort| effort.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-impl fmt::Display for Effort {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// One row of the gpt-5.6 catalog: the id that goes on the wire, the short
-/// name a user types, and the effort the model itself defaults to.
-///
-/// The default effort is per-model and is **not** uniform: `sol` defaults to
-/// `low` while `terra` and `luna` default to `medium`. Hardcoding one global
-/// default (as the bridge did) silently over- or under-spends depending on
-/// which model is selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CodexModel {
-    pub id: &'static str,
-    pub alias: &'static str,
-    pub default_effort: Effort,
-}
-
-/// The known family. Unknown ids are still forwarded verbatim (see
-/// [`ModelSpec::parse`]) — this table exists to give short names, correct
-/// per-model defaults, and a typo-proof error message, not to gatekeep.
-pub const CODEX_MODELS: [CodexModel; 3] = [
-    CodexModel {
-        id: "gpt-5.6-sol",
-        alias: "sol",
-        default_effort: Effort::Low,
-    },
-    CodexModel {
-        id: "gpt-5.6-terra",
-        alias: "terra",
-        default_effort: Effort::Medium,
-    },
-    CodexModel {
-        id: "gpt-5.6-luna",
-        alias: "luna",
-        default_effort: Effort::Medium,
-    },
-];
 
 /// Look up a catalog row by wire id.
-pub fn model_by_id(id: &str) -> Option<CodexModel> {
-    CODEX_MODELS.into_iter().find(|model| model.id == id)
+pub fn model_by_id(id: &str) -> Option<CatalogModel> {
+    codex_models().find(|model| model.wire_id == id)
 }
 
-fn model_by_alias(alias: &str) -> Option<CodexModel> {
+fn model_by_alias(alias: &str) -> Option<CatalogModel> {
     let alias = alias.trim().to_ascii_lowercase();
-    CODEX_MODELS
-        .into_iter()
-        .find(|model| model.alias == alias || model.id == alias)
+    codex_models().find(|model| {
+        model.cli_id == alias
+            || model.wire_id == alias
+            || model
+                .legacy_aliases
+                .iter()
+                .any(|candidate| *candidate == alias)
+    })
 }
 
 fn alias_catalog() -> String {
-    CODEX_MODELS
-        .iter()
-        .map(|model| model.alias)
+    codex_models()
+        .filter_map(|model| model.legacy_aliases.first().copied())
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -200,7 +114,7 @@ impl ModelSpec {
         };
 
         let model = match model_by_alias(model_part) {
-            Some(model) => model.id.to_string(),
+            Some(model) => model.wire_id.to_string(),
             None if looks_like_full_id(model_part) => model_part.to_string(),
             None => {
                 return Err(SelectionError::UnknownAlias {
@@ -218,7 +132,7 @@ impl ModelSpec {
     pub fn effective_effort(&self) -> Effort {
         self.effort.unwrap_or_else(|| {
             model_by_id(&self.model)
-                .map(|model| model.default_effort)
+                .and_then(|model| model.default_effort)
                 .unwrap_or(Effort::Medium)
         })
     }
@@ -302,9 +216,16 @@ pub fn picker_entry(selection: &ModelSpec) -> PickerEntry {
 /// Rendered from the catalog and the effort ladder so the row can never
 /// advertise a model or an effort the parser would then reject.
 fn picker_description() -> String {
-    let models = CODEX_MODELS
-        .iter()
-        .map(|model| format!("{} = {} ({})", model.alias, model.id, model.default_effort))
+    let models = codex_models()
+        .map(|model| {
+            let alias = model
+                .legacy_aliases
+                .first()
+                .copied()
+                .unwrap_or(model.cli_id);
+            let default_effort = model.default_effort.unwrap_or(Effort::Medium);
+            format!("{alias} = {} ({default_effort})", model.wire_id)
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -461,18 +382,19 @@ mod tests {
 
         // Terra and luna are unreachable from a second row, so the
         // description is the only place a user can discover them.
-        for model in CODEX_MODELS {
+        for model in codex_models() {
+            let alias = model.legacy_aliases.first().copied().unwrap();
             assert!(
-                entry.description.contains(model.id),
+                entry.description.contains(model.wire_id),
                 "{} must name {}",
                 entry.description,
-                model.id
+                model.wire_id
             );
             assert!(
-                entry.description.contains(model.alias),
+                entry.description.contains(alias),
                 "{} must name {}",
                 entry.description,
-                model.alias
+                alias
             );
         }
         for effort in Effort::ALL {

@@ -195,6 +195,11 @@ fn backend_prompt_launch_plan(
     backend_path: &str,
 ) -> command::LaunchPlan {
     let launch_args = Args {
+        provider: None,
+        unified: false,
+        mode: None,
+        effort: None,
+        context_window: None,
         prompt: Some(prompt),
         message: None,
         continue_session: false,

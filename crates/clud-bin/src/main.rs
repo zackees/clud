@@ -34,6 +34,7 @@ fn parse_args() -> args::Args {
 }
 
 fn run(mut args: args::Args) {
+    args.normalize_explicit_run();
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as
@@ -262,6 +263,55 @@ fn run(mut args: args::Args) {
         std::process::exit(worktrees::run(&opts));
     }
 
+    // Selection must be resolved from a read-only snapshot before any launch
+    // option can persist settings, acquire a settings lock, read credentials,
+    // dispatch to the daemon, or start a child.
+    let global_launch_preferences = match clud_settings::load_global_launch_preferences_read_only()
+    {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            eprintln!("[clud] warning: failed to load launch preferences: {error}; using defaults");
+            clud_settings::GlobalLaunchPreferences::default()
+        }
+    };
+    let cli_provider = args.explicit_model_provider();
+    let model_inferred_provider = args
+        .model
+        .as_deref()
+        .and_then(clud::provider_catalog::infer_provider);
+    let launch_target = match backend::resolve_routed_launch_target(
+        args.routing_mode(),
+        cli_provider.or(model_inferred_provider),
+        args.harness,
+        global_launch_preferences.model_provider,
+        global_launch_preferences.harness,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+    if let Err(error) = clud::provider_catalog::resolve(
+        Some(launch_target.model_provider),
+        args.model.as_deref(),
+        args.effort.as_deref(),
+        args.context_window.as_deref(),
+    ) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+    if launch_target.routing_mode == backend::RoutingMode::Unified && !args.dry_run {
+        eprintln!(
+            "unified routing is reserved by the #901 foundation but is not available until the launch-scoped gateway is enabled"
+        );
+        std::process::exit(2);
+    }
+
     if args.no_fix_hooks {
         if args.dry_run {
             println!("[clud] dry-run: would disable automatic hook-health repairs globally");
@@ -287,36 +337,6 @@ fn run(mut args: args::Args) {
             }
         }
     };
-
-    let global_launch_preferences = match if args.dry_run {
-        clud_settings::load_global_launch_preferences_read_only()
-    } else {
-        clud_settings::load_global_launch_preferences()
-    } {
-        Ok(preferences) => preferences,
-        Err(error) => {
-            eprintln!("[clud] warning: failed to load launch preferences: {error}; using defaults");
-            clud_settings::GlobalLaunchPreferences::default()
-        }
-    };
-    let launch_target = match backend::resolve_launch_target(
-        args.claude,
-        args.codex,
-        args.deepseek,
-        args.harness,
-        global_launch_preferences.model_provider,
-        global_launch_preferences.harness,
-    ) {
-        Ok(target) => target,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    };
-    if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
-        eprintln!("{error}");
-        std::process::exit(2);
-    }
 
     // Issue #112: explicit hook-parity remediation path. This flag resets the
     // sticky opt-out, applies deterministic repairs, and asks the selected
@@ -615,8 +635,9 @@ fn run(mut args: args::Args) {
         }
     };
     if persist_prompted_global_selection {
-        let explicit_provider =
-            (args.claude || args.codex || args.deepseek).then_some(launch_target.model_provider);
+        let explicit_provider = args
+            .explicit_model_provider()
+            .map(|_| launch_target.model_provider);
         if let Err(error) = clud_settings::save_global_launch_preferences(
             explicit_provider,
             args.harness,
@@ -665,6 +686,7 @@ fn run(mut args: args::Args) {
             "command": plan.command,
             "iterations": plan.iterations,
             "backend": backend.executable_name(),
+            "routing_mode": launch_target.routing_mode.as_str(),
             "model_provider": launch_target.model_provider.as_str(),
             "requested_harness": launch_target.requested_harness.as_str(),
             "effective_harness": launch_target.effective_harness.executable_name(),
@@ -679,6 +701,7 @@ fn run(mut args: args::Args) {
             // The resolved Codex selection, expanded from whatever short form
             // was typed, so a dry run shows what will actually be billed.
             "codex_model": plan.codex_model,
+            "model_selection": plan.model_selection,
             "transcript": args.transcript.as_ref().map(|p| p.to_string_lossy().to_string()),
             "loop_markers": plan.loop_markers.as_ref().map(|m| serde_json::json!({
                 "done_path": m.done_path,
