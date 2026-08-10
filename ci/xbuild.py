@@ -72,23 +72,16 @@ def _is_darwin(target: str) -> bool:
     return "apple" in target
 
 
-def _limit_address_space() -> None:
-    """Cap RLIMIT_AS at ~13 GB of the runner's 14-16 GB.
+def _run_argv(argv: list[str]) -> list[str]:
+    """Apply Linux's build memory limit without bypassing running-process.
 
-    Defensive: when the build genuinely runs out of memory, exceeding this kills
-    the offending process with a clean mmap/alloc failure naming the crate,
-    instead of an unexplained `137` from the kernel OOM killer. This replaces
-    the `ulimit -v 13000000` that the old workflow YAML applied per step.
+    `running_process` intentionally rejects Python's `preexec_fn`. Use a small
+    argv-only Bash wrapper on Linux instead: it applies the same 13 GB virtual
+    memory cap the old pre-exec hook supplied, then replaces itself with cargo.
     """
     if platform.system() != "Linux":
-        return
-    import resource
-
-    limit = 13_000_000 * 1024
-    _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    if hard != resource.RLIM_INFINITY and hard < limit:
-        return
-    resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+        return argv
+    return ["bash", "-c", "ulimit -v 13000000; exec \"$@\"", "clud-xbuild", *argv]
 
 
 def whisper_env(target: str, strategy: str, env: dict[str, str]) -> dict[str, str]:
@@ -254,14 +247,9 @@ def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
 
 
 def run(argv: list[str], env: dict[str, str]) -> int:
-    print(f"+ {' '.join(argv)}", flush=True)
-    return process.run(argv, cwd=ROOT, env=env, preexec_fn=_preexec()).returncode
-
-
-def _preexec():
-    if platform.system() != "Linux":
-        return None
-    return _limit_address_space
+    command = _run_argv(argv)
+    print(f"+ {' '.join(command)}", flush=True)
+    return process.run(command, cwd=ROOT, env=env).returncode
 
 
 def cmd_clippy(args: argparse.Namespace) -> int:
