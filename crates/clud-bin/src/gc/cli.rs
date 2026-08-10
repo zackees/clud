@@ -114,6 +114,7 @@ fn normalize(sub: GcSubcommand) -> GcAction {
             dry_run,
             kind_pos,
             kind,
+            ..
         } => GcAction::Prune {
             dry_run,
             kind: kind_pos.or(kind),
@@ -123,6 +124,7 @@ fn normalize(sub: GcSubcommand) -> GcAction {
             yes,
             kind_pos,
             kind,
+            ..
         } => GcAction::Purge {
             dry_run,
             yes,
@@ -132,6 +134,7 @@ fn normalize(sub: GcSubcommand) -> GcAction {
             purge,
             dry_run,
             yes,
+            ..
         } => GcAction::All {
             purge,
             dry_run,
@@ -757,6 +760,7 @@ mod tests {
         let positional = normalize(GcSubcommand::Purge {
             dry_run: false,
             yes: true,
+            older_than: None,
             kind_pos: Some("trash".into()),
             kind: None,
         });
@@ -764,6 +768,7 @@ mod tests {
 
         let flag = normalize(GcSubcommand::Prune {
             dry_run: true,
+            older_than: None,
             kind_pos: None,
             kind: Some("worktree".into()),
         });

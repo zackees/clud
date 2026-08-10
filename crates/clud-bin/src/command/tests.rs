@@ -1035,14 +1035,6 @@ fn test_build_fix_prompt_github_url() {
 }
 
 #[test]
-fn test_build_do_prompt_substitutes_url() {
-    let prompt = build_do_prompt("https://github.com/user/repo/issues/866");
-    assert!(prompt.starts_with("/goal "));
-    assert!(prompt.contains("https://github.com/user/repo/issues/866"));
-    assert!(!prompt.contains("{url}"));
-}
-
-#[test]
 fn test_build_up_prompt_default() {
     let prompt = build_up_prompt(None, false);
     assert!(prompt.contains("<your one-line summary>"));

@@ -28,15 +28,18 @@ After downloading and analyzing the logs:
 Then proceed with the validation process:
 {validation}";
 
-pub(super) const DO_GOAL_TEMPLATE: &str = concat!(
-    "/goal read {url} and implement it. goal is resolved when the issue is closed by ",
-    "a PR (one or more) where each is validated, tested, pushed and merged. You must ",
-    "wait for the GHA's with the PR to go green. then merge it. please add a watch. ",
-    "no cheating. no files left behind. all work must be done in this repo. no git ",
-    "worktrees, no sibling repos. work can only land here. when you are done do a git ",
-    "status and make sure it's clean. make sure that the local repo is rebased to the ",
-    "branch we started from. Find out that branch right now."
-);
+pub(super) const DO_GOAL_TEMPLATE: &str = "\
+/goal read {url} and implement it. goal is resolved when the issue is closed by \
+a PR (one or more) where each is validated, tested, pushed and merged. You must \
+wait for the GHA's with the PR to go green. then merge it. please add a watch. \
+no cheating. no files left behind. all work must be done in this repo. no git \
+worktrees, no sibling repos. work can only land here. when you are done do a git \
+status and make sure it's clean. make sure that the local repo is rebased to the \
+branch we started from. Find out that branch right now.";
+
+pub(super) fn build_do_prompt(url: &str) -> String {
+    DO_GOAL_TEMPLATE.replace("{url}", url)
+}
 
 pub(super) const REBASE_PROMPT: &str = "\
 First, unconditionally run `git fetch` to update all remote branches. \
@@ -135,19 +138,6 @@ pub(super) fn build_up_prompt(message: Option<&str>, publish: bool) -> String {
     prompt
 }
 
-pub(super) const DO_GOAL_TEMPLATE: &str = "\
-/goal read {url} and implement it. goal is resolved when the issue is closed by \
-a PR (one or more) where each is validated, tested, pushed and merged. You must \
-wait for the GHA's with the PR to go green. then merge it. please add a watch. \
-no cheating. no files left behind. all work must be done in this repo. no git \
-worktrees, no sibling repos. work can only land here. when you are done do a git \
-status and make sure it's clean. make sure that the local repo is rebased to the \
-branch we started from. Find out that branch right now.";
-
-pub(super) fn build_do_prompt(url: &str) -> String {
-    DO_GOAL_TEMPLATE.replace("{url}", url)
-}
-
 pub(super) const GRIND_LOOP_TEMPLATE: &str = "\
 /loop look at {url} and select the next issue and then perform the task. \
 agent iteration is done when (a) the task is satisfied when the issue is \
@@ -168,10 +158,6 @@ pub(super) fn build_fix_prompt(url: Option<&str>) -> String {
             .replace("{validation}", GITHUB_FIX_VALIDATION),
         _ => FIX_PROMPT.to_string(),
     }
-}
-
-pub(super) fn build_do_prompt(url: &str) -> String {
-    DO_GOAL_TEMPLATE.replace("{url}", url)
 }
 
 pub(super) fn is_github_url(url: &str) -> bool {
