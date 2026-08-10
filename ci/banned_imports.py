@@ -1,12 +1,13 @@
-"""Lint rule: ban direct subprocess/PTY calls in Rust source.
+"""Lint rule: ban direct subprocess/PTY calls in product source.
 
-All process execution must go through running-process.
-This script scans .rs files (excluding testbins/) for banned patterns
-and fails the build if any are found.
+All Rust and Python process execution must go through running-process.
+This script scans product source and fails the build if a direct process API
+is used.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -198,6 +199,35 @@ def scan_platform_tree_kills(path: Path) -> list[tuple[int, str]]:
     ]
 
 
+def scan_python_file(path: Path) -> list[tuple[int, str, str]]:
+    """Reject Python's raw subprocess module in product tooling."""
+    try:
+        content = path.read_text(encoding="utf-8")
+        tree = ast.parse(content, filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return []
+
+    lines = content.splitlines()
+    violations: list[tuple[int, str, str]] = []
+    seen: set[int] = set()
+    for node in ast.walk(tree):
+        banned = False
+        if isinstance(node, ast.Import):
+            banned = any(alias.name == "subprocess" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            banned = node.module == "subprocess"
+        elif isinstance(node, ast.Attribute):
+            banned = isinstance(node.value, ast.Name) and node.value.id == "subprocess"
+        if not banned or node.lineno in seen:
+            continue
+        seen.add(node.lineno)
+        line = lines[node.lineno - 1].strip() if node.lineno <= len(lines) else ""
+        violations.append(
+            (node.lineno, line, "use the Python running_process package instead")
+        )
+    return violations
+
+
 def main() -> int:
     # Scan all .rs files in crates/ (not testbins/ — mocks can use std::process)
     crates_dir = ROOT / "crates"
@@ -296,6 +326,11 @@ def main() -> int:
             total_violations += 1
 
     for path in sorted(crates_dir.rglob("*.py")):
+        for line_num, line, reason in scan_python_file(path):
+            rel = path.relative_to(ROOT)
+            print(f"{rel}:{line_num}: BANNED â€” {reason}", file=sys.stderr)
+            print(f"  {line}", file=sys.stderr)
+            total_violations += 1
         for line_num, line in scan_platform_tree_kills(path):
             rel = path.relative_to(ROOT)
             print(

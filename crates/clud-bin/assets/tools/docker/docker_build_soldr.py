@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = [
+#   "running-process==4.10.1",
+# ]
 # ///
 # managed-by: clud
 """docker_build_soldr.py — Rust + soldr + zccache docker-build stack.
@@ -49,9 +51,11 @@ import hashlib
 import os
 import platform
 import shutil
-import subprocess
 import sys
+import time
 from pathlib import Path
+
+from running_process import CalledProcessError, CompletedProcess, RunningProcess, TimeoutExpired
 
 STACK = "soldr"
 
@@ -181,15 +185,17 @@ def _label_args(path: Path, role: str) -> list[str]:
 
 
 def _docker(*args: str, check: bool = True,
-            capture: bool = False) -> subprocess.CompletedProcess:
+            capture: bool = False) -> CompletedProcess:
     """Wrap docker so we can swap shells later if needed. On Windows we
     rely on Docker Desktop's CLI being on PATH; the harness assumes
     native path quoting (see SKILL.md `path-conversion` table)."""
     cmd = ["docker", *args]
-    if capture:
-        return subprocess.run(cmd, check=check, capture_output=True,
-                              text=True)
-    return subprocess.run(cmd, check=check)
+    return RunningProcess.run(
+        cmd,
+        check=check,
+        capture_output=capture,
+        text=True,
+    )
 
 
 def cmd_init(path: Path) -> int:
@@ -658,8 +664,12 @@ def cmd_doctor(_path: Path | None = None) -> int:
     if not docker_ok:
         failures.append("docker not on PATH")
     else:
-        ping = subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"],
-                              capture_output=True, text=True, check=False)
+        ping = RunningProcess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if ping.returncode != 0:
             failures.append(f"docker daemon not reachable: {ping.stderr.strip()}")
         else:
@@ -678,13 +688,11 @@ def cmd_doctor(_path: Path | None = None) -> int:
     # Clock skew check — start a sub-second container and compare.
     if docker_ok:
         try:
-            r = subprocess.run(
+            r = RunningProcess.run(
                 ["docker", "run", "--rm", "alpine:3", "date", "+%s"],
                 capture_output=True, text=True, check=True, timeout=20)
             container_epoch = int(r.stdout.strip())
-            host_epoch = int(subprocess.run(
-                ["python", "-c", "import time; print(int(time.time()))"],
-                capture_output=True, text=True, check=True).stdout.strip())
+            host_epoch = int(time.time())
             skew = abs(container_epoch - host_epoch)
             sys.stdout.write(f"clock skew (container vs host): {skew}s\n")
             if skew > 1:
@@ -692,7 +700,7 @@ def cmd_doctor(_path: Path | None = None) -> int:
                     f"clock skew {skew}s exceeds 1s budget; warm incremental"
                     " builds will treat fresh outputs as stale and rebuild"
                     " from scratch")
-        except (subprocess.SubprocessError, ValueError) as e:
+        except (CalledProcessError, TimeoutExpired, OSError, ValueError) as e:
             failures.append(f"clock skew probe failed: {e}")
 
     if failures:

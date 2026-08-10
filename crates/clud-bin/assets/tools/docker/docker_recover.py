@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = [
+#   "running-process==4.10.1",
+# ]
 # ///
 # managed-by: clud
 """docker_recover.py — cross-platform Docker Desktop recovery + diagnostics.
@@ -87,15 +89,21 @@ import ntpath
 import os
 import platform
 import shutil
-import subprocess
 import sys
 import tempfile
-import threading
 import time
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from running_process import (
+    CompletedProcess,
+    RunningProcess,
+    TimeoutExpired,
+    launch_detached,
+)
+from running_process.command_render import list2cmdline
 
 # --------------------------------------------------------------------------
 # Exit codes — the public contract callers (SKILL.md, other tooling) rely on.
@@ -112,18 +120,11 @@ EXIT_NOT_AUTO_EXECUTED = 64
 READY_ATTEMPTS = 10
 READY_INTERVAL_SECONDS = 2.0
 
-# Windows process creation flags are only exported by subprocess on Windows.
-# Keep their documented values available so the launcher contract remains
-# unit-testable on Linux and macOS CI.
-WINDOWS_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-DAEMON_ENV_VAR = "RUNNING_PROCESS_IS_DAEMON"
 WINDOWS_DAEMON_GUARD_ARG = "__windows-daemon-guard"
 WINDOWS_DAEMON_GUARD_MUTEX = r"Local\clud-docker-recover-daemon-guard"
 WINDOWS_GUARD_PARENT_WAIT_SECONDS = 60.0
 WINDOWS_GUARD_STARTUP_SECONDS = 300.0
 WINDOWS_GUARD_CLI_SECONDS = 40.0
-WINDOWS_GUARD_CLI_TERMINATE_SECONDS = 1.0
 WINDOWS_GUARD_LOG_MAX_BYTES = 1024 * 1024
 WINDOWS_GUARD_EMPTY_SAMPLES = 3
 WINDOWS_GUARD_MONITOR_INTERVAL = 5.0
@@ -787,9 +788,9 @@ def _run(
     timeout: float = 20.0,
     *,
     env: Mapping[str, str] | None = None,
-) -> subprocess.CompletedProcess | None:
+) -> CompletedProcess | None:
     try:
-        return subprocess.run(
+        return RunningProcess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -797,7 +798,7 @@ def _run(
             check=False,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, TimeoutExpired):
         return None
 
 
@@ -844,7 +845,7 @@ def host_free_memory() -> int | None:
             return _windows_free_mem()
         if system == "Darwin":
             return _macos_free_mem()
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, RuntimeError):
         return None
     return None
 
@@ -1372,7 +1373,7 @@ def _run_recovery(args: argparse.Namespace, *, label: str) -> int:
     return EXIT_UNHEALTHY
 
 
-def _command_result_detail(label: str, result: subprocess.CompletedProcess | None) -> str:
+def _command_result_detail(label: str, result: CompletedProcess | None) -> str:
     if result is None:
         return f"{label}: command could not be executed"
     output = (result.stderr or result.stdout).strip().replace("\r", " ").replace("\n", " ")
@@ -1401,29 +1402,17 @@ def _windows_docker_desktop_executable(
     return next((candidate for candidate in candidates if exists(candidate)), None)
 
 
-def _declared_daemon_environment() -> dict[str, str]:
-    child_env = os.environ.copy()
-    child_env[DAEMON_ENV_VAR] = "1"
-    return child_env
-
-
 def _launch_windows_docker_desktop(executable: str) -> tuple[bool, str]:
     """Launch Desktop independently and positively declare it as a daemon."""
-    flags = WINDOWS_DETACHED_PROCESS | WINDOWS_CREATE_NEW_PROCESS_GROUP
     try:
-        subprocess.Popen(
-            [executable],
+        launch_detached(
+            list2cmdline([executable]),
             cwd=ntpath.dirname(executable),
-            env=_declared_daemon_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            creationflags=flags,
+            originator="clud-docker-recover",
         )
     except OSError as exc:
         return False, f"direct Docker Desktop launch failed for {executable}: {exc}"
-    return True, f"direct Docker Desktop launch started {executable} (daemon marker set)"
+    return True, f"direct Docker Desktop launch started {executable} via launch_detached"
 
 
 def _windows_docker_desktop_log_path(log_dir: Path | None = None) -> Path:
@@ -1434,24 +1423,18 @@ def _windows_docker_desktop_log_path(log_dir: Path | None = None) -> Path:
 
 def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
     """Start a declared-daemon parent that owns Docker's CLI launch subtree."""
-    flags = WINDOWS_DETACHED_PROCESS | WINDOWS_CREATE_NEW_PROCESS_GROUP
     script = os.path.abspath(__file__)
     try:
-        subprocess.Popen(
-            [sys.executable, script, WINDOWS_DAEMON_GUARD_ARG],
+        launch_detached(
+            list2cmdline([sys.executable, script, WINDOWS_DAEMON_GUARD_ARG]),
             cwd=os.path.dirname(script),
-            env=_declared_daemon_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            creationflags=flags,
+            originator="clud-docker-recover-guard",
         )
     except OSError as exc:
         return False, f"Docker Desktop daemon guard launch failed: {exc}"
     return (
         True,
-        "Docker Desktop daemon guard started (daemon marker set; CLI diagnostics: "
+        "Docker Desktop daemon guard started via launch_detached (CLI diagnostics: "
         f"{_windows_docker_desktop_log_path()})",
     )
 
@@ -1459,9 +1442,8 @@ def _launch_windows_docker_desktop_guard() -> tuple[bool, str]:
 def _write_bounded_diagnostic_log(stream, path: Path) -> None:
     """Drain one stream incrementally while retaining only its newest 1 MiB.
 
-    The reader is deliberately a daemon thread: Docker descendants can retain
-    the inherited pipe after the `running-process` supervisor exits, so joining
-    it indefinitely would recreate the inherited-handle wedge this guard avoids.
+    Running-process owns process and pipe lifetime; this helper only implements
+    the durable bounded-log policy for supplied bytes.
     """
     retained = 0
     try:
@@ -1477,14 +1459,29 @@ def _write_bounded_diagnostic_log(stream, path: Path) -> None:
                 log.flush()
                 retained += len(chunk)
     except OSError:
-        # Diagnostics must not alter the recovery path. The supervisor still
+        # Diagnostics must not alter the recovery path. Running-process still
         # owns the launch tree and the caller retains its hard wall-clock bound.
+        return
+
+
+def _append_bounded_diagnostic_line(path: Path, line: str | bytes) -> None:
+    payload = line if isinstance(line, bytes) else line.encode("utf-8", errors="replace")
+    payload += b"\n"
+    if len(payload) > WINDOWS_GUARD_LOG_MAX_BYTES:
+        payload = payload[-WINDOWS_GUARD_LOG_MAX_BYTES :]
+    try:
+        current_size = path.stat().st_size if path.exists() else 0
+        mode = "wb" if current_size + len(payload) > WINDOWS_GUARD_LOG_MAX_BYTES else "ab"
+        with path.open(mode) as log:
+            log.write(payload)
+            log.flush()
+    except OSError:
         return
 
 
 def _run_windows_desktop_cli(
     *, timeout: float, log_dir: Path | None = None
-) -> subprocess.CompletedProcess | None:
+) -> CompletedProcess | None:
     """Run Desktop's CLI through running-process with streamed diagnostics.
 
     `running-process --wall-clock-timeout` owns the required CLI-phase
@@ -1502,57 +1499,25 @@ def _run_windows_desktop_cli(
     except OSError:
         return None
 
-    supervised_command = [
-        "running-process",
-        "--no-auto-stack-dumping",
-        "--wall-clock-timeout",
-        str(timeout),
-        "--",
-        *command,
-    ]
     try:
-        process = subprocess.Popen(
-            supervised_command,
-            env=_declared_daemon_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            close_fds=True,
-            creationflags=WINDOWS_CREATE_NEW_PROCESS_GROUP,
+        process = RunningProcess(
+            command,
+            capture=True,
+            text=False,
         )
     except OSError:
         return None
 
-    stream = getattr(process, "stdout", None)
-    reader = None
-    if stream is not None:
-        reader = threading.Thread(
-            target=_write_bounded_diagnostic_log,
-            args=(stream, log_path),
-            name="clud-docker-desktop-output",
-            daemon=True,
-        )
-        reader.start()
     try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # The blessed supervisor normally exits after its own wall-clock tree
-        # cleanup. This is only a defensive wrapper cleanup, never a platform
-        # command or a direct Docker-tree fallback.
-        try:
-            process.kill()
-            process.wait(timeout=WINDOWS_GUARD_CLI_TERMINATE_SECONDS)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        returncode = process.wait(
+            echo=lambda line: _append_bounded_diagnostic_line(log_path, line),
+            timeout=timeout,
+        )
+    except TimeoutError:
         return None
     except OSError:
         return None
-    finally:
-        if reader is not None:
-            # Give ordinary short-lived CLI output a chance to reach the log,
-            # without ever waiting on a descendant-held pipe handle.
-            reader.join(timeout=0.1)
-    return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
+    return CompletedProcess(command, returncode, stdout="", stderr="")
 
 
 def _acquire_windows_guard_mutex() -> int | object | None:
@@ -2029,11 +1994,10 @@ def _execute_restart(system: str, *, hard: bool) -> list[str]:
             )
             return details
 
-        # Prefer launching the real executable so Docker Desktop itself
-        # inherits the positive daemon marker. `docker desktop start` may
-        # hand the launch off through an existing CLI/service path that
-        # drops the caller's environment; the engine can briefly become
-        # healthy and then be reaped as soon as this tool exits.
+        # Prefer launching the real executable through running-process's
+        # detached-daemon API. `docker desktop start` may hand the launch off
+        # through an existing CLI/service path; the direct high-level launch
+        # gives running-process explicit ownership of the persistent process.
         executable = _windows_docker_desktop_executable()
         if executable is not None:
             baseline = _windows_docker_process_identities()
@@ -2061,7 +2025,6 @@ def _execute_restart(system: str, *, hard: bool) -> list[str]:
         cli = _run(
             ["docker", "desktop", "start"],
             timeout=60.0,
-            env=_declared_daemon_environment(),
         )
         details.append(_command_result_detail("docker desktop start", cli))
         if cli is not None and cli.returncode == 0:

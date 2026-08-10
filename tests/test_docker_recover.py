@@ -381,7 +381,7 @@ def test_windows_restart_falls_back_to_cli_when_direct_launch_is_unobserved(
     dr, monkeypatch
 ):
     desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    cli = dr.subprocess.CompletedProcess(
+    cli = dr.CompletedProcess(
         ["docker", "desktop", "start"], 0, stdout="Docker Desktop started\n", stderr=""
     )
     cli_calls: list[list[str]] = []
@@ -418,7 +418,7 @@ def test_windows_restart_falls_back_to_cli_when_direct_launch_is_unobserved(
 
 
 def test_windows_restart_falls_back_to_cli_when_executable_missing(dr, monkeypatch):
-    cli = dr.subprocess.CompletedProcess(
+    cli = dr.CompletedProcess(
         ["docker", "desktop", "start"], 0, stdout="Docker Desktop started\n", stderr=""
     )
     cli_kwargs = {}
@@ -442,14 +442,14 @@ def test_windows_restart_falls_back_to_cli_when_executable_missing(dr, monkeypat
 
     details = dr._execute_restart("Windows", hard=False)
 
-    assert cli_kwargs["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
+    assert "env" not in cli_kwargs
     assert any("direct Docker Desktop launch unavailable" in detail for detail in details)
     assert any("runtime process observed" in detail.lower() for detail in details)
 
 
 def test_windows_restart_falls_back_to_cli_after_direct_launch_failure(dr, monkeypatch):
     desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    cli = dr.subprocess.CompletedProcess(
+    cli = dr.CompletedProcess(
         ["docker", "desktop", "start"], 1, stdout="", stderr="backend unavailable"
     )
 
@@ -476,54 +476,44 @@ def test_direct_windows_launch_is_detached_and_declared_daemon(dr, monkeypatch):
     desktop = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
     captured = {}
 
-    def fake_popen(argv, **kwargs):
-        captured["argv"] = argv
+    def fake_launch(command, **kwargs):
+        captured["command"] = command
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(dr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(dr, "launch_detached", fake_launch)
 
     ok, detail = dr._launch_windows_docker_desktop(desktop)
 
     assert ok is True
-    assert captured["argv"] == [desktop]
-    assert captured["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
-    assert captured["stdin"] is dr.subprocess.DEVNULL
-    assert captured["stdout"] is dr.subprocess.DEVNULL
-    assert captured["stderr"] is dr.subprocess.DEVNULL
-    assert captured["close_fds"] is True
-    assert captured["creationflags"] & dr.WINDOWS_DETACHED_PROCESS
-    assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert desktop in captured["command"]
+    assert captured["originator"] == "clud-docker-recover"
+    assert "env" not in captured
     assert "direct Docker Desktop launch" in detail
 
 
 def test_windows_guard_is_detached_declared_daemon_and_self_invokes(dr, monkeypatch):
     captured = {}
 
-    def fake_popen(argv, **kwargs):
-        captured["argv"] = argv
+    def fake_launch(command, **kwargs):
+        captured["command"] = command
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(dr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(dr, "launch_detached", fake_launch)
 
     ok, detail = dr._launch_windows_docker_desktop_guard()
 
     assert ok is True
-    assert captured["argv"][-1] == dr.WINDOWS_DAEMON_GUARD_ARG
-    assert captured["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
-    assert captured["stdin"] is dr.subprocess.DEVNULL
-    assert captured["stdout"] is dr.subprocess.DEVNULL
-    assert captured["stderr"] is dr.subprocess.DEVNULL
-    assert captured["close_fds"] is True
-    assert captured["creationflags"] & dr.WINDOWS_DETACHED_PROCESS
-    assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert captured["command"].endswith(dr.WINDOWS_DAEMON_GUARD_ARG)
+    assert captured["originator"] == "clud-docker-recover-guard"
+    assert "env" not in captured
     assert "daemon guard" in detail
     assert "docker-desktop-start.log" in detail
 
 
 def test_windows_guard_owns_cli_tree_until_docker_exits(dr, monkeypatch):
-    cli = dr.subprocess.CompletedProcess(
+    cli = dr.CompletedProcess(
         ["docker", "desktop", "start"], 0, stdout="started", stderr=""
     )
     calls = {}
@@ -567,7 +557,7 @@ def test_windows_guard_singleton_retry_exits_without_starting_cli(dr, monkeypatc
 
 
 def test_windows_guard_false_success_uses_direct_fallback(dr, monkeypatch):
-    cli = dr.subprocess.CompletedProcess(
+    cli = dr.CompletedProcess(
         ["docker", "desktop", "start"],
         0,
         stdout="Docker Desktop is already running\n",
@@ -642,37 +632,28 @@ def test_windows_desktop_cli_uses_running_process_and_streams_to_bounded_log(
     captured = {}
 
     class StartedCli:
-        stdout = io.BytesIO(b"starting Docker Desktop\n")
-
-        def wait(self, *, timeout):
+        def wait(self, *, echo, timeout):
             captured["wait_timeout"] = timeout
+            echo(b"starting Docker Desktop")
             return 0
 
-    def popen(command, **kwargs):
+    def running_process(command, **kwargs):
         captured["command"] = command
         captured.update(kwargs)
         return StartedCli()
 
-    monkeypatch.setattr(dr.subprocess, "Popen", popen)
+    monkeypatch.setattr(dr, "RunningProcess", running_process)
 
     result = dr._run_windows_desktop_cli(timeout=7.0, log_dir=tmp_path)
 
     assert result is not None
-    assert captured["command"] == [
-        "running-process",
-        "--no-auto-stack-dumping",
-        "--wall-clock-timeout",
-        "7.0",
-        "--",
-        "docker",
-        "desktop",
-        "start",
-    ]
-    assert captured["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
-    assert captured["stdin"] is dr.subprocess.DEVNULL
-    assert captured["stdout"] is dr.subprocess.PIPE
-    assert captured["stderr"] is dr.subprocess.STDOUT
-    assert captured["creationflags"] & dr.WINDOWS_CREATE_NEW_PROCESS_GROUP
+    assert captured["command"] == ["docker", "desktop", "start"]
+    assert captured == {
+        "command": ["docker", "desktop", "start"],
+        "capture": True,
+        "text": False,
+        "wait_timeout": 7.0,
+    }
     assert captured["wait_timeout"] == 7.0
     assert (tmp_path / "docker-desktop-start.log").read_bytes() == b"starting Docker Desktop\n"
 
@@ -686,63 +667,38 @@ def test_windows_desktop_cli_diagnostic_log_keeps_only_bounded_tail(dr, tmp_path
     assert log_path.read_bytes() == b"cdefghij"
 
 
-def test_windows_desktop_cli_timeout_never_drains_inherited_pipes(dr, monkeypatch):
+def test_windows_desktop_cli_timeout_is_owned_by_running_process(dr, monkeypatch):
     events = []
 
     class HungCli:
-        pid = 4242
-        waits = 0
-
-        def wait(self, *, timeout):
+        def wait(self, *, echo, timeout):
+            del echo
             events.append(("wait", timeout))
-            self.waits += 1
-            if self.waits == 1:
-                raise dr.subprocess.TimeoutExpired(
-                    ["docker", "desktop", "start"], timeout
-                )
-            return 1
+            raise TimeoutError("running-process enforced the deadline")
 
-        def kill(self):
-            events.append(("kill",))
-
-        def communicate(self):
-            raise AssertionError(
-                "communicate can hang on pipe handles inherited by daemon descendants"
-            )
-
-    def popen(command, **kwargs):
-        events.append(("popen", command, kwargs))
+    def running_process(command, **kwargs):
+        events.append(("running-process", command, kwargs))
         return HungCli()
 
-    monkeypatch.setattr(dr.subprocess, "Popen", popen)
+    monkeypatch.setattr(dr, "RunningProcess", running_process)
     assert dr._run_windows_desktop_cli(timeout=7.0) is None
-    assert events[0][1] == [
-        "running-process",
-        "--no-auto-stack-dumping",
-        "--wall-clock-timeout",
-        "7.0",
-        "--",
-        "docker",
-        "desktop",
-        "start",
-    ]
-    assert events[0][2]["env"]["RUNNING_PROCESS_IS_DAEMON"] == "1"
-    assert events[0][2]["stdin"] is dr.subprocess.DEVNULL
-    assert events[0][2]["stdout"] is dr.subprocess.PIPE
-    assert events[0][2]["stderr"] is dr.subprocess.STDOUT
-    assert events[1:] == [
+    assert events == [
+        (
+            "running-process",
+            ["docker", "desktop", "start"],
+            {"capture": True, "text": False},
+        ),
         ("wait", 7.0),
-        ("kill",),
-        ("wait", dr.WINDOWS_GUARD_CLI_TERMINATE_SECONDS),
     ]
 
 
 def test_windows_desktop_cli_wait_error_returns_unavailable(dr, monkeypatch):
     class BrokenCli:
-        def wait(self, *, timeout):
+        def wait(self, *, echo, timeout):
+            del echo
             raise OSError(f"wait failed after {timeout}")
 
-    monkeypatch.setattr(dr.subprocess, "Popen", lambda *_args, **_kwargs: BrokenCli())
+    monkeypatch.setattr(dr, "RunningProcess", lambda *_args, **_kwargs: BrokenCli())
 
     assert dr._run_windows_desktop_cli(timeout=7.0) is None
 

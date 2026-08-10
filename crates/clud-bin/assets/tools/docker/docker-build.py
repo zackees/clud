@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = [
+#   "running-process==4.10.1",
+# ]
 # ///
 # managed-by: clud
 """docker-build.py — trampoline for the docker-build tool family.
