@@ -1106,9 +1106,12 @@ mod imp {
     };
     use windows::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
-        SetInformationJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+        JobObjectBasicProcessIdList, QueryInformationJobObject, SetInformationJobObject,
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_PROCESS_ID_LIST,
     };
-    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
     use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus};
 
     use super::{
@@ -1131,6 +1134,14 @@ mod imp {
     /// destructive action without metadata.
     const SCAN_BACKOFF_BASE: Duration = Duration::from_millis(50);
     const SCAN_BACKOFF_MAX_MULTIPLIER: u32 = 10;
+
+    /// Minimum interval between retry-resolution scans for unresolved new
+    /// PIDs.  Without this, every 200 ms quiet-period tick that finds *any*
+    /// unresolved PID re-enumerates every process on the host — a cost that
+    /// grows with cumulative processes-ever-seen.  A 2-second floor cuts scan
+    /// frequency by 10× while keeping the per-PID retirement latency bounded
+    /// (at most `MAX_METADATA_RETRIES × 2 s ≈ 20 s` before a PID is retired).
+    const RETRY_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
     use super::TrackerProcesses;
 
@@ -1208,14 +1219,25 @@ mod imp {
     /// extend the cooldown. The first scan is immediate so a short-lived
     /// client cannot exit before its identity is recorded; the cooldown then
     /// prevents simultaneous foreground agents from scanning on every burst.
+    ///
+    /// `last_retry_scan` gates `retry_unresolved_new_processes`: the retry
+    /// path re-reads the host table, and without a floor it fires on every
+    /// 200 ms quiet-period tick while any PID is unresolved.
     struct ScanBackoff {
         next_allowed: Instant,
+        last_retry_scan: Instant,
     }
 
     impl ScanBackoff {
         fn new() -> Self {
+            let now = Instant::now();
             Self {
-                next_allowed: Instant::now(),
+                next_allowed: now,
+                // Seed far enough in the past that the first
+                // `claim_retry_scan` succeeds immediately — a cold
+                // session must resolve its initial process state
+                // without waiting for the interval.
+                last_retry_scan: now - RETRY_SCAN_INTERVAL,
             }
         }
 
@@ -1234,6 +1256,19 @@ mod imp {
             let multiplier = (1 + (work_items as u32 / 8)).min(SCAN_BACKOFF_MAX_MULTIPLIER);
             self.next_allowed = now + SCAN_BACKOFF_BASE * multiplier;
             deferred
+        }
+
+        /// Whether enough wall time has passed since the last retry scan to
+        /// justify another full host enumeration.  Returns `true` and records
+        /// the scan time when the interval has elapsed.
+        fn claim_retry_scan(&mut self) -> bool {
+            let now = Instant::now();
+            if now - self.last_retry_scan >= RETRY_SCAN_INTERVAL {
+                self.last_retry_scan = now;
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -1485,12 +1520,177 @@ mod imp {
         }
     }
 
+    /// Enumerate every PID still in the Job Object, apply the spare list,
+    /// explicitly terminate non-spared members, and log each decision to
+    /// reap.jsonl.  Only then is the job handle safe to close — `KILL_ON_JOB_CLOSE`
+    /// becomes a crash-only safety net instead of the primary kill mechanism.
+    ///
+    /// A PID whose image name cannot be resolved is left for the kernel
+    /// safety net rather than risked as a wrong kill.
+    fn explicitly_reap_job_members(
+        job: HANDLE,
+        processes: &Mutex<TrackerProcesses>,
+        telemetry: &Mutex<Telemetry>,
+    ) {
+        // ---- enumerate job member PIDs ----
+        let members: Vec<u32> = unsafe {
+            let mut buf: Vec<u8> = vec![0u8; 4096];
+            loop {
+                let info = buf.as_mut_ptr() as *mut JOBOBJECT_BASIC_PROCESS_ID_LIST;
+                let len = buf.len() as u32;
+                match QueryInformationJobObject(
+                    Some(job),
+                    JobObjectBasicProcessIdList,
+                    info as *mut _,
+                    len,
+                    None,
+                ) {
+                    Ok(()) => {
+                        let list = &*info;
+                        let count = list.NumberOfProcessIdsInList as usize;
+                        // ProcessIdList is `[usize; 1]` — the declared anchor of
+                        // a variable-length array.  Use pointer arithmetic to
+                        // reach the actual elements.
+                        let ids: Vec<u32> =
+                            std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count)
+                                .iter()
+                                .map(|pid| *pid as u32)
+                                .collect();
+                        break ids;
+                    }
+                    Err(e) if e.code() == windows_core::HRESULT::from_win32(234) => {
+                        // ERROR_MORE_DATA — double the buffer and retry.
+                        if buf.len() > 1_048_576 {
+                            // 1 MiB safety ceiling: a job with >32K members
+                            // is not plausible; stop rather than OOM-loop.
+                            return;
+                        }
+                        buf.resize(buf.len() * 2, 0);
+                    }
+                    Err(_) => return,
+                }
+            }
+        };
+
+        if members.is_empty() {
+            return;
+        }
+
+        // Never reap ourselves — we are the process that owns the job.
+        let our_pid = std::process::id();
+        let members: Vec<u32> = members.into_iter().filter(|&pid| pid != our_pid).collect();
+        if members.is_empty() {
+            return;
+        }
+
+        // ---- resolve image names: known map first, targeted read as fallback ----
+        let mut pids_to_resolve: Vec<u32> = Vec::new();
+        let mut image_names: HashMap<u32, String> = HashMap::new();
+        if let Ok(guard) = processes.lock() {
+            for &pid in &members {
+                if let Some(meta) = guard.known.get(&pid) {
+                    image_names.insert(pid, meta.image_name.clone());
+                } else {
+                    pids_to_resolve.push(pid);
+                }
+            }
+        } else {
+            return;
+        }
+        // Targeted read for any PID not in `known`.
+        for pid in pids_to_resolve {
+            if let Some(meta) = snapshot_pid(telemetry, pid) {
+                image_names.insert(pid, meta.image_name);
+            }
+            // If we still cannot resolve the image name, the PID is
+            // left in the job for the kernel safety net rather than
+            // risked as a wrong kill.
+        }
+
+        // ---- classify: cheap image-based checks first ----
+        // Absence from this map means "reap"; presence means "spare for this reason."
+        let mut spared: HashMap<u32, &'static str> = HashMap::new();
+        let spare_images = crate::reaper_facts::configured_spare_images_from_env();
+
+        for (&pid, name) in &image_names {
+            if crate::reaper_facts::is_docker_desktop_family_root(name) {
+                spared.insert(pid, "docker_desktop_process_family");
+            } else if spare_images.iter().any(|cfg| {
+                crate::reaper_facts::normalized_image(cfg)
+                    == crate::reaper_facts::normalized_image(name)
+            }) {
+                spared.insert(pid, "configured_spare_list");
+            }
+        }
+
+        // ---- collect host facts for remaining candidates ----
+        let remaining: Vec<u32> = members
+            .iter()
+            .copied()
+            .filter(|pid| image_names.contains_key(pid) && !spared.contains_key(pid))
+            .collect();
+        if !remaining.is_empty() {
+            // A one-time cost at exit: collect OS facts for the unresolvable
+            // candidates, then run the full spare-signal pipeline.
+            let facts =
+                crate::reaper_facts::collect_host_facts(&remaining, &HashSet::new(), spare_images);
+            for &pid in &remaining {
+                let name = image_names.get(&pid).map(String::as_str).unwrap_or("");
+                if let Some(reason) = crate::reaper_facts::spare_signal(&facts, pid, name) {
+                    spared.insert(pid, reason.as_str());
+                }
+            }
+        }
+
+        // ---- act: reap the non-spared, log everything ----
+        let now_ms = now_ms();
+        for &pid in &members {
+            let (action, reason) = match spared.get(&pid) {
+                Some(reason) => (ReapAction::Spared, *reason),
+                None => {
+                    // Explicit reap via TerminateProcess.
+                    unsafe {
+                        if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                            let _ = TerminateProcess(handle, 1);
+                            let _ = CloseHandle(handle);
+                        }
+                    }
+                    (ReapAction::Reaped, "job_member")
+                }
+            };
+
+            let event = ReapEvent {
+                ts_ms: now_ms,
+                pid: Some(pid),
+                parent_pid: None,
+                start_time: None,
+                image_name: image_names.get(&pid).cloned(),
+                action,
+                reason,
+                phase: ReapPhase::Exit,
+            };
+            with_telemetry(telemetry, |t| {
+                t.record(event);
+                match action {
+                    ReapAction::Reaped => t.epoch.reaped_at_exit += 1,
+                    ReapAction::Spared => t.epoch.spared += 1,
+                    _ => {}
+                }
+                t.epoch.decisions_emitted += 1;
+            });
+        }
+    }
+
     impl Drop for ForegroundJobTracker {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Release);
             if let Some(listener) = self.listener.take() {
                 let _ = listener.join();
             }
+            // #894: explicitly enumerate, spare, and reap every job member
+            // before the kernel kill-on-close fires.  The kernel path becomes
+            // a crash-only safety net.
+            explicitly_reap_job_members(self.job, &self.processes, &self.telemetry);
             unsafe {
                 let _ = CloseHandle(self.port);
                 let _ = CloseHandle(self.job);
@@ -1752,6 +1952,31 @@ mod imp {
         telemetry: &Mutex<Telemetry>,
         scan_backoff: &Mutex<ScanBackoff>,
     ) -> bool {
+        let unresolved_empty = processes
+            .lock()
+            .map(|p| p.unresolved_new_pids.is_empty())
+            .unwrap_or(true);
+        if unresolved_empty {
+            return true;
+        }
+
+        // Rate-limit retry scans to RETRY_SCAN_INTERVAL.  Without this floor,
+        // every 200 ms quiet-period tick that finds *any* unresolved PID
+        // re-enumerates every process on the host — a cost that grows with
+        // cumulative processes-ever-seen.  Returning the current (stale)
+        // `metadata_complete` is safe: a `false` only delays provisional-empty
+        // finalization; it never authorizes a kill.
+        let claim = scan_backoff
+            .lock()
+            .map(|mut gate| gate.claim_retry_scan())
+            .unwrap_or(true);
+        if !claim {
+            return processes
+                .lock()
+                .map(|p| p.metadata_complete())
+                .unwrap_or(true);
+        }
+
         let unresolved = processes
             .lock()
             .map(|processes| {
@@ -1762,6 +1987,8 @@ mod imp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Double-check: the set may have drained between the is_empty check
+        // and now.
         if unresolved.is_empty() {
             return true;
         }
@@ -2406,17 +2633,46 @@ mod imp {
 
     #[cfg(test)]
     mod scan_backoff_tests {
+        use std::time::{Duration, Instant};
+
         use super::ScanBackoff;
 
         #[test]
         fn cooldown_defers_an_immediate_second_host_scan() {
+            let now = Instant::now();
             let mut backoff = ScanBackoff {
                 // Start at the first permitted slot so this is a deterministic
                 // test of the post-scan cooldown.
-                next_allowed: std::time::Instant::now(),
+                next_allowed: now,
+                last_retry_scan: now,
             };
             assert!(!backoff.acquire(1));
             assert!(backoff.acquire(1));
+        }
+
+        #[test]
+        fn retry_scan_is_gated_by_interval() {
+            // Seed in the past so the first claim succeeds (cold start).
+            let past = Instant::now() - super::RETRY_SCAN_INTERVAL;
+            let mut backoff = ScanBackoff {
+                next_allowed: past,
+                last_retry_scan: past,
+            };
+            // First claim succeeds — seeded in the past.
+            assert!(backoff.claim_retry_scan());
+            // Immediate second claim is denied — interval hasn't elapsed.
+            assert!(!backoff.claim_retry_scan());
+        }
+
+        #[test]
+        fn retry_scan_is_granted_after_interval_elapses() {
+            // Start far enough in the past that the interval has elapsed.
+            let past = Instant::now() - super::RETRY_SCAN_INTERVAL - Duration::from_millis(1);
+            let mut backoff = ScanBackoff {
+                next_allowed: past,
+                last_retry_scan: past,
+            };
+            assert!(backoff.claim_retry_scan());
         }
     }
 }
@@ -3493,8 +3749,11 @@ mod lifecycle_tests {
         assert_eq!(decisions[0].candidate_pid, Some(40));
     }
 
+    /// `docker.exe` itself is a Docker Desktop family member (#773). Sparing
+    /// it prunes its entire descendant tree — conhost, com.docker.helper, and
+    /// any WSL runtime children — all at once.
     #[test]
-    fn unmarked_detached_docker_helper_below_conhost_is_spared() {
+    fn docker_cli_is_spared_as_docker_desktop_family() {
         let processes = vec![
             process(10, 1, "cmd.exe", true),
             process(11, 10, "node.exe", true),
@@ -3508,7 +3767,10 @@ mod lifecycle_tests {
 
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].action, DecisionAction::Spare);
-        assert_eq!(decisions[0].reason, ReapDecisionReason::ConsoleHost);
+        assert_eq!(
+            decisions[0].reason,
+            ReapDecisionReason::DockerDesktopProcessFamily
+        );
         assert_eq!(decisions[0].candidate_pid, Some(41));
     }
 
