@@ -94,6 +94,9 @@ pub struct CatalogModel {
     pub supported_context_windows: &'static [&'static str],
     pub default_effort: Option<EffortLevel>,
     pub default_context_window: Option<&'static str>,
+    /// Reviewed direct-launch default for this provider. Claude intentionally
+    /// has no row marked: its harness-owned default remains authoritative.
+    pub provider_default: bool,
 }
 
 pub const MODELS: &[CatalogModel] = &[
@@ -108,6 +111,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: Some(EffortLevel::Low),
         default_context_window: None,
+        provider_default: false,
     },
     CatalogModel {
         cli_id: "codex-terra",
@@ -120,6 +124,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
+        provider_default: true,
     },
     CatalogModel {
         cli_id: "codex-luna",
@@ -132,6 +137,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
+        provider_default: false,
     },
     CatalogModel {
         cli_id: "deepseek-v4-pro",
@@ -144,6 +150,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_OR_1M_CONTEXT,
         default_effort: Some(EffortLevel::Max),
         default_context_window: Some("1m"),
+        provider_default: true,
     },
     CatalogModel {
         cli_id: "deepseek-v4-flash",
@@ -156,6 +163,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: None,
         default_context_window: None,
+        provider_default: false,
     },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
     // can be added without changing the stable provider-qualified grammar.
@@ -170,6 +178,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: None,
         default_context_window: None,
+        provider_default: false,
     },
     CatalogModel {
         cli_id: "claude-sonnet",
@@ -182,6 +191,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: None,
         default_context_window: None,
+        provider_default: false,
     },
     CatalogModel {
         cli_id: "claude-haiku",
@@ -194,6 +204,7 @@ pub const MODELS: &[CatalogModel] = &[
         supported_context_windows: AUTO_CONTEXT,
         default_effort: None,
         default_context_window: None,
+        provider_default: false,
     },
 ];
 
@@ -202,6 +213,17 @@ pub const MODELS: &[CatalogModel] = &[
 pub enum SelectionSource {
     Cli,
     LegacyModelSuffix,
+    ProviderSetting,
+    CatalogDefault,
+}
+
+/// Provider-specific saved values supplied to direct launch resolution.
+/// Every value is already typed except the catalog model ID and context token.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProviderSelectionDefaults<'a> {
+    pub model: Option<&'a str>,
+    pub effort: Option<EffortLevel>,
+    pub context_window: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +336,29 @@ fn catalog_match(value: &str) -> Option<CatalogModel> {
                 .iter()
                 .any(|alias| alias.eq_ignore_ascii_case(value))
     })
+}
+
+pub fn model_by_cli_id(value: &str) -> Option<CatalogModel> {
+    MODELS.iter().copied().find(|entry| entry.cli_id == value)
+}
+
+pub fn models_for_provider(provider: ModelProvider) -> impl Iterator<Item = CatalogModel> {
+    MODELS
+        .iter()
+        .copied()
+        .filter(move |entry| entry.provider == provider)
+}
+
+pub fn reviewed_default_model(provider: ModelProvider) -> Option<CatalogModel> {
+    models_for_provider(provider).find(|entry| entry.provider_default)
+}
+
+pub fn supported_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
+    provider_efforts(provider)
+}
+
+pub fn supported_context_windows(provider: ModelProvider) -> &'static [&'static str] {
+    provider_context_windows(provider)
 }
 
 fn split_effort_suffix(raw: &str) -> (&str, Option<&str>) {
@@ -556,6 +601,82 @@ pub fn resolve(
     }))
 }
 
+/// Resolve direct-launch CLI input over a saved provider profile and the
+/// reviewed catalog default. Unified launches pass `use_catalog_default =
+/// false` and no profile so an initial model never imports direct-provider
+/// policy.
+pub fn resolve_for_launch(
+    provider: ModelProvider,
+    cli_model: Option<&str>,
+    cli_effort: Option<&str>,
+    cli_context_window: Option<&str>,
+    saved: Option<ProviderSelectionDefaults<'_>>,
+    use_catalog_default: bool,
+) -> Result<Option<ResolvedModelSelection>, SelectionError> {
+    let catalog_default = use_catalog_default
+        .then(|| reviewed_default_model(provider))
+        .flatten();
+    let saved = saved.unwrap_or_default();
+    let (model, model_source) = if let Some(model) = cli_model {
+        (Some(model), Some(SelectionSource::Cli))
+    } else if let Some(model) = saved.model {
+        (Some(model), Some(SelectionSource::ProviderSetting))
+    } else if let Some(model) = catalog_default {
+        (Some(model.cli_id), Some(SelectionSource::CatalogDefault))
+    } else {
+        (None, None)
+    };
+
+    let cli_has_legacy_effort = cli_model
+        .and_then(|model| split_effort_suffix(model).1)
+        .is_some();
+    let cli_has_legacy_context = cli_model
+        .map(|model| split_effort_suffix(model).0)
+        .and_then(|model| split_context_suffix(model).1)
+        .is_some();
+    let saved_effort = (cli_effort.is_none() && !cli_has_legacy_effort)
+        .then_some(saved.effort)
+        .flatten();
+    let saved_context = (cli_context_window.is_none() && !cli_has_legacy_context)
+        .then_some(saved.context_window)
+        .flatten();
+    let effort_text = cli_effort.or_else(|| saved_effort.map(EffortLevel::as_str));
+    let context_text = cli_context_window.or(saved_context);
+
+    let mut selection = resolve(Some(provider), model, effort_text, context_text)?;
+    let Some(selection) = selection.as_mut() else {
+        return Ok(None);
+    };
+    selection.model_source = model_source;
+    if saved_effort.is_some() {
+        selection.effort_source = Some(SelectionSource::ProviderSetting);
+    }
+    if saved_context.is_some() {
+        selection.context_window_source = Some(SelectionSource::ProviderSetting);
+    }
+
+    if use_catalog_default {
+        let selected_catalog = selection
+            .model
+            .as_deref()
+            .and_then(model_by_cli_id)
+            .or(catalog_default);
+        if selection.effort.is_none() {
+            if let Some(effort) = selected_catalog.and_then(|entry| entry.default_effort) {
+                selection.effort = Some(effort);
+                selection.effort_source = Some(SelectionSource::CatalogDefault);
+            }
+        }
+        if selection.context_window.is_none() {
+            if let Some(context) = selected_catalog.and_then(|entry| entry.default_context_window) {
+                selection.context_window = Some(context.to_string());
+                selection.context_window_source = Some(SelectionSource::CatalogDefault);
+            }
+        }
+    }
+    Ok(Some(selection.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +886,115 @@ mod tests {
         deduped.sort_unstable();
         deduped.dedup();
         assert_eq!(deduped.len(), ids.len());
+    }
+
+    #[test]
+    fn launch_cli_model_overrides_saved_and_catalog_default() {
+        let saved = ProviderSelectionDefaults {
+            model: Some("codex-terra"),
+            effort: Some(EffortLevel::Low),
+            context_window: None,
+        };
+        let selection = resolve_for_launch(
+            ModelProvider::Codex,
+            Some("codex-luna"),
+            Some("high"),
+            None,
+            Some(saved),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("codex-luna"));
+        assert_eq!(selection.model_source, Some(SelectionSource::Cli));
+        assert_eq!(selection.effort, Some(EffortLevel::High));
+        assert_eq!(selection.effort_source, Some(SelectionSource::Cli));
+    }
+
+    #[test]
+    fn launch_falls_back_to_saved_provider_profile() {
+        let saved = ProviderSelectionDefaults {
+            model: Some("codex-luna"),
+            effort: Some(EffortLevel::High),
+            context_window: None,
+        };
+        let selection =
+            resolve_for_launch(ModelProvider::Codex, None, None, None, Some(saved), true)
+                .unwrap()
+                .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("codex-luna"));
+        assert_eq!(
+            selection.model_source,
+            Some(SelectionSource::ProviderSetting)
+        );
+        assert_eq!(selection.effort, Some(EffortLevel::High));
+        assert_eq!(
+            selection.effort_source,
+            Some(SelectionSource::ProviderSetting)
+        );
+    }
+
+    #[test]
+    fn launch_falls_back_to_reviewed_catalog_default() {
+        let selection = resolve_for_launch(ModelProvider::Codex, None, None, None, None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("codex-terra"));
+        assert_eq!(
+            selection.model_source,
+            Some(SelectionSource::CatalogDefault)
+        );
+        assert_eq!(selection.effort, Some(EffortLevel::Medium));
+        assert_eq!(
+            selection.effort_source,
+            Some(SelectionSource::CatalogDefault)
+        );
+    }
+
+    #[test]
+    fn launch_deepseek_catalog_default_carries_context_window() {
+        let selection = resolve_for_launch(ModelProvider::DeepSeek, None, None, None, None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(selection.effort, Some(EffortLevel::Max));
+        assert_eq!(selection.context_window.as_deref(), Some("1m"));
+        assert_eq!(
+            selection.context_window_source,
+            Some(SelectionSource::CatalogDefault)
+        );
+    }
+
+    #[test]
+    fn launch_without_catalog_default_never_imports_provider_policy() {
+        // Unified routing passes use_catalog_default = false and no profile, so
+        // an initial model is never seeded from direct-provider defaults.
+        let selection =
+            resolve_for_launch(ModelProvider::Codex, None, None, None, None, false).unwrap();
+        assert!(selection.is_none());
+    }
+
+    #[test]
+    fn launch_legacy_effort_suffix_suppresses_saved_effort() {
+        let saved = ProviderSelectionDefaults {
+            model: None,
+            effort: Some(EffortLevel::High),
+            context_window: None,
+        };
+        let selection = resolve_for_launch(
+            ModelProvider::Codex,
+            Some("terra@low"),
+            None,
+            None,
+            Some(saved),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.effort, Some(EffortLevel::Low));
+        assert_eq!(
+            selection.effort_source,
+            Some(SelectionSource::LegacyModelSuffix)
+        );
     }
 }

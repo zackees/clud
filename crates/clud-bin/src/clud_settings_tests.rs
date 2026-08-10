@@ -229,6 +229,7 @@ fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Claude),
             pr_wait_fail_fast: Some(true),
+            provider_profiles: Vec::new(),
         },
     )
     .unwrap();
@@ -778,4 +779,149 @@ fn cpu_banner_reads_heartbeat_override() {
     let got = load_cpu_banner_settings_at(home.path()).unwrap();
     assert!(got.enabled, "default enabled preserved");
     assert_eq!(got.heartbeat_secs, 120);
+}
+
+#[test]
+fn provider_profile_round_trips_through_save_and_load() {
+    let home = tempdir().unwrap();
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            provider_profiles: vec![ProviderProfilePatch {
+                provider: Some(ModelProvider::Codex),
+                model: Some("codex-luna".to_string()),
+                harness: Some(HarnessSelection::Codex),
+                effort: Some(Some(EffortLevel::High)),
+                context_window: Some(Some("auto".to_string())),
+            }],
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+
+    let snapshot = load_launch_preferences_read_only_at(home.path()).unwrap();
+    let profile = snapshot.profile(ModelProvider::Codex).unwrap();
+    assert_eq!(profile.model.as_deref(), Some("codex-luna"));
+    assert_eq!(profile.harness, Some(HarnessSelection::Codex));
+    assert_eq!(profile.effort, Some(EffortLevel::High));
+    assert_eq!(profile.context_window.as_deref(), Some("auto"));
+
+    let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["providers"]["codex"]["model"], "codex-luna");
+    assert_eq!(json["providers"]["codex"]["effort"], "high");
+}
+
+#[test]
+fn provider_profile_effort_clears_when_patched_to_none() {
+    let home = tempdir().unwrap();
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            provider_profiles: vec![ProviderProfilePatch {
+                provider: Some(ModelProvider::Codex),
+                effort: Some(Some(EffortLevel::High)),
+                ..ProviderProfilePatch::default()
+            }],
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            provider_profiles: vec![ProviderProfilePatch {
+                provider: Some(ModelProvider::Codex),
+                effort: Some(None),
+                ..ProviderProfilePatch::default()
+            }],
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+
+    let snapshot = load_launch_preferences_read_only_at(home.path()).unwrap();
+    assert_eq!(
+        snapshot
+            .profile(ModelProvider::Codex)
+            .and_then(|p| p.effort),
+        None
+    );
+}
+
+fn write_provider_settings(home: &Path, body: &str) {
+    let path = settings_path_at(home);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, body).unwrap();
+}
+
+#[test]
+fn provider_profile_rejects_non_canonical_model() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"codex":{"model":"gpt-5.6-terra"}}}"#,
+    );
+    assert!(matches!(
+        load_launch_preferences_read_only_at(home.path()),
+        Err(SettingsError::InvalidProviderProfile {
+            provider: ModelProvider::Codex,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn provider_profile_rejects_cross_provider_model() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"codex":{"model":"deepseek-v4-pro"}}}"#,
+    );
+    assert!(matches!(
+        load_launch_preferences_read_only_at(home.path()),
+        Err(SettingsError::InvalidProviderProfile {
+            provider: ModelProvider::Codex,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn provider_profile_rejects_unknown_effort() {
+    let home = tempdir().unwrap();
+    write_provider_settings(home.path(), r#"{"providers":{"codex":{"effort":"turbo"}}}"#);
+    assert!(matches!(
+        load_launch_preferences_read_only_at(home.path()),
+        Err(SettingsError::InvalidProviderProfile { .. })
+    ));
+}
+
+#[test]
+fn provider_profile_rejects_unsupported_context_window() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"codex":{"context_window":"2m"}}}"#,
+    );
+    assert!(matches!(
+        load_launch_preferences_read_only_at(home.path()),
+        Err(SettingsError::InvalidProviderProfile { .. })
+    ));
+}
+
+#[test]
+fn provider_profile_rejects_codex_harness_on_non_codex_provider() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"deepseek":{"harness":"codex"}}}"#,
+    );
+    assert!(matches!(
+        load_launch_preferences_read_only_at(home.path()),
+        Err(SettingsError::InvalidProviderProfile {
+            provider: ModelProvider::DeepSeek,
+            ..
+        })
+    ));
 }

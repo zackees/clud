@@ -192,6 +192,7 @@ fn transcript_forces_centralized_daemon() {
         command: None,
         passthrough: Vec::new(),
         codex_config_overrides: Vec::new(),
+        resolved_model_selection: None,
     };
     assert!(experimental_enabled(&args));
 }

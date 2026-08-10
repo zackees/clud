@@ -18,6 +18,7 @@ use crossterm::terminal;
 use crate::backend::{HarnessSelection, ModelProvider};
 use crate::clud_settings;
 use crate::preference::{ChoiceOption, ChoiceSelector};
+use crate::provider_catalog::{self, EffortLevel};
 
 const MODEL_OPTIONS: [ChoiceOption<ModelProvider>; 3] = [
     ChoiceOption {
@@ -60,6 +61,18 @@ enum SettingValue {
     Bool(bool),
     ModelProvider(ModelProvider),
     Harness(HarnessSelection),
+    Model {
+        provider: ModelProvider,
+        value: &'static str,
+    },
+    Effort {
+        provider: ModelProvider,
+        value: Option<EffortLevel>,
+    },
+    ContextWindow {
+        provider: ModelProvider,
+        value: Option<&'static str>,
+    },
 }
 
 impl SettingValue {
@@ -76,6 +89,36 @@ impl SettingValue {
                 selector.cycle();
                 *value = selector.selected();
             }
+            Self::Model { provider, value } => {
+                let options = provider_catalog::models_for_provider(*provider)
+                    .map(|model| model.cli_id)
+                    .collect::<Vec<_>>();
+                let index = options
+                    .iter()
+                    .position(|candidate| candidate == value)
+                    .unwrap_or(0);
+                *value = options[(index + 1) % options.len()];
+            }
+            Self::Effort { provider, value } => {
+                let options = provider_catalog::supported_efforts(*provider);
+                *value = match value {
+                    None => options.first().copied(),
+                    Some(current) => options
+                        .iter()
+                        .position(|candidate| candidate == current)
+                        .and_then(|index| options.get(index + 1).copied()),
+                };
+            }
+            Self::ContextWindow { provider, value } => {
+                let options = provider_catalog::supported_context_windows(*provider);
+                *value = match value {
+                    None => options.first().copied(),
+                    Some(current) => options
+                        .iter()
+                        .position(|candidate| candidate == current)
+                        .and_then(|index| options.get(index + 1).copied()),
+                };
+            }
         }
     }
 
@@ -85,15 +128,28 @@ impl SettingValue {
             Self::Bool(false) => "[ ]".to_string(),
             Self::ModelProvider(value) => format!("[{}]", value.as_str()),
             Self::Harness(value) => format!("[{}]", value.as_str()),
+            Self::Model { value, .. } => format!("[{value}]"),
+            Self::Effort { value, .. } => {
+                format!("[{}]", value.map(EffortLevel::as_str).unwrap_or("default"))
+            }
+            Self::ContextWindow { value, .. } => {
+                format!("[{}]", value.unwrap_or("default"))
+            }
         }
     }
 
-    fn list_value(&self) -> &'static str {
+    fn list_value(&self) -> String {
         match self {
-            Self::Bool(true) => "true",
-            Self::Bool(false) => "false",
-            Self::ModelProvider(value) => value.as_str(),
-            Self::Harness(value) => value.as_str(),
+            Self::Bool(true) => "true".to_string(),
+            Self::Bool(false) => "false".to_string(),
+            Self::ModelProvider(value) => value.as_str().to_string(),
+            Self::Harness(value) => value.as_str().to_string(),
+            Self::Model { value, .. } => (*value).to_string(),
+            Self::Effort { value, .. } => value
+                .map(EffortLevel::as_str)
+                .unwrap_or("default")
+                .to_string(),
+            Self::ContextWindow { value, .. } => value.unwrap_or("default").to_string(),
         }
     }
 }
@@ -108,7 +164,8 @@ struct SettingItem {
 
 fn setting_items() -> Vec<SettingItem> {
     let launch = clud_settings::load_global_launch_preferences().unwrap_or_default();
-    vec![
+    let snapshot = clud_settings::load_launch_preferences_read_only().unwrap_or_default();
+    let mut items = vec![
         SettingItem {
             key: "backend.default",
             label: "Default model provider",
@@ -123,17 +180,125 @@ fn setting_items() -> Vec<SettingItem> {
             note: "default follows the model provider; explicit overrides are announced.",
             value: SettingValue::Harness(launch.harness.unwrap_or_default()),
         },
-        SettingItem {
-            key: "git.pr_wait_fail_fast",
-            label: "PR-wait fail-fast git commands",
-            note: "Blocks raw `gh pr checks --watch`-style commands in favor of \
+    ];
+    for provider in [
+        ModelProvider::Claude,
+        ModelProvider::Codex,
+        ModelProvider::DeepSeek,
+    ] {
+        append_provider_profile_items(&mut items, &snapshot, provider);
+    }
+    items.push(SettingItem {
+        key: "git.pr_wait_fail_fast",
+        label: "PR-wait fail-fast git commands",
+        note: "Blocks raw `gh pr checks --watch`-style commands in favor of \
                a bundled fail-fast waiter script. Off by default; may \
                become the default later.",
-            value: SettingValue::Bool(
-                clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false),
+        value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false)),
+    });
+    items
+}
+
+fn append_provider_profile_items(
+    items: &mut Vec<SettingItem>,
+    snapshot: &clud_settings::LaunchPreferencesSnapshot,
+    provider: ModelProvider,
+) {
+    let profile = snapshot.profile(provider);
+    let fallback_model = provider_catalog::reviewed_default_model(provider)
+        .or_else(|| provider_catalog::models_for_provider(provider).next())
+        .expect("every provider has catalog models");
+    let selected_model = profile
+        .and_then(|profile| profile.model.as_deref())
+        .and_then(provider_catalog::model_by_cli_id)
+        .unwrap_or(fallback_model);
+    let context_window = profile
+        .and_then(|profile| profile.context_window.as_deref())
+        .and_then(|value| match value {
+            "auto" => Some("auto"),
+            "1m" => Some("1m"),
+            _ => None,
+        });
+    let (
+        model_key,
+        harness_key,
+        effort_key,
+        context_key,
+        model_label,
+        harness_label,
+        effort_label,
+        context_label,
+    ) = match provider {
+        ModelProvider::Claude => (
+            "providers.claude.model",
+            "providers.claude.harness",
+            "providers.claude.effort",
+            "providers.claude.context_window",
+            "Claude model",
+            "Claude harness",
+            "Claude effort",
+            "Claude context window",
+        ),
+        ModelProvider::Codex => (
+            "providers.codex.model",
+            "providers.codex.harness",
+            "providers.codex.effort",
+            "providers.codex.context_window",
+            "Codex model",
+            "Codex harness",
+            "Codex effort",
+            "Codex context window",
+        ),
+        ModelProvider::DeepSeek => (
+            "providers.deepseek.model",
+            "providers.deepseek.harness",
+            "providers.deepseek.effort",
+            "providers.deepseek.context_window",
+            "DeepSeek model",
+            "DeepSeek harness",
+            "DeepSeek effort",
+            "DeepSeek context window",
+        ),
+    };
+    items.extend([
+        SettingItem {
+            key: model_key,
+            label: model_label,
+            note: "Canonical catalog model for direct launches.",
+            value: SettingValue::Model {
+                provider,
+                value: selected_model.cli_id,
+            },
+        },
+        SettingItem {
+            key: harness_key,
+            label: harness_label,
+            note: "Harness used when this provider is selected explicitly.",
+            value: SettingValue::Harness(
+                profile
+                    .and_then(|profile| profile.harness)
+                    .unwrap_or_default(),
             ),
         },
-    ]
+        SettingItem {
+            key: effort_key,
+            label: effort_label,
+            note: "Provider-scoped launch effort; default uses catalog policy.",
+            value: SettingValue::Effort {
+                provider,
+                value: profile.and_then(|profile| profile.effort),
+            },
+        },
+        SettingItem {
+            key: context_key,
+            label: context_label,
+            note: "Provider-scoped context; default uses catalog policy.",
+            value: SettingValue::ContextWindow {
+                provider,
+                value: context_window,
+            },
+        },
+    ]);
 }
 
 pub fn run(list_only: bool) -> i32 {
@@ -388,6 +553,23 @@ fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
             ("harness.default", SettingValue::Harness(value)) => {
                 patch.harness = Some(*value);
             }
+            (key, SettingValue::Model { provider, value }) if key.starts_with("providers.") => {
+                provider_patch(&mut patch, *provider).model = Some((*value).to_string());
+            }
+            (key, SettingValue::Harness(value)) if key.starts_with("providers.") => {
+                if let Some(provider) = provider_from_profile_key(key) {
+                    provider_patch(&mut patch, provider).harness = Some(*value);
+                }
+            }
+            (key, SettingValue::Effort { provider, value }) if key.starts_with("providers.") => {
+                provider_patch(&mut patch, *provider).effort = Some(*value);
+            }
+            (key, SettingValue::ContextWindow { provider, value })
+                if key.starts_with("providers.") =>
+            {
+                provider_patch(&mut patch, *provider).context_window =
+                    Some(value.map(str::to_string));
+            }
             ("git.pr_wait_fail_fast", SettingValue::Bool(value)) => {
                 patch.pr_wait_fail_fast = Some(*value);
             }
@@ -395,6 +577,31 @@ fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
         }
     }
     patch
+}
+
+fn provider_patch(
+    patch: &mut clud_settings::GlobalSettingsPatch,
+    provider: ModelProvider,
+) -> &mut clud_settings::ProviderProfilePatch {
+    if let Some(index) = patch
+        .provider_profiles
+        .iter()
+        .position(|profile| profile.provider == Some(provider))
+    {
+        return &mut patch.provider_profiles[index];
+    }
+    patch
+        .provider_profiles
+        .push(clud_settings::ProviderProfilePatch {
+            provider: Some(provider),
+            ..clud_settings::ProviderProfilePatch::default()
+        });
+    patch.provider_profiles.last_mut().unwrap()
+}
+
+fn provider_from_profile_key(key: &str) -> Option<ModelProvider> {
+    let provider = key.strip_prefix("providers.")?.split('.').next()?;
+    ModelProvider::from_settings_str(provider)
 }
 
 fn redraw<W: Write>(out: &mut W, menu: &Menu) -> io::Result<()> {
@@ -551,6 +758,7 @@ mod tests {
                 model_provider: Some(ModelProvider::Codex),
                 harness: Some(HarnessSelection::Claude),
                 pr_wait_fail_fast: Some(true),
+                provider_profiles: Vec::new(),
             }
         );
     }
@@ -584,6 +792,7 @@ mod tests {
                 model_provider: None,
                 harness: None,
                 pr_wait_fail_fast: Some(true),
+                provider_profiles: Vec::new(),
             }
         );
     }

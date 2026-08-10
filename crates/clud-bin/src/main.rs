@@ -266,25 +266,36 @@ fn run(mut args: args::Args) {
     // Selection must be resolved from a read-only snapshot before any launch
     // option can persist settings, acquire a settings lock, read credentials,
     // dispatch to the daemon, or start a child.
-    let global_launch_preferences = match clud_settings::load_global_launch_preferences_read_only()
-    {
+    let launch_preferences = match clud_settings::load_launch_preferences_read_only() {
         Ok(preferences) => preferences,
         Err(error) => {
             eprintln!("[clud] warning: failed to load launch preferences: {error}; using defaults");
-            clud_settings::GlobalLaunchPreferences::default()
+            clud_settings::LaunchPreferencesSnapshot::default()
         }
     };
+    let global_launch_preferences = launch_preferences.global;
     let cli_provider = args.explicit_model_provider();
     let model_inferred_provider = args
         .model
         .as_deref()
         .and_then(clud::provider_catalog::infer_provider);
-    let launch_target = match backend::resolve_routed_launch_target(
+    let direct_provider = cli_provider
+        .or(model_inferred_provider)
+        .or(global_launch_preferences.model_provider)
+        .unwrap_or(backend::ModelProvider::Claude);
+    let explicit_provider_intent = cli_provider.is_some() || model_inferred_provider.is_some();
+    let provider_profile = (args.routing_mode() == backend::RoutingMode::Direct)
+        .then(|| launch_preferences.profile(direct_provider))
+        .flatten();
+    let profile_harness = (explicit_provider_intent && args.harness.is_none())
+        .then(|| provider_profile.and_then(|profile| profile.harness))
+        .flatten();
+    let mut launch_target = match backend::resolve_routed_launch_target(
         args.routing_mode(),
         cli_provider.or(model_inferred_provider),
         args.harness,
         global_launch_preferences.model_provider,
-        global_launch_preferences.harness,
+        profile_harness.or(global_launch_preferences.harness),
     ) {
         Ok(target) => target,
         Err(error) => {
@@ -292,19 +303,27 @@ fn run(mut args: args::Args) {
             std::process::exit(2);
         }
     };
+    if profile_harness.is_some() {
+        launch_target.harness_source = backend::PreferenceSource::ProviderSetting;
+    }
     if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
         eprintln!("{error}");
         std::process::exit(2);
     }
-    if let Err(error) = clud::provider_catalog::resolve(
-        Some(launch_target.model_provider),
+    args.resolved_model_selection = match clud::provider_catalog::resolve_for_launch(
+        launch_target.model_provider,
         args.model.as_deref(),
         args.effort.as_deref(),
         args.context_window.as_deref(),
+        provider_profile.map(clud_settings::ProviderProfile::selection_defaults),
+        launch_target.routing_mode == backend::RoutingMode::Direct,
     ) {
-        eprintln!("{error}");
-        std::process::exit(2);
-    }
+        Ok(selection) => selection,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
     if launch_target.routing_mode == backend::RoutingMode::Unified && !args.dry_run {
         eprintln!(
             "unified routing is reserved by the #901 foundation but is not available until the launch-scoped gateway is enabled"

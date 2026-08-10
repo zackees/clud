@@ -14,6 +14,47 @@ pub(super) fn set_default_harness(document: &mut Value, harness: HarnessSelectio
     );
 }
 
+pub(super) fn set_provider_profile_patch(
+    document: &mut Value,
+    provider: ModelProvider,
+    patch: ProviderProfilePatch,
+) {
+    let providers = object_entry(document, "providers");
+    let entry = providers
+        .entry(provider.as_str().to_string())
+        .or_insert_with(|| json!({}));
+    if !entry.is_object() {
+        *entry = json!({});
+    }
+    let profile = entry.as_object_mut().unwrap();
+    if let Some(model) = patch.model {
+        profile.insert("model".to_string(), Value::String(model));
+    }
+    if let Some(harness) = patch.harness {
+        profile.insert(
+            "harness".to_string(),
+            Value::String(harness.as_str().to_string()),
+        );
+    }
+    if let Some(effort) = patch.effort {
+        if let Some(effort) = effort {
+            profile.insert(
+                "effort".to_string(),
+                Value::String(effort.as_str().to_string()),
+            );
+        } else {
+            profile.remove("effort");
+        }
+    }
+    if let Some(context_window) = patch.context_window {
+        if let Some(context_window) = context_window {
+            profile.insert("context_window".to_string(), Value::String(context_window));
+        } else {
+            profile.remove("context_window");
+        }
+    }
+}
+
 pub(super) fn set_launch_setup_scope(
     document: &mut Value,
     backend: Backend,

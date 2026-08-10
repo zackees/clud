@@ -118,6 +118,7 @@ impl std::fmt::Display for HarnessSelection {
 pub enum PreferenceSource {
     Cli,
     GlobalSetting,
+    ProviderSetting,
     BuiltInDefault,
 }
 
@@ -126,6 +127,7 @@ impl PreferenceSource {
         match self {
             Self::Cli => "cli",
             Self::GlobalSetting => "global_setting",
+            Self::ProviderSetting => "provider_setting",
             Self::BuiltInDefault => "built_in_default",
         }
     }
