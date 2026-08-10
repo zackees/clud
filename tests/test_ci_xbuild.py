@@ -15,6 +15,23 @@ def test_bundle_scratch_does_not_collide_with_the_build_entrypoint() -> None:
     assert bundle.CI_SCRATCH != bundle.ROOT / "build"
 
 
+def test_linux_runner_wraps_cargo_with_memory_limit(monkeypatch) -> None:
+    monkeypatch.setattr(xbuild.platform, "system", lambda: "Linux")
+    assert xbuild._run_argv(["cargo", "clippy"]) == [
+        "bash",
+        "-c",
+        "ulimit -v 13000000; exec \"$@\"",
+        "clud-xbuild",
+        "cargo",
+        "clippy",
+    ]
+
+
+def test_non_linux_runner_does_not_wrap_cargo(monkeypatch) -> None:
+    monkeypatch.setattr(xbuild.platform, "system", lambda: "Darwin")
+    assert xbuild._run_argv(["cargo", "clippy"]) == ["cargo", "clippy"]
+
+
 def test_soldr_strategy_routes_linking_builds_through_blessed_surface() -> None:
     target = "x86_64-pc-windows-msvc"
     assert xbuild.cargo_argv(["build", "--workspace", "--bins"], target, "soldr") == [
