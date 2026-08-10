@@ -51,6 +51,13 @@ jobs:
       - name: Install Dylint
         timeout-minutes: 10
         run: soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.1 --locked
+      - name: Set up Dylint Python environment
+        run: |
+          uv venv .venv
+          VENV_PY="$(pwd)/.venv/bin/python"
+          RUNNING_PROCESS_VERSION="$(python -c 'import tomllib; data = tomllib.load(open("pyproject.toml", "rb")); print(next(dep.split("==", 1)[1] for dep in data["dependency-groups"]["test"] if dep.startswith("running-process==")))')"
+          uv pip install --python "$VENV_PY" "running-process==$RUNNING_PROCESS_VERSION"
+          echo "VENV_PY=$VENV_PY" >> "$GITHUB_ENV"
       - name: Build published Dylint driver
         timeout-minutes: 15
         run: $VENV_PY -m ci.build_dylint_driver

@@ -44,6 +44,10 @@ def test_dylint_workflow_has_no_legacy_git_driver_or_generic_retry_loop() -> Non
         encoding="utf-8"
     )
 
+    assert "Set up Dylint Python environment" in workflow
+    assert "uv venv .venv" in workflow
+    assert 'uv pip install --python "$VENV_PY"' in workflow
+    assert 'data["dependency-groups"]["test"]' in workflow
     assert "Build published Dylint driver" in workflow
     assert "$VENV_PY -m ci.build_dylint_driver" in workflow
     assert 'DYLINT_VERSION = "6.0.1"' in driver_builder
