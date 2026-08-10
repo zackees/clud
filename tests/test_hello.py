@@ -428,7 +428,13 @@ def test_dry_run_deepseek_rejects_codex_harness() -> None:
 def test_dry_run_deepseek_rejects_model_override() -> None:
     result = _run("--dry-run", "--deepseek", "--model", "opus", "-p", "hello")
     assert result.returncode == 2
-    assert "--model" in result.stderr
+    # The provider resolver rejects a cross-provider model before bootstrap and
+    # names both the offending model's provider and the requested one (#904).
+    # Check the combined streams: running-process versions differ on whether a
+    # diagnostic lands on stdout or stderr.
+    output = (result.stdout or "") + (result.stderr or "")
+    assert "opus" in output
+    assert "deepseek" in output
 
 
 def test_dry_run_deepseek_conflicts_with_claude_and_codex_flags() -> None:

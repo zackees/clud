@@ -12,6 +12,7 @@ use crate::backend::{
     resolve_launch_target, Backend, HarnessSelection, LaunchTargetError, ModelProvider,
 };
 use crate::launch_setup::LaunchSetupScope;
+use crate::provider_catalog::{self, EffortLevel};
 
 pub const CLUD_DIR_NAME: &str = ".clud";
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -32,11 +33,54 @@ pub struct GlobalLaunchPreferences {
     pub harness: Option<HarnessSelection>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GlobalSettingsPatch {
     pub model_provider: Option<ModelProvider>,
     pub harness: Option<HarnessSelection>,
     pub pr_wait_fail_fast: Option<bool>,
+    pub provider_profiles: Vec<ProviderProfilePatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProfile {
+    pub provider: ModelProvider,
+    pub model: Option<String>,
+    pub harness: Option<HarnessSelection>,
+    pub effort: Option<EffortLevel>,
+    pub context_window: Option<String>,
+}
+
+impl ProviderProfile {
+    pub fn selection_defaults(&self) -> provider_catalog::ProviderSelectionDefaults<'_> {
+        provider_catalog::ProviderSelectionDefaults {
+            model: self.model.as_deref(),
+            effort: self.effort,
+            context_window: self.context_window.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderProfilePatch {
+    pub provider: Option<ModelProvider>,
+    pub model: Option<String>,
+    pub harness: Option<HarnessSelection>,
+    pub effort: Option<Option<EffortLevel>>,
+    pub context_window: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchPreferencesSnapshot {
+    pub global: GlobalLaunchPreferences,
+    pub provider_profiles: Vec<ProviderProfile>,
+}
+
+impl LaunchPreferencesSnapshot {
+    pub fn profile(&self, provider: ModelProvider) -> Option<&ProviderProfile> {
+        self.provider_profiles
+            .iter()
+            .find(|profile| profile.provider == provider)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +104,15 @@ impl Default for RustOptimizeSettings {
 pub enum SettingsError {
     NoHomeDir,
     Io(io::Error),
-    Parse { path: PathBuf, error: String },
+    Parse {
+        path: PathBuf,
+        error: String,
+    },
     InvalidLaunchTarget(LaunchTargetError),
+    InvalidProviderProfile {
+        provider: ModelProvider,
+        error: String,
+    },
 }
 
 impl std::fmt::Display for SettingsError {
@@ -74,6 +125,9 @@ impl std::fmt::Display for SettingsError {
             }
             SettingsError::InvalidLaunchTarget(error) => {
                 write!(f, "invalid launch preferences: {error}")
+            }
+            SettingsError::InvalidProviderProfile { provider, error } => {
+                write!(f, "invalid providers.{provider} settings: {error}")
             }
         }
     }
@@ -257,6 +311,136 @@ pub fn load_global_launch_preferences_read_only() -> Result<GlobalLaunchPreferen
     Ok(global_launch_preferences_from_document(&document))
 }
 
+/// Read global launch preferences and every configured provider profile from
+/// one document snapshot without seeding or writing defaults.
+pub fn load_launch_preferences_read_only() -> Result<LaunchPreferencesSnapshot, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_launch_preferences_read_only_at(&home)
+}
+
+pub fn load_launch_preferences_read_only_at(
+    home: &Path,
+) -> Result<LaunchPreferencesSnapshot, SettingsError> {
+    let document = read_settings_or_legacy(home)?;
+    launch_preferences_from_document(&document)
+}
+
+fn launch_preferences_from_document(
+    document: &Value,
+) -> Result<LaunchPreferencesSnapshot, SettingsError> {
+    let mut provider_profiles = Vec::new();
+    for provider in [
+        ModelProvider::Claude,
+        ModelProvider::Codex,
+        ModelProvider::DeepSeek,
+    ] {
+        if let Some(profile) = provider_profile_from_document(document, provider)? {
+            provider_profiles.push(profile);
+        }
+    }
+    Ok(LaunchPreferencesSnapshot {
+        global: global_launch_preferences_from_document(document),
+        provider_profiles,
+    })
+}
+
+fn provider_profile_from_document(
+    document: &Value,
+    provider: ModelProvider,
+) -> Result<Option<ProviderProfile>, SettingsError> {
+    let Some(value) = document
+        .get("providers")
+        .and_then(|providers| providers.get(provider.as_str()))
+    else {
+        return Ok(None);
+    };
+    let Some(profile) = value.as_object() else {
+        return Err(invalid_provider_profile(provider, "expected an object"));
+    };
+    let read_string = |key: &str| -> Result<Option<&str>, SettingsError> {
+        match profile.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.as_str())),
+            Some(_) => Err(invalid_provider_profile(
+                provider,
+                format!("{key} must be a string"),
+            )),
+        }
+    };
+
+    let model = read_string("model")?
+        .map(|value| {
+            let entry = provider_catalog::model_by_cli_id(value).ok_or_else(|| {
+                invalid_provider_profile(
+                    provider,
+                    format!("model '{value}' is not a canonical catalog ID"),
+                )
+            })?;
+            if entry.provider != provider {
+                return Err(invalid_provider_profile(
+                    provider,
+                    format!("model '{value}' belongs to provider '{}'", entry.provider),
+                ));
+            }
+            Ok(value.to_string())
+        })
+        .transpose()?;
+    let harness = read_string("harness")?
+        .map(|value| {
+            HarnessSelection::from_settings_str(value).ok_or_else(|| {
+                invalid_provider_profile(
+                    provider,
+                    format!("harness '{value}' must be default, claude, or codex"),
+                )
+            })
+        })
+        .transpose()?;
+    let effort = read_string("effort")?
+        .map(|value| {
+            EffortLevel::parse(value).ok_or_else(|| {
+                invalid_provider_profile(provider, format!("unknown effort '{value}'"))
+            })
+        })
+        .transpose()?;
+    let context_window = read_string("context_window")?
+        .map(|value| match value {
+            "auto" | "1m" => Ok(value.to_string()),
+            _ => Err(invalid_provider_profile(
+                provider,
+                format!("context_window '{value}' must be auto or 1m"),
+            )),
+        })
+        .transpose()?;
+
+    provider_catalog::resolve(
+        Some(provider),
+        model.as_deref(),
+        effort.map(EffortLevel::as_str),
+        context_window.as_deref(),
+    )
+    .map_err(|error| invalid_provider_profile(provider, error.to_string()))?;
+    if harness == Some(HarnessSelection::Codex) && provider != ModelProvider::Codex {
+        return Err(invalid_provider_profile(
+            provider,
+            "the Codex harness cannot run this provider",
+        ));
+    }
+    Ok(Some(ProviderProfile {
+        provider,
+        model,
+        harness,
+        effort,
+        context_window,
+    }))
+}
+
+fn invalid_provider_profile(provider: ModelProvider, error: impl Into<String>) -> SettingsError {
+    SettingsError::InvalidProviderProfile {
+        provider,
+        error: error.into(),
+    }
+}
+
 pub fn load_global_launch_preferences_at(
     home: &Path,
 ) -> Result<GlobalLaunchPreferences, SettingsError> {
@@ -385,6 +569,16 @@ fn save_settings_transaction_at(
         object_entry(&mut document, "git")
             .insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
     }
+    for profile in patch.provider_profiles {
+        let Some(provider) = profile.provider else {
+            continue;
+        };
+        set_provider_profile_patch(&mut document, provider, profile);
+    }
+
+    // Validate the complete post-patch document before the atomic write. This
+    // catches cross-field capability errors such as Flash + 1m.
+    let _ = launch_preferences_from_document(&document)?;
 
     let launch = global_launch_preferences_from_document(&document);
     let target = resolve_launch_target(
@@ -937,6 +1131,7 @@ mod clud_settings_document;
 use clud_settings_document::{
     backend_settings_key, infer_default_backend_from_launch_setup, object_entry, seed_object_entry,
     set_default_harness, set_default_model_provider, set_launch_setup_scope,
+    set_provider_profile_patch,
 };
 fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
     if let Some(parent) = path.parent() {

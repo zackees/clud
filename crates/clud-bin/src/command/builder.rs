@@ -140,14 +140,16 @@ fn build_launch_plan_for_target_at(
     let mut iterations = 1u32;
     let mut repeat_schedule: Option<RepeatSchedule> = None;
     let mut task_summary: Option<String> = None;
-    let model_selection = provider_catalog::resolve(
-        Some(target.model_provider),
-        args.model.as_deref(),
-        args.effort.as_deref(),
-        args.context_window.as_deref(),
-    )
-    .ok()
-    .flatten();
+    let model_selection = args.resolved_model_selection.clone().or_else(|| {
+        provider_catalog::resolve(
+            Some(target.model_provider),
+            args.model.as_deref(),
+            args.effort.as_deref(),
+            args.context_window.as_deref(),
+        )
+        .ok()
+        .flatten()
+    });
 
     let codex_uses_exec = matches!(backend, Backend::Codex) && has_noninteractive_prompt(args);
     let codex_uses_resume = matches!(backend, Backend::Codex)
@@ -237,12 +239,10 @@ fn build_launch_plan_for_target_at(
     // and rejected by the bridge, which owns the error message.
     let codex_model = codex_model_selection(args, target, model_selection.as_ref());
     let emitted_model = codex_model.clone().or_else(|| {
-        args.model.as_ref().map(|model| {
-            model_selection
-                .as_ref()
-                .and_then(|selection| selection.wire_model.clone())
-                .unwrap_or_else(|| model.clone())
-        })
+        model_selection
+            .as_ref()
+            .and_then(|selection| selection.wire_model.clone())
+            .or_else(|| args.model.clone())
     });
     if let Some(emitted) = emitted_model {
         match backend {

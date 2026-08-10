@@ -83,6 +83,12 @@ cache-keys = [
 minversion = "8.0"
 addopts = ["-ra", "--strict-markers"]
 testpaths = ["tests"]
+# `tests/` is a package (`tests/__init__.py`), so pytest's prepend import mode
+# inserts the repo root — not `tests/` — onto sys.path. That breaks the
+# top-level `import _subprocess_helpers` in tests/integration/conftest.py, which
+# aborts collection of BOTH the unit and integration lanes on every platform.
+# Put `tests/` on sys.path explicitly so the bare helper imports resolve.
+pythonpath = ["tests"]
 # Any single test that runs longer than this is considered hung; pytest-timeout
 # will interrupt it and dump a stack trace pointing at the exact line. Without
 # this, a stuck subprocess call (e.g. stderr.readline() on Windows when the

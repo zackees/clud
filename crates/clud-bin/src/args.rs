@@ -224,6 +224,10 @@ pub struct Args {
     /// Runtime Codex `-c` config overrides loaded from ~/.clud/settings.json.
     #[arg(skip)]
     pub codex_config_overrides: Vec<String>,
+
+    /// Selection normalized once before bootstrap or credential access.
+    #[arg(skip)]
+    pub resolved_model_selection: Option<crate::provider_catalog::ResolvedModelSelection>,
 }
 
 impl Args {
