@@ -130,6 +130,9 @@ Popen = RunningChild
 
 def run(*args: Any, **kwargs: Any) -> CompletedProcess[Any]:
     """Run one bounded test command through running-process."""
+    if kwargs.get("capture_output"):
+        # `running-process` merges stderr by default; mirror subprocess.run.
+        kwargs.setdefault("stderr", PIPE)
     return RunningProcess.run(*args, **kwargs)
 
 

@@ -45,6 +45,7 @@ def test_dylint_workflow_has_no_legacy_git_driver_or_generic_retry_loop() -> Non
     )
 
     assert "Build published Dylint driver" in workflow
+    assert "$VENV_PY -m ci.build_dylint_driver" in workflow
     assert 'DYLINT_VERSION = "6.0.1"' in driver_builder
     assert 'dylint_driver = "={DYLINT_VERSION}"' in driver_builder
     assert "git clone" not in driver_builder
