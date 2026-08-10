@@ -53,7 +53,7 @@ jobs:
         run: soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.1 --locked
       - name: Build published Dylint driver
         timeout-minutes: 15
-        run: uv run --no-project python ci/build_dylint_driver.py
+        run: $VENV_PY -m ci.build_dylint_driver
       - name: Check dylint formatting
         run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
