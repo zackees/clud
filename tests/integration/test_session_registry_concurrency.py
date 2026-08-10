@@ -20,13 +20,14 @@ These tests pin two contracts of the lockfile-based fix:
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import copy_launcher
 
@@ -42,7 +43,7 @@ def _launch_clud(
     env: dict[str, str],
     extra_args: list[str] | None = None,
     sleep_ms: int = 300,
-) -> subprocess.CompletedProcess[str]:
+) -> process.CompletedProcess[str]:
     """Run clud once with the mock backend; default workload is a short sleep
     so the session registry row is held in the DB while the test inspects
     a sibling launch.
@@ -57,7 +58,7 @@ def _launch_clud(
         if extra_args:
             args.extend(extra_args)
         args.extend(["--", "--mock-sleep-ms", str(sleep_ms)])
-        return subprocess.run(
+        return process.run(
             args,
             capture_output=True,
             text=True,
@@ -94,7 +95,7 @@ class TestConcurrentLaunchesNoWarning:
     ) -> None:
         env = _registry_env(mock_env, tmp_path, max_instances=8)
 
-        results: list[subprocess.CompletedProcess[str]] = []
+        results: list[process.CompletedProcess[str]] = []
         errors: list[BaseException] = []
         lock = threading.Lock()
 
@@ -136,12 +137,12 @@ class TestConcurrentLaunchesNoWarning:
         # cap count.
         first_done = threading.Event()
 
-        def run_first() -> subprocess.CompletedProcess[str]:
+        def run_first() -> process.CompletedProcess[str]:
             r = _launch_clud(clud_binary, env, sleep_ms=2000)
             first_done.set()
             return r
 
-        first_result_box: list[subprocess.CompletedProcess[str]] = []
+        first_result_box: list[process.CompletedProcess[str]] = []
 
         def first_target() -> None:
             first_result_box.append(run_first())
@@ -169,7 +170,7 @@ class TestCapActuallyRefuses:
         env = _registry_env(mock_env, tmp_path, max_instances=1)
 
         first_started = threading.Event()
-        first_result_box: list[subprocess.CompletedProcess[str]] = []
+        first_result_box: list[process.CompletedProcess[str]] = []
 
         def first_target() -> None:
             first_started.set()

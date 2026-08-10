@@ -49,9 +49,10 @@ import argparse
 import json
 import platform
 import shlex
-import subprocess
 import sys
 from pathlib import Path
+
+from ci import process
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -254,7 +255,7 @@ def cargo_argv(subcommand: list[str], target: str, strategy: str) -> list[str]:
 
 def run(argv: list[str], env: dict[str, str]) -> int:
     print(f"+ {' '.join(argv)}", flush=True)
-    return subprocess.run(argv, cwd=ROOT, env=env, preexec_fn=_preexec()).returncode
+    return process.run(argv, cwd=ROOT, env=env, preexec_fn=_preexec()).returncode
 
 
 def _preexec():
@@ -296,7 +297,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
         args.strategy,
     )
     print(f"+ {' '.join(harness)}", flush=True)
-    proc = subprocess.run(harness, cwd=ROOT, env=env, capture_output=True, text=True)
+    proc = process.run(harness, cwd=ROOT, env=env, capture_output=True, text=True)
     sys.stderr.write(proc.stderr)
     if proc.returncode != 0:
         return 1

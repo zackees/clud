@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -24,7 +25,7 @@ def _cargo_argv(subcommand: list[str]) -> list[str]:
     links C++ deps (whisper-rs) against MinGW runtime DLLs
     (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll). Those DLLs
     aren't present on stock Windows, so the resulting debug binary fails
-    with STATUS_ENTRYPOINT_NOT_FOUND when launched as a subprocess.
+    with STATUS_ENTRYPOINT_NOT_FOUND when launched as a process.
 
     `ci.env.build_env()` selects the rustup-managed MSVC toolchain, which
     links against VCRUNTIME140.dll / MSVCP140.dll. The `soldr` branch below is
@@ -88,7 +89,6 @@ from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E40
 from _subprocess_helpers import (  # type: ignore[import-not-found]  # noqa: E402
     windows_no_window_flags,
 )
-
 from integration._daemon_helpers import (  # type: ignore[import-not-found]  # noqa: E402
     copy_launcher,
     stop_daemons_below,
@@ -103,7 +103,7 @@ def _suppress_windows_console_windows():
 
     The fixture is session-scoped so it applies to the build-time helpers as
     well as the actual tests. Issue #55: add CREATE_NO_WINDOW to ordinary
-    ``subprocess.run`` / ``subprocess.Popen`` calls. Ctrl+Break tests that
+    ``process.run`` / ``process.Popen`` calls. Ctrl+Break tests that
     request ``CREATE_NEW_PROCESS_GROUP`` are left visible because hidden
     process groups do not reliably receive Ctrl+Break on Windows runners.
     """
@@ -112,8 +112,8 @@ def _suppress_windows_console_windows():
         return
 
     patch = pytest.MonkeyPatch()
-    original_run = subprocess.run
-    original_popen = subprocess.Popen
+    original_run = process.run
+    original_popen = process.Popen
 
     def run(*args, **kwargs):
         kwargs = dict(kwargs)
@@ -131,8 +131,8 @@ def _suppress_windows_console_windows():
             _add_windows_create_no_window(kwargs)
             super().__init__(*args, **kwargs)
 
-    patch.setattr(subprocess, "run", run)
-    patch.setattr(subprocess, "Popen", Popen)
+    patch.setattr(process, "run", run)
+    patch.setattr(process, "Popen", Popen)
     try:
         yield
     finally:
@@ -173,7 +173,7 @@ def _cargo_build_inherit_stdio(package: str) -> None:
     open. Letting cargo's output go straight to the CI log sidesteps the issue
     entirely and still produces the artifacts at a deterministic path.
     """
-    result = subprocess.run(
+    result = process.run(
         _cargo_argv(["build", "-p", package]),
         cwd=ROOT,
         env=_build_env_without_rustc_wrapper(),
@@ -262,8 +262,8 @@ def mock_env(mock_agent_binary: Path, tmp_path: Path) -> dict[str, str]:
 
     # Skip the Windows exe-unlock dance (rename+copy+GC on every start).
     # The unlock path is under investigation in #37 as the suspected cause
-    # of a pipe-EOF hang on Windows CI where subprocess.run cannot flush
-    # stdout/stderr of a `clud --version` subprocess. Tests don't need the
+    # of a pipe-EOF hang on Windows CI where process.run cannot flush
+    # stdout/stderr of a `clud --version` process. Tests don't need the
     # hot-reload safety net anyway; the repo isn't pip-installing over a
     # running clud during tests.
     env["CLUD_NO_UNLOCK"] = "1"
@@ -374,7 +374,7 @@ def _scan_for_clud_zombies() -> list[dict]:
     if scan_bin is None:
         return []
     try:
-        result = subprocess.run(
+        result = process.run(
             [str(scan_bin)],
             capture_output=True,
             text=True,

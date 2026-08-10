@@ -13,10 +13,11 @@ These tests pin the contract that makes the next occurrence self-diagnosing.
 from __future__ import annotations
 
 import os
-import subprocess
 import tempfile
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import _read_exit_stages, run_clud
 
@@ -30,7 +31,7 @@ def test_exit_stage_file_records_each_stage_as_it_runs(clud_binary, mock_env):
     try:
         env = dict(mock_env)
         env["CLUD_EXIT_TIMING_FILE"] = trace
-        result = subprocess.run(
+        result = process.run(
             [str(clud_binary), "-p", "hello"],
             capture_output=True,
             text=True,
@@ -67,7 +68,7 @@ def test_exit_stage_trace_stays_off_stderr(clud_binary, mock_env):
     try:
         env = dict(mock_env)
         env["CLUD_EXIT_TIMING_FILE"] = trace
-        result = subprocess.run(
+        result = process.run(
             [str(clud_binary), "-p", "hello"],
             capture_output=True,
             text=True,

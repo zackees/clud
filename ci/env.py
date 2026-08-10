@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import tomllib
+
+from ci import process
 
 
 def cargo_home() -> Path:
@@ -79,7 +80,7 @@ def _cargo_host_triple() -> str | None:
     cargo = shutil.which("cargo")
     if not cargo:
         return None
-    result = subprocess.run(
+    result = process.run(
         [cargo, "-Vv"],
         check=False,
         capture_output=True,
@@ -146,7 +147,7 @@ def _find_vsdevcmd() -> Path | None:
     vswhere = _find_vswhere()
     if vswhere is None:
         return None
-    result = subprocess.run(
+    result = process.run(
         [
             str(vswhere),
             "-latest",
@@ -195,7 +196,7 @@ def _windows_build_env() -> dict[str, str]:
         return env
 
     command = f'"{vsdevcmd}" -arch=x64 -host_arch=x64 >nul && set'
-    result = subprocess.run(
+    result = process.run(
         ["cmd", "/d", "/s", "/c", command],
         check=False,
         capture_output=True,

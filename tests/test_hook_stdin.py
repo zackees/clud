@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
+
+from tests import process
 
 ROOT = Path(__file__).resolve().parent.parent
 TELEMETRY = (
@@ -55,17 +56,17 @@ def _run_hook_with_open_stdin(
     payload: str | None,
     argv: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> process.CompletedProcess[str]:
     env = _hook_env(tmp_path / "home")
     if extra_env:
         env.update(extra_env)
     if argv is None:
         argv = [str(_block_bad_cmd_binary())]
-    proc = subprocess.Popen(
+    proc = process.Popen(
         argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdin=process.PIPE,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
         text=True,
         env=env,
     )
@@ -78,7 +79,7 @@ def _run_hook_with_open_stdin(
 
     try:
         returncode = proc.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
+    except process.TimeoutExpired:
         proc.kill()
         stdout, stderr = proc.communicate(timeout=1.0)
         raise AssertionError(
@@ -89,7 +90,7 @@ def _run_hook_with_open_stdin(
     proc.stdin.close()
     stdout = proc.stdout.read()
     stderr = proc.stderr.read()
-    return subprocess.CompletedProcess(proc.args, returncode, stdout, stderr)
+    return process.CompletedProcess(proc.args, returncode, stdout, stderr)
 
 
 def test_block_bad_cmd_reads_payload_without_waiting_for_stdin_eof(tmp_path: Path) -> None:

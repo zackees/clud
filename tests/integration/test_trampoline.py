@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 pytestmark = [pytest.mark.integration]
 
@@ -45,7 +46,7 @@ def prebuilt_wheel() -> Path:
         )
 
 
-def _pip_install(venv_python: Path, wheel: Path) -> subprocess.CompletedProcess[str]:
+def _pip_install(venv_python: Path, wheel: Path) -> process.CompletedProcess[str]:
     """pip install clud into the given venv from a pre-built wheel.
 
     Uses --no-deps to skip dependency resolution (clud has no runtime
@@ -63,7 +64,7 @@ def _pip_install(venv_python: Path, wheel: Path) -> subprocess.CompletedProcess[
         "--no-deps",
         str(wheel),
     ]
-    return subprocess.run(
+    return process.run(
         cmd,
         capture_output=True,
         text=True,
@@ -72,9 +73,9 @@ def _pip_install(venv_python: Path, wheel: Path) -> subprocess.CompletedProcess[
     )
 
 
-def _pip_uninstall(venv_python: Path) -> subprocess.CompletedProcess[str]:
+def _pip_uninstall(venv_python: Path) -> process.CompletedProcess[str]:
     """pip uninstall clud from the given venv."""
-    return subprocess.run(
+    return process.run(
         [_uv(), "pip", "uninstall", "--python", str(venv_python), "clud"],
         capture_output=True,
         text=True,
@@ -93,7 +94,7 @@ def _clud_exe(venv_dir: Path) -> Path:
 def test_venv(tmp_path: Path) -> Path:
     """Create a fresh venv for testing."""
     venv_dir = tmp_path / "venv"
-    result = subprocess.run(
+    result = process.run(
         [_uv(), "venv", str(venv_dir), "--python", sys.executable],
         capture_output=True,
         text=True,
@@ -136,7 +137,7 @@ class TestPipInstallWhileRunning:
         assert clud.is_file(), f"clud binary not found at {clud}"
 
         # Step 2: Launch clud with --dry-run (exits quickly but exercises trampoline)
-        run_result = subprocess.run(
+        run_result = process.run(
             [str(clud), "--dry-run", "-p", "hello"],
             capture_output=True,
             text=True,
@@ -152,7 +153,7 @@ class TestPipInstallWhileRunning:
         assert result.returncode == 0, f"Reinstall failed: {result.stderr}"
 
         # Step 4: Verify the new install works
-        run_result = subprocess.run(
+        run_result = process.run(
             [str(clud), "--version"],
             capture_output=True,
             text=True,
@@ -175,10 +176,10 @@ class TestPipInstallWhileRunning:
         # Step 2: Launch clud in the background (it will fail to find claude,
         # but the trampoline runs before that check)
         # Use a subprocess that stays alive briefly
-        proc = subprocess.Popen(
+        proc = process.Popen(
             [str(clud), "--dry-run", "-p", "hello"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
             text=True,
         )
 
@@ -192,14 +193,14 @@ class TestPipInstallWhileRunning:
         # Clean up the background process
         try:
             proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
+        except process.TimeoutExpired:
             proc.kill()
             proc.wait()
 
         assert reinstall_ok, f"Reinstall while running failed: {result.stderr}"
 
         # Step 4: Verify new install works
-        run_result = subprocess.run(
+        run_result = process.run(
             [str(clud), "--version"],
             capture_output=True,
             text=True,
@@ -217,7 +218,7 @@ class TestPipInstallWhileRunning:
         assert result.returncode == 0
 
         # Run (exercises trampoline, creates .old and cache files)
-        subprocess.run(
+        process.run(
             [str(clud), "--dry-run", "-p", "hello"],
             capture_output=True,
             text=True,
@@ -240,7 +241,7 @@ class TestPipInstallWhileRunning:
             result = _pip_install(python, prebuilt_wheel)
             assert result.returncode == 0, f"Install #{i + 1} failed: {result.stderr}"
 
-            run_result = subprocess.run(
+            run_result = process.run(
                 [str(clud), "--dry-run", "-p", f"iteration {i}"],
                 capture_output=True,
                 text=True,
@@ -258,7 +259,7 @@ class TestPipInstallWhileRunning:
         assert result.returncode == 0
 
         # First run creates .old
-        subprocess.run(
+        process.run(
             [str(clud), "--version"],
             capture_output=True,
             timeout=15,
@@ -268,7 +269,7 @@ class TestPipInstallWhileRunning:
         # .old may or may not exist depending on timing, but if it does,
         # the next run should clean it up
         if old_file.is_file():
-            subprocess.run(
+            process.run(
                 [str(clud), "--version"],
                 capture_output=True,
                 timeout=15,

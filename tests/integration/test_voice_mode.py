@@ -24,12 +24,13 @@ observer → VoiceMode → PTY write is intact.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import copy_launcher
 
@@ -44,14 +45,14 @@ def _run(
     env: dict[str, str],
     input_data: bytes | None = None,
     cwd: Path | None = None,
-) -> subprocess.CompletedProcess[bytes]:
+) -> process.CompletedProcess[bytes]:
     """Run clud with bytes-mode stdin. Voice events are raw escape
     sequences, so we need byte-fidelity over the pipe — `text=True` would
     re-encode and could mangle the kitty CSI bytes."""
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         launch = Path(temp_dir) / clud.name
         copy_launcher(clud, launch)
-        return subprocess.run(
+        return process.run(
             [str(launch), *args],
             capture_output=True,
             text=False,

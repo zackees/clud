@@ -12,9 +12,10 @@ run that still reports pass/fail (issue #726).
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
+
+from ci import process
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,7 +62,7 @@ def _pytest_ok(returncode: int) -> bool:
 def run(cmd: list[str], *, env: dict[str, str] | None = None) -> int:
     from ci.env import clean_env
 
-    return subprocess.run(cmd, cwd=ROOT, env=env if env is not None else clean_env()).returncode
+    return process.run(cmd, cwd=ROOT, env=env if env is not None else clean_env()).returncode
 
 
 def _cargo(subcommand: list[str], *, env: dict[str, str] | None = None) -> list[str]:
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         # Disable the Windows exe-unlock dance for every clud subprocess
         # spawned by tests. See #37: the rename+copy+GC pattern appears to
         # keep stdout/stderr pipe handles alive on Windows CI, which wedges
-        # subprocess.run in a pipe-EOF wait. Tests don't need hot-reload
+        # process.run in a pipe-EOF wait. Tests don't need hot-reload
         # protection, so this is strictly safer for the test harness.
         int_env["CLUD_NO_UNLOCK"] = "1"
         # NOT setting CLUD_USE_RUNTIME_CACHE here, deliberately. #333 wants a
@@ -210,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             "-v",
             *pytest_args,
         ]
-        rc = subprocess.run(int_cmd, cwd=ROOT, env=int_env).returncode
+        rc = process.run(int_cmd, cwd=ROOT, env=int_env).returncode
         if not _pytest_ok(rc):
             return 1
 

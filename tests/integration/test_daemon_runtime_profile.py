@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 import urllib.request
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     daemon_env,
@@ -28,7 +29,7 @@ def _start_daemon(
     env: dict[str, str],
     state_dir: Path,
 ) -> dict[str, object]:
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "daemon", "restart"],
         capture_output=True,
         text=True,
@@ -259,7 +260,7 @@ def test_configured_production_idle_timeout_exits_and_next_client_restarts(
         int(first["pid"]),
         int(first["pid_start"]),
     )
-    stop = subprocess.run(
+    stop = process.run(
         [str(clud_binary), "daemon", "stop"],
         capture_output=True,
         text=True,
@@ -286,7 +287,7 @@ def test_production_idle_timeout_defaults_to_fifteen_minutes(
     settings = json.loads((home / ".clud" / "settings.json").read_text(encoding="utf-8"))
     assert settings["daemon"]["idle_timeout_secs"] == 900
 
-    stop = subprocess.run(
+    stop = process.run(
         [str(clud_binary), "daemon", "stop"],
         capture_output=True,
         text=True,
@@ -350,7 +351,7 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
 ) -> None:
     state_dir = tmp_path / "daemon-state"
     env = _production_idle_env(mock_env, state_dir, tmp_path / "home", 2)
-    client = subprocess.Popen(
+    client = process.Popen(
         [
             str(clud_binary),
             "--codex",
@@ -361,8 +362,8 @@ def test_foreground_client_lease_blocks_configured_production_idle_timeout(
             "--mock-sleep-ms",
             "5000",
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=process.DEVNULL,
+        stderr=process.DEVNULL,
         text=True,
         env=env,
     )
@@ -392,7 +393,7 @@ def test_zero_production_idle_timeout_remains_disabled(
 
     time.sleep(3)
     assert process_identity_is_alive(int(info["pid"]), int(info["pid_start"]))
-    stop = subprocess.run(
+    stop = process.run(
         [str(clud_binary), "daemon", "stop"],
         capture_output=True,
         text=True,

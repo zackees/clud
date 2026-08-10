@@ -7,7 +7,6 @@ to stderr listing the top 4 source files in the repo that exceed the
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -15,13 +14,15 @@ from pathlib import Path
 # Reuse the binary builder + helper already exercised by test_hello.py.
 from test_hello import CLUD, copied_clud_env
 
+from tests import process
+
 ROOT = Path(__file__).resolve().parent.parent
 
 WARNING_HEADER = "large source files"
 
 
-def _run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def _run(cwd: Path, *args: str) -> process.CompletedProcess[str]:
+    return process.run(
         [CLUD, *args],
         cwd=str(cwd),
         capture_output=True,

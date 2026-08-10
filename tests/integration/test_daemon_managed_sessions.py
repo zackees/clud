@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import signal
-import subprocess
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     DETACH_EXIT_TIMEOUT,
@@ -65,7 +66,7 @@ class TestDaemonManagedSessionFlags:
         env = managed_env(mock_env, state_dir)
         env["ANTHROPIC_API_KEY"] = "ambient-secret-that-must-not-leak"
 
-        result = subprocess.run(
+        result = process.run(
             [
                 str(clud_binary),
                 "--transcript",
@@ -108,7 +109,7 @@ class TestDaemonManagedSessionFlags:
         transcript = tmp_path / "session.transcript"
         env = managed_env(mock_env, state_dir)
 
-        result = subprocess.run(
+        result = process.run(
             [
                 str(clud_binary),
                 "--transcript",
@@ -189,7 +190,7 @@ class TestDaemonManagedSessionFlags:
         try:
             assert wait_for_exit(proc1, timeout=DETACH_EXIT_TIMEOUT) == 0
 
-            listed = subprocess.run(
+            listed = process.run(
                 [str(clud_binary), "attach"],
                 capture_output=True,
                 text=True,
@@ -224,7 +225,7 @@ class TestDaemonManagedSessionFlags:
             assert wait_for_exit(proc, timeout=DETACH_EXIT_TIMEOUT) == 0
             metadata = session_metadata(state_dir, session_id)
 
-            listed = subprocess.run(
+            listed = process.run(
                 [str(clud_binary), "list"],
                 capture_output=True,
                 text=True,
@@ -245,9 +246,9 @@ class TestDaemonManagedSessionFlags:
         env = managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = process.CREATE_NEW_PROCESS_GROUP
 
-        proc = subprocess.Popen(
+        proc = process.Popen(
             [
                 str(clud_binary),
                 "--detachable",
@@ -258,9 +259,9 @@ class TestDaemonManagedSessionFlags:
                 "--mock-sleep-ms",
                 "5000",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
+            stdin=process.PIPE,
             text=True,
             env=env,
             **kwargs,
@@ -268,7 +269,7 @@ class TestDaemonManagedSessionFlags:
 
         try:
             session_id = read_session_id(proc)
-            listed = subprocess.run(
+            listed = process.run(
                 [str(clud_binary), "list"],
                 capture_output=True,
                 text=True,
@@ -298,7 +299,7 @@ class TestDaemonManagedSessionFlags:
         assert metadata["exit_code"] is None
         assert metadata["root_pid"] is not None
         assert pid_is_alive(metadata["root_pid"])
-        listed = subprocess.run(
+        listed = process.run(
             [str(clud_binary), "list"],
             capture_output=True,
             text=True,
@@ -326,9 +327,9 @@ class TestDaemonManagedSessionFlags:
         env = managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = process.CREATE_NEW_PROCESS_GROUP
 
-        proc = subprocess.Popen(
+        proc = process.Popen(
             [
                 str(clud_binary),
                 "--detachable",
@@ -339,9 +340,9 @@ class TestDaemonManagedSessionFlags:
                 "--mock-sleep-ms",
                 "30000",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
+            stdin=process.PIPE,
             text=True,
             env=env,
             **kwargs,
@@ -373,7 +374,7 @@ class TestDaemonManagedSessionFlags:
         assert pid_is_alive(metadata["root_pid"])
 
         # `clud list` must show the backgrounded session.
-        listed = subprocess.run(
+        listed = process.run(
             [str(clud_binary), "list"],
             capture_output=True,
             text=True,
@@ -396,9 +397,9 @@ class TestDaemonManagedSessionFlags:
             env = daemon_env(mock_env, state_dir)
             kwargs: dict[str, object] = {}
             if sys.platform == "win32":
-                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                kwargs["creationflags"] = process.CREATE_NEW_PROCESS_GROUP
 
-            proc = subprocess.Popen(
+            proc = process.Popen(
                 [
                     str(clud_binary),
                     "--codex",
@@ -408,9 +409,9 @@ class TestDaemonManagedSessionFlags:
                     "--mock-sleep-ms",
                     "30000",
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,
+                stdout=process.PIPE,
+                stderr=process.PIPE,
+                stdin=process.PIPE,
                 text=True,
                 env=env,
                 **kwargs,
@@ -476,10 +477,10 @@ class TestDaemonManagedSessionFlags:
         # #333: exercise the Windows runtime-cache relay while this test's
         # captured pipes and detached daemon make handle inheritance observable.
         # Without the relay's explicit non-inheritable stdio copies,
-        # subprocess.run() never receives EOF after the background daemon starts.
+        # process.run() never receives EOF after the background daemon starts.
         env["CLUD_USE_RUNTIME_CACHE"] = "1"
 
-        result = subprocess.run(
+        result = process.run(
             [
                 str(clud_binary),
                 "loop",
@@ -510,7 +511,7 @@ class TestDaemonManagedSessionFlags:
         else:
             raise AssertionError(f"repeat metadata not populated: {metadata}")
 
-        listed = subprocess.run(
+        listed = process.run(
             [str(clud_binary), "list"],
             capture_output=True,
             text=True,
@@ -541,10 +542,10 @@ class TestDaemonManagedSessionFlags:
             "30000",
         )
 
-        first_attach = subprocess.Popen(
+        first_attach = process.Popen(
             [str(clud_binary), "attach", session_id],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
             text=True,
             env=env,
         )
@@ -554,7 +555,7 @@ class TestDaemonManagedSessionFlags:
             time.sleep(1.0)
             assert first_attach.poll() is None
 
-            second_attach = subprocess.run(
+            second_attach = process.run(
                 [str(clud_binary), "attach", session_id],
                 capture_output=True,
                 text=True,
@@ -579,9 +580,9 @@ class TestDaemonManagedSessionFlags:
         env = managed_env(mock_env, state_dir)
         kwargs: dict[str, object] = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = process.CREATE_NEW_PROCESS_GROUP
 
-        proc = subprocess.Popen(
+        proc = process.Popen(
             [
                 str(clud_binary),
                 "--detachable",
@@ -592,9 +593,9 @@ class TestDaemonManagedSessionFlags:
                 "--mock-sleep-ms",
                 "30000",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
+            stdin=process.PIPE,
             text=True,
             env=env,
             **kwargs,
@@ -627,7 +628,7 @@ class TestDaemonManagedSessionFlags:
         assert metadata["root_pid"] is not None
         assert pid_is_alive(metadata["root_pid"])
 
-        listed = subprocess.run(
+        listed = process.run(
             [str(clud_binary), "list"],
             capture_output=True,
             text=True,

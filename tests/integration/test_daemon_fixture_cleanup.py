@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import psutil
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     managed_env,
@@ -23,7 +24,7 @@ pytest_plugins = ("pytester",)
 def _start_daemon(
     clud_binary: Path, env: dict[str, str], state_dir: Path
 ) -> dict[str, object]:
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "daemon", "restart"],
         capture_output=True,
         text=True,
@@ -107,7 +108,7 @@ def test_autouse_fixture_cleans_daemon_after_real_test_failure(
     pytester.makepyfile(
         f"""
         import json
-        import subprocess
+        from tests import process
         from pathlib import Path
 
         def test_body_fails_after_starting_daemon(
@@ -116,7 +117,7 @@ def test_autouse_fixture_cleans_daemon_after_real_test_failure(
             state_dir = tmp_path / "daemon-state"
             env = dict(mock_env)
             env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
-            result = subprocess.run(
+            result = process.run(
                 [str(clud_binary), "daemon", "restart"],
                 capture_output=True,
                 text=True,

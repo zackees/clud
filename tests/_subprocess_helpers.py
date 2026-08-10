@@ -12,11 +12,12 @@ without needing the integration harness to be enabled.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 
+from tests import process
+
 # Documented value of the Win32 ``CREATE_NO_WINDOW`` process-creation flag.
-# We hard-code it here (rather than only relying on ``subprocess.CREATE_NO_WINDOW``)
+# We hard-code it here (rather than only relying on ``process.CREATE_NO_WINDOW``)
 # so the unit test can assert the *exact* bit pattern even when the test is
 # running off-Windows where the attribute does not exist.
 CREATE_NO_WINDOW: int = 0x0800_0000
@@ -30,7 +31,7 @@ def windows_no_window_flags() -> dict[str, int]:
     from the test suite (or from any harness code that wants to suppress
     Windows' default conhost allocation). On POSIX the returned dict is
     empty, so spreading ``**windows_no_window_flags()`` into a
-    ``subprocess.Popen``/``subprocess.run`` call is a portable no-op.
+    ``process.Popen``/``process.run`` call is a portable no-op.
 
     See issue #55: every subprocess the integration suite spawns on Windows
     (clud, mock agents, daemon helpers, attach clients) inherits Windows'
@@ -43,9 +44,9 @@ def windows_no_window_flags() -> dict[str, int]:
     if sys.platform != "win32":
         return {}
     # ``getattr`` keeps the helper safe on hypothetical Python builds where
-    # ``subprocess.CREATE_NO_WINDOW`` was not exposed; the documented bit
+    # ``process.CREATE_NO_WINDOW`` was not exposed; the documented bit
     # pattern is the source of truth.
-    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW)}
+    return {"creationflags": getattr(process, "CREATE_NO_WINDOW", CREATE_NO_WINDOW)}
 
 
 def add_windows_create_no_window(kwargs: dict) -> None:
@@ -66,5 +67,5 @@ def add_windows_create_no_window(kwargs: dict) -> None:
         kwargs["creationflags"] = creationflags
         return
     kwargs["creationflags"] = creationflags | getattr(
-        subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW
+        process, "CREATE_NO_WINDOW", CREATE_NO_WINDOW
     )

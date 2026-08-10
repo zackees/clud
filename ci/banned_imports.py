@@ -187,16 +187,29 @@ def scan_file(path: Path) -> list[tuple[int, str, str]]:
 
 
 def scan_platform_tree_kills(path: Path) -> list[tuple[int, str]]:
-    """Return product Python uses of platform-specific tree-kill commands."""
+    """Reject direct platform tree-kill command arguments, not prose mentions."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+        content = path.read_text(encoding="utf-8")
+        tree = ast.parse(content, filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError):
         return []
-    return [
-        (number, line.strip())
-        for number, line in enumerate(lines, start=1)
-        if BANNED_PLATFORM_TREE_KILL_RE.search(line)
-    ]
+
+    lines = content.splitlines()
+    violations: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for arg in node.args:
+            if not isinstance(arg, ast.List | ast.Tuple) or not arg.elts:
+                continue
+            first = arg.elts[0]
+            if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+                continue
+            if BANNED_PLATFORM_TREE_KILL_RE.fullmatch(first.value):
+                line_num = first.lineno
+                line = lines[line_num - 1].strip()
+                violations.append((line_num, line))
+    return violations
 
 
 def scan_python_file(path: Path) -> list[tuple[int, str, str]]:
@@ -325,7 +338,13 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
             total_violations += 1
 
-    for path in sorted(crates_dir.rglob("*.py")):
+    excluded_python_parts = {".git", ".venv", "target", "__pycache__", "worktrees", "extern-repos"}
+    python_files = sorted(
+        path
+        for path in ROOT.rglob("*.py")
+        if not any(part in excluded_python_parts for part in path.relative_to(ROOT).parts)
+    )
+    for path in python_files:
         for line_num, line, reason in scan_python_file(path):
             rel = path.relative_to(ROOT)
             print(f"{rel}:{line_num}: BANNED â€” {reason}", file=sys.stderr)

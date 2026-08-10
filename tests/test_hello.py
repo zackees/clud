@@ -7,11 +7,12 @@ import os
 import re
 import shutil
 import socket
-import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+from tests import process
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,7 +60,7 @@ def _clud_binary() -> str:
     if env_binary and Path(env_binary).is_file():
         return env_binary
 
-    result = subprocess.run(
+    result = process.run(
         _cargo_argv(["build", "-p", "clud", "--message-format=json"]),
         cwd=ROOT,
         capture_output=True,
@@ -134,14 +135,14 @@ def _fake_claude_on_path(bin_dir: Path) -> None:
         fake.chmod(0o755)
 
 
-def _run(*args: str, input_data: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(*args: str, input_data: str | None = None) -> process.CompletedProcess[str]:
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         home = Path(temp_dir) / "home"
         state_dir = Path(temp_dir) / "state"
         home.mkdir()
-        return subprocess.run(
+        return process.run(
             [str(launch), *args],
             capture_output=True,
             text=True,
@@ -189,13 +190,13 @@ def _pid_is_alive(pid: int) -> bool:
         return False
     if sys.platform == "win32":
         try:
-            result = subprocess.run(
+            result = process.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-        except subprocess.TimeoutExpired:
+        except process.TimeoutExpired:
             return True
         return result.returncode == 0 and f'"{pid}"' in result.stdout
     try:
@@ -246,7 +247,7 @@ def test_gc_bare_prints_help_without_touching_clud_dir() -> None:
         marker.write_text("do not touch\n", encoding="utf-8")
         before = _snapshot_tree(clud_dir)
 
-        result = subprocess.run(
+        result = process.run(
             [str(launch), "gc"],
             capture_output=True,
             text=True,
@@ -279,7 +280,7 @@ def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
         victim = home / "victim.txt"
         victim.parent.mkdir(parents=True, exist_ok=True)
         victim.write_text("trash me\n", encoding="utf-8")
-        trash = subprocess.run(
+        trash = process.run(
             [str(launch), "trash", "--cross-volume", str(victim)],
             capture_output=True,
             text=True,
@@ -292,7 +293,7 @@ def test_gc_all_prunes_uv_cache_and_registered_trash() -> None:
             trash_root = home / ".clud" / "trash"
             assert any(trash_root.iterdir())
 
-            result = subprocess.run(
+            result = process.run(
                 [str(launch), "gc", "all"],
                 capture_output=True,
                 text=True,
@@ -321,7 +322,7 @@ def test_top_once_json_arg_surface() -> None:
         state_dir = Path(temp_dir) / "daemon-state"
         env = _isolated_clud_env(source, home, state_dir)
         try:
-            result = subprocess.run(
+            result = process.run(
                 [
                     str(launch),
                     "top",
@@ -360,7 +361,7 @@ def test_linux_binary_does_not_require_libasound_at_startup() -> None:
     if ldd is None:
         return
 
-    result = subprocess.run(
+    result = process.run(
         [ldd, CLUD],
         capture_output=True,
         text=True,
@@ -476,14 +477,14 @@ def test_dry_run_uses_global_harness_and_cli_can_override_it(tmp_path: Path) -> 
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
         env = _isolated_clud_env(source, home, state_dir)
-        saved = subprocess.run(
+        saved = process.run(
             [str(launch), "--dry-run", "-p", "hello"],
             capture_output=True,
             text=True,
             timeout=10,
             env=env,
         )
-        overridden = subprocess.run(
+        overridden = process.run(
             [
                 str(launch),
                 "--dry-run",
@@ -552,7 +553,7 @@ def test_saved_harness_override_is_announced_once_in_green_on_tty(
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
         master, slave = pty.openpty()
         try:
-            process = subprocess.Popen(
+            child = process.Popen(
                 [
                     str(launch),
                     "--no-daemon",
@@ -585,9 +586,9 @@ def test_saved_harness_override_is_announced_once_in_green_on_tty(
                         if error.errno != errno.EIO:
                             raise
                         break
-                if process.poll() is not None and not readable:
+                if child.poll() is not None and not readable:
                     break
-            returncode = process.wait(timeout=1)
+            returncode = child.wait(timeout=1)
         finally:
             os.close(master)
 
@@ -611,7 +612,7 @@ def _run_on_tty(launch: Path, env: dict[str, str], cwd: Path, args: list[str]) -
 
     master, slave = pty.openpty()
     try:
-        process = subprocess.Popen(
+        child = process.Popen(
             [str(launch), *args],
             cwd=cwd,
             env=env,
@@ -635,9 +636,9 @@ def _run_on_tty(launch: Path, env: dict[str, str], cwd: Path, args: list[str]) -
                     if error.errno != errno.EIO:
                         raise
                     break
-            if process.poll() is not None and not readable:
+            if child.poll() is not None and not readable:
                 break
-        returncode = process.wait(timeout=1)
+        returncode = child.wait(timeout=1)
     finally:
         os.close(master)
 
@@ -763,7 +764,7 @@ def test_settings_list_reports_model_and_harness_choices(tmp_path: Path) -> None
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
         launch = _copy_clud_for_test(temp_dir)
-        result = subprocess.run(
+        result = process.run(
             [str(launch), "settings", "--list"],
             capture_output=True,
             text=True,
@@ -790,7 +791,7 @@ def test_dry_run_codex_reports_project_doc_fallback(tmp_path: Path) -> None:
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         env["CLUD_HOOK_HOME"] = str(home)
-        result = subprocess.run(
+        result = process.run(
             [str(launch), "--dry-run", "--codex", "-p", "hello"],
             cwd=repo,
             env=env,
@@ -1027,7 +1028,7 @@ def test_startup_refreshes_stale_managed_bundled_tool(tmp_path: Path) -> None:
         env["USERPROFILE"] = str(home)
         env["CLUD_HOOK_HOME"] = str(home)
         env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
-        result = subprocess.run(
+        result = process.run(
             [
                 str(launch),
                 "--no-daemon",
@@ -1070,7 +1071,7 @@ def test_dry_run_does_not_refresh_stale_managed_bundled_tool(tmp_path: Path) -> 
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         env["CLUD_HOOK_HOME"] = str(home)
-        result = subprocess.run(
+        result = process.run(
             [str(launch), "--dry-run", "-p", "hello"],
             env=env,
             capture_output=True,
@@ -1140,7 +1141,7 @@ def test_fix_hooks_dry_run_plans_without_writing(tmp_path: Path) -> None:
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)
         env["CLUD_HOOK_HOME"] = str(home)
-        result = subprocess.run(
+        result = process.run(
             [str(launch), "--dry-run", "--fix-hooks"],
             cwd=repo,
             env=env,

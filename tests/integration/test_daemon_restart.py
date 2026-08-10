@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     kill_process,
@@ -32,8 +33,8 @@ def _read_daemon_info(state_dir: Path, timeout: float = 10.0) -> dict:
     raise AssertionError(f"timed out waiting for {info_path}")
 
 
-def _run_restart(clud_binary: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def _run_restart(clud_binary: Path, env: dict[str, str]) -> process.CompletedProcess[str]:
+    return process.run(
         [str(clud_binary), "daemon", "restart"],
         capture_output=True,
         text=True,
@@ -42,8 +43,8 @@ def _run_restart(clud_binary: Path, env: dict[str, str]) -> subprocess.Completed
     )
 
 
-def _run_stop(clud_binary: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def _run_stop(clud_binary: Path, env: dict[str, str]) -> process.CompletedProcess[str]:
+    return process.run(
         [str(clud_binary), "daemon", "stop"],
         capture_output=True,
         text=True,

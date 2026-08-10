@@ -2,7 +2,7 @@
 `tests/integration/` (pytest collects alphabetically, and `aaa` beats
 `daemon`).
 
-Every test here uses `subprocess.run(..., timeout=...)` so if clud hangs the
+Every test here uses `process.run(..., timeout=...)` so if clud hangs the
 test fails after N seconds with a TimeoutExpired — pytest-timeout is a second
 line of defense.
 
@@ -15,10 +15,11 @@ fork hangs on Windows". Diagnostic only — if they pass on CI and
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 pytestmark = pytest.mark.integration
 
@@ -31,11 +32,11 @@ def test_probe_version_exits_cleanly_no_pipes(clud_binary: Path) -> None:
     the problem isn't clud's exit behavior but Python's subprocess pipe
     reader threads on Windows CI (handles still held by *something*).
     """
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "--version"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
+        stdout=process.DEVNULL,
+        stderr=process.DEVNULL,
         timeout=15,
     )
     assert result.returncode == 0, f"clud --version rc={result.returncode}"
@@ -45,9 +46,9 @@ def test_probe_version_completes_quickly(clud_binary: Path) -> None:
     """`clud --version` is a pure stdout write — any Windows hang here means
     the binary itself is wedged before main() finishes, or the stdio pipes
     never close. Explicit stdin=DEVNULL guards against pipe-mode reading."""
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "--version"],
-        stdin=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -61,9 +62,9 @@ def test_probe_version_completes_quickly(clud_binary: Path) -> None:
 
 def test_probe_help_completes_quickly(clud_binary: Path) -> None:
     """clap help rendering — exercises argument parsing only."""
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "--help"],
-        stdin=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -77,9 +78,9 @@ def test_probe_demo_gfx_sixel_emits_sixel_bytes(
     clud_binary: Path, mock_env: dict[str, str]
 ) -> None:
     """Standalone graphics demo: no backend launch, just binary Sixel stdout."""
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "--demo-gfx-sixel"],
-        stdin=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
         capture_output=True,
         timeout=15,
         env=mock_env,
@@ -100,9 +101,9 @@ def test_probe_list_with_no_daemon_state(
     """`clud list` with an empty state dir shouldn't even contact a daemon."""
     env = mock_env.copy()
     env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "empty-state")
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "list"],
-        stdin=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -119,9 +120,9 @@ def test_probe_logs_with_no_sessions(
     """`clud logs` over an empty state dir should print a friendly message."""
     env = mock_env.copy()
     env["CLUD_DAEMON_STATE_DIR"] = str(tmp_path / "empty-state")
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "logs"],
-        stdin=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,
@@ -136,9 +137,9 @@ def test_probe_dry_run_emits_json(clud_binary: Path) -> None:
     """`clud --dry-run -p hello` writes the command plan to stdout as JSON
     without spawning anything. A hang here points at argv parsing, env probe,
     or the plan builder."""
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "--dry-run", "-p", "probe"],
-        stdin=subprocess.DEVNULL,
+        stdin=process.DEVNULL,
         capture_output=True,
         text=True,
         timeout=15,

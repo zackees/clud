@@ -4,23 +4,24 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from ci import process
 
 DYLINT_VERSION = "6.0.1"
 TOOLCHAIN_CHANNEL = "nightly-2026-04-16"
 
 
-def run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+def run(args: list[str], **kwargs) -> process.CompletedProcess[str]:
     print("+", " ".join(args), flush=True)
     kwargs.setdefault("timeout", 600)
-    return subprocess.run(args, check=True, text=True, **kwargs)
+    return process.run(args, check=True, text=True, **kwargs)
 
 
 def rustc_host() -> str:
-    output = subprocess.check_output(
+    output = process.check_output(
         ["rustup", "run", TOOLCHAIN_CHANNEL, "rustc", "-vV"],
         text=True,
         timeout=60,
@@ -32,7 +33,7 @@ def rustc_host() -> str:
 
 
 def rustc_toolchain_root(full_toolchain: str) -> Path:
-    rustc = subprocess.check_output(
+    rustc = process.check_output(
         ["rustup", "which", "--toolchain", full_toolchain, "rustc"],
         text=True,
         timeout=30,

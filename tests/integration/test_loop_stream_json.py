@@ -18,12 +18,13 @@ restores the live-progress UX the old Python loop had.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import copy_launcher
 
@@ -37,14 +38,14 @@ def _run(
     *args: str,
     env: dict[str, str],
     cwd: Path,
-) -> subprocess.CompletedProcess[str]:
+) -> process.CompletedProcess[str]:
     # Copy clud into the test's tmpdir so the Windows trampoline rename
     # dance never targets a file outside the temp scope. Matches the
     # pattern in test_mock_agents.py.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
         launch = Path(temp_dir) / clud.name
         copy_launcher(clud, launch)
-        return subprocess.run(
+        return process.run(
             [str(launch), *args],
             capture_output=True,
             text=True,

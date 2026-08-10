@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from pathlib import Path
 
 import psutil
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import kill_process_only, managed_env
 
@@ -52,8 +53,8 @@ def _launch_direct_client(
     clud_binary: Path,
     env: dict[str, str],
     sleep_ms: int,
-) -> subprocess.Popen[str]:
-    return subprocess.Popen(
+) -> process.Popen[str]:
+    return process.Popen(
         [
             str(clud_binary),
             "--codex",
@@ -64,14 +65,14 @@ def _launch_direct_client(
             "--mock-sleep-ms",
             str(sleep_ms),
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=process.DEVNULL,
+        stderr=process.DEVNULL,
         text=True,
         env=env,
     )
 
 
-def _kill_client_tree(proc: subprocess.Popen[str], daemon_pid: int) -> None:
+def _kill_client_tree(proc: process.Popen[str], daemon_pid: int) -> None:
     """Forcibly kill the client and its backend children — but never the daemon.
 
     The daemon is spawned *by* the client, so on Windows it sits inside the
@@ -95,7 +96,7 @@ def _kill_client_tree(proc: subprocess.Popen[str], daemon_pid: int) -> None:
     kill_process_only(proc.pid)
     try:
         proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
+    except process.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
     for pid in reversed(descendants):
