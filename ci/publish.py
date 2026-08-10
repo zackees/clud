@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import tomllib
+
+from ci import process
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = "auto-release.yml"
@@ -24,9 +25,9 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+def run(command: list[str], **kwargs: Any) -> process.CompletedProcess[Any]:
     log(f"  $ {' '.join(command)}")
-    return subprocess.run(command, check=True, **kwargs)
+    return process.run(command, check=True, **kwargs)
 
 
 def run_capture(command: list[str]) -> str:
@@ -34,8 +35,8 @@ def run_capture(command: list[str]) -> str:
     return result.stdout.strip()
 
 
-def run_capture_allow_failure(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, errors="replace")
+def run_capture_allow_failure(command: list[str]) -> process.CompletedProcess[str]:
+    return process.run(command, capture_output=True, text=True, errors="replace")
 
 
 def read_project_meta() -> tuple[str, str]:

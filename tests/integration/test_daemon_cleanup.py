@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     DETACH_EXIT_TIMEOUT,
@@ -128,7 +129,7 @@ class TestDaemonSessionHardening:
     ) -> None:
         state_dir = tmp_path / "daemon-state"
         env = managed_env(mock_env, state_dir)
-        result = subprocess.run(
+        result = process.run(
             [str(clud_binary), "attach"],
             capture_output=True,
             text=True,

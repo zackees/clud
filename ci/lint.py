@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
+
+from ci import process
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def run(cmd: list[str]) -> int:
     from ci.env import clean_env
 
-    return subprocess.run(cmd, cwd=ROOT, env=clean_env()).returncode
+    return process.run(cmd, cwd=ROOT, env=clean_env()).returncode
 
 
 def _cargo(subcommand: list[str]) -> list[str]:
@@ -49,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Ordered cheapest-first so the common failure reds out soonest: ruff is a
     # pure-Python scan (~1s), the two banned-* scans are source greps, and only
-    # then do we pay for a cargo subprocess. The old order put ruff last,
+    # then do we pay for a cargo process. The old order put ruff last,
     # behind fmt.
     if run([sys.executable, "-m", "ruff", "check", "src", "tests", "ci"]) != 0:
         return 1

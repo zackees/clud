@@ -15,9 +15,10 @@ no-op-but-with-a-key) gets caught at the cheapest layer.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
+
+from tests import process
 
 # `tests/conftest.py` has no sibling `tests/__init__.py`, so pytest puts
 # `tests/` on `sys.path` automatically; this import is a backstop in case
@@ -49,7 +50,7 @@ def test_create_no_window_constant_matches_win32_documentation() -> None:
 def test_windows_no_window_flags_returns_empty_dict_on_posix() -> None:
     """On macOS / Linux the helper must be a true no-op.
 
-    A non-empty dict here would either crash ``subprocess.Popen`` (which
+    A non-empty dict here would either crash ``process.Popen`` (which
     rejects ``creationflags`` on POSIX) or silently shadow a future
     POSIX-only kwarg the caller wanted to thread through. The helper's
     whole point is to be safely spreadable cross-platform.
@@ -68,7 +69,7 @@ def test_windows_no_window_flags_returns_create_no_window_on_windows() -> None:
     """On Windows the helper returns exactly the documented flag bit.
 
     We deliberately compare against the literal 0x0800_0000 (rather than
-    just ``subprocess.CREATE_NO_WINDOW``) so a future Python that exposed
+    just ``process.CREATE_NO_WINDOW``) so a future Python that exposed
     a different value under the same name would still fail the test.
     """
     if sys.platform != "win32":
@@ -79,20 +80,20 @@ def test_windows_no_window_flags_returns_create_no_window_on_windows() -> None:
     assert set(flags.keys()) == {"creationflags"}
     assert flags["creationflags"] == 0x0800_0000
     # The stdlib constant should agree (sanity check on the host Python).
-    assert flags["creationflags"] == subprocess.CREATE_NO_WINDOW
+    assert flags["creationflags"] == process.CREATE_NO_WINDOW
 
 
 def test_windows_no_window_flags_can_be_spread_into_subprocess_kwargs() -> None:
     """``**windows_no_window_flags()`` must compose with arbitrary kwargs.
 
-    Real call sites look like ``subprocess.Popen(..., **other,
+    Real call sites look like ``process.Popen(..., **other,
     **windows_no_window_flags())``. The helper must never fight existing
     keys — its empty-dict POSIX branch must leave every other key alone.
     """
-    base = {"text": True, "stdin": subprocess.PIPE}
+    base = {"text": True, "stdin": process.PIPE}
     merged = {**base, **windows_no_window_flags()}
     assert merged["text"] is True
-    assert merged["stdin"] is subprocess.PIPE
+    assert merged["stdin"] is process.PIPE
     if sys.platform == "win32":
         assert merged["creationflags"] == 0x0800_0000
     else:
@@ -167,13 +168,13 @@ def test_add_windows_create_no_window_does_not_strip_other_kwargs() -> None:
 
         pytest.skip("Windows-only behavior")
     kwargs: dict = {
-        "stdin": subprocess.PIPE,
+        "stdin": process.PIPE,
         "cwd": "/tmp",
         "env": {"FOO": "bar"},
         "text": True,
     }
     add_windows_create_no_window(kwargs)
-    assert kwargs["stdin"] is subprocess.PIPE
+    assert kwargs["stdin"] is process.PIPE
     assert kwargs["cwd"] == "/tmp"
     assert kwargs["env"] == {"FOO": "bar"}
     assert kwargs["text"] is True

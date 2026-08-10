@@ -6,7 +6,6 @@ import json
 import re
 import signal
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -15,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     copy_launcher,
@@ -40,7 +41,7 @@ def _run(
     env: dict[str, str],
     input_data: str | None = None,
     cwd: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> process.CompletedProcess[str]:
     # Issue #594: `ignore_cleanup_errors` so teardown never raises when Windows
     # still holds the just-executed clud.exe (Defender scan / lingering handle);
     # the temp dir is reclaimed later. `copy_launcher` covers the copy side.
@@ -58,7 +59,7 @@ def _run(
         )
 
 
-def _parse_agent_report(result: subprocess.CompletedProcess[str]) -> dict:
+def _parse_agent_report(result: process.CompletedProcess[str]) -> dict:
     """Parse the JSON report from the mock agent.
 
     PTY output may contain ANSI escape sequences around the JSON.
@@ -790,7 +791,7 @@ class TestInterruptReporting:
     ) -> None:
         pid_log = Path(mock_env_cmd_wrappers["RUNNING_PROCESS_CHILD_PID_LOG_PATH"])
         tree_log = tmp_path / f"{backend_name}-tree.jsonl"
-        proc = subprocess.Popen(
+        proc = process.Popen(
             [
                 str(clud_binary),
                 *backend_args,
@@ -802,12 +803,12 @@ class TestInterruptReporting:
                 "--mock-spawn-tree-log",
                 str(tree_log),
             ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdin=process.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
             text=True,
             env=mock_env_cmd_wrappers,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=process.CREATE_NEW_PROCESS_GROUP,
         )
 
         child_pids: list[int] = []
@@ -836,7 +837,7 @@ class TestInterruptReporting:
     ) -> None:
         kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = process.CREATE_NEW_PROCESS_GROUP
 
         # PR #145 gated the "[clud] interrupted via Ctrl+C (pty)" diagnostic
         # behind `--verbose`; pass that flag here so the assertion below has
@@ -846,7 +847,7 @@ class TestInterruptReporting:
         # PR #251 added a second variant on the daemon-handoff path
         # ("(pty, handed to daemon)"). The assertion below matches the common
         # prefix "(pty" so it accepts both forms.
-        proc = subprocess.Popen(
+        proc = process.Popen(
             [
                 str(clud_binary),
                 "--verbose",
@@ -857,8 +858,8 @@ class TestInterruptReporting:
                 "--mock-sleep-ms",
                 "5000",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
             text=True,
             env=mock_env,
             **kwargs,
@@ -906,7 +907,7 @@ class TestStdinForwarding:
         if report_file.exists():
             return json.loads(report_file.read_text())
         return _parse_agent_report(
-            subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr=stderr)
+            process.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr=stderr)
         )
 
     def test_subprocess_stdin_forwarding(

@@ -28,12 +28,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -42,12 +43,12 @@ if str(_TESTS_DIR) not in sys.path:
 from test_hello import CLUD, copied_clud_env  # type: ignore[import-not-found]  # noqa: E402
 
 
-def _run_clud_in_dir(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run_clud_in_dir(*args: str, cwd: Path) -> process.CompletedProcess[str]:
     """Run the locally-built Clud binary with a controlled cwd."""
     source = Path(CLUD)
     launch = cwd / source.name
     shutil.copy2(source, launch)
-    return subprocess.run(
+    return process.run(
         [str(launch), *args],
         capture_output=True,
         text=True,
@@ -119,14 +120,14 @@ $process.WaitForExit()
             "CLUD_TITLE_TEST_RESULT": str(result_path),
         }
     )
-    completed = subprocess.run(
+    completed = process.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
         capture_output=True,
         text=True,
         timeout=20,
         cwd=str(cwd),
         env=env,
-        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        creationflags=process.CREATE_NEW_CONSOLE,
     )
     assert completed.returncode == 0, (
         f"isolated PowerShell probe failed: stdout={completed.stdout!r} stderr={completed.stderr!r}"

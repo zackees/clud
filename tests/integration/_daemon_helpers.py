@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
 import time
@@ -23,6 +22,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import psutil
+
+from tests import process
 
 
 def copy_launcher(src: Path, dest: Path, *, attempts: int = 12, delay: float = 0.25) -> Path:
@@ -54,8 +55,8 @@ def run_clud(
     *,
     timeout: float,
     **kwargs,
-) -> subprocess.CompletedProcess[str]:
-    """`subprocess.run` that reports what the process managed to do before it
+) -> process.CompletedProcess[str]:
+    """`process.run` that reports what the process managed to do before it
     timed out.
 
     Issue #594: the Windows x86 lane fails ~every run with a rotating single
@@ -69,13 +70,13 @@ def run_clud(
     occurrence into evidence: startup chatter that stops mid-daemon-bringup
     reads very differently from a child that produced nothing at all.
 
-    Note the deliberate avoidance of `subprocess.run(..., timeout=)`. On
+    Note the deliberate avoidance of `process.run(..., timeout=)`. On
     Windows — the only platform where #594 fires — CPython raises
     `TimeoutExpired` from the reader-thread path *without* attaching the
     partial buffers, so `expired.stdout` is empty there while being populated
     on POSIX. Reading them requires killing the child and draining the pipes
     ourselves, which is what this does. Verified rather than assumed: the
-    first version of this helper used `subprocess.run` and reported nothing at
+    first version of this helper used `process.run` and reported nothing at
     all on Windows.
 
     Deliberately changes no timeout value. Whether these budgets are right is
@@ -99,24 +100,24 @@ def run_clud(
     os.close(trace_fd)
     env["CLUD_EXIT_TIMING_FILE"] = trace_path
 
-    proc = subprocess.Popen(
+    proc = process.Popen(
         argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.PIPE if kwargs.get("input") is not None else None,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
+        stdin=process.PIPE if kwargs.get("input") is not None else None,
         text=True,
         env=env,
         **{k: v for k, v in kwargs.items() if k != "input"},
     )
     try:
         stdout, stderr = proc.communicate(input=kwargs.get("input"), timeout=timeout)
-    except subprocess.TimeoutExpired as expired:
+    except process.TimeoutExpired as expired:
         elapsed = time.monotonic() - started
         proc.kill()
         # Second communicate() drains what the reader threads already buffered.
         try:
             stdout, stderr = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
+        except process.TimeoutExpired:
             stdout, stderr = "<pipes unreadable after kill>", ""
         raise AssertionError(
             f"timed out after {timeout}s (waited {elapsed:.1f}s): {argv}\n"
@@ -127,7 +128,7 @@ def run_clud(
     finally:
         with contextlib.suppress(OSError):
             os.unlink(trace_path)
-    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    return process.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def _read_exit_stages(path: str) -> str:
@@ -200,7 +201,7 @@ def extract_session_id(line: str) -> str | None:
     return None
 
 
-def read_session_id(proc: subprocess.Popen[str], timeout: float = 10.0) -> str:
+def read_session_id(proc: process.Popen[str], timeout: float = 10.0) -> str:
     assert proc.stderr is not None
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -309,7 +310,7 @@ def attach_for_report(
     attempts = 0
     while time.time() < deadline:
         attempts += 1
-        attached = subprocess.run(
+        attached = process.run(
             # `is None`, not `or`: an empty list is a meaningful selector --
             # bare `clud attach` with no argument -- and `or` would silently
             # substitute the session id, testing the opposite of the intent.
@@ -378,7 +379,7 @@ def _report_from_session_log(
     parsing the whole output: the log also holds ordinary agent chatter, and a
     PTY session's output can be wrapped in ANSI escapes.
     """
-    logs = subprocess.run(
+    logs = process.run(
         [str(clud_binary), "logs", session_id],
         capture_output=True,
         text=True,
@@ -416,13 +417,13 @@ def wait_for_session_exit(state_dir: Path, session_id: str, timeout: float = 15.
 def run_until(
     argv: list[str],
     env: dict[str, str],
-    ready: Callable[[subprocess.CompletedProcess[str]], bool],
+    ready: Callable[[process.CompletedProcess[str]], bool],
     *,
     what: str,
     deadline_secs: float = 20.0,
     interval: float = 0.1,
     timeout: float = 10.0,
-) -> subprocess.CompletedProcess[str]:
+) -> process.CompletedProcess[str]:
     """Re-run `argv` until `ready` accepts its result, then return that result.
 
     Issue #718. A daemon-facing read (`clud logs --last`, `clud logs`,
@@ -446,9 +447,9 @@ def run_until(
     """
     deadline = time.time() + deadline_secs
     attempts = 0
-    result: subprocess.CompletedProcess[str] | None = None
+    result: process.CompletedProcess[str] | None = None
     while True:
-        result = subprocess.run(
+        result = process.run(
             argv,
             capture_output=True,
             text=True,
@@ -475,31 +476,21 @@ def run_until(
 
 def kill_process(pid: int) -> None:
     if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        process.terminate_process_tree(pid)
     else:
         os.kill(pid, signal.SIGKILL)
 
 
 def kill_process_only(pid: int) -> None:
-    if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/F"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    else:
-        os.kill(pid, signal.SIGKILL)
+    try:
+        psutil.Process(pid).kill()
+    except psutil.NoSuchProcess:
+        pass
 
 
 def pid_is_alive(pid: int) -> bool:
     if sys.platform == "win32":
-        result = subprocess.run(
+        result = process.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
@@ -540,7 +531,7 @@ def _daemon_cleanup_diagnostics(
     *,
     pid: int | None,
     start_time: int | None,
-    result: subprocess.CompletedProcess[str] | None = None,
+    result: process.CompletedProcess[str] | None = None,
     error: BaseException | None = None,
 ) -> str:
     details = [f"state_dir: {state_dir}"]
@@ -610,14 +601,14 @@ def stop_daemon(
     env = dict(base_env or os.environ)
     env["CLUD_DAEMON_STATE_DIR"] = str(state_dir)
     try:
-        result = subprocess.run(
+        result = process.run(
             [str(clud_binary), "daemon", "stop"],
             capture_output=True,
             text=True,
             timeout=30,
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except (OSError, process.TimeoutExpired) as error:
         raise AssertionError(
             "daemon cleanup command failed\n"
             + _daemon_cleanup_diagnostics(
@@ -673,11 +664,11 @@ def launch_daemonized(
     clud_binary: Path,
     env: dict[str, str],
     *args: str,
-) -> tuple[subprocess.Popen[str], str]:
-    proc = subprocess.Popen(
+) -> tuple[process.Popen[str], str]:
+    proc = process.Popen(
         [str(clud_binary), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
         text=True,
         env=env,
     )
@@ -690,11 +681,11 @@ def launch_detached(
     env: dict[str, str],
     *args: str,
     cwd: Path | None = None,
-) -> tuple[subprocess.Popen[str], str]:
-    proc = subprocess.Popen(
+) -> tuple[process.Popen[str], str]:
+    proc = process.Popen(
         [str(clud_binary), "--detach", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=process.PIPE,
+        stderr=process.PIPE,
         text=True,
         env=env,
         cwd=cwd,
@@ -703,7 +694,7 @@ def launch_detached(
     return proc, session_id
 
 
-def wait_for_exit(proc: subprocess.Popen[str], timeout: float = 10.0) -> int:
+def wait_for_exit(proc: process.Popen[str], timeout: float = 10.0) -> int:
     """Wait for `proc`, reporting what it had emitted if it overruns.
 
     Issue #594: `Popen.wait` captures nothing, so the two integration victims
@@ -718,12 +709,12 @@ def wait_for_exit(proc: subprocess.Popen[str], timeout: float = 10.0) -> int:
     started = time.monotonic()
     try:
         return proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as expired:
+    except process.TimeoutExpired as expired:
         elapsed = time.monotonic() - started
         proc.kill()
         try:
             stdout, stderr = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
+        except process.TimeoutExpired:
             stdout, stderr = "<pipes unreadable after kill>", ""
         raise AssertionError(
             f"process did not exit within {timeout}s (waited {elapsed:.1f}s)\n"

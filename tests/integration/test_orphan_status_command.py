@@ -9,17 +9,18 @@ sweep-timing dependence.
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 from pathlib import Path
+
+from tests import process
 
 from ._daemon_helpers import managed_env
 
 
 def _run_orphan_status(
     clud_binary: Path, env: dict[str, str]
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+) -> process.CompletedProcess[str]:
+    return process.run(
         [str(clud_binary), "daemon", "orphan-status", "--json"],
         capture_output=True,
         text=True,

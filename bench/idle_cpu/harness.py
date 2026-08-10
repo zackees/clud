@@ -11,7 +11,6 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from running_process import PIPE, RunningProcess, terminate_process_tree
 
 from .report import assemble_report, budget_violations
 
@@ -70,7 +70,7 @@ def _find_binary(name: str, env_name: str) -> Path | None:
 def _ensure_binary(name: str, env_name: str) -> Path:
     if binary := _find_binary(name, env_name):
         return binary
-    result = subprocess.run(["soldr", "cargo", "build", "-p", name], cwd=ROOT, check=False)
+    result = RunningProcess.run(["soldr", "cargo", "build", "-p", name], cwd=ROOT, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"soldr cargo build -p {name} failed with {result.returncode}")
     if binary := _find_binary(name, env_name):
@@ -90,14 +90,16 @@ def _read_json(path: Path, timeout: float = 10.0) -> dict[str, Any]:
     raise RuntimeError(f"timed out waiting for valid JSON at {path}")
 
 
-def _read_session_id(proc: subprocess.Popen[str], timeout: float = 10.0) -> str:
-    assert proc.stderr is not None
+def _read_session_id(proc: RunningProcess, timeout: float = 10.0) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        line = proc.stderr.readline()
-        if "daemon session" in line:
+        try:
+            line = proc.get_next_stderr_line(timeout=min(0.1, deadline - time.monotonic()))
+        except TimeoutError:
+            line = ""
+        if isinstance(line, str) and "daemon session" in line:
             return line.strip().rsplit(" ", 1)[-1]
-        if "running in background" in line and "session " in line:
+        if isinstance(line, str) and "running in background" in line and "session " in line:
             return line.strip().split("session ", 1)[-1].split(" running")[0]
         if proc.poll() is not None:
             raise RuntimeError(f"clud exited while starting a session: {line!r}")
@@ -105,7 +107,7 @@ def _read_session_id(proc: subprocess.Popen[str], timeout: float = 10.0) -> str:
 
 
 def _start_daemon(clud_binary: Path, env: dict[str, str], state_dir: Path) -> int:
-    result = subprocess.run(
+    result = RunningProcess.run(
         [str(clud_binary), "daemon", "restart"],
         cwd=ROOT,
         env=env,
@@ -121,8 +123,8 @@ def _start_daemon(clud_binary: Path, env: dict[str, str], state_dir: Path) -> in
 
 def _launch_session(
     clud_binary: Path, env: dict[str, str], index: int, sleep_ms: int
-) -> tuple[subprocess.Popen[str], str]:
-    proc = subprocess.Popen(
+) -> tuple[RunningProcess, str]:
+    proc = RunningProcess(
         [
             str(clud_binary),
             "--detach",
@@ -135,8 +137,8 @@ def _launch_session(
         ],
         cwd=ROOT,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture=True,
+        stderr=PIPE,
         text=True,
     )
     return proc, _read_session_id(proc)
@@ -187,11 +189,7 @@ def _kill_tree(identity: ProcessIdentity) -> None:
     if not _identity_matches(identity):
         return
     if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/PID", str(identity.pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-        )
+        terminate_process_tree(identity.pid)
         return
     try:
         process = psutil.Process(identity.pid)
@@ -223,7 +221,7 @@ def _wait_gone(identities: list[ProcessIdentity], timeout: float = 15.0) -> list
 
 
 def _head() -> str:
-    result = subprocess.run(
+    result = RunningProcess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
     )
     return result.stdout.strip()
@@ -251,7 +249,7 @@ def run_harness(sessions: int, window_secs: float) -> dict[str, Any]:
     clud_binary = _ensure_binary("clud", "CLUD_TEST_BINARY")
     mock_agent = _ensure_binary("mock-agent", "CLUD_TEST_MOCK_AGENT_BINARY")
     tracked_processes: list[ProcessIdentity] = []
-    launchers: list[subprocess.Popen[str]] = []
+    launchers: list[RunningProcess] = []
 
     with tempfile.TemporaryDirectory(prefix="clud-idle-cpu-") as temp:
         temp_dir = Path(temp)

@@ -14,10 +14,11 @@ installer would write.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 pytestmark = pytest.mark.integration
 
@@ -54,7 +55,7 @@ def test_clud_codex_dry_run_does_not_crash(
     """A ``--codex --dry-run -p`` invocation must parse and emit a launch plan
     without writing skill files. This guards against regressions where the
     Codex backend path is broken in arg parsing or LaunchPlan construction."""
-    result = subprocess.run(
+    result = process.run(
         [str(clud_binary), "--codex", "--dry-run", "-p", "noop prompt"],
         capture_output=True,
         text=True,

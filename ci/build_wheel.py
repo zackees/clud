@@ -8,12 +8,12 @@ import contextlib
 import hashlib
 import json
 import platform
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
 from typing import Literal
 
+from ci import process
 from ci.wheel_repair import repair_windows_gnu_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -138,7 +138,7 @@ def latest_wheel() -> Path:
 
 
 def install_wheel(wheel: Path, *, env: dict[str, str]) -> int:
-    install = subprocess.run(
+    install = process.run(
         [
             "uv",
             "pip",
@@ -194,7 +194,7 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
             "tool_input": {"command": "bad" + " cmd"},
         }
     )
-    deny = subprocess.run(
+    deny = process.run(
         [str(guard)],
         input=deny_payload,
         text=True,
@@ -218,7 +218,7 @@ def verify_installed_scripts(*, env: dict[str, str]) -> int:
             "tool_input": {"command": "echo ok"},
         }
     )
-    allow = subprocess.run(
+    allow = process.run(
         [str(guard)],
         input=allow_payload,
         text=True,
@@ -265,7 +265,7 @@ def run_build(mode: BuildMode) -> int:
     before = wheel_snapshot()
     cmd = build_command(mode, env=env)
     print(f"build mode: {mode}", file=sys.stderr, flush=True)
-    result = subprocess.run(cmd, cwd=ROOT, check=False, env=env)
+    result = process.run(cmd, cwd=ROOT, check=False, env=env)
     if result.returncode != 0:
         return result.returncode
     changed_wheels = wheels_changed_since(before)

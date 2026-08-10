@@ -94,6 +94,14 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 
 After **any** code edit you **must** run `bash lint` (runs `cargo fmt --check`, `cargo clippy -D warnings`, and `ruff check`).
 
+### Process execution: `running-process` only
+
+**Python's `subprocess` module is banned everywhere.** Do not import it, invoke it indirectly, or introduce any new exception. Python's blocking stdout/stderr reads have caused serious problems in the toolset.
+
+**Rust's `std::process` APIs are banned for the same reason.** Do not use them to launch or manage processes. Use the `running-process` bindings exclusively in both languages: `running-process` provides efficient, non-blocking streamed stdout and stderr handling. Preserve that streaming behavior in all process-execution code.
+
+The only narrowly permitted Rust exception is a test that must use raw `std::process::Command` because `running_process::NativeProcess` would change the behavior under test. Such a test requires a documented, filename-specific exemption in `ci/banned_imports.py`; do not add an exemption for ordinary tests or production code.
+
 ### Cross-cutting registries — extend in all required places
 
 Several features have a "single source of truth" registry that must be updated alongside the code change. Forgetting any of these causes silent misbehavior (passthrough instead of dispatch) or surprising failures (banned-import lint, missing bundled file). The full list:

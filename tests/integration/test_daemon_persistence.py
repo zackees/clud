@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import (
     daemon_env,
@@ -72,7 +73,7 @@ class TestDaemonCentralizedPersistence:
             proc.kill()
             proc.wait(timeout=10)
 
-            result = subprocess.run(
+            result = process.run(
                 [str(clud_binary), "attach", session_id],
                 capture_output=True,
                 text=True,
@@ -118,9 +119,9 @@ class TestDaemonCentralizedPersistence:
             proc.kill()
             proc.wait(timeout=10)
 
-            result = subprocess.run(
+            result = process.run(
                 [str(clud_binary), "attach", session_id],
-                stdin=subprocess.DEVNULL,
+                stdin=process.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -173,9 +174,9 @@ class TestDaemonCentralizedPersistence:
             proc.kill()
             proc.wait(timeout=10)
 
-            result = subprocess.run(
+            result = process.run(
                 [str(clud_binary), "attach", session_id],
-                stdin=subprocess.DEVNULL,
+                stdin=process.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -292,7 +293,7 @@ class TestDaemonCentralizedPersistence:
 
             # Follow mode on a dead session: prints backlog, drains, then
             # exits 0 once it spots the recorded exit_code in the snapshot.
-            follow_result = subprocess.run(
+            follow_result = process.run(
                 [str(clud_binary), "logs", "-f", session_id],
                 capture_output=True,
                 text=True,
@@ -372,7 +373,7 @@ class TestDaemonCentralizedPersistence:
         assert metadata["exit_code"] is None
 
         # Sanity: orphan session shows up as "running" in `clud list` before reboot.
-        listed_before = subprocess.run(
+        listed_before = process.run(
             [str(clud_binary), "list"],
             capture_output=True,
             text=True,
@@ -420,7 +421,7 @@ class TestDaemonCentralizedPersistence:
             )
 
             # And `clud list` must no longer show the orphan as running.
-            listed_after = subprocess.run(
+            listed_after = process.run(
                 [str(clud_binary), "list"],
                 capture_output=True,
                 text=True,
@@ -457,14 +458,14 @@ class TestDaemonCentralizedPersistence:
             "--mock-sleep-ms",
             "8000",
         )
-        first_attach: subprocess.Popen[str] | None = None
+        first_attach: process.Popen[str] | None = None
         try:
             wait_for_exit(proc, timeout=10)
 
-            first_attach = subprocess.Popen(
+            first_attach = process.Popen(
                 [str(clud_binary), "attach", session_id],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=process.PIPE,
+                stderr=process.PIPE,
                 text=True,
                 env=env,
             )
@@ -493,7 +494,7 @@ class TestDaemonCentralizedPersistence:
             # Second attach: must NOT be rejected as occupied. The mock
             # backend has ~4s of sleep remaining, after which it exits 0
             # and the attach drains and returns.
-            second_attach = subprocess.run(
+            second_attach = process.run(
                 [str(clud_binary), "attach", session_id],
                 capture_output=True,
                 text=True,

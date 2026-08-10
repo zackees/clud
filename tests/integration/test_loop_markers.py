@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 pytestmark = pytest.mark.integration
 
@@ -17,8 +18,8 @@ def _run(
     *args: str,
     env: dict[str, str],
     cwd: Path,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+) -> process.CompletedProcess[str]:
+    return process.run(
         [str(clud), *args],
         capture_output=True,
         text=True,
@@ -28,7 +29,7 @@ def _run(
     )
 
 
-def _assert_rc(result: subprocess.CompletedProcess[str], expected: int) -> None:
+def _assert_rc(result: process.CompletedProcess[str], expected: int) -> None:
     """Assert the exit code, reporting what actually happened.
 
     Issue #594: `assert result.returncode == N, f"stderr: {result.stderr}"`

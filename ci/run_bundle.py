@@ -28,9 +28,10 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
+
+from ci import process
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -115,7 +116,7 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
         if sys.platform == "win32":
             argv += ["--test-threads=1"]
         print(f"::group::{harness.name}", flush=True)
-        rc = subprocess.run(argv, cwd=ROOT, env=env).returncode
+        rc = process.run(argv, cwd=ROOT, env=env).returncode
         print("::endgroup::", flush=True)
         if rc != 0:
             failures.append(f"{harness.name} (rc={rc})")
@@ -128,7 +129,7 @@ def run_harnesses(bundle: Path, manifest: dict, env: dict[str, str]) -> int:
 
 def run_pytest(marker: str, env: dict[str, str], extra: list[str]) -> int:
     argv = [sys.executable, "-m", "pytest", "-m", marker, *extra]
-    return subprocess.run(argv, cwd=ROOT, env=env).returncode
+    return process.run(argv, cwd=ROOT, env=env).returncode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     env["CLUD_INTEGRATION_TESTS"] = "1"
     # See ci/test.py:154-159 (#37): the Windows exe-unlock rename+copy+GC dance
     # keeps stdout/stderr pipe handles alive on Windows CI and wedges
-    # subprocess.run in a pipe-EOF wait. Tests do not need hot-reload
+    # process.run in a pipe-EOF wait. Tests do not need hot-reload
     # protection.
     env["CLUD_NO_UNLOCK"] = "1"
     # `-v` prints each test name before it runs, so a hang is pinned to an exact

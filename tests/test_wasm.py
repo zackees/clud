@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+from tests import process
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "wasm"
 WASM_FIXTURE = FIXTURE_DIR / "hello.wasm"
@@ -45,7 +46,7 @@ def test_wasm_fixture_is_deterministic_and_zig_free() -> None:
 
 
 def test_wasm_hello_world() -> None:
-    result = subprocess.run(
+    result = process.run(
         [CLUD, "wasm", str(WASM_FIXTURE)],
         capture_output=True,
         text=True,

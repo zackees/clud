@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import json
 import socket
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+from tests import process
 
 from ._daemon_helpers import copy_launcher, stop_daemon
 
@@ -129,7 +130,7 @@ class TestUiDashboardShowsLiveSessions:
 
         # Long sleep so the session row stays in the registry while we
         # navigate the dashboard.
-        clud_proc = subprocess.Popen(
+        clud_proc = process.Popen(
             [
                 str(launch),
                 "-p",
@@ -139,8 +140,8 @@ class TestUiDashboardShowsLiveSessions:
                 "20000",
             ],
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=process.PIPE,
+            stderr=process.PIPE,
             text=True,
         )
 
@@ -185,20 +186,15 @@ class TestUiDashboardShowsLiveSessions:
             try:
                 clud_proc.terminate()
                 clud_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
+            except process.TimeoutExpired:
                 if sys.platform == "win32":
-                    subprocess.run(
-                        ["taskkill", "/PID", str(clud_proc.pid), "/T", "/F"],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
+                    process.terminate_process_tree(clud_proc.pid)
                 else:
                     clud_proc.kill()
                     clud_proc.wait(timeout=5)
             # Drain pipes so the zombie scanner doesn't trip on us.
             try:
                 clud_proc.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
+            except process.TimeoutExpired:
                 pass
             stop_daemon(launch, state_dir, env)
