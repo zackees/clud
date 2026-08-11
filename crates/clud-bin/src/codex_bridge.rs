@@ -1,6 +1,7 @@
 //! Authenticated loopback bridge used by Codex-provider launches through the
 //! Claude harness (issue #626).
 
+use crate::backend::ModelProvider;
 use crate::bridge_log::{unix_ms, BridgeLog};
 use crate::codex_history::{ConversationKey, ConversationStore, HistoryLimits};
 use crate::codex_model::ModelSpec;
@@ -10,6 +11,7 @@ use crate::codex_upstream::{
     ApiKeyCredentials, FailureClass, ResolvedCredentials, UpstreamClient, UpstreamConfig,
     UpstreamError, UpstreamFailure,
 };
+use crate::provider_catalog;
 use base64::Engine as _;
 use std::collections::HashMap;
 use std::fmt;
@@ -78,6 +80,54 @@ const ABANDON: u16 = 0;
 type ActiveConnections = Arc<Mutex<HashMap<usize, TcpStream>>>;
 type SharedBridgeLog = Arc<Mutex<BridgeLog>>;
 
+const ANTHROPIC_MESSAGES_BASE_URL: &str = "https://api.anthropic.com";
+const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
+pub const UNIFIED_GATEWAY_TOKEN_HEADER: &str = "X-Clud-Gateway-Token";
+
+/// A launch-scoped multiplexer configuration. Secret material is intentionally
+/// opaque in Debug output and never reaches launch plans or daemon wire state.
+#[derive(Clone)]
+pub struct UnifiedGatewayConfig {
+    deepseek_api_key: Option<String>,
+    codex_available: bool,
+    anthropic_base_url: String,
+    deepseek_base_url: String,
+}
+
+impl UnifiedGatewayConfig {
+    pub fn new(deepseek_api_key: Option<String>, codex_available: bool) -> Self {
+        Self {
+            deepseek_api_key,
+            codex_available,
+            anthropic_base_url: ANTHROPIC_MESSAGES_BASE_URL.to_string(),
+            deepseek_base_url: DEEPSEEK_ANTHROPIC_BASE_URL.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_upstreams(mut self, anthropic_base_url: String, deepseek_base_url: String) -> Self {
+        self.anthropic_base_url = anthropic_base_url;
+        self.deepseek_base_url = deepseek_base_url;
+        self
+    }
+}
+
+impl fmt::Debug for UnifiedGatewayConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UnifiedGatewayConfig")
+            .field("deepseek_configured", &self.deepseek_api_key.is_some())
+            .field("codex_available", &self.codex_available)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+enum GatewayMode {
+    Codex,
+    Unified(UnifiedGatewayConfig),
+}
+
 /// Resource and test-seam policy for one bridge launch.
 #[derive(Clone)]
 pub struct BridgeConfig {
@@ -93,6 +143,7 @@ pub struct BridgeConfig {
     /// keeps the built-in default. A request that names its own model still
     /// wins over this.
     default_model: Option<ModelSpec>,
+    gateway_mode: GatewayMode,
     history_limits: HistoryLimits,
     log_path: Option<std::path::PathBuf>,
     log_max_bytes: usize,
@@ -117,6 +168,7 @@ impl Default for BridgeConfig {
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             admission_wait: DEFAULT_ADMISSION_WAIT,
             default_model: None,
+            gateway_mode: GatewayMode::Codex,
             history_limits: HistoryLimits::default(),
             log_path: default_bridge_log_path(),
             log_max_bytes: crate::bridge_log::DEFAULT_MAX_BYTES,
@@ -135,6 +187,13 @@ impl BridgeConfig {
     /// Pin the selection used when a request carries no model of its own.
     pub fn with_default_model(mut self, model: Option<ModelSpec>) -> Self {
         self.default_model = model;
+        self
+    }
+
+    /// Turn the existing launch-scoped bridge into the unified multiplexer.
+    /// This remains an in-process foreground listener; it is never a daemon.
+    pub fn with_unified_gateway(mut self, config: UnifiedGatewayConfig) -> Self {
+        self.gateway_mode = GatewayMode::Unified(config);
         self
     }
 
@@ -200,6 +259,7 @@ impl fmt::Debug for BridgeConfig {
                 "default_model",
                 &self.default_model.as_ref().map(ModelSpec::display),
             )
+            .field("gateway_mode", &self.gateway_mode)
             .field("history_limits", &self.history_limits)
             .field(
                 "test_upstream_url",
@@ -224,6 +284,9 @@ pub enum BridgeError {
     Settings(String),
     /// DeepSeek credentials could not be read at the child-spawn boundary.
     DeepSeekCredentials,
+    /// The caller has explicitly disabled the discovery request unified mode
+    /// needs, so launching would silently present a misleading picker.
+    DiscoveryDisabled,
 }
 
 impl fmt::Display for BridgeError {
@@ -239,6 +302,9 @@ impl fmt::Display for BridgeError {
             Self::Settings(error) => write!(formatter, "{error}"),
             Self::DeepSeekCredentials => formatter
                 .write_str("DeepSeek credentials are unavailable at the child-spawn boundary"),
+            Self::DiscoveryDisabled => formatter.write_str(
+                "unified routing requires Claude Code gateway discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
+            ),
         }
     }
 }
@@ -592,13 +658,12 @@ fn handle_connection(
         let _ = write_error(&mut stream, 413);
         return;
     }
-    let expected = format!("Bearer {bearer_token}");
-    if !parsed
-        .authorization
-        .as_deref()
-        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
-    {
-        record_rejection(log, 401, "bearer_mismatch");
+    if !request_is_authenticated(&parsed, bearer_token, &config.gateway_mode) {
+        let reason = match config.gateway_mode {
+            GatewayMode::Codex => "bearer_mismatch",
+            GatewayMode::Unified(_) => "gateway_token_mismatch",
+        };
+        record_rejection(log, 401, reason);
         let _ = write_error(&mut stream, 401);
         return;
     }
@@ -663,6 +728,9 @@ fn handle_connection(
                 }
             }
         }
+        ("GET", "/v1/models") if matches!(config.gateway_mode, GatewayMode::Unified(_)) => {
+            serve_unified_catalog(&mut stream, config);
+        }
         ("HEAD", "/v1/messages") => {
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
@@ -702,16 +770,30 @@ fn handle_connection(
                 }
             };
             let streaming = json.get("stream").and_then(serde_json::Value::as_bool) == Some(true);
-            serve_messages(
-                &mut stream,
-                config,
-                shutdown,
-                conversations,
-                &body,
-                streaming,
-                &conversation_key,
-                log,
-            );
+            if matches!(config.gateway_mode, GatewayMode::Unified(_)) {
+                serve_unified_messages(
+                    &mut stream,
+                    config,
+                    shutdown,
+                    conversations,
+                    &body,
+                    streaming,
+                    &conversation_key,
+                    &parsed.headers,
+                    log,
+                );
+            } else {
+                serve_messages(
+                    &mut stream,
+                    config,
+                    shutdown,
+                    conversations,
+                    &body,
+                    streaming,
+                    &conversation_key,
+                    log,
+                );
+            }
         }
         _ => {
             if std::env::var_os("CLUD_CODEX_BRIDGE_DEBUG").is_some_and(|value| value == "1") {
@@ -724,6 +806,43 @@ fn handle_connection(
             let _ = write_error(&mut stream, 404);
         }
     }
+}
+
+fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
+    let GatewayMode::Unified(unified) = &config.gateway_mode else {
+        unreachable!("catalog route is guarded by the unified mode match arm");
+    };
+    let data = provider_catalog::MODELS
+        .iter()
+        .filter(|entry| match entry.provider {
+            ModelProvider::Codex => unified.codex_available,
+            ModelProvider::DeepSeek => unified.deepseek_api_key.is_some(),
+            ModelProvider::Claude => false,
+        })
+        .filter_map(|entry| {
+            entry.discovery_id.map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "display_name": entry.display_name,
+                    "type": "model",
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::json!({"data": data, "has_more": false}).to_string();
+    let _ = write_response(stream, 200, "application/json", body.as_bytes(), false);
+}
+
+fn request_is_authenticated(request: &ParsedRequest, token: &str, mode: &GatewayMode) -> bool {
+    let provided = match mode {
+        GatewayMode::Codex => request.authorization.as_deref(),
+        GatewayMode::Unified(_) => request.header(UNIFIED_GATEWAY_TOKEN_HEADER),
+    };
+    let expected = match mode {
+        GatewayMode::Codex => format!("Bearer {token}"),
+        GatewayMode::Unified(_) => token.to_string(),
+    };
+    provided.is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
 }
 
 #[derive(Clone, Copy)]
@@ -866,6 +985,208 @@ fn build_pipeline(
         pipeline = pipeline.with_default_model(model);
     }
     Ok(pipeline)
+}
+
+/// Route one unified request before the legacy Codex translator sees it.
+/// Synthetic IDs are resolved here, never by the legacy `claude*` fallback.
+#[allow(clippy::too_many_arguments)]
+fn serve_unified_messages(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    shutdown: &AtomicBool,
+    conversations: &ConversationStore,
+    body: &[u8],
+    streaming: bool,
+    conversation_key: &ConversationKey,
+    headers: &[(String, String)],
+    log: Option<&SharedBridgeLog>,
+) {
+    let GatewayMode::Unified(unified) = &config.gateway_mode else {
+        unreachable!("unified request dispatch is guarded by the caller");
+    };
+    let mut request: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(_) => {
+            let _ = write_error(stream, 400);
+            return;
+        }
+    };
+    let model = match request.get("model").and_then(serde_json::Value::as_str) {
+        Some(model) => model,
+        None => {
+            let _ = write_error(stream, 400);
+            return;
+        }
+    };
+    let catalog = provider_catalog::MODELS
+        .iter()
+        .find(|entry| entry.discovery_id == Some(model))
+        .copied();
+    if model.starts_with("clud-claude-") && catalog.is_none() {
+        let ids = unified_catalog_ids(unified);
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": format!("unknown clud gateway model; available IDs: {}", ids.join(", ")),
+            }
+        })
+        .to_string();
+        let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+        return;
+    }
+    let Some(entry) = catalog else {
+        // Ordinary Claude model IDs remain byte-for-byte caller owned.
+        serve_anthropic_proxy(
+            stream,
+            &unified.anthropic_base_url,
+            body,
+            headers,
+            None,
+            config.stream_idle_timeout,
+        );
+        return;
+    };
+    match entry.provider {
+        ModelProvider::Codex if unified.codex_available => {
+            request["model"] = serde_json::Value::String(entry.wire_id.to_string());
+            let rewritten = serde_json::to_vec(&request).unwrap_or_default();
+            serve_messages(
+                stream,
+                config,
+                shutdown,
+                conversations,
+                &rewritten,
+                streaming,
+                conversation_key,
+                log,
+            );
+        }
+        ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
+            request["model"] = serde_json::Value::String(entry.wire_id.to_string());
+            let rewritten = serde_json::to_vec(&request).unwrap_or_default();
+            serve_anthropic_proxy(
+                stream,
+                &unified.deepseek_base_url,
+                &rewritten,
+                headers,
+                unified.deepseek_api_key.as_deref(),
+                config.stream_idle_timeout,
+            );
+        }
+        _ => {
+            // This is a defense-in-depth check: unavailable routes are omitted
+            // from discovery, but a stale picker must not reach any paid model.
+            let body = serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "the selected provider is not configured; run `clud auth status`",
+                }
+            })
+            .to_string();
+            let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
+        }
+    }
+}
+
+fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
+    provider_catalog::MODELS
+        .iter()
+        .filter(|entry| match entry.provider {
+            ModelProvider::Codex => config.codex_available,
+            ModelProvider::DeepSeek => config.deepseek_api_key.is_some(),
+            ModelProvider::Claude => false,
+        })
+        .filter_map(|entry| entry.discovery_id)
+        .collect()
+}
+
+/// Proxy an Anthropic-compatible Messages response without buffering its body.
+/// The caller's Claude credential is retained only for native Claude requests;
+/// DeepSeek injects its vault credential and never receives caller credentials.
+fn serve_anthropic_proxy(
+    stream: &mut TcpStream,
+    base_url: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    injected_api_key: Option<&str>,
+    idle_timeout: Duration,
+) {
+    let mut request = ureq::post(&format!("{}/v1/messages", base_url.trim_end_matches('/')))
+        .set("Content-Type", "application/json");
+    for (name, value) in headers {
+        let forwarded = name.eq_ignore_ascii_case("authorization")
+            || name.eq_ignore_ascii_case("x-api-key")
+            || name.eq_ignore_ascii_case("anthropic-version")
+            || name.to_ascii_lowercase().starts_with("anthropic-")
+            || name.eq_ignore_ascii_case("accept");
+        let hop_by_hop = name.eq_ignore_ascii_case("host")
+            || name.eq_ignore_ascii_case("connection")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case(UNIFIED_GATEWAY_TOKEN_HEADER);
+        if forwarded && !hop_by_hop && injected_api_key.is_none() {
+            request = request.set(name, value);
+        }
+    }
+    if let Some(api_key) = injected_api_key {
+        request = request.set("Authorization", &format!("Bearer {api_key}"));
+    }
+    let response = match request.timeout(idle_timeout).send_bytes(body) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(ureq::Error::Transport(_)) => {
+            let _ = write_response(
+                stream,
+                502,
+                "application/json",
+                br#"{"error":{"type":"api_error","message":"gateway upstream unavailable"}}"#,
+                false,
+            );
+            return;
+        }
+    };
+    let status = response.status();
+    let content_type = response
+        .header("content-type")
+        .unwrap_or("application/json")
+        .to_string();
+    let retry_after = response.header("retry-after").map(str::to_string);
+    let request_id = response.header("request-id").map(str::to_string);
+    let mut reader = response.into_reader();
+    let _ = stream.set_write_timeout(Some(idle_timeout));
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} Upstream\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nCache-Control: no-store\r\nConnection: close\r\n"
+    );
+    if let Some(retry_after) = retry_after {
+        let _ = write!(stream, "Retry-After: {retry_after}\r\n");
+    }
+    if let Some(request_id) = request_id {
+        let _ = write!(stream, "request-id: {request_id}\r\n");
+    }
+    if stream.write_all(b"\r\n").is_err() || stream.flush().is_err() {
+        return;
+    }
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                if write!(stream, "{count:x}\r\n")
+                    .and_then(|()| stream.write_all(&chunk[..count]))
+                    .and_then(|()| stream.write_all(b"\r\n"))
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = stream.write_all(b"0\r\n\r\n");
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 /// Serve one `POST /v1/messages`.
@@ -1304,11 +1625,21 @@ fn new_message_id() -> String {
 struct ParsedRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     authorization: Option<String>,
     session_id: Option<String>,
     agent_id: Option<String>,
     content_length: usize,
     body_prefix: Vec<u8>,
+}
+
+impl ParsedRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 fn read_headers(
@@ -1356,6 +1687,7 @@ fn read_headers(
     if request_line.next().ok_or(400_u16)? != "HTTP/1.1" || request_line.next().is_some() {
         return Err(400);
     }
+    let mut headers = Vec::new();
     let mut authorization = None;
     let mut session_id = None;
     let mut agent_id = None;
@@ -1363,6 +1695,10 @@ fn read_headers(
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(400_u16)?;
         let value = value.trim();
+        if value.contains(['\r', '\n']) {
+            return Err(400);
+        }
+        headers.push((name.to_string(), value.to_string()));
         if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("x-claude-code-session-id") {
@@ -1378,6 +1714,7 @@ fn read_headers(
     Ok(ParsedRequest {
         method,
         path,
+        headers,
         authorization,
         session_id,
         agent_id,
@@ -2134,6 +2471,46 @@ Connection: close
         ] {
             let response = request(addr, &authorized(method, path, &token, ""));
             assert_eq!(status(&response), 404, "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn unified_catalog_requires_its_custom_token_and_omits_unavailable_routes() {
+        let fake = FakeResponses::start();
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(Some("deepseek-test-secret".to_string()), true)
+                .with_upstreams(fake.base_url.clone(), fake.base_url.clone()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let addr = bridge.socket_addr();
+        let missing = request(
+            addr,
+            &authorized("GET", "/v1/models?limit=1000", bridge.bearer_token(), ""),
+        );
+        assert_eq!(status(&missing), 401, "bearer auth is never unified auth");
+        let response = request(
+            addr,
+            &authorized_with_headers(
+                "GET",
+                "/v1/models?limit=1000",
+                "native-claude-credential",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token())],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        for id in [
+            "clud-claude-codex-sol",
+            "clud-claude-codex-terra",
+            "clud-claude-codex-luna",
+            "clud-claude-deepseek-v4-pro",
+            "clud-claude-deepseek-v4-flash",
+        ] {
+            assert!(response.contains(id), "catalog is missing {id}: {response}");
+        }
+        for secret in [bridge.bearer_token(), "deepseek-test-secret"] {
+            assert!(!format!("{bridge:?}").contains(secret));
+            assert!(!response.contains(secret));
         }
     }
 

@@ -247,7 +247,7 @@ impl fmt::Display for PreflightError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing => formatter.write_str(
-                "DeepSeek credentials are not configured; run `clud deepseek-auth login`",
+                "DeepSeek credentials are not configured; run `clud auth login deepseek`",
             ),
             Self::Unavailable => formatter
                 .write_str("the native credential vault is unavailable; retry after unlocking it"),

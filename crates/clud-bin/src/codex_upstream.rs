@@ -83,7 +83,7 @@ const TOKEN_EXPIRY_SKEW: Duration = Duration::from_secs(60);
 pub const CREDENTIALS_EXPIRED: &str = "the Codex login has expired -- run `codex login`";
 /// Expiry guidance for clud's separately-managed subscription credential.
 pub const CLUD_CREDENTIALS_EXPIRED: &str =
-    "the Codex login has expired -- run `clud codex-auth login`";
+    "the Codex login has expired -- run `clud auth login codex`";
 
 /// Whether a failure could ever succeed on a fresh attempt.
 ///

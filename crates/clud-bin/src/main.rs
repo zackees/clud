@@ -1,10 +1,10 @@
 use clud::{
-    args, backend, backend_bootstrap, clud_settings, codex_auth, command, config, console_setup,
-    console_title, cpu_banner, crash_report, ctrl_c_track, daemon, deepseek_auth, gc, graphics,
-    grind, hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
-    loop_artifacts, loop_spec, optimize, orphan_reaper, runner, runtime_cache, settings_tui,
-    soldr_activate, startup, symbols, test_runtime, tool_cli, tool_install, tools, trampoline,
-    trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
+    console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, deepseek_auth,
+    gc, graphics, grind, hook_health, job_orphan_reaper, large_file_guard, launch_log,
+    launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, runner,
+    runtime_cache, settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli,
+    tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -47,16 +47,32 @@ fn run(mut args: args::Args) {
         std::process::exit(tool_cli::run(subcommand));
     }
 
-    // #629: credential management is self-contained and must never resolve a
-    // backend, start a daemon, or forward secrets to a harness.
+    // Credential management is self-contained and must never resolve a backend,
+    // start a daemon, or forward secrets to a harness.
+    if let Some(args::Command::Auth { subcommand }) = &args.command {
+        let interrupted = startup::install_ctrl_c_flag(args.verbose);
+        std::process::exit(auth::run(subcommand.as_ref(), interrupted.as_ref()));
+    }
+    // Compatibility aliases remain through this major version. Keep their
+    // provider implementation authoritative while giving callers the exact
+    // action-first replacement.
     if let Some(args::Command::CodexAuth { subcommand }) = &args.command {
+        let action = match subcommand {
+            args::CodexAuthSubcommand::Login { .. } => "login",
+            args::CodexAuthSubcommand::Status { .. } => "status",
+            args::CodexAuthSubcommand::Logout { .. } => "logout",
+        };
+        eprintln!("deprecated: use `clud auth {action} codex`");
         let interrupted = startup::install_ctrl_c_flag(args.verbose);
         std::process::exit(codex_auth::run(subcommand, interrupted.as_ref()));
     }
-
-    // DeepSeek credentials are self-contained and must never resolve a
-    // backend, start a daemon, or forward an API key to a harness.
     if let Some(args::Command::DeepseekAuth { subcommand }) = &args.command {
+        let action = match subcommand {
+            args::DeepseekAuthSubcommand::Login => "login",
+            args::DeepseekAuthSubcommand::Status { .. } => "status",
+            args::DeepseekAuthSubcommand::Logout { .. } => "logout",
+        };
+        eprintln!("deprecated: use `clud auth {action} deepseek`");
         std::process::exit(deepseek_auth::run(subcommand));
     }
 
@@ -324,12 +340,6 @@ fn run(mut args: args::Args) {
             std::process::exit(2);
         }
     };
-    if launch_target.routing_mode == backend::RoutingMode::Unified && !args.dry_run {
-        eprintln!(
-            "unified routing is reserved by the #901 foundation but is not available until the launch-scoped gateway is enabled"
-        );
-        std::process::exit(2);
-    }
 
     if args.no_fix_hooks {
         if args.dry_run {

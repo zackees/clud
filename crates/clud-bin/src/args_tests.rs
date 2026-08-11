@@ -94,6 +94,58 @@ fn codex_auth_status_is_a_registered_command() {
 }
 
 #[test]
+fn action_first_auth_subcommands_are_registered() {
+    let args = Args::try_parse_from([
+        "clud",
+        "auth",
+        "login",
+        "codex",
+        "--acknowledge-experimental",
+        "--no-browser",
+    ])
+    .unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Auth {
+            subcommand: Some(AuthSubcommand::Login {
+                provider: AuthProvider::Codex,
+                acknowledge_experimental: true,
+                no_browser: true,
+            })
+        })
+    ));
+
+    let args = Args::try_parse_from(["clud", "auth", "status", "deepseek", "--json"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Auth {
+            subcommand: Some(AuthSubcommand::Status {
+                provider: Some(AuthProvider::Deepseek),
+                json: true,
+            })
+        })
+    ));
+
+    let args = Args::try_parse_from(["clud", "auth", "logout", "deepseek"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Auth {
+            subcommand: Some(AuthSubcommand::Logout {
+                provider: AuthProvider::Deepseek,
+                json: false,
+            })
+        })
+    ));
+}
+
+#[test]
+fn action_first_auth_is_not_backend_passthrough() {
+    let args = parse(&["clud", "auth", "status", "codex", "--json"]);
+    assert!(args.passthrough.is_empty());
+    assert!(matches!(args.command, Some(Command::Auth { .. })));
+}
+
+#[test]
 fn deepseek_auth_subcommands_are_registered() {
     let args = Args::try_parse_from(["clud", "deepseek-auth", "status", "--json"]).unwrap();
     assert!(matches!(

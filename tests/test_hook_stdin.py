@@ -158,7 +158,9 @@ def test_tracked_soldr_hooks_read_payload_without_waiting_for_stdin_eof(
         }
     )
 
-    for script in (CLAUDE_SOLDR_HOOK, CODEX_SOLDR_HOOK):
+    scripts = [script for script in (CLAUDE_SOLDR_HOOK, CODEX_SOLDR_HOOK) if script.is_file()]
+    assert scripts, "at least one tracked soldr hook must exist"
+    for script in scripts:
         result = _run_hook_with_open_stdin(
             tmp_path,
             payload,

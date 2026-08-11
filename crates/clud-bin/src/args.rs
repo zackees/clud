@@ -268,16 +268,20 @@ impl Args {
 pub enum Command {
     /// Explicit compatibility spelling for a normal backend launch.
     Run,
-    /// Manage the experimental ChatGPT-subscription credentials used by the
-    /// Codex-to-Claude bridge. Never forwarded to a backend agent.
-    #[command(name = "codex-auth")]
+    /// Manage provider credentials. Claude authentication remains owned by
+    /// Claude Code and is reported as externally managed.
+    Auth {
+        #[command(subcommand)]
+        subcommand: Option<AuthSubcommand>,
+    },
+    /// Deprecated compatibility alias for `clud auth <action> codex`.
+    #[command(name = "codex-auth", hide = true)]
     CodexAuth {
         #[command(subcommand)]
         subcommand: CodexAuthSubcommand,
     },
-    /// Manage the DeepSeek API key in its native OS credential vault. Never
-    /// forwarded to a backend agent.
-    #[command(name = "deepseek-auth")]
+    /// Deprecated compatibility alias for `clud auth <action> deepseek`.
+    #[command(name = "deepseek-auth", hide = true)]
     DeepseekAuth {
         #[command(subcommand)]
         subcommand: DeepseekAuthSubcommand,
@@ -546,7 +550,58 @@ pub enum Command {
     },
 }
 
-/// Subcommands under `clud codex-auth`. See `codex_auth.rs`.
+/// Credential providers managed through `clud auth`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum AuthProvider {
+    Codex,
+    Deepseek,
+    Claude,
+}
+
+impl AuthProvider {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Deepseek => "deepseek",
+            Self::Claude => "claude",
+        }
+    }
+}
+
+/// Action-first credential commands under `clud auth`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthSubcommand {
+    /// Sign in to a provider managed by clud.
+    Login {
+        #[arg(value_enum)]
+        provider: AuthProvider,
+        /// Required only for Codex subscription authentication.
+        #[arg(long = "acknowledge-experimental")]
+        acknowledge_experimental: bool,
+        /// Do not open the Codex authorization URL in a browser.
+        #[arg(long = "no-browser")]
+        no_browser: bool,
+    },
+    /// Show secret-free status for all providers or one provider.
+    Status {
+        #[arg(value_enum)]
+        provider: Option<AuthProvider>,
+        /// Emit stable JSON for automation.
+        #[arg(long = "json")]
+        json: bool,
+    },
+    /// Remove only credentials owned by clud.
+    Logout {
+        #[arg(value_enum)]
+        provider: AuthProvider,
+        /// Emit stable JSON for automation.
+        #[arg(long = "json")]
+        json: bool,
+    },
+}
+
+/// Subcommands under the deprecated `clud codex-auth` alias. See `codex_auth.rs`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum CodexAuthSubcommand {
     /// Start the experimental ChatGPT subscription sign-in flow.
@@ -1002,6 +1057,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "symbols",
         "settings",
         "test",
+        "auth",
         "codex-auth",
         "deepseek-auth",
         "run",

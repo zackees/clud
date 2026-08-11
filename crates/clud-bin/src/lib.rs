@@ -5,6 +5,7 @@
 //! so there is exactly one instance of each module in the build.
 
 pub mod args;
+pub mod auth;
 pub mod backend;
 pub mod backend_bootstrap;
 pub mod block_bad_cmd;

@@ -376,7 +376,8 @@ fn build_launch_plan_for_target_at(
             iterations = 200; // high ceiling — loop terminates via BLOCKED
             push_prompt(&mut cmd, backend, final_prompt);
         }
-        Some(Command::CodexAuth { .. })
+        Some(Command::Auth { .. })
+        | Some(Command::CodexAuth { .. })
         | Some(Command::DeepseekAuth { .. })
         | Some(Command::Attach { .. })
         | Some(Command::Kill { .. })
