@@ -2,7 +2,10 @@
 
 ![hero-clud](https://github.com/user-attachments/assets/4009dfee-e703-446d-b073-80d826708a10)
 
-**A fast Rust CLI for Claude Code and Codex that runs in YOLO mode by default — no permission prompts, maximum velocity.**
+**A luxury agentic experience with Claude, Codex and Deepseek. By running them all on Claude**
+
+  * Fixes Windows Performance Problem with Windows git/bash zombie process
+  * transltate codex and deepseek into claude terminal
 
 The name `clud` is simply a shorter, easier-to-type version of `claude`.
 
