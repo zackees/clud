@@ -53,6 +53,16 @@ class _CapturedReader:
             return self._process.output_text if self._stream == "stdout" else ""
         return self._process.stdout if self._stream == "stdout" else self._process.stderr
 
+    def readline(self) -> str | bytes:
+        if isinstance(self._process, PseudoTerminalProcess):
+            return ""
+        line = (
+            self._process.get_next_stdout_line(timeout=0.1)
+            if self._stream == "stdout"
+            else self._process.get_next_stderr_line(timeout=0.1)
+        )
+        return line if isinstance(line, (str, bytes)) else ""
+
 
 class _ChildStdin:
     def __init__(self, process: RunningProcess) -> None:
