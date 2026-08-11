@@ -57,7 +57,7 @@ impl fmt::Debug for SubscriptionCredentials {
 }
 
 /// Location of clud-owned credentials. It intentionally does not share the
-/// Codex CLI location, so `clud codex-auth logout` cannot remove another
+/// Codex CLI location, so `clud auth logout codex` cannot remove another
 /// application's credentials.
 pub fn credentials_path_at(home: &Path) -> PathBuf {
     home.join(".clud").join(AUTH_FILE)
@@ -89,7 +89,7 @@ pub fn load_at(home: &Path) -> Result<Option<SubscriptionCredentials>, String> {
     let path = credentials_path_at(home);
     match fs::read(&path) {
         Ok(raw) => serde_json::from_slice(&raw).map(Some).map_err(|_| {
-            "clud subscription credentials are corrupted; run `clud codex-auth logout`".to_string()
+            "clud subscription credentials are corrupted; run `clud auth logout codex`".to_string()
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!(
@@ -345,11 +345,11 @@ fn refresh_remote(refresh_token: &str) -> Result<(String, String, Option<u64>), 
             ("refresh_token", refresh_token),
             ("client_id", CODEX_CLIENT_ID),
         ])
-        .map_err(|_| "the Codex login has expired -- run `clud codex-auth login`".to_string())?;
+        .map_err(|_| "the Codex login has expired -- run `clud auth login codex`".to_string())?;
     let tokens: Tokens = serde_json::from_reader(response.into_reader())
-        .map_err(|_| "the Codex login has expired -- run `clud codex-auth login`".to_string())?;
+        .map_err(|_| "the Codex login has expired -- run `clud auth login codex`".to_string())?;
     if tokens.access_token.trim().is_empty() || tokens.refresh_token.trim().is_empty() {
-        return Err("the Codex login has expired -- run `clud codex-auth login`".to_string());
+        return Err("the Codex login has expired -- run `clud auth login codex`".to_string());
     }
     let expiry = tokens.expires_in.map(|seconds| {
         SystemTime::now()
@@ -559,7 +559,7 @@ fn wait_for_callback_with(
             Err(error) => return Err(format!("could not accept OAuth callback: {error}")),
         }
     }
-    Err("OAuth callback timed out; re-run `clud codex-auth login`".to_string())
+    Err("OAuth callback timed out; re-run `clud auth login codex`".to_string())
 }
 
 fn callback_code(target: &str, expected_state: &str) -> Result<String, String> {
@@ -611,7 +611,7 @@ fn exchange_code(
             ("client_id", CODEX_CLIENT_ID),
             ("code_verifier", verifier),
         ])
-        .map_err(|_| "OAuth token exchange failed; re-run `clud codex-auth login`".to_string())?;
+        .map_err(|_| "OAuth token exchange failed; re-run `clud auth login codex`".to_string())?;
     let tokens: Tokens = serde_json::from_reader(response.into_reader())
         .map_err(|_| "OAuth token exchange returned an invalid response".to_string())?;
     let claims = tokens
@@ -810,7 +810,7 @@ mod tests {
         let timeout = wait_for_callback_with(&listener, "state", Instant::now(), || false);
         assert_eq!(
             timeout.unwrap_err(),
-            "OAuth callback timed out; re-run `clud codex-auth login`"
+            "OAuth callback timed out; re-run `clud auth login codex`"
         );
         let cancelled = wait_for_callback_with(
             &listener,

@@ -102,7 +102,7 @@ impl CludSubscriptionCredentials {
             }
             Err(_) => {
                 return Err(UpstreamError::Credentials(
-                    "the Codex login has expired -- run `clud codex-auth login`",
+                    "the Codex login has expired -- run `clud auth login codex`",
                 ));
             }
         };
@@ -266,7 +266,7 @@ pub enum ResolvedCredentials {
 
 impl ResolvedCredentials {
     /// A clud-managed subscription record is an explicit, persisted selection
-    /// made by `clud codex-auth login`; while it exists no API-key fallback is
+    /// made by `clud auth login codex`; while it exists no API-key fallback is
     /// attempted. Without it, only the platform API-key path is considered.
     pub fn resolve_default() -> Result<Self, UpstreamError> {
         Self::resolve_with(

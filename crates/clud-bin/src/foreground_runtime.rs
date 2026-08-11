@@ -1,7 +1,9 @@
 //! Foreground child runtime for provider/harness cross-routes (issue #626).
 
-use crate::backend::{Backend, ModelProvider};
-use crate::codex_bridge::{BridgeConfig, BridgeError, BridgeHandle};
+use crate::backend::{Backend, ModelProvider, RoutingMode};
+use crate::codex_bridge::{
+    BridgeConfig, BridgeError, BridgeHandle, UnifiedGatewayConfig, UNIFIED_GATEWAY_TOKEN_HEADER,
+};
 use crate::codex_model::{picker_entry, ModelSpec};
 use crate::codex_translate::default_model_spec;
 use crate::command::LaunchPlan;
@@ -64,7 +66,21 @@ impl ForegroundRuntime {
         mut env: Vec<(String, String)>,
         store: &dyn crate::deepseek_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
-        let (bridge, claude_settings) = if is_codex_via_claude(plan) {
+        let (bridge, claude_settings) = if is_unified(plan) {
+            // Optional routes must never block native Claude. Resolve only
+            // availability metadata here; the actual credentials stay inside
+            // the launch-scoped bridge and are not serialized into the plan.
+            let deepseek_key = store.get().ok().flatten();
+            let codex_available =
+                crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
+            let bridge = BridgeHandle::start(
+                BridgeConfig::default()
+                    .with_unified_gateway(UnifiedGatewayConfig::new(deepseek_key, codex_available)),
+            )?;
+            apply_unified_overlay(&mut env, &bridge)?;
+            let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
+            (Some(bridge), Some(settings))
+        } else if is_codex_via_claude(plan) {
             // A selection that does not parse fails the launch rather than
             // the first turn: by the time a request is in flight the user has
             // already waited, and the message would arrive wrapped in the
@@ -199,6 +215,10 @@ fn is_deepseek_via_claude(plan: &LaunchPlan) -> bool {
     plan.model_provider() == ModelProvider::DeepSeek && plan.effective_harness() == Backend::Claude
 }
 
+fn is_unified(plan: &LaunchPlan) -> bool {
+    plan.routing_mode == RoutingMode::Unified && plan.effective_harness() == Backend::Claude
+}
+
 fn apply_deepseek_overlay(
     env: &mut Vec<(String, String)>,
     secret: &str,
@@ -313,17 +333,65 @@ fn apply_cross_route_overlay(
     );
 }
 
-fn context_lifecycle_settings(bridge: &BridgeHandle) -> serde_json::Value {
+fn apply_unified_overlay(
+    env: &mut Vec<(String, String)>,
+    bridge: &BridgeHandle,
+) -> Result<(), BridgeError> {
+    if env.iter().any(|(key, value)| {
+        env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            && matches!(value.trim(), "1" | "true" | "TRUE")
+    }) {
+        return Err(BridgeError::DiscoveryDisabled);
+    }
+    // Replace only the base URL. Unlike direct DeepSeek and Codex routes, the
+    // Claude credential stays untouched so saved claude.ai OAuth/API-key auth
+    // reaches the native Claude upstream through this gateway.
+    env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_BASE_URL"));
+    env.push((
+        "ANTHROPIC_BASE_URL".to_string(),
+        bridge.base_url().to_string(),
+    ));
+    let custom = env
+        .iter()
+        .find(|(key, _)| env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"));
+    let gateway_header = format!("{UNIFIED_GATEWAY_TOKEN_HEADER}: {}", bridge.bearer_token());
+    let custom_headers = custom
+        .map(|headers| format!("{headers}\n{gateway_header}"))
+        .unwrap_or(gateway_header);
+    env.push(("ANTHROPIC_CUSTOM_HEADERS".to_string(), custom_headers));
+    set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
+    set_env(env, "CLUD_GATEWAY_TOKEN", bridge.bearer_token());
+    push_default(env, "API_TIMEOUT_MS", DEFAULT_API_TIMEOUT_MS);
+    Ok(())
+}
+
+fn set_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    env.retain(|(candidate, _)| !env_key_eq(candidate, key));
+    env.push((key.to_string(), value.to_string()));
+}
+
+fn context_lifecycle_settings(
+    bridge: &BridgeHandle,
+    header_name: &str,
+    header_value: &str,
+    allowed_env: &str,
+) -> serde_json::Value {
     let compact_url = format!("{}/_clud/context/compact", bridge.base_url());
     let clear_url = format!("{}/_clud/context/clear", bridge.base_url());
     let hook = |url: String| {
+        let mut headers = serde_json::Map::new();
+        headers.insert(
+            header_name.to_string(),
+            serde_json::Value::String(header_value.to_string()),
+        );
         serde_json::json!({
             "type": "http",
             "url": url,
-            "headers": {
-                "Authorization": "Bearer $ANTHROPIC_AUTH_TOKEN"
-            },
-            "allowedEnvVars": ["ANTHROPIC_AUTH_TOKEN"]
+            "headers": headers,
+            "allowedEnvVars": [allowed_env]
         })
     };
     serde_json::json!({
@@ -344,7 +412,36 @@ fn merged_context_lifecycle_settings(
     plan: &LaunchPlan,
     bridge: &BridgeHandle,
 ) -> Result<ClaudeSettings, BridgeError> {
-    let mut settings = context_lifecycle_settings(bridge);
+    merged_context_lifecycle_settings_with(
+        plan,
+        bridge,
+        "Authorization",
+        "Bearer $ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKEN",
+    )
+}
+
+fn merged_unified_context_lifecycle_settings(
+    plan: &LaunchPlan,
+    bridge: &BridgeHandle,
+) -> Result<ClaudeSettings, BridgeError> {
+    merged_context_lifecycle_settings_with(
+        plan,
+        bridge,
+        UNIFIED_GATEWAY_TOKEN_HEADER,
+        "$CLUD_GATEWAY_TOKEN",
+        "CLUD_GATEWAY_TOKEN",
+    )
+}
+
+fn merged_context_lifecycle_settings_with(
+    plan: &LaunchPlan,
+    bridge: &BridgeHandle,
+    header_name: &str,
+    header_value: &str,
+    allowed_env: &str,
+) -> Result<ClaudeSettings, BridgeError> {
+    let mut settings = context_lifecycle_settings(bridge, header_name, header_value, allowed_env);
     let Some(user_argument) = user_settings_argument(&plan.command)? else {
         return write_launch_scoped_settings(settings, false);
     };
@@ -601,6 +698,58 @@ mod tests {
         env.iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn unified_overlay_preserves_claude_credentials_and_enables_discovery() {
+        let mut route = plan(ModelProvider::Claude, Backend::Claude);
+        route.routing_mode = RoutingMode::Unified;
+        let base = vec![
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "claude-oauth".to_string(),
+            ),
+            (
+                "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+                "X-Existing: retained".to_string(),
+            ),
+        ];
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            base.clone(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        let env = runtime.env();
+        assert!(runtime.has_bridge());
+        assert_eq!(lookup(env, "ANTHROPIC_AUTH_TOKEN"), Some("claude-oauth"));
+        assert_eq!(lookup(env, "ANTHROPIC_BASE_URL"), runtime.base_url());
+        assert_eq!(
+            lookup(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
+        let headers = lookup(env, "ANTHROPIC_CUSTOM_HEADERS").unwrap();
+        assert!(headers.contains("X-Existing: retained"));
+        assert!(headers.contains(UNIFIED_GATEWAY_TOKEN_HEADER));
+        assert!(headers.contains(runtime.bearer_token().unwrap()));
+        assert_eq!(lookup(env, "CLUD_GATEWAY_TOKEN"), runtime.bearer_token());
+        assert_eq!(lookup(&base, "ANTHROPIC_AUTH_TOKEN"), Some("claude-oauth"));
+    }
+
+    #[test]
+    fn unified_mode_refuses_disabled_model_discovery() {
+        let mut route = plan(ModelProvider::Claude, Backend::Claude);
+        route.routing_mode = RoutingMode::Unified;
+        let error = ForegroundRuntime::start_with_secret_store(
+            &route,
+            vec![(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                "1".to_string(),
+            )],
+            &FakeSecretStore(None),
+        )
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::DiscoveryDisabled));
     }
 
     #[test]
