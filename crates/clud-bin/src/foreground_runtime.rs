@@ -709,6 +709,7 @@ mod tests {
                 "ANTHROPIC_AUTH_TOKEN".to_string(),
                 "claude-oauth".to_string(),
             ),
+            ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "xhigh".to_string()),
             (
                 "ANTHROPIC_CUSTOM_HEADERS".to_string(),
                 "X-Existing: retained".to_string(),
@@ -733,7 +734,21 @@ mod tests {
         assert!(headers.contains(UNIFIED_GATEWAY_TOKEN_HEADER));
         assert!(headers.contains(runtime.bearer_token().unwrap()));
         assert_eq!(lookup(env, "CLUD_GATEWAY_TOKEN"), runtime.bearer_token());
+        assert_eq!(lookup(env, "CLAUDE_CODE_EFFORT_LEVEL"), Some("xhigh"));
         assert_eq!(lookup(&base, "ANTHROPIC_AUTH_TOKEN"), Some("claude-oauth"));
+    }
+
+    #[test]
+    fn unified_overlay_does_not_inject_a_global_effort_default() {
+        let mut route = plan(ModelProvider::Claude, Backend::Claude);
+        route.routing_mode = RoutingMode::Unified;
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &route,
+            Vec::new(),
+            &FakeSecretStore(Some("deepseek-secret".to_string())),
+        )
+        .unwrap();
+        assert_eq!(lookup(runtime.env(), "CLAUDE_CODE_EFFORT_LEVEL"), None);
     }
 
     #[test]

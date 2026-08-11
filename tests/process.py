@@ -216,6 +216,17 @@ Popen = RunningChild
 
 def run(*args: Any, **kwargs: Any) -> CompletedProcess[Any]:
     """Run one bounded test command through running-process."""
+    # running-process defaults to decoded text while subprocess.run defaults
+    # to bytes. This module is a subprocess compatibility surface, so opt into
+    # text only when the caller names one of subprocess's text channels.
+    kwargs.setdefault(
+        "text",
+        bool(
+            kwargs.get("encoding") is not None
+            or kwargs.get("errors") is not None
+            or kwargs.get("universal_newlines", False)
+        ),
+    )
     if kwargs.get("capture_output"):
         # `running-process` merges stderr by default; mirror subprocess.run.
         kwargs.setdefault("stderr", PIPE)
@@ -259,7 +270,6 @@ def run(*args: Any, **kwargs: Any) -> CompletedProcess[Any]:
             or stdout_mode in (PIPE, DEVNULL)
             or stderr_mode in (PIPE, DEVNULL)
         )
-        options.setdefault("text", True)
         options.pop("close_fds", None)
 
         child = RunningChild(args[0], **options)

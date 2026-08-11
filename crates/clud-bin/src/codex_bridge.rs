@@ -3,7 +3,7 @@
 
 use crate::backend::ModelProvider;
 use crate::bridge_log::{unix_ms, BridgeLog};
-use crate::codex_history::{ConversationKey, ConversationStore, HistoryLimits};
+use crate::codex_history::{ConversationKey, ConversationRoute, ConversationStore, HistoryLimits};
 use crate::codex_model::ModelSpec;
 use crate::codex_pipeline::{Pipeline, PipelineError, ProviderFailure};
 use crate::codex_sse::InBandFailure;
@@ -791,6 +791,7 @@ fn handle_connection(
                     &body,
                     streaming,
                     &conversation_key,
+                    None,
                     log,
                 );
             }
@@ -1018,10 +1019,26 @@ fn serve_unified_messages(
             return;
         }
     };
-    let catalog = provider_catalog::MODELS
+    let exact_catalog = provider_catalog::MODELS
         .iter()
         .find(|entry| entry.discovery_id == Some(model))
         .copied();
+    // A Codex discovery selection may retain the bridge's legacy
+    // `<model>@<effort>` override. Resolve the reserved base ID before the
+    // translator sees its `claude` substring, then carry the suffix onto the
+    // reviewed wire model so `effort_for` remains the sole precedence owner.
+    let mut codex_effort_suffix = None;
+    let catalog = exact_catalog.or_else(|| {
+        let (base, effort) = model.rsplit_once('@')?;
+        let entry = provider_catalog::MODELS
+            .iter()
+            .find(|entry| entry.discovery_id == Some(base))
+            .copied()?;
+        (entry.provider == ModelProvider::Codex).then(|| {
+            codex_effort_suffix = Some(effort);
+            entry
+        })
+    });
     if model.starts_with("clud-claude-") && catalog.is_none() {
         let ids = unified_catalog_ids(unified);
         let body = serde_json::json!({
@@ -1037,8 +1054,11 @@ fn serve_unified_messages(
     }
     let Some(entry) = catalog else {
         // Ordinary Claude model IDs remain byte-for-byte caller owned.
-        serve_anthropic_proxy(
+        serve_unified_anthropic_proxy(
             stream,
+            conversations,
+            conversation_key,
+            ConversationRoute::Claude,
             &unified.anthropic_base_url,
             body,
             headers,
@@ -1049,7 +1069,11 @@ fn serve_unified_messages(
     };
     match entry.provider {
         ModelProvider::Codex if unified.codex_available => {
-            request["model"] = serde_json::Value::String(entry.wire_id.to_string());
+            let model = codex_effort_suffix.map_or_else(
+                || entry.wire_id.to_string(),
+                |effort| format!("{}@{effort}", entry.wire_id),
+            );
+            request["model"] = serde_json::Value::String(model);
             let rewritten = serde_json::to_vec(&request).unwrap_or_default();
             serve_messages(
                 stream,
@@ -1059,14 +1083,18 @@ fn serve_unified_messages(
                 &rewritten,
                 streaming,
                 conversation_key,
+                Some(ConversationRoute::Codex),
                 log,
             );
         }
         ModelProvider::DeepSeek if unified.deepseek_api_key.is_some() => {
             request["model"] = serde_json::Value::String(entry.wire_id.to_string());
             let rewritten = serde_json::to_vec(&request).unwrap_or_default();
-            serve_anthropic_proxy(
+            serve_unified_anthropic_proxy(
                 stream,
+                conversations,
+                conversation_key,
+                ConversationRoute::DeepSeek,
                 &unified.deepseek_base_url,
                 &rewritten,
                 headers,
@@ -1087,6 +1115,38 @@ fn serve_unified_messages(
             .to_string();
             let _ = write_response(stream, 400, "application/json", body.as_bytes(), false);
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_unified_anthropic_proxy(
+    stream: &mut TcpStream,
+    conversations: &ConversationStore,
+    conversation_key: &ConversationKey,
+    route: ConversationRoute,
+    base_url: &str,
+    body: &[u8],
+    headers: &[(String, String)],
+    injected_api_key: Option<&str>,
+    idle_timeout: Duration,
+) {
+    let routed = conversations.with_history(&conversation_key.id, |history| {
+        history.enter_route(route);
+        serve_anthropic_proxy(
+            stream,
+            base_url,
+            body,
+            headers,
+            injected_api_key,
+            idle_timeout,
+        );
+        Ok(())
+    });
+    if let Err(error) = routed {
+        let failure = PipelineError::Translate(crate::codex_translate::TranslateError::Invalid(
+            error.to_string(),
+        ));
+        let _ = write_pipeline_error(stream, &failure, None);
     }
 }
 
@@ -1204,6 +1264,7 @@ fn serve_messages(
     body: &[u8],
     streaming: bool,
     conversation_key: &ConversationKey,
+    unified_route: Option<ConversationRoute>,
     log: Option<&SharedBridgeLog>,
 ) {
     let pipeline = match build_pipeline(config, log) {
@@ -1219,6 +1280,9 @@ fn serve_messages(
     if streaming {
         let mut writer = EventStreamWriter::new(stream, config);
         let streamed = conversations.with_history(&conversation_key.id, |history| {
+            if let Some(route) = unified_route {
+                history.enter_route(route);
+            }
             let streamed = {
                 let mut sink = |frame: &str| -> Result<(), UpstreamError> {
                     writer
@@ -1284,6 +1348,9 @@ fn serve_messages(
     }
 
     match conversations.with_history(&conversation_key.id, |history| {
+        if let Some(route) = unified_route {
+            history.enter_route(route);
+        }
         let completed = pipeline
             .complete_with_history(body, &message_id, shutdown, history)
             .map(|completion| {
@@ -2290,6 +2357,54 @@ Connection: close
         BridgeConfig::default().with_test_upstream_url(Some(upstream.base_url.clone()))
     }
 
+    fn unified_config(
+        anthropic: &FakeResponses,
+        codex: &FakeResponses,
+        deepseek: &FakeResponses,
+    ) -> BridgeConfig {
+        BridgeConfig::default()
+            .with_test_upstream_url(Some(codex.base_url.clone()))
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-route-canary".to_string()), true)
+                    .with_upstreams(anthropic.base_url.clone(), deepseek.base_url.clone()),
+            )
+    }
+
+    fn unified_request(
+        bridge: &BridgeHandle,
+        body: &str,
+        session: &str,
+        agent: Option<&str>,
+    ) -> String {
+        let mut headers = vec![
+            (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+            ("x-api-key", "claude-api-key-canary"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "oauth-2025-04-20,fixture-capability"),
+            ("x-claude-code-session-id", session),
+        ];
+        if let Some(agent) = agent {
+            headers.push(("x-claude-code-agent-id", agent));
+        }
+        request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages?beta=true",
+                "claude-oauth-canary",
+                body,
+                &headers,
+            ),
+        )
+    }
+
+    fn captured_body(raw_request: &str) -> &str {
+        raw_request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("captured HTTP body")
+    }
+
     /// The smallest request the translator accepts.
     const PROBE_BODY: &str =
         r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"stream":false}"#;
@@ -2511,6 +2626,362 @@ Connection: close
         for secret in [bridge.bearer_token(), "deepseek-test-secret"] {
             assert!(!format!("{bridge:?}").contains(secret));
             assert!(!response.contains(secret));
+        }
+    }
+
+    #[test]
+    fn unified_native_claude_preserves_effort_payload_and_required_headers_byte_for_byte() {
+        let anthropic = FakeResponses::start();
+        let codex = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let body = r#"{ "model":"claude-opus-4-8", "messages":[{"role":"user","content":"fixture prompt"}], "thinking":{"type":"adaptive","fixture":{"keep":true}}, "output_config":{"effort":"xhigh","format":{"type":"json_schema"}}, "stream":false }"#;
+
+        let response = unified_request(&bridge, body, "native-byte-session", None);
+        assert_eq!(status(&response), 200, "{response}");
+        let requests = anthropic.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(captured_body(&requests[0]), body);
+        let sent = requests[0].to_ascii_lowercase();
+        for required in [
+            "authorization: bearer claude-oauth-canary",
+            "x-api-key: claude-api-key-canary",
+            "anthropic-version: 2023-06-01",
+            "anthropic-beta: oauth-2025-04-20,fixture-capability",
+        ] {
+            assert!(sent.contains(required), "missing {required}: {sent}");
+        }
+        for forbidden in [bridge.bearer_token(), "deepseek-route-canary"] {
+            assert!(!requests[0].contains(forbidden), "leaked {forbidden}");
+        }
+        assert!(codex.requests().is_empty());
+        assert!(deepseek.requests().is_empty());
+    }
+
+    #[test]
+    fn unified_codex_models_and_efforts_reach_the_exact_responses_fields() {
+        let anthropic = FakeResponses::start();
+        let codex = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let models = [
+            ("clud-claude-codex-sol", "gpt-5.6-sol"),
+            ("clud-claude-codex-terra", "gpt-5.6-terra"),
+            ("clud-claude-codex-luna", "gpt-5.6-luna"),
+        ];
+        let efforts = ["none", "low", "medium", "high", "xhigh", "max"];
+        let mut expected = Vec::new();
+        for (model_index, (discovery, wire)) in models.iter().enumerate() {
+            for (effort_index, effort) in efforts.iter().enumerate() {
+                let body = serde_json::json!({
+                    "model": discovery,
+                    "messages": [{"role": "user", "content": "route matrix"}],
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": effort},
+                    "stream": false,
+                })
+                .to_string();
+                let session = format!("codex-{model_index}-{effort_index}");
+                let response = unified_request(&bridge, &body, &session, None);
+                assert_eq!(status(&response), 200, "{discovery} {effort}: {response}");
+                expected.push((*wire, *effort));
+            }
+        }
+
+        let suffix = r#"{"model":"clud-claude-codex-terra@max","messages":[{"role":"user","content":"suffix wins"}],"thinking":{"type":"enabled","budget_tokens":9000},"output_config":{"effort":"low"},"stream":false}"#;
+        assert_eq!(
+            status(&unified_request(&bridge, suffix, "codex-suffix", None)),
+            200
+        );
+        expected.push(("gpt-5.6-terra", "max"));
+
+        let thinking = r#"{"model":"clud-claude-codex-luna","messages":[{"role":"user","content":"thinking fallback"}],"thinking":{"type":"enabled","budget_tokens":9000},"stream":false}"#;
+        assert_eq!(
+            status(&unified_request(&bridge, thinking, "codex-thinking", None)),
+            200
+        );
+        expected.push(("gpt-5.6-luna", "high"));
+
+        let catalog_default = r#"{"model":"clud-claude-codex-sol","messages":[{"role":"user","content":"default fallback"}],"thinking":{"type":"adaptive"},"stream":false}"#;
+        assert_eq!(
+            status(&unified_request(
+                &bridge,
+                catalog_default,
+                "codex-default",
+                None
+            )),
+            200
+        );
+        expected.push(("gpt-5.6-sol", "low"));
+
+        let requests = codex.requests();
+        assert_eq!(requests.len(), expected.len());
+        for (request, (model, effort)) in requests.iter().zip(expected) {
+            let body: serde_json::Value =
+                serde_json::from_str(captured_body(request)).expect("Responses JSON");
+            assert_eq!(body["model"], model);
+            assert_eq!(body["reasoning"]["effort"], effort);
+            assert!(!request.contains("claude-oauth-canary"));
+            assert!(!request.contains("claude-api-key-canary"));
+            assert!(!request.contains("deepseek-route-canary"));
+        }
+
+        let before_rejection = codex.requests().len();
+        for rejected in ["minimal", "ultra"] {
+            let body = serde_json::json!({
+                "model": "clud-claude-codex-terra",
+                "messages": [{"role": "user", "content": "reject locally"}],
+                "output_config": {"effort": rejected},
+                "stream": false,
+            })
+            .to_string();
+            let response =
+                unified_request(&bridge, &body, &format!("codex-reject-{rejected}"), None);
+            assert_eq!(status(&response), 400, "{response}");
+            assert!(response.contains(rejected), "{response}");
+            assert!(response.contains("xhigh"), "{response}");
+        }
+        assert_eq!(
+            codex.requests().len(),
+            before_rejection,
+            "a rejected effort must make zero upstream requests"
+        );
+        assert!(anthropic.requests().is_empty());
+        assert!(deepseek.requests().is_empty());
+    }
+
+    #[test]
+    fn unified_deepseek_preserves_effort_for_both_models_without_codex_validation() {
+        fn provider_effective_effort(incoming: &str) -> Option<&'static str> {
+            match incoming {
+                "low" | "medium" | "high" => Some("high"),
+                "xhigh" | "max" => Some("max"),
+                _ => None,
+            }
+        }
+
+        let anthropic = FakeResponses::start();
+        let codex = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let models = [
+            ("clud-claude-deepseek-v4-pro", "deepseek-v4-pro[1m]"),
+            ("clud-claude-deepseek-v4-flash", "deepseek-v4-flash"),
+        ];
+        // DeepSeek, not clud, owns this compatibility mapping. Assert both the
+        // unchanged gateway payload and the provider-documented effective
+        // level so this acceptance matrix cannot silently drift.
+        let efforts = [
+            ("low", "high"),
+            ("medium", "high"),
+            ("high", "high"),
+            ("xhigh", "max"),
+            ("max", "max"),
+        ];
+        for (model_index, (discovery, wire)) in models.iter().enumerate() {
+            for (effort_index, (incoming, effective)) in efforts.iter().enumerate() {
+                let body = serde_json::json!({
+                    "model": discovery,
+                    "messages": [{"role": "user", "content": "deepseek matrix"}],
+                    "thinking": {"type": "adaptive", "fixture": {"keep": true}},
+                    "output_config": {"effort": incoming, "fixture": {"keep": true}},
+                    "stream": false,
+                })
+                .to_string();
+                let response = unified_request(
+                    &bridge,
+                    &body,
+                    &format!("deepseek-{model_index}-{effort_index}"),
+                    None,
+                );
+                assert_eq!(status(&response), 200, "{discovery} {incoming}: {response}");
+                let requests = deepseek.requests();
+                let sent = requests.last().expect("DeepSeek request");
+                let sent_body: serde_json::Value =
+                    serde_json::from_str(captured_body(sent)).expect("Anthropic JSON");
+                assert_eq!(sent_body["model"], *wire);
+                assert_eq!(
+                    sent_body["thinking"],
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "fixture": {"keep": true},
+                    })
+                );
+                assert_eq!(
+                    sent_body["output_config"],
+                    serde_json::json!({
+                        "effort": incoming,
+                        "fixture": {"keep": true},
+                    })
+                );
+                assert_eq!(
+                    provider_effective_effort(
+                        sent_body["output_config"]["effort"]
+                            .as_str()
+                            .expect("DeepSeek effort string")
+                    ),
+                    Some(*effective),
+                    "provider mapping for {incoming}"
+                );
+                assert!(sent
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer deepseek-route-canary"));
+                assert!(!sent.contains("claude-oauth-canary"));
+                assert!(!sent.contains("claude-api-key-canary"));
+                assert!(!sent.contains(bridge.bearer_token()));
+            }
+        }
+
+        let future = r#"{"model":"clud-claude-deepseek-v4-flash","messages":[{"role":"user","content":"future effort"}],"output_config":{"effort":"future-provider-level"},"stream":false}"#;
+        assert_eq!(
+            status(&unified_request(&bridge, future, "deepseek-future", None)),
+            200
+        );
+        let requests = deepseek.requests();
+        let body: serde_json::Value =
+            serde_json::from_str(captured_body(requests.last().unwrap())).expect("Anthropic JSON");
+        assert_eq!(body["output_config"]["effort"], "future-provider-level");
+        assert!(anthropic.requests().is_empty());
+        assert!(codex.requests().is_empty());
+    }
+
+    #[test]
+    fn unified_provider_switch_reseeds_codex_and_keeps_main_and_agent_efforts_independent() {
+        let anthropic = FakeResponses::start();
+        let codex = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
+        let session = "switch-session";
+        let turn = |model: &str, messages: serde_json::Value, effort: &str| {
+            serde_json::json!({
+                "model": model,
+                "messages": messages,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+                "stream": false,
+            })
+            .to_string()
+        };
+
+        let claude_first = turn(
+            "claude-opus-4-8",
+            serde_json::json!([{"role": "user", "content": "claude first"}]),
+            "high",
+        );
+        assert_eq!(
+            status(&unified_request(&bridge, &claude_first, session, None)),
+            200
+        );
+        let codex_first = turn(
+            "clud-claude-codex-terra",
+            serde_json::json!([
+                {"role": "user", "content": "claude first"},
+                {"role": "assistant", "content": "claude reply"},
+                {"role": "user", "content": "codex first"}
+            ]),
+            "high",
+        );
+        assert_eq!(
+            status(&unified_request(&bridge, &codex_first, session, None)),
+            200
+        );
+        let deepseek_turn = turn(
+            "clud-claude-deepseek-v4-pro",
+            serde_json::json!([
+                {"role": "user", "content": "claude first"},
+                {"role": "assistant", "content": "claude reply"},
+                {"role": "user", "content": "codex first"},
+                {"role": "assistant", "content": "bridged reply"},
+                {"role": "user", "content": "deepseek turn"}
+            ]),
+            "high",
+        );
+        assert_eq!(
+            status(&unified_request(&bridge, &deepseek_turn, session, None)),
+            200
+        );
+        let claude_return = turn(
+            "claude-opus-4-8",
+            serde_json::json!([
+                {"role": "user", "content": "claude first"},
+                {"role": "assistant", "content": "claude reply"},
+                {"role": "user", "content": "codex first"},
+                {"role": "assistant", "content": "bridged reply"},
+                {"role": "user", "content": "deepseek turn"},
+                {"role": "assistant", "content": "deepseek reply"},
+                {"role": "user", "content": "claude return"}
+            ]),
+            "high",
+        );
+        assert_eq!(
+            status(&unified_request(&bridge, &claude_return, session, None)),
+            200
+        );
+        let codex_return = turn(
+            "clud-claude-codex-luna",
+            serde_json::json!([
+                {"role": "user", "content": "claude first"},
+                {"role": "assistant", "content": "claude reply"},
+                {"role": "user", "content": "codex first"},
+                {"role": "assistant", "content": "bridged reply"},
+                {"role": "user", "content": "deepseek turn"},
+                {"role": "assistant", "content": "deepseek reply"},
+                {"role": "user", "content": "claude return"},
+                {"role": "assistant", "content": "claude return reply"},
+                {"role": "user", "content": "codex return"}
+            ]),
+            "high",
+        );
+        assert_eq!(
+            status(&unified_request(&bridge, &codex_return, session, None)),
+            200
+        );
+
+        let agent = turn(
+            "clud-claude-deepseek-v4-flash",
+            serde_json::json!([{"role": "user", "content": "agent override"}]),
+            "xhigh",
+        );
+        assert_eq!(
+            status(&unified_request(
+                &bridge,
+                &agent,
+                session,
+                Some("child-agent")
+            )),
+            200
+        );
+
+        let codex_requests = codex.requests();
+        let reseeded: serde_json::Value = serde_json::from_str(captured_body(
+            codex_requests.last().expect("returning Codex request"),
+        ))
+        .expect("Responses JSON");
+        assert_eq!(reseeded["model"], "gpt-5.6-luna");
+        assert_eq!(reseeded["reasoning"]["effort"], "high");
+        let text = reseeded["input"].to_string();
+        for visible in [
+            "claude first",
+            "claude reply",
+            "codex first",
+            "deepseek turn",
+            "deepseek reply",
+            "claude return",
+            "claude return reply",
+            "codex return",
+        ] {
+            assert!(text.contains(visible), "missing {visible}: {text}");
+        }
+        let deepseek_requests = deepseek.requests();
+        let agent_body: serde_json::Value = serde_json::from_str(captured_body(
+            deepseek_requests.last().expect("agent DeepSeek request"),
+        ))
+        .expect("Anthropic JSON");
+        assert_eq!(agent_body["output_config"]["effort"], "xhigh");
+        for request in anthropic.requests() {
+            let body: serde_json::Value =
+                serde_json::from_str(captured_body(&request)).expect("Anthropic JSON");
+            assert_eq!(body["output_config"]["effort"], "high");
         }
     }
 

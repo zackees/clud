@@ -99,6 +99,7 @@ timeout = 90
 timeout_method = "thread"
 markers = [
     "integration: end-to-end tests with mock agents; skipped unless CLUD_INTEGRATION_TESTS=1",
+    "real_claude: opt-in secret-free protocol fixtures using an installed Claude Code binary",
 ]
 
 [tool.ruff]

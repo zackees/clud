@@ -29,10 +29,58 @@ its Anthropic-compatible endpoint. Unknown reserved IDs fail locally rather
 than falling through to a paid provider. Ordinary Claude IDs are proxied
 unchanged to Anthropic.
 
-Unified mode never injects DeepSeek's direct-mode global effort overlay.
-Claude Code's effective request effort is therefore preserved per request;
-Codex continues to use the existing strict Responses effort mapping while
-DeepSeek receives its Anthropic field unchanged.
+Each Claude session/subagent identity also owns an active route epoch. Crossing
+a provider boundary clears Codex's provider-private canonical Responses items.
+If that conversation later returns to Codex, the translator reseeds from the
+complete Anthropic-visible transcript in the request. Opaque reasoning,
+signatures, cache identifiers, and tool identifiers are never reused across
+providers. Switching among Codex models can retain the current Codex epoch.
+`/clear`, eviction, and gateway shutdown remove both transcript and route state.
+
+## Session-wide effort
+
+Claude Code resolves `/effort`, `--effort`, settings, environment, model-picker
+controls, and request-specific skill/subagent overrides before sending a
+Messages request. The gateway sees the final `output_config.effort` string but
+no source marker. Unified mode therefore has one honest contract: the harness's
+effective effort is session-wide, survives `/model` switches, and is consumed
+independently on every request.
+
+Unified child setup neither injects DeepSeek's direct-mode
+`CLAUDE_CODE_EFFORT_LEVEL=max` nor deletes an ambient user value. The direct
+`clud --deepseek` max profile is unchanged. `/effort auto` and a session with no
+explicit setting are harness-resolved; the gateway cannot recover `auto` or
+secretly restore Sol's `low`, Terra/Luna's `medium`, or direct DeepSeek's `max`
+after the final request value exists.
+
+| Route | Gateway behavior |
+|---|---|
+| Native Claude | Preserve the request body byte-for-byte, including all of `thinking` and `output_config`, and forward the required caller-owned Anthropic headers. |
+| Codex Sol/Terra/Luna | Resolve the synthetic ID first, then use `codex_translate::effort_for`: `<model>@effort` > `output_config.effort` > stated thinking budget > catalog default. Unsupported stated values fail locally with zero upstream calls. |
+| DeepSeek Pro/Flash | Rewrite only the model ID and preserve `thinking` plus the complete `output_config`; do not apply Codex validation. DeepSeek maps `low`/`medium` to effective `high`, `high` to `high`, and `xhigh`/`max` to `max`. |
+
+The same level name is calibrated differently by each model. Diagnostics may
+name the public provider/effort, but never credentials, prompts, reasoning
+content, response bodies, or provider-private state.
+
+## Acceptance matrix
+
+| Contract | Guardrail |
+|---|---|
+| Native body/header fidelity and credential isolation | `unified_native_claude_preserves_effort_payload_and_required_headers_byte_for_byte` |
+| Every Codex discovery model and accepted effort; suffix/budget/default precedence; local rejection | `unified_codex_models_and_efforts_reach_the_exact_responses_fields` |
+| Both DeepSeek models, documented effective mapping, future provider value passthrough | `unified_deepseek_preserves_effort_for_both_models_without_codex_validation` |
+| Claude -> Codex -> DeepSeek -> Claude switching, Codex reseed, child override isolation | `unified_provider_switch_reseeds_codex_and_keeps_main_and_agent_efforts_independent` |
+| Ambient effort preservation and no global default injection | `unified_overlay_preserves_claude_credentials_and_enables_discovery`, `unified_overlay_does_not_inject_a_global_effort_default` |
+| Installed-client `--effort low|high|xhigh|max` request shape | `tests/test_real_claude_unified_effort.py` (opt in with `CLUD_REAL_CLAUDE_TESTS=1`) |
+
+Gateway discovery requires Claude Code 2.1.223 or newer. For a release smoke,
+run the opt-in fixture above, then launch `clud --unified` interactively and
+verify `/model` shows the honestly labeled configured routes. Select a
+synthetic row, open `/effort`, and verify the effort control (including the
+`/model` slider where that client version exposes it) remains available after a
+model switch. Discovery metadata does not guarantee slider presentation on
+every client build; `/effort` and `--effort` remain the protocol-level controls.
 
 ## Credential commands
 
