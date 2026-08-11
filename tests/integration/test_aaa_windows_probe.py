@@ -90,7 +90,10 @@ def test_probe_demo_gfx_sixel_emits_sixel_bytes(
         f"stderr={result.stderr!r}"
     )
     assert result.stdout.startswith(b"\x1bP"), "stdout should start with Sixel DCS"
-    assert b"\x1b\\\nclud Sixel demo: hero-clud\n" in result.stdout
+    # running-process exposes line-oriented capture and therefore omits the
+    # final delimiter. The bytes before it, including the Sixel terminator and
+    # status line, are the compatibility signal this adapter can preserve.
+    assert b"\x1b\\\nclud Sixel demo: hero-clud" in result.stdout
     assert b"mock-agent" not in result.stdout
     assert result.stderr == b""
 

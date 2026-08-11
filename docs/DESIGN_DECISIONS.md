@@ -1818,3 +1818,40 @@ selection instead of re-reading settings. During the dependency-ordered #901
 burn-down, unified grammar and wire state may land before the gateway; until
 the gateway is enabled, a non-dry unified launch fails locally rather than
 silently acting like direct Claude.
+
+---
+
+## DD-042: Unified effort is the harness-resolved session value
+
+**Status:** Accepted
+
+**Context:** Issue #899. Claude Code sends the final effective effort in
+`output_config.effort`, after resolving `/effort`, `--effort`, settings,
+environment, picker controls, and request-specific overrides. The wire request
+does not identify the winning source and `/effort auto` has already been
+resolved. Claude, Codex, and DeepSeek expose different defaults and capability
+ladders, so a gateway cannot both honor the final value and silently restore a
+provider default after `/model` changes.
+
+**Decision:** Unified mode treats effort as one harness-owned session value and
+routes each request independently. It does not inject DeepSeek direct mode's
+global max overlay and does not remove an ambient
+`CLAUDE_CODE_EFFORT_LEVEL`. Native Claude receives the original Messages body.
+Codex discovery IDs resolve before the legacy `claude*` fallback and reuse the
+existing strict precedence (`@effort`, `output_config`, stated thinking budget,
+catalog default). DeepSeek receives the Anthropic effort field unchanged and
+owns its documented five-name-to-two-effective-level mapping.
+
+Provider switching also starts a new conversation route epoch. Crossing away
+from Codex discards its opaque canonical Responses state; returning to Codex
+reseeds from the complete Anthropic-visible transcript instead of appending to
+stale provider-private history. Session and subagent identities remain
+independent.
+
+**Consequences:** The same effort label can have different latency/cost effects
+on different models. Unified mode does not promise to restore Sol `low`,
+Terra/Luna `medium`, or direct DeepSeek `max` defaults after a switch because
+that source information no longer exists at the gateway. Unsupported Codex
+values fail before an upstream call, while DeepSeek-compatible or future values
+are not rejected by Codex policy. Direct Claude, Codex, Codex-via-Claude, and
+DeepSeek launch profiles are unchanged.

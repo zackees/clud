@@ -54,12 +54,13 @@ Entry and orchestration:
   for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; buffers complete
   lines across concurrent bridge workers, emits one visible truncation marker,
   and creates no file for a healthy launch.
-- `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell for
-  Codex-provider launches through Claude: ephemeral listener + per-launch
-  bearer, bounded parser/workers/timeouts, deterministic Anthropic fixture
-  routes, authenticated context compact/clear lifecycle controls, and joined
-  shutdown. Per-phase header/body deadlines and a per-frame idle timeout, with
-  chunked progressive SSE via `write_event_stream` (#627 step 1, DD-028).
+- `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell and
+  #898/#899's unified Claude/Codex/DeepSeek multiplexer: ephemeral listener +
+  per-launch bearer, provider catalog routing, strict credential isolation,
+  request-time effort mapping, route epochs, bounded parser/workers/timeouts,
+  authenticated context compact/clear lifecycle controls, and joined shutdown.
+  Per-phase header/body deadlines and a per-frame idle timeout preserve chunked
+  progressive SSE; see `docs/architecture/unified-gateway.md`.
 - `codex_model.rs` - #752's Codex compatibility view over the shared provider
   catalog: the `sol`/`terra`/`luna` aliases and per-model defaults, the
   `<model>@<effort>` parser, and the provider-neutral `Effort` ladder
@@ -114,13 +115,12 @@ Entry and orchestration:
   upstream output, evicts at bridge shutdown, and makes validated compaction
   replacement atomic; see [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
-  subprocess/PTY environment-spawn seam. It conditionally owns the #626 bridge,
-  applies child-local Claude overrides, registers launch-scoped authenticated
-  `PreCompact` and `SessionStart(clear)` HTTP hooks, and tears the listener down
-  on every runner return path. The `ANTHROPIC_CUSTOM_MODEL_OPTION*` overlay is
-  unconditional on the bridge route (#820, DD-038): the harness renders exactly
-  one custom `/model` row, so it always exists and always spells the model that
-  will be billed, even when no `--model` was passed.
+  subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
+  bridge or unified gateway, applies child-local overlays, registers
+  launch-scoped authenticated `PreCompact` and `SessionStart(clear)` HTTP hooks,
+  and tears the listener down on every runner return path. Unified mode enables
+  discovery while preserving Claude credentials and ambient session effort;
+  the direct Codex route retains #820/DD-038's one custom `/model` row.
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a

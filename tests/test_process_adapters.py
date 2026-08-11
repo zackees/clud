@@ -28,6 +28,18 @@ def test_capture_output_keeps_stdout_and_stderr_separate(adapter) -> None:
     assert result.stderr == "stderr"
 
 
+@pytest.mark.parametrize("adapter", [ci_process, test_process])
+def test_capture_output_defaults_to_bytes_like_subprocess(adapter) -> None:
+    result = adapter.run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'raw')"],
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout == b"raw"
+    assert isinstance(result.stdout, bytes)
+
+
 def test_run_supports_devnull_streams() -> None:
     result = test_process.run(
         [sys.executable, "-c", "print('discarded')"],
@@ -52,8 +64,8 @@ def test_run_supports_creationflags() -> None:
     )
 
     assert result.returncode == 0
-    assert result.stdout == "ok"
-    assert isinstance(result.stdout, str)
+    assert result.stdout == b"ok"
+    assert isinstance(result.stdout, bytes)
 
 
 def test_live_reader_returns_control_after_a_bounded_wait() -> None:

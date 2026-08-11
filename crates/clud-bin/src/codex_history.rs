@@ -19,6 +19,19 @@ use sha2::{Digest, Sha256};
 /// fallback is stable for that bridge's lifetime and is evicted at shutdown.
 pub const BRIDGE_SESSION_CONVERSATION: &str = "bridge-session";
 
+/// Provider-private transcript ownership inside a unified gateway session.
+///
+/// Claude and DeepSeek receive the caller's complete Anthropic transcript on
+/// every request. Codex additionally retains opaque Responses items, so that
+/// canonical history is valid only while consecutive requests stay on the
+/// Codex route. Crossing any provider boundary starts a new route epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationRoute {
+    Claude,
+    Codex,
+    DeepSeek,
+}
+
 /// A bounded, non-sensitive key for one Claude session and (when present) one
 /// sub-agent. Raw Claude identifiers never enter the history map or logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +208,7 @@ pub struct ConversationHistory {
     limits: HistoryLimits,
     items: Vec<StoredItem>,
     bytes: usize,
+    route: Option<ConversationRoute>,
 }
 
 #[derive(Debug)]
@@ -209,7 +223,20 @@ impl ConversationHistory {
             limits,
             items: Vec::new(),
             bytes: 0,
+            route: None,
         }
+    }
+
+    /// Enter one provider route while the conversation lock is held.
+    ///
+    /// A provider change invalidates every provider-private item from the
+    /// previous epoch. The next Codex request then reseeds from the complete
+    /// Anthropic-visible transcript supplied by Claude Code.
+    pub fn enter_route(&mut self, route: ConversationRoute) {
+        if self.route.is_some_and(|previous| previous != route) {
+            self.clear();
+        }
+        self.route = Some(route);
     }
 
     /// Clear this transcript while its conversation mutex remains held.
@@ -464,6 +491,35 @@ mod tests {
         );
         assert_eq!(history[4]["encrypted_content"], encrypted);
         assert_eq!(history[1]["id"], "msg_server_1");
+    }
+
+    #[test]
+    fn provider_boundary_starts_a_fresh_route_epoch() {
+        let store = ConversationStore::default();
+        let key = ConversationKey::from_headers(Some("session-route"), None);
+        store
+            .with_history(&key.id, |history| {
+                history.enter_route(ConversationRoute::Codex);
+                history.append_successful_turn(
+                    &[item("message", serde_json::json!({"text": "input"}))],
+                    &[item(
+                        "reasoning",
+                        serde_json::json!({"encrypted_content": "opaque"}),
+                    )],
+                )
+            })
+            .unwrap();
+        store
+            .with_history(&key.id, |history| {
+                history.enter_route(ConversationRoute::Claude);
+                assert!(history.snapshot().is_empty());
+                history.enter_route(ConversationRoute::DeepSeek);
+                assert!(history.snapshot().is_empty());
+                history.enter_route(ConversationRoute::Codex);
+                assert!(history.snapshot().is_empty());
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

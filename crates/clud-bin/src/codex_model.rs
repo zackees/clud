@@ -174,11 +174,11 @@ fn looks_like_full_id(value: &str) -> bool {
 ///    or delimited form: the binary contains exactly four names in this
 ///    family (`…_OPTION`, `…_OPTION_NAME`, `…_OPTION_DESCRIPTION`,
 ///    `…_OPTION_SUPPORTED_CAPABILITIES`), all scalars.
-/// 3. Gateway discovery (`GET /v1/models`), which needs an opt-in
-///    `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, does not run while
-///    non-essential traffic is disabled (clud forces that off), and filters
-///    the response with `/^(claude|anthropic)/i` — dropping every id the
-///    bridge serves. #820 rules it out explicitly, as does DD-035.
+/// 3. Gateway discovery (`GET /v1/models`) is a separate unified-mode surface
+///    as of #898. It needs `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`, cannot
+///    run while non-essential traffic is disabled, and requires Claude Code
+///    2.1.223+ for `clud-claude-*` IDs. It does not add rows to this direct
+///    Codex overlay, so the environment-only ceiling here remains one.
 /// 4. `additionalModelOptionsCache` in the user's global config: a cache of
 ///    Anthropic's *own* server response, refreshed behind our back. Not an
 ///    extension point.

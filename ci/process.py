@@ -10,6 +10,14 @@ from running_process import PIPE, CompletedProcess, RunningProcess
 
 def run(*args: Any, **kwargs: Any) -> CompletedProcess[Any]:
     """Run a command while preserving `subprocess.run` capture semantics."""
+    kwargs.setdefault(
+        "text",
+        bool(
+            kwargs.get("encoding") is not None
+            or kwargs.get("errors") is not None
+            or kwargs.get("universal_newlines", False)
+        ),
+    )
     if kwargs.get("capture_output"):
         # `running-process` merges stderr into stdout unless this is explicit;
         # Python's `subprocess.run(capture_output=True)` captures both streams.
