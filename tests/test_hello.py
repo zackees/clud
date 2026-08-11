@@ -598,7 +598,7 @@ def test_saved_harness_override_is_announced_once_in_green_on_tty(
         finally:
             os.close(master)
 
-    text = output.decode(errors="replace")
+    text = output.decode(errors="replace") or str(child.stdout.read())
     notice = "[clud] Harness override: Claude (global setting)"
     assert returncode == 0, text
     assert text.count(notice) == 1
@@ -648,7 +648,7 @@ def _run_on_tty(launch: Path, env: dict[str, str], cwd: Path, args: list[str]) -
     finally:
         os.close(master)
 
-    return returncode, output.decode(errors="replace")
+    return returncode, output.decode(errors="replace") or str(child.stdout.read())
 
 
 def test_plan_mode_suppression_is_announced_once_in_green_on_tty(

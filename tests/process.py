@@ -16,6 +16,7 @@ from running_process import (
     PIPE,
     STDOUT,
     CompletedProcess,
+    PseudoTerminalProcess,
     RunningProcess,
     TimeoutExpired,
     terminate_process_tree,
@@ -48,7 +49,24 @@ class _CapturedReader:
         self._stream = stream
 
     def read(self) -> str | bytes:
+        if isinstance(self._process, PseudoTerminalProcess):
+            return self._process.output_text if self._stream == "stdout" else ""
         return self._process.stdout if self._stream == "stdout" else self._process.stderr
+
+
+class _ChildStdin:
+    def __init__(self, process: RunningProcess) -> None:
+        self._process = process
+
+    def write(self, data: str | bytes) -> int:
+        self._process.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 class RunningChild:
@@ -63,18 +81,31 @@ class RunningChild:
         self.args = args
         self._text = kwargs.get("text", kwargs.get("universal_newlines", False))
         stderr = kwargs.get("stderr")
-        self._process = RunningProcess(
-            args,
-            cwd=kwargs.get("cwd"),
-            check=False,
-            shell=kwargs.get("shell", False),
-            env=kwargs.get("env"),
-            creationflags=kwargs.get("creationflags"),
-            capture=True,
-            stdin=kwargs.get("stdin"),
-            stderr=PIPE if stderr is PIPE else None,
-            text=self._text,
-        )
+        stdin = kwargs.get("stdin")
+        if isinstance(stdin, int) and stdin not in (PIPE, DEVNULL):
+            # running-process intentionally does not adopt raw PTY descriptors.
+            # Use its owned PTY instead, which still makes all child stdio a TTY.
+            self._process = PseudoTerminalProcess(
+                args,
+                cwd=kwargs.get("cwd"),
+                shell=kwargs.get("shell", False),
+                env=kwargs.get("env"),
+                capture=True,
+            )
+        else:
+            self._process = RunningProcess(
+                args,
+                cwd=kwargs.get("cwd"),
+                check=False,
+                shell=kwargs.get("shell", False),
+                env=kwargs.get("env"),
+                creationflags=kwargs.get("creationflags"),
+                capture=True,
+                stdin=stdin,
+                stderr=PIPE if stderr is PIPE else None,
+                text=self._text,
+            )
+        self.stdin = _ChildStdin(self._process) if stdin is PIPE else None
         self.stdout = _CapturedReader(self._process, "stdout")
         self.stderr = _CapturedReader(self._process, "stderr")
 
