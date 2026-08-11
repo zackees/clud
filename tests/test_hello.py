@@ -674,7 +674,7 @@ def test_plan_mode_suppression_is_announced_once_in_green_on_tty(
     home.mkdir()
     _fake_claude_on_path(fake_bin)
 
-    notice_marker = "[clud] Plan mode disabled on the Codex->Claude bridge"
+    notice_marker = "[clud] Plan mode disabled on the non-Claude bridge"
     base = [
         "--no-daemon",
         "--no-fix-hooks",
