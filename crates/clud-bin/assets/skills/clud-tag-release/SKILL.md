@@ -41,12 +41,10 @@ This skill should not implement fixes or features. If the release is blocked by 
    - `git tag -l <tag>` and `git tag -l v<tag>` are both empty (no local tag).
    - `git ls-remote --tags origin <tag>` and same with `v<tag>` are empty (no remote tag).
    - `gh api repos/<owner>/<repo>/releases/tags/<tag>` returns 404 (no published release).
-   - Last CI run on `<default>` is green: `gh run list --branch <default> --limit 1 --json conclusion,headSha`. If red or in progress, surface and ask before proceeding — don't silently ship a broken main.
 6. **Confirm with the user.** Show:
    - Tag to push: `<tag>`
    - HEAD SHA: `<sha>` (and one-line commit subject)
    - Workflow that will fire: `<release-workflow-path>`
-   - Last CI status on `<default>`: green/red/in-progress
    Wait for explicit confirmation. Don't proceed on silence.
 7. **Tag and push.**
    - `git tag -a <tag> -m "Release <version>"` — **annotated**, not lightweight, so `git describe` works downstream.
@@ -65,7 +63,6 @@ This skill should not implement fixes or features. If the release is blocked by 
 - **`git push --tags`.** Pushes every local tag, including stale ones from old branches. Push exactly the one you just created.
 - **Lightweight tag.** `git tag <tag>` (no `-a`/`-m`) creates a lightweight ref with no metadata. Use annotated tags so `git describe` and release notes have something to anchor on.
 - **Tagging from a feature branch.** Even if the commit is identical to main's HEAD, the branch context muddies the audit trail. Switch to main first.
-- **Tagging on a red main.** The auto-release workflow may publish artifacts before realizing tests are failing. Confirm the last CI on main is green; if red, ask the user before tagging.
 - **Re-pushing a deleted tag.** If a tag was previously published and then deleted, the GitHub release may still exist (just untagged). The skill checks `releases/tags/<tag>`; respect the result.
 - **Skipping the workflow detection step.** Pushing a tag with no auto-release workflow is a silent no-op — the user will think they shipped, nothing happens. Always confirm a workflow is wired up to the tag pattern.
 
