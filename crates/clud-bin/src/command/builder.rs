@@ -238,12 +238,16 @@ fn build_launch_plan_for_target_at(
     // through without validating it. An id that does not parse is left alone
     // and rejected by the bridge, which owns the error message.
     let codex_model = codex_model_selection(args, target, model_selection.as_ref());
-    let emitted_model = codex_model.clone().or_else(|| {
-        model_selection
-            .as_ref()
-            .and_then(|selection| selection.wire_model.clone())
-            .or_else(|| args.model.clone())
-    });
+    let emitted_model = if target.routing_mode == crate::backend::RoutingMode::Unified {
+        unified_gateway_model_selection(model_selection.as_ref()).or_else(|| args.model.clone())
+    } else {
+        codex_model.clone().or_else(|| {
+            model_selection
+                .as_ref()
+                .and_then(|selection| selection.wire_model.clone())
+                .or_else(|| args.model.clone())
+        })
+    };
     if let Some(emitted) = emitted_model {
         match backend {
             Backend::Claude => {
@@ -511,7 +515,9 @@ fn codex_model_selection(
     target: ResolvedLaunchTarget,
     selection: Option<&provider_catalog::ResolvedModelSelection>,
 ) -> Option<String> {
-    if target.model_provider != ModelProvider::Codex || target.effective_harness != Backend::Claude
+    if target.routing_mode != crate::backend::RoutingMode::Direct
+        || target.model_provider != ModelProvider::Codex
+        || target.effective_harness != Backend::Claude
     {
         return None;
     }
@@ -531,6 +537,25 @@ fn codex_model_selection(
     }
     let requested = args.model.as_deref()?;
     ModelSpec::parse(requested).ok().map(|spec| spec.display())
+}
+
+/// Translate a normalized initial selection into the ID Claude Code must send
+/// back to the unified discovery gateway. Provider wire IDs are not safe here:
+/// an unrecognized `gpt-*` would look like an ordinary native Claude ID and
+/// could be proxied to Anthropic.
+fn unified_gateway_model_selection(
+    selection: Option<&provider_catalog::ResolvedModelSelection>,
+) -> Option<String> {
+    let selection = selection?;
+    if selection.provider == ModelProvider::Claude {
+        return selection.wire_model.clone();
+    }
+    selection
+        .model
+        .as_deref()
+        .and_then(provider_catalog::model_by_cli_id)
+        .and_then(|model| model.discovery_id)
+        .map(str::to_string)
 }
 
 fn has_codex_project_doc_fallback_override(overrides: &[String]) -> bool {

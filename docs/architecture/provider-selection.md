@@ -2,8 +2,8 @@
 
 Issue #900 establishes one launch grammar and one model registry for direct
 Claude, Codex, and DeepSeek launches and for the unified gateway introduced by
-#898. This document owns the normalized identity and propagation contract.
-Gateway request routing is documented separately once that runtime lands.
+#898. This document owns the normalized identity and propagation contract;
+[unified-gateway.md](unified-gateway.md) owns runtime request routing.
 
 ## Vocabulary
 
@@ -37,10 +37,10 @@ permanent provider-profile selectors. `--provider` is an additive spelling for
 scripts. Newly claimed tokens belong to clud before `--` and remain literal
 harness arguments after it.
 
-Unified routing is reserved by this foundation and carried through plans and
-repeat reconstruction. Until the launch-scoped gateway exists, a non-dry
-unified launch fails locally rather than silently behaving like direct Claude;
-`--dry-run` remains available to inspect the normalized intent.
+Unified routing is carried through plans and repeat reconstruction and starts
+the launch-scoped gateway for non-dry launches. `--dry-run` remains available
+to inspect normalized intent without probing credentials, checking the Claude
+Code discovery version, or starting the gateway.
 
 ## Three model identifiers
 
@@ -53,9 +53,8 @@ unified launch fails locally rather than silently behaving like direct Claude;
 | Provider wire ID | `gpt-5.6-terra` |
 
 The catalog also owns display names, compatibility aliases, effort/context
-capabilities, and reviewed defaults. Direct launch parsing and the future
-gateway must consume these rows instead of maintaining parallel provider
-tables.
+capabilities, and reviewed defaults. Direct launch parsing and the gateway
+consume these rows instead of maintaining parallel provider tables.
 
 All three registered namespaces resolve through the same rows. Unknown custom
 wire IDs remain reachable under an already resolved provider. The typed

@@ -4,6 +4,12 @@
 Claude Code child. It is foreground-owned and is shut down with that child; it
 is neither a sidecar nor a daemon.
 
+Unified is an explicit routing mode, not a provider. It always uses the Claude
+harness, rejects an explicit Codex harness before bootstrap, and requires
+Claude Code 2.1.223 or newer. Older clients are rejected with their installed
+version and the `claude update` remedy before the gateway or a paid request is
+started.
+
 ## Discovery and authentication
 
 The child receives a loopback `ANTHROPIC_BASE_URL`,
@@ -16,7 +22,8 @@ Claude credentials remain owned by Claude Code: clud preserves its incoming
 `Authorization`/`x-api-key` headers only on the native Claude route. The
 Codex route constructs its own OpenAI request through the existing translator;
 DeepSeek receives only the key from clud's native credential vault. Missing
-optional credentials omit only their discovery rows.
+optional credentials omit only their discovery rows and produce one sanitized,
+actionable startup notice; native Claude remains usable.
 
 ## Routing
 
@@ -36,6 +43,13 @@ complete Anthropic-visible transcript in the request. Opaque reasoning,
 signatures, cache identifiers, and tool identifiers are never reused across
 providers. Switching among Codex models can retain the current Codex epoch.
 `/clear`, eviction, and gateway shutdown remove both transcript and route state.
+
+`POST /v1/messages/count_tokens` is proxied for ordinary native Claude model
+IDs. Synthetic Codex and DeepSeek routes return an explicit local 404 because
+their upstream token-count contracts are not Anthropic-compatible; Claude Code
+falls back to its documented local estimation. Streaming message responses
+remain progressive; the proxy never buffers a complete upstream stream before
+returning it.
 
 ## Session-wide effort
 
@@ -71,7 +85,10 @@ content, response bodies, or provider-private state.
 | Every Codex discovery model and accepted effort; suffix/budget/default precedence; local rejection | `unified_codex_models_and_efforts_reach_the_exact_responses_fields` |
 | Both DeepSeek models, documented effective mapping, future provider value passthrough | `unified_deepseek_preserves_effort_for_both_models_without_codex_validation` |
 | Claude -> Codex -> DeepSeek -> Claude switching, Codex reseed, child override isolation | `unified_provider_switch_reseeds_codex_and_keeps_main_and_agent_efforts_independent` |
+| Every discovery ID routes to exactly its upstream with per-provider credential isolation | `unified_routes_all_five_ids_with_provider_credential_isolation` |
+| Native token counting proxied with Claude auth; synthetic routes 404; unknown reserved IDs fail locally | `unified_native_count_tokens_is_proxied_with_claude_auth` |
 | Ambient effort preservation and no global default injection | `unified_overlay_preserves_claude_credentials_and_enables_discovery`, `unified_overlay_does_not_inject_a_global_effort_default` |
+| Missing optional credentials emit one sanitized, actionable notice | `unified_missing_provider_notices_are_sanitized_and_actionable` |
 | Installed-client `--effort low|high|xhigh|max` request shape | `tests/test_real_claude_unified_effort.py` (opt in with `CLUD_REAL_CLAUDE_TESTS=1`) |
 
 Gateway discovery requires Claude Code 2.1.223 or newer. For a release smoke,
@@ -82,6 +99,11 @@ synthetic row, open `/effort`, and verify the effort control (including the
 model switch. Discovery metadata does not guarantee slider presentation on
 every client build; `/effort` and `--effort` remain the protocol-level controls.
 
+The advertised DeepSeek Pro row maps to the reviewed
+`deepseek-v4-pro[1m]` wire ID. Unified mode does not install direct DeepSeek's
+global max-effort/1m overlay and does not suppress Claude plan mode for Codex;
+Claude Code remains the per-turn policy owner.
+
 ## Credential commands
 
 Credential management uses `clud auth login <provider>`, `clud auth status
@@ -89,3 +111,11 @@ Credential management uses `clud auth login <provider>`, `clud auth status
 `deepseek-auth` remain hidden aliases for this major version and print their
 exact replacement. Claude status is reported as externally managed; clud never
 copies, refreshes, or deletes Claude credentials.
+
+## Validation boundary
+
+Focused protocol tests select every advertised synthetic ID against separate
+Claude, Codex, and DeepSeek canary upstreams, assert the exact wire model and
+credential boundary, exercise native token counting, reject unknown reserved
+IDs before any upstream request, and switch Claude -> Codex -> DeepSeek ->
+Claude in one conversation before verifying Codex is freshly seeded.

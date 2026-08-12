@@ -9,6 +9,11 @@ binaries, and is distributed as a Python wheel via maturin with
 The crate also exposes a `clud` library target (`src/lib.rs`) so integration
 tests can exercise internals directly.
 
+Provider and harness identity is documented in
+[`docs/architecture/provider-selection.md`](../../docs/architecture/provider-selection.md).
+The launch-scoped `clud --unified` routing and credential boundary lives in
+[`docs/architecture/unified-gateway.md`](../../docs/architecture/unified-gateway.md).
+
 ## Layout
 
 - [`src/`](src/README.md) — binary entry point, library modules, platform code

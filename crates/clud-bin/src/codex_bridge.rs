@@ -735,13 +735,41 @@ fn handle_connection(
             let _ = write_response(&mut stream, 200, "application/json", b"", true);
         }
         ("POST", "/v1/messages/count_tokens") => {
-            record_rejection(log, 404, "token_counting_unsupported");
-            let _ = write_response(
+            if !matches!(config.gateway_mode, GatewayMode::Unified(_)) {
+                record_rejection(log, 404, "token_counting_unsupported");
+                let _ = write_response(
+                    &mut stream,
+                    404,
+                    "application/json",
+                    br#"{"error":{"type":"not_found_error","message":"token counting is not supported by the Codex bridge"}}"#,
+                    false,
+                );
+                return;
+            }
+            let body_deadline = Instant::now() + config.body_timeout;
+            let body = match read_body(
                 &mut stream,
-                404,
-                "application/json",
-                br#"{"error":{"type":"not_found_error","message":"token counting is not supported by the Codex bridge"}}"#,
-                false,
+                parsed.body_prefix,
+                parsed.content_length,
+                body_deadline,
+                shutdown,
+            ) {
+                Ok(body) => body,
+                Err(ABANDON) => return,
+                Err(status) => {
+                    record_rejection(log, status, "request_body");
+                    let _ = write_error(&mut stream, status);
+                    return;
+                }
+            };
+            serve_unified_count_tokens(
+                &mut stream,
+                config,
+                shutdown,
+                conversations,
+                &body,
+                &conversation_key,
+                &parsed.headers,
             );
         }
         ("POST", "/v1/messages") => {
@@ -1054,10 +1082,12 @@ fn serve_unified_messages(
             conversation_key,
             ConversationRoute::Claude,
             &unified.anthropic_base_url,
+            "/v1/messages",
             body,
             headers,
             None,
             config.stream_idle_timeout,
+            shutdown,
         );
         return;
     };
@@ -1090,10 +1120,12 @@ fn serve_unified_messages(
                 conversation_key,
                 ConversationRoute::DeepSeek,
                 &unified.deepseek_base_url,
+                "/v1/messages",
                 &rewritten,
                 headers,
                 unified.deepseek_api_key.as_deref(),
                 config.stream_idle_timeout,
+                shutdown,
             );
         }
         _ => {
@@ -1119,20 +1151,26 @@ fn serve_unified_anthropic_proxy(
     conversation_key: &ConversationKey,
     route: ConversationRoute,
     base_url: &str,
+    path: &str,
     body: &[u8],
     headers: &[(String, String)],
     injected_api_key: Option<&str>,
     idle_timeout: Duration,
+    shutdown: &AtomicBool,
 ) {
     let routed = conversations.with_history(&conversation_key.id, |history| {
         history.enter_route(route);
         serve_anthropic_proxy(
             stream,
-            base_url,
+            AnthropicProxyTarget {
+                base_url,
+                path,
+                injected_api_key,
+            },
             body,
             headers,
-            injected_api_key,
             idle_timeout,
+            shutdown,
         );
         Ok(())
     });
@@ -1142,6 +1180,58 @@ fn serve_unified_anthropic_proxy(
         ));
         let _ = write_pipeline_error(stream, &failure, None);
     }
+}
+
+/// Unified token counting has one Anthropic-compatible contract: ordinary
+/// Claude model IDs proxy upstream, while synthetic provider routes return an
+/// explicit 404 so Claude Code falls back to its documented local estimation.
+#[allow(clippy::too_many_arguments)]
+fn serve_unified_count_tokens(
+    stream: &mut TcpStream,
+    config: &BridgeConfig,
+    shutdown: &AtomicBool,
+    conversations: &ConversationStore,
+    body: &[u8],
+    conversation_key: &ConversationKey,
+    headers: &[(String, String)],
+) {
+    let GatewayMode::Unified(unified) = &config.gateway_mode else {
+        unreachable!("unified token-count dispatch is guarded by the caller");
+    };
+    let request: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(_) => {
+            let _ = write_error(stream, 400);
+            return;
+        }
+    };
+    let Some(model) = request.get("model").and_then(serde_json::Value::as_str) else {
+        let _ = write_error(stream, 400);
+        return;
+    };
+    let catalog = provider_catalog::model_by_discovery_id(model);
+    if model.starts_with("clud-claude-") && catalog.is_none() {
+        let _ = write_error(stream, 400);
+        return;
+    }
+    if catalog.is_some() {
+        let response = br#"{"error":{"type":"not_found_error","message":"token counting is not supported for this unified provider route"}}"#;
+        let _ = write_response(stream, 404, "application/json", response, false);
+        return;
+    }
+    serve_unified_anthropic_proxy(
+        stream,
+        conversations,
+        conversation_key,
+        ConversationRoute::Claude,
+        &unified.anthropic_base_url,
+        "/v1/messages/count_tokens",
+        body,
+        headers,
+        None,
+        config.stream_idle_timeout,
+        shutdown,
+    );
 }
 
 fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
@@ -1159,16 +1249,26 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
 /// Proxy an Anthropic-compatible Messages response without buffering its body.
 /// The caller's Claude credential is retained only for native Claude requests;
 /// DeepSeek injects its vault credential and never receives caller credentials.
+struct AnthropicProxyTarget<'a> {
+    base_url: &'a str,
+    path: &'a str,
+    injected_api_key: Option<&'a str>,
+}
+
 fn serve_anthropic_proxy(
     stream: &mut TcpStream,
-    base_url: &str,
+    target: AnthropicProxyTarget<'_>,
     body: &[u8],
     headers: &[(String, String)],
-    injected_api_key: Option<&str>,
     idle_timeout: Duration,
+    shutdown: &AtomicBool,
 ) {
-    let mut request = ureq::post(&format!("{}/v1/messages", base_url.trim_end_matches('/')))
-        .set("Content-Type", "application/json");
+    let mut request = ureq::post(&format!(
+        "{}{}",
+        target.base_url.trim_end_matches('/'),
+        target.path
+    ))
+    .set("Content-Type", "application/json");
     for (name, value) in headers {
         let forwarded = name.eq_ignore_ascii_case("authorization")
             || name.eq_ignore_ascii_case("x-api-key")
@@ -1179,11 +1279,13 @@ fn serve_anthropic_proxy(
             || name.eq_ignore_ascii_case("connection")
             || name.eq_ignore_ascii_case("content-length")
             || name.eq_ignore_ascii_case(UNIFIED_GATEWAY_TOKEN_HEADER);
-        if forwarded && !hop_by_hop && injected_api_key.is_none() {
+        let caller_credential =
+            name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key");
+        if forwarded && !hop_by_hop && (target.injected_api_key.is_none() || !caller_credential) {
             request = request.set(name, value);
         }
     }
-    if let Some(api_key) = injected_api_key {
+    if let Some(api_key) = target.injected_api_key {
         request = request.set("Authorization", &format!("Bearer {api_key}"));
     }
     let response = match request.timeout(idle_timeout).send_bytes(body) {
@@ -1224,6 +1326,9 @@ fn serve_anthropic_proxy(
     }
     let mut chunk = [0_u8; 8192];
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
         match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(count) => {
@@ -2608,23 +2713,363 @@ Connection: close
             ),
         );
         assert_eq!(status(&response), 200, "{response}");
-        for id in [
+        let catalog: serde_json::Value = serde_json::from_str(
+            response
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("catalog response body"),
+        )
+        .unwrap();
+        let rows = catalog["data"].as_array().unwrap();
+        let ids = rows
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "clud-claude-codex-sol",
+                "clud-claude-codex-terra",
+                "clud-claude-codex-luna",
+                "clud-claude-deepseek-v4-pro-0813",
+                "clud-claude-deepseek-v4-flash",
+            ],
+            "catalog ordering is part of the picker contract"
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["display_name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "Codex Sol (OpenAI)",
+                "Codex Terra (OpenAI)",
+                "Codex Luna (OpenAI)",
+                "DeepSeek V4 Pro 0813",
+                "DeepSeek V4 Flash",
+            ]
+        );
+        for secret in [bridge.bearer_token(), "deepseek-test-secret"] {
+            assert!(!format!("{bridge:?}").contains(secret));
+            assert!(!response.contains(secret));
+        }
+
+        let unavailable = BridgeHandle::start(
+            BridgeConfig::default().with_unified_gateway(UnifiedGatewayConfig::new(None, false)),
+        )
+        .unwrap();
+        let response = request(
+            unavailable.socket_addr(),
+            &authorized_with_headers(
+                "GET",
+                "/v1/models?limit=1000",
+                "native-claude-credential",
+                "",
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, unavailable.bearer_token())],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains(r#""data":[]"#), "{response}");
+    }
+
+    fn unified_message_request(
+        bridge: &BridgeHandle,
+        model: &str,
+        session_id: &str,
+        caller_credential: &str,
+    ) -> String {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": format!("route {model}")}],
+            "stream": false,
+        })
+        .to_string();
+        authorized_with_headers(
+            "POST",
+            "/v1/messages",
+            caller_credential,
+            &body,
+            &[
+                (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+                ("X-Claude-Code-Session-Id", session_id),
+                ("X-Api-Key", "native-claude-api-key"),
+                ("Anthropic-Version", "2023-06-01"),
+                ("Anthropic-Beta", "context-1m-2025-08-07"),
+            ],
+        )
+    }
+
+    #[test]
+    fn unified_routes_all_five_ids_with_provider_credential_isolation() {
+        let codex = FakeResponses::start();
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let config = BridgeConfig::default()
+            .with_test_upstream_url(Some(codex.base_url.clone()))
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), true)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+            );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        let native = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "claude-opus-4-1",
+                "unified-native",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&native), 200, "{native}");
+
+        for model in [
             "clud-claude-codex-sol",
             "clud-claude-codex-terra",
             "clud-claude-codex-luna",
             "clud-claude-deepseek-v4-pro-0813",
             "clud-claude-deepseek-v4-flash",
         ] {
-            assert!(response.contains(id), "catalog is missing {id}: {response}");
+            let response = request(
+                bridge.socket_addr(),
+                &unified_message_request(
+                    &bridge,
+                    model,
+                    "unified-synthetic",
+                    "native-claude-oauth-canary",
+                ),
+            );
+            assert_eq!(status(&response), 200, "{model}: {response}");
         }
-        assert!(
-            response.contains("DeepSeek V4 Pro 0813"),
-            "catalog must expose the served DeepSeek checkpoint: {response}"
+
+        let claude_request = claude.requests().pop().unwrap();
+        assert!(claude_request.starts_with("POST /v1/messages "));
+        assert!(claude_request.contains("claude-opus-4-1"));
+        assert!(claude_request.contains("Bearer native-claude-oauth-canary"));
+        assert!(claude_request.contains("native-claude-api-key"));
+        assert!(claude_request.contains("Anthropic-Beta: context-1m-2025-08-07"));
+        assert!(!claude_request.contains(bridge.bearer_token()));
+        assert!(!claude_request.contains("deepseek-vault-canary"));
+        assert!(!claude_request.contains("clud-test-upstream-key"));
+
+        let codex_requests = codex.requests();
+        assert_eq!(codex_requests.len(), 3);
+        for (raw, wire_id) in
+            codex_requests
+                .iter()
+                .zip(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+        {
+            assert!(raw.starts_with("POST /v1/responses "));
+            assert!(raw.contains(wire_id), "{raw}");
+            assert!(raw.contains("Bearer clud-test-upstream-key"));
+            for forbidden in [
+                bridge.bearer_token(),
+                "native-claude-oauth-canary",
+                "native-claude-api-key",
+                "deepseek-vault-canary",
+            ] {
+                assert!(!raw.contains(forbidden), "Codex leaked {forbidden}: {raw}");
+            }
+        }
+
+        let deepseek_requests = deepseek.requests();
+        assert_eq!(deepseek_requests.len(), 2);
+        for (raw, wire_id) in deepseek_requests
+            .iter()
+            .zip(["deepseek-v4-pro[1m]", "deepseek-v4-flash"])
+        {
+            assert!(raw.starts_with("POST /v1/messages "));
+            assert!(raw.contains(wire_id), "{raw}");
+            assert!(raw.contains("Bearer deepseek-vault-canary"));
+            assert!(raw.contains("Anthropic-Version: 2023-06-01"));
+            assert!(raw.contains("Anthropic-Beta: context-1m-2025-08-07"));
+            for forbidden in [
+                bridge.bearer_token(),
+                "native-claude-oauth-canary",
+                "native-claude-api-key",
+                "clud-test-upstream-key",
+            ] {
+                assert!(
+                    !raw.contains(forbidden),
+                    "DeepSeek leaked {forbidden}: {raw}"
+                );
+            }
+        }
+
+        let before = codex.requests().len() + claude.requests().len() + deepseek.requests().len();
+        let unknown = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "clud-claude-unknown",
+                "unified-unknown",
+                "native-claude-oauth-canary",
+            ),
         );
-        for secret in [bridge.bearer_token(), "deepseek-test-secret"] {
-            assert!(!format!("{bridge:?}").contains(secret));
-            assert!(!response.contains(secret));
-        }
+        assert_eq!(status(&unknown), 400, "{unknown}");
+        assert_eq!(
+            codex.requests().len() + claude.requests().len() + deepseek.requests().len(),
+            before,
+            "reserved unknown IDs must fail before any upstream request"
+        );
+    }
+
+    #[test]
+    fn unified_native_count_tokens_is_proxied_with_claude_auth() {
+        let body = r#"{"input_tokens":7}"#;
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let claude = FakeResponses::start_with_response(Some(reply));
+        let other = FakeResponses::start();
+        let config = BridgeConfig::default().with_unified_gateway(
+            UnifiedGatewayConfig::new(None, false)
+                .with_upstreams(claude.base_url.clone(), other.base_url.clone()),
+        );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let request_body =
+            r#"{"model":"claude-opus-4-1","messages":[{"role":"user","content":"measure"}]}"#;
+        let response = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages/count_tokens",
+                "native-count-token-canary",
+                request_body,
+                &[
+                    (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+                    ("Anthropic-Version", "2023-06-01"),
+                ],
+            ),
+        );
+        assert_eq!(status(&response), 200, "{response}");
+        assert!(response.contains(r#"{"input_tokens":7}"#));
+        let upstream = claude.requests().pop().unwrap();
+        assert!(upstream.starts_with("POST /v1/messages/count_tokens "));
+        assert!(upstream.contains("Bearer native-count-token-canary"));
+        assert!(!upstream.contains(bridge.bearer_token()));
+
+        let synthetic = serde_json::json!({
+            "model": "clud-claude-codex-sol",
+            "messages": [{"role": "user", "content": "measure"}],
+        })
+        .to_string();
+        let unsupported = request(
+            bridge.socket_addr(),
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages/count_tokens",
+                "native-count-token-canary",
+                &synthetic,
+                &[(UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token())],
+            ),
+        );
+        assert_eq!(status(&unsupported), 404, "{unsupported}");
+    }
+
+    #[test]
+    fn unified_provider_switches_reseed_codex_without_private_output_items() {
+        let codex =
+            FakeResponses::start_with_responses(vec![Some(recovery_success_response()), None]);
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let config = BridgeConfig::default()
+            .with_test_upstream_url(Some(codex.base_url.clone()))
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-route-key".to_string()), true)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+            );
+        let bridge = BridgeHandle::start(config).unwrap();
+        let session = "provider-switch-session";
+        let turn = |model: &str, messages: serde_json::Value| {
+            let body = serde_json::json!({
+                "model": model,
+                "messages": messages,
+                "stream": false,
+            })
+            .to_string();
+            request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages",
+                    "native-route-credential",
+                    &body,
+                    &[
+                        (UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token()),
+                        ("X-Claude-Code-Session-Id", session),
+                        ("Anthropic-Version", "2023-06-01"),
+                    ],
+                ),
+            )
+        };
+
+        let first_claude = turn(
+            "claude-opus-4-1",
+            serde_json::json!([{"role": "user", "content": "first claude prompt"}]),
+        );
+        assert_eq!(status(&first_claude), 200, "{first_claude}");
+        let first_codex = turn(
+            "clud-claude-codex-sol",
+            serde_json::json!([
+                {"role": "user", "content": "first claude prompt"},
+                {"role": "assistant", "content": "first claude visible answer"},
+                {"role": "user", "content": "first codex prompt"}
+            ]),
+        );
+        assert_eq!(status(&first_codex), 200, "{first_codex}");
+        let switched_deepseek = turn(
+            "clud-claude-deepseek-v4-flash",
+            serde_json::json!([
+                {"role": "user", "content": "first claude prompt"},
+                {"role": "assistant", "content": "first claude visible answer"},
+                {"role": "user", "content": "first codex prompt"},
+                {"role": "assistant", "content": "recovered"},
+                {"role": "user", "content": "deepseek prompt"}
+            ]),
+        );
+        assert_eq!(status(&switched_deepseek), 200, "{switched_deepseek}");
+        let switched_claude = turn(
+            "claude-opus-4-1",
+            serde_json::json!([
+                {"role": "user", "content": "first claude prompt"},
+                {"role": "assistant", "content": "first claude visible answer"},
+                {"role": "user", "content": "first codex prompt"},
+                {"role": "assistant", "content": "recovered"},
+                {"role": "user", "content": "deepseek prompt"},
+                {"role": "assistant", "content": "deepseek visible answer"},
+                {"role": "user", "content": "second claude prompt"}
+            ]),
+        );
+        assert_eq!(status(&switched_claude), 200, "{switched_claude}");
+        let final_codex = turn(
+            "clud-claude-codex-terra",
+            serde_json::json!([
+                {"role": "user", "content": "first claude prompt"},
+                {"role": "assistant", "content": "first claude visible answer"},
+                {"role": "user", "content": "first codex prompt"},
+                {"role": "assistant", "content": "recovered"},
+                {"role": "user", "content": "deepseek prompt"},
+                {"role": "assistant", "content": "deepseek visible answer"},
+                {"role": "user", "content": "second claude prompt"},
+                {"role": "assistant", "content": "second claude visible answer"},
+                {"role": "user", "content": "final codex prompt"}
+            ]),
+        );
+        assert_eq!(status(&final_codex), 200, "{final_codex}");
+
+        let requests = codex.requests();
+        assert_eq!(requests.len(), 2);
+        let final_request = &requests[1];
+        assert!(final_request.contains("first claude prompt"));
+        assert!(final_request.contains("deepseek visible answer"));
+        assert!(final_request.contains("second claude visible answer"));
+        assert!(final_request.contains("final codex prompt"));
+        assert!(
+            !final_request.contains("msg_recovered"),
+            "provider-private Codex output IDs crossed a route epoch: {final_request}"
+        );
     }
 
     #[test]

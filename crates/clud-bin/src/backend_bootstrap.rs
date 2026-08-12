@@ -24,6 +24,25 @@ const CODEX_POSIX_INSTALL_COMMAND: &str = "curl -fsSL https://chatgpt.com/codex/
 const CODEX_WINDOWS_POWERSHELL_INSTALL_COMMAND: &str =
     "irm https://chatgpt.com/codex/install.ps1 | iex";
 
+const MIN_UNIFIED_CLAUDE_CODE_VERSION: ClaudeCodeVersion = ClaudeCodeVersion {
+    major: 2,
+    minor: 1,
+    patch: 223,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ClaudeCodeVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl fmt::Display for ClaudeCodeVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPlatform {
     MacOs,
@@ -507,6 +526,54 @@ fn verify_backend(_backend: Backend, path: &Path) -> Result<(), String> {
     }
 }
 
+/// Unified model discovery accepts clud's synthetic IDs only in Claude Code
+/// 2.1.223 and newer. Probe the executable selected by bootstrap so a stale
+/// client fails before the launch-scoped gateway or any paid request starts.
+pub fn require_unified_claude_version(path: &Path) -> Result<ClaudeCodeVersion, String> {
+    let command = vec![path.to_string_lossy().to_string(), "--version".to_string()];
+    let (exit_code, output) = run_captured_command(command).map_err(|error| {
+        format!(
+            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but the installed client version could not be checked: {error}"
+        )
+    })?;
+    if exit_code != 0 {
+        return Err(format!(
+            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but the installed client's --version command exited with {exit_code}"
+        ));
+    }
+    validate_unified_claude_version_output(&output)
+}
+
+fn validate_unified_claude_version_output(output: &str) -> Result<ClaudeCodeVersion, String> {
+    let installed = parse_claude_code_version(output).ok_or_else(|| {
+        format!(
+            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}, but no installed version could be parsed from `claude --version`"
+        )
+    })?;
+    if installed < MIN_UNIFIED_CLAUDE_CODE_VERSION {
+        return Err(format!(
+            "unified routing requires Claude Code >= {MIN_UNIFIED_CLAUDE_CODE_VERSION}; installed version is {installed}. Run `claude update` and retry"
+        ));
+    }
+    Ok(installed)
+}
+
+fn parse_claude_code_version(output: &str) -> Option<ClaudeCodeVersion> {
+    output
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .find_map(|candidate| {
+            let mut parts = candidate.split('.');
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next()?.parse().ok()?;
+            let patch = parts.next()?.parse().ok()?;
+            Some(ClaudeCodeVersion {
+                major,
+                minor,
+                patch,
+            })
+        })
+}
+
 fn run_captured_command(command: Vec<String>) -> Result<(i32, String), String> {
     let process = subprocess::ManagedSubprocess::start_inheriting_env(
         command,
@@ -543,6 +610,34 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io;
+
+    #[test]
+    fn unified_claude_version_parser_accepts_supported_output_shapes() {
+        assert_eq!(
+            parse_claude_code_version("2.1.223 (Claude Code)"),
+            Some(MIN_UNIFIED_CLAUDE_CODE_VERSION)
+        );
+        assert_eq!(
+            parse_claude_code_version("Claude Code v2.2.0\n"),
+            Some(ClaudeCodeVersion {
+                major: 2,
+                minor: 2,
+                patch: 0,
+            })
+        );
+        assert_eq!(parse_claude_code_version("Claude Code unknown"), None);
+    }
+
+    #[test]
+    fn unified_claude_version_floor_rejects_every_older_discovery_build() {
+        let error = validate_unified_claude_version_output("2.1.222").unwrap_err();
+        assert!(error.contains("installed version is 2.1.222"), "{error}");
+        assert!(error.contains("claude update"), "{error}");
+        assert_eq!(
+            validate_unified_claude_version_output("2.1.223").unwrap(),
+            MIN_UNIFIED_CLAUDE_CODE_VERSION
+        );
+    }
 
     struct MockHost {
         platform: InstallPlatform,
