@@ -479,7 +479,9 @@ reads it from the vault a second time — directly in the process that is
 about to spawn the child, foreground or worker — and builds a DeepSeek-only
 overlay for the Claude child: the documented Anthropic-compatible endpoint,
 auth token, and the resolved model, effort, and context profile. The reviewed
-default remains `deepseek-v4-pro[1m]` with max effort; explicit Pro/Flash and
+default remains the stable `deepseek-v4-pro[1m]` alias with max effort. As of
+2026-08-12, DeepSeek's live Models & Pricing page identifies that alias as
+`DeepSeek-V4-Pro-0813`; the API slug did not change. Explicit Pro/Flash and
 auto/1m selections are applied as documented in
 [provider selection](provider-selection.md). The 1m compaction threshold is
 emitted only for a 1m wire profile. Every conflicting inherited Anthropic/profile

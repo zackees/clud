@@ -70,6 +70,13 @@ Known compatibility spellings normalize immediately:
 - `deepseek-v4-pro[1m]` -> model `deepseek-v4-pro`, context window `1m`;
 - `opus` -> model `claude-opus`, wire alias `opus`.
 
+DeepSeek upgrades its stable API aliases in place. As of 2026-08-12,
+DeepSeek's live Models & Pricing page identifies the stable alias as
+`DeepSeek-V4-Pro-0813`; it continues to use `deepseek-v4-pro` (or
+`deepseek-v4-pro[1m]` for Claude Code), rather than a version-suffixed API
+model ID. The catalog display name records the served checkpoint while the
+wire ID stays on DeepSeek's documented stable alias.
+
 An unknown future `gpt-*` wire ID remains directly reachable for backwards
 compatibility. Its normalized selection records Codex as the provider while
 the model and wire values remain byte-for-byte (for example,
