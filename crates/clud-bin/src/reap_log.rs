@@ -432,8 +432,7 @@ pub fn session_reap_log_path(
     session_pid: u32,
     session_start_epoch: u64,
 ) -> PathBuf {
-    state_dir
-        .join("sessions")
+    crate::bridge_log::forensic_sessions_dir(state_dir)
         .join(format!("{session_pid}__{session_start_epoch}"))
         .join("reap.jsonl")
 }
@@ -758,9 +757,9 @@ mod tests {
     }
 
     #[test]
-    fn the_log_lives_beside_the_sessions_other_artifacts() {
+    fn unit_test_reap_log_is_isolated_from_production_sessions() {
         let path = session_reap_log_path(Path::new("/state"), 47180, 1_700_000_000);
-        assert!(path.ends_with("sessions/47180__1700000000/reap.jsonl"));
+        assert!(path.ends_with("test-sessions/47180__1700000000/reap.jsonl"));
     }
 
     #[test]

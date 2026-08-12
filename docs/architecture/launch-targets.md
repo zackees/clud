@@ -314,6 +314,9 @@ scrubbed detail); request/response bodies, credentials, bearers, authorization
 headers, and upstream URLs are never inputs to the logger. A healthy launch
 creates no file. On shutdown, a launch that recorded failures prints the path.
 `CLUD_CODEX_BRIDGE_DEBUG=1` remains the richer interactive stderr tier.
+Unit-test builds and processes marked `CLUD_INTEGRATION_TESTS=1` use the sibling
+`~/.clud/state/test-sessions/` tree so synthetic failures never enter the
+production log inventory.
 
 Once `EventStreamWriter` has flushed a frame the response is committed, so a
 later failure is reported in-band as a sanitized SSE `error` event and the

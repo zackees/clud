@@ -271,7 +271,9 @@ as fixed while the same symptom kept growing. `reap_log.rs` provides:
   of their own), and nothing at all is written for a pass that changed nothing.
   Every recorded decision includes timestamp, PID, executable, immediate parent,
   rule/reason, action, and phase so a later incident can be attributed without
-  inferring process lineage from a partial UI state (#773).
+  inferring process lineage from a partial UI state (#773). Unit tests and
+  processes marked `CLUD_INTEGRATION_TESTS=1` write the same layout beneath
+  `~/.clud/state/test-sessions/`, isolated from production diagnostics.
 
 **Metadata misses go to the session log, never the shared one.** A job
 notification for a PID Toolhelp could not resolve before it exited is *expected*

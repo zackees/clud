@@ -46,6 +46,14 @@ def test_the_installed_wheel_is_opt_in() -> None:
     assert ci_test._use_installed_clud(["--use-installed-clud"])
 
 
+def test_test_process_env_is_marked_without_mutating_the_source() -> None:
+    source = {"EXISTING": "value"}
+    marked = ci_test._marked_test_env(source)
+
+    assert source == {"EXISTING": "value"}
+    assert marked == {"EXISTING": "value", "CLUD_INTEGRATION_TESTS": "1"}
+
+
 def test_prepare_pytest_binaries_reuses_installed_clud(monkeypatch, tmp_path) -> None:
     target_dir = tmp_path / "target" / "debug"
     target_dir.mkdir(parents=True)

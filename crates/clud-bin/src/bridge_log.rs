@@ -3,7 +3,10 @@
 //! Only failures and retry decisions are recorded. Request/response bodies,
 //! credentials, bearer tokens, and upstream URLs are deliberately absent from
 //! this API so callers cannot persist them accidentally.
+//! Unit tests and binaries marked with `CLUD_INTEGRATION_TESTS=1` write under
+//! `test-sessions/`, keeping fixture failures out of production diagnostics.
 
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,6 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const FLUSH_LINES: usize = 64;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
+const INTEGRATION_TESTS_ENV: &str = "CLUD_INTEGRATION_TESTS";
+const PRODUCTION_SESSIONS_DIR: &str = "sessions";
+const TEST_SESSIONS_DIR: &str = "test-sessions";
 
 #[derive(Debug)]
 pub struct BridgeLog {
@@ -123,10 +129,34 @@ pub fn session_bridge_log_path(
     session_pid: u32,
     session_start_epoch: u64,
 ) -> PathBuf {
-    state_dir
-        .join("sessions")
+    forensic_sessions_dir(state_dir)
         .join(format!("{session_pid}__{session_start_epoch}"))
         .join("bridge.jsonl")
+}
+
+/// Root for foreground forensic logs. Test-mode processes use a sibling tree
+/// so their synthetic failures cannot be mistaken for production incidents.
+pub fn forensic_sessions_dir(state_dir: &Path) -> PathBuf {
+    forensic_sessions_dir_for_mode(state_dir, test_log_mode())
+}
+
+fn test_log_mode() -> bool {
+    test_log_mode_from(
+        cfg!(test),
+        std::env::var_os(INTEGRATION_TESTS_ENV).as_deref(),
+    )
+}
+
+fn test_log_mode_from(test_build: bool, integration_tests: Option<&OsStr>) -> bool {
+    test_build || integration_tests.is_some_and(|value| value == "1")
+}
+
+fn forensic_sessions_dir_for_mode(state_dir: &Path, test_mode: bool) -> PathBuf {
+    state_dir.join(if test_mode {
+        TEST_SESSIONS_DIR
+    } else {
+        PRODUCTION_SESSIONS_DIR
+    })
 }
 
 pub fn unix_ms() -> u64 {
@@ -196,13 +226,34 @@ mod tests {
     }
 
     #[test]
-    fn path_matches_other_session_artifacts() {
+    fn unit_test_log_path_is_isolated_from_production_sessions() {
         assert_eq!(
             session_bridge_log_path(Path::new("/state"), 42, 1700000000),
             Path::new("/state")
-                .join("sessions")
+                .join("test-sessions")
                 .join("42__1700000000")
                 .join("bridge.jsonl")
         );
+    }
+
+    #[test]
+    fn production_and_test_forensic_roots_are_disjoint() {
+        let state = Path::new("/state");
+        assert_eq!(
+            forensic_sessions_dir_for_mode(state, false),
+            state.join("sessions")
+        );
+        assert_eq!(
+            forensic_sessions_dir_for_mode(state, true),
+            state.join("test-sessions")
+        );
+    }
+
+    #[test]
+    fn integration_test_marker_selects_the_test_log_tree() {
+        assert!(!test_log_mode_from(false, None));
+        assert!(!test_log_mode_from(false, Some(OsStr::new("0"))));
+        assert!(test_log_mode_from(false, Some(OsStr::new("1"))));
+        assert!(test_log_mode_from(true, None));
     }
 }

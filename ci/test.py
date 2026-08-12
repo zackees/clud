@@ -148,6 +148,13 @@ def _prepare_pytest_binaries(
     return pytest_env
 
 
+def _marked_test_env(env: dict[str, str]) -> dict[str, str]:
+    """Mark spawned clud binaries so their forensic logs stay test-only."""
+    marked = env.copy()
+    marked["CLUD_INTEGRATION_TESTS"] = "1"
+    return marked
+
+
 def main(argv: list[str] | None = None) -> int:
     from ci.env import activate, clean_env
 
@@ -170,12 +177,23 @@ def main(argv: list[str] | None = None) -> int:
     if pytest_env is None:
         return 1
     if run_unit:
-        if run(_cargo(["test", "--workspace", "--no-run"], env=env), env=env) != 0:
+        # Integration-test crates spawn a normally compiled clud binary, so
+        # `cfg(test)` cannot identify those child processes. Propagate the
+        # marker through Cargo's test environment as the runtime half of the
+        # test-log isolation contract.
+        rust_test_env = _marked_test_env(env)
+        if (
+            run(
+                _cargo(["test", "--workspace", "--no-run"], env=rust_test_env),
+                env=rust_test_env,
+            )
+            != 0
+        ):
             return 1
-        cargo_test = _cargo(["test", "--workspace"], env=env)
+        cargo_test = _cargo(["test", "--workspace"], env=rust_test_env)
         if sys.platform == "win32":
             cargo_test += ["--", "--test-threads=1"]
-        if run(cargo_test, env=env) != 0:
+        if run(cargo_test, env=rust_test_env) != 0:
             return 1
 
         # Python unit tests (skip integration by default)
@@ -187,8 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     # before it runs so a hang in CI is pinned to the exact test rather than
     # appearing as silent dead air.
     if run_integration:
-        int_env = pytest_env.copy()
-        int_env["CLUD_INTEGRATION_TESTS"] = "1"
+        int_env = _marked_test_env(pytest_env)
         # Disable the Windows exe-unlock dance for every clud subprocess
         # spawned by tests. See #37: the rename+copy+GC pattern appears to
         # keep stdout/stderr pipe handles alive on Windows CI, which wedges
