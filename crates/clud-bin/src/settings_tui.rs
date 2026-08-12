@@ -128,7 +128,11 @@ impl SettingValue {
             Self::Bool(false) => "[ ]".to_string(),
             Self::ModelProvider(value) => format!("[{}]", value.as_str()),
             Self::Harness(value) => format!("[{}]", value.as_str()),
-            Self::Model { value, .. } => format!("[{value}]"),
+            Self::Model { value, .. } => {
+                let display_name = provider_catalog::model_by_cli_id(value)
+                    .map_or(*value, |model| model.display_name);
+                format!("[{display_name}]")
+            }
             Self::Effort { value, .. } => {
                 format!("[{}]", value.map(EffortLevel::as_str).unwrap_or("default"))
             }
@@ -725,6 +729,16 @@ mod tests {
         assert_eq!(harness, SettingValue::Harness(HarnessSelection::Codex));
         harness.cycle();
         assert_eq!(harness, SettingValue::Harness(HarnessSelection::Default));
+    }
+
+    #[test]
+    fn model_marker_shows_checkpoint_while_list_value_stays_stable() {
+        let model = SettingValue::Model {
+            provider: ModelProvider::DeepSeek,
+            value: "deepseek-v4-pro",
+        };
+        assert_eq!(model.marker(), "[DeepSeek V4 Pro 0813]");
+        assert_eq!(model.list_value(), "deepseek-v4-pro");
     }
 
     #[test]

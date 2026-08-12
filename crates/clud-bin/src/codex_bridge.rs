@@ -1019,10 +1019,7 @@ fn serve_unified_messages(
             return;
         }
     };
-    let exact_catalog = provider_catalog::MODELS
-        .iter()
-        .find(|entry| entry.discovery_id == Some(model))
-        .copied();
+    let exact_catalog = provider_catalog::model_by_discovery_id(model);
     // A Codex discovery selection may retain the bridge's legacy
     // `<model>@<effort>` override. Resolve the reserved base ID before the
     // translator sees its `claude` substring, then carry the suffix onto the
@@ -1030,10 +1027,7 @@ fn serve_unified_messages(
     let mut codex_effort_suffix = None;
     let catalog = exact_catalog.or_else(|| {
         let (base, effort) = model.rsplit_once('@')?;
-        let entry = provider_catalog::MODELS
-            .iter()
-            .find(|entry| entry.discovery_id == Some(base))
-            .copied()?;
+        let entry = provider_catalog::model_by_discovery_id(base)?;
         (entry.provider == ModelProvider::Codex).then(|| {
             codex_effort_suffix = Some(effort);
             entry
@@ -2618,11 +2612,15 @@ Connection: close
             "clud-claude-codex-sol",
             "clud-claude-codex-terra",
             "clud-claude-codex-luna",
-            "clud-claude-deepseek-v4-pro",
+            "clud-claude-deepseek-v4-pro-0813",
             "clud-claude-deepseek-v4-flash",
         ] {
             assert!(response.contains(id), "catalog is missing {id}: {response}");
         }
+        assert!(
+            response.contains("DeepSeek V4 Pro 0813"),
+            "catalog must expose the served DeepSeek checkpoint: {response}"
+        );
         for secret in [bridge.bearer_token(), "deepseek-test-secret"] {
             assert!(!format!("{bridge:?}").contains(secret));
             assert!(!response.contains(secret));
@@ -2765,7 +2763,7 @@ Connection: close
         let deepseek = FakeResponses::start();
         let bridge = BridgeHandle::start(unified_config(&anthropic, &codex, &deepseek)).unwrap();
         let models = [
-            ("clud-claude-deepseek-v4-pro", "deepseek-v4-pro[1m]"),
+            ("clud-claude-deepseek-v4-pro-0813", "deepseek-v4-pro[1m]"),
             ("clud-claude-deepseek-v4-flash", "deepseek-v4-flash"),
         ];
         // DeepSeek, not clud, owns this compatibility mapping. Assert both the
@@ -2886,7 +2884,7 @@ Connection: close
             200
         );
         let deepseek_turn = turn(
-            "clud-claude-deepseek-v4-pro",
+            "clud-claude-deepseek-v4-pro-0813",
             serde_json::json!([
                 {"role": "user", "content": "claude first"},
                 {"role": "assistant", "content": "claude reply"},

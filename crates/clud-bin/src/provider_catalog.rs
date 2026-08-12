@@ -143,12 +143,12 @@ pub const MODELS: &[CatalogModel] = &[
         cli_id: "deepseek-v4-pro",
         provider: ModelProvider::DeepSeek,
         wire_id: "deepseek-v4-pro[1m]",
-        discovery_id: Some("clud-claude-deepseek-v4-pro"),
+        discovery_id: Some("clud-claude-deepseek-v4-pro-0813"),
         // DeepSeek keeps the stable API slug while upgrading the served
         // checkpoint. The 2026-08-12 pricing page identifies this alias as
         // DeepSeek-V4-Pro-0813.
         display_name: "DeepSeek V4 Pro 0813",
-        legacy_aliases: &["deepseek-v4-pro[1m]"],
+        legacy_aliases: &["deepseek-v4-pro[1m]", "clud-claude-deepseek-v4-pro"],
         supported_efforts: ANTHROPIC_EFFORTS,
         supported_context_windows: AUTO_OR_1M_CONTEXT,
         default_effort: Some(EffortLevel::Max),
@@ -343,6 +343,22 @@ fn catalog_match(value: &str) -> Option<CatalogModel> {
 
 pub fn model_by_cli_id(value: &str) -> Option<CatalogModel> {
     MODELS.iter().copied().find(|entry| entry.cli_id == value)
+}
+
+/// Resolve a model identifier emitted by Claude's gateway model picker.
+/// Versioned discovery IDs make the served checkpoint visible in the UI;
+/// retired IDs remain accepted so an already-selected or cached row does not
+/// silently fall through to native Claude routing after a catalog refresh.
+pub fn model_by_discovery_id(value: &str) -> Option<CatalogModel> {
+    MODELS.iter().copied().find(|entry| {
+        entry
+            .discovery_id
+            .is_some_and(|id| id.eq_ignore_ascii_case(value))
+            || entry
+                .legacy_aliases
+                .iter()
+                .any(|alias| alias.starts_with("clud-claude-") && alias.eq_ignore_ascii_case(value))
+    })
 }
 
 pub fn models_for_provider(provider: ModelProvider) -> impl Iterator<Item = CatalogModel> {
@@ -847,6 +863,16 @@ mod tests {
             assert_eq!(selection.model.as_deref(), Some(entry.cli_id));
             assert_eq!(selection.wire_model.as_deref(), Some(entry.wire_id));
         }
+    }
+
+    #[test]
+    fn deepseek_checkpoint_discovery_id_is_versioned_with_legacy_routing() {
+        let current = model_by_discovery_id("clud-claude-deepseek-v4-pro-0813").unwrap();
+        let legacy = model_by_discovery_id("clud-claude-deepseek-v4-pro").unwrap();
+        assert_eq!(current, legacy);
+        assert_eq!(current.cli_id, "deepseek-v4-pro");
+        assert_eq!(current.wire_id, "deepseek-v4-pro[1m]");
+        assert_eq!(current.display_name, "DeepSeek V4 Pro 0813");
     }
 
     #[test]

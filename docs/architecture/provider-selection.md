@@ -74,8 +74,12 @@ DeepSeek upgrades its stable API aliases in place. As of 2026-08-12,
 DeepSeek's live Models & Pricing page identifies the stable alias as
 `DeepSeek-V4-Pro-0813`; it continues to use `deepseek-v4-pro` (or
 `deepseek-v4-pro[1m]` for Claude Code), rather than a version-suffixed API
-model ID. The catalog display name records the served checkpoint while the
-wire ID stays on DeepSeek's documented stable alias.
+model ID. The catalog display name and clud-owned discovery ID
+(`clud-claude-deepseek-v4-pro-0813`) record the served checkpoint so stale
+catalog metadata is visible in model-picker and settings UIs, while the CLI
+and wire IDs stay on DeepSeek's documented stable aliases. The retired
+`clud-claude-deepseek-v4-pro` discovery ID remains routable for cached or
+already-selected picker rows.
 
 An unknown future `gpt-*` wire ID remains directly reachable for backwards
 compatibility. Its normalized selection records Codex as the provider while
