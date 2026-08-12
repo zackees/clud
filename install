@@ -12,7 +12,7 @@ set -euo pipefail
 # `setup-soldr` versions under .github/ — a developer whose
 # local soldr trails CI's cannot reproduce a CI failure. All three are one
 # decision; `tests/test_packaging_metadata.py` asserts they agree. See DD-020.
-VERSION="${SOLDR_VERSION:-0.8.40}"
+VERSION="${SOLDR_VERSION:-0.8.44}"
 GLOBAL=0
 
 usage() {
