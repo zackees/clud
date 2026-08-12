@@ -1855,3 +1855,46 @@ that source information no longer exists at the gateway. Unsupported Codex
 values fail before an upstream call, while DeepSeek-compatible or future values
 are not rejected by Codex policy. Direct Claude, Codex, Codex-via-Claude, and
 DeepSeek launch profiles are unchanged.
+
+---
+
+## DD-043: Unified launch guards, token counting, and optional-provider notices
+
+**Status:** Accepted
+
+**Context:** Issue #898 left three open edges on the merged unified gateway.
+Claude Code discovery silently discards synthetic IDs on clients older than
+2.1.223, so a stale install presents the old picker instead of failing. The
+gateway had no answer for `POST /v1/messages/count_tokens` in unified mode.
+And a launch with missing optional credentials showed fewer picker rows with
+no explanation of how to restore them.
+
+**Decision:**
+
+- **Version floor at launch.** Before the child or gateway starts, a non-dry
+  unified launch probes the bootstrapped client's `--version`. Outputs older
+  than 2.1.223 fail with the installed version and the `claude update` remedy.
+  Dry runs skip the probe entirely.
+- **Token counting has one Anthropic-compatible contract.** Ordinary Claude
+  model IDs proxy to the Anthropic endpoint; synthetic Codex and DeepSeek
+  routes return an explicit local 404 so Claude Code falls back to its
+  documented local estimation. Unknown reserved IDs still fail locally before
+  any upstream request.
+- **One sanitized startup notice per missing optional provider.** The
+  foreground runtime prints a single actionable line naming the remedy
+  (`clud auth login codex` / `clud auth login deepseek`) instead of a silent
+  short catalog. Notices never contain secret material, and a missing optional
+  credential still never blocks native Claude.
+- **Initial selections resolve to discovery IDs.** A launch-time
+  `--model`/settings selection for Codex or DeepSeek is emitted to the child
+  as the catalog discovery ID, not the provider wire ID: an unrecognized
+  `gpt-*`/`deepseek-*` ID would otherwise read as an ordinary Claude ID and be
+  proxied to Anthropic.
+
+**Consequences:** A stale Claude Code install cannot silently show a degraded
+picker, and a partial credential setup explains itself at launch. Token
+counting either reaches a provider that speaks the contract or falls back to
+harness-local estimation; clud never fabricates a count for a synthetic route.
+Deprecated `codex-auth`/`deepseek-auth` aliases also print their exact
+replacement spelling, including preserved flags, instead of a bare command
+name.

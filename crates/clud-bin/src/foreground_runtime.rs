@@ -43,6 +43,7 @@ pub struct ForegroundRuntime {
     env: Vec<(String, String)>,
     bridge: Option<BridgeHandle>,
     claude_settings: Option<ClaudeSettings>,
+    startup_notices: Vec<&'static str>,
 }
 
 struct ClaudeSettings {
@@ -55,7 +56,11 @@ impl ForegroundRuntime {
     pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
         let store = crate::deepseek_auth::NativeSecretStore::new()
             .map_err(|_| BridgeError::DeepSeekCredentials)?;
-        Self::start_with_secret_store(plan, env, &store)
+        let runtime = Self::start_with_secret_store(plan, env, &store)?;
+        for notice in &runtime.startup_notices {
+            eprintln!("{notice}");
+        }
+        Ok(runtime)
     }
 
     /// Routing core, seamed on the secret-store dependency so tests can
@@ -66,20 +71,21 @@ impl ForegroundRuntime {
         mut env: Vec<(String, String)>,
         store: &dyn crate::deepseek_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
-        let (bridge, claude_settings) = if is_unified(plan) {
+        let (bridge, claude_settings, startup_notices) = if is_unified(plan) {
             // Optional routes must never block native Claude. Resolve only
             // availability metadata here; the actual credentials stay inside
             // the launch-scoped bridge and are not serialized into the plan.
             let deepseek_key = store.get().ok().flatten();
             let codex_available =
                 crate::codex_upstream::ResolvedCredentials::resolve_default().is_ok();
+            let startup_notices = unified_startup_notices(codex_available, deepseek_key.is_some());
             let bridge = BridgeHandle::start(
                 BridgeConfig::default()
                     .with_unified_gateway(UnifiedGatewayConfig::new(deepseek_key, codex_available)),
             )?;
             apply_unified_overlay(&mut env, &bridge)?;
             let settings = merged_unified_context_lifecycle_settings(plan, &bridge)?;
-            (Some(bridge), Some(settings))
+            (Some(bridge), Some(settings), startup_notices)
         } else if is_codex_via_claude(plan) {
             // A selection that does not parse fails the launch rather than
             // the first turn: by the time a request is in flight the user has
@@ -95,21 +101,22 @@ impl ForegroundRuntime {
                 BridgeHandle::start(BridgeConfig::default().with_default_model(selection.clone()))?;
             apply_cross_route_overlay(&mut env, &bridge, selection.as_ref());
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
-            (Some(bridge), Some(settings))
+            (Some(bridge), Some(settings), Vec::new())
         } else if is_deepseek_via_claude(plan) {
             let secret = store
                 .get()
                 .map_err(|_| BridgeError::DeepSeekCredentials)?
                 .ok_or(BridgeError::DeepSeekCredentials)?;
             apply_deepseek_overlay(&mut env, &secret, plan.model_selection.as_ref());
-            (None, None)
+            (None, None, Vec::new())
         } else {
-            (None, None)
+            (None, None, Vec::new())
         };
         Ok(Self {
             env,
             bridge,
             claude_settings,
+            startup_notices,
         })
     }
 
@@ -217,6 +224,21 @@ fn is_deepseek_via_claude(plan: &LaunchPlan) -> bool {
 
 fn is_unified(plan: &LaunchPlan) -> bool {
     plan.routing_mode == RoutingMode::Unified && plan.effective_harness() == Backend::Claude
+}
+
+fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> Vec<&'static str> {
+    let mut notices = Vec::new();
+    if !codex_available {
+        notices.push(
+            "[clud] unified gateway: Codex models unavailable; set OPENAI_API_KEY or run `clud auth login codex`",
+        );
+    }
+    if !deepseek_available {
+        notices.push(
+            "[clud] unified gateway: DeepSeek models unavailable; run `clud auth login deepseek`",
+        );
+    }
+    notices
 }
 
 fn apply_deepseek_overlay(
@@ -339,7 +361,7 @@ fn apply_unified_overlay(
 ) -> Result<(), BridgeError> {
     if env.iter().any(|(key, value)| {
         env_key_eq(key, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-            && matches!(value.trim(), "1" | "true" | "TRUE")
+            && (value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"))
     }) {
         return Err(BridgeError::DiscoveryDisabled);
     }
@@ -359,7 +381,7 @@ fn apply_unified_overlay(
     env.retain(|(key, _)| !env_key_eq(key, "ANTHROPIC_CUSTOM_HEADERS"));
     let gateway_header = format!("{UNIFIED_GATEWAY_TOKEN_HEADER}: {}", bridge.bearer_token());
     let custom_headers = custom
-        .map(|headers| format!("{headers}\n{gateway_header}"))
+        .map(|headers| format!("{gateway_header}\n{headers}"))
         .unwrap_or(gateway_header);
     env.push(("ANTHROPIC_CUSTOM_HEADERS".to_string(), custom_headers));
     set_env(env, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1");
@@ -733,6 +755,7 @@ mod tests {
         assert!(headers.contains("X-Existing: retained"));
         assert!(headers.contains(UNIFIED_GATEWAY_TOKEN_HEADER));
         assert!(headers.contains(runtime.bearer_token().unwrap()));
+        assert!(headers.starts_with(UNIFIED_GATEWAY_TOKEN_HEADER));
         assert_eq!(lookup(env, "CLUD_GATEWAY_TOKEN"), runtime.bearer_token());
         assert_eq!(lookup(env, "CLAUDE_CODE_EFFORT_LEVEL"), Some("xhigh"));
         assert_eq!(lookup(&base, "ANTHROPIC_AUTH_TOKEN"), Some("claude-oauth"));
@@ -749,6 +772,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lookup(runtime.env(), "CLAUDE_CODE_EFFORT_LEVEL"), None);
+    }
+
+    #[test]
+    fn unified_missing_provider_notices_are_sanitized_and_actionable() {
+        let notices = unified_startup_notices(false, false);
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].contains("clud auth login codex"));
+        assert!(notices[1].contains("clud auth login deepseek"));
+        assert!(!notices.join(" ").to_ascii_lowercase().contains("secret"));
+        assert!(unified_startup_notices(true, true).is_empty());
     }
 
     #[test]
@@ -1088,6 +1121,7 @@ mod tests {
             env,
             bridge: None,
             claude_settings: None,
+            startup_notices: Vec::new(),
         };
         let adapter = RecordingAdapter::default();
         runtime

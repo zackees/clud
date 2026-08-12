@@ -170,6 +170,17 @@ fn deepseek_bridge_target() -> ResolvedLaunchTarget {
     }
 }
 
+fn unified_target(provider: ModelProvider) -> ResolvedLaunchTarget {
+    ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Unified,
+        model_provider: provider,
+        requested_harness: HarnessSelection::Claude,
+        effective_harness: Backend::Claude,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    }
+}
+
 #[test]
 fn test_bridge_disallows_plan_mode_even_when_interactive() {
     // The reported bug: an ordinary interactive question on this bridge turned
@@ -280,6 +291,40 @@ fn test_bridge_expands_a_short_model_name_in_argv_and_on_the_plan() {
     assert_eq!(p.command[model_index + 1], "gpt-5.6-terra@high");
     assert_eq!(p.codex_model.as_deref(), Some("gpt-5.6-terra@high"));
     assert!(!p.command.iter().any(|arg| arg == "--effort"));
+}
+
+#[test]
+fn unified_initial_routes_use_discovery_ids_and_keep_plan_mode() {
+    for (provider, model, discovery_id) in [
+        (ModelProvider::Codex, "codex-luna", "clud-claude-codex-luna"),
+        (
+            ModelProvider::DeepSeek,
+            "deepseek-v4-pro",
+            "clud-claude-deepseek-v4-pro-0813",
+        ),
+    ] {
+        let args = parse(&["clud", "--model", model, "--effort", "high"]);
+        let plan = build_launch_plan_for_target(&args, unified_target(provider), "claude");
+        assert!(
+            plan.command
+                .windows(2)
+                .any(|pair| pair == ["--model", discovery_id]),
+            "{}",
+            plan.command.join(" ")
+        );
+        assert!(
+            plan.command
+                .windows(2)
+                .any(|pair| pair == ["--effort", "high"]),
+            "{}",
+            plan.command.join(" ")
+        );
+        assert!(!plan
+            .command
+            .iter()
+            .any(|arg| arg == "--disallowedTools=EnterPlanMode"));
+        assert_eq!(plan.codex_model, None);
+    }
 }
 
 #[test]

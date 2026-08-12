@@ -8,6 +8,47 @@ use std::sync::atomic::AtomicBool;
 use crate::args::{AuthProvider, AuthSubcommand, CodexAuthSubcommand, DeepseekAuthSubcommand};
 use crate::deepseek_auth::{NativeSecretStore, SecretStore};
 
+/// Exact action-first spelling for a deprecated Codex alias invocation.
+pub fn codex_alias_replacement(subcommand: &CodexAuthSubcommand) -> String {
+    match subcommand {
+        CodexAuthSubcommand::Login {
+            acknowledge_experimental,
+            no_browser,
+        } => {
+            let mut command = "clud auth login codex".to_string();
+            if *acknowledge_experimental {
+                command.push_str(" --acknowledge-experimental");
+            }
+            if *no_browser {
+                command.push_str(" --no-browser");
+            }
+            command
+        }
+        CodexAuthSubcommand::Status { json } => replacement_with_json("status", "codex", *json),
+        CodexAuthSubcommand::Logout { json } => replacement_with_json("logout", "codex", *json),
+    }
+}
+
+/// Exact action-first spelling for a deprecated DeepSeek alias invocation.
+pub fn deepseek_alias_replacement(subcommand: &DeepseekAuthSubcommand) -> String {
+    match subcommand {
+        DeepseekAuthSubcommand::Login => "clud auth login deepseek".to_string(),
+        DeepseekAuthSubcommand::Status { json } => {
+            replacement_with_json("status", "deepseek", *json)
+        }
+        DeepseekAuthSubcommand::Logout { json } => {
+            replacement_with_json("logout", "deepseek", *json)
+        }
+    }
+}
+
+fn replacement_with_json(action: &str, provider: &str, json: bool) -> String {
+    format!(
+        "clud auth {action} {provider}{}",
+        if json { " --json" } else { "" }
+    )
+}
+
 pub fn run(subcommand: Option<&AuthSubcommand>, interrupted: &AtomicBool) -> i32 {
     match subcommand {
         Some(AuthSubcommand::Login {
@@ -150,5 +191,28 @@ mod tests {
     #[test]
     fn claude_credential_mutation_is_rejected() {
         assert_eq!(externally_managed("login"), 2);
+    }
+
+    #[test]
+    fn deprecated_alias_replacements_preserve_every_flag() {
+        assert_eq!(
+            codex_alias_replacement(&CodexAuthSubcommand::Login {
+                acknowledge_experimental: true,
+                no_browser: true,
+            }),
+            "clud auth login codex --acknowledge-experimental --no-browser"
+        );
+        assert_eq!(
+            codex_alias_replacement(&CodexAuthSubcommand::Status { json: true }),
+            "clud auth status codex --json"
+        );
+        assert_eq!(
+            deepseek_alias_replacement(&DeepseekAuthSubcommand::Logout { json: true }),
+            "clud auth logout deepseek --json"
+        );
+        assert_eq!(
+            deepseek_alias_replacement(&DeepseekAuthSubcommand::Login),
+            "clud auth login deepseek"
+        );
     }
 }

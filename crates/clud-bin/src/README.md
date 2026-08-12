@@ -1,7 +1,10 @@
 # src/
 
-The cross-cutting contract for `clud --codex --harness claude` lives in
-[`docs/architecture/codex-via-claude.md`](../../../docs/architecture/codex-via-claude.md);
+The cross-cutting contracts for `clud --codex --harness claude` and
+`clud --unified` live in
+[`docs/architecture/codex-via-claude.md`](../../../docs/architecture/codex-via-claude.md)
+and
+[`docs/architecture/unified-gateway.md`](../../../docs/architecture/unified-gateway.md);
 this README only maps the source owners.
 
 Entry point and source tree for the `clud-bin` Rust binary. The binary launches
@@ -57,9 +60,10 @@ Entry and orchestration:
   and creates no file for a healthy launch.
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell and
   #898/#899's unified Claude/Codex/DeepSeek multiplexer: ephemeral listener +
-  per-launch bearer, provider catalog routing, strict credential isolation,
-  request-time effort mapping, route epochs, bounded parser/workers/timeouts,
-  authenticated context compact/clear lifecycle controls, and joined shutdown.
+  per-launch bearer, deterministic `/v1/models`, provider catalog routing,
+  strict credential isolation, request-time effort mapping, route epochs,
+  native Claude token counting, bounded parser/workers/timeouts, authenticated
+  context compact/clear lifecycle controls, and joined shutdown.
   Per-phase header/body deadlines and a per-frame idle timeout preserve chunked
   progressive SSE; see `docs/architecture/unified-gateway.md`.
 - `codex_model.rs` - #752's Codex compatibility view over the shared provider
@@ -98,14 +102,17 @@ Entry and orchestration:
   narrow observer reports each attempt/backoff to the bridge forensic log. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md)
   and DD-032.
-- `codex_auth.rs` - #629's clud-owned `codex-auth login|status|logout`: browser
+- `auth.rs` - #898's action-first `clud auth login|status|logout <provider>`
+  dispatcher and secret-free aggregate provider status. Hidden compatibility
+  aliases retain provider-owned implementations and print an exact replacement.
+- `codex_auth.rs` - #629's clud-owned Codex credential implementation: browser
   authorization-code + PKCE callback flow, separate `~/.clud/codex-auth.json`
   store, safe status claims, locked atomic refresh, and token-redacted
   diagnostics. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md).
-- `deepseek_auth.rs` - #877's `deepseek-auth login|status|logout` credential
-  commands: hidden terminal input, OS-native credential vault adapter, injectable
-  in-memory test store, and secret-free status/error surfaces.
+- `deepseek_auth.rs` - #877's DeepSeek credential implementation: hidden
+  terminal input, OS-native credential vault adapter, injectable in-memory test
+  store, and secret-free status/error surfaces.
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
   one call, plus `MessageAggregator` so a non-streaming request reuses the
   streaming state machine. Owns the downstream status policy — since #764,
@@ -114,14 +121,17 @@ Entry and orchestration:
 - `codex_history.rs` - bounded, in-memory canonical Responses transcript for
   the foreground bridge. It commits only newly pending input plus opaque
   upstream output, evicts at bridge shutdown, and makes validated compaction
-  replacement atomic; see [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md).
+  replacement and unified provider-route epoch changes atomic; see
+  [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md) and
+  [unified-gateway.md](../../../docs/architecture/unified-gateway.md).
 - `foreground_runtime.rs` - shared foreground lifetime owner and injectable
   subprocess/PTY environment-spawn seam. It conditionally owns the direct Codex
-  bridge or unified gateway, applies child-local overlays, registers
-  launch-scoped authenticated `PreCompact` and `SessionStart(clear)` HTTP hooks,
-  and tears the listener down on every runner return path. Unified mode enables
-  discovery while preserving Claude credentials and ambient session effort;
-  the direct Codex route retains #820/DD-038's one custom `/model` row.
+  bridge or unified gateway, applies child-local overlays, emits sanitized
+  optional-provider notices, registers launch-scoped authenticated `PreCompact`
+  and `SessionStart(clear)` HTTP hooks, and tears the listener down on every
+  runner return path. Unified mode enables discovery while preserving Claude
+  credentials and ambient session effort; the direct Codex route retains
+  #820/DD-038's one custom `/model` row.
 - `shell/` - shell-policy plumbing: lazy fetch of a vendored portable Git
   Bash bundle (`shell/git_bash_resolver.rs`) so callers can hand
   `CLAUDE_CODE_GIT_BASH_PATH` to Claude Code without depending on a
@@ -444,6 +454,9 @@ Subsystems that span multiple files have their own topic docs under
   `voice` ARM carveout) -> [docs/architecture/windows-quirks.md](../../../docs/architecture/windows-quirks.md)
 - **Launch plan** (`command/types::LaunchPlan` + all consumers) -> [docs/architecture/launch-plan.md](../../../docs/architecture/launch-plan.md)
 - **Launch targets** (provider/harness resolution + sticky settings) -> [docs/architecture/launch-targets.md](../../../docs/architecture/launch-targets.md)
+- **Provider selection** (routing mode + provider-neutral model registry) -> [docs/architecture/provider-selection.md](../../../docs/architecture/provider-selection.md)
+- **Unified gateway** (`codex_bridge`, `codex_history`, `foreground_runtime`,
+  `provider_catalog`, `auth`) -> [docs/architecture/unified-gateway.md](../../../docs/architecture/unified-gateway.md)
 
 Non-obvious design choices (single `LaunchPlan`, `lib.rs` as the only
 `mod ...` site, cooperative Ctrl+C, redb single-owner) have ADRs in

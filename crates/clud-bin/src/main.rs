@@ -57,22 +57,18 @@ fn run(mut args: args::Args) {
     // provider implementation authoritative while giving callers the exact
     // action-first replacement.
     if let Some(args::Command::CodexAuth { subcommand }) = &args.command {
-        let action = match subcommand {
-            args::CodexAuthSubcommand::Login { .. } => "login",
-            args::CodexAuthSubcommand::Status { .. } => "status",
-            args::CodexAuthSubcommand::Logout { .. } => "logout",
-        };
-        eprintln!("deprecated: use `clud auth {action} codex`");
+        eprintln!(
+            "deprecated: use `{}`",
+            auth::codex_alias_replacement(subcommand)
+        );
         let interrupted = startup::install_ctrl_c_flag(args.verbose);
         std::process::exit(codex_auth::run(subcommand, interrupted.as_ref()));
     }
     if let Some(args::Command::DeepseekAuth { subcommand }) = &args.command {
-        let action = match subcommand {
-            args::DeepseekAuthSubcommand::Login => "login",
-            args::DeepseekAuthSubcommand::Status { .. } => "status",
-            args::DeepseekAuthSubcommand::Logout { .. } => "logout",
-        };
-        eprintln!("deprecated: use `clud auth {action} deepseek`");
+        eprintln!(
+            "deprecated: use `{}`",
+            auth::deepseek_alias_replacement(subcommand)
+        );
         std::process::exit(deepseek_auth::run(subcommand));
     }
 
@@ -340,6 +336,31 @@ fn run(mut args: args::Args) {
             std::process::exit(2);
         }
     };
+    if launch_target.routing_mode == backend::RoutingMode::Unified {
+        if let Some(selection) = args
+            .resolved_model_selection
+            .as_ref()
+            .filter(|selection| selection.provider != backend::ModelProvider::Claude)
+        {
+            let has_discovery_route = selection
+                .model
+                .as_deref()
+                .and_then(clud::provider_catalog::model_by_cli_id)
+                .and_then(|model| model.discovery_id)
+                .is_some();
+            if !has_discovery_route {
+                eprintln!(
+                    "unified routing requires a registered Codex or DeepSeek model; '{}' has no gateway discovery route",
+                    selection
+                        .wire_model
+                        .as_deref()
+                        .or(selection.model.as_deref())
+                        .unwrap_or("unknown")
+                );
+                std::process::exit(2);
+            }
+        }
+    }
 
     if args.no_fix_hooks {
         if args.dry_run {
@@ -611,6 +632,14 @@ fn run(mut args: args::Args) {
             }
         }
     };
+    if launch_target.routing_mode == backend::RoutingMode::Unified && !args.dry_run {
+        if let Err(error) =
+            backend_bootstrap::require_unified_claude_version(std::path::Path::new(&backend_path))
+        {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
 
     // Issue #242: mutable harness setup is scoped per launch until the user
     // opts into a global selection. Dry-runs read provider/harness preferences

@@ -18,7 +18,7 @@ re-explaining.
 | [architecture/launch-plan.md](architecture/launch-plan.md) | ~180 | `LaunchPlan` as the single source of truth: construction, consumers, `--dry-run` JSON |
 | [architecture/launch-targets.md](architecture/launch-targets.md) | ~540 | Independent model-provider and harness resolution, sticky settings, foreground bridge lifecycle, compatibility; DeepSeek direct provider (credential trust boundary, preflight, child overlay, no bridge) |
 | [architecture/provider-selection.md](architecture/provider-selection.md) | ~120 | #900's compatible launch grammar, direct-vs-unified routing mode, provider-neutral model catalog, modifier normalization, and plan/repeat propagation |
-| [architecture/unified-gateway.md](architecture/unified-gateway.md) | ~130 | #898/#899's authenticated foreground multiplexer: discovery, route epochs, credential isolation, and cross-provider effort contract |
+| [architecture/unified-gateway.md](architecture/unified-gateway.md) | ~130 | #898/#899's authenticated foreground multiplexer: version gate, discovery, provider routing, route epochs, token counting, credential isolation, and cross-provider effort contract |
 | [architecture/codex-via-claude.md](architecture/codex-via-claude.md) | ~120 | Canonical cross-route ownership: resolution, bridge protocol, credentials, security boundary, rollback |
 | [architecture/crash-reports.md](architecture/crash-reports.md) | ~110 | Panic-hook + native crash handler + `clud symbols` verifier: JSON schema, embed-line-tables-everywhere choice, opportunistic-verify model (#374) |
 | [architecture/process-reaping.md](architecture/process-reaping.md) | ~200 | The two disjoint reapers, the `(pid, creation_time)` keyspace and its single purge sweep, daemon-sparing by OS signal (marker second, whitelist last), the cooperative-marker caveat, and which test tier a reaper change belongs in |
@@ -41,6 +41,7 @@ re-explaining.
 - **"Where does the argv that clud runs come from?"** -> [launch-plan.md](architecture/launch-plan.md)
 - **"How do provider and harness preferences resolve?"** -> [launch-targets.md](architecture/launch-targets.md)
 - **"Which model ID is stable, and how do effort/context reach a worker?"** -> [provider-selection.md](architecture/provider-selection.md)
+- **"How does one Claude session switch safely among providers?"** -> [unified-gateway.md](architecture/unified-gateway.md)
 - **"How does Codex run through Claude, and how do I roll it back?"** -> [codex-via-claude.md](architecture/codex-via-claude.md)
 - **"What happens when clud crashes, and how do I read the report?"** -> [crash-reports.md](architecture/crash-reports.md)
 - **"Should I run all the tests or just some?"** -> [test-runtime-memory.md](architecture/test-runtime-memory.md) *(design proposal, #405)*
