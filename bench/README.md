@@ -8,6 +8,10 @@ idle-session CPU harness used by #542.
 The [Codex-via-Claude bridge benchmark](codex_bridge/README.md) measures the
 bounded loopback request path and reports RSS growth for #630.
 
+The [connector log inventory](connector_logs/README.md) is a read-only,
+content-safe diagnostic that identifies which Claude transcripts and clud
+bridge logs can be attributed to Codex or DeepSeek.
+
 ## Runbook: real-daemon survival check (Tier 3, #674)
 
 **Never gating.** The reaper's daemon-survival suite is hermetic on purpose —

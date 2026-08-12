@@ -51,7 +51,8 @@ Entry and orchestration:
   + `CLAUDE_CODE_GIT_BASH_PATH` (resolved via
   [`shell/`](shell/README.md)) — see issue #447.
 - `bridge_log.rs` - issue #772's always-on, failure-only, bounded JSONL writer
-  for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; buffers complete
+  for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; test-mode logs use
+  the isolated sibling tree `~/.clud/state/test-sessions/`. Buffers complete
   lines across concurrent bridge workers, emits one visible truncation marker,
   and creates no file for a healthy launch.
 - `codex_bridge.rs` - issue #626's authenticated, loopback-only HTTP shell and
