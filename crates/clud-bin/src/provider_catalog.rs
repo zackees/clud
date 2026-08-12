@@ -144,7 +144,10 @@ pub const MODELS: &[CatalogModel] = &[
         provider: ModelProvider::DeepSeek,
         wire_id: "deepseek-v4-pro[1m]",
         discovery_id: Some("clud-claude-deepseek-v4-pro"),
-        display_name: "DeepSeek V4 Pro",
+        // DeepSeek keeps the stable API slug while upgrading the served
+        // checkpoint. The 2026-08-12 pricing page identifies this alias as
+        // DeepSeek-V4-Pro-0813.
+        display_name: "DeepSeek V4 Pro 0813",
         legacy_aliases: &["deepseek-v4-pro[1m]"],
         supported_efforts: ANTHROPIC_EFFORTS,
         supported_context_windows: AUTO_OR_1M_CONTEXT,
@@ -956,7 +959,10 @@ mod tests {
         let selection = resolve_for_launch(ModelProvider::DeepSeek, None, None, None, None, true)
             .unwrap()
             .unwrap();
+        let default = reviewed_default_model(ModelProvider::DeepSeek).unwrap();
+        assert_eq!(default.display_name, "DeepSeek V4 Pro 0813");
         assert_eq!(selection.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro[1m]"));
         assert_eq!(selection.effort, Some(EffortLevel::Max));
         assert_eq!(selection.context_window.as_deref(), Some("1m"));
         assert_eq!(
