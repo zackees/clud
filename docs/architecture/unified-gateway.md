@@ -32,9 +32,12 @@ available Codex and DeepSeek routes. Synthetic IDs are in the reserved
 `clud-claude-*` namespace. A selected synthetic ID is resolved before legacy
 Codex compatibility parsing: Codex IDs are rewritten to their reviewed wire
 model and translated to Responses; DeepSeek IDs are rewritten and proxied to
-its Anthropic-compatible endpoint. Unknown reserved IDs fail locally rather
-than falling through to a paid provider. Ordinary Claude IDs are proxied
-unchanged to Anthropic.
+its Anthropic-compatible endpoint. A persisted or continued session can also
+name a known provider by wire ID or CLI alias (`gpt-5.6-terra`,
+`deepseek-v4-pro[1m]`); those resolve through the shared catalog to their own
+provider instead of leaking to Anthropic. Unknown reserved IDs fail locally
+rather than falling through to a paid provider. Ordinary Claude IDs are
+proxied unchanged to Anthropic.
 
 Each Claude session/subagent identity also owns an active route epoch. Crossing
 a provider boundary clears Codex's provider-private canonical Responses items.
@@ -86,7 +89,8 @@ content, response bodies, or provider-private state.
 | Both DeepSeek models, documented effective mapping, future provider value passthrough | `unified_deepseek_preserves_effort_for_both_models_without_codex_validation` |
 | Claude -> Codex -> DeepSeek -> Claude switching, Codex reseed, child override isolation | `unified_provider_switch_reseeds_codex_and_keeps_main_and_agent_efforts_independent` |
 | Every discovery ID routes to exactly its upstream with per-provider credential isolation | `unified_routes_all_five_ids_with_provider_credential_isolation` |
-| Native token counting proxied with Claude auth; synthetic routes 404; unknown reserved IDs fail locally | `unified_native_count_tokens_is_proxied_with_claude_auth` |
+| Persisted wire IDs (`gpt-*`, `deepseek-*`) route to their own provider and never reach Anthropic | `unified_wire_ids_route_to_their_own_provider_not_anthropic` |
+| Native token counting proxied with Claude auth; synthetic and wire-ID routes 404; unknown reserved IDs fail locally | `unified_native_count_tokens_is_proxied_with_claude_auth` |
 | Ambient effort preservation and no global default injection | `unified_overlay_preserves_claude_credentials_and_enables_discovery`, `unified_overlay_does_not_inject_a_global_effort_default` |
 | Missing optional credentials emit one sanitized, actionable notice | `unified_missing_provider_notices_are_sanitized_and_actionable` |
 | Installed-client `--effort low|high|xhigh|max` request shape | `tests/test_real_claude_unified_effort.py` (opt in with `CLUD_REAL_CLAUDE_TESTS=1`) |

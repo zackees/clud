@@ -361,6 +361,16 @@ pub fn model_by_discovery_id(value: &str) -> Option<CatalogModel> {
     })
 }
 
+/// Resolve a model string a persisted or continued session may still carry:
+/// a provider wire ID, CLI ID, or legacy alias. Discovery IDs are resolved by
+/// [`model_by_discovery_id`]; this covers the remaining namespaces so a
+/// gateway request naming `gpt-*` or `deepseek-*` routes to its own provider
+/// instead of being proxied to Anthropic as an "ordinary Claude" model.
+/// Claude-owned rows are excluded — those remain caller-owned native IDs.
+pub fn non_claude_model_by_any_id(value: &str) -> Option<CatalogModel> {
+    catalog_match(value).filter(|entry| entry.provider != ModelProvider::Claude)
+}
+
 pub fn models_for_provider(provider: ModelProvider) -> impl Iterator<Item = CatalogModel> {
     MODELS
         .iter()

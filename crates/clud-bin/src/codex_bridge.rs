@@ -1053,14 +1053,23 @@ fn serve_unified_messages(
     // translator sees its `claude` substring, then carry the suffix onto the
     // reviewed wire model so `effort_for` remains the sole precedence owner.
     let mut codex_effort_suffix = None;
-    let catalog = exact_catalog.or_else(|| {
-        let (base, effort) = model.rsplit_once('@')?;
-        let entry = provider_catalog::model_by_discovery_id(base)?;
-        (entry.provider == ModelProvider::Codex).then(|| {
-            codex_effort_suffix = Some(effort);
-            entry
+    let catalog = exact_catalog
+        .or_else(|| {
+            let (base, effort) = model.rsplit_once('@')?;
+            let entry = provider_catalog::model_by_discovery_id(base).or_else(|| {
+                provider_catalog::non_claude_model_by_any_id(base)
+                    .filter(|entry| entry.provider == ModelProvider::Codex)
+            })?;
+            (entry.provider == ModelProvider::Codex).then(|| {
+                codex_effort_suffix = Some(effort);
+                entry
+            })
         })
-    });
+        // A persisted or continued session can still name a known provider by
+        // wire ID or CLI alias instead of its discovery ID. Resolve those
+        // through the shared catalog so they route to their own provider
+        // rather than leaking to Anthropic as an "ordinary Claude" model.
+        .or_else(|| provider_catalog::non_claude_model_by_any_id(model));
     if model.starts_with("clud-claude-") && catalog.is_none() {
         let ids = unified_catalog_ids(unified);
         let body = serde_json::json!({
@@ -1209,7 +1218,8 @@ fn serve_unified_count_tokens(
         let _ = write_error(stream, 400);
         return;
     };
-    let catalog = provider_catalog::model_by_discovery_id(model);
+    let catalog = provider_catalog::model_by_discovery_id(model)
+        .or_else(|| provider_catalog::non_claude_model_by_any_id(model));
     if model.starts_with("clud-claude-") && catalog.is_none() {
         let _ = write_error(stream, 400);
         return;
@@ -2914,6 +2924,59 @@ Connection: close
     }
 
     #[test]
+    fn unified_wire_ids_route_to_their_own_provider_not_anthropic() {
+        let codex = FakeResponses::start();
+        let claude = FakeResponses::start();
+        let deepseek = FakeResponses::start();
+        let config = BridgeConfig::default()
+            .with_test_upstream_url(Some(codex.base_url.clone()))
+            .with_unified_gateway(
+                UnifiedGatewayConfig::new(Some("deepseek-vault-canary".to_string()), true)
+                    .with_upstreams(claude.base_url.clone(), deepseek.base_url.clone()),
+            );
+        let bridge = BridgeHandle::start(config).unwrap();
+
+        // A persisted or continued session can carry provider wire IDs
+        // instead of discovery IDs. Each must reach its own upstream.
+        let deepseek_wire = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "deepseek-v4-pro[1m]",
+                "unified-wire-deepseek",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&deepseek_wire), 200, "{deepseek_wire}");
+        let deepseek_request = deepseek.requests().pop().unwrap();
+        assert!(deepseek_request.starts_with("POST /v1/messages "));
+        assert!(deepseek_request.contains("deepseek-v4-pro[1m]"));
+        assert!(deepseek_request.contains("Bearer deepseek-vault-canary"));
+        assert!(!deepseek_request.contains("native-claude-oauth-canary"));
+
+        let codex_wire = request(
+            bridge.socket_addr(),
+            &unified_message_request(
+                &bridge,
+                "gpt-5.6-terra",
+                "unified-wire-codex",
+                "native-claude-oauth-canary",
+            ),
+        );
+        assert_eq!(status(&codex_wire), 200, "{codex_wire}");
+        let codex_request = codex.requests().pop().unwrap();
+        assert!(codex_request.starts_with("POST /v1/responses "));
+        assert!(codex_request.contains("gpt-5.6-terra"));
+        assert!(codex_request.contains("Bearer clud-test-upstream-key"));
+        assert!(!codex_request.contains("native-claude-oauth-canary"));
+
+        assert!(
+            claude.requests().is_empty(),
+            "a known provider wire ID must never reach Anthropic"
+        );
+    }
+
+    #[test]
     fn unified_native_count_tokens_is_proxied_with_claude_auth() {
         let body = r#"{"input_tokens":7}"#;
         let reply = format!(
@@ -2950,22 +3013,37 @@ Connection: close
         assert!(upstream.contains("Bearer native-count-token-canary"));
         assert!(!upstream.contains(bridge.bearer_token()));
 
-        let synthetic = serde_json::json!({
-            "model": "clud-claude-codex-sol",
-            "messages": [{"role": "user", "content": "measure"}],
-        })
-        .to_string();
-        let unsupported = request(
-            bridge.socket_addr(),
-            &authorized_with_headers(
-                "POST",
-                "/v1/messages/count_tokens",
-                "native-count-token-canary",
-                &synthetic,
-                &[(UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token())],
-            ),
+        for synthetic in [
+            serde_json::json!({
+                "model": "clud-claude-codex-sol",
+                "messages": [{"role": "user", "content": "measure"}],
+            })
+            .to_string(),
+            // A persisted session may name the provider wire ID instead of
+            // its discovery ID; it must not be proxied to Anthropic.
+            serde_json::json!({
+                "model": "deepseek-v4-pro[1m]",
+                "messages": [{"role": "user", "content": "measure"}],
+            })
+            .to_string(),
+        ] {
+            let unsupported = request(
+                bridge.socket_addr(),
+                &authorized_with_headers(
+                    "POST",
+                    "/v1/messages/count_tokens",
+                    "native-count-token-canary",
+                    &synthetic,
+                    &[(UNIFIED_GATEWAY_TOKEN_HEADER, bridge.bearer_token())],
+                ),
+            );
+            assert_eq!(status(&unsupported), 404, "{unsupported}");
+        }
+        assert_eq!(
+            claude.requests().len(),
+            1,
+            "only the native Claude count request may reach Anthropic"
         );
-        assert_eq!(status(&unsupported), 404, "{unsupported}");
     }
 
     #[test]
