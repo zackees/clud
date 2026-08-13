@@ -1890,6 +1890,12 @@ no explanation of how to restore them.
   as the catalog discovery ID, not the provider wire ID: an unrecognized
   `gpt-*`/`deepseek-*` ID would otherwise read as an ordinary Claude ID and be
   proxied to Anthropic.
+- **The gateway also resolves persisted wire IDs.** A continued or resumed
+  session can still carry a provider wire ID or CLI alias past discovery. The
+  gateway resolves every model through the shared catalog before falling
+  through to native Claude, so known `gpt-*`/`deepseek-*` IDs route to their
+  own provider (and count_tokens answers 404 for them) instead of leaking to
+  Anthropic.
 
 **Consequences:** A stale Claude Code install cannot silently show a degraded
 picker, and a partial credential setup explains itself at launch. Token
