@@ -639,6 +639,26 @@ mod tests {
         );
     }
 
+    /// Issue #921's exact repro shape: a 2.1.212 client with the
+    /// `(Claude Code)` suffix must be refused naming its version, the floor,
+    /// and the remedy — and missing/unparseable output must refuse too, never
+    /// a silent picker without connector rows.
+    #[test]
+    fn unified_claude_version_floor_rejects_the_212_repro_and_unparseable_output() {
+        let error = validate_unified_claude_version_output("2.1.212 (Claude Code)").unwrap_err();
+        assert!(error.contains("installed version is 2.1.212"), "{error}");
+        assert!(error.contains("2.1.223"), "{error}");
+        assert!(error.contains("claude update"), "{error}");
+        for output in ["", "no version here"] {
+            let error = validate_unified_claude_version_output(output).unwrap_err();
+            assert!(
+                error.contains("no installed version could be parsed"),
+                "{error}"
+            );
+            assert!(error.contains("2.1.223"), "{error}");
+        }
+    }
+
     struct MockHost {
         platform: InstallPlatform,
         find_results: VecDeque<Option<PathBuf>>,
