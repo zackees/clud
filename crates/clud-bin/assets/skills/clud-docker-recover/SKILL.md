@@ -1,13 +1,6 @@
 ---
 name: clud-docker-recover
-description: "Diagnose and recover a wedged Docker Desktop (engine pipe/socket absent while the UI stays alive, WSL/Docker startup failures) and answer Docker VM disk-growth / memory-pressure questions. Read-only `doctor` first; every restart/reset is confirmation-gated and preserves images/volumes; storage disks are resolved from Docker Desktop's real config (never assumed) and never compacted or deleted automatically."
-triggers:
-  - "When Docker Desktop hangs or `docker` commands fail with a missing engine socket/pipe (e.g. `open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`)"
-  - "When WSL or Docker Desktop fails to start, or `wsl -l -v` shows the docker-desktop distro Stopped/Installing"
-  - "When the user asks why the Docker VM disk (docker_data.vhdx / Docker.raw) is huge, or about Docker memory/disk pressure"
-  - "When the user wants to safely reclaim Docker disk space or relocate/compact the Docker data disk"
-  - "When the user wants to clean up / garbage-collect / trim unused Docker images, stopped containers, or dangling volumes, or wants Docker dev disk usage to stop growing unbounded (including on a schedule)"
-  - "Do NOT trigger for fast incremental Linux build loops (use /clud-docker-linux-build); for macOS-x86 emulation (use /clud-docker-mac-x86); or when Docker is already healthy and the user just wants to run a container"
+description: "Diagnose and recover a wedged Docker Desktop, missing engine pipe/socket, stopped or failed WSL distro, backing-volume exhaustion, ext4 journal abort/read-only remount, or oversized/corrupt docker_data.vhdx / Docker.raw. Use for safe restart/reset, dangling-object cleanup, disk-pressure diagnosis, VHD relocation/compaction guidance, and explicitly confirmed destructive VHDX deletion plus clean reinitialization. Start with read-only diagnosis; resolve storage from Docker Desktop's real config; preserve images/volumes unless the user explicitly confirms deletion. Do not use for healthy-daemon build workflows or macOS-x86 emulation."
 ---
 <!-- managed-by: clud -->
 
@@ -132,6 +125,23 @@ The resolver therefore:
    compaction / deletion / reset / relocation until the user selects one
    with `--select <path>`.
 
+### Full backing volume can corrupt the guest filesystem
+
+Check free space on the **physical volume containing the resolved VHDX**, not
+only the Windows system drive. A Docker VHDX on a relocated drive can exhaust
+that drive while `C:` still has plenty of space. The decisive WSL signature is:
+
+- `I/O error, dev <device>` or `Buffer I/O error`;
+- `Journal has aborted` / `Detected aborted journal`;
+- `Remounting filesystem read-only`.
+
+When these appear, stop treating the incident as an ordinary
+`engine-unavailable` restart. Stop Docker Desktop and run `wsl --shutdown` to
+prevent more writes. Report the resolved VHDX path, its size, and free bytes on
+its actual host volume. Freeing host space may permit a subsequent mount, but
+an aborted ext4 journal can still require repair or replacement. Never loop on
+restart while the host volume remains full.
+
 ## Garbage collection — the lightest rung (default-safe)
 
 `gc` (alias `trim`) reclaims **dangling** Docker objects so dev disk usage
@@ -171,8 +181,13 @@ The tool does NOT embed its own daemon/scheduler; trigger it externally.
 ## Storage remediation is opt-in and never automatic
 
 The one hard rule: **this skill never compacts, prunes, deletes, resets, or
-relocates a Docker VHD / `Docker.raw` / data-root on its own.** Before any
-storage action the tool requires, in order:
+relocates a Docker VHD / `Docker.raw` / data-root on its own.** If diagnosis
+shows an unrecoverable or disposable Docker data VHDX, **ask the user whether
+they want to permanently delete it and initialize Docker from scratch**. Do
+not merely mention deletion as an option and do not infer consent from a
+generic request to repair or restart Docker.
+
+Before any storage action the tool requires, in order:
 
 1. An **unambiguous single candidate** (ambiguity always wins over action —
    even `--yes` is refused while candidates are ambiguous, exit code 4).
@@ -183,6 +198,40 @@ Even with all gates satisfied, v0 prints the vetted backup + compaction plan
 (`Optimize-VHD`, prune, delete, factory-reset) rather than executing it
 (exit code 64). Use the [[clud-tag-release]] confirmation discipline: print
 the plan, wait for an explicit decision, never proceed on silence.
+
+### Explicit VHDX deletion and clean reinitialization
+
+Use this path only after the user explicitly confirms deletion. State plainly
+that deletion irreversibly removes every Docker image, container, volume, and
+build cache stored in the VHDX. Treat a request such as "completely delete the
+VHDX, then restart" as confirmation; otherwise ask and wait.
+
+On Windows:
+
+1. Re-run `doctor` and require exactly one high-confidence active WSL disk.
+2. Run `wsl --shutdown`; verify `docker-desktop` is `Stopped` and no Docker
+   Desktop/backend/build processes remain.
+3. Resolve the literal path again and verify the target is the expected
+   `docker_data.vhdx`. Never delete a computed, ambiguous, or default-assumed
+   path.
+4. Delete only that file. If normal PowerShell deletion is denied and the user
+   approves elevation, launch one UAC-elevated PowerShell process whose sole
+   destructive action is `Remove-Item -LiteralPath <validated-path> -Force`.
+   Do not elevate Docker Desktop itself.
+5. Verify the old file is absent and report space reclaimed on the backing
+   volume.
+6. Launch the validated Docker Desktop executable non-elevated. A fresh VHDX
+   should appear small and grow dynamically. Initialization can remain
+   `starting` beyond the normal 20-second poll, so inspect WSL state and `dmesg`
+   for renewed disk/ext4 errors before allowing one additional bounded poll.
+7. Require `docker desktop status` = `running`, a working server response from
+   `docker version`, a healthy `docker buildx ls`, and a successful
+   `docker run --rm hello-world` before declaring recovery complete.
+
+If the new VHDX appears and `dmesg` has no recurrence of the prior I/O/journal
+errors, a brief `starting` state is initialization rather than proof of another
+failure. Preserve the original diagnosis in the final report and explicitly
+record that the old Docker data was deleted at the user's request.
 
 ## Verify recovery, preserve the diagnosis
 
