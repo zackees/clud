@@ -19,6 +19,9 @@ before exiting with the test-requested code.
 
 - Reads argv. Recognized `--mock-*` flags are consumed; everything else is
   echoed back in the report's `args` field exactly as `clud` forwarded it.
+- A leading `--version` arg short-circuits to a Claude Code version line
+  (issue #921's unified gateway-discovery gate): prints `MOCK_CLAUDE_VERSION`
+  if set, else `9.9.9 (mock-agent)`, then exits 0 without the JSON report.
 - Recognized flags (each takes the next argv slot as its value):
   - `--mock-exit-code <n>` — exit with `n` (default 0).
   - `--mock-sleep-ms <ms>` — sleep before emitting the JSON report.

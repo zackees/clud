@@ -7,6 +7,9 @@
 //! - Writes received args as JSON to stdout
 //! - Reads stdin if available (for pipe mode testing)
 //! - Exits with the code specified by --mock-exit-code (default 0)
+//! - With a leading `--version` arg, prints `MOCK_CLAUDE_VERSION`
+//!   (default `9.9.9 (mock-agent)`) so tests can exercise clud's Claude Code
+//!   version gate
 //! - With --mock-read-stdin-ms, reads stdin for N ms (even if terminal) and reports it
 //! - With --mock-stdin-raw-to, writes captured stdin bytes (pre-JSON) to a file
 //!   using Rust byte-literal escaping (e.g., `\x1b`) so binary input is preserved.
@@ -197,6 +200,18 @@ fn main() {
             continue;
         }
         filtered_args.push(arg.clone());
+    }
+
+    // `clud` probes `claude --version` for the unified gateway-discovery
+    // floor (issue #921). Stand in for a real Claude Code install: print the
+    // version string from `MOCK_CLAUDE_VERSION` (default: a release far above
+    // the floor, so existing tests stay silent) and exit before the JSON
+    // report machinery runs.
+    if args.get(1).map(String::as_str) == Some("--version") {
+        let version = std::env::var("MOCK_CLAUDE_VERSION")
+            .unwrap_or_else(|_| "9.9.9 (mock-agent)".to_string());
+        println!("{version}");
+        return;
     }
 
     // Emit scripted ANSI bytes before everything else so they land in the
