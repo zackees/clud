@@ -8,7 +8,7 @@ use super::types::{HookConfigError, HookFrontend, HookHealthReport, NormalizedHo
 use super::utils::{display_path, join_matchers};
 use super::CATCH_ALL_MATCHER;
 use crate::args::Args;
-use crate::backend::{self, ModelProvider, ResolvedLaunchTarget};
+use crate::backend::{ModelProvider, ResolvedLaunchTarget};
 use crate::command;
 use crate::subprocess;
 
@@ -159,11 +159,13 @@ pub(in crate::hook_health) fn run_backend_prompt(
     prompt: String,
 ) -> Result<i32, String> {
     let selected_backend = launch_target.effective_harness;
-    let backend_path = backend::find_backend(selected_backend)
+    // Issue #934: PATH, then the documented native install location — a
+    // stale PATH must not make a present binary look missing.
+    let backend_path = crate::backend_bootstrap::locate_installed_backend(selected_backend)
         .map(|path| path.to_string_lossy().to_string())
         .ok_or_else(|| {
             format!(
-                "{} not found on PATH; cannot run hook migration prompt",
+                "{} not found on PATH or at its native install location; cannot run hook migration prompt",
                 selected_backend.executable_name()
             )
         })?;

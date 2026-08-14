@@ -322,6 +322,33 @@ impl BackendBootstrapHost for ProductionBackendBootstrapHost {
     }
 }
 
+/// Locate an already-installed backend for callers outside the install
+/// flow. Same PATH-then-native-location rule the bootstrap gate uses, so a
+/// stale `PATH` doesn't make a present binary look missing (issue #934).
+pub fn locate_installed_backend(backend: Backend) -> Option<PathBuf> {
+    let mut host = ProductionBackendBootstrapHost;
+    let spec = BackendInstallSpec::for_backend(backend, host.platform());
+    locate_backend(&mut host, backend, &spec)
+}
+
+/// Locate an already-installed backend: `PATH` first, then the documented
+/// native install location for this platform.
+///
+/// Issue #934: both the pre-prompt gate and the post-install verification
+/// go through here, so "installed" means the same thing on both sides. When
+/// they disagreed, a PATH-only miss escalated to a full reinstall of a
+/// binary that was already on disk.
+fn locate_backend<H>(host: &mut H, backend: Backend, spec: &BackendInstallSpec) -> Option<PathBuf>
+where
+    H: BackendBootstrapHost + ?Sized,
+{
+    if let Some(path) = host.find_backend(backend) {
+        return Some(path);
+    }
+    host.native_backend_path(spec)
+        .filter(|path| path.is_file())
+}
+
 pub fn resolve_backend_path<R, W, H>(
     backend: Backend,
     dry_run: bool,
@@ -335,7 +362,14 @@ where
     W: Write,
     H: BackendBootstrapHost,
 {
-    if let Some(path) = host.find_backend(backend) {
+    let spec = BackendInstallSpec::for_backend(backend, host.platform());
+
+    // Issue #934: PATH first, then the documented native install location.
+    // Checking only PATH here meant a transient PATH miss (stale shell, an
+    // updater mid-swap) prompted for a full reinstall of a binary already
+    // sitting at the fallback location — which is the very path this
+    // function accepts *after* the installer runs.
+    if let Some(path) = locate_backend(host, backend, &spec) {
         return Ok(path.to_string_lossy().to_string());
     }
 
@@ -343,7 +377,6 @@ where
         return Ok(backend.executable_name().to_string());
     }
 
-    let spec = BackendInstallSpec::for_backend(backend, host.platform());
     if !interactive {
         return Err(BackendBootstrapError::BackendMissingNonInteractive {
             backend,
@@ -352,6 +385,18 @@ where
         });
     }
 
+    // Issue #934: name what was actually checked, so a false "not installed"
+    // is diagnosable from the transcript instead of being a mystery.
+    match host.native_backend_path(&spec) {
+        Some(fallback) => writeln!(
+            err,
+            "[clud] {} not found on PATH, and no binary at {}",
+            backend.executable_name(),
+            fallback.display()
+        ),
+        None => writeln!(err, "[clud] {} not found on PATH", backend.executable_name()),
+    }
+    .ok();
     writeln!(err, "{}", spec.prompt()).ok();
     err.flush().ok();
 
@@ -370,11 +415,7 @@ where
         }
     })?;
 
-    let installed_path = host.find_backend(backend).or_else(|| {
-        host.native_backend_path(&spec)
-            .filter(|path| path.is_file())
-    });
-    let Some(path) = installed_path else {
+    let Some(path) = locate_backend(host, backend, &spec) else {
         return Err(BackendBootstrapError::BackendVerificationFailed {
             backend,
             product_name: spec.product_name,
@@ -666,6 +707,10 @@ mod tests {
         installer_runs: Vec<Backend>,
         installer_result: Result<(), String>,
         native_path: Option<PathBuf>,
+        /// Path the installer materializes when it runs. Models the real
+        /// world, where the fallback location is empty *before* the install
+        /// and populated after — the distinction the pre-prompt gate turns on.
+        installer_creates: Option<PathBuf>,
         verified: Vec<(Backend, PathBuf)>,
         verify_result: Result<(), String>,
     }
@@ -679,6 +724,7 @@ mod tests {
                 installer_runs: Vec::new(),
                 installer_result: Ok(()),
                 native_path: None,
+                installer_creates: None,
                 verified: Vec::new(),
                 verify_result: Ok(()),
             }
@@ -697,6 +743,11 @@ mod tests {
 
         fn run_backend_installer(&mut self, spec: &BackendInstallSpec) -> Result<(), String> {
             self.installer_runs.push(spec.backend);
+            if self.installer_result.is_ok() {
+                if let Some(path) = &self.installer_creates {
+                    std::fs::write(path, b"mock").expect("installer writes binary");
+                }
+            }
             self.installer_result.clone()
         }
 
@@ -938,9 +989,17 @@ mod tests {
             let (path, prompt) =
                 resolve_with(backend, false, true, "yes\n", &mut host).expect("path");
             assert_eq!(path, installed.to_string_lossy());
+            // stderr is the issue #934 diagnostic followed by the prompt.
             let expected_prompt =
                 BackendInstallSpec::for_backend(backend, InstallPlatform::Linux).prompt() + "\n";
-            assert_eq!(prompt, expected_prompt);
+            assert!(
+                prompt.ends_with(&expected_prompt),
+                "prompt must be the last thing written, got: {prompt:?}"
+            );
+            assert!(
+                prompt.contains("not found on PATH"),
+                "diagnostic must precede the prompt, got: {prompt:?}"
+            );
             assert_eq!(host.installer_runs, vec![backend]);
             assert_eq!(host.verified, vec![(backend, installed)]);
         }
@@ -1004,17 +1063,87 @@ mod tests {
             } else {
                 backend.executable_name().to_string()
             });
-            std::fs::write(&native, b"mock").expect("write native path");
+            // The binary does NOT exist yet — the installer materializes it.
+            // (Pre-writing it here would now short-circuit at the pre-prompt
+            // gate and never exercise the post-install fallback.)
             let mut host = MockHost {
                 find_results: VecDeque::from([None, None]),
                 installer_result: Ok(()),
                 native_path: Some(native.clone()),
+                installer_creates: Some(native.clone()),
                 verify_result: Ok(()),
                 ..Default::default()
             };
             let (path, _) = resolve_with(backend, false, true, "Y\n", &mut host).expect("path");
             assert_eq!(path, native.to_string_lossy());
             assert_eq!(host.verified, vec![(backend, native)]);
+            assert_eq!(host.installer_runs, vec![backend]);
         }
+    }
+
+    /// Issue #934: the binary is already at the documented native install
+    /// location but missing from `PATH` (stale shell env, an updater
+    /// mid-swap). clud must use it as-is — no prompt, no reinstall.
+    #[test]
+    fn existing_native_install_is_used_when_path_lookup_misses() {
+        for backend in [Backend::Claude, Backend::Codex] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let native = temp.path().join(if cfg!(windows) {
+                format!("{}.exe", backend.executable_name())
+            } else {
+                backend.executable_name().to_string()
+            });
+            std::fs::write(&native, b"mock").expect("write native path");
+            let mut host = MockHost {
+                find_results: VecDeque::from([None]),
+                native_path: Some(native.clone()),
+                ..Default::default()
+            };
+
+            // Empty stdin: if this prompted, `read_yes` would see EOF and the
+            // call would fail as declined rather than resolving.
+            let (path, err) = resolve_with(backend, false, true, "", &mut host).expect("path");
+
+            assert_eq!(path, native.to_string_lossy());
+            assert!(
+                host.installer_runs.is_empty(),
+                "must not reinstall a backend that is already on disk"
+            );
+            assert!(
+                !err.contains("is not installed"),
+                "must not claim the backend is missing, got: {err:?}"
+            );
+        }
+    }
+
+    /// The diagnostic names the fallback location it checked, so a false
+    /// "not installed" is debuggable from the transcript alone.
+    #[test]
+    fn missing_backend_prompt_reports_the_locations_checked() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let absent = temp.path().join("claude-not-here");
+        let mut host = MockHost {
+            find_results: VecDeque::from([None]),
+            native_path: Some(absent.clone()),
+            ..Default::default()
+        };
+
+        let mut input = io::Cursor::new(b"n\n".to_vec());
+        let mut buf = Vec::<u8>::new();
+        let _ = resolve_backend_path(
+            Backend::Claude,
+            false,
+            true,
+            &mut input,
+            &mut buf,
+            &mut host,
+        );
+
+        let text = String::from_utf8(buf).expect("utf8");
+        assert!(text.contains("not found on PATH"), "got: {text:?}");
+        assert!(
+            text.contains(&absent.display().to_string()),
+            "diagnostic must name the fallback path checked, got: {text:?}"
+        );
     }
 }
