@@ -263,23 +263,20 @@ which test tier a change belongs in — lives in
   provenance survives merge/dedupe, so a shadowing rule keeps its own origin.
 - `block_bad_cmd.rs` - native `cmd-scan` PreToolUse hook binary (formerly
   `block-bad-cmd`; `clud-block-bad-cmd` still ships as a compat binary, see
-  `block_bad_cmd_rollout.rs`): hardcoded Rust-toolchain enforcement
-  (`RUST_TOOLS` → `soldr <tool>`), GitHub PR waiter enforcement (`gh ...
-  --watch` / hand-written polling loops → `clud tool run
-  github/pr_merge_watch.py <PR>`) gated behind the `clud settings`
-  `git.pr_wait_fail_fast` toggle (off by default, see `settings_tui.rs`),
-  eager GC tracking of `git clone`/`git worktree add` destinations plus a
-  `.extern-repos/` clone guard (zackees/clud#532), and the generic
-  `bad_commands` rule engine from `repo_clud_config.rs` (DD-016) — shell-segment
-  scanning, nested-shell/`eval`/command-substitution recursion,
-  `passthrough_prefixes`, and the `CLUD_BAD_CMD_OVERRIDE` escape hatch. When a
-  config `bad_commands` rule fires, the denial appends concise provenance to
-  `permissionDecisionReason`/stderr (matched token, normalized program, rule
-  id, and `<file>#/bad_commands/<index>` source) and writes a structured
-  `bad_cmd_denied` event to `~/.clud/tools/hooks/block-bad-cmd.log` (#525).
-  DD-017 extends these rules with structured argument predicates, known-wrapper
-  unwrapping, and a sibling `bad_pipelines` array. Both rule arrays concatenate
-  across repo/user settings and dedupe by `id`.
+  `block_bad_cmd_rollout.rs`). Enforces three things per Bash command:
+  hardcoded Rust-toolchain rules (`RUST_TOOLS` → `soldr <tool>`); GitHub PR
+  waiter rules (`gh ... --watch` / polling loops → `github/pr_merge_watch.py`),
+  gated behind the `git.pr_wait_fail_fast` toggle (off by default, see
+  `settings_tui.rs`); and the config-driven `bad_commands`/`bad_pipelines`
+  engine from `repo_clud_config.rs` (DD-016/DD-017). Also eager-GC-tracks
+  `git clone`/`git worktree add` destinations and guards clones outside
+  `.extern-repos/` (zackees/clud#532). The scanner splits shell segments and
+  unwraps nested shells/`eval`/command-substitution before matching;
+  `CLUD_BAD_CMD_OVERRIDE` is the per-rule escape hatch. Config denials cite
+  provenance (matched token, rule id, `<file>#/bad_commands/<index>`) in the
+  reason and log a structured `bad_cmd_denied` event to
+  `~/.clud/tools/hooks/block-bad-cmd.log` (#525). User-facing rule-writing
+  guide lives in the root `README.md`.
 - `settings_tui.rs` - `clud settings`: small cross-platform TUI checkbox menu
   over global boolean settings in `~/.clud/settings.json` (`clud_settings.rs`
   owns persistence). Pure `Menu` state machine + crossterm raw-mode I/O shell,
