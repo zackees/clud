@@ -1,0 +1,23 @@
+# clud-webterm — Phase-1 fidelity spike for zackees/clud#929.
+#
+# Standalone crate, deliberately EXCLUDED from the root workspace (see the
+# root Cargo.toml `exclude` list) so its heavy Tauri/wry dependency tree and
+# its portable-pty process spawning do NOT perturb the shipped `clud` build,
+# CI matrix, or `bash lint` (banned_imports). Phase 5 will fold a hardened
+# version back into the workspace with a documented banned_imports exemption.
+[package]
+name = "clud-webterm"
+version = "0.0.0"
+edition = "2021"
+description = "clud web terminal fidelity spike (Tauri + xterm.js + portable-pty)"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"

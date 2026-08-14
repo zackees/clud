@@ -9,6 +9,10 @@ members = [
 ]
 exclude = [
     "dylints/ban_manual_slash_normalize",
+    # Phase-1 web-terminal fidelity spike (zackees/clud#929). Kept out of the
+    # workspace so its Tauri/wry tree + portable-pty spawning don't perturb the
+    # shipped build, CI matrix, or `bash lint`.
+    "clud-webterm",
 ]
 
 [workspace.metadata.dylint]

@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Spike capability: allow the single window to use core APIs (invoke of app commands + event listen).",
+  "windows": ["*"],
+  "permissions": ["core:default"]
+}
