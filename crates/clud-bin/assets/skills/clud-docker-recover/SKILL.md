@@ -1,6 +1,11 @@
 ---
 name: clud-docker-recover
 description: "Diagnose and recover a wedged Docker Desktop, missing engine pipe/socket, stopped or failed WSL distro, backing-volume exhaustion, ext4 journal abort/read-only remount, or oversized/corrupt docker_data.vhdx / Docker.raw. Use for safe restart/reset, dangling-object cleanup, disk-pressure diagnosis, VHD relocation/compaction guidance, and explicitly confirmed destructive VHDX deletion plus clean reinitialization. Start with read-only diagnosis; resolve storage from Docker Desktop's real config; preserve images/volumes unless the user explicitly confirms deletion. Do not use for healthy-daemon build workflows or macOS-x86 emulation."
+triggers:
+  - "When Docker Desktop is wedged: the engine pipe/socket is absent while the backend or UI stays alive, or `docker` commands hang or report the daemon is unreachable"
+  - "When the WSL distro backing Docker fails to start, is stopped, or the engine won't come up after a reboot or update"
+  - "When the user asks about Docker VM disk growth, backing-volume exhaustion, memory pressure, or an oversized/corrupt docker_data.vhdx / Docker.raw"
+  - "When the user wants a safe restart/reset, dangling-object cleanup, VHD relocation/compaction guidance, or an explicitly confirmed destructive VHDX deletion and clean reinitialization"
 ---
 <!-- managed-by: clud -->
 
