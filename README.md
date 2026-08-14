@@ -222,6 +222,173 @@ PowerShell hook command end with `exit $LASTEXITCODE` after the batch wrapper.
 Without that, a hook intended to block a tool call can return success to Codex
 after the wrapper fails.
 
+## `clud-cmd-scan` — Command Guard
+
+Agents sometimes reach for the wrong command — bare `cargo` when your repo
+needs `soldr cargo`, or `playwright` when you have a faster test script.
+`clud-cmd-scan` catches those *before* they run. It's a hook that reads every
+shell command the agent is about to execute, and for the ones you've banned it
+blocks the command and tells the agent what to run instead.
+
+clud ships with a few built-in rules (bare `cargo`/`rustc` → `soldr cargo`,
+whole-disk `find /`). You add your own in `.clud/settings.json`.
+
+### Turn it on
+
+The guard runs as a Claude Code hook. Add it once to `~/.claude/settings.json`
+(covers every repo) or to a single repo's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "clud-cmd-scan", "timeout": 30 }]
+      }
+    ]
+  }
+}
+```
+
+If you ever see `clud-cmd-scan: command not found`, the guard isn't installed
+and is doing nothing — run `uv tool install --force clud`. (If you have an old
+config that calls `block-bad-cmd`, clud quietly upgrades it to `clud-cmd-scan`
+the next time it launches.)
+
+### Write your first rule
+
+A rule says: *when the agent runs command X, block it and suggest Y.* Put it in
+`bad_commands`:
+
+```json
+{
+  "bad_commands": [
+    {
+      "id": "no-raw-playwright",
+      "match": "playwright",
+      "replacement": "npm run test:integration",
+      "reason": "use the blessed pipeline; raw playwright is slower.",
+      "allow_override": true
+    }
+  ]
+}
+```
+
+Now when the agent tries to run `playwright`, it gets stopped:
+
+```text
+$ playwright test
+use the blessed pipeline; raw playwright is slower. Use `npm run test:integration` instead.
+Blocked `playwright` by rule `no-raw-playwright`
+from `/repo/.clud/settings.json#/bad_commands/0`.
+```
+
+The block message always names the exact rule and file that fired, so you're
+never left guessing why something was denied.
+
+**One thing to know about `match`:** it only looks at the *program being run* —
+the first word of the command — not the whole line. So a rule for `playwright`
+stops `playwright test`, but leaves `rg playwright` and `grep playwright .`
+alone, because there you're *searching for* the word, not running the program.
+By default `match` is a glob (`*`, `?`), matching the whole program name; add
+`"match_mode": "regex"` if you need a regex.
+
+You don't have to worry about the agent sneaking a command past the rule with
+`&&`, pipes, `bash -c '...'`, `$(...)`, `eval`, and so on — the scanner unwraps
+all of those and checks inside. Words merely quoted in an `echo` are left alone.
+
+### Where rules live
+
+You can define rules in three files. They **add together** — a rule in any of
+them applies:
+
+| File | Use it for |
+| --- | --- |
+| `~/.clud/settings.json` | rules you want on your own machine, everywhere |
+| `<repo>/.clud/settings.json` | rules for the whole team — commit it |
+| `<repo>/.clud/settings.local.json` | your personal rules for one repo — gitignored |
+
+If two rules share an `id`, the more specific file wins (repo over user).
+
+### Block only the *dangerous* form of a command
+
+Sometimes `git push` is fine but `git push --force` isn't. Add an `arguments`
+block to match on the flags:
+
+```json
+{
+  "bad_commands": [
+    {
+      "id": "no-force-push",
+      "match": "git",
+      "arguments": {
+        "ordered": ["push"],
+        "any": ["--force", "-f"],
+        "none": ["--force-with-lease"]
+      },
+      "replacement": "git push --force-with-lease",
+      "reason": "unconditional force pushes can overwrite remote work."
+    }
+  ]
+}
+```
+
+This blocks `git push --force` but lets `git push --force-with-lease` and
+`git status` through. The building blocks: `any` (at least one is present),
+`all` (all present), `none` (none present), and `ordered` (these appear in this
+order, gaps allowed). Everything you list must hold at once. See DD-017 for the
+rest (`prefix`, `contiguous`, short-flag bundles like `-rf`, and looking past
+wrappers like `sudo`).
+
+### Block a *pipe* between two commands
+
+Some risks are about two commands together — like piping a download straight
+into a shell. Those go in `bad_pipelines`:
+
+```json
+{
+  "bad_pipelines": [
+    {
+      "id": "no-download-to-shell",
+      "stages": [
+        { "match": "curl" },
+        { "match": "^(?:ba)?sh$", "match_mode": "regex" }
+      ],
+      "replacement": "download the script, inspect it, then run it",
+      "reason": "piping downloaded content into a shell hides executed code."
+    }
+  ]
+}
+```
+
+This trips on `curl ... | sh` (and `| bash`). A `|` inside a quoted string
+doesn't count as a real pipe.
+
+### Let the agent through, just this once
+
+If a rule sets `"allow_override": true`, you can wave a single command past it
+by setting an environment variable — with a reason:
+
+```bash
+CLUD_BAD_CMD_OVERRIDE="no-raw-playwright:debugging a trace-viewer bug"
+```
+
+The `id:reason` form is required; an override with no reason is ignored and the
+command stays blocked. It has to be a real environment variable — you can't
+just type it in front of the command.
+
+### What it is (and isn't)
+
+This is a guardrail for a *cooperative* agent, not a security wall. If it can't
+parse a command it lets it through (fails open), and it makes no attempt to
+stop someone deliberately hiding a command — via a shell variable, base64, a
+throwaway script, etc. Its whole job is to stop an agent from *accidentally*
+grabbing the wrong tool.
+
+For the complete field reference, see **DD-016** and **DD-017** in
+[`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
+
 ## Detached Sessions
 
 Use daemon-managed sessions when you want to disconnect and reattach later.
