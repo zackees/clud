@@ -63,7 +63,7 @@ Entry and orchestration:
   per-launch bearer, deterministic `/v1/models`, provider catalog routing,
   strict credential isolation, request-time effort mapping, route epochs,
   native Claude token counting, bounded parser/workers/timeouts, authenticated
-  context compact/clear lifecycle controls, and joined shutdown.
+  context compact/finalize/clear lifecycle controls, and joined shutdown.
   Per-phase header/body deadlines and a per-frame idle timeout preserve chunked
   progressive SSE; see `docs/architecture/unified-gateway.md`.
 - `codex_model.rs` - #752's Codex compatibility view over the shared provider
@@ -120,7 +120,8 @@ Entry and orchestration:
   `Downstream` map to `413`/`499`/`499` instead of borrowing it.
 - `codex_history.rs` - bounded, in-memory canonical Responses transcript for
   the foreground bridge. It commits only newly pending input plus opaque
-  upstream output, evicts at bridge shutdown, and makes validated compaction
+  upstream output, evicts at bridge shutdown, performs the two-phase harness
+  fallback after failed compaction, and makes validated provider compaction
   replacement and unified provider-route epoch changes atomic; see
   [codex-via-claude.md](../../../docs/architecture/codex-via-claude.md) and
   [unified-gateway.md](../../../docs/architecture/unified-gateway.md).

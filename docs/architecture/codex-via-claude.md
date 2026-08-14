@@ -55,19 +55,27 @@ failure stays terminal. Recovery suppresses every frame from the failed
 attempt, so the client receives only the retry's single valid response
 sequence.
 
-The authenticated loopback listener also exposes two launch-private lifecycle
+The authenticated loopback listener also exposes three launch-private lifecycle
 controls. Every bridged Claude launch registers session-local HTTP hooks through
 a protected temporary `--settings` file: `PreCompact` (manual or automatic)
 calls compact before Claude mutates its transcript, and `SessionStart(clear)`
 clears the bridge after Claude starts the fresh session:
 
 - `POST /_clud/context/compact` compacts the bridge's canonical transcript and
-  replaces it only after a valid opaque response. Empty history is a successful
-  no-op.
+  replaces it only after a valid opaque response. Empty history makes no
+  provider request but arms the same post-compaction reset. If the transcript
+  has an outstanding function call or the selected
+  credential route cannot compact it, the bridge acknowledges the hook and
+  enters a harness-compaction fallback instead of blocking Claude.
+- `POST /_clud/context/compact-finished` handles `SessionStart(compact)`. It
+  completes a pending fallback by discarding the pre-compaction transcript that
+  Claude's summary inference temporarily replayed. The next ordinary turn then
+  seeds canonical history from Claude's compacted transcript. When provider-side
+  compaction succeeded, this control is a no-op and preserves its opaque output.
 - `POST /_clud/context/clear` clears the addressed Claude session and all of its
   agent descendants, then performs no upstream inference or compaction request.
 
-Both routes use the same loopback URL and launch-scoped
+All three routes use the same loopback URL and launch-scoped
 `ANTHROPIC_AUTH_TOKEN` already supplied to the child. The generated settings
 interpolate the bearer from the environment, so it never appears in argv.
 Routes accept either an empty direct-control body or the exact matching Claude
