@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>clud webterm spike</title>
+    <link rel="stylesheet" href="vendor/xterm.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0e14;
+        overflow: hidden;
+      }
+      #term {
+        position: absolute;
+        inset: 0;
+        padding: 6px;
+        box-sizing: border-box;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="term"></div>
+
+    <script src="vendor/xterm.js"></script>
+    <script src="vendor/addon-fit.js"></script>
+    <script>
+      const { invoke } = window.__TAURI__.core;
+      const { listen } = window.__TAURI__.event;
+
+      const term = new Terminal({
+        fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
+        fontSize: 14,
+        cursorBlink: true,
+        allowProposedApi: true,
+        scrollback: 10000,
+        theme: { background: "#0b0e14", foreground: "#c9d1d9" },
+      });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open(document.getElementById("term"));
+      fit.fit();
+
+      // base64 (from the Rust side) -> raw bytes for xterm.
+      function b64ToBytes(b64) {
+        const bin = atob(b64);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      }
+
+      listen("pty://data", (e) => term.write(b64ToBytes(e.payload)));
+      listen("pty://exit", () =>
+        term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"),
+      );
+
+      // Keystrokes / pasted text -> PTY.
+      term.onData((d) => invoke("write_pty", { data: d }));
+
+      // Debounced resize -> PTY.
+      let rt;
+      window.addEventListener("resize", () => {
+        clearTimeout(rt);
+        rt = setTimeout(() => {
+          fit.fit();
+          invoke("resize_pty", { cols: term.cols, rows: term.rows });
+        }, 60);
+      });
+
+      (async () => {
+        fit.fit();
+        await invoke("start_pty", { cols: term.cols, rows: term.rows });
+        term.focus();
+      })();
+    </script>
+  </body>
+</html>
