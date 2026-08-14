@@ -691,6 +691,15 @@ fn validate_continuation_input(
     )))
 }
 
+/// Verify that a bridge-owned transcript can be sent to the Responses
+/// compaction endpoint. Unlike an ordinary continuation there is no pending
+/// Messages suffix that could complete an outstanding tool call here.
+pub(crate) fn validate_canonical_history(
+    history: &[serde_json::Value],
+) -> Result<(), PipelineError> {
+    validate_continuation_input(history, &[])
+}
+
 /// Replayed Messages history is display state, not a second canonical
 /// transcript. A continuation carries the current developer instruction in
 /// place of the historical one plus its complete pending message suffix.

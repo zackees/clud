@@ -728,6 +728,29 @@ fn handle_connection(
                 }
             }
         }
+        ("POST", "/_clud/context/compact-finished") => {
+            let body_deadline = Instant::now() + config.body_timeout;
+            match read_context_control_body(
+                &mut stream,
+                parsed.body_prefix,
+                parsed.content_length,
+                body_deadline,
+                shutdown,
+                ContextControl::CompactFinished,
+            ) {
+                Ok(body_key) => serve_context_compact_finished(
+                    &mut stream,
+                    conversations,
+                    log,
+                    body_key.unwrap_or_else(|| conversation_key.clone()),
+                ),
+                Err(ABANDON) => {}
+                Err(status) => {
+                    record_rejection(log, status, "context_control_body");
+                    let _ = write_error(&mut stream, status);
+                }
+            }
+        }
         ("GET", "/v1/models") if matches!(config.gateway_mode, GatewayMode::Unified(_)) => {
             serve_unified_catalog(&mut stream, config);
         }
@@ -877,6 +900,7 @@ fn request_is_authenticated(request: &ParsedRequest, token: &str, mode: &Gateway
 #[derive(Clone, Copy)]
 enum ContextControl {
     Compact,
+    CompactFinished,
     Clear,
 }
 
@@ -911,6 +935,13 @@ fn read_context_control_body(
                 == Some("SessionStart")
                 && value.get("source").and_then(serde_json::Value::as_str) == Some("clear")
         }
+        ContextControl::CompactFinished => {
+            value
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str)
+                == Some("SessionStart")
+                && value.get("source").and_then(serde_json::Value::as_str) == Some("compact")
+        }
     };
     if !matches_lifecycle_event {
         return Err(400);
@@ -932,19 +963,32 @@ fn serve_context_compact(
     let operation = conversations.with_history(&conversation_key.id, |history| {
         let snapshot = history.snapshot();
         if snapshot.is_empty() {
+            history.begin_harness_compaction_fallback();
             return Ok(Ok(()));
         }
-        let pipeline = build_pipeline(config, log).map_err(PipelineError::Upstream);
-        let result = pipeline
+        // Claude may start compaction while a tool batch is outstanding, and
+        // some credential routes may not expose `/responses/compact`. Neither
+        // condition may block Claude's own compaction lifecycle. Fall back to
+        // a two-phase clear: allow the compaction inference to replay the old
+        // transcript, then discard that temporary replay when
+        // `SessionStart(compact)` confirms Claude installed its summary.
+        let result = crate::codex_pipeline::validate_canonical_history(&snapshot)
+            .and_then(|()| build_pipeline(config, log).map_err(PipelineError::Upstream))
             .and_then(|pipeline| pipeline.compact_canonical_history(snapshot, shutdown))
             .and_then(|replacement| {
-                history.replace_history(&replacement).map_err(|error| {
-                    PipelineError::Translate(crate::codex_translate::TranslateError::Invalid(
-                        error.to_string(),
-                    ))
-                })
+                history
+                    .install_provider_compaction(&replacement)
+                    .map_err(|error| {
+                        PipelineError::Translate(crate::codex_translate::TranslateError::Invalid(
+                            error.to_string(),
+                        ))
+                    })
             });
-        Ok(result)
+        if let Err(error) = result {
+            log_context_compact_fallback(&error, &conversation_key, log);
+            history.begin_harness_compaction_fallback();
+        }
+        Ok(Ok(()))
     });
     match operation {
         Ok(Ok(())) => {
@@ -960,6 +1004,61 @@ fn serve_context_compact(
             let _ = write_pipeline_error(stream, &failure, log);
         }
     }
+}
+
+fn serve_context_compact_finished(
+    stream: &mut TcpStream,
+    conversations: &ConversationStore,
+    log: Option<&SharedBridgeLog>,
+    conversation_key: ConversationKey,
+) {
+    let operation = conversations.with_history(&conversation_key.id, |history| {
+        Ok(history.finish_harness_compaction_fallback())
+    });
+    match operation {
+        Ok(reset) => {
+            if reset {
+                if let Some(log) = log {
+                    lock_log(log).record(serde_json::json!({
+                        "ts_ms": unix_ms(),
+                        "event": "context_compact_fallback_finished",
+                        "conversation_scope": conversation_key.scope(),
+                    }));
+                }
+            }
+            let _ = write_response(stream, 204, "application/json", b"", false);
+        }
+        Err(error) => {
+            let failure = PipelineError::Translate(
+                crate::codex_translate::TranslateError::Invalid(error.to_string()),
+            );
+            let _ = write_pipeline_error(stream, &failure, log);
+        }
+    }
+}
+
+fn log_context_compact_fallback(
+    error: &PipelineError,
+    conversation_key: &ConversationKey,
+    log: Option<&SharedBridgeLog>,
+) {
+    let Some(log) = log else {
+        return;
+    };
+    let mut event = serde_json::json!({
+        "ts_ms": unix_ms(),
+        "event": "context_compact_fallback",
+        "conversation_scope": conversation_key.scope(),
+        "kind": pipeline_error_kind(error),
+    });
+    if let PipelineError::ContinuationInvariant(failure) = error {
+        event["unmatched_call_count"] = failure.unmatched_call_count.into();
+        event["input_count"] = failure.input_count.into();
+    }
+    if let PipelineError::Upstream(UpstreamError::Status(failure)) = error {
+        add_failure_fields(&mut event, failure);
+    }
+    lock_log(log).record(event);
 }
 
 fn serve_context_clear(
@@ -2371,6 +2470,15 @@ Connection: close
         .into_bytes()
     }
 
+    fn not_found_response() -> Vec<u8> {
+        let body = r#"{"error":{"type":"not_found_error","message":"not found"}}"#;
+        format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
     fn incomplete_response() -> Vec<u8> {
         response_with_events(
             "event: response.created\ndata: {\"type\":\"response.created\"}\n\n\
@@ -3629,6 +3737,242 @@ Connection: close
         assert!(
             !post_clear.contains("hi"),
             "stale pre-clear input leaked: {post_clear}"
+        );
+    }
+
+    #[test]
+    fn automatic_compaction_fallback_resets_rehydrated_tool_history() {
+        let upstream = FakeResponses::start_with_responses(vec![
+            Some(parallel_function_call_response(3)),
+            None,
+            None,
+        ]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+        let headers = [("X-Claude-Code-Session-Id", "session-auto-compact")];
+        let first = request(
+            addr,
+            &authorized_with_headers("POST", "/v1/messages", &token, PROBE_STREAM_BODY, &headers),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let compact = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact",
+                &token,
+                r#"{"hook_event_name":"PreCompact","trigger":"auto","session_id":"session-auto-compact"}"#,
+            ),
+        );
+        assert_eq!(status(&compact), 204, "{compact}");
+        assert!(
+            !upstream
+                .requests()
+                .iter()
+                .any(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1")),
+            "an incomplete continuation must be discarded locally, not sent upstream"
+        );
+
+        let mut replay: serde_json::Value =
+            serde_json::from_str(&split_parallel_result_body(3, true)).unwrap();
+        replay["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"role": "user", "content": "compact this context"}));
+        let replay = replay.to_string();
+        let compaction_inference = request(
+            addr,
+            &authorized_with_headers("POST", "/v1/messages", &token, &replay, &headers),
+        );
+        assert_eq!(status(&compaction_inference), 200, "{compaction_inference}");
+
+        let finished = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact-finished",
+                &token,
+                r#"{"hook_event_name":"SessionStart","source":"compact","session_id":"session-auto-compact"}"#,
+            ),
+        );
+        assert_eq!(status(&finished), 204, "{finished}");
+
+        let compacted_turn = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                &token,
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"COMPACTED SUMMARY"},{"role":"user","content":"after compact"}],"stream":false}"#,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&compacted_turn), 200, "{compacted_turn}");
+        let requests = upstream.requests();
+        let compaction_request = requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+            .nth(1)
+            .expect("Claude compaction inference");
+        assert!(
+            compaction_request.contains("call_0"),
+            "{compaction_request}"
+        );
+        assert!(
+            compaction_request.contains("result-0"),
+            "{compaction_request}"
+        );
+        let fresh_request = requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/responses HTTP/1.1"))
+            .nth(2)
+            .expect("post-compaction inference");
+        assert!(
+            fresh_request.contains("COMPACTED SUMMARY"),
+            "{fresh_request}"
+        );
+        assert!(
+            !fresh_request.contains("call_0"),
+            "the post-compaction reset must not retain the old tool replay: {fresh_request}"
+        );
+    }
+
+    #[test]
+    fn automatic_compaction_fallback_handles_unavailable_endpoint() {
+        let upstream =
+            FakeResponses::start_with_responses(vec![None, Some(not_found_response()), None, None]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+        let headers = [("X-Claude-Code-Session-Id", "session-compact-404")];
+        let first = request(
+            addr,
+            &authorized_with_headers("POST", "/v1/messages", &token, PROBE_BODY, &headers),
+        );
+        assert_eq!(status(&first), 200, "{first}");
+
+        let compact = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact",
+                &token,
+                r#"{"hook_event_name":"PreCompact","trigger":"auto","session_id":"session-compact-404"}"#,
+            ),
+        );
+        assert_eq!(status(&compact), 204, "{compact}");
+
+        let compaction_inference = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                &token,
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"bridged reply"},{"role":"user","content":"compact this context"}],"stream":false}"#,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&compaction_inference), 200, "{compaction_inference}");
+        let finished = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact-finished",
+                &token,
+                r#"{"hook_event_name":"SessionStart","source":"compact","session_id":"session-compact-404"}"#,
+            ),
+        );
+        assert_eq!(status(&finished), 204, "{finished}");
+        let after = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                &token,
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"SUMMARY AFTER 404"}],"stream":false}"#,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&after), 200, "{after}");
+        let requests = upstream.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/responses/compact HTTP/1.1"))
+                .count(),
+            1
+        );
+        let final_request = requests.last().expect("post-compaction inference");
+        assert!(
+            final_request.contains("SUMMARY AFTER 404"),
+            "{final_request}"
+        );
+        assert!(!final_request.contains("bridged reply"), "{final_request}");
+    }
+
+    #[test]
+    fn automatic_compaction_fallback_resets_an_initially_empty_history() {
+        let upstream = FakeResponses::start_with_responses(vec![None, None]);
+        let bridge = BridgeHandle::start(bridged_config(&upstream)).unwrap();
+        let addr = bridge.socket_addr();
+        let token = bridge.bearer_token().to_owned();
+        let headers = [("X-Claude-Code-Session-Id", "session-empty-compact")];
+
+        let compact = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact",
+                &token,
+                r#"{"hook_event_name":"PreCompact","trigger":"auto","session_id":"session-empty-compact"}"#,
+            ),
+        );
+        assert_eq!(status(&compact), 204, "{compact}");
+        let compaction_inference = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                &token,
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"FULL PRECOMPACTION HISTORY"},{"role":"user","content":"compact this context"}],"stream":false}"#,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&compaction_inference), 200, "{compaction_inference}");
+        let finished = request(
+            addr,
+            &authorized(
+                "POST",
+                "/_clud/context/compact-finished",
+                &token,
+                r#"{"hook_event_name":"SessionStart","source":"compact","session_id":"session-empty-compact"}"#,
+            ),
+        );
+        assert_eq!(status(&finished), 204, "{finished}");
+        let after = request(
+            addr,
+            &authorized_with_headers(
+                "POST",
+                "/v1/messages",
+                &token,
+                r#"{"model":"claude-x","messages":[{"role":"user","content":"SUMMARY FROM EMPTY"}],"stream":false}"#,
+                &headers,
+            ),
+        );
+        assert_eq!(status(&after), 200, "{after}");
+        let final_request = upstream
+            .requests()
+            .pop()
+            .expect("post-compaction inference");
+        assert!(
+            final_request.contains("SUMMARY FROM EMPTY"),
+            "{final_request}"
+        );
+        assert!(
+            !final_request.contains("FULL PRECOMPACTION HISTORY"),
+            "{final_request}"
         );
     }
 

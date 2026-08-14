@@ -402,6 +402,7 @@ fn context_lifecycle_settings(
     allowed_env: &str,
 ) -> serde_json::Value {
     let compact_url = format!("{}/_clud/context/compact", bridge.base_url());
+    let compact_finished_url = format!("{}/_clud/context/compact-finished", bridge.base_url());
     let clear_url = format!("{}/_clud/context/clear", bridge.base_url());
     let hook = |url: String| {
         let mut headers = serde_json::Map::new();
@@ -422,10 +423,16 @@ fn context_lifecycle_settings(
                 "matcher": "manual|auto",
                 "hooks": [hook(compact_url)]
             }],
-            "SessionStart": [{
-                "matcher": "clear",
-                "hooks": [hook(clear_url)]
-            }]
+            "SessionStart": [
+                {
+                    "matcher": "clear",
+                    "hooks": [hook(clear_url)]
+                },
+                {
+                    "matcher": "compact",
+                    "hooks": [hook(compact_finished_url)]
+                }
+            ]
         }
     })
 }
@@ -1180,17 +1187,24 @@ mod tests {
             settings["hooks"]["SessionStart"][0]["hooks"][0]["url"],
             format!("{base_url}/_clud/context/clear")
         );
+        assert_eq!(settings["hooks"]["SessionStart"][1]["matcher"], "compact");
+        assert_eq!(
+            settings["hooks"]["SessionStart"][1]["hooks"][0]["url"],
+            format!("{base_url}/_clud/context/compact-finished")
+        );
         for event in ["PreCompact", "SessionStart"] {
-            let hook = &settings["hooks"][event][0]["hooks"][0];
-            assert_eq!(hook["type"], "http");
-            assert_eq!(
-                hook["headers"]["Authorization"],
-                "Bearer $ANTHROPIC_AUTH_TOKEN"
-            );
-            assert_eq!(
-                hook["allowedEnvVars"],
-                serde_json::json!(["ANTHROPIC_AUTH_TOKEN"])
-            );
+            for entry in settings["hooks"][event].as_array().unwrap() {
+                let hook = &entry["hooks"][0];
+                assert_eq!(hook["type"], "http");
+                assert_eq!(
+                    hook["headers"]["Authorization"],
+                    "Bearer $ANTHROPIC_AUTH_TOKEN"
+                );
+                assert_eq!(
+                    hook["allowedEnvVars"],
+                    serde_json::json!(["ANTHROPIC_AUTH_TOKEN"])
+                );
+            }
         }
         assert!(
             !command.join(" ").contains(runtime.bearer_token().unwrap()),
@@ -1298,7 +1312,7 @@ mod tests {
         assert_eq!(settings["env"]["USER_SETTING"], "preserved");
         assert_eq!(
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
-            2
+            3
         );
         assert_eq!(settings["hooks"]["PreCompact"][0]["matcher"], "manual|auto");
         drop(calls);

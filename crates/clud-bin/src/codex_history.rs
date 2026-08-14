@@ -209,6 +209,7 @@ pub struct ConversationHistory {
     items: Vec<StoredItem>,
     bytes: usize,
     route: Option<ConversationRoute>,
+    reset_after_harness_compaction: bool,
 }
 
 #[derive(Debug)]
@@ -224,6 +225,7 @@ impl ConversationHistory {
             items: Vec::new(),
             bytes: 0,
             route: None,
+            reset_after_harness_compaction: false,
         }
     }
 
@@ -245,6 +247,35 @@ impl ConversationHistory {
     /// committed. The next replay then seeds fresh history instead of extending
     /// stale canonical state.
     pub fn clear(&mut self) {
+        self.clear_items();
+        self.reset_after_harness_compaction = false;
+    }
+
+    /// Fall back from provider-side compaction to Claude's own compaction.
+    ///
+    /// Claude's compaction inference may replay the old Messages transcript
+    /// and temporarily repopulate this cache. The matching
+    /// `SessionStart(compact)` control must clear it once more so the next
+    /// ordinary turn seeds from Claude's compacted transcript instead.
+    pub fn begin_harness_compaction_fallback(&mut self) {
+        self.clear_items();
+        self.reset_after_harness_compaction = true;
+    }
+
+    /// Complete a pending harness-compaction fallback.
+    ///
+    /// Returns whether a reset was pending, allowing the HTTP boundary to log
+    /// only real state transitions.
+    pub fn finish_harness_compaction_fallback(&mut self) -> bool {
+        if !self.reset_after_harness_compaction {
+            return false;
+        }
+        self.clear_items();
+        self.reset_after_harness_compaction = false;
+        true
+    }
+
+    fn clear_items(&mut self) {
         self.items.clear();
         self.bytes = 0;
     }
@@ -276,6 +307,17 @@ impl ConversationHistory {
         let replacement = self.encode_replacement(compact_output.iter().cloned())?;
         self.bytes = replacement.iter().map(|item| item.bytes).sum();
         self.items = replacement;
+        Ok(())
+    }
+
+    /// Install a provider-side lifecycle compaction and cancel any stale
+    /// harness-fallback reset left by a missed `SessionStart(compact)` hook.
+    pub fn install_provider_compaction(
+        &mut self,
+        compact_output: &[Value],
+    ) -> Result<(), HistoryError> {
+        self.replace_history(compact_output)?;
+        self.reset_after_harness_compaction = false;
         Ok(())
     }
 
@@ -554,6 +596,54 @@ mod tests {
                 .unwrap(),
             vec![compact, pending]
         );
+    }
+
+    #[test]
+    fn harness_compaction_fallback_clears_the_temporary_replay_once() {
+        let mut history = ConversationHistory::new(HistoryLimits::default());
+        history
+            .append_successful_turn(&[item("message", serde_json::json!({"id": "old"}))], &[])
+            .unwrap();
+        history.begin_harness_compaction_fallback();
+        assert!(history.snapshot().is_empty());
+        history
+            .append_successful_turn(
+                &[item(
+                    "message",
+                    serde_json::json!({"id": "temporary-replay"}),
+                )],
+                &[],
+            )
+            .unwrap();
+
+        assert!(history.finish_harness_compaction_fallback());
+        assert!(history.snapshot().is_empty());
+        assert!(!history.finish_harness_compaction_fallback());
+    }
+
+    #[test]
+    fn provider_compaction_cancels_a_stale_harness_fallback_reset() {
+        let mut history = ConversationHistory::new(HistoryLimits::default());
+        history.begin_harness_compaction_fallback();
+        history
+            .append_successful_turn(
+                &[item(
+                    "message",
+                    serde_json::json!({"id": "temporary-replay"}),
+                )],
+                &[],
+            )
+            .unwrap();
+        let compact = item(
+            "compaction",
+            serde_json::json!({"encrypted_content": "opaque"}),
+        );
+
+        history
+            .install_provider_compaction(std::slice::from_ref(&compact))
+            .unwrap();
+        assert!(!history.finish_harness_compaction_fallback());
+        assert_eq!(history.snapshot(), vec![compact]);
     }
 
     #[test]
