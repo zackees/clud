@@ -345,8 +345,7 @@ where
     if let Some(path) = host.find_backend(backend) {
         return Some(path);
     }
-    host.native_backend_path(spec)
-        .filter(|path| path.is_file())
+    host.native_backend_path(spec).filter(|path| path.is_file())
 }
 
 pub fn resolve_backend_path<R, W, H>(
@@ -394,7 +393,11 @@ where
             backend.executable_name(),
             fallback.display()
         ),
-        None => writeln!(err, "[clud] {} not found on PATH", backend.executable_name()),
+        None => writeln!(
+            err,
+            "[clud] {} not found on PATH",
+            backend.executable_name()
+        ),
     }
     .ok();
     writeln!(err, "{}", spec.prompt()).ok();
