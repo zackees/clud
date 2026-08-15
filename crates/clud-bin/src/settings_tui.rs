@@ -20,23 +20,21 @@ use crate::clud_settings;
 use crate::preference::{ChoiceOption, ChoiceSelector};
 use crate::provider_catalog::{self, EffortLevel};
 
-const MODEL_OPTIONS: [ChoiceOption<ModelProvider>; 3] = [
-    ChoiceOption {
-        value: ModelProvider::Claude,
-        label: "claude",
-        note: "",
-    },
-    ChoiceOption {
-        value: ModelProvider::Codex,
-        label: "codex",
-        note: "",
-    },
-    ChoiceOption {
-        value: ModelProvider::DeepSeek,
-        label: "deepseek",
-        note: "",
-    },
-];
+/// One selector row per [`ModelProvider::ALL`] entry, built at call time
+/// (rather than a `const` array) so a new registered provider needs no
+/// second array here. `label` intentionally reuses `as_str()` rather than a
+/// display name: this is the lowercase `--claude`/`--codex`/`--deepseek`-
+/// style value cycled through and written to `settings.json`, not prose.
+fn model_options() -> Vec<ChoiceOption<ModelProvider>> {
+    ModelProvider::ALL
+        .iter()
+        .map(|&value| ChoiceOption {
+            value,
+            label: value.as_str(),
+            note: "",
+        })
+        .collect()
+}
 
 const HARNESS_OPTIONS: [ChoiceOption<HarnessSelection>; 3] = [
     ChoiceOption {
@@ -80,7 +78,7 @@ impl SettingValue {
         match self {
             Self::Bool(value) => *value = !*value,
             Self::ModelProvider(value) => {
-                let mut selector = ChoiceSelector::new(&MODEL_OPTIONS, *value, *value);
+                let mut selector = ChoiceSelector::new(&model_options(), *value, *value);
                 selector.cycle();
                 *value = selector.selected();
             }
@@ -185,11 +183,7 @@ fn setting_items() -> Vec<SettingItem> {
             value: SettingValue::Harness(launch.harness.unwrap_or_default()),
         },
     ];
-    for provider in [
-        ModelProvider::Claude,
-        ModelProvider::Codex,
-        ModelProvider::DeepSeek,
-    ] {
+    for &provider in ModelProvider::ALL {
         append_provider_profile_items(&mut items, &snapshot, provider);
     }
     items.push(SettingItem {
@@ -201,6 +195,31 @@ fn setting_items() -> Vec<SettingItem> {
         value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false)),
     });
     items
+}
+
+/// Human-readable provider name for TUI labels. Anthropic-compat providers
+/// (DeepSeek, and Kimi once it lands) carry irregular capitalization
+/// (`"DeepSeek"`, not `"Deepseek"`) recorded once in their registry
+/// descriptor, so this defers to that when one exists; Claude and Codex have
+/// no descriptor (they are native/translation-bridge, not vault providers)
+/// and fall back to capitalizing `as_str()`, which is exact for both.
+fn provider_display_name(provider: ModelProvider) -> String {
+    if let Some(descriptor) = crate::provider_registry::descriptor_for(provider) {
+        return descriptor.display_name.to_string();
+    }
+    let mut chars = provider.as_str().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Leaks a short-lived formatted string to `'static` so it can populate
+/// `SettingItem::key`/`label` without changing that struct's field types.
+/// `clud settings` builds this list at most once per process invocation, so
+/// the leak is bounded and never accumulates across a long-running loop.
+fn leak_string(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
 }
 
 fn append_provider_profile_items(
@@ -223,47 +242,16 @@ fn append_provider_profile_items(
             "1m" => Some("1m"),
             _ => None,
         });
-    let (
-        model_key,
-        harness_key,
-        effort_key,
-        context_key,
-        model_label,
-        harness_label,
-        effort_label,
-        context_label,
-    ) = match provider {
-        ModelProvider::Claude => (
-            "providers.claude.model",
-            "providers.claude.harness",
-            "providers.claude.effort",
-            "providers.claude.context_window",
-            "Claude model",
-            "Claude harness",
-            "Claude effort",
-            "Claude context window",
-        ),
-        ModelProvider::Codex => (
-            "providers.codex.model",
-            "providers.codex.harness",
-            "providers.codex.effort",
-            "providers.codex.context_window",
-            "Codex model",
-            "Codex harness",
-            "Codex effort",
-            "Codex context window",
-        ),
-        ModelProvider::DeepSeek => (
-            "providers.deepseek.model",
-            "providers.deepseek.harness",
-            "providers.deepseek.effort",
-            "providers.deepseek.context_window",
-            "DeepSeek model",
-            "DeepSeek harness",
-            "DeepSeek effort",
-            "DeepSeek context window",
-        ),
-    };
+    let settings_id = provider.as_str();
+    let display = provider_display_name(provider);
+    let model_key = leak_string(format!("providers.{settings_id}.model"));
+    let harness_key = leak_string(format!("providers.{settings_id}.harness"));
+    let effort_key = leak_string(format!("providers.{settings_id}.effort"));
+    let context_key = leak_string(format!("providers.{settings_id}.context_window"));
+    let model_label = leak_string(format!("{display} model"));
+    let harness_label = leak_string(format!("{display} harness"));
+    let effort_label = leak_string(format!("{display} effort"));
+    let context_label = leak_string(format!("{display} context window"));
     items.extend([
         SettingItem {
             key: model_key,

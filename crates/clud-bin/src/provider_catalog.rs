@@ -97,6 +97,11 @@ pub struct CatalogModel {
     /// Reviewed direct-launch default for this provider. Claude intentionally
     /// has no row marked: its harness-owned default remains authoritative.
     pub provider_default: bool,
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` value to set in the child-env overlay
+    /// when this row's wire ID is selected, or `None` if the overlay should
+    /// leave the variable unset. Replaces a hardcoded `model.ends_with("[1m]")`
+    /// check with catalog data (#937 Phase 2).
+    pub claude_compact_window: Option<u32>,
 }
 
 pub const MODELS: &[CatalogModel] = &[
@@ -112,6 +117,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Low),
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "codex-terra",
@@ -125,6 +131,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
         provider_default: true,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "codex-luna",
@@ -138,6 +145,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "deepseek-v4-pro",
@@ -154,6 +162,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Max),
         default_context_window: Some("1m"),
         provider_default: true,
+        claude_compact_window: Some(786_432),
     },
     CatalogModel {
         cli_id: "deepseek-v4-flash",
@@ -167,6 +176,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
     // can be added without changing the stable provider-qualified grammar.
@@ -182,6 +192,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "claude-sonnet",
@@ -195,6 +206,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "claude-haiku",
@@ -208,6 +220,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
 ];
 
@@ -343,6 +356,15 @@ fn catalog_match(value: &str) -> Option<CatalogModel> {
 
 pub fn model_by_cli_id(value: &str) -> Option<CatalogModel> {
     MODELS.iter().copied().find(|entry| entry.cli_id == value)
+}
+
+/// Exact wire-ID lookup, deliberately narrower than [`catalog_match`] (which
+/// also matches `cli_id` and aliases). The child-env overlay uses this to
+/// look up `claude_compact_window`: an auto-context wire model like
+/// `"deepseek-v4-pro"` must NOT fall back to matching the `[1m]` row via its
+/// `cli_id` and pick up that row's compaction window.
+pub fn model_by_wire_id(value: &str) -> Option<CatalogModel> {
+    MODELS.iter().copied().find(|entry| entry.wire_id == value)
 }
 
 /// Resolve a model identifier emitted by Claude's gateway model picker.
@@ -497,7 +519,16 @@ pub fn resolve(
             explicit_effort,
             explicit_context.as_deref(),
         )?;
-        if provider == ModelProvider::DeepSeek && explicit_context.as_deref() == Some("auto") {
+        // "This provider has a 1m-tier model" rather than `provider ==
+        // ModelProvider::DeepSeek`: a model-less --context-window auto only
+        // needs disambiguation (which of the provider's models?) when the
+        // provider has more than one context tier to choose from. Kimi's
+        // future row (#937 Phase 3) has a 1m tier too and picks this up with
+        // zero edits here.
+        if explicit_context.as_deref() == Some("auto")
+            && models_for_provider(provider)
+                .any(|entry| entry.supported_context_windows.contains(&"1m"))
+        {
             return Err(SelectionError::ContextRequiresModel {
                 provider,
                 context_window: "auto".to_string(),
@@ -596,7 +627,12 @@ pub fn resolve(
 
     let mut wire_model =
         catalog.map_or_else(|| base_model.to_string(), |entry| entry.wire_id.to_string());
-    if model_provider == ModelProvider::DeepSeek {
+    // "This model has a 1m context tier" rather than `model_provider ==
+    // ModelProvider::DeepSeek`: `contexts` is already the resolved model's
+    // (or, for an uncataloged wire ID, the provider's fallback) supported
+    // context-window slice, so this is behavior-identical for DeepSeek/Codex
+    // and picks up Kimi's future 1m row (#937 Phase 3) unchanged.
+    if contexts.contains(&"1m") {
         match effective_context.as_deref() {
             Some("auto") => {
                 wire_model = wire_model
@@ -706,6 +742,24 @@ pub fn resolve_for_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guardrail: `apply_anthropic_compat_overlay` (foreground_runtime.rs)
+    /// expects `reviewed_default_model` to resolve for every
+    /// Anthropic-compat descriptor's provider, and panics via `.expect()` at
+    /// launch if it doesn't. Pin the invariant here so a future descriptor
+    /// row (e.g. Kimi in #937 Phase 3) without a matching
+    /// `provider_default: true` catalog row fails a test instead of a
+    /// runtime launch.
+    #[test]
+    fn every_anthropic_compat_provider_has_a_reviewed_catalog_default() {
+        for descriptor in crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+            assert!(
+                reviewed_default_model(descriptor.provider).is_some(),
+                "{} has no provider_default: true catalog row",
+                descriptor.display_name
+            );
+        }
+    }
 
     #[test]
     fn inferred_provider_from_wire_matches_representative_ids() {

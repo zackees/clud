@@ -329,11 +329,7 @@ fn launch_preferences_from_document(
     document: &Value,
 ) -> Result<LaunchPreferencesSnapshot, SettingsError> {
     let mut provider_profiles = Vec::new();
-    for provider in [
-        ModelProvider::Claude,
-        ModelProvider::Codex,
-        ModelProvider::DeepSeek,
-    ] {
+    for &provider in ModelProvider::ALL {
         if let Some(profile) = provider_profile_from_document(document, provider)? {
             provider_profiles.push(profile);
         }

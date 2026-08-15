@@ -470,15 +470,19 @@ fn run(mut args: args::Args) {
     }
 
     // #878: credentials must exist before any foreground or daemon-backed
-    // DeepSeek work is accepted. Dry-runs intentionally remain vault-free.
-    if provider_auth::launch_needs_preflight(launch_target.model_provider, args.dry_run) {
+    // Anthropic-compat-provider (DeepSeek today) work is accepted. Dry-runs
+    // intentionally remain vault-free -- `launch_preflight_target` returns
+    // `None` for every dry run regardless of provider.
+    if let Some(descriptor) =
+        provider_auth::launch_preflight_target(launch_target.model_provider, args.dry_run)
+    {
         let interactive = provider_auth::launch_is_interactive(
             &args,
             io::stdin().is_terminal(),
             io::stderr().is_terminal(),
         );
-        if let Err(error) = provider_auth::preflight_native(interactive) {
-            eprintln!("deepseek: {error}");
+        if let Err(error) = provider_auth::preflight_native(descriptor, interactive) {
+            eprintln!("{}: {}", descriptor.settings_id, error.describe(descriptor));
             std::process::exit(2);
         }
     }

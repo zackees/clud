@@ -256,6 +256,55 @@ fn repeat_command_preserves_deepseek_provider() {
         .any(|part| part == ["--harness", "claude"]));
 }
 
+/// Guardrail for #937 Phase 2B: `build_repeat_once_command`'s provider match
+/// (`daemon/entry.rs`) stays a hand-written, compiler-enforced exhaustive
+/// match rather than becoming registry-driven, per the design in #936/#937.
+/// That match is therefore exactly the kind of silent-drift risk the design
+/// calls out: the compiler forces *some* arm to exist for a new provider,
+/// but never checks that the literal it pushes matches the registry's
+/// `cli_flag`. This test closes that gap: for every provider that has an
+/// Anthropic-compat descriptor, the flag this surface actually emits on the
+/// re-exec command line must equal `descriptor.cli_flag` byte-for-byte.
+#[test]
+fn repeat_command_flag_matches_descriptor_cli_flag_for_every_anthropic_compat_provider() {
+    for descriptor in crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+        let args = Args::parse_from_raw(
+            [
+                "clud",
+                descriptor.cli_flag,
+                "loop",
+                "--repeat",
+                "1h",
+                "task",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+        let target = crate::backend::resolve_launch_target(
+            args.claude,
+            args.codex,
+            args.deepseek,
+            args.harness,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            target.model_provider, descriptor.provider,
+            "descriptor.cli_flag must resolve back to its own provider"
+        );
+        let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+        let command = build_repeat_once_command(&args, &plan).unwrap();
+        assert!(
+            command.windows(1).any(|part| part == [descriptor.cli_flag]),
+            "expected {:?} to contain the literal flag {:?}",
+            command,
+            descriptor.cli_flag
+        );
+    }
+}
+
 #[test]
 fn repeat_command_preserves_unified_routing_without_a_direct_provider_flag() {
     let args = Args::parse_from_raw(

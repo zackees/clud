@@ -6,7 +6,36 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::args::{AuthProvider, AuthSubcommand, CodexAuthSubcommand, DeepseekAuthSubcommand};
+use crate::backend::ModelProvider;
 use crate::provider_auth::{NativeSecretStore, SecretStore};
+use crate::provider_registry::{self, AnthropicCompatProvider};
+
+/// Maps the auth-command's provider selector onto the model-provider space
+/// the registry is keyed by. Exhaustive: a new `AuthProvider` variant fails
+/// to compile here until it is routed somewhere.
+fn model_provider_for(provider: AuthProvider) -> ModelProvider {
+    match provider {
+        AuthProvider::Claude => ModelProvider::Claude,
+        AuthProvider::Codex => ModelProvider::Codex,
+        AuthProvider::Deepseek => ModelProvider::DeepSeek,
+    }
+}
+
+/// Anthropic-compat descriptor for an `AuthProvider`, when it has one.
+/// `None` for Claude (externally managed) and Codex (its own translation-
+/// bridge auth path, not a vault-backed Anthropic-compat provider).
+fn anthropic_compat_descriptor(provider: AuthProvider) -> Option<&'static AnthropicCompatProvider> {
+    provider_registry::descriptor_for(model_provider_for(provider))
+}
+
+/// Inverse of [`model_provider_for`]. Exhaustive for the same reason.
+fn auth_provider_for(provider: ModelProvider) -> AuthProvider {
+    match provider {
+        ModelProvider::Claude => AuthProvider::Claude,
+        ModelProvider::Codex => AuthProvider::Codex,
+        ModelProvider::DeepSeek => AuthProvider::Deepseek,
+    }
+}
 
 /// Exact action-first spelling for a deprecated Codex alias invocation.
 pub fn codex_alias_replacement(subcommand: &CodexAuthSubcommand) -> String {
@@ -31,13 +60,15 @@ pub fn codex_alias_replacement(subcommand: &CodexAuthSubcommand) -> String {
 
 /// Exact action-first spelling for a deprecated DeepSeek alias invocation.
 pub fn deepseek_alias_replacement(subcommand: &DeepseekAuthSubcommand) -> String {
+    let descriptor = anthropic_compat_descriptor(AuthProvider::Deepseek)
+        .expect("DeepSeek has an Anthropic-compat descriptor");
     match subcommand {
-        DeepseekAuthSubcommand::Login => "clud auth login deepseek".to_string(),
+        DeepseekAuthSubcommand::Login => descriptor.login_command.to_string(),
         DeepseekAuthSubcommand::Status { json } => {
-            replacement_with_json("status", "deepseek", *json)
+            replacement_with_json("status", descriptor.settings_id, *json)
         }
         DeepseekAuthSubcommand::Logout { json } => {
-            replacement_with_json("logout", "deepseek", *json)
+            replacement_with_json("logout", descriptor.settings_id, *json)
         }
     }
 }
@@ -85,7 +116,10 @@ fn login(
             },
             interrupted,
         ),
-        AuthProvider::Deepseek => crate::provider_auth::run(&DeepseekAuthSubcommand::Login),
+        AuthProvider::Deepseek => crate::provider_auth::run_for(
+            anthropic_compat_descriptor(provider).expect("DeepSeek has a descriptor"),
+            &DeepseekAuthSubcommand::Login,
+        ),
         AuthProvider::Claude => externally_managed("login"),
     }
 }
@@ -96,9 +130,10 @@ fn logout(provider: AuthProvider, json: bool) -> i32 {
             &CodexAuthSubcommand::Logout { json },
             &AtomicBool::new(false),
         ),
-        AuthProvider::Deepseek => {
-            crate::provider_auth::run(&DeepseekAuthSubcommand::Logout { json })
-        }
+        AuthProvider::Deepseek => crate::provider_auth::run_for(
+            anthropic_compat_descriptor(provider).expect("DeepSeek has a descriptor"),
+            &DeepseekAuthSubcommand::Logout { json },
+        ),
         AuthProvider::Claude => externally_managed("logout"),
     }
 }
@@ -113,11 +148,16 @@ fn externally_managed(action: &str) -> i32 {
 fn status(provider: Option<AuthProvider>, json: bool) -> i32 {
     let providers = match provider {
         Some(provider) => vec![provider],
-        None => vec![
-            AuthProvider::Claude,
-            AuthProvider::Codex,
-            AuthProvider::Deepseek,
-        ],
+        // `ModelProvider::ALL` is the registry's ordered source of truth;
+        // mapping through it (rather than a second hand-written array here)
+        // keeps this listing's order in lockstep with every other
+        // provider-enumeration surface. Its order happens to already be
+        // Claude, Codex, DeepSeek -- this listing's existing output order.
+        None => ModelProvider::ALL
+            .iter()
+            .copied()
+            .map(auth_provider_for)
+            .collect(),
     };
     let rows: Vec<serde_json::Value> = providers.into_iter().map(status_row).collect();
     if json {
@@ -162,11 +202,14 @@ fn status_row(provider: AuthProvider) -> serde_json::Value {
             })
         }
         AuthProvider::Deepseek => {
-            let configured = NativeSecretStore::new()
-                .and_then(|store| store.get())
-                .ok()
-                .flatten()
-                .is_some();
+            let descriptor =
+                anthropic_compat_descriptor(provider).expect("DeepSeek has a descriptor");
+            let configured =
+                NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
+                    .and_then(|store| store.get())
+                    .ok()
+                    .flatten()
+                    .is_some();
             serde_json::json!({
                 "provider": provider.as_str(),
                 "source": "native_vault",
