@@ -89,6 +89,13 @@ See [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) for full rationale.
 - **Single `LaunchPlan`** — production launches go through `command::build_launch_plan_for_target`; `build_launch_plan` is the native compatibility/test wrapper, and `--dry-run` emits the resolved plan as JSON ([DD-005](docs/DESIGN_DECISIONS.md#dd-005-single-launchplan-as-source-of-truth-for-everything-clud-runs), [launch-plan.md](docs/architecture/launch-plan.md)).
 - **Unknown flag passthrough** — unrecognized CLI flags are forwarded to the backend.
 - **Test-first** — every feature has both Rust `#[test]` and Python subprocess tests.
+- **OpenRouter model selection** — OpenRouter is a gateway while Claude Code
+  remains the frontend. `clud --openrouter` uses the reviewed Sonnet alias,
+  `--model <wire-id>` pins startup, and Claude Code's `/model` uses live gateway
+  discovery. Do not add a second clud-side picker or fold changing OpenRouter
+  inventory into the static catalog. Preserve independent role-model mappings
+  and treat non-Claude models as best-effort; see
+  [`provider-selection.md`](docs/architecture/provider-selection.md#openrouter-model-selection-contract).
 
 ## Code Quality Standards
 

@@ -145,6 +145,28 @@ accepted work.
   provider-qualified clud model ID. OpenRouter's live `/v1/models` response,
   rather than clud's static catalog, owns additional picker inventory.
 
+### OpenRouter model-selection contract
+
+OpenRouter is the routing gateway, not the interactive harness. Claude Code
+remains the frontend and receives the resolved main-model wire ID through its
+`--model` argument. Selection has three supported entry points:
+
+1. `clud --openrouter` resolves the reviewed
+   `~anthropic/claude-sonnet-latest` default.
+2. `clud --openrouter --model <wire-id>` pins any explicit OpenRouter alias or
+   catalog slug before launch. Unknown full IDs pass through losslessly because
+   OpenRouter owns that namespace.
+3. Claude Code's `/model` command consumes the gateway-discovered live
+   inventory after launch. Clud enables discovery but does not implement a
+   separate pre-launch OpenRouter picker.
+
+An explicit main-model selection replaces `ANTHROPIC_MODEL`; it does not
+rewrite the provider descriptor's independent Fable, Opus, Sonnet, Haiku, or
+subagent role mappings. Arbitrary non-Claude wire IDs remain syntactically
+reachable but are best-effort through the Claude harness. `--dry-run` resolves
+and reports all of the above without reading the OpenRouter vault, whereas a
+live `/model` inventory or request requires a stored OpenRouter credential.
+
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.
 

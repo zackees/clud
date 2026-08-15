@@ -126,13 +126,42 @@ clud --openrouter
 
 Clud connects Claude Code directly to `https://openrouter.ai/api`, explicitly
 clears inherited Anthropic API-key auth, and enables gateway model discovery.
-The reviewed default is OpenRouter's Claude Sonnet alias; Fable, Opus, Sonnet,
-Haiku, and subagent roles use OpenRouter's documented Anthropic aliases. OpenRouter
-only guarantees Claude Code compatibility through Anthropic's first-party
-provider, so arbitrary non-Claude models are best-effort. If Claude Code has a
-cached Anthropic login and reports authentication or model-not-found errors,
-run `/logout` once inside Claude Code, exit, and relaunch `clud --openrouter`.
-Use `clud --claude` to return to native Claude routing.
+OpenRouter is the routing gateway; Claude Code remains the interactive frontend.
+
+Choose the main model in one of three ways:
+
+```bash
+# Use clud's reviewed default: OpenRouter's latest Claude Sonnet alias
+clud --openrouter
+
+# Pin a documented OpenRouter alias before launch
+clud --openrouter --model "~anthropic/claude-opus-latest"
+clud --openrouter --model "~anthropic/claude-haiku-latest"
+
+# Or pass an exact model slug from OpenRouter's catalog
+clud --openrouter --model "anthropic/<model-slug>"
+```
+
+After launch, run `/model` inside Claude Code to use the live model inventory
+discovered from OpenRouter. Clud does not currently show its own OpenRouter
+picker before Claude Code starts; use `--model` for deterministic startup or
+Claude Code's `/model` picker for interactive selection. `--model` controls the
+main model, while Claude Code's Fable, Opus, Sonnet, Haiku, and subagent roles
+retain OpenRouter's documented role aliases.
+
+Arbitrary OpenRouter model slugs are accepted, but non-Claude models are
+best-effort because the Claude harness is only guaranteed along OpenRouter's
+Anthropic-first-party Claude path. Without an OpenRouter key, `--dry-run` can
+verify routing and selection but live discovery and requests cannot run:
+
+```bash
+clud --openrouter --model "~anthropic/claude-opus-latest" --dry-run
+```
+
+If Claude Code has a cached Anthropic login and reports authentication or
+model-not-found errors, run `/logout` once inside Claude Code, exit, and
+relaunch `clud --openrouter`. Use `clud --claude` to return to native Claude
+routing.
 
 `clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
 to opt back into PTY while Claude PTY issues are being investigated.
