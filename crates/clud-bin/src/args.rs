@@ -25,30 +25,34 @@ pub struct Args {
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<Option<String>>,
 
-    #[arg(long = "claude", conflicts_with_all = ["codex", "deepseek", "kimi"])]
+    #[arg(long = "claude", conflicts_with_all = ["codex", "deepseek", "kimi", "openrouter"])]
     pub claude: bool,
 
-    #[arg(long = "codex", conflicts_with_all = ["claude", "deepseek", "kimi"])]
+    #[arg(long = "codex", conflicts_with_all = ["claude", "deepseek", "kimi", "openrouter"])]
     pub codex: bool,
 
     /// Use DeepSeek's Anthropic-compatible API through the Claude harness.
-    #[arg(long = "deepseek", conflicts_with_all = ["claude", "codex", "kimi"])]
+    #[arg(long = "deepseek", conflicts_with_all = ["claude", "codex", "kimi", "openrouter"])]
     pub deepseek: bool,
 
     /// Use Kimi's Anthropic-compatible API through the Claude harness.
-    #[arg(long = "kimi", conflicts_with_all = ["claude", "codex", "deepseek", "provider", "unified", "mode"])]
+    #[arg(long = "kimi", conflicts_with_all = ["claude", "codex", "deepseek", "openrouter", "provider", "unified", "mode"])]
     pub kimi: bool,
 
+    /// Use OpenRouter's Anthropic-compatible API through the Claude harness.
+    #[arg(long = "openrouter", conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "provider", "unified", "mode"])]
+    pub openrouter: bool,
+
     /// Select a provider using the generic script-friendly spelling.
-    #[arg(long = "provider", value_enum, conflicts_with_all = ["claude", "codex", "deepseek", "kimi"])]
+    #[arg(long = "provider", value_enum, conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "openrouter"])]
     pub provider: Option<ModelProvider>,
 
     /// Route configured providers through one Claude model picker.
-    #[arg(long = "unified", conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "provider", "mode"])]
+    #[arg(long = "unified", conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "openrouter", "provider", "mode"])]
     pub unified: bool,
 
     /// Generic spelling for the launch routing mode.
-    #[arg(long = "mode", value_parser = ["unified"], conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "provider", "unified"])]
+    #[arg(long = "mode", value_parser = ["unified"], conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "openrouter", "provider", "unified"])]
     pub mode: Option<String>,
 
     /// Select the agent harness independently from the model provider.
@@ -243,6 +247,8 @@ impl Args {
             Some(ModelProvider::DeepSeek)
         } else if self.kimi {
             Some(ModelProvider::Kimi)
+        } else if self.openrouter {
+            Some(ModelProvider::OpenRouter)
         } else if self.codex {
             Some(ModelProvider::Codex)
         } else if self.claude {
@@ -563,6 +569,7 @@ pub enum AuthProvider {
     Codex,
     Deepseek,
     Kimi,
+    Openrouter,
     Claude,
 }
 
@@ -572,6 +579,7 @@ impl AuthProvider {
             Self::Codex => "codex",
             Self::Deepseek => "deepseek",
             Self::Kimi => "kimi",
+            Self::Openrouter => "openrouter",
             Self::Claude => "claude",
         }
     }
@@ -1002,6 +1010,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--codex",
         "--deepseek",
         "--kimi",
+        "--openrouter",
         "--unified",
         "--subprocess",
         "--pty",

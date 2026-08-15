@@ -67,7 +67,7 @@ impl ForegroundRuntime {
             ),
             None => crate::provider_auth::NativeSecretStore::new(),
         }
-        .map_err(|_| BridgeError::DeepSeekCredentials)?;
+        .map_err(|_| BridgeError::AnthropicCompatCredentials)?;
         let runtime = Self::start_with_secret_store(plan, env, &store)?;
         for notice in &runtime.startup_notices {
             eprintln!("{notice}");
@@ -122,8 +122,8 @@ impl ForegroundRuntime {
                 .expect("is_anthropic_compat_via_claude already proved a descriptor resolves");
             let secret = store
                 .get()
-                .map_err(|_| BridgeError::DeepSeekCredentials)?
-                .ok_or(BridgeError::DeepSeekCredentials)?;
+                .map_err(|_| BridgeError::AnthropicCompatCredentials)?
+                .ok_or(BridgeError::AnthropicCompatCredentials)?;
             apply_anthropic_compat_overlay(
                 &mut env,
                 &secret,
@@ -298,6 +298,7 @@ const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_EFFORT_LEVEL",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
 ];
 
 /// Provider-neutral child-env overlay for any Anthropic-compatible API-key
@@ -325,6 +326,9 @@ fn apply_anthropic_compat_overlay(
                 .to_ascii_uppercase()
                 .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
     });
+    if descriptor.provider == ModelProvider::OpenRouter {
+        env.retain(|(key, _)| !key.eq_ignore_ascii_case("OPENROUTER_API_KEY"));
+    }
     let default_wire_model = crate::provider_catalog::reviewed_default_model(descriptor.provider)
         .expect(
             "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
@@ -338,6 +342,11 @@ fn apply_anthropic_compat_overlay(
         .and_then(|selection| selection.effort)
         .unwrap_or(crate::provider_catalog::EffortLevel::Max)
         .as_str();
+    let role_models = descriptor.role_models;
+    let opus_model = role_models.map_or(model, |roles| roles.opus);
+    let sonnet_model = role_models.map_or(model, |roles| roles.sonnet);
+    let haiku_model = role_models.map_or(descriptor.subagent_wire_id, |roles| roles.haiku);
+    let subagent_model = role_models.map_or(descriptor.subagent_wire_id, |roles| roles.subagent);
     env.extend([
         (
             "ANTHROPIC_BASE_URL".to_string(),
@@ -347,26 +356,42 @@ fn apply_anthropic_compat_overlay(
         ("ANTHROPIC_MODEL".to_string(), model.to_string()),
         (
             "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
-            model.to_string(),
+            opus_model.to_string(),
         ),
         (
             "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-            model.to_string(),
+            sonnet_model.to_string(),
         ),
         (
             "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-            descriptor.subagent_wire_id.to_string(),
-        ),
-        (
-            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
-            model.to_string(),
+            haiku_model.to_string(),
         ),
         (
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-            descriptor.subagent_wire_id.to_string(),
+            subagent_model.to_string(),
         ),
         ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort.to_string()),
     ]);
+    match role_models.and_then(|roles| roles.fable) {
+        Some(fable) => env.push((
+            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+            fable.to_string(),
+        )),
+        None if role_models.is_none() => env.push((
+            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+            model.to_string(),
+        )),
+        None => {}
+    }
+    if descriptor.explicitly_empty_anthropic_api_key {
+        env.push(("ANTHROPIC_API_KEY".to_string(), String::new()));
+    }
+    if descriptor.enable_gateway_model_discovery {
+        env.push((
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
+            "1".to_string(),
+        ));
+    }
     // Catalog data, not a hardcoded `model.ends_with("[1m]")` check (#937
     // Phase 2, #936 "Generalization" -> 1e): exact wire-ID lookup so an
     // auto-context wire model never falls back to a same-family row's window
@@ -1297,7 +1322,7 @@ mod tests {
             &store,
         )
         .unwrap_err();
-        assert!(matches!(error, BridgeError::DeepSeekCredentials));
+        assert!(matches!(&error, BridgeError::AnthropicCompatCredentials));
     }
 
     #[cfg(windows)]
@@ -1801,9 +1826,9 @@ mod tests {
             &store,
         )
         .unwrap_err();
-        // No `KimiCredentials` variant exists -- Kimi shares the same
-        // generic descriptor-backed credential-missing error as DeepSeek.
-        assert!(matches!(error, BridgeError::DeepSeekCredentials));
+        // Every descriptor-backed provider shares one secret-free,
+        // provider-neutral credential error.
+        assert!(matches!(&error, BridgeError::AnthropicCompatCredentials));
     }
 
     #[test]
@@ -1833,6 +1858,112 @@ mod tests {
         );
         assert_eq!(lookup(&calls[0].2, "ANTHROPIC_API_KEY"), None);
         assert!(!runtime.has_bridge());
+    }
+
+    fn openrouter_descriptor() -> &'static crate::provider_registry::AnthropicCompatProvider {
+        crate::provider_registry::descriptor_for(ModelProvider::OpenRouter)
+            .expect("OpenRouter must have an Anthropic-compat descriptor")
+    }
+
+    #[test]
+    fn golden_openrouter_overlay_uses_documented_claude_gateway_profile() {
+        let base = vec![
+            (
+                "ANTHROPIC_API_KEY".to_string(),
+                "ambient-anthropic".to_string(),
+            ),
+            (
+                "OPENROUTER_API_KEY".to_string(),
+                "ambient-openrouter".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+                "ambient-fable".to_string(),
+            ),
+            (
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
+                "0".to_string(),
+            ),
+        ];
+        let mut child = base.clone();
+        apply_anthropic_compat_overlay(
+            &mut child,
+            "openrouter-vault-secret",
+            openrouter_descriptor(),
+            None,
+        );
+
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_BASE_URL"),
+            Some("https://openrouter.ai/api")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_AUTH_TOKEN"),
+            Some("openrouter-vault-secret")
+        );
+        assert_eq!(lookup(&child, "ANTHROPIC_API_KEY"), Some(""));
+        assert_eq!(lookup(&child, "OPENROUTER_API_KEY"), None);
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_MODEL"),
+            Some("~anthropic/claude-sonnet-latest")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("~anthropic/claude-opus-latest")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some("~anthropic/claude-sonnet-latest")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some("~anthropic/claude-haiku-latest")
+        );
+        assert_eq!(
+            lookup(&child, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some("~anthropic/claude-opus-latest")
+        );
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            Some("~anthropic/claude-fable-latest")
+        );
+        assert_eq!(
+            lookup(&child, "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"),
+            Some("1")
+        );
+        assert_eq!(
+            lookup(&base, "ANTHROPIC_API_KEY"),
+            Some("ambient-anthropic")
+        );
+    }
+
+    #[test]
+    fn openrouter_direct_route_creates_no_bridge_and_requires_its_vault_secret() {
+        let store = FakeSecretStore(Some("openrouter-routing-secret".to_string()));
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::OpenRouter, Backend::Claude),
+            Vec::new(),
+            &store,
+        )
+        .unwrap();
+        assert!(!runtime.has_bridge());
+        assert_eq!(runtime.socket_addr(), None);
+        assert_eq!(
+            lookup(runtime.env(), "ANTHROPIC_AUTH_TOKEN"),
+            Some("openrouter-routing-secret")
+        );
+    }
+
+    #[test]
+    fn openrouter_route_without_a_stored_credential_reports_a_provider_neutral_error() {
+        let error = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::OpenRouter, Backend::Claude),
+            Vec::new(),
+            &FakeSecretStore(None),
+        )
+        .unwrap_err();
+        assert!(matches!(&error, BridgeError::AnthropicCompatCredentials));
+        assert!(!error.to_string().contains("DeepSeek"));
     }
 
     /// `launch_preflight_target` (provider_auth.rs) and `PreflightError`

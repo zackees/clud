@@ -158,6 +158,7 @@ fn transcript_forces_centralized_daemon() {
         codex: false,
         deepseek: false,
         kimi: false,
+        openrouter: false,
         harness: None,
         subprocess: false,
         pty: false,

@@ -13,6 +13,8 @@ pub enum ModelProvider {
     #[serde(rename = "deepseek")]
     DeepSeek,
     Kimi,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
 }
 
 /// Whether one provider owns the launch or the Claude harness routes among
@@ -41,8 +43,13 @@ impl ModelProvider {
     /// Every provider variant. Registry guardrail tests iterate this so a new
     /// variant added without updating it fails loudly instead of silently
     /// falling through provider-inference/settings lookups.
-    pub const ALL: &'static [ModelProvider] =
-        &[Self::Claude, Self::Codex, Self::DeepSeek, Self::Kimi];
+    pub const ALL: &'static [ModelProvider] = &[
+        Self::Claude,
+        Self::Codex,
+        Self::DeepSeek,
+        Self::Kimi,
+        Self::OpenRouter,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -50,6 +57,7 @@ impl ModelProvider {
             Self::Codex => "codex",
             Self::DeepSeek => "deepseek",
             Self::Kimi => "kimi",
+            Self::OpenRouter => "openrouter",
         }
     }
 
@@ -63,7 +71,7 @@ impl ModelProvider {
 
     pub fn native_harness(self) -> Backend {
         match self {
-            Self::Claude | Self::DeepSeek | Self::Kimi => Backend::Claude,
+            Self::Claude | Self::DeepSeek | Self::Kimi | Self::OpenRouter => Backend::Claude,
             Self::Codex => Backend::Codex,
         }
     }
@@ -77,6 +85,9 @@ impl ModelProvider {
             Self::Codex => &["gpt-", "codex-"],
             Self::DeepSeek => &["deepseek-"],
             Self::Kimi => &["kimi-"],
+            // OpenRouter's `anthropic/*` aliases are not an unambiguous
+            // provider identity; require --openrouter or its clud catalog ID.
+            Self::OpenRouter => &[],
         }
     }
 }
@@ -167,6 +178,7 @@ pub enum LaunchTargetError {
     ClaudeViaCodexUnsupported,
     DeepSeekViaCodexUnsupported,
     KimiViaCodexUnsupported,
+    OpenRouterViaCodexUnsupported,
     UnifiedViaCodexUnsupported,
 }
 
@@ -184,6 +196,10 @@ impl std::fmt::Display for LaunchTargetError {
             Self::KimiViaCodexUnsupported => write!(
                 f,
                 "unsupported launch target: Kimi provider requires the Claude harness"
+            ),
+            Self::OpenRouterViaCodexUnsupported => write!(
+                f,
+                "unsupported launch target: OpenRouter provider requires the Claude harness"
             ),
             Self::UnifiedViaCodexUnsupported => write!(
                 f,
@@ -382,6 +398,9 @@ pub fn resolve_routed_launch_target(
             ModelProvider::Claude => return Err(LaunchTargetError::ClaudeViaCodexUnsupported),
             ModelProvider::DeepSeek => return Err(LaunchTargetError::DeepSeekViaCodexUnsupported),
             ModelProvider::Kimi => return Err(LaunchTargetError::KimiViaCodexUnsupported),
+            ModelProvider::OpenRouter => {
+                return Err(LaunchTargetError::OpenRouterViaCodexUnsupported)
+            }
             ModelProvider::Codex => {}
         }
     }

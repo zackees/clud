@@ -522,6 +522,29 @@ Uncatalogued DeepSeek capabilities and Codex OAuth credential migration remain
 out of scope; see issue #874's decisions and the provider-selection catalog for
 the supported DeepSeek profiles.
 
+## OpenRouter: vault-backed direct Claude gateway (#939)
+
+`clud --openrouter` is another descriptor-backed Anthropic-compatible direct
+route. It reuses `provider_auth::NativeSecretStore`, preflight, settings,
+daemon/repeat metadata, and `ForegroundRuntime` dispatch, but stores a distinct
+credential at `clud.openrouter/api-key-v1`; it never reads or copies the
+DeepSeek/Kimi records. Dry runs resolve the provider without touching a vault.
+
+The child-only overlay targets `https://openrouter.ai/api` (no `/v1`), places
+the vault secret only in `ANTHROPIC_AUTH_TOKEN`, explicitly sets
+`ANTHROPIC_API_KEY` to the empty string, and enables
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`. OpenRouter's documented Claude
+role aliases are pinned independently: Opus, Sonnet, Haiku, and Opus for
+subagents, plus OpenRouter's documented Fable alias. The parent environment is
+unchanged and the route creates no local bridge or listener.
+
+This direct connector guarantees only the Anthropic-first-party Claude path
+that OpenRouter documents as compatible with Claude Code. Non-Claude models are
+best-effort. OpenRouter through the Codex harness and OpenRouter in clud's
+unified gateway are separate scopes because they use different protocol and
+routing contracts. Clud does not delete Claude Code-owned cached login state;
+users encountering an auth conflict must run `/logout` once in Claude Code.
+
 ## Ownership
 
 - `backend.rs`: typed dimensions, precedence, validation, notice policy.

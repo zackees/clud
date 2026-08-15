@@ -282,8 +282,9 @@ pub enum BridgeError {
     /// The launch supplied Claude settings that could not be composed with
     /// the bridge's session-local lifecycle hooks.
     Settings(String),
-    /// DeepSeek credentials could not be read at the child-spawn boundary.
-    DeepSeekCredentials,
+    /// Descriptor-backed provider credentials could not be read at the
+    /// child-spawn boundary. The error is provider-neutral and secret-free.
+    AnthropicCompatCredentials,
     /// The caller has explicitly disabled the discovery request unified mode
     /// needs, so launching would silently present a misleading picker.
     DiscoveryDisabled,
@@ -300,8 +301,9 @@ impl fmt::Display for BridgeError {
             Self::Join => formatter.write_str("bridge worker panicked during shutdown"),
             Self::Model(error) => write!(formatter, "{error}"),
             Self::Settings(error) => write!(formatter, "{error}"),
-            Self::DeepSeekCredentials => formatter
-                .write_str("DeepSeek credentials are unavailable at the child-spawn boundary"),
+            Self::AnthropicCompatCredentials => formatter.write_str(
+                "provider credentials are unavailable at the child-spawn boundary",
+            ),
             Self::DiscoveryDisabled => formatter.write_str(
                 "unified routing requires Claude Code gateway discovery, but CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is enabled",
             ),
@@ -872,6 +874,7 @@ fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
             // Phase 4 of #937 wires Kimi's unified route; until then it is
             // never advertised, so a direct `--kimi` launch is unaffected.
             ModelProvider::Kimi => false,
+            ModelProvider::OpenRouter => false,
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| {
@@ -1354,6 +1357,7 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
             ModelProvider::DeepSeek => config.deepseek_api_key.is_some(),
             // Phase 4 of #937 wires Kimi's unified route.
             ModelProvider::Kimi => false,
+            ModelProvider::OpenRouter => false,
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| entry.discovery_id)

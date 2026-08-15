@@ -197,6 +197,21 @@ pub const MODELS: &[CatalogModel] = &[
         provider_default: true,
         claude_compact_window: Some(1_048_576),
     },
+    CatalogModel {
+        cli_id: "openrouter-claude-sonnet",
+        provider: ModelProvider::OpenRouter,
+        wire_id: "~anthropic/claude-sonnet-latest",
+        // OpenRouter's live gateway discovery owns its changing inventory.
+        discovery_id: None,
+        display_name: "Claude Sonnet via OpenRouter",
+        legacy_aliases: &[],
+        supported_efforts: ANTHROPIC_EFFORTS,
+        supported_context_windows: AUTO_CONTEXT,
+        default_effort: Some(EffortLevel::Max),
+        default_context_window: None,
+        provider_default: true,
+        claude_compact_window: None,
+    },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
     // can be added without changing the stable provider-qualified grammar.
     CatalogModel {
@@ -409,7 +424,9 @@ pub fn model_by_discovery_id(value: &str) -> Option<CatalogModel> {
 /// instead of being proxied to Anthropic as an "ordinary Claude" model.
 /// Claude-owned rows are excluded — those remain caller-owned native IDs.
 pub fn non_claude_model_by_any_id(value: &str) -> Option<CatalogModel> {
-    catalog_match(value).filter(|entry| entry.provider != ModelProvider::Claude)
+    catalog_match(value).filter(|entry| {
+        entry.provider != ModelProvider::Claude && entry.provider != ModelProvider::OpenRouter
+    })
 }
 
 pub fn models_for_provider(provider: ModelProvider) -> impl Iterator<Item = CatalogModel> {
@@ -455,7 +472,9 @@ fn inferred_provider_from_wire(value: &str) -> Option<ModelProvider> {
 fn provider_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
     match provider {
         ModelProvider::Codex => ALL_CODEX_EFFORTS,
-        ModelProvider::Claude | ModelProvider::DeepSeek => ANTHROPIC_EFFORTS,
+        ModelProvider::Claude | ModelProvider::DeepSeek | ModelProvider::OpenRouter => {
+            ANTHROPIC_EFFORTS
+        }
         // K3 documents only low/high/max; the narrower per-model slice on the
         // catalog row is what actually rejects an unsupported value.
         ModelProvider::Kimi => KIMI_EFFORTS,
@@ -464,7 +483,7 @@ fn provider_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
 
 fn provider_context_windows(provider: ModelProvider) -> &'static [&'static str] {
     match provider {
-        ModelProvider::Claude | ModelProvider::Codex => AUTO_CONTEXT,
+        ModelProvider::Claude | ModelProvider::Codex | ModelProvider::OpenRouter => AUTO_CONTEXT,
         ModelProvider::DeepSeek | ModelProvider::Kimi => AUTO_OR_1M_CONTEXT,
     }
 }
@@ -501,8 +520,22 @@ pub fn infer_provider(model: &str) -> Option<ModelProvider> {
     let (without_effort, _) = split_effort_suffix(model.trim());
     let (base, _) = split_context_suffix(without_effort);
     catalog_match(base)
-        .map(|entry| entry.provider)
+        .and_then(|entry| provider_inferred_from_catalog(entry, base))
         .or_else(|| inferred_provider_from_wire(base))
+}
+
+/// OpenRouter reuses provider-owned `anthropic/*` wire IDs, so an exact wire
+/// match is not enough to infer the gateway. Its clud-qualified ID remains an
+/// unambiguous inference source.
+fn provider_inferred_from_catalog(entry: CatalogModel, input: &str) -> Option<ModelProvider> {
+    if entry.provider == ModelProvider::OpenRouter
+        && entry.wire_id.eq_ignore_ascii_case(input)
+        && !entry.cli_id.eq_ignore_ascii_case(input)
+    {
+        None
+    } else {
+        Some(entry.provider)
+    }
 }
 
 /// Normalize compatibility spellings at the CLI boundary. `None` preserves a
@@ -580,7 +613,7 @@ pub fn resolve(
 
     let catalog = catalog_match(base_model).or_else(|| catalog_match(without_effort));
     let inferred_provider = catalog
-        .map(|entry| entry.provider)
+        .and_then(|entry| provider_inferred_from_catalog(entry, base_model))
         .or_else(|| inferred_provider_from_wire(base_model));
     if let (Some(provider), Some(model_provider)) = (requested_provider, inferred_provider) {
         if provider != model_provider {
@@ -1179,6 +1212,39 @@ mod tests {
         assert_eq!(selection.effort, Some(EffortLevel::Max));
         assert_eq!(selection.context_window.as_deref(), Some("1m"));
         assert_eq!(default.claude_compact_window, Some(1_048_576));
+    }
+
+    #[test]
+    fn openrouter_default_is_qualified_and_does_not_claim_anthropic_wire_ids() {
+        let selection = resolve_for_launch(ModelProvider::OpenRouter, None, None, None, None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.model.as_deref(), Some("openrouter-claude-sonnet"));
+        assert_eq!(
+            selection.wire_model.as_deref(),
+            Some("~anthropic/claude-sonnet-latest")
+        );
+        assert_eq!(ModelProvider::OpenRouter.wire_prefixes(), &[] as &[&str]);
+        assert_eq!(
+            infer_provider("~anthropic/claude-sonnet-latest"),
+            None,
+            "an Anthropic-owned wire alias must not imply the OpenRouter gateway"
+        );
+        assert!(matches!(
+            resolve(None, Some("~anthropic/claude-sonnet-latest"), None, None),
+            Err(SelectionError::UnknownModel(_))
+        ));
+        assert_eq!(
+            resolve(None, Some("openrouter-claude-sonnet"), None, None)
+                .unwrap()
+                .unwrap()
+                .provider,
+            ModelProvider::OpenRouter
+        );
+        assert_eq!(
+            serde_json::to_value(&selection).unwrap()["provider"],
+            "openrouter"
+        );
     }
 
     #[test]

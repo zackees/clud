@@ -210,6 +210,7 @@ fn backend_prompt_launch_plan(
         codex: launch_target.model_provider == ModelProvider::Codex,
         deepseek: launch_target.model_provider == ModelProvider::DeepSeek,
         kimi: launch_target.model_provider == ModelProvider::Kimi,
+        openrouter: launch_target.model_provider == ModelProvider::OpenRouter,
         harness: Some(launch_target.requested_harness),
         subprocess: true,
         pty: false,

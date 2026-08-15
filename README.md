@@ -58,6 +58,9 @@ pip install clud       # plain pip; you must ensure the install bin dir is on PA
 clud                              # Launch Claude in YOLO mode via subprocess
 clud --codex                      # Use Codex as the backend
 clud --claude                     # Use Claude as the backend (default)
+clud --deepseek                   # Use DeepSeek through the Claude harness
+clud --kimi                       # Use Kimi through the Claude harness
+clud --openrouter                 # Use Claude through OpenRouter
 clud --pty                        # Force PTY launch mode
 clud --subprocess                 # Force subprocess launch mode
 clud --pty --graphics=sixel       # Force a Sixel header above PTY output
@@ -91,6 +94,9 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `-r`, `--resume [TERM]` | Resume by session ID or search term |
 | `--claude` | Use Claude as the backend |
 | `--codex` | Use Codex as the backend |
+| `--deepseek` | Use DeepSeek's Anthropic-compatible API through Claude Code |
+| `--kimi` | Use Kimi's Anthropic-compatible API through Claude Code |
+| `--openrouter` | Use OpenRouter's Anthropic endpoint through Claude Code |
 | `--subprocess` | Force subprocess launch mode |
 | `--pty` | Force PTY launch mode |
 | `--graphics <auto\|off\|sixel>` | Control PTY graphics headers. `auto` only enables Sixel from a live terminal probe |
@@ -107,6 +113,26 @@ clud wasm guest.wasm              # Run a local wasm module with clud's embedded
 | `-V`, `--version` | Show version |
 
 Unknown flags are forwarded directly to the backend agent.
+
+### OpenRouter through Claude Code
+
+OpenRouter uses its own API key; a DeepSeek or Anthropic key cannot authenticate
+there. Store it in the native credential vault, then launch:
+
+```bash
+clud auth login openrouter
+clud --openrouter
+```
+
+Clud connects Claude Code directly to `https://openrouter.ai/api`, explicitly
+clears inherited Anthropic API-key auth, and enables gateway model discovery.
+The reviewed default is OpenRouter's Claude Sonnet alias; Fable, Opus, Sonnet,
+Haiku, and subagent roles use OpenRouter's documented Anthropic aliases. OpenRouter
+only guarantees Claude Code compatibility through Anthropic's first-party
+provider, so arbitrary non-Claude models are best-effort. If Claude Code has a
+cached Anthropic login and reports authentication or model-not-found errors,
+run `/logout` once inside Claude Code, exit, and relaunch `clud --openrouter`.
+Use `clud --claude` to return to native Claude routing.
 
 `clud` now defaults to subprocess launch mode for Claude and Codex. Use `--pty`
 to opt back into PTY while Claude PTY issues are being investigated.

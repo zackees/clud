@@ -31,6 +31,12 @@ pub const DEEPSEEK_VAULT_ACCOUNT: &str = "api-key-v1";
 pub const KIMI_VAULT_SERVICE: &str = "clud.kimi";
 pub const KIMI_VAULT_ACCOUNT: &str = "api-key-v1";
 
+/// OpenRouter uses the same vault-backed lifecycle as DeepSeek and Kimi, but
+/// its credential is a distinct service record and is never interchangeable
+/// with either provider's key.
+pub const OPENROUTER_VAULT_SERVICE: &str = "clud.openrouter";
+pub const OPENROUTER_VAULT_ACCOUNT: &str = "api-key-v1";
+
 /// Composes the vault target identifier from a service and account. Shared
 /// (not `cfg(windows)`-gated) so the identifier-freeze test can assert the
 /// exact composition on every platform, even though only the Windows
