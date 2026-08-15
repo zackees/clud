@@ -54,7 +54,7 @@ struct ClaudeSettings {
 
 impl ForegroundRuntime {
     pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
-        let store = crate::deepseek_auth::NativeSecretStore::new()
+        let store = crate::provider_auth::NativeSecretStore::new()
             .map_err(|_| BridgeError::DeepSeekCredentials)?;
         let runtime = Self::start_with_secret_store(plan, env, &store)?;
         for notice in &runtime.startup_notices {
@@ -69,7 +69,7 @@ impl ForegroundRuntime {
     fn start_with_secret_store(
         plan: &LaunchPlan,
         mut env: Vec<(String, String)>,
-        store: &dyn crate::deepseek_auth::SecretStore,
+        store: &dyn crate::provider_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
         let (bridge, claude_settings, startup_notices) = if is_unified(plan) {
             // Optional routes must never block native Claude. Resolve only
@@ -685,14 +685,14 @@ mod tests {
     /// credential vault.
     struct FakeSecretStore(Option<String>);
 
-    impl crate::deepseek_auth::SecretStore for FakeSecretStore {
-        fn get(&self) -> Result<Option<String>, crate::deepseek_auth::SecretStoreError> {
+    impl crate::provider_auth::SecretStore for FakeSecretStore {
+        fn get(&self) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
             Ok(self.0.clone())
         }
-        fn set(&self, _secret: &str) -> Result<(), crate::deepseek_auth::SecretStoreError> {
+        fn set(&self, _secret: &str) -> Result<(), crate::provider_auth::SecretStoreError> {
             unreachable!("routing tests never write to the store")
         }
-        fn delete(&self) -> Result<(), crate::deepseek_auth::SecretStoreError> {
+        fn delete(&self) -> Result<(), crate::provider_auth::SecretStoreError> {
             unreachable!("routing tests never write to the store")
         }
     }

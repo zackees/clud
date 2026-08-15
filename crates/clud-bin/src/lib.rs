@@ -32,7 +32,7 @@ pub mod crash_report;
 pub mod ctrl_c_track;
 pub mod daemon;
 pub mod dashboard_auth;
-pub mod deepseek_auth;
+
 pub mod dnd;
 pub mod foreground_runtime;
 pub mod gc;
@@ -55,7 +55,9 @@ pub mod preference;
 pub mod process_identity;
 pub mod process_scan;
 pub mod process_tree;
+pub mod provider_auth;
 pub mod provider_catalog;
+pub mod provider_registry;
 pub mod reap_log;
 pub mod reaper_facts;
 pub mod repo_clud_config;

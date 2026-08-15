@@ -1,10 +1,10 @@
 use clud::{
     args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
-    console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, deepseek_auth,
-    gc, graphics, grind, hook_health, job_orphan_reaper, large_file_guard, launch_log,
-    launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, runner,
-    runtime_cache, settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli,
-    tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics,
+    grind, hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
+    loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth, runner, runtime_cache,
+    settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli, tool_install, tools,
+    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -69,7 +69,7 @@ fn run(mut args: args::Args) {
             "deprecated: use `{}`",
             auth::deepseek_alias_replacement(subcommand)
         );
-        std::process::exit(deepseek_auth::run(subcommand));
+        std::process::exit(provider_auth::run(subcommand));
     }
 
     // Install the crash reporter first so a panic during the rest of startup
@@ -471,13 +471,13 @@ fn run(mut args: args::Args) {
 
     // #878: credentials must exist before any foreground or daemon-backed
     // DeepSeek work is accepted. Dry-runs intentionally remain vault-free.
-    if deepseek_auth::launch_needs_preflight(launch_target.model_provider, args.dry_run) {
-        let interactive = deepseek_auth::launch_is_interactive(
+    if provider_auth::launch_needs_preflight(launch_target.model_provider, args.dry_run) {
+        let interactive = provider_auth::launch_is_interactive(
             &args,
             io::stdin().is_terminal(),
             io::stderr().is_terminal(),
         );
-        if let Err(error) = deepseek_auth::preflight_native(interactive) {
+        if let Err(error) = provider_auth::preflight_native(interactive) {
             eprintln!("deepseek: {error}");
             std::process::exit(2);
         }

@@ -628,7 +628,7 @@ pub enum CodexAuthSubcommand {
     },
 }
 
-/// Subcommands under `clud deepseek-auth`. See `deepseek_auth.rs`.
+/// Subcommands under `clud deepseek-auth`. See `provider_auth.rs`.
 #[derive(Subcommand, Debug, Clone)]
 pub enum DeepseekAuthSubcommand {
     /// Prompt for and store the DeepSeek API key in the native credential vault.

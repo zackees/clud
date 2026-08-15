@@ -15,10 +15,21 @@ use crate::args::{Args, Command, DeepseekAuthSubcommand};
 use crate::backend::ModelProvider;
 use crate::command;
 
-#[cfg(not(windows))]
-const SERVICE_NAME: &str = "clud.deepseek";
-#[cfg(not(windows))]
-const ACCOUNT_NAME: &str = "api-key-v1";
+/// DeepSeek's vault identifiers. Changing either literal orphans every
+/// existing user's stored key: on non-Windows this is the `keyring` service
+/// and account, and on Windows it is the two halves of the Credential
+/// Manager target name (`{service}/{account}`, see [`vault_target`]).
+pub const DEEPSEEK_VAULT_SERVICE: &str = "clud.deepseek";
+pub const DEEPSEEK_VAULT_ACCOUNT: &str = "api-key-v1";
+
+/// Composes the vault target identifier from a service and account. Shared
+/// (not `cfg(windows)`-gated) so the identifier-freeze test can assert the
+/// exact composition on every platform, even though only the Windows
+/// Credential Manager path consumes it at runtime.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn vault_target(service: &str, account: &str) -> String {
+    format!("{service}/{account}")
+}
 
 /// A non-secret classification of a credential-vault failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,25 +55,43 @@ pub trait SecretStore {
     fn delete(&self) -> Result<(), SecretStoreError>;
 }
 
-/// Production adapter for the OS-native encrypted credential vault.
-pub struct NativeSecretStore;
+/// Production adapter for the OS-native encrypted credential vault,
+/// parameterized on the vault identifiers so multiple providers (DeepSeek,
+/// and Kimi in Phase 2) can each hold a distinct record with no shared
+/// global state.
+pub struct NativeSecretStore {
+    service: &'static str,
+    account: &'static str,
+}
 
 impl NativeSecretStore {
+    /// DeepSeek-scoped convenience constructor. Kept with its exact prior
+    /// signature and behavior because it has call sites outside this file
+    /// (`auth.rs`, `foreground_runtime.rs`) that this phase does not touch.
+    /// Phase 2 migrates those external call sites to [`Self::new_for`].
     pub fn new() -> Result<Self, SecretStoreError> {
-        Ok(Self)
+        Self::new_for(DEEPSEEK_VAULT_SERVICE, DEEPSEEK_VAULT_ACCOUNT)
+    }
+
+    /// General constructor taking explicit vault identifiers. Two instances
+    /// built with different identifiers are fully independent records.
+    pub fn new_for(service: &'static str, account: &'static str) -> Result<Self, SecretStoreError> {
+        Ok(Self { service, account })
     }
 }
 
 #[cfg(not(windows))]
 fn with_native_vault<T: Send + 'static>(
+    service: &'static str,
+    account: &'static str,
     operation: impl FnOnce(keyring::Entry) -> Result<T, SecretStoreError> + Send + 'static,
 ) -> Result<T, SecretStoreError> {
     let worker = std::thread::Builder::new()
-        .name("clud-deepseek-vault".to_string())
+        .name("clud-vault".to_string())
         .stack_size(4 * 1024 * 1024)
         .spawn(move || {
-            let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-                .map_err(|_| SecretStoreError::Unavailable)?;
+            let entry =
+                keyring::Entry::new(service, account).map_err(|_| SecretStoreError::Unavailable)?;
             operation(entry)
         })
         .map_err(|_| SecretStoreError::Unavailable)?;
@@ -126,8 +155,6 @@ mod windows_vault {
 
     use super::SecretStoreError;
 
-    const TARGET: &str = "clud.deepseek/api-key-v1";
-
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(Some(0)).collect()
     }
@@ -138,8 +165,8 @@ mod windows_vault {
         unsafe { GetLastError() == ERROR_NOT_FOUND }
     }
 
-    pub fn get() -> Result<Option<String>, SecretStoreError> {
-        let target = wide(TARGET);
+    pub fn get(target: &str) -> Result<Option<String>, SecretStoreError> {
+        let target = wide(target);
         let mut credential = std::ptr::null_mut();
         // SAFETY: `target` is NUL-terminated and Windows initializes the output
         // pointer only on success, which we free after copying the blob.
@@ -162,8 +189,8 @@ mod windows_vault {
         secret.map(Some)
     }
 
-    pub fn set(secret: &str) -> Result<(), SecretStoreError> {
-        let mut target = wide(TARGET);
+    pub fn set(target: &str, secret: &str) -> Result<(), SecretStoreError> {
+        let mut target = wide(target);
         let mut user = wide("clud");
         let mut blob = Zeroizing::new(secret.as_bytes().to_vec());
         // SAFETY: CREDENTIALW is a Win32 C struct containing only integer,
@@ -187,8 +214,8 @@ mod windows_vault {
         }
     }
 
-    pub fn delete() -> Result<(), SecretStoreError> {
-        let target = wide(TARGET);
+    pub fn delete(target: &str) -> Result<(), SecretStoreError> {
+        let target = wide(target);
         // SAFETY: `target` is NUL-terminated and lives for this call.
         if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 || is_missing() {
             Ok(())
@@ -201,22 +228,24 @@ mod windows_vault {
 impl SecretStore for NativeSecretStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError> {
         #[cfg(windows)]
-        return windows_vault::get();
+        return windows_vault::get(&vault_target(self.service, self.account));
         #[cfg(not(windows))]
-        with_native_vault(|entry| match entry.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(SecretStoreError::Unavailable),
+        with_native_vault(self.service, self.account, |entry| {
+            match entry.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(_) => Err(SecretStoreError::Unavailable),
+            }
         })
     }
 
     fn set(&self, secret: &str) -> Result<(), SecretStoreError> {
         #[cfg(windows)]
-        return windows_vault::set(secret);
+        return windows_vault::set(&vault_target(self.service, self.account), secret);
         #[cfg(not(windows))]
         {
             let secret = Zeroizing::new(secret.to_owned());
-            with_native_vault(move |entry| {
+            with_native_vault(self.service, self.account, move |entry| {
                 entry
                     .set_password(&secret)
                     .map_err(|_| SecretStoreError::Unavailable)
@@ -226,11 +255,13 @@ impl SecretStore for NativeSecretStore {
 
     fn delete(&self) -> Result<(), SecretStoreError> {
         #[cfg(windows)]
-        return windows_vault::delete();
+        return windows_vault::delete(&vault_target(self.service, self.account));
         #[cfg(not(windows))]
-        with_native_vault(|entry| match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(SecretStoreError::Unavailable),
+        with_native_vault(self.service, self.account, |entry| {
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(_) => Err(SecretStoreError::Unavailable),
+            }
         })
     }
 }
@@ -443,6 +474,42 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    /// Credential-continuity guarantee: these literals identify DeepSeek's
+    /// existing vault record. Changing either string, or the `{service}/
+    /// {account}` composition rule the Windows path uses, orphans every
+    /// currently-stored key — non-Windows keyring lookups and Windows
+    /// `CredReadW` calls would target a record that no longer matches what
+    /// was written before this refactor.
+    #[test]
+    fn deepseek_vault_identifiers_are_frozen() {
+        assert_eq!(DEEPSEEK_VAULT_SERVICE, "clud.deepseek");
+        assert_eq!(DEEPSEEK_VAULT_ACCOUNT, "api-key-v1");
+        assert_eq!(
+            vault_target(DEEPSEEK_VAULT_SERVICE, DEEPSEEK_VAULT_ACCOUNT),
+            "clud.deepseek/api-key-v1"
+        );
+
+        // The zero-arg convenience constructor other modules still call
+        // must keep resolving to exactly these identifiers.
+        let store = NativeSecretStore::new().unwrap();
+        assert_eq!(store.service, DEEPSEEK_VAULT_SERVICE);
+        assert_eq!(store.account, DEEPSEEK_VAULT_ACCOUNT);
+    }
+
+    /// Construction-level only: proves two `NativeSecretStore` instances
+    /// built with different identifiers are independent records with no
+    /// shared global state, without touching the real host vault.
+    #[test]
+    fn distinct_identifiers_produce_distinct_stores() {
+        let deepseek = NativeSecretStore::new_for("clud.deepseek", "api-key-v1").unwrap();
+        let kimi = NativeSecretStore::new_for("clud.kimi", "api-key-v1").unwrap();
+
+        assert_eq!(deepseek.service, "clud.deepseek");
+        assert_eq!(kimi.service, "clud.kimi");
+        assert_ne!(deepseek.service, kimi.service);
+        assert_eq!(deepseek.account, kimi.account);
+    }
 
     #[derive(Default)]
     struct InMemorySecretStore {

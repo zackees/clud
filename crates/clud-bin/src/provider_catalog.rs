@@ -403,15 +403,12 @@ fn split_context_suffix(raw: &str) -> (&str, Option<&str>) {
 
 fn inferred_provider_from_wire(value: &str) -> Option<ModelProvider> {
     let lower = value.to_ascii_lowercase();
-    if lower.starts_with("claude-") {
-        Some(ModelProvider::Claude)
-    } else if lower.starts_with("gpt-") || lower.starts_with("codex-") {
-        Some(ModelProvider::Codex)
-    } else if lower.starts_with("deepseek-") {
-        Some(ModelProvider::DeepSeek)
-    } else {
-        None
-    }
+    ModelProvider::ALL.iter().copied().find(|provider| {
+        provider
+            .wire_prefixes()
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+    })
 }
 
 fn provider_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
@@ -709,6 +706,29 @@ pub fn resolve_for_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inferred_provider_from_wire_matches_representative_ids() {
+        // Table-driven rewrite over ModelProvider::ALL / wire_prefixes must
+        // return the exact same answers as the original hardcoded ladder.
+        assert_eq!(
+            inferred_provider_from_wire("deepseek-v4-pro[1m]"),
+            Some(ModelProvider::DeepSeek)
+        );
+        assert_eq!(
+            inferred_provider_from_wire("gpt-5.6-terra"),
+            Some(ModelProvider::Codex)
+        );
+        assert_eq!(
+            inferred_provider_from_wire("codex-sol"),
+            Some(ModelProvider::Codex)
+        );
+        assert_eq!(
+            inferred_provider_from_wire("claude-opus-x"),
+            Some(ModelProvider::Claude)
+        );
+        assert_eq!(inferred_provider_from_wire("unknown-wire-id"), None);
+    }
 
     #[test]
     fn qualified_codex_model_infers_provider_and_keeps_effort_independent() {

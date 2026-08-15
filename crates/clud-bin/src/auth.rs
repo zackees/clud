@@ -6,7 +6,7 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::args::{AuthProvider, AuthSubcommand, CodexAuthSubcommand, DeepseekAuthSubcommand};
-use crate::deepseek_auth::{NativeSecretStore, SecretStore};
+use crate::provider_auth::{NativeSecretStore, SecretStore};
 
 /// Exact action-first spelling for a deprecated Codex alias invocation.
 pub fn codex_alias_replacement(subcommand: &CodexAuthSubcommand) -> String {
@@ -85,7 +85,7 @@ fn login(
             },
             interrupted,
         ),
-        AuthProvider::Deepseek => crate::deepseek_auth::run(&DeepseekAuthSubcommand::Login),
+        AuthProvider::Deepseek => crate::provider_auth::run(&DeepseekAuthSubcommand::Login),
         AuthProvider::Claude => externally_managed("login"),
     }
 }
@@ -97,7 +97,7 @@ fn logout(provider: AuthProvider, json: bool) -> i32 {
             &AtomicBool::new(false),
         ),
         AuthProvider::Deepseek => {
-            crate::deepseek_auth::run(&DeepseekAuthSubcommand::Logout { json })
+            crate::provider_auth::run(&DeepseekAuthSubcommand::Logout { json })
         }
         AuthProvider::Claude => externally_managed("logout"),
     }
