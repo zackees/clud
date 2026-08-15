@@ -209,6 +209,7 @@ fn backend_prompt_launch_plan(
         claude: launch_target.model_provider == ModelProvider::Claude,
         codex: launch_target.model_provider == ModelProvider::Codex,
         deepseek: launch_target.model_provider == ModelProvider::DeepSeek,
+        kimi: launch_target.model_provider == ModelProvider::Kimi,
         harness: Some(launch_target.requested_harness),
         subprocess: true,
         pty: false,

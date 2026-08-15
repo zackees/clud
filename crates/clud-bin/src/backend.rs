@@ -12,6 +12,7 @@ pub enum ModelProvider {
     Codex,
     #[serde(rename = "deepseek")]
     DeepSeek,
+    Kimi,
 }
 
 /// Whether one provider owns the launch or the Claude harness routes among
@@ -40,13 +41,15 @@ impl ModelProvider {
     /// Every provider variant. Registry guardrail tests iterate this so a new
     /// variant added without updating it fails loudly instead of silently
     /// falling through provider-inference/settings lookups.
-    pub const ALL: &'static [ModelProvider] = &[Self::Claude, Self::Codex, Self::DeepSeek];
+    pub const ALL: &'static [ModelProvider] =
+        &[Self::Claude, Self::Codex, Self::DeepSeek, Self::Kimi];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::DeepSeek => "deepseek",
+            Self::Kimi => "kimi",
         }
     }
 
@@ -60,7 +63,7 @@ impl ModelProvider {
 
     pub fn native_harness(self) -> Backend {
         match self {
-            Self::Claude | Self::DeepSeek => Backend::Claude,
+            Self::Claude | Self::DeepSeek | Self::Kimi => Backend::Claude,
             Self::Codex => Backend::Codex,
         }
     }
@@ -73,6 +76,7 @@ impl ModelProvider {
             Self::Claude => &["claude-"],
             Self::Codex => &["gpt-", "codex-"],
             Self::DeepSeek => &["deepseek-"],
+            Self::Kimi => &["kimi-"],
         }
     }
 }
@@ -162,6 +166,7 @@ pub struct ResolvedLaunchTarget {
 pub enum LaunchTargetError {
     ClaudeViaCodexUnsupported,
     DeepSeekViaCodexUnsupported,
+    KimiViaCodexUnsupported,
     UnifiedViaCodexUnsupported,
 }
 
@@ -175,6 +180,10 @@ impl std::fmt::Display for LaunchTargetError {
             Self::DeepSeekViaCodexUnsupported => write!(
                 f,
                 "unsupported launch target: DeepSeek provider requires the Claude harness"
+            ),
+            Self::KimiViaCodexUnsupported => write!(
+                f,
+                "unsupported launch target: Kimi provider requires the Claude harness"
             ),
             Self::UnifiedViaCodexUnsupported => write!(
                 f,
@@ -372,6 +381,7 @@ pub fn resolve_routed_launch_target(
         match model_provider {
             ModelProvider::Claude => return Err(LaunchTargetError::ClaudeViaCodexUnsupported),
             ModelProvider::DeepSeek => return Err(LaunchTargetError::DeepSeekViaCodexUnsupported),
+            ModelProvider::Kimi => return Err(LaunchTargetError::KimiViaCodexUnsupported),
             ModelProvider::Codex => {}
         }
     }
@@ -536,6 +546,7 @@ mod tests {
         assert_eq!(ModelProvider::Claude.wire_prefixes(), &["claude-"]);
         assert_eq!(ModelProvider::Codex.wire_prefixes(), &["gpt-", "codex-"]);
         assert_eq!(ModelProvider::DeepSeek.wire_prefixes(), &["deepseek-"]);
+        assert_eq!(ModelProvider::Kimi.wire_prefixes(), &["kimi-"]);
     }
 
     #[test]
@@ -673,6 +684,10 @@ mod tests {
             HarnessSelection::Default.resolve(ModelProvider::DeepSeek),
             Backend::Claude
         );
+        assert_eq!(
+            HarnessSelection::Default.resolve(ModelProvider::Kimi),
+            Backend::Claude
+        );
     }
 
     #[test]
@@ -712,6 +727,27 @@ mod tests {
             Ok(())
         );
         assert_eq!(validate_provider_options(target, None), Ok(()));
+    }
+
+    #[test]
+    fn kimi_rejects_the_codex_harness_but_accepts_the_claude_harness() {
+        let target = resolve_launch_target_with_provider(
+            Some(ModelProvider::Kimi),
+            Some(HarnessSelection::Codex),
+            None,
+            None,
+        );
+        assert_eq!(target, Err(LaunchTargetError::KimiViaCodexUnsupported));
+        assert_eq!(
+            target.unwrap_err().to_string(),
+            "unsupported launch target: Kimi provider requires the Claude harness"
+        );
+
+        let target =
+            resolve_launch_target_with_provider(Some(ModelProvider::Kimi), None, None, None)
+                .unwrap();
+        assert_eq!(target.effective_harness, Backend::Claude);
+        assert_eq!(validate_provider_options(target, Some("kimi-k3")), Ok(()));
     }
 
     #[test]

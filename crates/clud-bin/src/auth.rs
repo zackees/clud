@@ -18,6 +18,7 @@ fn model_provider_for(provider: AuthProvider) -> ModelProvider {
         AuthProvider::Claude => ModelProvider::Claude,
         AuthProvider::Codex => ModelProvider::Codex,
         AuthProvider::Deepseek => ModelProvider::DeepSeek,
+        AuthProvider::Kimi => ModelProvider::Kimi,
     }
 }
 
@@ -34,6 +35,7 @@ fn auth_provider_for(provider: ModelProvider) -> AuthProvider {
         ModelProvider::Claude => AuthProvider::Claude,
         ModelProvider::Codex => AuthProvider::Codex,
         ModelProvider::DeepSeek => AuthProvider::Deepseek,
+        ModelProvider::Kimi => AuthProvider::Kimi,
     }
 }
 
@@ -96,7 +98,22 @@ pub fn run(subcommand: Option<&AuthSubcommand>, interrupted: &AtomicBool) -> i32
         Some(AuthSubcommand::Logout { provider, json }) => logout(*provider, *json),
         None => {
             println!("Usage: clud auth <login|status|logout> <provider>");
-            println!("Providers: codex, deepseek (Claude authentication is externally managed)");
+            // Built from the same registry `status()` iterates, so a future
+            // vault-backed provider (or a removed one) can't drift this
+            // usage line out of sync with what the command actually accepts.
+            let vault_backed: Vec<&str> = ModelProvider::ALL
+                .iter()
+                .copied()
+                .filter(|provider| provider_registry::descriptor_for(*provider).is_some())
+                .map(|provider| provider.as_str())
+                .collect();
+            let codex_and_vault_backed = std::iter::once("codex")
+                .chain(vault_backed)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "Providers: {codex_and_vault_backed} (Claude authentication is externally managed)"
+            );
             0
         }
     }
@@ -116,8 +133,9 @@ fn login(
             },
             interrupted,
         ),
-        AuthProvider::Deepseek => crate::provider_auth::run_for(
-            anthropic_compat_descriptor(provider).expect("DeepSeek has a descriptor"),
+        AuthProvider::Deepseek | AuthProvider::Kimi => crate::provider_auth::run_for(
+            anthropic_compat_descriptor(provider)
+                .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
             &DeepseekAuthSubcommand::Login,
         ),
         AuthProvider::Claude => externally_managed("login"),
@@ -130,8 +148,9 @@ fn logout(provider: AuthProvider, json: bool) -> i32 {
             &CodexAuthSubcommand::Logout { json },
             &AtomicBool::new(false),
         ),
-        AuthProvider::Deepseek => crate::provider_auth::run_for(
-            anthropic_compat_descriptor(provider).expect("DeepSeek has a descriptor"),
+        AuthProvider::Deepseek | AuthProvider::Kimi => crate::provider_auth::run_for(
+            anthropic_compat_descriptor(provider)
+                .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
             &DeepseekAuthSubcommand::Logout { json },
         ),
         AuthProvider::Claude => externally_managed("logout"),
@@ -201,9 +220,9 @@ fn status_row(provider: AuthProvider) -> serde_json::Value {
                 "configured": configured,
             })
         }
-        AuthProvider::Deepseek => {
-            let descriptor =
-                anthropic_compat_descriptor(provider).expect("DeepSeek has a descriptor");
+        AuthProvider::Deepseek | AuthProvider::Kimi => {
+            let descriptor = anthropic_compat_descriptor(provider)
+                .expect("vault-backed auth provider has an Anthropic-compat descriptor");
             let configured =
                 NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
                     .and_then(|store| store.get())
@@ -234,6 +253,28 @@ mod tests {
     #[test]
     fn claude_credential_mutation_is_rejected() {
         assert_eq!(externally_managed("login"), 2);
+    }
+
+    #[test]
+    fn kimi_status_row_uses_the_native_vault_source() {
+        let row = status_row(AuthProvider::Kimi);
+        assert_eq!(row["provider"], "kimi");
+        assert_eq!(row["source"], "native_vault");
+    }
+
+    #[test]
+    fn kimi_and_deepseek_status_rows_never_share_a_configured_vault_entry() {
+        // Both descriptors resolve independently through the registry; this
+        // just proves the auth surface routes Kimi through its own
+        // descriptor rather than accidentally reusing DeepSeek's.
+        assert_ne!(
+            anthropic_compat_descriptor(AuthProvider::Kimi)
+                .unwrap()
+                .vault_service,
+            anthropic_compat_descriptor(AuthProvider::Deepseek)
+                .unwrap()
+                .vault_service,
+        );
     }
 
     #[test]

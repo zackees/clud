@@ -79,6 +79,11 @@ const ANTHROPIC_EFFORTS: &[EffortLevel] = &[
     EffortLevel::XHigh,
     EffortLevel::Max,
 ];
+/// Kimi K3 documents exactly three reasoning-effort levels -- low, high, and
+/// max (default max). Deliberately NOT `ANTHROPIC_EFFORTS`: medium and xhigh
+/// are not part of K3's contract and must be rejected before an upstream
+/// request. See https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.
+const KIMI_EFFORTS: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::High, EffortLevel::Max];
 const AUTO_CONTEXT: &[&str] = &["auto"];
 const AUTO_OR_1M_CONTEXT: &[&str] = &["auto", "1m"];
 
@@ -177,6 +182,20 @@ pub const MODELS: &[CatalogModel] = &[
         default_context_window: None,
         provider_default: false,
         claude_compact_window: None,
+    },
+    CatalogModel {
+        cli_id: "kimi-k3",
+        provider: ModelProvider::Kimi,
+        wire_id: "kimi-k3[1m]",
+        discovery_id: Some("clud-claude-kimi-k3"),
+        display_name: "Kimi K3",
+        legacy_aliases: &["kimi-k3[1m]"],
+        supported_efforts: KIMI_EFFORTS,
+        supported_context_windows: AUTO_OR_1M_CONTEXT,
+        default_effort: Some(EffortLevel::Max),
+        default_context_window: Some("1m"),
+        provider_default: true,
+        claude_compact_window: Some(1_048_576),
     },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
     // can be added without changing the stable provider-qualified grammar.
@@ -437,13 +456,16 @@ fn provider_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
     match provider {
         ModelProvider::Codex => ALL_CODEX_EFFORTS,
         ModelProvider::Claude | ModelProvider::DeepSeek => ANTHROPIC_EFFORTS,
+        // K3 documents only low/high/max; the narrower per-model slice on the
+        // catalog row is what actually rejects an unsupported value.
+        ModelProvider::Kimi => KIMI_EFFORTS,
     }
 }
 
 fn provider_context_windows(provider: ModelProvider) -> &'static [&'static str] {
     match provider {
         ModelProvider::Claude | ModelProvider::Codex => AUTO_CONTEXT,
-        ModelProvider::DeepSeek => AUTO_OR_1M_CONTEXT,
+        ModelProvider::DeepSeek | ModelProvider::Kimi => AUTO_OR_1M_CONTEXT,
     }
 }
 
@@ -1088,6 +1110,75 @@ mod tests {
         let selection =
             resolve_for_launch(ModelProvider::Codex, None, None, None, None, false).unwrap();
         assert!(selection.is_none());
+    }
+
+    #[test]
+    fn kimi_catalog_row_resolves_by_cli_id_wire_id_and_discovery_id() {
+        let by_cli = resolve(None, Some("kimi-k3"), None, None).unwrap().unwrap();
+        assert_eq!(by_cli.provider, ModelProvider::Kimi);
+        assert_eq!(by_cli.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_cli.wire_model.as_deref(), Some("kimi-k3[1m]"));
+
+        let by_wire = resolve(None, Some("kimi-k3[1m]"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_wire.provider, ModelProvider::Kimi);
+        assert_eq!(by_wire.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_wire.wire_model.as_deref(), Some("kimi-k3[1m]"));
+
+        let by_discovery = resolve(None, Some("clud-claude-kimi-k3"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_discovery.provider, ModelProvider::Kimi);
+        assert_eq!(by_discovery.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_discovery.wire_model.as_deref(), Some("kimi-k3[1m]"));
+    }
+
+    /// K3 documents only low/high/max -- medium and xhigh must be rejected
+    /// before any upstream request (#937 Phase 3), unlike DeepSeek which
+    /// reuses the full `ANTHROPIC_EFFORTS` slice.
+    #[test]
+    fn kimi_rejects_medium_and_xhigh_but_accepts_low_high_max() {
+        for rejected in ["medium", "xhigh"] {
+            assert!(
+                matches!(
+                    resolve(
+                        Some(ModelProvider::Kimi),
+                        Some("kimi-k3"),
+                        Some(rejected),
+                        None
+                    ),
+                    Err(SelectionError::UnsupportedEffort { .. })
+                ),
+                "expected effort '{rejected}' to be rejected for Kimi"
+            );
+        }
+        for accepted in ["low", "high", "max"] {
+            assert!(
+                resolve(
+                    Some(ModelProvider::Kimi),
+                    Some("kimi-k3"),
+                    Some(accepted),
+                    None
+                )
+                .is_ok(),
+                "expected effort '{accepted}' to be accepted for Kimi"
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_launch_catalog_default_carries_1m_context_and_max_effort() {
+        let selection = resolve_for_launch(ModelProvider::Kimi, None, None, None, None, true)
+            .unwrap()
+            .unwrap();
+        let default = reviewed_default_model(ModelProvider::Kimi).unwrap();
+        assert_eq!(default.display_name, "Kimi K3");
+        assert_eq!(selection.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(selection.wire_model.as_deref(), Some("kimi-k3[1m]"));
+        assert_eq!(selection.effort, Some(EffortLevel::Max));
+        assert_eq!(selection.context_window.as_deref(), Some("1m"));
+        assert_eq!(default.claude_compact_window, Some(1_048_576));
     }
 
     #[test]

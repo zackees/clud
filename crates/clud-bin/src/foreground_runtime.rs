@@ -1647,4 +1647,233 @@ mod tests {
         assert!(!rendered.contains(runtime.base_url().unwrap()));
         assert!(!rendered.contains(runtime.bearer_token().unwrap()));
     }
+
+    // -- Kimi (#937 Phase 3, Lane 3B) -----------------------------------
+    //
+    // `apply_anthropic_compat_overlay` is fully generic (landed in Phase 2),
+    // so nothing below requires a production change in this file -- these
+    // tests exist to prove the existing generic machinery produces exactly
+    // Kimi's official profile (#936) once Lane 3A's descriptor/catalog rows
+    // land, and to pin the routing/no-bridge/no-secret-leak guarantees
+    // DeepSeek already has.
+
+    fn kimi_descriptor() -> &'static crate::provider_registry::AnthropicCompatProvider {
+        crate::provider_registry::descriptor_for(ModelProvider::Kimi)
+            .expect("Kimi must have an Anthropic-compat descriptor")
+    }
+
+    /// #936's exact documented profile: every default-model slot *and* the
+    /// subagent slot pin to `kimi-k3[1m]` (unlike DeepSeek, whose
+    /// haiku/subagent slots use a cheaper flash model), compact window
+    /// 1048576, effort max.
+    #[test]
+    fn golden_kimi_overlay_default_selection() {
+        let mut env = Vec::new();
+        apply_anthropic_compat_overlay(&mut env, "kimi-golden-secret", kimi_descriptor(), None);
+        let mut pairs = env.clone();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "kimi-golden-secret".to_string()
+                ),
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "https://api.moonshot.ai/anthropic".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                ("ANTHROPIC_MODEL".to_string(), "kimi-k3[1m]".to_string()),
+                (
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+                    "1048576".to_string()
+                ),
+                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
+                (
+                    "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Ambient `ANTHROPIC_API_KEY`, `ANTHROPIC_SMALL_FAST_MODEL`, and the
+    /// mixed-case `anthropic_api_key` form are actively scrubbed by the
+    /// shared union const. `MOONSHOT_API_KEY` is not an `ANTHROPIC_*`
+    /// variable and is not scrubbed (there is no ambient-credential fallback
+    /// to scrub away -- #936 says "do not fall back to ... ambient
+    /// MOONSHOT_API_KEY", a claim about which value seeds
+    /// `ANTHROPIC_AUTH_TOKEN`, not about deleting an unrelated key from the
+    /// child env). The real proof is that the auth token equals the
+    /// injected vault secret and never the ambient Moonshot value, even
+    /// when both are present in the base environment. The parent `base`
+    /// vector must stay byte-identical throughout.
+    #[test]
+    fn kimi_overlay_scrubs_ambient_anthropic_values_and_never_consults_moonshot_key() {
+        let base = vec![
+            ("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string()),
+            (
+                "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+                "ambient-fast".to_string(),
+            ),
+            (
+                "anthropic_api_key".to_string(),
+                "ambient-mixed-case-key".to_string(),
+            ),
+            (
+                "MOONSHOT_API_KEY".to_string(),
+                "ambient-moonshot-key".to_string(),
+            ),
+            ("UNCHANGED".to_string(), "yes".to_string()),
+        ];
+        let mut child = base.clone();
+        apply_anthropic_compat_overlay(&mut child, "kimi-test-secret", kimi_descriptor(), None);
+
+        assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
+        assert_eq!(lookup(&child, "ANTHROPIC_API_KEY"), None);
+        assert_eq!(lookup(&child, "ANTHROPIC_SMALL_FAST_MODEL"), None);
+        assert_eq!(lookup(&child, "anthropic_api_key"), None);
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_AUTH_TOKEN"),
+            Some("kimi-test-secret"),
+            "the auth token must come from the injected vault secret, never an ambient key"
+        );
+        assert_ne!(
+            lookup(&child, "ANTHROPIC_AUTH_TOKEN"),
+            Some("ambient-moonshot-key"),
+            "MOONSHOT_API_KEY must never be consulted as a credential source"
+        );
+        assert_eq!(lookup(&base, "ANTHROPIC_API_KEY"), Some("ambient-key"));
+        assert_eq!(
+            lookup(&base, "MOONSHOT_API_KEY"),
+            Some("ambient-moonshot-key")
+        );
+    }
+
+    /// Kimi routes directly through the child-overlay path, exactly like
+    /// DeepSeek: no `BridgeHandle`, so no loopback listener either.
+    #[test]
+    fn kimi_direct_route_creates_no_bridge_and_no_listener() {
+        let base = vec![("UNRELATED".to_string(), "kept".to_string())];
+        let store = FakeSecretStore(Some("kimi-routing-secret".to_string()));
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Kimi, Backend::Claude),
+            base.clone(),
+            &store,
+        )
+        .unwrap();
+        assert!(
+            !runtime.has_bridge(),
+            "Kimi must route directly, never through BridgeHandle"
+        );
+        assert_eq!(runtime.socket_addr(), None, "no listener without a bridge");
+        assert_eq!(runtime.base_url(), None);
+        assert_eq!(runtime.bearer_token(), None);
+        assert_eq!(
+            lookup(runtime.env(), "ANTHROPIC_AUTH_TOKEN"),
+            Some("kimi-routing-secret")
+        );
+        assert_eq!(lookup(runtime.env(), "UNRELATED"), Some("kept"));
+    }
+
+    #[test]
+    fn kimi_route_without_a_stored_credential_fails_the_launch() {
+        let store = FakeSecretStore(None);
+        let error = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Kimi, Backend::Claude),
+            Vec::new(),
+            &store,
+        )
+        .unwrap_err();
+        // No `KimiCredentials` variant exists -- Kimi shares the same
+        // generic descriptor-backed credential-missing error as DeepSeek.
+        assert!(matches!(error, BridgeError::DeepSeekCredentials));
+    }
+
+    #[test]
+    fn kimi_subprocess_and_pty_receive_the_same_secret_child_overlay() {
+        let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
+        apply_anthropic_compat_overlay(&mut env, "kimi-test-secret", kimi_descriptor(), None);
+        let runtime = ForegroundRuntime {
+            env,
+            bridge: None,
+            claude_settings: None,
+            startup_notices: Vec::new(),
+        };
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Subprocess, vec!["claude".into()], None)
+            .unwrap();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Pty, vec!["claude".into()], None)
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2, calls[1].2);
+        assert_eq!(
+            lookup(&calls[0].2, "ANTHROPIC_AUTH_TOKEN"),
+            Some("kimi-test-secret")
+        );
+        assert_eq!(lookup(&calls[0].2, "ANTHROPIC_API_KEY"), None);
+        assert!(!runtime.has_bridge());
+    }
+
+    /// `launch_preflight_target` (provider_auth.rs) and `PreflightError`
+    /// are already provider-neutral: `launch_preflight_target` is a plain
+    /// registry lookup, and `PreflightError::describe` takes the descriptor
+    /// as a parameter rather than hardcoding a provider. Both are exercised
+    /// against DeepSeek in `provider_auth.rs`'s own test module (which this
+    /// lane does not own), so this only pins that the same generic surface
+    /// resolves correctly for Kimi's descriptor once it lands: the
+    /// dry-run-is-vault-free guarantee, and that the actionable message
+    /// names `clud auth login kimi`. The interactive
+    /// prompt/store/continue, empty/cancel, and non-interactive
+    /// no-stdin-read mechanics themselves live in `preflight_with`, a
+    /// private fn in `provider_auth.rs` that takes no `ModelProvider`
+    /// parameter at all (only an injected `SecretStore` + closure) -- so
+    /// DeepSeek's existing coverage of that fn already proves Kimi's
+    /// identical behavior; there is no Kimi-specific mechanism to
+    /// duplicate here.
+    #[test]
+    fn kimi_preflight_target_resolves_to_kimis_descriptor_and_is_vault_free_on_dry_run() {
+        assert_eq!(
+            crate::provider_auth::launch_preflight_target(ModelProvider::Kimi, false),
+            Some(kimi_descriptor())
+        );
+        assert_eq!(
+            crate::provider_auth::launch_preflight_target(ModelProvider::Kimi, true),
+            None,
+            "dry run must never resolve a descriptor to preflight against, for any provider"
+        );
+    }
+
+    #[test]
+    fn kimi_preflight_error_names_kimi_and_its_login_command() {
+        let descriptor = kimi_descriptor();
+        assert_eq!(
+            crate::provider_auth::PreflightError::Missing.describe(descriptor),
+            "Kimi credentials are not configured; run `clud auth login kimi`"
+        );
+        assert_eq!(
+            crate::provider_auth::PreflightError::Cancelled.describe(descriptor),
+            "Kimi credential entry was cancelled"
+        );
+    }
 }

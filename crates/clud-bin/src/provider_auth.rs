@@ -23,6 +23,14 @@ use crate::provider_registry::{self, AnthropicCompatProvider};
 pub const DEEPSEEK_VAULT_SERVICE: &str = "clud.deepseek";
 pub const DEEPSEEK_VAULT_ACCOUNT: &str = "api-key-v1";
 
+/// Kimi's vault identifiers (#937 Phase 3). Deliberately distinct from
+/// DeepSeek's `vault_service` -- this is what gives the two providers
+/// isolated credential records even though both use the `"api-key-v1"`
+/// account name. Same continuity guarantee as the DeepSeek constants above:
+/// changing either literal orphans every already-stored Kimi key.
+pub const KIMI_VAULT_SERVICE: &str = "clud.kimi";
+pub const KIMI_VAULT_ACCOUNT: &str = "api-key-v1";
+
 /// Composes the vault target identifier from a service and account. Shared
 /// (not `cfg(windows)`-gated) so the identifier-freeze test can assert the
 /// exact composition on every platform, even though only the Windows
@@ -343,7 +351,9 @@ pub fn preflight_native(
 ) -> Result<(), PreflightError> {
     let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
         .map_err(|_| PreflightError::Unavailable)?;
-    preflight_with(&store, interactive, prompt_secret)
+    preflight_with(&store, interactive, || {
+        prompt_secret(descriptor.display_name)
+    })
 }
 
 fn preflight_with(
@@ -385,7 +395,9 @@ pub fn run_for(
         }
     };
     let mut stdout = io::stdout().lock();
-    run_with(descriptor, subcommand, &store, &mut stdout, prompt_secret)
+    run_with(descriptor, subcommand, &store, &mut stdout, || {
+        prompt_secret(descriptor.display_name)
+    })
 }
 
 /// DeepSeek-scoped delegate kept for its existing call sites: `main.rs`'s
@@ -398,8 +410,10 @@ pub fn run(subcommand: &DeepseekAuthSubcommand) -> i32 {
 }
 
 /// Read a secret from the terminal without echoing typed characters.
-fn prompt_secret() -> Result<String, ()> {
-    eprint!("DeepSeek API key: ");
+/// `display_name` names the provider prompted for (e.g. "DeepSeek", "Kimi")
+/// so this one implementation serves every Anthropic-compat provider.
+fn prompt_secret(display_name: &str) -> Result<String, ()> {
+    eprint!("{display_name} API key: ");
     io::stderr().flush().map_err(|_| ())?;
     terminal::enable_raw_mode().map_err(|_| ())?;
     let result = (|| {

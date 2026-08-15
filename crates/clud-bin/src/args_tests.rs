@@ -52,6 +52,105 @@ fn test_deepseek_backend_is_known_and_conflicts_with_other_providers() {
 }
 
 #[test]
+fn test_kimi_backend_is_known_and_conflicts_with_other_providers() {
+    let args = parse(&["clud", "--kimi"]);
+    assert!(args.kimi);
+    assert!(!args.claude);
+    assert!(!args.codex);
+    assert!(!args.deepseek);
+    assert!(args.passthrough.is_empty());
+    assert!(Args::try_parse_from(["clud", "--kimi", "--claude"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--kimi", "--codex"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--kimi", "--deepseek"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--kimi", "--unified"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--kimi", "--mode", "unified"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--kimi", "--provider", "deepseek"]).is_err());
+    // Symmetric: the other selectors reject --kimi too, not just vice versa.
+    assert!(Args::try_parse_from(["clud", "--claude", "--kimi"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--codex", "--kimi"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--deepseek", "--kimi"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--unified", "--kimi"]).is_err());
+    assert!(Args::try_parse_from(["clud", "--provider", "deepseek", "--kimi"]).is_err());
+}
+
+#[test]
+fn test_kimi_flag_not_forwarded_to_passthrough() {
+    let args = parse(&["clud", "--kimi", "-p", "hello"]);
+    assert!(args.kimi);
+    assert!(args.passthrough.is_empty());
+}
+
+/// #937 Phase 3: `DeepseekAuthSubcommand` is now a type alias for
+/// `ApiKeyAuthSubcommand` (Kimi reuses the same auth-subcommand grammar).
+/// This proves the alias is interchangeable, not just separately compiling.
+#[test]
+fn api_key_auth_subcommand_alias_is_interchangeable_with_deepseek_auth_subcommand() {
+    let via_generic_name: ApiKeyAuthSubcommand = ApiKeyAuthSubcommand::Status { json: true };
+    let via_legacy_name: DeepseekAuthSubcommand = via_generic_name;
+    assert!(matches!(
+        via_legacy_name,
+        DeepseekAuthSubcommand::Status { json: true }
+    ));
+}
+
+#[test]
+fn test_provider_kimi_parses_and_is_an_explicit_cli_provider() {
+    let args = parse(&["clud", "--provider", "kimi"]);
+    assert_eq!(args.provider, Some(crate::backend::ModelProvider::Kimi));
+    assert_eq!(
+        args.explicit_model_provider(),
+        Some(crate::backend::ModelProvider::Kimi)
+    );
+}
+
+#[test]
+fn test_kimi_flag_is_an_explicit_cli_provider() {
+    let args = parse(&["clud", "--kimi"]);
+    assert_eq!(
+        args.explicit_model_provider(),
+        Some(crate::backend::ModelProvider::Kimi)
+    );
+}
+
+#[test]
+fn test_kimi_flag_resolves_to_kimi_provider_and_claude_harness() {
+    let args = parse(&["clud", "--kimi"]);
+    let target = crate::backend::resolve_launch_target_with_provider(
+        args.explicit_model_provider(),
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(target.model_provider, crate::backend::ModelProvider::Kimi);
+    assert_eq!(target.effective_harness, crate::backend::Backend::Claude);
+}
+
+/// #937 Phase 3: `clud --kimi --harness codex` (and `--kimi --codex`, which
+/// clap itself rejects above) must be rejected during launch-target
+/// resolution, before any vault access. `resolve_launch_target_with_provider`
+/// is a pure function with no I/O, so simply calling it here already proves
+/// the rejection happens without touching the vault.
+#[test]
+fn test_kimi_with_codex_harness_rejected_before_any_vault_access() {
+    let args = parse(&["clud", "--kimi", "--harness", "codex"]);
+    let result = crate::backend::resolve_launch_target_with_provider(
+        args.explicit_model_provider(),
+        args.harness,
+        None,
+        None,
+    );
+    assert_eq!(
+        result,
+        Err(crate::backend::LaunchTargetError::KimiViaCodexUnsupported)
+    );
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "unsupported launch target: Kimi provider requires the Claude harness"
+    );
+}
+
+#[test]
 fn test_harness_flag_is_typed_and_not_forwarded() {
     for (raw, expected) in [
         (

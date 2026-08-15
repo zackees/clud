@@ -44,22 +44,38 @@ pub struct AnthropicCompatProvider {
     pub subagent_wire_id: &'static str,
 }
 
-/// The registry. Only the DeepSeek row exists in Phase 1; Kimi's row lands in
-/// Phase 3.
-pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[AnthropicCompatProvider {
-    provider: ModelProvider::DeepSeek,
-    display_name: "DeepSeek",
-    settings_id: "deepseek",
-    cli_flag: "--deepseek",
-    // Bound to the vault module's own constants rather than re-typed as
-    // literals: two independent copies of a credential identifier can drift
-    // silently, and drift here orphans stored keys.
-    vault_service: crate::provider_auth::DEEPSEEK_VAULT_SERVICE,
-    vault_account: crate::provider_auth::DEEPSEEK_VAULT_ACCOUNT,
-    anthropic_base_url: "https://api.deepseek.com/anthropic",
-    login_command: "clud auth login deepseek",
-    subagent_wire_id: "deepseek-v4-flash",
-}];
+/// The registry: DeepSeek's row from Phase 1, plus Kimi's row landed in
+/// #937 Phase 3.
+pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
+    AnthropicCompatProvider {
+        provider: ModelProvider::DeepSeek,
+        display_name: "DeepSeek",
+        settings_id: "deepseek",
+        cli_flag: "--deepseek",
+        // Bound to the vault module's own constants rather than re-typed as
+        // literals: two independent copies of a credential identifier can
+        // drift silently, and drift here orphans stored keys.
+        vault_service: crate::provider_auth::DEEPSEEK_VAULT_SERVICE,
+        vault_account: crate::provider_auth::DEEPSEEK_VAULT_ACCOUNT,
+        anthropic_base_url: "https://api.deepseek.com/anthropic",
+        login_command: "clud auth login deepseek",
+        subagent_wire_id: "deepseek-v4-flash",
+    },
+    AnthropicCompatProvider {
+        provider: ModelProvider::Kimi,
+        display_name: "Kimi",
+        settings_id: "kimi",
+        cli_flag: "--kimi",
+        vault_service: crate::provider_auth::KIMI_VAULT_SERVICE,
+        vault_account: crate::provider_auth::KIMI_VAULT_ACCOUNT,
+        anthropic_base_url: "https://api.moonshot.ai/anthropic",
+        login_command: "clud auth login kimi",
+        // Unlike DeepSeek (which points haiku/subagent at a cheaper flash
+        // model), Kimi's official Claude Code profile points the haiku AND
+        // subagent slots at the same main model: kimi-k3[1m].
+        subagent_wire_id: "kimi-k3[1m]",
+    },
+];
 
 /// Look up the Anthropic-compat descriptor for a provider, if it has one.
 /// `Claude` and `Codex` never resolve here -- Claude is native, Codex is a
@@ -115,5 +131,39 @@ mod tests {
         let descriptor = descriptor_for(ModelProvider::DeepSeek).unwrap();
         assert_eq!(descriptor.vault_service, "clud.deepseek");
         assert_eq!(descriptor.vault_account, "api-key-v1");
+    }
+
+    #[test]
+    fn kimi_vault_identifiers_are_frozen_for_credential_continuity() {
+        let descriptor = descriptor_for(ModelProvider::Kimi).unwrap();
+        assert_eq!(descriptor.vault_service, "clud.kimi");
+        assert_eq!(descriptor.vault_account, "api-key-v1");
+    }
+
+    /// Cross-provider vault isolation (#937 Phase 3 DoD): Kimi's vault
+    /// service must differ from DeepSeek's even though both currently use
+    /// the same account name, so a launch never reads or writes the wrong
+    /// provider's credential.
+    #[test]
+    fn kimi_and_deepseek_vault_services_are_isolated() {
+        let deepseek = descriptor_for(ModelProvider::DeepSeek).unwrap();
+        let kimi = descriptor_for(ModelProvider::Kimi).unwrap();
+        assert_ne!(deepseek.vault_service, kimi.vault_service);
+        assert_eq!(kimi.vault_service, "clud.kimi");
+    }
+
+    #[test]
+    fn kimi_subagent_wire_id_points_at_the_same_model_unlike_deepseek() {
+        // Kimi's official Claude Code profile is deliberately different from
+        // DeepSeek's: haiku/subagent slots point at the SAME model as the
+        // main model, not a cheaper flash variant.
+        let deepseek = descriptor_for(ModelProvider::DeepSeek).unwrap();
+        let kimi = descriptor_for(ModelProvider::Kimi).unwrap();
+        assert_eq!(kimi.subagent_wire_id, "kimi-k3[1m]");
+        // DeepSeek's subagent slot is a cheaper flash model, not its main
+        // model -- Kimi's is the same model, which is the documented
+        // asymmetry between the two profiles.
+        assert_ne!(deepseek.subagent_wire_id, "deepseek-v4-pro[1m]");
+        assert_ne!(kimi.subagent_wire_id, deepseek.subagent_wire_id);
     }
 }

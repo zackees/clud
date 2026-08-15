@@ -170,6 +170,17 @@ fn deepseek_bridge_target() -> ResolvedLaunchTarget {
     }
 }
 
+fn kimi_bridge_target() -> ResolvedLaunchTarget {
+    ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
+        model_provider: ModelProvider::Kimi,
+        requested_harness: HarnessSelection::Claude,
+        effective_harness: Backend::Claude,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    }
+}
+
 fn unified_target(provider: ModelProvider) -> ResolvedLaunchTarget {
     ResolvedLaunchTarget {
         routing_mode: RoutingMode::Unified,
@@ -271,6 +282,28 @@ fn test_allow_plan_mode_restores_plan_mode_on_deepseek_bridge() {
         .command
         .iter()
         .any(|a| a.contains("EnterPlanMode") && a.starts_with("--disallowedTools")));
+}
+
+/// #937 Phase 3 / #936 "Decisions": "Do not copy DeepSeek-specific plan-mode
+/// suppression without Kimi-specific failing evidence." `is_non_claude_
+/// claude_harness_bridge`'s `matches!` is not compiler-exhaustive, so the
+/// absence of a `ModelProvider::Kimi` arm there is a silent, deliberate
+/// choice rather than something the compiler forces a reviewer to notice.
+/// This test makes that choice visible: an interactive Kimi-via-Claude
+/// launch (exercised through a real interactive `parse`, not `--unattended`
+/// or `loop`, which strip plan mode for an unrelated reason) must keep
+/// `EnterPlanMode` available.
+#[test]
+fn test_kimi_bridge_does_not_suppress_plan_mode() {
+    let args = parse(&["clud"]);
+    let p = build_launch_plan_for_target(&args, kimi_bridge_target(), "claude");
+    assert!(
+        !p.command
+            .iter()
+            .any(|a| a.starts_with("--disallowedTools") && a.contains("EnterPlanMode")),
+        "Kimi must not suppress EnterPlanMode without Kimi-specific evidence (#936): {:?}",
+        p.command
+    );
 }
 
 #[test]

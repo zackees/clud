@@ -869,6 +869,9 @@ fn serve_unified_catalog(stream: &mut TcpStream, config: &BridgeConfig) {
         .filter(|entry| match entry.provider {
             ModelProvider::Codex => unified.codex_available,
             ModelProvider::DeepSeek => unified.deepseek_api_key.is_some(),
+            // Phase 4 of #937 wires Kimi's unified route; until then it is
+            // never advertised, so a direct `--kimi` launch is unaffected.
+            ModelProvider::Kimi => false,
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| {
@@ -1349,6 +1352,8 @@ fn unified_catalog_ids(config: &UnifiedGatewayConfig) -> Vec<&'static str> {
         .filter(|entry| match entry.provider {
             ModelProvider::Codex => config.codex_available,
             ModelProvider::DeepSeek => config.deepseek_api_key.is_some(),
+            // Phase 4 of #937 wires Kimi's unified route.
+            ModelProvider::Kimi => false,
             ModelProvider::Claude => false,
         })
         .filter_map(|entry| entry.discovery_id)
