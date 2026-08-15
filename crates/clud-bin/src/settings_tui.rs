@@ -708,6 +708,8 @@ mod tests {
         model.cycle();
         assert_eq!(model, SettingValue::ModelProvider(ModelProvider::DeepSeek));
         model.cycle();
+        assert_eq!(model, SettingValue::ModelProvider(ModelProvider::Kimi));
+        model.cycle();
         assert_eq!(model, SettingValue::ModelProvider(ModelProvider::Claude));
 
         let mut harness = SettingValue::Harness(HarnessSelection::Default);
