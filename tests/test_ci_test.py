@@ -115,4 +115,4 @@ def test_prepare_pytest_binaries_builds_clud_without_installed_script(
     assert env["CLUD_TEST_BINARY"] == str(clud)
     assert env["CLUD_TEST_BLOCK_BAD_CMD_BINARY"] == str(block_guard)
     assert env["CLUD_TEST_MOCK_AGENT_BINARY"] == str(mock_agent)
-    assert captured == [["cargo", "build", "-p", "clud", "-p", "mock-agent"]]
+    assert captured == [["cargo", "build", "-p", "clud", "-p", "mock-agent", "-p", "daemon-stub"]]

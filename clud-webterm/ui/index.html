@@ -1,79 +1,13 @@
 <!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>clud webterm spike</title>
-    <link rel="stylesheet" href="vendor/xterm.css" />
-    <style>
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        background: #0b0e14;
-        overflow: hidden;
-      }
-      #term {
-        position: absolute;
-        inset: 0;
-        padding: 6px;
-        box-sizing: border-box;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="term"></div>
-
-    <script src="vendor/xterm.js"></script>
-    <script src="vendor/addon-fit.js"></script>
-    <script>
-      const { invoke } = window.__TAURI__.core;
-      const { listen } = window.__TAURI__.event;
-
-      const term = new Terminal({
-        fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
-        fontSize: 14,
-        cursorBlink: true,
-        allowProposedApi: true,
-        scrollback: 10000,
-        theme: { background: "#0b0e14", foreground: "#c9d1d9" },
-      });
-      const fit = new FitAddon.FitAddon();
-      term.loadAddon(fit);
-      term.open(document.getElementById("term"));
-      fit.fit();
-
-      // base64 (from the Rust side) -> raw bytes for xterm.
-      function b64ToBytes(b64) {
-        const bin = atob(b64);
-        const out = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-        return out;
-      }
-
-      listen("pty://data", (e) => term.write(b64ToBytes(e.payload)));
-      listen("pty://exit", () =>
-        term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"),
-      );
-
-      // Keystrokes / pasted text -> PTY.
-      term.onData((d) => invoke("write_pty", { data: d }));
-
-      // Debounced resize -> PTY.
-      let rt;
-      window.addEventListener("resize", () => {
-        clearTimeout(rt);
-        rt = setTimeout(() => {
-          fit.fit();
-          invoke("resize_pty", { cols: term.cols, rows: term.rows });
-        }, 60);
-      });
-
-      (async () => {
-        fit.fit();
-        await invoke("start_pty", { cols: term.cols, rows: term.rows });
-        term.focus();
-      })();
-    </script>
-  </body>
-</html>
+<html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>clud web terminal</title><link rel="stylesheet" href="vendor/xterm.css" />
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#0b0e14}body{margin:0;height:100vh;overflow:hidden;background:#0b0e14}#app{display:grid;grid-template-rows:38px 1fr;height:100%}#tabs{display:flex;align-items:stretch;gap:2px;padding:3px 5px;background:#151b26;border-bottom:1px solid #293241}.tab{max-width:220px;min-width:100px;display:flex;align-items:center;gap:7px;padding:0 9px;border:0;border-radius:5px 5px 0 0;color:#aeb8c6;background:transparent;cursor:pointer}.tab.active{color:#f0f5ff;background:#0b0e14}.badge{width:7px;height:7px;border-radius:50%;background:#4fb477;flex:none}.badge.done{background:#e0a93a}.tab-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;text-align:left}.close{border:0;color:inherit;background:transparent;font-size:17px;line-height:1;cursor:pointer}#new-tab{width:32px;border:0;border-radius:4px;color:#c9d1d9;background:transparent;cursor:pointer;font-size:20px}#terminal-area{position:relative;min-height:0}.terminal{position:absolute;inset:0;padding:7px;box-sizing:border-box}.terminal.hidden{display:none}#toasts{position:fixed;top:46px;right:12px;display:grid;gap:8px;z-index:5}.toast{max-width:340px;padding:10px 12px;border:1px solid #39475d;border-radius:6px;background:#1d2633;color:#e6edf3;box-shadow:0 8px 25px #0008}#modal-backdrop{position:fixed;inset:0;display:grid;place-items:center;background:#0009;z-index:10}#modal-backdrop.hidden{display:none}#modal{width:min(360px,calc(100vw - 32px));padding:18px;border:1px solid #41516b;border-radius:8px;background:#18212d;color:#e6edf3}#modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:16px}#modal button{padding:6px 10px;border:1px solid #4b607e;border-radius:4px;color:#e6edf3;background:#263449;cursor:pointer}#modal #confirm-close{border-color:#b45b5b;background:#713636}
+</style></head><body>
+<div id="app"><div id="tabs"><button id="new-tab" title="New terminal tab">+</button></div><div id="terminal-area"></div></div><div id="toasts" aria-live="polite"></div><div id="modal-backdrop" class="hidden"><div id="modal" role="dialog" aria-modal="true"><strong>Close terminal tab?</strong><div>This stops the command running in this tab.</div><div id="modal-actions"><button id="cancel-close">Cancel</button><button id="confirm-close">Close tab</button></div></div></div>
+<script src="vendor/xterm.js"></script><script src="vendor/addon-fit.js"></script><script>
+const {invoke}=window.__TAURI__.core,{listen}=window.__TAURI__.event,tabs=new Map();let activeId=null,closingId=null;const tabBar=document.getElementById("tabs"),terminalArea=document.getElementById("terminal-area");
+function bytes(b64){const raw=atob(b64);return Uint8Array.from(raw,c=>c.charCodeAt(0))}function toast(text){const node=document.createElement("div");node.className="toast";node.textContent=text;document.getElementById("toasts").append(node);setTimeout(()=>node.remove(),4500)}function redrawTab(tab){tab.button.classList.toggle("active",tab.id===activeId);tab.container.classList.toggle("hidden",tab.id!==activeId);tab.badge.classList.toggle("done",tab.exited)}function activate(id){activeId=id;for(const tab of tabs.values())redrawTab(tab);const tab=tabs.get(id);if(tab){tab.fit.fit();invoke("resize_pty",{tabId:id,cols:tab.term.cols,rows:tab.term.rows});tab.term.focus()}}
+async function createTab(argv=[]){const container=document.createElement("div");container.className="terminal";terminalArea.append(container);const term=new Terminal({fontFamily:"Cascadia Mono, Consolas, Menlo, monospace",fontSize:14,cursorBlink:true,allowProposedApi:true,scrollback:10000,theme:{background:"#0b0e14",foreground:"#c9d1d9"}}),fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(container);fit.fit();let id;try{id=await invoke("start_tab",{cols:term.cols,rows:term.rows,argv})}catch(error){container.remove();term.dispose();toast(`Could not start terminal: ${error}`);return}const button=document.createElement("button");button.className="tab";button.innerHTML='<span class="badge"></span><span class="tab-label"></span><span class="close" title="Close tab">×</span>';button.querySelector(".tab-label").textContent=argv.length?"clud":"shell";tabBar.insertBefore(button,document.getElementById("new-tab"));const tab={id,term,fit,container,button,badge:button.querySelector(".badge"),exited:false};tabs.set(id,tab);button.addEventListener("click",event=>{if(event.target.classList.contains("close"))askClose(id);else activate(id)});term.onData(data=>{if(!tab.exited)invoke("write_pty",{tabId:id,data})});activate(id)}
+function askClose(id){closingId=id;document.getElementById("modal-backdrop").classList.remove("hidden")}async function closeActiveTab(){const id=closingId;closingId=null;document.getElementById("modal-backdrop").classList.add("hidden");const tab=tabs.get(id);if(!tab)return;try{await invoke("close_tab",{tabId:id})}catch(error){toast(`Could not close terminal: ${error}`);return}tab.button.remove();tab.container.remove();tab.term.dispose();tabs.delete(id);activate(tabs.keys().next().value)}
+document.getElementById("new-tab").addEventListener("click",()=>createTab());document.getElementById("cancel-close").addEventListener("click",()=>document.getElementById("modal-backdrop").classList.add("hidden"));document.getElementById("confirm-close").addEventListener("click",closeActiveTab);window.addEventListener("resize",()=>{for(const tab of tabs.values()){tab.fit.fit();invoke("resize_pty",{tabId:tab.id,cols:tab.term.cols,rows:tab.term.rows})}});listen("pty://data",event=>{const tab=tabs.get(event.payload.tab_id);if(tab)tab.term.write(bytes(event.payload.data))});listen("pty://exit",event=>{const tab=tabs.get(event.payload.tab_id);if(!tab||tab.exited)return;tab.exited=true;tab.term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");redrawTab(tab);toast(`Terminal tab ${tab.id} exited`)});(async()=>createTab(await invoke("initial_command")))();
+</script></body></html>

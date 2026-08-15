@@ -113,7 +113,7 @@ def _prepare_pytest_binaries(
     packages = (
         ["mock-agent"]
         if installed_clud is not None and installed_block_guard is not None
-        else ["clud", "mock-agent"]
+        else ["clud", "mock-agent", "daemon-stub"]
     )
     cmd = _cargo(["build", *[arg for package in packages for arg in ("-p", package)]], env=env)
     if run(cmd, env=env) != 0:

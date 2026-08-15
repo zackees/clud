@@ -13,6 +13,21 @@ use crate::graphics::GraphicsMode;
     after_help = "Unknown flags are forwarded directly to the backend agent."
 )]
 pub struct Args {
+    /// Open this backend launch in clud's owned web terminal window.
+    #[arg(long = "web-term", conflicts_with = "set_web_term")]
+    pub web_term: bool,
+
+    /// Persist the web-terminal preference. With no value this enables it;
+    /// pass `off` to restore the ordinary console launch.
+    #[arg(
+        long = "set-web-term",
+        value_enum,
+        num_args = 0..=1,
+        default_missing_value = "on",
+        conflicts_with = "web_term"
+    )]
+    pub set_web_term: Option<WebTermPreference>,
+
     #[arg(short = 'p', long = "prompt")]
     pub prompt: Option<String>,
 
@@ -236,6 +251,25 @@ pub struct Args {
     /// Selection normalized once before bootstrap or credential access.
     #[arg(skip)]
     pub resolved_model_selection: Option<crate::provider_catalog::ResolvedModelSelection>,
+
+    /// Original invocation, retained only so `--web-term` can hand every
+    /// backend option to the child clud process without re-serializing clap's
+    /// parsed representation.
+    #[arg(skip)]
+    pub raw_argv: Vec<String>,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum WebTermPreference {
+    On,
+    Off,
+}
+
+impl WebTermPreference {
+    pub const fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
 
 impl Args {
@@ -967,6 +1001,7 @@ impl Args {
         let (known, unknown) = split_known_unknown(&raw);
         let mut args = Args::parse_from(known);
         args.passthrough.extend(unknown);
+        args.raw_argv = raw;
         args
     }
 }
@@ -1002,6 +1037,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--state-dir",
         // Issue #469: `clud log --cmd "..."` arg.
         "--cmd",
+        "--set-web-term",
     ];
     let short_value_flags: &[&str] = &["-p", "-m", "-r"];
     let bool_flags: &[&str] = &[
@@ -1043,6 +1079,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--demo-gfx-sixel",
         "--help",
         "--version",
+        "--web-term",
         // Issue #469: `clud log --fail-on-no-server` bool flag.
         "--fail-on-no-server",
         // `clud settings --list` bool flag.

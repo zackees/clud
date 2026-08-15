@@ -4,7 +4,7 @@ use clud::{
     grind, hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
     loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth, runner, runtime_cache,
     settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli, tool_install, tools,
-    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, worktrees,
+    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm, worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -35,6 +35,12 @@ fn parse_args() -> args::Args {
 
 fn run(mut args: args::Args) {
     args.normalize_explicit_run();
+    if let Some(exit_code) = webterm::handle(&args) {
+        std::process::exit(exit_code);
+    }
+    if let Some(exit_code) = webterm::handle(&args) {
+        std::process::exit(exit_code);
+    }
     // Fast tool path. Detect `clud tool ...` before
     // normal clud startup so hook/tool invocations do not connect to the
     // daemon, touch runtime-cache, start title keepers, or register as

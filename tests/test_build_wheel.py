@@ -36,6 +36,23 @@ def test_windows_wheel_ships_the_cmd_scan_binary() -> None:
     assert "clud-cmd-scan" in build_wheel.REQUIRED_SCRIPTS
 
 
+def test_local_webterm_companion_uses_the_configured_target_directory(
+    monkeypatch, tmp_path
+) -> None:
+    target = "x86_64-pc-windows-msvc"
+    companion = tmp_path / "clud-webterm" / "target" / target / "debug" / "clud-webterm.exe"
+    companion.parent.mkdir(parents=True)
+    companion.write_bytes(b"webterm")
+    monkeypatch.setattr(build_wheel, "ROOT", tmp_path)
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(build_wheel.process, "run", lambda *args, **kwargs: Result())
+
+    assert build_wheel.build_local_webterm_companion(mode="dev", target=target, env={}) == companion
+
+
 def test_hook_rollout_target_is_a_shipped_script() -> None:
     """Whatever binary the rollout migrates hook configs to MUST be in the
     wheel. Reads NEW_COMMAND from the rollout source so a future rename

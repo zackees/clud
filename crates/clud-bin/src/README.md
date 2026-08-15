@@ -53,6 +53,10 @@ Entry and orchestration:
   the two undocumented kill-switch env vars `CLAUDE_CODE_USE_POWERSHELL_TOOL=0`
   + `CLAUDE_CODE_GIT_BASH_PATH` (resolved via
   [`shell/`](shell/README.md)) — see issue #447.
+- `webterm.rs` - desktop web-terminal launcher: persists the global preference,
+  prevents launch recursion with `CLUD_WEBTERM`, and forwards the original
+  clud argv to the separately packaged Tauri companion. See
+  [`docs/architecture/web-terminal.md`](../../../docs/architecture/web-terminal.md).
 - `bridge_log.rs` - issue #772's always-on, failure-only, bounded JSONL writer
   for `~/.clud/state/sessions/<pid>__<epoch>/bridge.jsonl`; test-mode logs use
   the isolated sibling tree `~/.clud/state/test-sessions/`. Buffers complete

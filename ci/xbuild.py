@@ -390,11 +390,28 @@ def cmd_wheel(args: argparse.Namespace) -> int:
     manylinux link must not reuse a host-default glibc artifact.
     """
     from ci.env import maturin_argv
+    from ci.webterm_wheel import add_companion, companion_name, desktop_target
 
     env = build_env(args.target, args.strategy)
+    profile = "release" if args.profile == "release" else "debug"
+    companion = (
+        ROOT / "clud-webterm" / "target" / args.target / profile / companion_name(args.target)
+    )
+    if desktop_target(args.target):
+        command = [
+            "soldr",
+            "build",
+            "--manifest-path",
+            str(ROOT / "clud-webterm" / "Cargo.toml"),
+            "--target",
+            args.target,
+        ]
+        if args.profile == "release":
+            command.append("--release")
+        if run(command, env) != 0:
+            return 1
     if _is_windows(args.target) and args.strategy == "soldr":
         target_dir = ROOT / "target"
-        profile = "release" if args.profile == "release" else "debug"
         from ci.build_wheel import build_windows_wheel_from_binaries
 
         try:
@@ -408,6 +425,7 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         except RuntimeError as error:
             print(error, file=sys.stderr)
             return 1
+        add_companion(wheel, companion, args.target)
         print(f"packaged soldr-built Windows wheel: {wheel}")
         return 0
     if args.profile == "release" and args.target.endswith("-unknown-linux-gnu"):
@@ -455,6 +473,8 @@ def cmd_wheel(args: argparse.Namespace) -> int:
         print("build completed but produced no wheel", file=sys.stderr)
         return 1
     for wheel in wheels:
+        if desktop_target(args.target):
+            add_companion(wheel, companion, args.target)
         repair_windows_gnu_wheel(wheel)
         if verify_wheel_scripts(wheel) != 0:
             return 1
