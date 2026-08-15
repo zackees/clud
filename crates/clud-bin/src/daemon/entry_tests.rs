@@ -145,6 +145,8 @@ fn repeat_jobs_always_subprocess() {
 #[test]
 fn transcript_forces_centralized_daemon() {
     let args = Args {
+        web_term: false,
+        set_web_term: None,
         provider: None,
         unified: false,
         mode: None,
@@ -195,6 +197,7 @@ fn transcript_forces_centralized_daemon() {
         passthrough: Vec::new(),
         codex_config_overrides: Vec::new(),
         resolved_model_selection: None,
+        raw_argv: Vec::new(),
     };
     assert!(experimental_enabled(&args));
 }

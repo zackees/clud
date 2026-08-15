@@ -23,6 +23,20 @@ fn missing_settings_file_defaults_pr_wait_fail_fast_disabled() {
 }
 
 #[test]
+fn web_term_preference_round_trips_without_clobbering_other_settings() {
+    let home = tempdir().unwrap();
+    save_pr_wait_fail_fast_enabled_at(home.path(), true).unwrap();
+    assert!(!load_web_term_enabled_at(home.path()).unwrap());
+
+    save_web_term_enabled_at(home.path(), true).unwrap();
+    assert!(load_web_term_enabled_at(home.path()).unwrap());
+    assert!(load_pr_wait_fail_fast_enabled_at(home.path()).unwrap());
+
+    save_web_term_enabled_at(home.path(), false).unwrap();
+    assert!(!load_web_term_enabled_at(home.path()).unwrap());
+}
+
+#[test]
 fn saves_pr_wait_fail_fast_sticky_opt_in_and_reset() {
     let home = tempdir().unwrap();
 
@@ -255,6 +269,7 @@ fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
             model_provider: Some(ModelProvider::Codex),
             harness: Some(HarnessSelection::Claude),
             pr_wait_fail_fast: Some(true),
+            web_term: None,
             provider_profiles: Vec::new(),
         },
     )

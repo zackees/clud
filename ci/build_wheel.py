@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from ci import process
+from ci.webterm_wheel import add_companion, companion_name, desktop_target
 from ci.wheel_repair import repair_windows_gnu_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,6 +30,38 @@ BuildMode = Literal["dev", "release"]
 # configs at `clud-cmd-scan` while the win_amd64 wheel didn't contain it
 # (#862). `test_hook_rollout_target_is_a_shipped_script` pins the invariant.
 REQUIRED_SCRIPTS = ("clud", "clud-shim", "clud-block-bad-cmd", "clud-cmd-scan")
+
+
+def local_webterm_target() -> str | None:
+    from ci.env import host_target_triple
+
+    target = host_target_triple()
+    return target if desktop_target(target) else None
+
+
+def build_local_webterm_companion(
+    *, mode: BuildMode, target: str, env: dict[str, str]
+) -> Path:
+    """Build the native Tauri companion for a local desktop wheel."""
+    command = [
+        "soldr",
+        "build",
+        "--manifest-path",
+        str(ROOT / "clud-webterm" / "Cargo.toml"),
+    ]
+    if mode == "release":
+        command.append("--release")
+    result = process.run(command, cwd=ROOT, check=False, env=env)
+    if result.returncode != 0:
+        raise RuntimeError("failed to build clud-webterm companion")
+    profile = "release" if mode == "release" else "debug"
+    # build_env sets CARGO_BUILD_TARGET on desktop hosts, so Cargo places the
+    # artifact under the target triple even though this local invocation does
+    # not repeat `--target` on its command line.
+    companion = ROOT / "clud-webterm" / "target" / target / profile / companion_name(target)
+    if not companion.is_file():
+        raise RuntimeError(f"web terminal build produced no companion: {companion}")
+    return companion
 
 
 def build_command(mode: BuildMode, env: dict[str, str] | None = None) -> list[str]:
@@ -178,7 +211,11 @@ def _installed_script(name: str) -> Path:
 
 
 def verify_installed_scripts(*, env: dict[str, str]) -> int:
-    missing = [name for name in REQUIRED_SCRIPTS if not _installed_script(name).is_file()]
+    required = list(REQUIRED_SCRIPTS)
+    target = local_webterm_target()
+    if target is not None:
+        required.append(companion_name(target).removesuffix(".exe"))
+    missing = [name for name in required if not _installed_script(name).is_file()]
     if missing:
         print(
             "installed wheel is missing scripts: " + ", ".join(missing),
@@ -272,8 +309,16 @@ def run_build(mode: BuildMode) -> int:
     if not changed_wheels:
         print("build completed but produced no wheel", file=sys.stderr, flush=True)
         return 1
+    target = local_webterm_target()
+    companion = (
+        build_local_webterm_companion(mode=mode, target=target, env=env)
+        if target is not None
+        else None
+    )
     for wheel in changed_wheels:
         repair_windows_gnu_wheel(wheel)
+        if companion is not None and target is not None:
+            add_companion(wheel, companion, target)
         verify = verify_wheel_scripts(wheel)
         if verify != 0:
             return verify

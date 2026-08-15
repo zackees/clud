@@ -197,6 +197,8 @@ fn backend_prompt_launch_plan(
     backend_path: &str,
 ) -> command::LaunchPlan {
     let launch_args = Args {
+        web_term: false,
+        set_web_term: None,
         provider: None,
         unified: false,
         mode: None,
@@ -247,6 +249,7 @@ fn backend_prompt_launch_plan(
         passthrough: args.passthrough.clone(),
         codex_config_overrides: args.codex_config_overrides.clone(),
         resolved_model_selection: args.resolved_model_selection.clone(),
+        raw_argv: Vec::new(),
     };
     command::build_launch_plan_for_target(&launch_args, launch_target, backend_path)
 }

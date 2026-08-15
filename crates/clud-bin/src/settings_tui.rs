@@ -194,6 +194,12 @@ fn setting_items() -> Vec<SettingItem> {
                become the default later.",
         value: SettingValue::Bool(clud_settings::load_pr_wait_fail_fast_enabled().unwrap_or(false)),
     });
+    items.push(SettingItem {
+        key: "web_term.enabled",
+        label: "Open bare clud launches in the web terminal",
+        note: "Uses the bundled desktop companion; disabled by default.",
+        value: SettingValue::Bool(clud_settings::load_web_term_enabled().unwrap_or(false)),
+    });
     items
 }
 
@@ -565,6 +571,9 @@ fn patch_from_menu(menu: &Menu) -> clud_settings::GlobalSettingsPatch {
             ("git.pr_wait_fail_fast", SettingValue::Bool(value)) => {
                 patch.pr_wait_fail_fast = Some(*value);
             }
+            ("web_term.enabled", SettingValue::Bool(value)) => {
+                patch.web_term = Some(*value);
+            }
             _ => {}
         }
     }
@@ -767,6 +776,7 @@ mod tests {
                 model_provider: Some(ModelProvider::Codex),
                 harness: Some(HarnessSelection::Claude),
                 pr_wait_fail_fast: Some(true),
+                web_term: None,
                 provider_profiles: Vec::new(),
             }
         );
@@ -801,6 +811,7 @@ mod tests {
                 model_provider: None,
                 harness: None,
                 pr_wait_fail_fast: Some(true),
+                web_term: None,
                 provider_profiles: Vec::new(),
             }
         );

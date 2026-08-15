@@ -38,6 +38,7 @@ pub struct GlobalSettingsPatch {
     pub model_provider: Option<ModelProvider>,
     pub harness: Option<HarnessSelection>,
     pub pr_wait_fail_fast: Option<bool>,
+    pub web_term: Option<bool>,
     pub provider_profiles: Vec<ProviderProfilePatch>,
 }
 
@@ -178,6 +179,12 @@ pub fn seed_global_settings_defaults(document: &mut Value) {
 
     if let Some(git) = seed_object_entry(document, "git") {
         git.entry("pr_wait_fail_fast".to_string())
+            .or_insert(Value::Bool(false));
+    }
+
+    if let Some(web_term) = seed_object_entry(document, "web_term") {
+        web_term
+            .entry("enabled".to_string())
             .or_insert(Value::Bool(false));
     }
 
@@ -565,6 +572,9 @@ fn save_settings_transaction_at(
         object_entry(&mut document, "git")
             .insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
     }
+    if let Some(enabled) = patch.web_term {
+        object_entry(&mut document, "web_term").insert("enabled".to_string(), Value::Bool(enabled));
+    }
     for profile in patch.provider_profiles {
         let Some(provider) = profile.provider else {
             continue;
@@ -649,6 +659,36 @@ pub fn save_pr_wait_fail_fast_enabled_at(home: &Path, enabled: bool) -> Result<(
         git.entry("pr_wait_fail_fast_note".to_string())
             .or_insert_with(|| Value::String(GIT_PR_WAIT_FAIL_FAST_NOTE.to_string()));
         git.insert("pr_wait_fail_fast".to_string(), Value::Bool(enabled));
+    })
+}
+
+/// Whether bare interactive launches should open in clud's owned web terminal.
+/// This preference is intentionally global: a project-local setting could make
+/// a normal invocation unexpectedly require a desktop companion binary.
+pub fn load_web_term_enabled() -> Result<bool, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_web_term_enabled_at(&home)
+}
+
+pub fn load_web_term_enabled_at(home: &Path) -> Result<bool, SettingsError> {
+    let lock_path = home.join(CLUD_DIR_NAME).join(LOCK_FILE_NAME);
+    let _lock = acquire_lock(&lock_path)?;
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("web_term")
+        .and_then(|item| item.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+pub fn save_web_term_enabled(enabled: bool) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_web_term_enabled_at(&home, enabled)
+}
+
+pub fn save_web_term_enabled_at(home: &Path, enabled: bool) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        object_entry(document, "web_term").insert("enabled".to_string(), Value::Bool(enabled));
     })
 }
 
