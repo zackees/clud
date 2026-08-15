@@ -856,6 +856,7 @@ fn build_repeat_once_command(args: &Args, plan: &LaunchPlan) -> io::Result<Vec<S
             crate::backend::ModelProvider::Claude => command.push("--claude".to_string()),
             crate::backend::ModelProvider::Codex => command.push("--codex".to_string()),
             crate::backend::ModelProvider::DeepSeek => command.push("--deepseek".to_string()),
+            crate::backend::ModelProvider::Kimi => command.push("--kimi".to_string()),
         }
     }
     command.push("--harness".to_string());

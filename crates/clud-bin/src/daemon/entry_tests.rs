@@ -157,6 +157,7 @@ fn transcript_forces_centralized_daemon() {
         claude: false,
         codex: false,
         deepseek: false,
+        kimi: false,
         harness: None,
         subprocess: false,
         pty: false,
@@ -256,6 +257,86 @@ fn repeat_command_preserves_deepseek_provider() {
         .any(|part| part == ["--harness", "claude"]));
 }
 
+/// Kimi twin of `repeat_command_preserves_deepseek_provider`. Uses the
+/// provider-neutral `resolve_launch_target_with_provider` entry point (see
+/// the comment on `repeat_command_flag_matches_descriptor_cli_flag_for_every_
+/// anthropic_compat_provider` below for why).
+#[test]
+fn repeat_command_preserves_kimi_provider() {
+    let args = Args::parse_from_raw(
+        ["clud", "--kimi", "loop", "--repeat", "1h", "task"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    let target = crate::backend::resolve_launch_target_with_provider(
+        args.explicit_model_provider(),
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    assert!(command.windows(1).any(|part| part == ["--kimi"]));
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--harness", "claude"]));
+}
+
+/// Guardrail for #937 Phase 2B: `build_repeat_once_command`'s provider match
+/// (`daemon/entry.rs`) stays a hand-written, compiler-enforced exhaustive
+/// match rather than becoming registry-driven, per the design in #936/#937.
+/// That match is therefore exactly the kind of silent-drift risk the design
+/// calls out: the compiler forces *some* arm to exist for a new provider,
+/// but never checks that the literal it pushes matches the registry's
+/// `cli_flag`. This test closes that gap: for every provider that has an
+/// Anthropic-compat descriptor, the flag this surface actually emits on the
+/// re-exec command line must equal `descriptor.cli_flag` byte-for-byte.
+#[test]
+fn repeat_command_flag_matches_descriptor_cli_flag_for_every_anthropic_compat_provider() {
+    for descriptor in crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+        let args = Args::parse_from_raw(
+            [
+                "clud",
+                descriptor.cli_flag,
+                "loop",
+                "--repeat",
+                "1h",
+                "task",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+        // Provider-neutral entry point, not the 3-bool `resolve_launch_target`
+        // wrapper: that wrapper only knows about `claude`/`codex`/`deepseek`
+        // and silently drops any provider (e.g. Kimi's `args.kimi`) it wasn't
+        // written to read, which would make this loop's assertion below pass
+        // for the wrong reason (or not run at all) for a provider added after
+        // the wrapper was last touched.
+        let target = crate::backend::resolve_launch_target_with_provider(
+            args.explicit_model_provider(),
+            args.harness,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            target.model_provider, descriptor.provider,
+            "descriptor.cli_flag must resolve back to its own provider"
+        );
+        let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+        let command = build_repeat_once_command(&args, &plan).unwrap();
+        assert!(
+            command.windows(1).any(|part| part == [descriptor.cli_flag]),
+            "expected {:?} to contain the literal flag {:?}",
+            command,
+            descriptor.cli_flag
+        );
+    }
+}
+
 #[test]
 fn repeat_command_preserves_unified_routing_without_a_direct_provider_flag() {
     let args = Args::parse_from_raw(
@@ -313,6 +394,44 @@ fn repeat_command_pins_the_normalized_model_effort_and_context() {
     assert!(command
         .windows(2)
         .any(|part| part == ["--model", "deepseek-v4-pro[1m]"]));
+    assert!(command.windows(2).any(|part| part == ["--effort", "max"]));
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--context-window", "1m"]));
+}
+
+/// Kimi twin of `repeat_command_pins_the_normalized_model_effort_and_context`.
+#[test]
+fn repeat_command_pins_the_normalized_kimi_model_effort_and_context() {
+    let args = Args::parse_from_raw(
+        [
+            "clud",
+            "--kimi",
+            "--model",
+            "kimi-k3[1m]",
+            "--effort",
+            "max",
+            "loop",
+            "--repeat",
+            "1h",
+            "task",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+    );
+    let target = crate::backend::resolve_launch_target_with_provider(
+        args.explicit_model_provider(),
+        args.harness,
+        None,
+        None,
+    )
+    .unwrap();
+    let plan = crate::command::build_launch_plan_for_target(&args, target, "claude");
+    let command = build_repeat_once_command(&args, &plan).unwrap();
+    assert!(command
+        .windows(2)
+        .any(|part| part == ["--model", "kimi-k3[1m]"]));
     assert!(command.windows(2).any(|part| part == ["--effort", "max"]));
     assert!(command
         .windows(2)

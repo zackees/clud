@@ -46,6 +46,14 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
 ///
 /// Deliberately narrow: a plain `clud` (Claude provider, Claude harness) keeps
 /// plan mode, and `AskUserQuestion` is never touched by this rule.
+///
+/// Kimi (#937 Phase 3) is deliberately **not** listed here. #936's
+/// "Decisions" section is explicit: "Do not copy DeepSeek-specific plan-mode
+/// suppression without Kimi-specific failing evidence." `matches!` is not
+/// compiler-exhaustive over `ModelProvider`, so adding a new provider here
+/// is a silent choice, not a forced one -- see
+/// `command::tests::test_kimi_bridge_does_not_suppress_plan_mode`, which
+/// pins this omission as deliberate rather than an oversight.
 fn is_non_claude_claude_harness_bridge(target: ResolvedLaunchTarget) -> bool {
     target.routing_mode == crate::backend::RoutingMode::Direct
         && matches!(

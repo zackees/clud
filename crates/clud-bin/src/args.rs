@@ -25,26 +25,30 @@ pub struct Args {
     #[arg(short = 'r', long = "resume")]
     pub resume: Option<Option<String>>,
 
-    #[arg(long = "claude", conflicts_with_all = ["codex", "deepseek"])]
+    #[arg(long = "claude", conflicts_with_all = ["codex", "deepseek", "kimi"])]
     pub claude: bool,
 
-    #[arg(long = "codex", conflicts_with_all = ["claude", "deepseek"])]
+    #[arg(long = "codex", conflicts_with_all = ["claude", "deepseek", "kimi"])]
     pub codex: bool,
 
     /// Use DeepSeek's Anthropic-compatible API through the Claude harness.
-    #[arg(long = "deepseek", conflicts_with_all = ["claude", "codex"])]
+    #[arg(long = "deepseek", conflicts_with_all = ["claude", "codex", "kimi"])]
     pub deepseek: bool,
 
+    /// Use Kimi's Anthropic-compatible API through the Claude harness.
+    #[arg(long = "kimi", conflicts_with_all = ["claude", "codex", "deepseek", "provider", "unified", "mode"])]
+    pub kimi: bool,
+
     /// Select a provider using the generic script-friendly spelling.
-    #[arg(long = "provider", value_enum, conflicts_with_all = ["claude", "codex", "deepseek"])]
+    #[arg(long = "provider", value_enum, conflicts_with_all = ["claude", "codex", "deepseek", "kimi"])]
     pub provider: Option<ModelProvider>,
 
     /// Route configured providers through one Claude model picker.
-    #[arg(long = "unified", conflicts_with_all = ["claude", "codex", "deepseek", "provider", "mode"])]
+    #[arg(long = "unified", conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "provider", "mode"])]
     pub unified: bool,
 
     /// Generic spelling for the launch routing mode.
-    #[arg(long = "mode", value_parser = ["unified"], conflicts_with_all = ["claude", "codex", "deepseek", "provider", "unified"])]
+    #[arg(long = "mode", value_parser = ["unified"], conflicts_with_all = ["claude", "codex", "deepseek", "kimi", "provider", "unified"])]
     pub mode: Option<String>,
 
     /// Select the agent harness independently from the model provider.
@@ -237,6 +241,8 @@ impl Args {
     pub fn explicit_model_provider(&self) -> Option<ModelProvider> {
         if self.deepseek {
             Some(ModelProvider::DeepSeek)
+        } else if self.kimi {
+            Some(ModelProvider::Kimi)
         } else if self.codex {
             Some(ModelProvider::Codex)
         } else if self.claude {
@@ -556,6 +562,7 @@ pub enum Command {
 pub enum AuthProvider {
     Codex,
     Deepseek,
+    Kimi,
     Claude,
 }
 
@@ -564,6 +571,7 @@ impl AuthProvider {
         match self {
             Self::Codex => "codex",
             Self::Deepseek => "deepseek",
+            Self::Kimi => "kimi",
             Self::Claude => "claude",
         }
     }
@@ -628,24 +636,33 @@ pub enum CodexAuthSubcommand {
     },
 }
 
-/// Subcommands under `clud deepseek-auth`. See `deepseek_auth.rs`.
+/// Subcommands shared by every vault-backed Anthropic-compat provider's
+/// auth commands (`provider_auth::run_for`) -- originally DeepSeek-only,
+/// now also used by Kimi (#937 Phase 3). Named generically for that reason.
 #[derive(Subcommand, Debug, Clone)]
-pub enum DeepseekAuthSubcommand {
-    /// Prompt for and store the DeepSeek API key in the native credential vault.
+pub enum ApiKeyAuthSubcommand {
+    /// Prompt for and store the provider's API key in the native credential vault.
     Login,
-    /// Report whether a DeepSeek API key is available without revealing it.
+    /// Report whether an API key is available without revealing it.
     Status {
         /// Emit stable JSON for automation.
         #[arg(long = "json")]
         json: bool,
     },
-    /// Remove the clud-managed DeepSeek API key from the native credential vault.
+    /// Remove the clud-managed API key from the native credential vault.
     Logout {
         /// Emit stable JSON for automation.
         #[arg(long = "json")]
         json: bool,
     },
 }
+
+/// Compatibility alias: the CLI-visible `deepseek-auth` subcommand name and
+/// its flags are unchanged; only the underlying subcommand type is now
+/// shared across vault-backed Anthropic-compat providers. Keeps
+/// `Command::DeepseekAuth` and every existing external reference to this
+/// type name compiling unchanged.
+pub type DeepseekAuthSubcommand = ApiKeyAuthSubcommand;
 
 impl Command {
     /// The clap name of this subcommand if it is one of the hidden internal
@@ -984,6 +1001,7 @@ fn split_known_unknown(raw: &[String]) -> (Vec<String>, Vec<String>) {
         "--claude",
         "--codex",
         "--deepseek",
+        "--kimi",
         "--unified",
         "--subprocess",
         "--pty",

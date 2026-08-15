@@ -79,6 +79,11 @@ const ANTHROPIC_EFFORTS: &[EffortLevel] = &[
     EffortLevel::XHigh,
     EffortLevel::Max,
 ];
+/// Kimi K3 documents exactly three reasoning-effort levels -- low, high, and
+/// max (default max). Deliberately NOT `ANTHROPIC_EFFORTS`: medium and xhigh
+/// are not part of K3's contract and must be rejected before an upstream
+/// request. See https://platform.kimi.ai/docs/guide/kimi-k3-quickstart.
+const KIMI_EFFORTS: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::High, EffortLevel::Max];
 const AUTO_CONTEXT: &[&str] = &["auto"];
 const AUTO_OR_1M_CONTEXT: &[&str] = &["auto", "1m"];
 
@@ -97,6 +102,11 @@ pub struct CatalogModel {
     /// Reviewed direct-launch default for this provider. Claude intentionally
     /// has no row marked: its harness-owned default remains authoritative.
     pub provider_default: bool,
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` value to set in the child-env overlay
+    /// when this row's wire ID is selected, or `None` if the overlay should
+    /// leave the variable unset. Replaces a hardcoded `model.ends_with("[1m]")`
+    /// check with catalog data (#937 Phase 2).
+    pub claude_compact_window: Option<u32>,
 }
 
 pub const MODELS: &[CatalogModel] = &[
@@ -112,6 +122,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Low),
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "codex-terra",
@@ -125,6 +136,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
         provider_default: true,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "codex-luna",
@@ -138,6 +150,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Medium),
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "deepseek-v4-pro",
@@ -154,6 +167,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: Some(EffortLevel::Max),
         default_context_window: Some("1m"),
         provider_default: true,
+        claude_compact_window: Some(786_432),
     },
     CatalogModel {
         cli_id: "deepseek-v4-flash",
@@ -167,6 +181,21 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
+    },
+    CatalogModel {
+        cli_id: "kimi-k3",
+        provider: ModelProvider::Kimi,
+        wire_id: "kimi-k3[1m]",
+        discovery_id: Some("clud-claude-kimi-k3"),
+        display_name: "Kimi K3",
+        legacy_aliases: &["kimi-k3[1m]"],
+        supported_efforts: KIMI_EFFORTS,
+        supported_context_windows: AUTO_OR_1M_CONTEXT,
+        default_effort: Some(EffortLevel::Max),
+        default_context_window: Some("1m"),
+        provider_default: true,
+        claude_compact_window: Some(1_048_576),
     },
     // Claude tier aliases are compatibility rows. Versioned Claude inventory
     // can be added without changing the stable provider-qualified grammar.
@@ -182,6 +211,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "claude-sonnet",
@@ -195,6 +225,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
     CatalogModel {
         cli_id: "claude-haiku",
@@ -208,6 +239,7 @@ pub const MODELS: &[CatalogModel] = &[
         default_effort: None,
         default_context_window: None,
         provider_default: false,
+        claude_compact_window: None,
     },
 ];
 
@@ -345,6 +377,15 @@ pub fn model_by_cli_id(value: &str) -> Option<CatalogModel> {
     MODELS.iter().copied().find(|entry| entry.cli_id == value)
 }
 
+/// Exact wire-ID lookup, deliberately narrower than [`catalog_match`] (which
+/// also matches `cli_id` and aliases). The child-env overlay uses this to
+/// look up `claude_compact_window`: an auto-context wire model like
+/// `"deepseek-v4-pro"` must NOT fall back to matching the `[1m]` row via its
+/// `cli_id` and pick up that row's compaction window.
+pub fn model_by_wire_id(value: &str) -> Option<CatalogModel> {
+    MODELS.iter().copied().find(|entry| entry.wire_id == value)
+}
+
 /// Resolve a model identifier emitted by Claude's gateway model picker.
 /// Versioned discovery IDs make the served checkpoint visible in the UI;
 /// retired IDs remain accepted so an already-selected or cached row does not
@@ -403,28 +444,28 @@ fn split_context_suffix(raw: &str) -> (&str, Option<&str>) {
 
 fn inferred_provider_from_wire(value: &str) -> Option<ModelProvider> {
     let lower = value.to_ascii_lowercase();
-    if lower.starts_with("claude-") {
-        Some(ModelProvider::Claude)
-    } else if lower.starts_with("gpt-") || lower.starts_with("codex-") {
-        Some(ModelProvider::Codex)
-    } else if lower.starts_with("deepseek-") {
-        Some(ModelProvider::DeepSeek)
-    } else {
-        None
-    }
+    ModelProvider::ALL.iter().copied().find(|provider| {
+        provider
+            .wire_prefixes()
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+    })
 }
 
 fn provider_efforts(provider: ModelProvider) -> &'static [EffortLevel] {
     match provider {
         ModelProvider::Codex => ALL_CODEX_EFFORTS,
         ModelProvider::Claude | ModelProvider::DeepSeek => ANTHROPIC_EFFORTS,
+        // K3 documents only low/high/max; the narrower per-model slice on the
+        // catalog row is what actually rejects an unsupported value.
+        ModelProvider::Kimi => KIMI_EFFORTS,
     }
 }
 
 fn provider_context_windows(provider: ModelProvider) -> &'static [&'static str] {
     match provider {
         ModelProvider::Claude | ModelProvider::Codex => AUTO_CONTEXT,
-        ModelProvider::DeepSeek => AUTO_OR_1M_CONTEXT,
+        ModelProvider::DeepSeek | ModelProvider::Kimi => AUTO_OR_1M_CONTEXT,
     }
 }
 
@@ -500,7 +541,16 @@ pub fn resolve(
             explicit_effort,
             explicit_context.as_deref(),
         )?;
-        if provider == ModelProvider::DeepSeek && explicit_context.as_deref() == Some("auto") {
+        // "This provider has a 1m-tier model" rather than `provider ==
+        // ModelProvider::DeepSeek`: a model-less --context-window auto only
+        // needs disambiguation (which of the provider's models?) when the
+        // provider has more than one context tier to choose from. Kimi's
+        // future row (#937 Phase 3) has a 1m tier too and picks this up with
+        // zero edits here.
+        if explicit_context.as_deref() == Some("auto")
+            && models_for_provider(provider)
+                .any(|entry| entry.supported_context_windows.contains(&"1m"))
+        {
             return Err(SelectionError::ContextRequiresModel {
                 provider,
                 context_window: "auto".to_string(),
@@ -599,7 +649,12 @@ pub fn resolve(
 
     let mut wire_model =
         catalog.map_or_else(|| base_model.to_string(), |entry| entry.wire_id.to_string());
-    if model_provider == ModelProvider::DeepSeek {
+    // "This model has a 1m context tier" rather than `model_provider ==
+    // ModelProvider::DeepSeek`: `contexts` is already the resolved model's
+    // (or, for an uncataloged wire ID, the provider's fallback) supported
+    // context-window slice, so this is behavior-identical for DeepSeek/Codex
+    // and picks up Kimi's future 1m row (#937 Phase 3) unchanged.
+    if contexts.contains(&"1m") {
         match effective_context.as_deref() {
             Some("auto") => {
                 wire_model = wire_model
@@ -709,6 +764,47 @@ pub fn resolve_for_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guardrail: `apply_anthropic_compat_overlay` (foreground_runtime.rs)
+    /// expects `reviewed_default_model` to resolve for every
+    /// Anthropic-compat descriptor's provider, and panics via `.expect()` at
+    /// launch if it doesn't. Pin the invariant here so a future descriptor
+    /// row (e.g. Kimi in #937 Phase 3) without a matching
+    /// `provider_default: true` catalog row fails a test instead of a
+    /// runtime launch.
+    #[test]
+    fn every_anthropic_compat_provider_has_a_reviewed_catalog_default() {
+        for descriptor in crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+            assert!(
+                reviewed_default_model(descriptor.provider).is_some(),
+                "{} has no provider_default: true catalog row",
+                descriptor.display_name
+            );
+        }
+    }
+
+    #[test]
+    fn inferred_provider_from_wire_matches_representative_ids() {
+        // Table-driven rewrite over ModelProvider::ALL / wire_prefixes must
+        // return the exact same answers as the original hardcoded ladder.
+        assert_eq!(
+            inferred_provider_from_wire("deepseek-v4-pro[1m]"),
+            Some(ModelProvider::DeepSeek)
+        );
+        assert_eq!(
+            inferred_provider_from_wire("gpt-5.6-terra"),
+            Some(ModelProvider::Codex)
+        );
+        assert_eq!(
+            inferred_provider_from_wire("codex-sol"),
+            Some(ModelProvider::Codex)
+        );
+        assert_eq!(
+            inferred_provider_from_wire("claude-opus-x"),
+            Some(ModelProvider::Claude)
+        );
+        assert_eq!(inferred_provider_from_wire("unknown-wire-id"), None);
+    }
 
     #[test]
     fn qualified_codex_model_infers_provider_and_keeps_effort_independent() {
@@ -1014,6 +1110,75 @@ mod tests {
         let selection =
             resolve_for_launch(ModelProvider::Codex, None, None, None, None, false).unwrap();
         assert!(selection.is_none());
+    }
+
+    #[test]
+    fn kimi_catalog_row_resolves_by_cli_id_wire_id_and_discovery_id() {
+        let by_cli = resolve(None, Some("kimi-k3"), None, None).unwrap().unwrap();
+        assert_eq!(by_cli.provider, ModelProvider::Kimi);
+        assert_eq!(by_cli.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_cli.wire_model.as_deref(), Some("kimi-k3[1m]"));
+
+        let by_wire = resolve(None, Some("kimi-k3[1m]"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_wire.provider, ModelProvider::Kimi);
+        assert_eq!(by_wire.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_wire.wire_model.as_deref(), Some("kimi-k3[1m]"));
+
+        let by_discovery = resolve(None, Some("clud-claude-kimi-k3"), None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_discovery.provider, ModelProvider::Kimi);
+        assert_eq!(by_discovery.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(by_discovery.wire_model.as_deref(), Some("kimi-k3[1m]"));
+    }
+
+    /// K3 documents only low/high/max -- medium and xhigh must be rejected
+    /// before any upstream request (#937 Phase 3), unlike DeepSeek which
+    /// reuses the full `ANTHROPIC_EFFORTS` slice.
+    #[test]
+    fn kimi_rejects_medium_and_xhigh_but_accepts_low_high_max() {
+        for rejected in ["medium", "xhigh"] {
+            assert!(
+                matches!(
+                    resolve(
+                        Some(ModelProvider::Kimi),
+                        Some("kimi-k3"),
+                        Some(rejected),
+                        None
+                    ),
+                    Err(SelectionError::UnsupportedEffort { .. })
+                ),
+                "expected effort '{rejected}' to be rejected for Kimi"
+            );
+        }
+        for accepted in ["low", "high", "max"] {
+            assert!(
+                resolve(
+                    Some(ModelProvider::Kimi),
+                    Some("kimi-k3"),
+                    Some(accepted),
+                    None
+                )
+                .is_ok(),
+                "expected effort '{accepted}' to be accepted for Kimi"
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_launch_catalog_default_carries_1m_context_and_max_effort() {
+        let selection = resolve_for_launch(ModelProvider::Kimi, None, None, None, None, true)
+            .unwrap()
+            .unwrap();
+        let default = reviewed_default_model(ModelProvider::Kimi).unwrap();
+        assert_eq!(default.display_name, "Kimi K3");
+        assert_eq!(selection.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(selection.wire_model.as_deref(), Some("kimi-k3[1m]"));
+        assert_eq!(selection.effort, Some(EffortLevel::Max));
+        assert_eq!(selection.context_window.as_deref(), Some("1m"));
+        assert_eq!(default.claude_compact_window, Some(1_048_576));
     }
 
     #[test]

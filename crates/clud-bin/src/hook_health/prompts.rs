@@ -209,6 +209,7 @@ fn backend_prompt_launch_plan(
         claude: launch_target.model_provider == ModelProvider::Claude,
         codex: launch_target.model_provider == ModelProvider::Codex,
         deepseek: launch_target.model_provider == ModelProvider::DeepSeek,
+        kimi: launch_target.model_provider == ModelProvider::Kimi,
         harness: Some(launch_target.requested_harness),
         subprocess: true,
         pty: false,
@@ -259,6 +260,40 @@ mod tests {
 
     fn args(argv: &[&str]) -> Args {
         Args::parse_from_raw(argv.iter().map(|value| (*value).to_string()).collect())
+    }
+
+    /// Guardrail for #937 Phase 2B: `backend_prompt_launch_plan` re-encodes
+    /// the resolved provider as `Args`' hand-written `claude`/`codex`/
+    /// `deepseek` booleans (a struct literal, not a match -- adding a field
+    /// to `Args` fails this literal to compile, which is the guardrail for
+    /// *a case existing at all*, but says nothing about whether the boolean
+    /// wired to a given provider is the *right* one). This closes that gap:
+    /// for every provider with an Anthropic-compat descriptor, resolving a
+    /// launch target for that exact provider and threading it through this
+    /// function must round-trip back to the same provider on the plan, and
+    /// the descriptor's `cli_flag` must be the literal `--<settings_id>`
+    /// form these booleans stand in for.
+    #[test]
+    fn backend_prompt_plan_resolves_the_same_provider_for_every_anthropic_compat_descriptor() {
+        for descriptor in crate::provider_registry::ANTHROPIC_COMPAT_PROVIDERS {
+            assert_eq!(
+                descriptor.cli_flag,
+                format!("--{}", descriptor.settings_id),
+                "cli_flag must be the literal flag spelling of settings_id"
+            );
+            let target = ResolvedLaunchTarget {
+                routing_mode: crate::backend::RoutingMode::Direct,
+                model_provider: descriptor.provider,
+                requested_harness: crate::backend::HarnessSelection::Default,
+                effective_harness: descriptor.provider.native_harness(),
+                provider_source: crate::backend::PreferenceSource::Cli,
+                harness_source: crate::backend::PreferenceSource::Cli,
+            };
+            let args = args(&["clud", "--fix-hooks"]);
+            let plan =
+                backend_prompt_launch_plan(&args, target, "repair hooks".to_string(), "claude");
+            assert_eq!(plan.model_provider(), descriptor.provider);
+        }
     }
 
     #[test]

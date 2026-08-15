@@ -216,6 +216,32 @@ fn deepseek_model_provider_round_trips_through_settings() {
     assert_eq!(json["backend"]["default"], "deepseek");
 }
 
+/// Kimi twin of `deepseek_model_provider_round_trips_through_settings`
+/// (#937 Phase 3).
+#[test]
+fn kimi_model_provider_round_trips_through_settings() {
+    let home = tempdir().unwrap();
+
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            model_provider: Some(ModelProvider::Kimi),
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        load_global_launch_preferences_at(home.path())
+            .unwrap()
+            .model_provider,
+        Some(ModelProvider::Kimi)
+    );
+    let json: Value =
+        serde_json::from_str(&fs::read_to_string(settings_path_at(home.path())).unwrap()).unwrap();
+    assert_eq!(json["backend"]["default"], "kimi");
+}
+
 #[test]
 fn one_atomic_patch_updates_all_typed_settings_and_preserves_unknown_fields() {
     let home = tempdir().unwrap();
@@ -812,6 +838,40 @@ fn provider_profile_round_trips_through_save_and_load() {
     assert_eq!(json["providers"]["codex"]["effort"], "high");
 }
 
+/// Kimi twin of `provider_profile_round_trips_through_save_and_load`
+/// (#937 Phase 3): `providers.kimi.*` validates and round-trips like every
+/// other provider's profile.
+#[test]
+fn provider_profile_round_trips_for_kimi() {
+    let home = tempdir().unwrap();
+    save_settings_patch_at(
+        home.path(),
+        GlobalSettingsPatch {
+            provider_profiles: vec![ProviderProfilePatch {
+                provider: Some(ModelProvider::Kimi),
+                model: Some("kimi-k3".to_string()),
+                harness: Some(HarnessSelection::Claude),
+                effort: Some(Some(EffortLevel::High)),
+                context_window: Some(Some("auto".to_string())),
+            }],
+            ..GlobalSettingsPatch::default()
+        },
+    )
+    .unwrap();
+
+    let snapshot = load_launch_preferences_read_only_at(home.path()).unwrap();
+    let profile = snapshot.profile(ModelProvider::Kimi).unwrap();
+    assert_eq!(profile.model.as_deref(), Some("kimi-k3"));
+    assert_eq!(profile.harness, Some(HarnessSelection::Claude));
+    assert_eq!(profile.effort, Some(EffortLevel::High));
+    assert_eq!(profile.context_window.as_deref(), Some("auto"));
+
+    let text = fs::read_to_string(settings_path_at(home.path())).unwrap();
+    let json: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["providers"]["kimi"]["model"], "kimi-k3");
+    assert_eq!(json["providers"]["kimi"]["effort"], "high");
+}
+
 #[test]
 fn provider_profile_effort_clears_when_patched_to_none() {
     let home = tempdir().unwrap();
@@ -882,6 +942,25 @@ fn provider_profile_rejects_cross_provider_model() {
         load_launch_preferences_read_only_at(home.path()),
         Err(SettingsError::InvalidProviderProfile {
             provider: ModelProvider::Codex,
+            ..
+        })
+    ));
+}
+
+/// Cross-provider model rejection, mirrored onto Kimi (#937 Phase 3): a
+/// `deepseek-*` model in `providers.kimi.*` must be rejected the same way a
+/// `deepseek-v4-pro` model was rejected on the Codex profile above.
+#[test]
+fn provider_profile_rejects_deepseek_model_on_kimi_profile() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"kimi":{"model":"deepseek-v4-pro"}}}"#,
+    );
+    assert!(matches!(
+        load_launch_preferences_read_only_at(home.path()),
+        Err(SettingsError::InvalidProviderProfile {
+            provider: ModelProvider::Kimi,
             ..
         })
     ));

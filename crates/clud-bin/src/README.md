@@ -110,9 +110,15 @@ Entry and orchestration:
   store, safe status claims, locked atomic refresh, and token-redacted
   diagnostics. See
   [`../../../docs/architecture/launch-targets.md`](../../../docs/architecture/launch-targets.md).
-- `deepseek_auth.rs` - #877's DeepSeek credential implementation: hidden
-  terminal input, OS-native credential vault adapter, injectable in-memory test
-  store, and secret-free status/error surfaces.
+- `provider_auth.rs` - shared API-key credential implementation (originally
+  #877's DeepSeek-only `deepseek_auth.rs`, generalized by #937): hidden terminal
+  input, OS-native credential vault adapter parameterized on the vault
+  service/account identifiers, injectable in-memory test store, and secret-free
+  status/error surfaces.
+- `provider_registry.rs` - the `AnthropicCompatProvider` descriptor table
+  (#937): per-provider vault identifiers, base URL, CLI flag, and child-env
+  values for providers that speak the Anthropic API directly. Adding a provider
+  is a row here plus a `ModelProvider` variant, not a new code path.
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
   one call, plus `MessageAggregator` so a non-streaming request reuses the
   streaming state machine. Owns the downstream status policy — since #764,

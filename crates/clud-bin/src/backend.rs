@@ -12,6 +12,7 @@ pub enum ModelProvider {
     Codex,
     #[serde(rename = "deepseek")]
     DeepSeek,
+    Kimi,
 }
 
 /// Whether one provider owns the launch or the Claude harness routes among
@@ -37,27 +38,45 @@ impl RoutingMode {
 }
 
 impl ModelProvider {
+    /// Every provider variant. Registry guardrail tests iterate this so a new
+    /// variant added without updating it fails loudly instead of silently
+    /// falling through provider-inference/settings lookups.
+    pub const ALL: &'static [ModelProvider] =
+        &[Self::Claude, Self::Codex, Self::DeepSeek, Self::Kimi];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::DeepSeek => "deepseek",
+            Self::Kimi => "kimi",
         }
     }
 
     pub fn from_settings_str(value: &str) -> Option<Self> {
-        match value.to_ascii_lowercase().as_str() {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "deepseek" => Some(Self::DeepSeek),
-            _ => None,
-        }
+        let lowered = value.to_ascii_lowercase();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|provider| provider.as_str() == lowered)
     }
 
     pub fn native_harness(self) -> Backend {
         match self {
-            Self::Claude | Self::DeepSeek => Backend::Claude,
+            Self::Claude | Self::DeepSeek | Self::Kimi => Backend::Claude,
             Self::Codex => Backend::Codex,
+        }
+    }
+
+    /// Provider-native wire-ID prefixes, used to infer a provider from a raw
+    /// model wire ID that isn't in the catalog. Exhaustive match is
+    /// deliberate: adding a provider must extend this or the build breaks.
+    pub fn wire_prefixes(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["claude-"],
+            Self::Codex => &["gpt-", "codex-"],
+            Self::DeepSeek => &["deepseek-"],
+            Self::Kimi => &["kimi-"],
         }
     }
 }
@@ -147,6 +166,7 @@ pub struct ResolvedLaunchTarget {
 pub enum LaunchTargetError {
     ClaudeViaCodexUnsupported,
     DeepSeekViaCodexUnsupported,
+    KimiViaCodexUnsupported,
     UnifiedViaCodexUnsupported,
 }
 
@@ -160,6 +180,10 @@ impl std::fmt::Display for LaunchTargetError {
             Self::DeepSeekViaCodexUnsupported => write!(
                 f,
                 "unsupported launch target: DeepSeek provider requires the Claude harness"
+            ),
+            Self::KimiViaCodexUnsupported => write!(
+                f,
+                "unsupported launch target: Kimi provider requires the Claude harness"
             ),
             Self::UnifiedViaCodexUnsupported => write!(
                 f,
@@ -357,6 +381,7 @@ pub fn resolve_routed_launch_target(
         match model_provider {
             ModelProvider::Claude => return Err(LaunchTargetError::ClaudeViaCodexUnsupported),
             ModelProvider::DeepSeek => return Err(LaunchTargetError::DeepSeekViaCodexUnsupported),
+            ModelProvider::Kimi => return Err(LaunchTargetError::KimiViaCodexUnsupported),
             ModelProvider::Codex => {}
         }
     }
@@ -480,6 +505,49 @@ fn resolve_launch_mode_with_pty_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_provider_all_has_no_duplicates_and_matches_variant_count() {
+        // Fails loudly if a variant is added without updating `ALL` -- the
+        // exact silent-fallback failure mode this registry hoist removes.
+        let all = ModelProvider::ALL;
+        for (index, provider) in all.iter().enumerate() {
+            for other in &all[index + 1..] {
+                assert_ne!(provider, other, "ModelProvider::ALL has a duplicate entry");
+            }
+        }
+        // Compare against clap's derive-generated variant list rather than a
+        // hardcoded count: a hardcoded `3` would silently keep passing if a
+        // future variant were added without updating `ALL`, which is exactly
+        // the silent-fallback failure mode this registry exists to remove.
+        assert_eq!(
+            all.len(),
+            ModelProvider::value_variants().len(),
+            "ModelProvider::ALL must list every enum variant exactly once"
+        );
+    }
+
+    #[test]
+    fn every_model_provider_round_trips_through_settings_str() {
+        for provider in ModelProvider::ALL {
+            let value = provider.as_str();
+            assert_eq!(ModelProvider::from_settings_str(value), Some(*provider));
+            // Case-insensitivity must survive the table-driven rewrite.
+            assert_eq!(
+                ModelProvider::from_settings_str(&value.to_ascii_uppercase()),
+                Some(*provider)
+            );
+        }
+        assert_eq!(ModelProvider::from_settings_str("not-a-provider"), None);
+    }
+
+    #[test]
+    fn wire_prefixes_are_exhaustive_and_match_the_original_prefix_ladder() {
+        assert_eq!(ModelProvider::Claude.wire_prefixes(), &["claude-"]);
+        assert_eq!(ModelProvider::Codex.wire_prefixes(), &["gpt-", "codex-"]);
+        assert_eq!(ModelProvider::DeepSeek.wire_prefixes(), &["deepseek-"]);
+        assert_eq!(ModelProvider::Kimi.wire_prefixes(), &["kimi-"]);
+    }
 
     #[test]
     fn test_default_is_claude() {
@@ -616,6 +684,10 @@ mod tests {
             HarnessSelection::Default.resolve(ModelProvider::DeepSeek),
             Backend::Claude
         );
+        assert_eq!(
+            HarnessSelection::Default.resolve(ModelProvider::Kimi),
+            Backend::Claude
+        );
     }
 
     #[test]
@@ -655,6 +727,27 @@ mod tests {
             Ok(())
         );
         assert_eq!(validate_provider_options(target, None), Ok(()));
+    }
+
+    #[test]
+    fn kimi_rejects_the_codex_harness_but_accepts_the_claude_harness() {
+        let target = resolve_launch_target_with_provider(
+            Some(ModelProvider::Kimi),
+            Some(HarnessSelection::Codex),
+            None,
+            None,
+        );
+        assert_eq!(target, Err(LaunchTargetError::KimiViaCodexUnsupported));
+        assert_eq!(
+            target.unwrap_err().to_string(),
+            "unsupported launch target: Kimi provider requires the Claude harness"
+        );
+
+        let target =
+            resolve_launch_target_with_provider(Some(ModelProvider::Kimi), None, None, None)
+                .unwrap();
+        assert_eq!(target.effective_harness, Backend::Claude);
+        assert_eq!(validate_provider_options(target, Some("kimi-k3")), Ok(()));
     }
 
     #[test]

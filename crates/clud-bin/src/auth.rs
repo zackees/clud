@@ -6,7 +6,38 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::args::{AuthProvider, AuthSubcommand, CodexAuthSubcommand, DeepseekAuthSubcommand};
-use crate::deepseek_auth::{NativeSecretStore, SecretStore};
+use crate::backend::ModelProvider;
+use crate::provider_auth::{NativeSecretStore, SecretStore};
+use crate::provider_registry::{self, AnthropicCompatProvider};
+
+/// Maps the auth-command's provider selector onto the model-provider space
+/// the registry is keyed by. Exhaustive: a new `AuthProvider` variant fails
+/// to compile here until it is routed somewhere.
+fn model_provider_for(provider: AuthProvider) -> ModelProvider {
+    match provider {
+        AuthProvider::Claude => ModelProvider::Claude,
+        AuthProvider::Codex => ModelProvider::Codex,
+        AuthProvider::Deepseek => ModelProvider::DeepSeek,
+        AuthProvider::Kimi => ModelProvider::Kimi,
+    }
+}
+
+/// Anthropic-compat descriptor for an `AuthProvider`, when it has one.
+/// `None` for Claude (externally managed) and Codex (its own translation-
+/// bridge auth path, not a vault-backed Anthropic-compat provider).
+fn anthropic_compat_descriptor(provider: AuthProvider) -> Option<&'static AnthropicCompatProvider> {
+    provider_registry::descriptor_for(model_provider_for(provider))
+}
+
+/// Inverse of [`model_provider_for`]. Exhaustive for the same reason.
+fn auth_provider_for(provider: ModelProvider) -> AuthProvider {
+    match provider {
+        ModelProvider::Claude => AuthProvider::Claude,
+        ModelProvider::Codex => AuthProvider::Codex,
+        ModelProvider::DeepSeek => AuthProvider::Deepseek,
+        ModelProvider::Kimi => AuthProvider::Kimi,
+    }
+}
 
 /// Exact action-first spelling for a deprecated Codex alias invocation.
 pub fn codex_alias_replacement(subcommand: &CodexAuthSubcommand) -> String {
@@ -31,13 +62,15 @@ pub fn codex_alias_replacement(subcommand: &CodexAuthSubcommand) -> String {
 
 /// Exact action-first spelling for a deprecated DeepSeek alias invocation.
 pub fn deepseek_alias_replacement(subcommand: &DeepseekAuthSubcommand) -> String {
+    let descriptor = anthropic_compat_descriptor(AuthProvider::Deepseek)
+        .expect("DeepSeek has an Anthropic-compat descriptor");
     match subcommand {
-        DeepseekAuthSubcommand::Login => "clud auth login deepseek".to_string(),
+        DeepseekAuthSubcommand::Login => descriptor.login_command.to_string(),
         DeepseekAuthSubcommand::Status { json } => {
-            replacement_with_json("status", "deepseek", *json)
+            replacement_with_json("status", descriptor.settings_id, *json)
         }
         DeepseekAuthSubcommand::Logout { json } => {
-            replacement_with_json("logout", "deepseek", *json)
+            replacement_with_json("logout", descriptor.settings_id, *json)
         }
     }
 }
@@ -65,7 +98,22 @@ pub fn run(subcommand: Option<&AuthSubcommand>, interrupted: &AtomicBool) -> i32
         Some(AuthSubcommand::Logout { provider, json }) => logout(*provider, *json),
         None => {
             println!("Usage: clud auth <login|status|logout> <provider>");
-            println!("Providers: codex, deepseek (Claude authentication is externally managed)");
+            // Built from the same registry `status()` iterates, so a future
+            // vault-backed provider (or a removed one) can't drift this
+            // usage line out of sync with what the command actually accepts.
+            let vault_backed: Vec<&str> = ModelProvider::ALL
+                .iter()
+                .copied()
+                .filter(|provider| provider_registry::descriptor_for(*provider).is_some())
+                .map(|provider| provider.as_str())
+                .collect();
+            let codex_and_vault_backed = std::iter::once("codex")
+                .chain(vault_backed)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "Providers: {codex_and_vault_backed} (Claude authentication is externally managed)"
+            );
             0
         }
     }
@@ -85,7 +133,11 @@ fn login(
             },
             interrupted,
         ),
-        AuthProvider::Deepseek => crate::deepseek_auth::run(&DeepseekAuthSubcommand::Login),
+        AuthProvider::Deepseek | AuthProvider::Kimi => crate::provider_auth::run_for(
+            anthropic_compat_descriptor(provider)
+                .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
+            &DeepseekAuthSubcommand::Login,
+        ),
         AuthProvider::Claude => externally_managed("login"),
     }
 }
@@ -96,9 +148,11 @@ fn logout(provider: AuthProvider, json: bool) -> i32 {
             &CodexAuthSubcommand::Logout { json },
             &AtomicBool::new(false),
         ),
-        AuthProvider::Deepseek => {
-            crate::deepseek_auth::run(&DeepseekAuthSubcommand::Logout { json })
-        }
+        AuthProvider::Deepseek | AuthProvider::Kimi => crate::provider_auth::run_for(
+            anthropic_compat_descriptor(provider)
+                .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
+            &DeepseekAuthSubcommand::Logout { json },
+        ),
         AuthProvider::Claude => externally_managed("logout"),
     }
 }
@@ -113,11 +167,16 @@ fn externally_managed(action: &str) -> i32 {
 fn status(provider: Option<AuthProvider>, json: bool) -> i32 {
     let providers = match provider {
         Some(provider) => vec![provider],
-        None => vec![
-            AuthProvider::Claude,
-            AuthProvider::Codex,
-            AuthProvider::Deepseek,
-        ],
+        // `ModelProvider::ALL` is the registry's ordered source of truth;
+        // mapping through it (rather than a second hand-written array here)
+        // keeps this listing's order in lockstep with every other
+        // provider-enumeration surface. Its order happens to already be
+        // Claude, Codex, DeepSeek -- this listing's existing output order.
+        None => ModelProvider::ALL
+            .iter()
+            .copied()
+            .map(auth_provider_for)
+            .collect(),
     };
     let rows: Vec<serde_json::Value> = providers.into_iter().map(status_row).collect();
     if json {
@@ -161,12 +220,15 @@ fn status_row(provider: AuthProvider) -> serde_json::Value {
                 "configured": configured,
             })
         }
-        AuthProvider::Deepseek => {
-            let configured = NativeSecretStore::new()
-                .and_then(|store| store.get())
-                .ok()
-                .flatten()
-                .is_some();
+        AuthProvider::Deepseek | AuthProvider::Kimi => {
+            let descriptor = anthropic_compat_descriptor(provider)
+                .expect("vault-backed auth provider has an Anthropic-compat descriptor");
+            let configured =
+                NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
+                    .and_then(|store| store.get())
+                    .ok()
+                    .flatten()
+                    .is_some();
             serde_json::json!({
                 "provider": provider.as_str(),
                 "source": "native_vault",
@@ -191,6 +253,28 @@ mod tests {
     #[test]
     fn claude_credential_mutation_is_rejected() {
         assert_eq!(externally_managed("login"), 2);
+    }
+
+    #[test]
+    fn kimi_status_row_uses_the_native_vault_source() {
+        let row = status_row(AuthProvider::Kimi);
+        assert_eq!(row["provider"], "kimi");
+        assert_eq!(row["source"], "native_vault");
+    }
+
+    #[test]
+    fn kimi_and_deepseek_status_rows_never_share_a_configured_vault_entry() {
+        // Both descriptors resolve independently through the registry; this
+        // just proves the auth surface routes Kimi through its own
+        // descriptor rather than accidentally reusing DeepSeek's.
+        assert_ne!(
+            anthropic_compat_descriptor(AuthProvider::Kimi)
+                .unwrap()
+                .vault_service,
+            anthropic_compat_descriptor(AuthProvider::Deepseek)
+                .unwrap()
+                .vault_service,
+        );
     }
 
     #[test]

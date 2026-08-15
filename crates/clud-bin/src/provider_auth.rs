@@ -14,11 +14,31 @@ use zeroize::Zeroizing;
 use crate::args::{Args, Command, DeepseekAuthSubcommand};
 use crate::backend::ModelProvider;
 use crate::command;
+use crate::provider_registry::{self, AnthropicCompatProvider};
 
-#[cfg(not(windows))]
-const SERVICE_NAME: &str = "clud.deepseek";
-#[cfg(not(windows))]
-const ACCOUNT_NAME: &str = "api-key-v1";
+/// DeepSeek's vault identifiers. Changing either literal orphans every
+/// existing user's stored key: on non-Windows this is the `keyring` service
+/// and account, and on Windows it is the two halves of the Credential
+/// Manager target name (`{service}/{account}`, see [`vault_target`]).
+pub const DEEPSEEK_VAULT_SERVICE: &str = "clud.deepseek";
+pub const DEEPSEEK_VAULT_ACCOUNT: &str = "api-key-v1";
+
+/// Kimi's vault identifiers (#937 Phase 3). Deliberately distinct from
+/// DeepSeek's `vault_service` -- this is what gives the two providers
+/// isolated credential records even though both use the `"api-key-v1"`
+/// account name. Same continuity guarantee as the DeepSeek constants above:
+/// changing either literal orphans every already-stored Kimi key.
+pub const KIMI_VAULT_SERVICE: &str = "clud.kimi";
+pub const KIMI_VAULT_ACCOUNT: &str = "api-key-v1";
+
+/// Composes the vault target identifier from a service and account. Shared
+/// (not `cfg(windows)`-gated) so the identifier-freeze test can assert the
+/// exact composition on every platform, even though only the Windows
+/// Credential Manager path consumes it at runtime.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn vault_target(service: &str, account: &str) -> String {
+    format!("{service}/{account}")
+}
 
 /// A non-secret classification of a credential-vault failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,25 +64,43 @@ pub trait SecretStore {
     fn delete(&self) -> Result<(), SecretStoreError>;
 }
 
-/// Production adapter for the OS-native encrypted credential vault.
-pub struct NativeSecretStore;
+/// Production adapter for the OS-native encrypted credential vault,
+/// parameterized on the vault identifiers so multiple providers (DeepSeek,
+/// and Kimi in Phase 2) can each hold a distinct record with no shared
+/// global state.
+pub struct NativeSecretStore {
+    service: &'static str,
+    account: &'static str,
+}
 
 impl NativeSecretStore {
+    /// DeepSeek-scoped convenience constructor. Kept with its exact prior
+    /// signature and behavior because it has call sites outside this file
+    /// (`auth.rs`, `foreground_runtime.rs`) that this phase does not touch.
+    /// Phase 2 migrates those external call sites to [`Self::new_for`].
     pub fn new() -> Result<Self, SecretStoreError> {
-        Ok(Self)
+        Self::new_for(DEEPSEEK_VAULT_SERVICE, DEEPSEEK_VAULT_ACCOUNT)
+    }
+
+    /// General constructor taking explicit vault identifiers. Two instances
+    /// built with different identifiers are fully independent records.
+    pub fn new_for(service: &'static str, account: &'static str) -> Result<Self, SecretStoreError> {
+        Ok(Self { service, account })
     }
 }
 
 #[cfg(not(windows))]
 fn with_native_vault<T: Send + 'static>(
+    service: &'static str,
+    account: &'static str,
     operation: impl FnOnce(keyring::Entry) -> Result<T, SecretStoreError> + Send + 'static,
 ) -> Result<T, SecretStoreError> {
     let worker = std::thread::Builder::new()
-        .name("clud-deepseek-vault".to_string())
+        .name("clud-vault".to_string())
         .stack_size(4 * 1024 * 1024)
         .spawn(move || {
-            let entry = keyring::Entry::new(SERVICE_NAME, ACCOUNT_NAME)
-                .map_err(|_| SecretStoreError::Unavailable)?;
+            let entry =
+                keyring::Entry::new(service, account).map_err(|_| SecretStoreError::Unavailable)?;
             operation(entry)
         })
         .map_err(|_| SecretStoreError::Unavailable)?;
@@ -126,8 +164,6 @@ mod windows_vault {
 
     use super::SecretStoreError;
 
-    const TARGET: &str = "clud.deepseek/api-key-v1";
-
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(Some(0)).collect()
     }
@@ -138,8 +174,8 @@ mod windows_vault {
         unsafe { GetLastError() == ERROR_NOT_FOUND }
     }
 
-    pub fn get() -> Result<Option<String>, SecretStoreError> {
-        let target = wide(TARGET);
+    pub fn get(target: &str) -> Result<Option<String>, SecretStoreError> {
+        let target = wide(target);
         let mut credential = std::ptr::null_mut();
         // SAFETY: `target` is NUL-terminated and Windows initializes the output
         // pointer only on success, which we free after copying the blob.
@@ -162,8 +198,8 @@ mod windows_vault {
         secret.map(Some)
     }
 
-    pub fn set(secret: &str) -> Result<(), SecretStoreError> {
-        let mut target = wide(TARGET);
+    pub fn set(target: &str, secret: &str) -> Result<(), SecretStoreError> {
+        let mut target = wide(target);
         let mut user = wide("clud");
         let mut blob = Zeroizing::new(secret.as_bytes().to_vec());
         // SAFETY: CREDENTIALW is a Win32 C struct containing only integer,
@@ -187,8 +223,8 @@ mod windows_vault {
         }
     }
 
-    pub fn delete() -> Result<(), SecretStoreError> {
-        let target = wide(TARGET);
+    pub fn delete(target: &str) -> Result<(), SecretStoreError> {
+        let target = wide(target);
         // SAFETY: `target` is NUL-terminated and lives for this call.
         if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 || is_missing() {
             Ok(())
@@ -201,22 +237,24 @@ mod windows_vault {
 impl SecretStore for NativeSecretStore {
     fn get(&self) -> Result<Option<String>, SecretStoreError> {
         #[cfg(windows)]
-        return windows_vault::get();
+        return windows_vault::get(&vault_target(self.service, self.account));
         #[cfg(not(windows))]
-        with_native_vault(|entry| match entry.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(SecretStoreError::Unavailable),
+        with_native_vault(self.service, self.account, |entry| {
+            match entry.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(_) => Err(SecretStoreError::Unavailable),
+            }
         })
     }
 
     fn set(&self, secret: &str) -> Result<(), SecretStoreError> {
         #[cfg(windows)]
-        return windows_vault::set(secret);
+        return windows_vault::set(&vault_target(self.service, self.account), secret);
         #[cfg(not(windows))]
         {
             let secret = Zeroizing::new(secret.to_owned());
-            with_native_vault(move |entry| {
+            with_native_vault(self.service, self.account, move |entry| {
                 entry
                     .set_password(&secret)
                     .map_err(|_| SecretStoreError::Unavailable)
@@ -226,11 +264,13 @@ impl SecretStore for NativeSecretStore {
 
     fn delete(&self) -> Result<(), SecretStoreError> {
         #[cfg(windows)]
-        return windows_vault::delete();
+        return windows_vault::delete(&vault_target(self.service, self.account));
         #[cfg(not(windows))]
-        with_native_vault(|entry| match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(SecretStoreError::Unavailable),
+        with_native_vault(self.service, self.account, |entry| {
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(_) => Err(SecretStoreError::Unavailable),
+            }
         })
     }
 }
@@ -243,23 +283,40 @@ pub enum PreflightError {
     Cancelled,
 }
 
-impl fmt::Display for PreflightError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl PreflightError {
+    /// Sanitized, provider-specific failure message shown to the user.
+    /// `Missing` and `Cancelled` name the provider by its descriptor's
+    /// `display_name`, and `Missing` points at its exact `login_command`
+    /// rather than a hardcoded one -- this is what lets a second
+    /// Anthropic-compat provider reuse this error type verbatim.
+    pub fn describe(self, descriptor: &AnthropicCompatProvider) -> String {
         match self {
-            Self::Missing => formatter.write_str(
-                "DeepSeek credentials are not configured; run `clud auth login deepseek`",
+            Self::Missing => format!(
+                "{} credentials are not configured; run `{}`",
+                descriptor.display_name, descriptor.login_command
             ),
-            Self::Unavailable => formatter
-                .write_str("the native credential vault is unavailable; retry after unlocking it"),
-            Self::Cancelled => formatter.write_str("DeepSeek credential entry was cancelled"),
+            Self::Unavailable => {
+                "the native credential vault is unavailable; retry after unlocking it".to_string()
+            }
+            Self::Cancelled => {
+                format!("{} credential entry was cancelled", descriptor.display_name)
+            }
         }
     }
 }
 
-/// Whether a launch needs credential preflight at all. False for every
-/// non-DeepSeek provider and for `--dry-run`, which must make zero vault calls.
-pub fn launch_needs_preflight(provider: ModelProvider, dry_run: bool) -> bool {
-    provider == ModelProvider::DeepSeek && !dry_run
+/// Returns the descriptor of the provider needing a credential preflight
+/// before this launch may proceed, or `None` when no preflight applies:
+/// `--dry-run` (which must make zero vault calls) or a provider with no
+/// Anthropic-compat descriptor (Claude, Codex).
+pub fn launch_preflight_target(
+    provider: ModelProvider,
+    dry_run: bool,
+) -> Option<&'static AnthropicCompatProvider> {
+    if dry_run {
+        return None;
+    }
+    provider_registry::descriptor_for(provider)
 }
 
 /// Whether a DeepSeek launch may prompt for a missing key. Takes the terminal
@@ -285,11 +342,18 @@ pub fn launch_is_interactive(
         && !repeat
 }
 
-/// Preflight the native vault immediately before accepting a DeepSeek launch.
-/// A missing key may be entered only for a truly interactive foreground launch.
-pub fn preflight_native(interactive: bool) -> Result<(), PreflightError> {
-    let store = NativeSecretStore::new().map_err(|_| PreflightError::Unavailable)?;
-    preflight_with(&store, interactive, prompt_secret)
+/// Preflight the native vault immediately before accepting a launch for
+/// `descriptor`'s provider. A missing key may be entered only for a truly
+/// interactive foreground launch.
+pub fn preflight_native(
+    descriptor: &'static AnthropicCompatProvider,
+    interactive: bool,
+) -> Result<(), PreflightError> {
+    let store = NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
+        .map_err(|_| PreflightError::Unavailable)?;
+    preflight_with(&store, interactive, || {
+        prompt_secret(descriptor.display_name)
+    })
 }
 
 fn preflight_with(
@@ -311,21 +375,45 @@ fn preflight_with(
     }
 }
 
-pub fn run(subcommand: &DeepseekAuthSubcommand) -> i32 {
-    let store = match NativeSecretStore::new() {
+/// Runs an action-first auth subcommand for any Anthropic-compat provider,
+/// built from `descriptor`'s vault identifiers and names rather than a
+/// hardcoded provider. This is what lets a second provider (e.g. Kimi in a
+/// later phase) reuse the exact same login/status/logout implementation.
+pub fn run_for(
+    descriptor: &'static AnthropicCompatProvider,
+    subcommand: &DeepseekAuthSubcommand,
+) -> i32 {
+    let store = match NativeSecretStore::new_for(descriptor.vault_service, descriptor.vault_account)
+    {
         Ok(store) => store,
         Err(error) => {
-            eprintln!("deepseek-auth: {error}; retry after unlocking the vault");
+            eprintln!(
+                "{}-auth: {error}; retry after unlocking the vault",
+                descriptor.settings_id
+            );
             return 2;
         }
     };
     let mut stdout = io::stdout().lock();
-    run_with(subcommand, &store, &mut stdout, prompt_secret)
+    run_with(descriptor, subcommand, &store, &mut stdout, || {
+        prompt_secret(descriptor.display_name)
+    })
+}
+
+/// DeepSeek-scoped delegate kept for its existing call sites: `main.rs`'s
+/// `clud deepseek-auth` deprecated-alias dispatch. Behavior and output are
+/// unchanged from before this module became provider-generic.
+pub fn run(subcommand: &DeepseekAuthSubcommand) -> i32 {
+    let descriptor = provider_registry::descriptor_for(ModelProvider::DeepSeek)
+        .expect("DeepSeek has an Anthropic-compat descriptor");
+    run_for(descriptor, subcommand)
 }
 
 /// Read a secret from the terminal without echoing typed characters.
-fn prompt_secret() -> Result<String, ()> {
-    eprint!("DeepSeek API key: ");
+/// `display_name` names the provider prompted for (e.g. "DeepSeek", "Kimi")
+/// so this one implementation serves every Anthropic-compat provider.
+fn prompt_secret(display_name: &str) -> Result<String, ()> {
+    eprint!("{display_name} API key: ");
     io::stderr().flush().map_err(|_| ())?;
     terminal::enable_raw_mode().map_err(|_| ())?;
     let result = (|| {
@@ -354,6 +442,7 @@ fn prompt_secret() -> Result<String, ()> {
 }
 
 fn run_with(
+    descriptor: &AnthropicCompatProvider,
     subcommand: &DeepseekAuthSubcommand,
     store: &dyn SecretStore,
     stdout: &mut dyn Write,
@@ -364,7 +453,10 @@ fn run_with(
             let secret = match read_secret() {
                 Ok(secret) if !secret.trim().is_empty() => Zeroizing::new(secret),
                 _ => {
-                    eprintln!("deepseek-auth: no API key entered; nothing was stored");
+                    eprintln!(
+                        "{}-auth: no API key entered; nothing was stored",
+                        descriptor.settings_id
+                    );
                     return 2;
                 }
             };
@@ -372,12 +464,16 @@ fn run_with(
                 Ok(()) => {
                     let _ = writeln!(
                         stdout,
-                        "DeepSeek API key stored in the native credential vault"
+                        "{} API key stored in the native credential vault",
+                        descriptor.display_name
                     );
                     0
                 }
                 Err(error) => {
-                    eprintln!("deepseek-auth: {error}; retry after unlocking the vault");
+                    eprintln!(
+                        "{}-auth: {error}; retry after unlocking the vault",
+                        descriptor.settings_id
+                    );
                     2
                 }
             }
@@ -414,7 +510,10 @@ fn run_with(
                 1
             }
             Err(error) => {
-                eprintln!("deepseek-auth: {error}; retry after unlocking the vault");
+                eprintln!(
+                    "{}-auth: {error}; retry after unlocking the vault",
+                    descriptor.settings_id
+                );
                 2
             }
         },
@@ -426,12 +525,16 @@ fn run_with(
             Ok(()) => {
                 let _ = writeln!(
                     stdout,
-                    "DeepSeek API key removed from the native credential vault"
+                    "{} API key removed from the native credential vault",
+                    descriptor.display_name
                 );
                 0
             }
             Err(error) => {
-                eprintln!("deepseek-auth: {error}; retry after unlocking the vault");
+                eprintln!(
+                    "{}-auth: {error}; retry after unlocking the vault",
+                    descriptor.settings_id
+                );
                 2
             }
         },
@@ -443,6 +546,42 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    /// Credential-continuity guarantee: these literals identify DeepSeek's
+    /// existing vault record. Changing either string, or the `{service}/
+    /// {account}` composition rule the Windows path uses, orphans every
+    /// currently-stored key — non-Windows keyring lookups and Windows
+    /// `CredReadW` calls would target a record that no longer matches what
+    /// was written before this refactor.
+    #[test]
+    fn deepseek_vault_identifiers_are_frozen() {
+        assert_eq!(DEEPSEEK_VAULT_SERVICE, "clud.deepseek");
+        assert_eq!(DEEPSEEK_VAULT_ACCOUNT, "api-key-v1");
+        assert_eq!(
+            vault_target(DEEPSEEK_VAULT_SERVICE, DEEPSEEK_VAULT_ACCOUNT),
+            "clud.deepseek/api-key-v1"
+        );
+
+        // The zero-arg convenience constructor other modules still call
+        // must keep resolving to exactly these identifiers.
+        let store = NativeSecretStore::new().unwrap();
+        assert_eq!(store.service, DEEPSEEK_VAULT_SERVICE);
+        assert_eq!(store.account, DEEPSEEK_VAULT_ACCOUNT);
+    }
+
+    /// Construction-level only: proves two `NativeSecretStore` instances
+    /// built with different identifiers are independent records with no
+    /// shared global state, without touching the real host vault.
+    #[test]
+    fn distinct_identifiers_produce_distinct_stores() {
+        let deepseek = NativeSecretStore::new_for("clud.deepseek", "api-key-v1").unwrap();
+        let kimi = NativeSecretStore::new_for("clud.kimi", "api-key-v1").unwrap();
+
+        assert_eq!(deepseek.service, "clud.deepseek");
+        assert_eq!(kimi.service, "clud.kimi");
+        assert_ne!(deepseek.service, kimi.service);
+        assert_eq!(deepseek.account, kimi.account);
+    }
 
     #[derive(Default)]
     struct InMemorySecretStore {
@@ -475,16 +614,25 @@ mod tests {
         }
     }
 
+    fn deepseek_descriptor() -> &'static AnthropicCompatProvider {
+        provider_registry::descriptor_for(ModelProvider::DeepSeek).unwrap()
+    }
+
     #[test]
     fn login_status_and_logout_use_only_the_injected_store() {
+        let descriptor = deepseek_descriptor();
         let store = InMemorySecretStore::default();
         let mut output = Vec::new();
         let secret = "ds-test-secret";
 
         assert_eq!(
-            run_with(&DeepseekAuthSubcommand::Login, &store, &mut output, || Ok(
-                secret.to_string()
-            ),),
+            run_with(
+                descriptor,
+                &DeepseekAuthSubcommand::Login,
+                &store,
+                &mut output,
+                || Ok(secret.to_string()),
+            ),
             0
         );
         assert!(!String::from_utf8_lossy(&output).contains(secret));
@@ -493,6 +641,7 @@ mod tests {
         output.clear();
         assert_eq!(
             run_with(
+                descriptor,
                 &DeepseekAuthSubcommand::Status { json: true },
                 &store,
                 &mut output,
@@ -508,6 +657,7 @@ mod tests {
         let mut output = Vec::new();
         assert_eq!(
             run_with(
+                descriptor,
                 &DeepseekAuthSubcommand::Logout { json: false },
                 &store,
                 &mut output,
@@ -523,9 +673,13 @@ mod tests {
         let store = InMemorySecretStore::default();
         let mut output = Vec::new();
         assert_eq!(
-            run_with(&DeepseekAuthSubcommand::Login, &store, &mut output, || Ok(
-                "   ".to_string()
-            ),),
+            run_with(
+                deepseek_descriptor(),
+                &DeepseekAuthSubcommand::Login,
+                &store,
+                &mut output,
+                || Ok("   ".to_string()),
+            ),
             2
         );
         assert_eq!(store.get().unwrap(), None);
@@ -536,11 +690,36 @@ mod tests {
     }
 
     #[test]
-    fn preflight_is_needed_only_for_deepseek_and_never_for_dry_run() {
-        assert!(launch_needs_preflight(ModelProvider::DeepSeek, false));
-        assert!(!launch_needs_preflight(ModelProvider::DeepSeek, true));
-        assert!(!launch_needs_preflight(ModelProvider::Claude, false));
-        assert!(!launch_needs_preflight(ModelProvider::Codex, false));
+    fn preflight_target_is_deepseeks_descriptor_and_never_set_for_dry_run() {
+        assert_eq!(
+            launch_preflight_target(ModelProvider::DeepSeek, false),
+            Some(deepseek_descriptor())
+        );
+        // The dry-run-makes-zero-vault-calls guarantee: no descriptor is ever
+        // returned for a dry run, regardless of provider.
+        assert_eq!(launch_preflight_target(ModelProvider::DeepSeek, true), None);
+        assert_eq!(launch_preflight_target(ModelProvider::Claude, true), None);
+        assert_eq!(launch_preflight_target(ModelProvider::Codex, true), None);
+        // Claude and Codex have no Anthropic-compat descriptor, dry run or not.
+        assert_eq!(launch_preflight_target(ModelProvider::Claude, false), None);
+        assert_eq!(launch_preflight_target(ModelProvider::Codex, false), None);
+    }
+
+    #[test]
+    fn preflight_error_messages_name_the_descriptors_provider_and_login_command() {
+        let descriptor = deepseek_descriptor();
+        assert_eq!(
+            PreflightError::Missing.describe(descriptor),
+            "DeepSeek credentials are not configured; run `clud auth login deepseek`"
+        );
+        assert_eq!(
+            PreflightError::Unavailable.describe(descriptor),
+            "the native credential vault is unavailable; retry after unlocking it"
+        );
+        assert_eq!(
+            PreflightError::Cancelled.describe(descriptor),
+            "DeepSeek credential entry was cancelled"
+        );
     }
 
     #[test]
@@ -624,6 +803,7 @@ mod tests {
         let mut output = Vec::new();
         assert_eq!(
             run_with(
+                deepseek_descriptor(),
                 &DeepseekAuthSubcommand::Status { json: false },
                 &store,
                 &mut output,
@@ -646,6 +826,7 @@ mod tests {
         let mut output = Vec::new();
         assert_eq!(
             run_with(
+                deepseek_descriptor(),
                 &DeepseekAuthSubcommand::Status { json: false },
                 &store,
                 &mut output,

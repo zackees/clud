@@ -54,8 +54,20 @@ struct ClaudeSettings {
 
 impl ForegroundRuntime {
     pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
-        let store = crate::deepseek_auth::NativeSecretStore::new()
-            .map_err(|_| BridgeError::DeepSeekCredentials)?;
+        // Prefer a descriptor resolved from the plan's provider so the store
+        // is built with that provider's own vault identifiers. Unified plans
+        // (provider `Claude`, no descriptor) fall back to the DeepSeek-scoped
+        // constructor: `start_with_secret_store`'s unified branch still needs
+        // to probe for a DeepSeek key even though DeepSeek is not this plan's
+        // routed provider.
+        let store = match crate::provider_registry::descriptor_for(plan.model_provider()) {
+            Some(descriptor) => crate::provider_auth::NativeSecretStore::new_for(
+                descriptor.vault_service,
+                descriptor.vault_account,
+            ),
+            None => crate::provider_auth::NativeSecretStore::new(),
+        }
+        .map_err(|_| BridgeError::DeepSeekCredentials)?;
         let runtime = Self::start_with_secret_store(plan, env, &store)?;
         for notice in &runtime.startup_notices {
             eprintln!("{notice}");
@@ -69,7 +81,7 @@ impl ForegroundRuntime {
     fn start_with_secret_store(
         plan: &LaunchPlan,
         mut env: Vec<(String, String)>,
-        store: &dyn crate::deepseek_auth::SecretStore,
+        store: &dyn crate::provider_auth::SecretStore,
     ) -> Result<Self, BridgeError> {
         let (bridge, claude_settings, startup_notices) = if is_unified(plan) {
             // Optional routes must never block native Claude. Resolve only
@@ -102,12 +114,22 @@ impl ForegroundRuntime {
             apply_cross_route_overlay(&mut env, &bridge, selection.as_ref());
             let settings = merged_context_lifecycle_settings(plan, &bridge)?;
             (Some(bridge), Some(settings), Vec::new())
-        } else if is_deepseek_via_claude(plan) {
+        } else if is_anthropic_compat_via_claude(plan) {
+            // `is_anthropic_compat_via_claude` only returns true when a
+            // descriptor resolves, so this `expect` cannot fail in practice;
+            // it documents that invariant rather than silently defaulting.
+            let descriptor = crate::provider_registry::descriptor_for(plan.model_provider())
+                .expect("is_anthropic_compat_via_claude already proved a descriptor resolves");
             let secret = store
                 .get()
                 .map_err(|_| BridgeError::DeepSeekCredentials)?
                 .ok_or(BridgeError::DeepSeekCredentials)?;
-            apply_deepseek_overlay(&mut env, &secret, plan.model_selection.as_ref());
+            apply_anthropic_compat_overlay(
+                &mut env,
+                &secret,
+                descriptor,
+                plan.model_selection.as_ref(),
+            );
             (None, None, Vec::new())
         } else {
             (None, None, Vec::new())
@@ -218,8 +240,13 @@ fn is_codex_via_claude(plan: &LaunchPlan) -> bool {
     plan.model_provider() == ModelProvider::Codex && plan.effective_harness() == Backend::Claude
 }
 
-fn is_deepseek_via_claude(plan: &LaunchPlan) -> bool {
-    plan.model_provider() == ModelProvider::DeepSeek && plan.effective_harness() == Backend::Claude
+/// True when the plan routes a descriptor-backed Anthropic-compatible
+/// provider (DeepSeek today, Kimi in #937 Phase 3) directly through the
+/// Claude harness -- as opposed to Claude native, the Codex translation
+/// bridge, or unified-gateway routing.
+fn is_anthropic_compat_via_claude(plan: &LaunchPlan) -> bool {
+    plan.effective_harness() == Backend::Claude
+        && crate::provider_registry::descriptor_for(plan.model_provider()).is_some()
 }
 
 fn is_unified(plan: &LaunchPlan) -> bool {
@@ -241,39 +268,72 @@ fn unified_startup_notices(codex_available: bool, deepseek_available: bool) -> V
     notices
 }
 
-fn apply_deepseek_overlay(
+/// Shared union scrub const used by every Anthropic-compat provider's overlay
+/// (issue #937 Phase 2, #936 "Generalization" -> 1d). This is the union of:
+///
+/// - the DeepSeek connector's original list, plus
+/// - `ANTHROPIC_SMALL_FAST_MODEL` and `ANTHROPIC_DEFAULT_FABLE_MODEL`, plus
+/// - the legacy `*_NAME` variants of every default-model slot.
+///
+/// The additions are an intended hardening delta, not a no-op refactor: a
+/// review finding on #936 noted the original list let an ambient value in any
+/// of these slots survive into the DeepSeek child and misroute model
+/// selection. `ANTHROPIC_CUSTOM_MODEL_OPTION*` stays a separate prefix scrub
+/// below, not a literal entry here, since it has no fixed suffix.
+const ANTHROPIC_COMPAT_CONFLICTING: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+];
+
+/// Provider-neutral child-env overlay for any Anthropic-compatible API-key
+/// provider (#936/#937 Phase 2, replacing the DeepSeek-only
+/// `apply_deepseek_overlay`). `descriptor` supplies the base URL and the
+/// subagent/haiku wire model; the default wire model when `selection` is
+/// `None` comes from the catalog's reviewed default for the descriptor's
+/// provider, not a hardcoded literal.
+fn apply_anthropic_compat_overlay(
     env: &mut Vec<(String, String)>,
     secret: &str,
+    descriptor: &'static crate::provider_registry::AnthropicCompatProvider,
     selection: Option<&crate::provider_catalog::ResolvedModelSelection>,
 ) {
     // Unconditionally case-insensitive (unlike `env_key_eq`, which mirrors
     // real per-OS env-var uniqueness semantics for the Codex overlay above):
     // this is a security guarantee against leaking an ambient Anthropic key
-    // into the DeepSeek child, not an OS-semantics match, and it must hold
-    // the same way on every platform.
-    const CONFLICTING: &[&str] = &[
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "CLAUDE_CODE_EFFORT_LEVEL",
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-    ];
+    // into the child, not an OS-semantics match, and it must hold the same
+    // way on every platform.
     env.retain(|(key, _)| {
-        !CONFLICTING
+        !ANTHROPIC_COMPAT_CONFLICTING
             .iter()
             .any(|candidate| key.eq_ignore_ascii_case(candidate))
             && !key
                 .to_ascii_uppercase()
                 .starts_with("ANTHROPIC_CUSTOM_MODEL_OPTION")
     });
+    let default_wire_model = crate::provider_catalog::reviewed_default_model(descriptor.provider)
+        .expect(
+            "every Anthropic-compat descriptor's provider must have a reviewed catalog default \
+             -- add a `provider_default: true` row in provider_catalog.rs",
+        )
+        .wire_id;
     let model = selection
         .and_then(|selection| selection.wire_model.as_deref())
-        .unwrap_or("deepseek-v4-pro[1m]");
+        .unwrap_or(default_wire_model);
     let effort = selection
         .and_then(|selection| selection.effort)
         .unwrap_or(crate::provider_catalog::EffortLevel::Max)
@@ -281,7 +341,7 @@ fn apply_deepseek_overlay(
     env.extend([
         (
             "ANTHROPIC_BASE_URL".to_string(),
-            "https://api.deepseek.com/anthropic".to_string(),
+            descriptor.anthropic_base_url.to_string(),
         ),
         ("ANTHROPIC_AUTH_TOKEN".to_string(), secret.to_string()),
         ("ANTHROPIC_MODEL".to_string(), model.to_string()),
@@ -295,18 +355,28 @@ fn apply_deepseek_overlay(
         ),
         (
             "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-            "deepseek-v4-flash".to_string(),
+            descriptor.subagent_wire_id.to_string(),
+        ),
+        (
+            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+            model.to_string(),
         ),
         (
             "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
-            "deepseek-v4-flash".to_string(),
+            descriptor.subagent_wire_id.to_string(),
         ),
         ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort.to_string()),
     ]);
-    if model.ends_with("[1m]") {
+    // Catalog data, not a hardcoded `model.ends_with("[1m]")` check (#937
+    // Phase 2, #936 "Generalization" -> 1e): exact wire-ID lookup so an
+    // auto-context wire model never falls back to a same-family row's window
+    // via `cli_id`/alias matching.
+    if let Some(window) = crate::provider_catalog::model_by_wire_id(model)
+        .and_then(|entry| entry.claude_compact_window)
+    {
         env.push((
             "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
-            "786432".to_string(),
+            window.to_string(),
         ));
     }
 }
@@ -685,14 +755,14 @@ mod tests {
     /// credential vault.
     struct FakeSecretStore(Option<String>);
 
-    impl crate::deepseek_auth::SecretStore for FakeSecretStore {
-        fn get(&self) -> Result<Option<String>, crate::deepseek_auth::SecretStoreError> {
+    impl crate::provider_auth::SecretStore for FakeSecretStore {
+        fn get(&self) -> Result<Option<String>, crate::provider_auth::SecretStoreError> {
             Ok(self.0.clone())
         }
-        fn set(&self, _secret: &str) -> Result<(), crate::deepseek_auth::SecretStoreError> {
+        fn set(&self, _secret: &str) -> Result<(), crate::provider_auth::SecretStoreError> {
             unreachable!("routing tests never write to the store")
         }
-        fn delete(&self) -> Result<(), crate::deepseek_auth::SecretStoreError> {
+        fn delete(&self) -> Result<(), crate::provider_auth::SecretStoreError> {
             unreachable!("routing tests never write to the store")
         }
     }
@@ -906,6 +976,187 @@ mod tests {
         assert!(rendered.contains("terra"), "{rendered}");
     }
 
+    fn deepseek_descriptor() -> &'static crate::provider_registry::AnthropicCompatProvider {
+        crate::provider_registry::descriptor_for(ModelProvider::DeepSeek)
+            .expect("DeepSeek must have an Anthropic-compat descriptor")
+    }
+
+    /// GOLDEN (issue #937 Phase 2 Lane 2A): the frozen pre-refactor baseline
+    /// for the default (no selection) case, captured against
+    /// `apply_deepseek_overlay` before it became
+    /// `apply_anthropic_compat_overlay`, updated for exactly one documented
+    /// delta -- the new `ANTHROPIC_DEFAULT_FABLE_MODEL` pin (#936
+    /// "Generalization" -> 1d). Every other pair is byte-identical to the
+    /// pre-refactor baseline that was confirmed green before this function
+    /// was touched.
+    #[test]
+    fn golden_anthropic_compat_overlay_default_selection() {
+        let mut env = Vec::new();
+        apply_anthropic_compat_overlay(&mut env, "ds-golden-secret", deepseek_descriptor(), None);
+        let mut pairs = env.clone();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "ds-golden-secret".to_string()
+                ),
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "https://api.deepseek.com/anthropic".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+                    "deepseek-v4-pro[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    "deepseek-v4-flash".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                    "deepseek-v4-pro[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    "deepseek-v4-pro[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_MODEL".to_string(),
+                    "deepseek-v4-pro[1m]".to_string()
+                ),
+                (
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+                    "786432".to_string()
+                ),
+                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
+                (
+                    "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+                    "deepseek-v4-flash".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// GOLDEN: a selection whose wire model has no `[1m]` suffix, so no
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set. Same delta as above: only
+    /// the new `ANTHROPIC_DEFAULT_FABLE_MODEL` pin is added relative to the
+    /// confirmed pre-refactor baseline.
+    #[test]
+    fn golden_anthropic_compat_overlay_auto_context_selection_has_no_compact_window() {
+        let selection = crate::provider_catalog::resolve(
+            Some(ModelProvider::DeepSeek),
+            Some("deepseek-v4-pro"),
+            Some("high"),
+            Some("auto"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.wire_model.as_deref(), Some("deepseek-v4-pro"));
+        let mut env = Vec::new();
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "ds-golden-secret",
+            deepseek_descriptor(),
+            Some(&selection),
+        );
+        let mut pairs = env.clone();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "ds-golden-secret".to_string()
+                ),
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "https://api.deepseek.com/anthropic".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+                    "deepseek-v4-pro".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    "deepseek-v4-flash".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                    "deepseek-v4-pro".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    "deepseek-v4-pro".to_string()
+                ),
+                ("ANTHROPIC_MODEL".to_string(), "deepseek-v4-pro".to_string()),
+                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "high".to_string()),
+                (
+                    "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+                    "deepseek-v4-flash".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// GOLDEN: the second documented delta -- the widened scrub const now
+    /// removes `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL`,
+    /// and the legacy `*_NAME` forms. Before this phase's refactor, an
+    /// identically-shaped test (`frozen_baseline_deepseek_overlay_does_not_yet_scrub_the_widened_keys`,
+    /// since replaced by this one) proved these keys survived unscrubbed;
+    /// that was the review finding #936/#937 document as the intended
+    /// hardening delta.
+    #[test]
+    fn golden_anthropic_compat_overlay_scrubs_the_widened_keys() {
+        let base = vec![
+            (
+                "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+                "ambient-fast".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+                "ambient-fable".to_string(),
+            ),
+            (
+                "ANTHROPIC_MODEL_NAME".to_string(),
+                "ambient-model-name".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME".to_string(),
+                "ambient-opus-name".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME".to_string(),
+                "ambient-sonnet-name".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME".to_string(),
+                "ambient-haiku-name".to_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME".to_string(),
+                "ambient-fable-name".to_string(),
+            ),
+        ];
+        let mut env = base.clone();
+        apply_anthropic_compat_overlay(&mut env, "ds-golden-secret", deepseek_descriptor(), None);
+        for (key, _) in &base {
+            assert_eq!(
+                lookup(&env, key),
+                if key == "ANTHROPIC_DEFAULT_FABLE_MODEL" {
+                    // This slot is scrubbed AND re-set by the overlay itself
+                    // (the new FABLE pin), so its post-overlay value is the
+                    // overlay's own model, not `None` and not the ambient value.
+                    Some("deepseek-v4-pro[1m]")
+                } else {
+                    None
+                },
+                "{key} must no longer carry its ambient value after the widened scrub"
+            );
+        }
+    }
+
     #[test]
     fn deepseek_overlay_replaces_conflicting_profile_values_without_parent_mutation() {
         let base = vec![
@@ -918,7 +1169,7 @@ mod tests {
             ("UNCHANGED".to_string(), "yes".to_string()),
         ];
         let mut child = base.clone();
-        apply_deepseek_overlay(&mut child, "ds-test-secret", None);
+        apply_anthropic_compat_overlay(&mut child, "ds-test-secret", deepseek_descriptor(), None);
 
         assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
         assert_eq!(lookup(&child, "anthropic_api_key"), None);
@@ -957,7 +1208,12 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut env = Vec::new();
-        apply_deepseek_overlay(&mut env, "ds-test-secret", Some(&selection));
+        apply_anthropic_compat_overlay(
+            &mut env,
+            "ds-test-secret",
+            deepseek_descriptor(),
+            Some(&selection),
+        );
         assert_eq!(lookup(&env, "ANTHROPIC_MODEL"), Some("deepseek-v4-pro"));
         assert_eq!(lookup(&env, "CLAUDE_CODE_EFFORT_LEVEL"), Some("high"));
         assert_eq!(lookup(&env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW"), None);
@@ -1123,7 +1379,7 @@ mod tests {
     #[test]
     fn deepseek_subprocess_and_pty_receive_the_same_secret_child_overlay() {
         let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
-        apply_deepseek_overlay(&mut env, "ds-test-secret", None);
+        apply_anthropic_compat_overlay(&mut env, "ds-test-secret", deepseek_descriptor(), None);
         let runtime = ForegroundRuntime {
             env,
             bridge: None,
@@ -1390,5 +1646,234 @@ mod tests {
         let rendered = format!("{runtime:?}");
         assert!(!rendered.contains(runtime.base_url().unwrap()));
         assert!(!rendered.contains(runtime.bearer_token().unwrap()));
+    }
+
+    // -- Kimi (#937 Phase 3, Lane 3B) -----------------------------------
+    //
+    // `apply_anthropic_compat_overlay` is fully generic (landed in Phase 2),
+    // so nothing below requires a production change in this file -- these
+    // tests exist to prove the existing generic machinery produces exactly
+    // Kimi's official profile (#936) once Lane 3A's descriptor/catalog rows
+    // land, and to pin the routing/no-bridge/no-secret-leak guarantees
+    // DeepSeek already has.
+
+    fn kimi_descriptor() -> &'static crate::provider_registry::AnthropicCompatProvider {
+        crate::provider_registry::descriptor_for(ModelProvider::Kimi)
+            .expect("Kimi must have an Anthropic-compat descriptor")
+    }
+
+    /// #936's exact documented profile: every default-model slot *and* the
+    /// subagent slot pin to `kimi-k3[1m]` (unlike DeepSeek, whose
+    /// haiku/subagent slots use a cheaper flash model), compact window
+    /// 1048576, effort max.
+    #[test]
+    fn golden_kimi_overlay_default_selection() {
+        let mut env = Vec::new();
+        apply_anthropic_compat_overlay(&mut env, "kimi-golden-secret", kimi_descriptor(), None);
+        let mut pairs = env.clone();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "kimi-golden-secret".to_string()
+                ),
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "https://api.moonshot.ai/anthropic".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+                ("ANTHROPIC_MODEL".to_string(), "kimi-k3[1m]".to_string()),
+                (
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(),
+                    "1048576".to_string()
+                ),
+                ("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "max".to_string()),
+                (
+                    "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+                    "kimi-k3[1m]".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// Ambient `ANTHROPIC_API_KEY`, `ANTHROPIC_SMALL_FAST_MODEL`, and the
+    /// mixed-case `anthropic_api_key` form are actively scrubbed by the
+    /// shared union const. `MOONSHOT_API_KEY` is not an `ANTHROPIC_*`
+    /// variable and is not scrubbed (there is no ambient-credential fallback
+    /// to scrub away -- #936 says "do not fall back to ... ambient
+    /// MOONSHOT_API_KEY", a claim about which value seeds
+    /// `ANTHROPIC_AUTH_TOKEN`, not about deleting an unrelated key from the
+    /// child env). The real proof is that the auth token equals the
+    /// injected vault secret and never the ambient Moonshot value, even
+    /// when both are present in the base environment. The parent `base`
+    /// vector must stay byte-identical throughout.
+    #[test]
+    fn kimi_overlay_scrubs_ambient_anthropic_values_and_never_consults_moonshot_key() {
+        let base = vec![
+            ("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string()),
+            (
+                "ANTHROPIC_SMALL_FAST_MODEL".to_string(),
+                "ambient-fast".to_string(),
+            ),
+            (
+                "anthropic_api_key".to_string(),
+                "ambient-mixed-case-key".to_string(),
+            ),
+            (
+                "MOONSHOT_API_KEY".to_string(),
+                "ambient-moonshot-key".to_string(),
+            ),
+            ("UNCHANGED".to_string(), "yes".to_string()),
+        ];
+        let mut child = base.clone();
+        apply_anthropic_compat_overlay(&mut child, "kimi-test-secret", kimi_descriptor(), None);
+
+        assert_eq!(lookup(&child, "UNCHANGED"), Some("yes"));
+        assert_eq!(lookup(&child, "ANTHROPIC_API_KEY"), None);
+        assert_eq!(lookup(&child, "ANTHROPIC_SMALL_FAST_MODEL"), None);
+        assert_eq!(lookup(&child, "anthropic_api_key"), None);
+        assert_eq!(
+            lookup(&child, "ANTHROPIC_AUTH_TOKEN"),
+            Some("kimi-test-secret"),
+            "the auth token must come from the injected vault secret, never an ambient key"
+        );
+        assert_ne!(
+            lookup(&child, "ANTHROPIC_AUTH_TOKEN"),
+            Some("ambient-moonshot-key"),
+            "MOONSHOT_API_KEY must never be consulted as a credential source"
+        );
+        assert_eq!(lookup(&base, "ANTHROPIC_API_KEY"), Some("ambient-key"));
+        assert_eq!(
+            lookup(&base, "MOONSHOT_API_KEY"),
+            Some("ambient-moonshot-key")
+        );
+    }
+
+    /// Kimi routes directly through the child-overlay path, exactly like
+    /// DeepSeek: no `BridgeHandle`, so no loopback listener either.
+    #[test]
+    fn kimi_direct_route_creates_no_bridge_and_no_listener() {
+        let base = vec![("UNRELATED".to_string(), "kept".to_string())];
+        let store = FakeSecretStore(Some("kimi-routing-secret".to_string()));
+        let runtime = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Kimi, Backend::Claude),
+            base.clone(),
+            &store,
+        )
+        .unwrap();
+        assert!(
+            !runtime.has_bridge(),
+            "Kimi must route directly, never through BridgeHandle"
+        );
+        assert_eq!(runtime.socket_addr(), None, "no listener without a bridge");
+        assert_eq!(runtime.base_url(), None);
+        assert_eq!(runtime.bearer_token(), None);
+        assert_eq!(
+            lookup(runtime.env(), "ANTHROPIC_AUTH_TOKEN"),
+            Some("kimi-routing-secret")
+        );
+        assert_eq!(lookup(runtime.env(), "UNRELATED"), Some("kept"));
+    }
+
+    #[test]
+    fn kimi_route_without_a_stored_credential_fails_the_launch() {
+        let store = FakeSecretStore(None);
+        let error = ForegroundRuntime::start_with_secret_store(
+            &plan(ModelProvider::Kimi, Backend::Claude),
+            Vec::new(),
+            &store,
+        )
+        .unwrap_err();
+        // No `KimiCredentials` variant exists -- Kimi shares the same
+        // generic descriptor-backed credential-missing error as DeepSeek.
+        assert!(matches!(error, BridgeError::DeepSeekCredentials));
+    }
+
+    #[test]
+    fn kimi_subprocess_and_pty_receive_the_same_secret_child_overlay() {
+        let mut env = vec![("ANTHROPIC_API_KEY".to_string(), "ambient-key".to_string())];
+        apply_anthropic_compat_overlay(&mut env, "kimi-test-secret", kimi_descriptor(), None);
+        let runtime = ForegroundRuntime {
+            env,
+            bridge: None,
+            claude_settings: None,
+            startup_notices: Vec::new(),
+        };
+        let adapter = RecordingAdapter::default();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Subprocess, vec!["claude".into()], None)
+            .unwrap();
+        runtime
+            .spawn_with(&adapter, SpawnMode::Pty, vec!["claude".into()], None)
+            .unwrap();
+
+        let calls = adapter.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2, calls[1].2);
+        assert_eq!(
+            lookup(&calls[0].2, "ANTHROPIC_AUTH_TOKEN"),
+            Some("kimi-test-secret")
+        );
+        assert_eq!(lookup(&calls[0].2, "ANTHROPIC_API_KEY"), None);
+        assert!(!runtime.has_bridge());
+    }
+
+    /// `launch_preflight_target` (provider_auth.rs) and `PreflightError`
+    /// are already provider-neutral: `launch_preflight_target` is a plain
+    /// registry lookup, and `PreflightError::describe` takes the descriptor
+    /// as a parameter rather than hardcoding a provider. Both are exercised
+    /// against DeepSeek in `provider_auth.rs`'s own test module (which this
+    /// lane does not own), so this only pins that the same generic surface
+    /// resolves correctly for Kimi's descriptor once it lands: the
+    /// dry-run-is-vault-free guarantee, and that the actionable message
+    /// names `clud auth login kimi`. The interactive
+    /// prompt/store/continue, empty/cancel, and non-interactive
+    /// no-stdin-read mechanics themselves live in `preflight_with`, a
+    /// private fn in `provider_auth.rs` that takes no `ModelProvider`
+    /// parameter at all (only an injected `SecretStore` + closure) -- so
+    /// DeepSeek's existing coverage of that fn already proves Kimi's
+    /// identical behavior; there is no Kimi-specific mechanism to
+    /// duplicate here.
+    #[test]
+    fn kimi_preflight_target_resolves_to_kimis_descriptor_and_is_vault_free_on_dry_run() {
+        assert_eq!(
+            crate::provider_auth::launch_preflight_target(ModelProvider::Kimi, false),
+            Some(kimi_descriptor())
+        );
+        assert_eq!(
+            crate::provider_auth::launch_preflight_target(ModelProvider::Kimi, true),
+            None,
+            "dry run must never resolve a descriptor to preflight against, for any provider"
+        );
+    }
+
+    #[test]
+    fn kimi_preflight_error_names_kimi_and_its_login_command() {
+        let descriptor = kimi_descriptor();
+        assert_eq!(
+            crate::provider_auth::PreflightError::Missing.describe(descriptor),
+            "Kimi credentials are not configured; run `clud auth login kimi`"
+        );
+        assert_eq!(
+            crate::provider_auth::PreflightError::Cancelled.describe(descriptor),
+            "Kimi credential entry was cancelled"
+        );
     }
 }
