@@ -116,9 +116,11 @@ Entry and orchestration:
   service/account identifiers, injectable in-memory test store, and secret-free
   status/error surfaces.
 - `provider_registry.rs` - the `AnthropicCompatProvider` descriptor table
-  (#937): per-provider vault identifiers, base URL, CLI flag, and child-env
-  values for providers that speak the Anthropic API directly. Adding a provider
-  is a row here plus a `ModelProvider` variant, not a new code path.
+  (#937/#939): per-provider vault identifiers, base URL, CLI flag, optional
+  Claude role-model profile, and child-env behavior for providers that speak
+  the Anthropic API directly. DeepSeek, Kimi, and OpenRouter share this path;
+  adding a provider is primarily a row here plus a `ModelProvider` variant,
+  not a new auth or transport stack.
 - `codex_pipeline.rs` - #627 step 5: chains translate -> upstream -> SSE into
   one call, plus `MessageAggregator` so a non-streaming request reuses the
   streaming state machine. Owns the downstream status policy — since #764,

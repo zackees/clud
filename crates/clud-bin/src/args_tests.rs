@@ -74,6 +74,26 @@ fn test_kimi_backend_is_known_and_conflicts_with_other_providers() {
 }
 
 #[test]
+fn test_openrouter_backend_is_known_and_conflicts_with_other_providers() {
+    let args = parse(&["clud", "--openrouter"]);
+    assert!(args.openrouter);
+    assert!(!args.claude);
+    assert!(!args.codex);
+    assert!(!args.deepseek);
+    assert!(!args.kimi);
+    assert!(args.passthrough.is_empty());
+    for other in ["--claude", "--codex", "--deepseek", "--kimi", "--unified"] {
+        assert!(Args::try_parse_from(["clud", "--openrouter", other]).is_err());
+    }
+    assert!(Args::try_parse_from(["clud", "--openrouter", "--provider", "deepseek",]).is_err());
+    let generic = parse(&["clud", "--provider", "openrouter"]);
+    assert_eq!(
+        generic.explicit_model_provider(),
+        Some(crate::backend::ModelProvider::OpenRouter)
+    );
+}
+
+#[test]
 fn test_kimi_flag_not_forwarded_to_passthrough() {
     let args = parse(&["clud", "--kimi", "-p", "hello"]);
     assert!(args.kimi);

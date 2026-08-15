@@ -11,6 +11,17 @@
 
 use crate::backend::ModelProvider;
 
+/// Optional per-role Claude Code model pins for gateways whose recommended
+/// profile does not use one model for every role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnthropicCompatRoleModels {
+    pub opus: &'static str,
+    pub sonnet: &'static str,
+    pub haiku: &'static str,
+    pub fable: Option<&'static str>,
+    pub subagent: &'static str,
+}
+
 /// Descriptor for one Anthropic-compatible API-key provider. Fields capture
 /// everything that varies between such providers; the shared logic (vault
 /// access, preflight, child-env overlay, gateway proxying) stays provider-
@@ -42,6 +53,14 @@ pub struct AnthropicCompatProvider {
     /// Wire model ID placed in the haiku/subagent env slots by the child-env
     /// overlay (e.g. `CLAUDE_CODE_SUBAGENT_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`).
     pub subagent_wire_id: &'static str,
+    /// Distinct Claude Code role mappings, when the provider documents them.
+    /// `None` preserves the DeepSeek/Kimi single-profile behavior.
+    pub role_models: Option<AnthropicCompatRoleModels>,
+    /// OpenRouter requires this variable to exist with an empty value; merely
+    /// removing an inherited key can make Claude Code fall back to Anthropic.
+    pub explicitly_empty_anthropic_api_key: bool,
+    /// Ask Claude Code to populate `/model` from the gateway's `/v1/models`.
+    pub enable_gateway_model_discovery: bool,
 }
 
 /// The registry: DeepSeek's row from Phase 1, plus Kimi's row landed in
@@ -60,6 +79,9 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         anthropic_base_url: "https://api.deepseek.com/anthropic",
         login_command: "clud auth login deepseek",
         subagent_wire_id: "deepseek-v4-flash",
+        role_models: None,
+        explicitly_empty_anthropic_api_key: false,
+        enable_gateway_model_discovery: false,
     },
     AnthropicCompatProvider {
         provider: ModelProvider::Kimi,
@@ -74,6 +96,29 @@ pub const ANTHROPIC_COMPAT_PROVIDERS: &[AnthropicCompatProvider] = &[
         // model), Kimi's official Claude Code profile points the haiku AND
         // subagent slots at the same main model: kimi-k3[1m].
         subagent_wire_id: "kimi-k3[1m]",
+        role_models: None,
+        explicitly_empty_anthropic_api_key: false,
+        enable_gateway_model_discovery: false,
+    },
+    AnthropicCompatProvider {
+        provider: ModelProvider::OpenRouter,
+        display_name: "OpenRouter",
+        settings_id: "openrouter",
+        cli_flag: "--openrouter",
+        vault_service: crate::provider_auth::OPENROUTER_VAULT_SERVICE,
+        vault_account: crate::provider_auth::OPENROUTER_VAULT_ACCOUNT,
+        anthropic_base_url: "https://openrouter.ai/api",
+        login_command: "clud auth login openrouter",
+        subagent_wire_id: "~anthropic/claude-opus-latest",
+        role_models: Some(AnthropicCompatRoleModels {
+            opus: "~anthropic/claude-opus-latest",
+            sonnet: "~anthropic/claude-sonnet-latest",
+            haiku: "~anthropic/claude-haiku-latest",
+            fable: Some("~anthropic/claude-fable-latest"),
+            subagent: "~anthropic/claude-opus-latest",
+        }),
+        explicitly_empty_anthropic_api_key: true,
+        enable_gateway_model_discovery: true,
     },
 ];
 
@@ -138,6 +183,21 @@ mod tests {
         let descriptor = descriptor_for(ModelProvider::Kimi).unwrap();
         assert_eq!(descriptor.vault_service, "clud.kimi");
         assert_eq!(descriptor.vault_account, "api-key-v1");
+    }
+
+    #[test]
+    fn openrouter_descriptor_matches_the_documented_claude_connection() {
+        let descriptor = descriptor_for(ModelProvider::OpenRouter).unwrap();
+        assert_eq!(descriptor.vault_service, "clud.openrouter");
+        assert_eq!(descriptor.vault_account, "api-key-v1");
+        assert_eq!(descriptor.anthropic_base_url, "https://openrouter.ai/api");
+        assert_eq!(descriptor.login_command, "clud auth login openrouter");
+        assert_ne!(
+            descriptor.vault_service,
+            descriptor_for(ModelProvider::DeepSeek)
+                .unwrap()
+                .vault_service
+        );
     }
 
     /// Cross-provider vault isolation (#937 Phase 3 DoD): Kimi's vault

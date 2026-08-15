@@ -1,7 +1,7 @@
 # Provider-neutral launch selection
 
 Issue #900 establishes one launch grammar and one model registry for direct
-Claude, Codex, and DeepSeek launches and for the unified gateway introduced by
+Claude, Codex, DeepSeek, Kimi, and OpenRouter launches and for the unified gateway introduced by
 #898. This document owns the normalized identity and propagation contract;
 [unified-gateway.md](unified-gateway.md) owns runtime request routing.
 
@@ -12,7 +12,7 @@ Four independent dimensions describe a launch:
 | Dimension | Examples | Meaning |
 |---|---|---|
 | Routing mode | `direct`, `unified` | One provider owns the process, or one Claude process can route among providers |
-| Provider | `claude`, `codex`, `deepseek` | The API/model family billed for a request |
+| Provider | `claude`, `codex`, `deepseek`, `kimi`, `openrouter` | The API/model family billed for a request |
 | Harness | `default`, `claude`, `codex` | The executable and interactive tool surface |
 | Process launch mode | `subprocess`, `pty` | How clud hosts the selected harness process |
 
@@ -25,7 +25,7 @@ subprocess/PTY selection.
 The compatibility-preserving launch shape is:
 
 ```text
-clud [--claude|--codex|--deepseek|--provider NAME|--unified|--mode unified]
+clud [--claude|--codex|--deepseek|--kimi|--openrouter|--provider NAME|--unified|--mode unified]
      [--harness default|claude|codex]
      [--model MODEL] [--effort LEVEL] [--context-window SIZE]
      [run|do|loop|fix|up|rebase|grind ...]
@@ -137,6 +137,13 @@ accepted work.
 - Direct DeepSeek keeps its reviewed no-override max/1m child profile. Explicit
   model, effort, and context selections replace only their corresponding
   child-profile values.
+- Direct OpenRouter uses the Claude harness with
+  `openrouter-claude-sonnet` as its reviewed clud profile and
+  `~anthropic/claude-sonnet-latest` as the wire ID. Because `anthropic/*` and
+  `~anthropic/*` IDs do not identify a unique gateway, they never infer the
+  OpenRouter provider; use `--openrouter`, `--provider openrouter`, or the
+  provider-qualified clud model ID. OpenRouter's live `/v1/models` response,
+  rather than clud's static catalog, owns additional picker inventory.
 
 No normalized field may contain credentials. Dry-run output exposes the
 selection and its sources so routing can be audited without a paid request.

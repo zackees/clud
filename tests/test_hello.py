@@ -418,6 +418,31 @@ def test_dry_run_deepseek() -> None:
     assert "sk-" not in result.stderr
 
 
+def test_dry_run_openrouter_is_keyless_and_uses_stable_provider_identity() -> None:
+    result = _run("--dry-run", "--openrouter", "-p", "hello")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["backend"] == "claude"
+    assert data["model_provider"] == "openrouter"
+    assert data["effective_harness"] == "claude"
+    assert data["model_selection"]["provider"] == "openrouter"
+    assert data["model_selection"]["model"] == "openrouter-claude-sonnet"
+    assert (
+        data["model_selection"]["wire_model"]
+        == "~anthropic/claude-sonnet-latest"
+    )
+    assert "sk-or-" not in result.stdout
+    assert "sk-or-" not in result.stderr
+
+
+def test_dry_run_openrouter_rejects_codex_harness() -> None:
+    result = _run("--dry-run", "--openrouter", "--harness", "codex", "-p", "hello")
+    assert result.returncode == 2
+    output = (result.stdout or "") + (result.stderr or "")
+    assert "openrouter" in output.lower()
+    assert "claude harness" in output.lower()
+
+
 def test_dry_run_deepseek_rejects_codex_harness() -> None:
     result = _run("--dry-run", "--deepseek", "--harness", "codex", "-p", "hello")
     assert result.returncode == 2

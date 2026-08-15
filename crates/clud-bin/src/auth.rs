@@ -19,6 +19,7 @@ fn model_provider_for(provider: AuthProvider) -> ModelProvider {
         AuthProvider::Codex => ModelProvider::Codex,
         AuthProvider::Deepseek => ModelProvider::DeepSeek,
         AuthProvider::Kimi => ModelProvider::Kimi,
+        AuthProvider::Openrouter => ModelProvider::OpenRouter,
     }
 }
 
@@ -36,6 +37,7 @@ fn auth_provider_for(provider: ModelProvider) -> AuthProvider {
         ModelProvider::Codex => AuthProvider::Codex,
         ModelProvider::DeepSeek => AuthProvider::Deepseek,
         ModelProvider::Kimi => AuthProvider::Kimi,
+        ModelProvider::OpenRouter => AuthProvider::Openrouter,
     }
 }
 
@@ -133,11 +135,13 @@ fn login(
             },
             interrupted,
         ),
-        AuthProvider::Deepseek | AuthProvider::Kimi => crate::provider_auth::run_for(
-            anthropic_compat_descriptor(provider)
-                .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
-            &DeepseekAuthSubcommand::Login,
-        ),
+        AuthProvider::Deepseek | AuthProvider::Kimi | AuthProvider::Openrouter => {
+            crate::provider_auth::run_for(
+                anthropic_compat_descriptor(provider)
+                    .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
+                &DeepseekAuthSubcommand::Login,
+            )
+        }
         AuthProvider::Claude => externally_managed("login"),
     }
 }
@@ -148,11 +152,13 @@ fn logout(provider: AuthProvider, json: bool) -> i32 {
             &CodexAuthSubcommand::Logout { json },
             &AtomicBool::new(false),
         ),
-        AuthProvider::Deepseek | AuthProvider::Kimi => crate::provider_auth::run_for(
-            anthropic_compat_descriptor(provider)
-                .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
-            &DeepseekAuthSubcommand::Logout { json },
-        ),
+        AuthProvider::Deepseek | AuthProvider::Kimi | AuthProvider::Openrouter => {
+            crate::provider_auth::run_for(
+                anthropic_compat_descriptor(provider)
+                    .expect("vault-backed auth provider has an Anthropic-compat descriptor"),
+                &DeepseekAuthSubcommand::Logout { json },
+            )
+        }
         AuthProvider::Claude => externally_managed("logout"),
     }
 }
@@ -220,7 +226,7 @@ fn status_row(provider: AuthProvider) -> serde_json::Value {
                 "configured": configured,
             })
         }
-        AuthProvider::Deepseek | AuthProvider::Kimi => {
+        AuthProvider::Deepseek | AuthProvider::Kimi | AuthProvider::Openrouter => {
             let descriptor = anthropic_compat_descriptor(provider)
                 .expect("vault-backed auth provider has an Anthropic-compat descriptor");
             let configured =
@@ -274,6 +280,23 @@ mod tests {
             anthropic_compat_descriptor(AuthProvider::Deepseek)
                 .unwrap()
                 .vault_service,
+        );
+    }
+
+    #[test]
+    fn openrouter_auth_reuses_the_vault_path_with_an_isolated_record() {
+        let openrouter = anthropic_compat_descriptor(AuthProvider::Openrouter).unwrap();
+        assert_eq!(openrouter.vault_service, "clud.openrouter");
+        assert_eq!(openrouter.login_command, "clud auth login openrouter");
+        assert_ne!(
+            openrouter.vault_service,
+            anthropic_compat_descriptor(AuthProvider::Deepseek)
+                .unwrap()
+                .vault_service
+        );
+        assert_eq!(
+            status_row(AuthProvider::Openrouter)["source"],
+            "native_vault"
         );
     }
 
