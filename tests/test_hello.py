@@ -698,6 +698,7 @@ def _run_picker_on_tty(
 ) -> tuple[int, str]:
     """Run a bare launch and optionally answer its harness picker."""
     from running_process import PseudoTerminalProcess
+    from running_process.pty import Expect
 
     terminal_before = cwd / f"terminal-before-{time.time_ns()}"
     terminal_after = cwd / f"terminal-after-{time.time_ns()}"
@@ -718,18 +719,20 @@ exit "$launch_status"
         env=child_env,
         capture=True,
     )
-    sent = input_after_picker is None
-    input_at = time.monotonic() + 0.5
     deadline = time.monotonic() + 15
     try:
+        if input_after_picker is not None:
+            picker_ready = child.wait_for(
+                Expect("Select an agent harness"),
+                timeout=5,
+            )
+            if not picker_ready.matched:
+                raise TimeoutError("harness picker did not render within 5 seconds")
+            # The picker drains stale input immediately after its first render.
+            time.sleep(0.15)
+            child.write(input_after_picker)
+
         while time.monotonic() < deadline:
-            if not sent and time.monotonic() >= input_at:
-                # Crossterm drains stale input after its first render. Give the
-                # picker time to establish raw mode, then submit one deliberate
-                # arrow-key choice without depending on terminal-screen text
-                # that cleanup will erase from running-process's screen model.
-                child.write(input_after_picker or b"")
-                sent = True
             if child.poll() is not None:
                 break
             time.sleep(0.05)
