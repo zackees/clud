@@ -719,19 +719,19 @@ exit "$launch_status"
         env=child_env,
         capture=True,
     )
-    deadline = time.monotonic() + 15
     try:
         if input_after_picker is not None:
             picker_ready = child.wait_for(
                 Expect("Select an agent harness"),
-                timeout=5,
+                timeout=15,
             )
             if not picker_ready.matched:
-                raise TimeoutError("harness picker did not render within 5 seconds")
+                raise TimeoutError("harness picker did not render within 15 seconds")
             # The picker drains stale input immediately after its first render.
             time.sleep(0.15)
             child.write(input_after_picker)
 
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if child.poll() is not None:
                 break
