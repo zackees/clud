@@ -1,0 +1,24 @@
+# Dylint lint libraries must link through `dylint-link`, the wrapper that
+# names the cdylib `lib<name>@<toolchain>.so` — the exact filename
+# `cargo dylint` looks up after building. Without it the build succeeds and
+# emits a plain `lib<name>.so`, and Dylint fails with:
+#
+#   Could not find `.../libban_manual_slash_normalize@<toolchain>.so`
+#   despite successful build
+#
+# This file comes from Dylint's own lint-library template; clud's crate was
+# created without it (issue #911). CI had been papering over the gap by
+# copying the artifact to the suffixed name and re-running Dylint, which read
+# as an upstream artifact-naming bug — it was a missing linker config here.
+#
+# `cfg(all())` rather than a concrete triple, because it must apply on
+# whatever host builds the lint. (`ci/banned_cross_tools.py` also rejects a
+# hand-rolled `[target.<triple>] linker =`, though only for the Apple/MSVC
+# triples it treats as soldr-owned.)
+#
+# Caveat: config `rustflags` are REPLACED, not merged, when the `RUSTFLAGS`
+# env var is set. Adding `RUSTFLAGS` to `_dylint.yml` would silently drop
+# `-C linker=dylint-link` and bring the missing-alias failure straight back,
+# with this file still looking correct.
+[target.'cfg(all())']
+rustflags = ["-C", "linker=dylint-link"]
