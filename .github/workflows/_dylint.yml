@@ -35,7 +35,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
       - uses: zackees/setup-soldr@v0
         with:
           version: 0.8.44
@@ -50,17 +49,7 @@ jobs:
         run: rustup toolchain install nightly-2026-04-16 --component llvm-tools-preview --component rust-src --component rustc-dev --profile minimal
       - name: Install Dylint
         timeout-minutes: 10
-        run: soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.1 --locked
-      - name: Set up Dylint Python environment
-        run: |
-          uv venv .venv
-          VENV_PY="$(pwd)/.venv/bin/python"
-          RUNNING_PROCESS_VERSION="$(python -c 'import tomllib; data = tomllib.load(open("pyproject.toml", "rb")); print(next(dep.split("==", 1)[1] for dep in data["dependency-groups"]["test"] if dep.startswith("running-process==")))')"
-          uv pip install --python "$VENV_PY" "running-process==$RUNNING_PROCESS_VERSION"
-          echo "VENV_PY=$VENV_PY" >> "$GITHUB_ENV"
-      - name: Build published Dylint driver
-        timeout-minutes: 15
-        run: $VENV_PY -m ci.build_dylint_driver
+        run: soldr --no-cache cargo install cargo-dylint dylint-link --version 6.0.4 --locked
       - name: Check dylint formatting
         run: soldr --no-cache cargo fmt --manifest-path dylints/ban_manual_slash_normalize/Cargo.toml --all -- --check
       - name: Test dylint crate
@@ -68,28 +57,4 @@ jobs:
       - name: Run dylint over workspace
         run: |
           export PATH="${CARGO_HOME}/bin:${PATH}"
-          set +e
-          RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr --no-cache cargo dylint --all -- --workspace --all-targets
-          rc=$?
-          set -e
-          if [ "$rc" -eq 0 ]; then
-            exit 0
-          fi
-
-          # Dylint 6.0.1 can build the cdylib successfully without creating the
-          # @<toolchain> alias it immediately requires. Reproduced on Ubuntu in
-          # https://github.com/zackees/clud/actions/runs/30172921153. Its own
-          # driver builder also drops required toolchain state (run 30173166314),
-          # so the preceding step supplies the published 6.0.1 driver.
-          host="$(RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr rustc -vV | sed -n 's/^host: //p')"
-          toolchain="nightly-2026-04-16-${host}"
-          library_root="target/dylint/libraries/${toolchain}"
-          expected="${library_root}/release/libban_manual_slash_normalize@${toolchain}.so"
-          candidate="$(find "${library_root}" -path '*/release/libban_manual_slash_normalize.so' -print -quit)"
-          if [ -z "$candidate" ] || [ -e "$expected" ]; then
-            echo "::error::Dylint failed without the reproduced missing-alias artifact shape"
-            exit "$rc"
-          fi
-          mkdir -p "$(dirname "$expected")"
-          cp "$candidate" "$expected"
           RUSTUP_TOOLCHAIN=nightly-2026-04-16 soldr --no-cache cargo dylint --all -- --workspace --all-targets
