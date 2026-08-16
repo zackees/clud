@@ -719,10 +719,15 @@ exit "$launch_status"
         capture=True,
     )
     sent = input_after_picker is None
+    picker_snapshot = ""
     deadline = time.monotonic() + 15
     try:
         while time.monotonic() < deadline:
             output = child.output_text
+            if not picker_snapshot and "Select an agent harness" in output:
+                # running-process keeps a bounded capture buffer. Preserve the
+                # picker frame before later bootstrap output can evict it.
+                picker_snapshot = output
             if not sent and "Select an agent harness" in output:
                 # The picker drains stale terminal input immediately after its
                 # first render, so wait one poll before sending a real choice.
@@ -735,7 +740,7 @@ exit "$launch_status"
         if child.poll() is None:
             raise TimeoutError("harness picker did not exit within 15 seconds")
         returncode = child.wait(timeout=2)
-        output = child.output_text
+        output = picker_snapshot + child.output_text
     finally:
         if child.poll() is None:
             child.terminate()
