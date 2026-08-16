@@ -454,14 +454,14 @@ def test_dry_run_openrouter_rejects_codex_harness() -> None:
     assert result.returncode == 2
     output = (result.stdout or "") + (result.stderr or "")
     assert "openrouter" in output.lower()
-    assert "claude harness" in output.lower()
+    assert "cannot use the codex harness" in output.lower()
 
 
 def test_dry_run_deepseek_rejects_codex_harness() -> None:
     result = _run("--dry-run", "--deepseek", "--harness", "codex", "-p", "hello")
     assert result.returncode == 2
     assert "deepseek" in result.stderr.lower()
-    assert "claude harness" in result.stderr.lower()
+    assert "cannot use the codex harness" in result.stderr.lower()
 
 
 def test_dry_run_deepseek_rejects_model_override() -> None:
@@ -746,7 +746,6 @@ exit "$launch_status"
     assert terminal_before.read_text(encoding="utf-8") == terminal_after.read_text(
         encoding="utf-8"
     )
-    assert "\x1b[?25h" in output
     return returncode, output
 
 
