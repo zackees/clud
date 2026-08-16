@@ -3,8 +3,15 @@
 //!
 //! `clud grind` with no argument resolves the git `origin` remote, maps it to
 //! the forge's issues page (`<repo>/issues` for GitHub, `<repo>/-/issues` for
-//! GitLab), prints a green notice, and hands the URL to the same `/goal` flow
-//! `clud do <url>` uses. An explicit URL argument is used verbatim.
+//! GitLab), prints a green notice, and drives the URL through the `/loop`
+//! contract. An explicit URL argument is used verbatim.
+//!
+//! Issue #897: this deliberately does **not** reuse `clud do <url>`'s `/goal`
+//! flow. `/goal` is single-shot — it resolves once and stops — whereas
+//! grinding an issues page is iterative: one issue per iteration, ending only
+//! when every issue is done. So `grind` builds its own prompt
+//! (`command::prompts::build_grind_prompt`) and terminates via the loop
+//! subsystem's DONE/BLOCKED markers rather than a Stop hook.
 
 use std::path::Path;
 use std::time::Duration;
