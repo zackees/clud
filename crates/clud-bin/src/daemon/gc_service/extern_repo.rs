@@ -160,7 +160,14 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
     // beside a parent with one untracked file reads as `HasLocalWork` and
     // is pinned forever, while a clean parent vouches for a checkout that
     // was never inspected. `.git` is a directory in a clone and a file in a
-    // linked worktree, so `exists()` covers both.
+    // linked worktree, so `exists()` covers both. The gate alone is not
+    // enough — a *malformed* `.git` (an interrupted clone leaves an empty
+    // one) passes `exists()` and git then resumes walking up, verified:
+    // from such a directory inside a dirty parent, `status --porcelain`
+    // exits 0 and prints the parent's entries. Every query below is
+    // therefore additionally pinned with `--git-dir`/`--work-tree`, which
+    // disables discovery outright, so a malformed `.git` errors into
+    // `ProbeFailed` (spare) instead of borrowing the parent's answer.
     if !cwd.join(".git").exists() {
         // A bare clone/mirror has no `.git`; its repository *is* the
         // directory. We do not probe it (a bare repo has no work tree, so
@@ -188,6 +195,8 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
         cwd,
         &[
             "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
             "status",
             "--porcelain",
             "--untracked-files=normal",
@@ -209,6 +218,8 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
         cwd,
         &[
             "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
             "log",
             "--all",
             "--not",
@@ -223,7 +234,16 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
         return GitWorkState::HasLocalWork;
     }
 
-    let Some(stash) = probe_git(cwd, &["--no-optional-locks", "stash", "list"]) else {
+    let Some(stash) = probe_git(
+        cwd,
+        &[
+            "--no-optional-locks",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "stash",
+            "list",
+        ],
+    ) else {
         return GitWorkState::ProbeFailed;
     };
     if !stash.trim().is_empty() {
@@ -241,6 +261,28 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
 pub(super) struct PurgeDecision {
     pub(super) purge: bool,
     pub(super) reason: &'static str,
+    /// How `clud gc list` should classify the row (issue #896).
+    ///
+    /// Carried explicitly rather than inferred from `purge`, because "not
+    /// purged" is three different things to a reader: a checkout GC will
+    /// never auto-reclaim, one it simply has not aged into yet, and a row
+    /// whose directory is gone. Collapsing them paints every
+    /// recently-touched checkout yellow, which is the legibility loss #896
+    /// exists to fix.
+    pub(super) class: PurgeClass,
+}
+
+/// The display classes a purge verdict maps onto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PurgeClass {
+    /// GC will take it on a future tick.
+    Reclaimable,
+    /// Not yet eligible, but nothing is holding it — it will age in.
+    Spared,
+    /// Deliberately retained; GC will keep refusing while this holds.
+    Pinned,
+    /// The registry row points at a path that is gone.
+    Dangling,
 }
 
 /// Pure purge decision, factored out so the matrix is unit-testable without
@@ -263,30 +305,36 @@ pub(super) fn extern_repo_purge_decision(
         return PurgeDecision {
             purge: false,
             reason: "dangling: path missing",
+            class: PurgeClass::Dangling,
         };
     }
     if !idle {
         return PurgeDecision {
             purge: false,
             reason: "spared: recently active",
+            class: PurgeClass::Spared,
         };
     }
     match git {
         GitWorkState::HasLocalWork => PurgeDecision {
             purge: false,
             reason: "pinned: uncommitted or unpushed work",
+            class: PurgeClass::Pinned,
         },
         GitWorkState::ProbeFailed => PurgeDecision {
             purge: false,
             reason: "pinned: git state unreadable",
+            class: PurgeClass::Pinned,
         },
         GitWorkState::Clean => PurgeDecision {
             purge: true,
             reason: "reclaimable: clean and pushed",
+            class: PurgeClass::Reclaimable,
         },
         GitWorkState::Unknown => PurgeDecision {
             purge: true,
             reason: "reclaimable: not a git checkout",
+            class: PurgeClass::Reclaimable,
         },
     }
 }
@@ -298,10 +346,15 @@ pub(super) fn extern_repo_purge_decision(
 /// beyond the higher-level live-session check applied by `entry_is_live`
 /// these two gates are the safety net: mtime throttles how eagerly we act,
 /// the git-work check guards against deleting a checkout with local work.
-pub(super) fn extern_repo_is_purgeable(entry: &TrackedEntry, stale_after: Duration) -> bool {
+/// Returns the full verdict. `gc list` (issue #896) displays the reason,
+/// so it is recorded by the caller rather than discarded here.
+pub(super) fn extern_repo_purge_verdict(
+    entry: &TrackedEntry,
+    stale_after: Duration,
+) -> PurgeDecision {
     let path = Path::new(&entry.path);
     if !path.is_dir() {
-        return extern_repo_purge_decision(false, false, GitWorkState::Unknown).purge;
+        return extern_repo_purge_decision(false, false, GitWorkState::Unknown);
     }
     let idle = most_recent_mtime(path)
         .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
@@ -309,7 +362,7 @@ pub(super) fn extern_repo_is_purgeable(entry: &TrackedEntry, stale_after: Durati
         .unwrap_or(false);
     if !idle {
         // Not idle yet — skip the git probe entirely.
-        return extern_repo_purge_decision(true, false, GitWorkState::Unknown).purge;
+        return extern_repo_purge_decision(true, false, GitWorkState::Unknown);
     }
     let decision = extern_repo_purge_decision(true, true, git_work_state(path));
     if !decision.purge {
@@ -318,7 +371,7 @@ pub(super) fn extern_repo_is_purgeable(entry: &TrackedEntry, stale_after: Durati
         // collect. Issue #896 surfaces the same string in `gc list`.
         eprintln!("[clud] gc extern-repo {} — {}", entry.path, decision.reason);
     }
-    decision.purge
+    decision
 }
 
 fn most_recent_mtime(path: &Path) -> Option<SystemTime> {
@@ -346,37 +399,55 @@ mod tests {
     #[test]
     fn decision_matrix_covers_every_gate() {
         let cases = [
-            // (is_dir, idle, git state)      → (purge, reason)
+            // (is_dir, idle, git state)   → (purge, reason, display class)
             (
                 (false, true, GitWorkState::Clean),
-                (false, "dangling: path missing"),
+                (false, "dangling: path missing", PurgeClass::Dangling),
             ),
             (
                 (true, false, GitWorkState::Clean),
-                (false, "spared: recently active"),
+                // Not yet eligible, but nothing is holding it: it ages in,
+                // so it must NOT be classed as pinned (issue #896).
+                (false, "spared: recently active", PurgeClass::Spared),
             ),
             (
                 (true, true, GitWorkState::HasLocalWork),
-                (false, "pinned: uncommitted or unpushed work"),
+                (
+                    false,
+                    "pinned: uncommitted or unpushed work",
+                    PurgeClass::Pinned,
+                ),
             ),
             (
                 (true, true, GitWorkState::ProbeFailed),
-                (false, "pinned: git state unreadable"),
+                (false, "pinned: git state unreadable", PurgeClass::Pinned),
             ),
             (
                 (true, true, GitWorkState::Clean),
-                (true, "reclaimable: clean and pushed"),
+                (
+                    true,
+                    "reclaimable: clean and pushed",
+                    PurgeClass::Reclaimable,
+                ),
             ),
             (
                 (true, true, GitWorkState::Unknown),
-                (true, "reclaimable: not a git checkout"),
+                (
+                    true,
+                    "reclaimable: not a git checkout",
+                    PurgeClass::Reclaimable,
+                ),
             ),
         ];
-        for ((is_dir, idle, git), (purge, reason)) in cases {
+        for ((is_dir, idle, git), (purge, reason, class)) in cases {
             let got = extern_repo_purge_decision(is_dir, idle, git);
             assert_eq!(
                 got,
-                PurgeDecision { purge, reason },
+                PurgeDecision {
+                    purge,
+                    reason,
+                    class
+                },
                 "is_dir={is_dir} idle={idle} git={git:?}"
             );
         }
@@ -450,6 +521,36 @@ mod tests {
         assert!(!bare.join(".git").exists(), "fixture is not actually bare");
         assert_eq!(git_work_state(&bare), GitWorkState::ProbeFailed);
         assert!(!extern_repo_purge_decision(true, true, git_work_state(&bare)).purge);
+    }
+
+    /// Regression guard for the hole the `.git` *existence* gate left open.
+    /// An interrupted clone leaves a `.git` that exists but is not a usable
+    /// gitdir; `exists()` passes it through, and git then resumes its
+    /// upward walk. Verified against real git: from such a directory inside
+    /// a dirty parent repo, `status --porcelain` exits 0 and prints the
+    /// **parent's** entries — so without the pinned `--git-dir`/`--work-tree`
+    /// this reads as `HasLocalWork` (pinned forever on a dirty parent) or,
+    /// worse, as `Clean` on a tidy parent, authorizing a delete of a
+    /// checkout that was never inspected.
+    #[test]
+    fn malformed_git_dir_inside_a_repo_does_not_borrow_the_parents_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        init_repo(parent);
+        std::fs::write(parent.join("dirty.txt"), "uncommitted").unwrap();
+
+        // `.git` exists, so the gate passes — but it is empty, so it is not
+        // a repository.
+        let child = parent.join(".extern-repos").join("interrupted-clone");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+
+        assert_eq!(
+            git_work_state(&child),
+            GitWorkState::ProbeFailed,
+            "a malformed .git must fail closed, not inherit the parent repo"
+        );
+        // Fail closed means spare, never purge.
+        assert!(!extern_repo_purge_decision(true, true, GitWorkState::ProbeFailed).purge);
     }
 
     #[test]

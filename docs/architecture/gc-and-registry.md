@@ -134,9 +134,35 @@ The tracked-entry subcommands are thin IPC clients against the daemon. `--no-dae
 
 - **`clud gc list [--json]`** — `cmd_list` (`crates/clud-bin/src/gc/cli.rs`) calls
   `daemon::gc_client_list`, prints a table (or JSON). Each row reports
-  `kind / age / agent_id / branch / path` plus a `live_locked` flag computed by the daemon
-  by parsing `git worktree list --porcelain` and extracting `(pid <N>)` from any
+  `kind / age / agent_id / branch / state / path` plus a `live_locked` flag computed by the
+  daemon by parsing `git worktree list --porcelain` and extracting `(pid <N>)` from any
   `locked <reason>` line.
+
+  **Row state and reason (issue #896).** Once the extern-repo guard began refusing to
+  reclaim checkouts holding local work, a pinned row became indistinguishable from garbage
+  GC keeps failing to collect. Every row therefore carries a `state` —
+  `reclaimable | pinned | dangling` — plus a short `reason` for the non-default states. The
+  human table paints `pinned` yellow and `dangling` red; `--json` carries `state`, `reason`,
+  `reclaimable` and `evaluated_unix` so tooling never parses ANSI.
+
+  The load-bearing constraint is that **`gc list` never runs the extern-repo git probe.**
+  It is a hot client op on the single registry worker thread, and that probe costs up to
+  three subprocesses per checkout. So the verdict is not recomputed at list time: the
+  periodic purge tick already evaluates every extern-repo entry, and
+  `gc_service/list_state.rs` caches what it decided (`SpareReasons`, owned by the worker
+  loop — the same thread that runs the tick, hence no lock). `gc list` reads that cache plus
+  a `try_exists()` stat per row for the `dangling` state.
+
+  It is *not* subprocess-free, and the doc should not pretend otherwise: `GcOp::List` still
+  calls `collect_live_lock_paths()`, which shells out to `git worktree list --porcelain`
+  through `worktrees::run_git` — the deliberately-unbounded runner that
+  `gc_service/extern_repo.rs` warns must not be used on this thread. That predates the
+  state/reason work; **#946** covers moving this class of work off the worker.
+
+  Consequences worth knowing: a verdict can be up to one tick stale (1 h by default — hence
+  `evaluated_unix`), and rows never yet evaluated report plain `reclaimable` rather than a
+  fabricated verdict. Eviction is keyed on a monotonic tick generation, not a timestamp, so
+  a backwards clock step cannot wipe the cache.
 - **`clud gc prune <kind> [--dry-run]`** and
   **`clud gc all [--dry-run]`** call `daemon::gc_client_purge` with the kind-specific safe
   prune policy. Worktree-like rows use the built-in stale duration, extern-repo rows rely on

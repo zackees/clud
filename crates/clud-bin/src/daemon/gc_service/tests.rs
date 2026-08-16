@@ -659,7 +659,11 @@ fn periodic_tick_auto_purges_old_worktree_entry_when_free_space_low() {
         &live_cwds_provider,
         &config,
         &|_| Ok(4 * BYTES_PER_GB),
-        PeriodicPurgeContext::default(),
+        PeriodicPurgeContext {
+            session_state_dir: None,
+            activity: None,
+            spare_reasons: &mut SpareReasons::new(),
+        },
     );
     // The two seeded entries — one worktree, one sibling clone — are both
     // old enough and both under a low-space root, so the tick must dispatch
@@ -722,7 +726,11 @@ fn periodic_tick_keeps_old_worktree_entry_when_free_space_is_healthy() {
         &live_cwds_provider,
         &config,
         &|_| Ok(20 * BYTES_PER_GB),
-        PeriodicPurgeContext::default(),
+        PeriodicPurgeContext {
+            session_state_dir: None,
+            activity: None,
+            spare_reasons: &mut SpareReasons::new(),
+        },
     );
     // Healthy disk → no dispatches expected, so no completions
     // should land.
@@ -820,6 +828,7 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
         &live_cwds_provider,
         None,
         None,
+        &mut SpareReasons::new(),
     );
     // Same #383/#560 hazard as the periodic-purge test: this one discarded
     // the drain count entirely, so a completion that never arrived showed up
@@ -871,6 +880,7 @@ fn periodic_tick_keeps_fresh_extern_repo_entry() {
         &live_cwds_provider,
         None,
         None,
+        &mut SpareReasons::new(),
     );
     let drained = drain_purge_completions(
         &registry,
@@ -883,6 +893,155 @@ fn periodic_tick_keeps_fresh_extern_repo_entry() {
     let rows = registry.list(Some(EXTERN_REPO_KIND)).expect("list");
     assert_eq!(rows.len(), 1, "fresh extern-repo row should survive");
     assert!(repo.exists(), "fresh extern-repo dir should survive");
+}
+
+/// Issue #896, and the load-bearing test for its design: `gc list` must
+/// explain a retained row *without* re-running the git probe, because it is
+/// a hot client op on the registry worker thread (see #946).
+///
+/// The proof is the second assertion: the very same registry row reads as a
+/// plain `reclaimable` row when handed an empty cache. If `List` probed git
+/// itself it would reach the same `pinned` verdict both times, and that
+/// assertion would fail.
+#[test]
+fn list_surfaces_the_ticks_reason_from_cache_and_never_probes_itself() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("list-state.redb");
+    let repo = dir.path().join("extern-pinned");
+    // A `.git` that is not a usable repository: the anchor gate passes, then
+    // every probe query fails, which is `ProbeFailed` → spared. That is a
+    // real pinned state and needs no git fixture to reproduce.
+    fs::create_dir_all(repo.join(".git")).unwrap();
+
+    // Idle immediately, so the tick evaluates rather than skipping on mtime.
+    let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
+
+    let registry = Registry::open_at(&db_path).expect("open registry");
+    registry
+        .insert_if_new(&InsertInput {
+            kind: EXTERN_REPO_KIND.to_string(),
+            path: repo.to_string_lossy().to_string(),
+            repo_root: Some(dir.path().to_string_lossy().to_string()),
+            branch: None,
+            agent_id: None,
+            now_unix: now_unix(),
+        })
+        .expect("insert extern repo");
+
+    let pool_tx = spawn_purge_pool(1);
+    let (completion_tx, _completion_rx) = mpsc::channel::<RegistryMsg>();
+    let mut spare_reasons = SpareReasons::new();
+
+    // A dry-run purge exercises the same evaluation the periodic tick does,
+    // without deleting anything out from under the assertions.
+    let purge_reply = process_op(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        GcOp::Purge {
+            duration: None,
+            kind: Some(EXTERN_REPO_KIND.to_string()),
+            dry_run: true,
+        },
+        Vec::new(),
+        &mut spare_reasons,
+    );
+    match purge_reply {
+        GcReply::PurgeOk { removed, skipped } => {
+            assert_eq!(removed, 0, "an unreadable checkout must not be purgeable");
+            assert_eq!(skipped, 1, "it should be counted as spared");
+        }
+        other => panic!("expected PurgeOk, got {other:?}"),
+    }
+    assert!(
+        !spare_reasons.is_empty(),
+        "the evaluation must have recorded a verdict for gc list to reuse"
+    );
+
+    let rows = list_rows(&registry, &pool_tx, &completion_tx, &mut spare_reasons);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, "pinned");
+    assert!(!rows[0].reclaimable);
+    assert_eq!(
+        rows[0].reason.as_deref(),
+        Some("pinned: git state unreadable")
+    );
+    assert!(
+        rows[0].evaluated_unix.is_some(),
+        "a cached verdict should carry when it was computed"
+    );
+
+    // The same row, with nothing cached: plain reclaimable, no reason. This
+    // is what proves the state came from the cache and not from `List`
+    // probing git on its own.
+    let uncached = list_rows(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        &mut SpareReasons::new(),
+    );
+    assert_eq!(uncached[0].state, "reclaimable");
+    assert!(uncached[0].reclaimable);
+    assert_eq!(uncached[0].reason, None);
+    assert_eq!(uncached[0].evaluated_unix, None);
+}
+
+/// A registry row whose directory is gone reads as `dangling` (red) — and
+/// that needs no cached verdict, since `List` can stat the path itself.
+#[test]
+fn list_marks_a_row_whose_path_is_gone_as_dangling() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("dangling.redb");
+
+    let registry = Registry::open_at(&db_path).expect("open registry");
+    registry
+        .insert_if_new(&InsertInput {
+            kind: WORKTREE_KIND.to_string(),
+            path: dir
+                .path()
+                .join("never-existed")
+                .to_string_lossy()
+                .to_string(),
+            repo_root: None,
+            branch: None,
+            agent_id: None,
+            now_unix: now_unix(),
+        })
+        .expect("insert worktree");
+
+    let pool_tx = spawn_purge_pool(1);
+    let (completion_tx, _completion_rx) = mpsc::channel::<RegistryMsg>();
+    let rows = list_rows(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        &mut SpareReasons::new(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, "dangling");
+    assert!(!rows[0].reclaimable);
+    assert_eq!(rows[0].reason.as_deref(), Some("dangling: path missing"));
+}
+
+fn list_rows(
+    registry: &Registry,
+    pool_tx: &mpsc::Sender<PurgeJob>,
+    completion_tx: &mpsc::Sender<RegistryMsg>,
+    spare_reasons: &mut SpareReasons,
+) -> Vec<ListRow> {
+    match process_op(
+        registry,
+        pool_tx,
+        completion_tx,
+        GcOp::List { kind: None },
+        Vec::new(),
+        spare_reasons,
+    ) {
+        GcReply::ListOk { rows } => rows,
+        other => panic!("expected ListOk, got {other:?}"),
+    }
 }
 
 #[test]

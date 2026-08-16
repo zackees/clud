@@ -25,14 +25,16 @@ use super::types::{GcOp, GcReply, GcWatchRoot, ListRow};
 
 mod extern_repo;
 mod filesystem;
+mod list_state;
 
 use super::watch_service as gc_watch_service;
 
-use extern_repo::{extern_repo_is_purgeable, extern_repo_stale_after};
+use extern_repo::{extern_repo_purge_verdict, extern_repo_stale_after, PurgeClass, PurgeDecision};
 use filesystem::{
     collect_live_lock_paths, reap_trash_entries, remove_entry_and_delete_row,
     remove_entry_filesystem,
 };
+use list_state::{derive_state, EntryState, SpareReasons};
 
 /// How long a connection thread waits for the registry worker before
 /// giving up. Since #268 the worker no longer runs `remove_dir_all`
@@ -348,6 +350,12 @@ fn run_worker_loop(
     let session_state_dir = config.session_state_dir.as_deref();
     let mut watch_service = None;
     let Some(tick_cadence) = config.tick_cadence else {
+        // No periodic tick in this mode. A client-initiated purge still
+        // fills the cache, but nothing ever evicts from it, so a verdict
+        // here can outlive the state it described. Bounded in practice —
+        // only extern-repo rows are cached, one entry per registry row —
+        // and `evaluated_unix` lets a reader see the staleness.
+        let mut spare_reasons = SpareReasons::new();
         while let Ok(msg) = rx.recv() {
             handle_registry_msg(
                 &registry,
@@ -356,11 +364,16 @@ fn run_worker_loop(
                 &mut watch_service,
                 msg,
                 &config.live_cwds_provider,
+                &mut spare_reasons,
             );
         }
         return;
     };
 
+    // Owned by this loop, which is also the thread that runs the periodic
+    // tick — so the cache the tick fills is the same one `GcOp::List`
+    // reads, with no lock and no cross-thread staleness (issue #896).
+    let mut spare_reasons = SpareReasons::new();
     let mut next_tick = Instant::now() + tick_cadence;
     loop {
         let timeout = next_tick.saturating_duration_since(Instant::now());
@@ -373,6 +386,7 @@ fn run_worker_loop(
                     &mut watch_service,
                     msg,
                     &config.live_cwds_provider,
+                    &mut spare_reasons,
                 );
                 if Instant::now() >= next_tick {
                     let _job_guard = config.activity.as_ref().map(DaemonActivity::start_job);
@@ -383,6 +397,7 @@ fn run_worker_loop(
                         &config.live_cwds_provider,
                         session_state_dir,
                         config.activity.as_ref(),
+                        &mut spare_reasons,
                     );
                     next_tick = Instant::now() + tick_cadence;
                 }
@@ -396,6 +411,7 @@ fn run_worker_loop(
                     &config.live_cwds_provider,
                     session_state_dir,
                     config.activity.as_ref(),
+                    &mut spare_reasons,
                 );
                 next_tick = Instant::now() + tick_cadence;
             }
@@ -411,6 +427,7 @@ fn handle_registry_msg(
     watch_service: &mut Option<gc_watch_service::WatchService>,
     msg: RegistryMsg,
     live_cwds_provider: &LiveCwdsProvider,
+    spare_reasons: &mut SpareReasons,
 ) {
     match msg {
         RegistryMsg::Op(req) => {
@@ -429,7 +446,14 @@ fn handle_registry_msg(
                     });
                     GcReply::WatchOk
                 }
-                op => process_op(registry, pool_tx, completion_tx, op, live_cwds_provider()),
+                op => process_op(
+                    registry,
+                    pool_tx,
+                    completion_tx,
+                    op,
+                    live_cwds_provider(),
+                    spare_reasons,
+                ),
             };
             // Hung-up callers are fine — the worker keeps serving the rest.
             let _ = req.reply_tx.send(reply);
@@ -477,6 +501,7 @@ fn run_periodic_purge_tick(
     live_cwds_provider: &LiveCwdsProvider,
     session_state_dir: Option<&Path>,
     activity: Option<&DaemonActivity>,
+    spare_reasons: &mut SpareReasons,
 ) -> usize {
     let config = GcDiskWatchdogConfig::from_env();
     run_periodic_purge_tick_with_free_space(
@@ -489,6 +514,7 @@ fn run_periodic_purge_tick(
         PeriodicPurgeContext {
             session_state_dir,
             activity,
+            spare_reasons,
         },
     )
 }
@@ -502,10 +528,12 @@ fn run_periodic_purge_tick(
 /// must know when the purge has finished can wait for exactly that many
 /// completions instead of inferring completion from a quiet interval, which
 /// is timing-dependent and was the source of issue #560's Windows flake.
-#[derive(Default)]
 struct PeriodicPurgeContext<'a> {
     session_state_dir: Option<&'a Path>,
     activity: Option<&'a DaemonActivity>,
+    /// Verdicts recorded by this tick, for `gc list` to explain retained
+    /// rows without re-probing git (issue #896).
+    spare_reasons: &'a mut SpareReasons,
 }
 
 fn run_periodic_purge_tick_with_free_space<F>(
@@ -520,6 +548,18 @@ fn run_periodic_purge_tick_with_free_space<F>(
 where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
 {
+    // Anything not re-evaluated during this tick is evicted below, which is
+    // what keeps the cache from growing forever as entries come and go.
+    // Keyed on a monotonic generation rather than the wall clock: an NTP
+    // step backwards mid-tick would make every fresh stamp look older than
+    // `tick_start` and wipe the whole cache.
+    let PeriodicPurgeContext {
+        session_state_dir,
+        activity,
+        spare_reasons,
+    } = context;
+    spare_reasons.begin_generation();
+
     let mut dispatched = run_disk_watchdog_tick(
         registry,
         pool_tx,
@@ -527,6 +567,7 @@ where
         live_cwds_provider,
         disk_config,
         free_space,
+        spare_reasons,
     );
 
     let worktree_reply = process_op(
@@ -539,6 +580,7 @@ where
             dry_run: false,
         },
         live_cwds_provider(),
+        spare_reasons,
     );
     dispatched += log_periodic_purge_reply(WORKTREE_KIND, worktree_reply);
 
@@ -552,8 +594,20 @@ where
             dry_run: false,
         },
         live_cwds_provider(),
+        spare_reasons,
     );
+    let extern_pass_evaluated = !matches!(extern_reply, GcReply::Error { .. });
     dispatched += log_periodic_purge_reply(EXTERN_REPO_KIND, extern_reply);
+
+    // The extern-repo pass above ran with `duration: None`, so every
+    // extern-repo row was a candidate and any survivor from an older
+    // generation is stale — its registry entry is gone. Drop it rather
+    // than let `gc list` show a verdict for a row that no longer has one.
+    // Skipped when that pass errored: it evaluated nothing, so retaining
+    // would empty the cache on a transient registry failure.
+    if extern_pass_evaluated {
+        spare_reasons.evict_stale();
+    }
 
     match reap_trash_entries(registry) {
         Ok((removed, failed)) => {
@@ -570,7 +624,7 @@ where
     // (crash leftovers) so the 2 s proc sampler and per-list liveness probes
     // stop paying for them forever. Synchronous rename/delete only — never
     // routed through the purge pool, and never terminates a process.
-    if let Some(dir) = context.session_state_dir {
+    if let Some(dir) = session_state_dir {
         match super::sessions::reconcile_session_records(dir) {
             Ok((tombstoned, deleted)) => {
                 if tombstoned > 0 || deleted > 0 {
@@ -594,7 +648,7 @@ where
     // walk the filesystem and can take a while, so they run on a detached
     // background thread rather than blocking this tick loop. They prioritize
     // by disk pressure and system load — see `spawn_maintenance_sweeps`.
-    spawn_maintenance_sweeps(disk_config, context.activity.cloned());
+    spawn_maintenance_sweeps(disk_config, activity.cloned());
 
     dispatched
 }
@@ -726,6 +780,7 @@ fn run_disk_watchdog_tick<F>(
     live_cwds_provider: &LiveCwdsProvider,
     config: &GcDiskWatchdogConfig,
     free_space: &F,
+    spare_reasons: &mut SpareReasons,
 ) -> usize
 where
     F: Fn(&Path) -> Result<u64, String> + ?Sized,
@@ -774,6 +829,7 @@ where
         live_cwds_provider,
         &purge_roots,
         config.min_age,
+        spare_reasons,
     );
     log_disk_watchdog_purge_reply(purge_roots.len(), config, purge_reply)
 }
@@ -791,6 +847,7 @@ fn process_op(
     completion_tx: &mpsc::Sender<RegistryMsg>,
     op: GcOp,
     live_cwds: Vec<PathBuf>,
+    spare_reasons: &mut SpareReasons,
 ) -> GcReply {
     match op {
         GcOp::Watch { .. } => unreachable!("watch registration is handled before process_op"),
@@ -799,15 +856,37 @@ fn process_op(
                 let live_locks = collect_live_lock_paths();
                 let out: Vec<ListRow> = rows
                     .into_iter()
-                    .map(|r| ListRow {
-                        live_locked: r.kind == "worktree" && live_locks.contains(&r.path),
-                        id: r.id,
-                        kind: r.kind,
-                        path: r.path,
-                        repo_root: r.repo_root,
-                        branch: r.branch,
-                        agent_id: r.agent_id,
-                        created_unix: r.created_unix,
+                    .map(|r| {
+                        let live_locked = r.kind == "worktree" && live_locks.contains(&r.path);
+                        let cached = spare_reasons.get(&r.path);
+                        // Issue #896. Deliberately no git probe here — the
+                        // verdict comes from the tick's cache; see
+                        // `list_state` and #946.
+                        let (state, reason) =
+                            // `try_exists().unwrap_or(true)`, not `exists()`:
+                            // the latter reports *any* error as absent, so an
+                            // EACCES on a parent or a flaky mount would paint a
+                            // live row red. "Present" is the conservative
+                            // direction for a problem state.
+                            derive_state(
+                                Path::new(&r.path).try_exists().unwrap_or(true),
+                                live_locked,
+                                cached,
+                            );
+                        ListRow {
+                            live_locked,
+                            state: state.as_str().to_string(),
+                            reason: reason.map(str::to_string),
+                            reclaimable: state == EntryState::Reclaimable,
+                            evaluated_unix: cached.map(|c| c.evaluated_unix),
+                            id: r.id,
+                            kind: r.kind,
+                            path: r.path,
+                            repo_root: r.repo_root,
+                            branch: r.branch,
+                            agent_id: r.agent_id,
+                            created_unix: r.created_unix,
+                        }
                     })
                     .collect();
                 GcReply::ListOk { rows: out }
@@ -845,9 +924,9 @@ fn process_op(
                 }
             };
             if dry_run {
-                dry_run_purge_entries(candidates, live_cwds)
+                dry_run_purge_entries(candidates, live_cwds, spare_reasons)
             } else {
-                dispatch_purge_entries(pool_tx, completion_tx, candidates, live_cwds)
+                dispatch_purge_entries(pool_tx, completion_tx, candidates, live_cwds, spare_reasons)
             }
         }
 

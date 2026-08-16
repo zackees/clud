@@ -133,6 +133,7 @@ fn dispatch_purge_entries_returns_purge_started_with_counts() {
         &completion_tx,
         candidates,
         vec![path_keep.clone()],
+        &mut SpareReasons::new(),
     );
     match reply {
         GcReply::PurgeStarted {
