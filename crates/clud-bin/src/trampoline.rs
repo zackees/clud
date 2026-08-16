@@ -40,10 +40,11 @@ use crate::runtime_cache;
 /// everything the relayed clud starts joins the same job — including the
 /// processes that are meant to outlive it. The `__daemon` started by
 /// [`spawn_detached_self`] is exactly that. It detaches with
-/// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` and deliberately does **not**
-/// request `CREATE_BREAKAWAY_FROM_JOB`, so it stays a job member; when the
-/// relay exits and the job handle closes, the daemon is terminated with the
-/// rest of the job. The observable symptom is a `daemon.json` naming a PID
+/// `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB`.
+/// The breakaway keeps the daemon outside a client or test runner's
+/// kill-on-close Job Object. If a supervisor forbids breakaway, the spawn
+/// retries with the ordinary detached flags instead of failing a restart.
+/// The observable symptom is a `daemon.json` naming a PID
 /// that is already dead — the first of the 31 integration failures measured
 /// with `CLUD_USE_RUNTIME_CACHE=1` on Windows and recorded in #333.
 ///
@@ -99,6 +100,29 @@ pub fn relay_child_and_wait(program: &Path, args: &[impl AsRef<OsStr>]) -> std::
 /// investigated in #37 and the PTY attach timeouts in #38.
 pub fn spawn_detached_self(args: &[String]) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
+
+    #[cfg(windows)]
+    {
+        // A caller can itself be contained in a job that forbids breakaway.
+        // Prefer a durable daemon, but retain the prior detached behavior for
+        // those supervisors instead of turning `daemon restart` into an
+        // access-denied error.
+        let _guard = windows_stdio::NonInheritableStdioGuard::install();
+        match spawn_detached_command(&exe, args, true) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.raw_os_error() == Some(5) => {
+                return spawn_detached_command(&exe, args, false);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    #[cfg(unix)]
+    spawn_detached_command(&exe, args)
+}
+
+#[cfg(windows)]
+fn spawn_detached_command(exe: &Path, args: &[String], break_away: bool) -> std::io::Result<()> {
     let mut command = std::process::Command::new(exe);
     command.args(args);
     command.stdin(std::process::Stdio::null());
@@ -108,26 +132,43 @@ pub fn spawn_detached_self(args: &[String]) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(detached_creation_flags(break_away));
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    let _child = command.spawn()?;
+    Ok(())
+}
 
-    #[cfg(windows)]
-    let _guard = windows_stdio::NonInheritableStdioGuard::install();
+#[cfg(windows)]
+const fn detached_creation_flags(break_away: bool) -> u32 {
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    if break_away {
+        flags | CREATE_BREAKAWAY_FROM_JOB
+    } else {
+        flags
+    }
+}
+
+#[cfg(unix)]
+fn spawn_detached_command(exe: &Path, args: &[String]) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new(exe);
+    command.args(args);
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::null());
+    command.stderr(std::process::Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let _child = command.spawn()?;
     Ok(())
 }
@@ -327,6 +368,17 @@ fn gc_old_files(dir: &Path, stem: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_daemon_breaks_away_from_a_parent_job() {
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        assert_ne!(detached_creation_flags(true) & CREATE_BREAKAWAY_FROM_JOB, 0);
+        assert_eq!(
+            detached_creation_flags(false) & CREATE_BREAKAWAY_FROM_JOB,
+            0
+        );
+    }
 
     #[test]
     fn test_gc_old_files() {
