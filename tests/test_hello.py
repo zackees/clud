@@ -696,7 +696,10 @@ def _run_picker_on_tty(
     cwd: Path,
 ) -> tuple[int, str]:
     """Run a bare launch through the harness picker."""
-    from running_process import PseudoTerminalProcess
+    import errno
+    import pty
+    import select
+    import subprocess
 
     terminal_before = cwd / f"terminal-before-{time.time_ns()}"
     terminal_after = cwd / f"terminal-after-{time.time_ns()}"
@@ -711,33 +714,48 @@ launch_status=$?
 stty -g > "$TERM_AFTER"
 exit "$launch_status"
 """
-    child = PseudoTerminalProcess(
-        ["sh", "-c", shell_command],
-        cwd=cwd,
-        env=child_env,
-        capture=True,
-    )
+    master, slave = pty.openpty()
+    try:
+        child = subprocess.Popen(
+            ["sh", "-c", shell_command],
+            cwd=cwd,
+            env=child_env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+    finally:
+        os.close(slave)
+
+    output = bytearray()
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            if child.poll() is not None:
+            readable, _, _ = select.select([master], [], [], 0.1)
+            if readable:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    break
+            if child.poll() is not None and not readable:
                 break
-            time.sleep(0.05)
         if child.poll() is None:
             raise TimeoutError("harness picker did not exit within 15 seconds")
         returncode = child.wait(timeout=2)
-        output = child.output_text
     finally:
         if child.poll() is None:
             child.terminate()
         if child.poll() is None:
             child.kill()
-        child.close()
+        os.close(master)
 
     assert terminal_before.read_text(encoding="utf-8") == terminal_after.read_text(
         encoding="utf-8"
     )
-    return returncode, output
+    return returncode, output.decode(errors="replace")
 
 
 def test_installed_harness_picker_uses_saved_default_and_counts_down(
