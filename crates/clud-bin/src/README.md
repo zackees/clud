@@ -440,8 +440,11 @@ Quick lookup, which file owns a given subcommand:
   `daemon/gc_service.rs` (registry owner inside the always-on `__daemon`).
 - `clud grind [url]` -> `grind.rs` resolves the repo's `origin` remote to its
   forge issues page (GitHub `<repo>/issues`, GitLab `<repo>/-/issues`), prints
-  the green notice, then rewrites the command to `Do { url }` in `main.rs` so
-  the shared `/goal` launch path runs. An explicit URL is passed through verbatim.
+  the green notice, and keeps the `Grind` command (issue #897 — it no longer
+  rewrites to `Do`). `command/builder.rs` then builds the `/loop` prompt via
+  `build_grind_prompt` and arms the loop subsystem's DONE/BLOCKED markers, so
+  grinding iterates one issue at a time instead of running `/goal`'s
+  single-shot flow. An explicit URL is passed through verbatim.
 - `clud --clean-worktrees` -> `worktrees.rs`.
 - `clud optimize rust` -> `optimize.rs`.
 - `clud --fix-hooks` -> `hook_health/`.

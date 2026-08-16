@@ -1079,6 +1079,45 @@ fn test_claude_loop_subprocess_injects_stream_json() {
     );
 }
 
+/// Issue #897: `grind` drives the same `/loop` contract and pushes its prompt
+/// with `push_prompt`, so on Claude it gets `-p` and buffers for the whole
+/// iteration — the exact silence the stream-json injection above exists to
+/// fix. It was excluded only because the guard matched `Command::Loop`
+/// literally, while `is_loop` (the launch-mode input) already covered it.
+#[test]
+fn test_claude_grind_subprocess_injects_stream_json() {
+    let p = plan(&[
+        "clud",
+        "--subprocess",
+        "grind",
+        "https://github.com/zackees/clud/issues",
+    ]);
+    assert_eq!(p.launch_mode, LaunchMode::Subprocess);
+    let idx = expect_arg(&p.command, "stream-json");
+    assert_eq!(
+        p.command[idx - 1],
+        "--output-format",
+        "stream-json must follow --output-format; cmd={:?}",
+        p.command
+    );
+    assert!(
+        p.command.iter().any(|a| a == "--verbose"),
+        "stream-json requires --verbose per claude's CLI contract; cmd={:?}",
+        p.command
+    );
+    assert!(
+        p.stream_json_progress,
+        "grind must signal the runtime to parse stream-json, like loop"
+    );
+    // The prompt must stay last — downstream tooling and the dry-run JSON
+    // contract depend on `command[-1]` being the prompt body.
+    assert!(
+        p.command.last().is_some_and(|a| a.starts_with("/loop")),
+        "grind prompt must remain the final argument; cmd={:?}",
+        p.command
+    );
+}
+
 #[test]
 fn test_claude_loop_stream_json_flags_emitted_before_prompt() {
     // Regression guard for PR #91 / commit 8c0818a: the stream-json flags

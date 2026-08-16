@@ -459,7 +459,15 @@ fn build_launch_plan_for_target_at(
 
     cmd.extend(args.passthrough.iter().cloned());
 
-    let is_loop_cmd = matches!(&args.command, Some(Command::Loop { .. }));
+    // `grind` belongs here too (issue #897): it drives the same `/loop`
+    // contract, sets `loop_markers`, and pushes its prompt with `push_prompt`
+    // — so on Claude it gets `-p` and buffers exactly like `clud loop` did
+    // before the stream-json fix below. `is_loop` (the launch-mode input) is
+    // already true for it; only this narrower check had been left behind.
+    let is_loop_cmd = matches!(
+        &args.command,
+        Some(Command::Loop { .. }) | Some(Command::Grind { .. })
+    );
     let is_loop = loop_markers.is_some() && repeat_schedule.is_none();
     let parent_has_tty = crate::session::terminals_are_interactive();
     let launch_mode = crate::backend::resolve_launch_mode(
