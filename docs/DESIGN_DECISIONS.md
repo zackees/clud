@@ -1904,3 +1904,29 @@ harness-local estimation; clud never fabricates a count for a synthetic route.
 Deprecated `codex-auth`/`deepseek-auth` aliases also print their exact
 replacement spelling, including preserved flags, instead of a bare command
 name.
+
+## DD-044: Installed harness selection is transient launcher history
+
+**Context:** DeepSeek AI publishes a separate developer-preview harness whose
+binary and command grammar (`dsh web`, or `dsh --profile headless <prompt>`)
+are distinct from clud's existing DeepSeek-provider-through-Claude route.
+Meanwhile, a bare launch had no fast way to choose among multiple installed
+agent harnesses without turning a remembered UI choice into routing policy.
+
+**Decision:** Model provider and executable harness identity remain separate.
+`--deepseek` retains its existing provider meaning, while
+`--harness deepseek` selects `dsh`. Bare interactive launches discover
+Claude, Codex, and DeepSeek Harness in stable order. One choice launches
+directly; multiple choices use a three-second crossterm countdown selector.
+Navigation cancels auto-submit, and confirmation writes
+`launcher.last_harness` atomically. That key is not consulted as
+`harness.default` and never rewrites provider profiles. Explicit and
+noninteractive invocations bypass the selector. DSH installation remains
+user-owned while it is a developer preview; clud reports upstream's `npx`
+command rather than performing a global npm install.
+
+**Consequences:** Repeated bare launches are quick without silently changing
+provider routing, `--deepseek` remains backward compatible, and DSH's unstable
+grammar is isolated in the command adapter. The picker must restore terminal
+state on every exit, and Claude/Codex-specific options must error for DSH
+instead of becoming misleading no-ops.

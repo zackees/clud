@@ -164,6 +164,8 @@ CLI surface and backend resolution:
   PATH lookup, and backend-path resolution. See
   `docs/architecture/launch-targets.md` and
   `docs/architecture/provider-selection.md`.
+- `harness_picker.rs` - installed Claude/Codex/DeepSeek discovery plus the
+  three-second bare-launch selector and its pure choice/countdown model.
 - `provider_catalog.rs` - the single registry mapping stable clud model IDs,
   gateway discovery IDs, provider wire IDs, compatibility aliases, and
   independent effort/context capability metadata.

@@ -54,6 +54,16 @@ struct ClaudeSettings {
 
 impl ForegroundRuntime {
     pub fn start(plan: &LaunchPlan, env: Vec<(String, String)>) -> Result<Self, BridgeError> {
+        // `dsh` owns its provider configuration and credentials. A native
+        // DeepSeek Harness launch needs no clud vault or bridge setup at all.
+        if plan.effective_harness() == Backend::DeepSeek {
+            return Ok(Self {
+                env,
+                bridge: None,
+                claude_settings: None,
+                startup_notices: Vec::new(),
+            });
+        }
         // Prefer a descriptor resolved from the plan's provider so the store
         // is built with that provider's own vault identifiers. Unified plans
         // (provider `Claude`, no descriptor) fall back to the DeepSeek-scoped
@@ -802,6 +812,7 @@ mod tests {
             requested_harness: Some(match harness {
                 Backend::Claude => HarnessSelection::Claude,
                 Backend::Codex => HarnessSelection::Codex,
+                Backend::DeepSeek => HarnessSelection::DeepSeek,
             }),
             effective_harness: Some(harness),
             provider_source: Some(PreferenceSource::Cli),
@@ -816,6 +827,20 @@ mod tests {
             codex_model: None,
             model_selection: None,
         }
+    }
+
+    #[test]
+    fn native_deepseek_harness_needs_no_clud_bridge_or_vault() {
+        let runtime = ForegroundRuntime::start(
+            &plan(ModelProvider::DeepSeek, Backend::DeepSeek),
+            vec![("UNCHANGED".to_string(), "yes".to_string())],
+        )
+        .unwrap();
+        assert!(runtime.bridge.is_none());
+        assert_eq!(
+            runtime.env(),
+            &[("UNCHANGED".to_string(), "yes".to_string())]
+        );
     }
 
     fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {

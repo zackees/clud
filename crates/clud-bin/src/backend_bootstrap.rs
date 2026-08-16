@@ -23,6 +23,7 @@ const CLAUDE_WINDOWS_CMD_INSTALL_COMMAND: &str =
 const CODEX_POSIX_INSTALL_COMMAND: &str = "curl -fsSL https://chatgpt.com/codex/install.sh | sh";
 const CODEX_WINDOWS_POWERSHELL_INSTALL_COMMAND: &str =
     "irm https://chatgpt.com/codex/install.ps1 | iex";
+const DEEPSEEK_RUN_COMMAND: &str = "npx @deepseek-ai/dsh web";
 
 const MIN_UNIFIED_CLAUDE_CODE_VERSION: ClaudeCodeVersion = ClaudeCodeVersion {
     major: 2,
@@ -71,6 +72,7 @@ pub enum InstallerPlan {
         command: &'static str,
         cmd_fallback: Option<&'static str>,
     },
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,7 @@ pub enum InstallLocation {
     HomeLocalBin { executable: &'static str },
     UserProfileLocalBin { executable: &'static str },
     LocalAppDataCodexBin,
+    PathOnly,
 }
 
 impl InstallLocation {
@@ -98,6 +101,7 @@ impl InstallLocation {
                     .join("bin")
                     .join("codex.exe")
             }),
+            Self::PathOnly => None,
         }
     }
 }
@@ -198,6 +202,17 @@ impl BackendInstallSpec {
                     cmd_fallback: None,
                 },
                 fallback_location: InstallLocation::LocalAppDataCodexBin,
+            },
+            (Backend::DeepSeek, platform) => Self {
+                backend,
+                platform,
+                product_name: "DeepSeek Harness",
+                vendor_name: "DeepSeek AI",
+                installer_kind: "npm developer preview",
+                prompt_text: "DeepSeek Harness is not installed.",
+                manual_install_command: DEEPSEEK_RUN_COMMAND,
+                installer: InstallerPlan::Unsupported,
+                fallback_location: InstallLocation::PathOnly,
             },
         }
     }
@@ -376,6 +391,17 @@ where
         return Ok(backend.executable_name().to_string());
     }
 
+    // DeepSeek Harness is currently a rapidly changing npm developer preview.
+    // Upstream documents npx execution rather than a stable native installer,
+    // so clud reports that exact path instead of mutating global npm state.
+    if backend == Backend::DeepSeek {
+        return Err(BackendBootstrapError::BackendMissingNonInteractive {
+            backend,
+            product_name: spec.product_name,
+            install_command: spec.manual_install_command,
+        });
+    }
+
     if !interactive {
         return Err(BackendBootstrapError::BackendMissingNonInteractive {
             backend,
@@ -471,6 +497,10 @@ fn run_backend_installer(spec: &BackendInstallSpec) -> Result<(), String> {
             command,
             cmd_fallback,
         } => run_windows_powershell_installer(command, cmd_fallback, spec.backend),
+        InstallerPlan::Unsupported => Err(format!(
+            "automatic installation is unavailable; run {}",
+            spec.manual_install_command
+        )),
     }
 }
 
@@ -866,6 +896,22 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_install_spec_is_path_only_with_official_npx_guidance() {
+        for platform in [
+            InstallPlatform::MacOs,
+            InstallPlatform::Linux,
+            InstallPlatform::Windows,
+        ] {
+            let spec = BackendInstallSpec::for_backend(Backend::DeepSeek, platform);
+            assert_eq!(spec.product_name, "DeepSeek Harness");
+            assert_eq!(spec.manual_install_command, DEEPSEEK_RUN_COMMAND);
+            assert_eq!(spec.installer, InstallerPlan::Unsupported);
+            assert_eq!(spec.fallback_location, InstallLocation::PathOnly);
+            assert_eq!(spec.fallback_path(&path_env()), None);
+        }
+    }
+
+    #[test]
     fn codex_linux_install_spec_uses_standalone_command_and_home_local_bin() {
         let spec = BackendInstallSpec::for_backend(Backend::Codex, InstallPlatform::Linux);
         assert_eq!(spec.manual_install_command, CODEX_POSIX_INSTALL_COMMAND);
@@ -922,7 +968,7 @@ mod tests {
 
     #[test]
     fn dry_run_uses_placeholder_without_installing() {
-        for backend in [Backend::Claude, Backend::Codex] {
+        for backend in Backend::ALL {
             let mut host = MockHost::default();
             let (path, prompt) = resolve_with(backend, true, true, "y\n", &mut host).expect("path");
             assert_eq!(path, backend.executable_name());
@@ -962,6 +1008,23 @@ mod tests {
         );
         assert!(err.to_string().contains("chatgpt.com/codex/install.sh"));
         assert!(host.installer_runs.is_empty());
+    }
+
+    #[test]
+    fn deepseek_missing_even_interactively_reports_guidance_without_installing() {
+        let mut host = MockHost::default();
+        let err = resolve_with(Backend::DeepSeek, false, true, "y\n", &mut host).unwrap_err();
+        assert_eq!(
+            err,
+            BackendBootstrapError::BackendMissingNonInteractive {
+                backend: Backend::DeepSeek,
+                product_name: "DeepSeek Harness",
+                install_command: DEEPSEEK_RUN_COMMAND,
+            }
+        );
+        assert!(err.to_string().contains("npx @deepseek-ai/dsh web"));
+        assert!(host.installer_runs.is_empty());
+        assert!(host.verified.is_empty());
     }
 
     #[test]

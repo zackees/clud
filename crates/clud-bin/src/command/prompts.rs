@@ -93,6 +93,9 @@ pub(super) fn push_prompt(cmd: &mut Vec<String>, backend: Backend, prompt: Strin
         Backend::Codex => {
             cmd.push(prompt);
         }
+        Backend::DeepSeek => {
+            cmd.push(prompt);
+        }
     }
 }
 

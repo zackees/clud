@@ -108,14 +108,25 @@ pub enum HarnessSelection {
     Default,
     Claude,
     Codex,
+    #[serde(rename = "deepseek")]
+    DeepSeek,
 }
 
 impl HarnessSelection {
+    pub const fn for_backend(backend: Backend) -> Self {
+        match backend {
+            Backend::Claude => Self::Claude,
+            Backend::Codex => Self::Codex,
+            Backend::DeepSeek => Self::DeepSeek,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::DeepSeek => "deepseek",
         }
     }
 
@@ -124,6 +135,7 @@ impl HarnessSelection {
             "default" => Some(Self::Default),
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "deepseek" | "dsh" => Some(Self::DeepSeek),
             _ => None,
         }
     }
@@ -133,6 +145,7 @@ impl HarnessSelection {
             Self::Default => provider.native_harness(),
             Self::Claude => Backend::Claude,
             Self::Codex => Backend::Codex,
+            Self::DeepSeek => Backend::DeepSeek,
         }
     }
 }
@@ -180,6 +193,7 @@ pub enum LaunchTargetError {
     KimiViaCodexUnsupported,
     OpenRouterViaCodexUnsupported,
     UnifiedViaCodexUnsupported,
+    UnifiedViaDeepSeekUnsupported,
 }
 
 impl std::fmt::Display for LaunchTargetError {
@@ -191,17 +205,21 @@ impl std::fmt::Display for LaunchTargetError {
             ),
             Self::DeepSeekViaCodexUnsupported => write!(
                 f,
-                "unsupported launch target: DeepSeek provider requires the Claude harness"
+                "unsupported launch target: DeepSeek provider cannot use the Codex harness"
             ),
             Self::KimiViaCodexUnsupported => write!(
                 f,
-                "unsupported launch target: Kimi provider requires the Claude harness"
+                "unsupported launch target: Kimi provider cannot use the Codex harness"
             ),
             Self::OpenRouterViaCodexUnsupported => write!(
                 f,
-                "unsupported launch target: OpenRouter provider requires the Claude harness"
+                "unsupported launch target: OpenRouter provider cannot use the Codex harness"
             ),
             Self::UnifiedViaCodexUnsupported => write!(
+                f,
+                "unsupported launch target: unified routing requires the Claude harness"
+            ),
+            Self::UnifiedViaDeepSeekUnsupported => write!(
                 f,
                 "unsupported launch target: unified routing requires the Claude harness"
             ),
@@ -216,14 +234,18 @@ impl std::error::Error for LaunchTargetError {}
 pub enum Backend {
     Claude,
     Codex,
+    DeepSeek,
 }
 
 impl Backend {
+    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::DeepSeek];
+
     /// The executable name to search for on PATH.
     pub fn executable_name(&self) -> &'static str {
         match self {
             Backend::Claude => "claude",
             Backend::Codex => "codex",
+            Backend::DeepSeek => "dsh",
         }
     }
 
@@ -232,6 +254,8 @@ impl Backend {
             Some(Backend::Claude)
         } else if value.eq_ignore_ascii_case("codex") {
             Some(Backend::Codex)
+        } else if value.eq_ignore_ascii_case("deepseek") || value.eq_ignore_ascii_case("dsh") {
+            Some(Backend::DeepSeek)
         } else {
             None
         }
@@ -241,6 +265,7 @@ impl Backend {
         match self {
             Self::Claude => ModelProvider::Claude,
             Self::Codex => ModelProvider::Codex,
+            Self::DeepSeek => ModelProvider::DeepSeek,
         }
     }
 }
@@ -360,6 +385,9 @@ pub fn resolve_routed_launch_target(
         if requested_harness == HarnessSelection::Codex {
             return Err(LaunchTargetError::UnifiedViaCodexUnsupported);
         }
+        if requested_harness == HarnessSelection::DeepSeek {
+            return Err(LaunchTargetError::UnifiedViaDeepSeekUnsupported);
+        }
         return Ok(ResolvedLaunchTarget {
             routing_mode,
             model_provider: cli_provider.unwrap_or(ModelProvider::Claude),
@@ -438,6 +466,7 @@ pub fn saved_harness_override_notice(
     let name = match target.effective_harness {
         Backend::Claude => "Claude",
         Backend::Codex => "Codex",
+        Backend::DeepSeek => "DeepSeek",
     };
     Some(format!(
         "\x1b[32m[clud] Harness override: {name} (global setting)\x1b[0m"
@@ -518,6 +547,7 @@ fn resolve_launch_mode_with_pty_default(
         Backend::Codex if codex_uses_exec => LaunchMode::Subprocess,
         Backend::Codex if parent_has_tty => LaunchMode::Subprocess,
         Backend::Codex => LaunchMode::Pty,
+        Backend::DeepSeek => LaunchMode::Subprocess,
     }
 }
 
@@ -622,6 +652,7 @@ mod tests {
             Some(HarnessSelection::Default),
             Some(HarnessSelection::Claude),
             Some(HarnessSelection::Codex),
+            Some(HarnessSelection::DeepSeek),
         ];
 
         for (claude, codex, deepseek, cli_provider) in cli_providers {
@@ -759,7 +790,7 @@ mod tests {
         assert_eq!(target, Err(LaunchTargetError::KimiViaCodexUnsupported));
         assert_eq!(
             target.unwrap_err().to_string(),
-            "unsupported launch target: Kimi provider requires the Claude harness"
+            "unsupported launch target: Kimi provider cannot use the Codex harness"
         );
 
         let target =
@@ -810,6 +841,20 @@ mod tests {
                 None,
             ),
             Err(LaunchTargetError::UnifiedViaCodexUnsupported)
+        );
+    }
+
+    #[test]
+    fn unified_routing_rejects_an_explicit_deepseek_harness() {
+        assert_eq!(
+            resolve_routed_launch_target(
+                RoutingMode::Unified,
+                None,
+                Some(HarnessSelection::DeepSeek),
+                None,
+                None,
+            ),
+            Err(LaunchTargetError::UnifiedViaDeepSeekUnsupported)
         );
     }
 

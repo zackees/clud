@@ -12,6 +12,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from tests import process
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -132,6 +134,18 @@ def _fake_claude_on_path(bin_dir: Path) -> None:
     else:
         fake = bin_dir / "claude"
         fake.write_text("#!/usr/bin/env sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+
+
+def _fake_harnesses_on_path(bin_dir: Path) -> None:
+    """Install logging Claude/Codex/DeepSeek shims for POSIX picker tests."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for executable in ("claude", "codex", "dsh"):
+        fake = bin_dir / executable
+        fake.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "{executable}" >> "$HARNESS_LOG"\n',
+            encoding="utf-8",
+        )
         fake.chmod(0o755)
 
 
@@ -440,14 +454,14 @@ def test_dry_run_openrouter_rejects_codex_harness() -> None:
     assert result.returncode == 2
     output = (result.stdout or "") + (result.stderr or "")
     assert "openrouter" in output.lower()
-    assert "claude harness" in output.lower()
+    assert "cannot use the codex harness" in output.lower()
 
 
 def test_dry_run_deepseek_rejects_codex_harness() -> None:
     result = _run("--dry-run", "--deepseek", "--harness", "codex", "-p", "hello")
     assert result.returncode == 2
     assert "deepseek" in result.stderr.lower()
-    assert "claude harness" in result.stderr.lower()
+    assert "cannot use the codex harness" in result.stderr.lower()
 
 
 def test_dry_run_deepseek_rejects_model_override() -> None:
@@ -674,6 +688,76 @@ def _run_on_tty(launch: Path, env: dict[str, str], cwd: Path, args: list[str]) -
         os.close(master)
 
     return returncode, output.decode(errors="replace") or str(child.stdout.read())
+
+
+def _run_picker_on_tty(
+    launch: Path,
+    env: dict[str, str],
+    cwd: Path,
+) -> tuple[int, str]:
+    """Run a bare launch through the harness picker."""
+    terminal_before = cwd / f"terminal-before-{time.time_ns()}"
+    terminal_after = cwd / f"terminal-after-{time.time_ns()}"
+    child_env = dict(env)
+    child_env["CLUD_LAUNCH"] = str(launch)
+    child_env["TERM_BEFORE"] = str(terminal_before)
+    child_env["TERM_AFTER"] = str(terminal_after)
+    child_env["PICKER_SHELL"] = """
+stty -g > "$TERM_BEFORE"
+"$CLUD_LAUNCH" --no-daemon --no-fix-hooks --no-cpu-banner --no-dnd --subprocess
+launch_status=$?
+stty -g > "$TERM_AFTER"
+exit "$launch_status"
+"""
+    python_command = """
+import os
+import pty
+
+status = pty.spawn(["sh", "-c", os.environ["PICKER_SHELL"]])
+raise SystemExit(os.waitstatus_to_exitcode(status))
+"""
+    result = process.run(
+        [sys.executable, "-c", python_command],
+        cwd=cwd,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert terminal_before.read_text(encoding="utf-8") == terminal_after.read_text(
+        encoding="utf-8"
+    )
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
+def test_installed_harness_picker_launches_default_and_restores_terminal(
+    tmp_path: Path,
+) -> None:
+    if sys.platform == "win32":
+        # Python's stdlib has no ConPTY API; the picker state machine and the
+        # Windows crossterm build are covered by the Rust suite.
+        pytest.skip("running-process has no supported Windows test PTY")
+
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    state_dir = tmp_path / "state"
+    fake_bin = tmp_path / "bin"
+    harness_log = tmp_path / "harness.log"
+    repo.mkdir()
+    home.mkdir()
+    _fake_harnesses_on_path(fake_bin)
+
+    with _copied_clud_tempdir() as temp_dir:
+        source = Path(CLUD)
+        launch = _copy_clud_for_test(temp_dir)
+        env = _isolated_clud_env(source, home, state_dir)
+        env["PATH"] = str(fake_bin) + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
+        env["HARNESS_LOG"] = str(harness_log)
+
+        returncode, output = _run_picker_on_tty(launch, env, repo)
+        assert returncode == 0, output
+        assert harness_log.read_text(encoding="utf-8").splitlines() == ["claude"]
 
 
 def test_plan_mode_suppression_is_announced_once_in_green_on_tty(
