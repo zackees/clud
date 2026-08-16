@@ -696,66 +696,39 @@ def _run_picker_on_tty(
     cwd: Path,
 ) -> tuple[int, str]:
     """Run a bare launch through the harness picker."""
-    import errno
-    import pty
-    import select
-    import subprocess
-
     terminal_before = cwd / f"terminal-before-{time.time_ns()}"
     terminal_after = cwd / f"terminal-after-{time.time_ns()}"
     child_env = dict(env)
     child_env["CLUD_LAUNCH"] = str(launch)
     child_env["TERM_BEFORE"] = str(terminal_before)
     child_env["TERM_AFTER"] = str(terminal_after)
-    shell_command = """
+    child_env["PICKER_SHELL"] = """
 stty -g > "$TERM_BEFORE"
 "$CLUD_LAUNCH" --no-daemon --no-fix-hooks --no-cpu-banner --no-dnd --subprocess
 launch_status=$?
 stty -g > "$TERM_AFTER"
 exit "$launch_status"
 """
-    master, slave = pty.openpty()
-    try:
-        child = subprocess.Popen(
-            ["sh", "-c", shell_command],
-            cwd=cwd,
-            env=child_env,
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            close_fds=True,
-        )
-    finally:
-        os.close(slave)
+    python_command = """
+import os
+import pty
 
-    output = bytearray()
-    try:
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([master], [], [], 0.1)
-            if readable:
-                try:
-                    output.extend(os.read(master, 4096))
-                except OSError as error:
-                    if error.errno != errno.EIO:
-                        raise
-                    break
-            if child.poll() is not None and not readable:
-                break
-        if child.poll() is None:
-            raise TimeoutError("harness picker did not exit within 15 seconds")
-        returncode = child.wait(timeout=2)
-    finally:
-        if child.poll() is None:
-            child.terminate()
-        if child.poll() is None:
-            child.kill()
-        os.close(master)
+status = pty.spawn(["sh", "-c", os.environ["PICKER_SHELL"]])
+raise SystemExit(os.waitstatus_to_exitcode(status))
+"""
+    result = process.run(
+        [sys.executable, "-c", python_command],
+        cwd=cwd,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
 
     assert terminal_before.read_text(encoding="utf-8") == terminal_after.read_text(
         encoding="utf-8"
     )
-    return returncode, output.decode(errors="replace")
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
 def test_installed_harness_picker_uses_saved_default_and_counts_down(
