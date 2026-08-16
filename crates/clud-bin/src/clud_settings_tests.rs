@@ -992,6 +992,22 @@ fn provider_profile_rejects_unknown_effort() {
 }
 
 #[test]
+fn provider_profile_invalid_harness_lists_deepseek_as_supported() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"providers":{"codex":{"harness":"other"}}}"#,
+    );
+    let error = load_launch_preferences_read_only_at(home.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("must be default, claude, codex, or deepseek"),
+        "{error}"
+    );
+}
+
+#[test]
 fn provider_profile_rejects_unsupported_context_window() {
     let home = tempdir().unwrap();
     write_provider_settings(
@@ -1018,4 +1034,26 @@ fn provider_profile_rejects_codex_harness_on_non_codex_provider() {
             ..
         })
     ));
+}
+
+#[test]
+fn launcher_last_harness_round_trips_without_changing_routing_preferences() {
+    let home = tempdir().unwrap();
+    write_provider_settings(
+        home.path(),
+        r#"{"backend":{"default":"codex"},"custom":{"keep":true}}"#,
+    );
+
+    save_last_launcher_harness_at(home.path(), Backend::DeepSeek).unwrap();
+
+    assert_eq!(
+        load_last_launcher_harness_at(home.path()).unwrap(),
+        Some(Backend::DeepSeek)
+    );
+    assert_eq!(
+        load_default_model_provider_at(home.path()).unwrap(),
+        Some(ModelProvider::Codex)
+    );
+    let document = read_settings_json_file(&settings_path_at(home.path())).unwrap();
+    assert_eq!(document["custom"]["keep"], true);
 }

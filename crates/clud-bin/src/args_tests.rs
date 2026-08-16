@@ -166,7 +166,7 @@ fn test_kimi_with_codex_harness_rejected_before_any_vault_access() {
     );
     assert_eq!(
         result.unwrap_err().to_string(),
-        "unsupported launch target: Kimi provider requires the Claude harness"
+        "unsupported launch target: Kimi provider cannot use the Codex harness"
     );
 }
 
@@ -185,11 +185,44 @@ fn test_harness_flag_is_typed_and_not_forwarded() {
             vec!["clud", "--codex", "--harness", "codex"],
             HarnessSelection::Codex,
         ),
+        (
+            vec!["clud", "--harness", "deepseek"],
+            HarnessSelection::DeepSeek,
+        ),
     ] {
         let args = parse(&raw);
         assert_eq!(args.harness, Some(expected));
         assert!(args.passthrough.is_empty());
     }
+}
+
+#[test]
+fn deepseek_harness_rejects_clud_options_it_cannot_translate() {
+    for (argv, expected) in [
+        (vec!["clud", "--message", "system"], "--message"),
+        (vec!["clud", "--continue"], "--continue"),
+        (vec!["clud", "--resume"], "--resume"),
+        (vec!["clud", "--model", "model"], "--model"),
+        (vec!["clud", "--effort", "high"], "--effort"),
+        (vec!["clud", "--context-window", "1m"], "--context-window"),
+        (vec!["clud", "--safe"], "--safe"),
+        (vec!["clud", "--unattended"], "--unattended"),
+        (vec!["clud", "--allow-plan-mode"], "--allow-plan-mode"),
+    ] {
+        let args = parse(&argv);
+        assert_eq!(args.unsupported_deepseek_harness_option(), Some(expected));
+    }
+    let args = parse(&[
+        "clud",
+        "--harness",
+        "deepseek",
+        "-p",
+        "hello",
+        "--",
+        "--verbose",
+    ]);
+    assert_eq!(args.unsupported_deepseek_harness_option(), None);
+    assert_eq!(args.passthrough, ["--verbose"]);
 }
 
 #[test]

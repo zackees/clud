@@ -170,6 +170,61 @@ fn deepseek_bridge_target() -> ResolvedLaunchTarget {
     }
 }
 
+fn deepseek_harness_target() -> ResolvedLaunchTarget {
+    ResolvedLaunchTarget {
+        routing_mode: RoutingMode::Direct,
+        model_provider: ModelProvider::DeepSeek,
+        requested_harness: HarnessSelection::DeepSeek,
+        effective_harness: Backend::DeepSeek,
+        provider_source: PreferenceSource::Cli,
+        harness_source: PreferenceSource::Cli,
+    }
+}
+
+#[test]
+fn deepseek_harness_bare_launch_uses_web_profile() {
+    let args = parse(&["clud", "--harness", "deepseek"]);
+    let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
+    assert_eq!(plan.command, vec!["dsh", "web"]);
+    assert_eq!(plan.effective_harness(), Backend::DeepSeek);
+}
+
+#[test]
+fn deepseek_harness_prompt_uses_headless_profile_without_yolo_flags() {
+    let args = parse(&["clud", "--harness", "deepseek", "-p", "hello"]);
+    let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
+    assert_eq!(plan.command, vec!["dsh", "--profile", "headless", "hello"]);
+}
+
+#[test]
+fn deepseek_harness_generated_grind_prompt_uses_headless_profile() {
+    let args = parse(&[
+        "clud",
+        "--harness",
+        "deepseek",
+        "grind",
+        "https://github.com/zackees/clud/issues",
+    ]);
+    let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
+    assert_eq!(&plan.command[..3], ["dsh", "--profile", "headless"]);
+    assert!(plan.command.last().unwrap().starts_with("/loop "));
+}
+
+#[test]
+fn deepseek_harness_native_passthrough_does_not_inject_web() {
+    let args = parse(&[
+        "clud",
+        "--harness",
+        "deepseek",
+        "--",
+        "--profile",
+        "headless",
+        "hello",
+    ]);
+    let plan = build_launch_plan_for_target(&args, deepseek_harness_target(), "dsh");
+    assert_eq!(plan.command, ["dsh", "--profile", "headless", "hello"]);
+}
+
 fn kimi_bridge_target() -> ResolvedLaunchTarget {
     ResolvedLaunchTarget {
         routing_mode: RoutingMode::Direct,

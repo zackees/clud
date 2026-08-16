@@ -32,6 +32,7 @@ pub fn has_noninteractive_prompt(args: &Args) -> bool {
                 | Some(Command::Rebase)
                 | Some(Command::Fix { .. })
                 | Some(Command::Do { .. })
+                | Some(Command::Grind { .. })
         )
 }
 
@@ -164,6 +165,14 @@ fn build_launch_plan_for_target_at(
         && !codex_uses_exec
         && (args.continue_session || args.resume.is_some());
 
+    if matches!(backend, Backend::DeepSeek) {
+        if has_noninteractive_prompt(args) {
+            cmd.extend(["--profile".to_string(), "headless".to_string()]);
+        } else if args.passthrough.is_empty() {
+            cmd.push("web".to_string());
+        }
+    }
+
     if matches!(backend, Backend::Codex) {
         for override_value in &args.codex_config_overrides {
             cmd.push("-c".to_string());
@@ -194,6 +203,7 @@ fn build_launch_plan_for_target_at(
         match backend {
             Backend::Claude => cmd.push("--dangerously-skip-permissions".to_string()),
             Backend::Codex => cmd.push("--dangerously-bypass-approvals-and-sandbox".to_string()),
+            Backend::DeepSeek => {}
         }
     }
 
@@ -266,6 +276,7 @@ fn build_launch_plan_for_target_at(
                 cmd.push("-m".to_string());
                 cmd.push(emitted);
             }
+            Backend::DeepSeek => {}
         }
     }
     // Direct Codex-via-Claude already carries effort in the bridge-owned
@@ -440,6 +451,7 @@ fn build_launch_plan_for_target_at(
                             cmd.push(term.clone());
                         }
                     }
+                    Backend::DeepSeek => {}
                 }
             }
         }

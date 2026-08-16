@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use crate::backend::{HarnessSelection, ModelProvider, RoutingMode};
 use crate::graphics::GraphicsMode;
 
-/// Fast CLI for running Claude Code and Codex in YOLO mode.
+/// Fast CLI for running supported agent harnesses in YOLO mode.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "clud",
     version,
-    about = "Fast CLI for running Claude Code and Codex in YOLO mode",
+    about = "Fast CLI for running supported agent harnesses in YOLO mode",
     after_help = "Unknown flags are forwarded directly to the backend agent."
 )]
 pub struct Args {
@@ -273,6 +273,34 @@ impl WebTermPreference {
 }
 
 impl Args {
+    /// Return the first clud option whose semantics are owned by Claude or
+    /// Codex and therefore cannot be translated honestly to DeepSeek Harness.
+    /// Backend passthrough remains available after `--` for native `dsh`
+    /// options.
+    pub fn unsupported_deepseek_harness_option(&self) -> Option<&'static str> {
+        if self.message.is_some() {
+            Some("--message")
+        } else if self.continue_session {
+            Some("--continue")
+        } else if self.resume.is_some() {
+            Some("--resume")
+        } else if self.model.is_some() {
+            Some("--model")
+        } else if self.effort.is_some() {
+            Some("--effort")
+        } else if self.context_window.is_some() {
+            Some("--context-window")
+        } else if self.safe {
+            Some("--safe")
+        } else if self.unattended {
+            Some("--unattended")
+        } else if self.allow_plan_mode {
+            Some("--allow-plan-mode")
+        } else {
+            None
+        }
+    }
+
     /// Return only provider intent that came from the command line. Model
     /// inference and saved defaults are resolved later so source metadata does
     /// not accidentally label `--provider` as a global setting.

@@ -3,8 +3,8 @@
 clud resolves two independent launch dimensions before harness bootstrap,
 setup, or launch-plan construction:
 
-- `ModelProvider` is the API/model family selected by `--claude` or `--codex`.
-- `HarnessSelection` is `default`, `claude`, or `codex`, selected by
+- `ModelProvider` is the API/model family selected by provider flags.
+- `HarnessSelection` is `default`, `claude`, `codex`, or `deepseek`, selected by
   `--harness`.
 
 `default` maps the provider to its native harness: Claude to Claude and Codex
@@ -12,6 +12,12 @@ to Codex. The resolved `Backend` remains the concrete executable compatibility
 type used by bootstrap, setup, argv construction, and runners. New code must
 not infer the provider from that legacy field; use `ResolvedLaunchTarget` or
 `LaunchPlan::model_provider()`.
+
+DeepSeek has two deliberately separate meanings. `--deepseek` keeps its
+backward-compatible meaning: use the DeepSeek API through Claude Code.
+`--harness deepseek` selects DeepSeek AI's `dsh` executable. A bare `dsh`
+launch maps to `dsh web`; a prompt-bearing launch maps to
+`dsh --profile headless <prompt>`.
 
 ## Resolution
 
@@ -40,6 +46,25 @@ unsupported launch target: Claude provider cannot use the Codex harness
 
 There is no fallback. HTTP translation and credentials are later phases under
 issue #622.
+
+## Bare interactive harness launcher
+
+A command-less launch on a real input and error terminal discovers `claude`,
+`codex`, and `dsh` in that stable order. One installed harness launches
+immediately. Multiple installed harnesses open the crossterm selector, whose
+highlighted row auto-launches after three seconds. Up/Down or j/k moves the
+highlight and disables the timeout; Enter confirms and Esc/Ctrl-C cancels.
+
+The confirmed choice is stored as `launcher.last_harness` in
+`~/.clud/settings.json`. This is launcher history only and does not alter
+`harness.default`, provider profiles, or routing policy. An absent saved
+harness falls back to the first installed row. Explicit provider/harness
+intent, prompts, non-TTY launches, dry runs, subcommands, and daemon-style
+launches bypass discovery and remain deterministic.
+
+DeepSeek Harness is PATH-only in this first integration. clud does not install
+the developer preview automatically; an explicit missing selection reports
+the upstream `npx @deepseek-ai/dsh web` guidance.
 
 ## Foreground Codex-through-Claude bridge
 

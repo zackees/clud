@@ -293,6 +293,45 @@ pub fn load_default_backend() -> Result<Option<Backend>, SettingsError> {
     Ok(load_default_model_provider()?.map(ModelProvider::native_harness))
 }
 
+/// Last harness chosen by the bare-launch picker. This is interaction history,
+/// not provider-routing policy, so it deliberately lives outside
+/// `backend.default` and `harness.default`.
+pub fn load_last_launcher_harness() -> Result<Option<Backend>, SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    load_last_launcher_harness_at(&home)
+}
+
+pub fn load_last_launcher_harness_at(home: &Path) -> Result<Option<Backend>, SettingsError> {
+    let document = read_settings_or_legacy(home)?;
+    Ok(document
+        .get("launcher")
+        .and_then(|value| value.get("last_harness"))
+        .and_then(Value::as_str)
+        .and_then(Backend::from_settings_str))
+}
+
+pub fn save_last_launcher_harness(backend: Backend) -> Result<(), SettingsError> {
+    let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
+    save_last_launcher_harness_at(&home, backend)
+}
+
+pub fn save_last_launcher_harness_at(home: &Path, backend: Backend) -> Result<(), SettingsError> {
+    with_settings_document(home, |document| {
+        let launcher = object_entry(document, "launcher");
+        launcher.insert(
+            "last_harness".to_string(),
+            Value::String(
+                match backend {
+                    Backend::Claude => "claude",
+                    Backend::Codex => "codex",
+                    Backend::DeepSeek => "deepseek",
+                }
+                .to_string(),
+            ),
+        );
+    })
+}
+
 pub fn load_default_model_provider() -> Result<Option<ModelProvider>, SettingsError> {
     let home = home_dir().ok_or(SettingsError::NoHomeDir)?;
     load_default_model_provider_at(&home)
@@ -393,7 +432,7 @@ fn provider_profile_from_document(
             HarnessSelection::from_settings_str(value).ok_or_else(|| {
                 invalid_provider_profile(
                     provider,
-                    format!("harness '{value}' must be default, claude, or codex"),
+                    format!("harness '{value}' must be default, claude, codex, or deepseek"),
                 )
             })
         })

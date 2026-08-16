@@ -16,7 +16,7 @@ marker paths, or stream-json injection.
 pub struct LaunchPlan {
     pub command: Vec<String>,           // argv: command[0] is the backend exe
     pub iterations: u32,                // 1 for one-shot; >1 for `clud loop`
-    pub backend: Backend,               // Claude | Codex
+    pub backend: Backend,               // Claude | Codex | DeepSeek
     pub routing_mode: RoutingMode,      // Direct | Unified provider routing
     pub model_provider: Option<ModelProvider>,
     pub requested_harness: Option<HarnessSelection>,
@@ -116,16 +116,15 @@ The legacy `Backend` enum now identifies the executable harness in plan
 construction. Model-provider selection is carried separately by
 `ResolvedLaunchTarget`.
 
-| Concern | Claude harness | Codex harness |
-|---|---|---|
-| Subcommand keyword | (none) | `exec` for non-interactive prompt; `resume` for `-c`/`--resume` |
-| YOLO flag | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` |
-| Model flag | `--model <id>` | `-m <id>` |
-| Prompt delivery | `-p <prompt>` | bare positional |
-| `-m <message>` | `-m <message>` passthrough | dropped because it would clobber `--model` |
-| `--continue` | `--continue` | `resume --last` |
-| `--resume <id>` | `--resume <id>` | `resume <id>` positional |
-| Stream-json progress | `--output-format stream-json --verbose` injected before `-p` for subprocess-mode loops | not exposed by codex; skipped |
+| Concern | Claude harness | Codex harness | DeepSeek harness |
+|---|---|---|---|
+| Subcommand keyword | (none) | `exec` for non-interactive prompt; `resume` for `-c`/`--resume` | `web` when interactive; `--profile headless` before a prompt |
+| YOLO flag | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | none; DSH owns permissions |
+| Model flag | `--model <id>` | `-m <id>` | unsupported; DSH owns provider/model profiles |
+| Prompt delivery | `-p <prompt>` | bare positional | bare positional after the headless profile |
+| `-m <message>` | `-m <message>` passthrough | dropped because it would clobber `--model` | rejected before bootstrap |
+| `--continue` / `--resume` | native flags | `resume` subcommand | rejected before bootstrap |
+| Stream-json progress | injected for subprocess-mode loops | not exposed; skipped | not exposed; skipped |
 
 ## YOLO injection
 
@@ -142,7 +141,8 @@ decision is a single branch at the top of plan construction.
 The builder appends it verbatim after the synthesized prompt and before any
 launch-mode-specific splices. Adding a new clud flag means
 declaring it in `crates/clud-bin/src/args.rs`; anything not declared falls
-through to the backend.
+through to the backend. Recognized Claude/Codex-only clud options are rejected
+for DeepSeek Harness; native `dsh` options can still be passed after `--`.
 
 ## `--dry-run` contract
 

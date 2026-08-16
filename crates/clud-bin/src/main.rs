@@ -1,10 +1,11 @@
 use clud::{
     args, auth, backend, backend_bootstrap, clud_settings, codex_auth, command, config,
     console_setup, console_title, cpu_banner, crash_report, ctrl_c_track, daemon, gc, graphics,
-    grind, hook_health, job_orphan_reaper, large_file_guard, launch_log, launch_setup, log_event,
-    loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth, runner, runtime_cache,
-    settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli, tool_install, tools,
-    trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm, worktrees,
+    grind, harness_picker, hook_health, job_orphan_reaper, large_file_guard, launch_log,
+    launch_setup, log_event, loop_artifacts, loop_spec, optimize, orphan_reaper, provider_auth,
+    runner, runtime_cache, settings_tui, soldr_activate, startup, symbols, test_runtime, tool_cli,
+    tool_install, tools, trampoline, trash, ui, uv_run_hook_guard, verbose_log, wasm, webterm,
+    worktrees,
 };
 
 use std::io::{self, IsTerminal, Read, Write};
@@ -281,9 +282,54 @@ fn run(mut args: args::Args) {
         std::process::exit(worktrees::run(&opts));
     }
 
-    // Selection must be resolved from a read-only snapshot before any launch
-    // option can persist settings, acquire a settings lock, read credentials,
-    // dispatch to the daemon, or start a child.
+    let auto_selected_harness = if harness_picker::should_select(
+        &args,
+        io::stdin().is_terminal(),
+        io::stderr().is_terminal(),
+    ) {
+        let installed = harness_picker::discover_installed_with(|candidate| {
+            backend_bootstrap::locate_installed_backend(candidate).is_some()
+        });
+        let saved = clud_settings::load_last_launcher_harness()
+            .map_err(|error| {
+                if args.verbose {
+                    eprintln!("[clud] note: could not read last harness choice: {error}");
+                }
+            })
+            .ok()
+            .flatten();
+        let selected = match harness_picker::selection_flow(&installed, saved) {
+            harness_picker::SelectionFlow::NoneInstalled => None,
+            harness_picker::SelectionFlow::Immediate(backend) => Some(backend),
+            harness_picker::SelectionFlow::Prompt(default) => {
+                let stderr = io::stderr();
+                let mut out = stderr.lock();
+                match harness_picker::prompt(&mut out, installed, default) {
+                    Ok(harness_picker::PickerOutcome::Selected(backend)) => Some(backend),
+                    Ok(harness_picker::PickerOutcome::Cancelled) => {
+                        eprintln!("[clud] harness selection cancelled");
+                        std::process::exit(130);
+                    }
+                    Err(error) => {
+                        eprintln!("[clud] harness selection failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+        if let Some(selected) = selected {
+            if let Err(error) = clud_settings::save_last_launcher_harness(selected) {
+                eprintln!("[clud] note: could not remember harness choice: {error}");
+            }
+        }
+        selected
+    } else {
+        None
+    };
+
+    // Routing is resolved from a read-only snapshot after the separate
+    // launcher-history write above. No provider preference is mutated merely
+    // because the user chose an installed harness from the launcher.
     let launch_preferences = match clud_settings::load_launch_preferences_read_only() {
         Ok(preferences) => preferences,
         Err(error) => {
@@ -292,7 +338,12 @@ fn run(mut args: args::Args) {
         }
     };
     let global_launch_preferences = launch_preferences.global;
-    let cli_provider = args.explicit_model_provider();
+    let cli_provider = args
+        .explicit_model_provider()
+        .or_else(|| auto_selected_harness.map(backend::Backend::as_model_provider));
+    let cli_harness = args
+        .harness
+        .or_else(|| auto_selected_harness.map(backend::HarnessSelection::for_backend));
     let model_inferred_provider = args
         .model
         .as_deref()
@@ -305,13 +356,13 @@ fn run(mut args: args::Args) {
     let provider_profile = (args.routing_mode() == backend::RoutingMode::Direct)
         .then(|| launch_preferences.profile(direct_provider))
         .flatten();
-    let profile_harness = (explicit_provider_intent && args.harness.is_none())
+    let profile_harness = (explicit_provider_intent && cli_harness.is_none())
         .then(|| provider_profile.and_then(|profile| profile.harness))
         .flatten();
     let mut launch_target = match backend::resolve_routed_launch_target(
         args.routing_mode(),
         cli_provider.or(model_inferred_provider),
-        args.harness,
+        cli_harness,
         global_launch_preferences.model_provider,
         profile_harness.or(global_launch_preferences.harness),
     ) {
@@ -327,6 +378,14 @@ fn run(mut args: args::Args) {
     if let Err(error) = backend::validate_provider_options(launch_target, args.model.as_deref()) {
         eprintln!("{error}");
         std::process::exit(2);
+    }
+    if launch_target.effective_harness == backend::Backend::DeepSeek {
+        if let Some(option) = args.unsupported_deepseek_harness_option() {
+            eprintln!(
+                "unsupported option for DeepSeek Harness: {option}; pass native dsh options after --"
+            );
+            std::process::exit(2);
+        }
     }
     args.resolved_model_selection = match clud::provider_catalog::resolve_for_launch(
         launch_target.model_provider,
@@ -475,21 +534,25 @@ fn run(mut args: args::Args) {
         }
     }
 
-    // #878: credentials must exist before any foreground or daemon-backed
+    // Provider credentials must exist before foreground or daemon-backed work
+    // is accepted. DeepSeek Harness owns its own provider credentials, so only
+    // clud-managed Claude/Codex routes use this preflight.
     // Anthropic-compat-provider (DeepSeek today) work is accepted. Dry-runs
     // intentionally remain vault-free -- `launch_preflight_target` returns
     // `None` for every dry run regardless of provider.
-    if let Some(descriptor) =
-        provider_auth::launch_preflight_target(launch_target.model_provider, args.dry_run)
-    {
-        let interactive = provider_auth::launch_is_interactive(
-            &args,
-            io::stdin().is_terminal(),
-            io::stderr().is_terminal(),
-        );
-        if let Err(error) = provider_auth::preflight_native(descriptor, interactive) {
-            eprintln!("{}: {}", descriptor.settings_id, error.describe(descriptor));
-            std::process::exit(2);
+    if launch_target.effective_harness != backend::Backend::DeepSeek {
+        if let Some(descriptor) =
+            provider_auth::launch_preflight_target(launch_target.model_provider, args.dry_run)
+        {
+            let interactive = provider_auth::launch_is_interactive(
+                &args,
+                io::stdin().is_terminal(),
+                io::stderr().is_terminal(),
+            );
+            if let Err(error) = provider_auth::preflight_native(descriptor, interactive) {
+                eprintln!("{}: {}", descriptor.settings_id, error.describe(descriptor));
+                std::process::exit(2);
+            }
         }
     }
 
