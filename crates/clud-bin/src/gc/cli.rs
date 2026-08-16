@@ -88,17 +88,20 @@ enum GcAction {
     },
     Prune {
         dry_run: bool,
+        older_than: Option<String>,
         kind: Option<String>,
     },
     Purge {
         dry_run: bool,
         yes: bool,
+        older_than: Option<String>,
         kind: Option<String>,
     },
     All {
         purge: bool,
         dry_run: bool,
         yes: bool,
+        older_than: Option<String>,
     },
     Reconcile,
 }
@@ -112,33 +115,39 @@ fn normalize(sub: GcSubcommand) -> GcAction {
         },
         GcSubcommand::Prune {
             dry_run,
+            older_than,
             kind_pos,
             kind,
             ..
         } => GcAction::Prune {
             dry_run,
+            older_than,
             kind: kind_pos.or(kind),
         },
         GcSubcommand::Purge {
             dry_run,
             yes,
+            older_than,
             kind_pos,
             kind,
             ..
         } => GcAction::Purge {
             dry_run,
             yes,
+            older_than,
             kind: kind_pos.or(kind),
         },
         GcSubcommand::All {
             purge,
             dry_run,
             yes,
+            older_than,
             ..
         } => GcAction::All {
             purge,
             dry_run,
             yes,
+            older_than,
         },
         GcSubcommand::Reconcile => GcAction::Reconcile,
     }
@@ -169,12 +178,14 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
             dry_run,
             yes,
             kind: Some(k),
+            ..
         } if k == UV_CACHE_KIND => {
             return cmd_purge_uv_cache(*dry_run, *yes);
         }
         GcAction::Prune {
             dry_run,
             kind: Some(k),
+            ..
         } if k == UV_CACHE_KIND => return cmd_prune_uv_cache(*dry_run),
         _ => {}
     }
@@ -191,29 +202,39 @@ pub fn run(args: &Args, sub: Option<GcSubcommand>) -> i32 {
     };
     match action {
         GcAction::List { json, kind } => cmd_list(&state_dir, json, kind.as_deref()),
-        GcAction::Prune { dry_run, kind } => {
+        GcAction::Prune {
+            dry_run,
+            older_than,
+            kind,
+        } => {
             let kind = kind.expect("validated kind");
             if kind == ALL_KIND {
-                run_all_kinds(&state_dir, false, dry_run, false)
+                run_all_kinds(&state_dir, false, dry_run, false, older_than.as_deref())
             } else {
                 let spec = find_kind(&kind).expect("validated kind");
-                cmd_prune_tracked(&state_dir, spec, dry_run)
+                cmd_prune_tracked(&state_dir, spec, dry_run, older_than.as_deref())
             }
         }
-        GcAction::Purge { dry_run, yes, kind } => {
+        GcAction::Purge {
+            dry_run,
+            yes,
+            older_than,
+            kind,
+        } => {
             let kind = kind.expect("validated kind");
             if kind == ALL_KIND {
-                run_all_kinds(&state_dir, true, dry_run, yes)
+                run_all_kinds(&state_dir, true, dry_run, yes, older_than.as_deref())
             } else {
                 let spec = find_kind(&kind).expect("validated kind");
-                cmd_purge_tracked(&state_dir, spec, dry_run, yes)
+                cmd_purge_tracked(&state_dir, spec, dry_run, yes, older_than.as_deref())
             }
         }
         GcAction::All {
             purge,
             dry_run,
             yes,
-        } => cmd_all(&state_dir, purge, dry_run, yes),
+            older_than,
+        } => cmd_all(&state_dir, purge, dry_run, yes, older_than.as_deref()),
         GcAction::Reconcile => cmd_reconcile(&state_dir),
     }
 }
@@ -227,6 +248,10 @@ fn missing_kind_error(action: &str) -> String {
         "error: {action} requires a KIND; e.g. `clud gc {action} worktree{yes}` or `clud gc {action} all{yes}` (kinds: {}, all)",
         managed_kind_names()
     )
+}
+
+fn unsupported_older_than_error(kind: &str) -> String {
+    format!("error: --older-than is not supported for kind {kind}")
 }
 
 fn unknown_kind_error(kind: &str) -> String {
@@ -260,10 +285,28 @@ fn validate_pre_daemon(action: &GcAction) -> Option<i32> {
             eprintln!("{}", unknown_kind_error(k));
             Some(2)
         }
+        // `uv-cache` is filesystem-managed and its handlers take no
+        // duration, so honouring `--older-than` here is not possible.
+        // Reject it rather than accept-and-ignore — a silently dropped
+        // flag is the exact defect this command already had.
+        GcAction::Prune {
+            older_than: Some(_),
+            kind: Some(k),
+            ..
+        }
+        | GcAction::Purge {
+            older_than: Some(_),
+            kind: Some(k),
+            ..
+        } if k == UV_CACHE_KIND => {
+            eprintln!("{}", unsupported_older_than_error(k));
+            Some(2)
+        }
         GcAction::Purge {
             dry_run: false,
             yes: false,
             kind: Some(k),
+            ..
         } => {
             eprintln!("{}", missing_yes_error(k));
             Some(2)
@@ -494,23 +537,43 @@ fn cmd_reconcile(state_dir: &Path) -> i32 {
     }
 }
 
-fn cmd_prune_tracked(state_dir: &Path, spec: GcKindSpec, dry_run: bool) -> i32 {
+fn cmd_prune_tracked(
+    state_dir: &Path,
+    spec: GcKindSpec,
+    dry_run: bool,
+    older_than: Option<&str>,
+) -> i32 {
     debug_assert_eq!(spec.backend, GcKindBackend::Tracked);
     maybe_reconcile_current_repo(state_dir);
-    run_tracked_gc(state_dir, spec, "prune", spec.prune_duration, dry_run)
+    // `--older-than` overrides the per-kind default prune window.
+    let duration = older_than.or(spec.prune_duration);
+    run_tracked_gc(state_dir, spec, "prune", duration, dry_run)
 }
 
-fn cmd_purge_tracked(state_dir: &Path, spec: GcKindSpec, dry_run: bool, yes: bool) -> i32 {
+fn cmd_purge_tracked(
+    state_dir: &Path,
+    spec: GcKindSpec,
+    dry_run: bool,
+    yes: bool,
+    older_than: Option<&str>,
+) -> i32 {
     debug_assert_eq!(spec.backend, GcKindBackend::Tracked);
     if !dry_run && !yes {
         eprintln!("{}", missing_yes_error(spec.name));
         return 2;
     }
     maybe_reconcile_current_repo(state_dir);
-    run_tracked_gc(state_dir, spec, "purge", None, dry_run)
+    // Purge removes everything by default; `--older-than` restricts to a window.
+    run_tracked_gc(state_dir, spec, "purge", older_than, dry_run)
 }
 
-fn cmd_all(state_dir: &Path, purge: bool, dry_run: bool, yes: bool) -> i32 {
+fn cmd_all(
+    state_dir: &Path,
+    purge: bool,
+    dry_run: bool,
+    yes: bool,
+    older_than: Option<&str>,
+) -> i32 {
     if purge && !yes {
         eprintln!("error: `clud gc all --purge` requires --yes: `clud gc all --purge --yes`");
         return 2;
@@ -519,13 +582,19 @@ fn cmd_all(state_dir: &Path, purge: bool, dry_run: bool, yes: bool) -> i32 {
         eprintln!("error: --yes only applies with `clud gc all --purge`.");
         return 2;
     }
-    run_all_kinds(state_dir, purge, dry_run, yes)
+    run_all_kinds(state_dir, purge, dry_run, yes, older_than)
 }
 
 /// Shared every-managed-kind sweep, reached via `clud gc all` or the
 /// `all` pseudo-kind on `prune`/`purge` (issue #506). Callers validate
 /// `--yes` under their own subcommand's rules before getting here.
-fn run_all_kinds(state_dir: &Path, purge: bool, dry_run: bool, yes: bool) -> i32 {
+fn run_all_kinds(
+    state_dir: &Path,
+    purge: bool,
+    dry_run: bool,
+    yes: bool,
+    older_than: Option<&str>,
+) -> i32 {
     maybe_reconcile_current_repo(state_dir);
     let mut status = 0;
     for spec in MANAGED_KINDS {
@@ -533,10 +602,11 @@ fn run_all_kinds(state_dir: &Path, purge: bool, dry_run: bool, yes: bool) -> i32
             (GcKindBackend::UvCache, false) => cmd_prune_uv_cache(dry_run),
             (GcKindBackend::UvCache, true) => cmd_purge_uv_cache(dry_run, yes),
             (GcKindBackend::Tracked, false) => {
-                run_tracked_gc(state_dir, *spec, "prune", spec.prune_duration, dry_run)
+                let duration = older_than.or(spec.prune_duration);
+                run_tracked_gc(state_dir, *spec, "prune", duration, dry_run)
             }
             (GcKindBackend::Tracked, true) => {
-                run_tracked_gc(state_dir, *spec, "purge", None, dry_run)
+                run_tracked_gc(state_dir, *spec, "purge", older_than, dry_run)
             }
         };
         if code != 0 {
@@ -555,7 +625,7 @@ fn run_tracked_gc(
 ) -> i32 {
     if let Some(d) = duration {
         if let Err(e) = worktrees::parse_duration(d) {
-            eprintln!("error: invalid prune duration for {}: {e}", spec.name);
+            eprintln!("error: invalid {action} duration for {}: {e}", spec.name);
             return 2;
         }
     }
@@ -674,6 +744,7 @@ mod tests {
     fn prune(kind: Option<&str>) -> GcAction {
         GcAction::Prune {
             dry_run: false,
+            older_than: None,
             kind: kind.map(String::from),
         }
     }
@@ -682,6 +753,7 @@ mod tests {
         GcAction::Purge {
             dry_run,
             yes,
+            older_than: None,
             kind: kind.map(String::from),
         }
     }
@@ -726,6 +798,7 @@ mod tests {
                 purge: true,
                 dry_run: false,
                 yes: false,
+                older_than: None,
             }),
             Some(2)
         );
@@ -776,8 +849,101 @@ mod tests {
             flag,
             GcAction::Prune {
                 dry_run: true,
+                older_than: None,
                 kind: Some("worktree".into()),
             }
+        );
+    }
+
+    /// Regression guard: `--older-than` used to be parsed by clap and then
+    /// dropped on the floor by `normalize`'s `..` rest-pattern, so
+    /// `clud gc prune --older-than 2d` was a silent no-op. Assert the value
+    /// survives normalization on every subcommand that accepts it — `All`
+    /// especially, which was the arm that never forwarded it.
+    #[test]
+    fn normalize_threads_older_than_through_every_subcommand() {
+        assert_eq!(
+            normalize(GcSubcommand::Prune {
+                dry_run: false,
+                older_than: Some("2d".into()),
+                kind_pos: Some("worktree".into()),
+                kind: None,
+            }),
+            GcAction::Prune {
+                dry_run: false,
+                older_than: Some("2d".into()),
+                kind: Some("worktree".into()),
+            }
+        );
+
+        assert_eq!(
+            normalize(GcSubcommand::Purge {
+                dry_run: false,
+                yes: true,
+                older_than: Some("48h".into()),
+                kind_pos: Some("trash".into()),
+                kind: None,
+            }),
+            GcAction::Purge {
+                dry_run: false,
+                yes: true,
+                older_than: Some("48h".into()),
+                kind: Some("trash".into()),
+            }
+        );
+
+        assert_eq!(
+            normalize(GcSubcommand::All {
+                purge: true,
+                dry_run: false,
+                yes: true,
+                older_than: Some("7d".into()),
+            }),
+            GcAction::All {
+                purge: true,
+                dry_run: false,
+                yes: true,
+                older_than: Some("7d".into()),
+            }
+        );
+    }
+
+    /// `uv-cache` has no duration-aware handler, so `--older-than` must be
+    /// refused rather than accepted and dropped — accept-and-ignore is the
+    /// defect this command already shipped for the tracked kinds.
+    #[test]
+    fn older_than_is_rejected_for_uv_cache_and_allowed_elsewhere() {
+        assert_eq!(
+            validate_pre_daemon(&GcAction::Prune {
+                dry_run: false,
+                older_than: Some("2d".into()),
+                kind: Some(UV_CACHE_KIND.into()),
+            }),
+            Some(2)
+        );
+        assert_eq!(
+            validate_pre_daemon(&GcAction::Purge {
+                dry_run: false,
+                yes: true,
+                older_than: Some("2d".into()),
+                kind: Some(UV_CACHE_KIND.into()),
+            }),
+            Some(2)
+        );
+        // Without the flag, uv-cache is untouched by this rule.
+        assert_eq!(
+            validate_pre_daemon(&prune(Some(UV_CACHE_KIND))),
+            None,
+            "uv-cache without --older-than must still be accepted"
+        );
+        // And a tracked kind still accepts the flag.
+        assert_eq!(
+            validate_pre_daemon(&GcAction::Prune {
+                dry_run: false,
+                older_than: Some("2d".into()),
+                kind: Some("worktree".into()),
+            }),
+            None
         );
     }
 
