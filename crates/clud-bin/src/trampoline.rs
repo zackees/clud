@@ -109,11 +109,9 @@ pub fn spawn_detached_self(args: &[String]) -> std::io::Result<()> {
         // access-denied error.
         let _guard = windows_stdio::NonInheritableStdioGuard::install();
         match spawn_detached_command(&exe, args, true) {
-            Ok(()) => return Ok(()),
-            Err(err) if err.raw_os_error() == Some(5) => {
-                return spawn_detached_command(&exe, args, false);
-            }
-            Err(err) => return Err(err),
+            Ok(()) => Ok(()),
+            Err(err) if err.raw_os_error() == Some(5) => spawn_detached_command(&exe, args, false),
+            Err(err) => Err(err),
         }
     }
 
