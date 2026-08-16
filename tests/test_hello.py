@@ -719,19 +719,15 @@ exit "$launch_status"
         capture=True,
     )
     sent = input_after_picker is None
-    picker_snapshot = ""
+    input_at = time.monotonic() + 0.5
     deadline = time.monotonic() + 15
     try:
         while time.monotonic() < deadline:
-            output = child.output_text
-            if not picker_snapshot and "Select an agent harness" in output:
-                # running-process keeps a bounded capture buffer. Preserve the
-                # picker frame before later bootstrap output can evict it.
-                picker_snapshot = output
-            if not sent and "Select an agent harness" in output:
-                # The picker drains stale terminal input immediately after its
-                # first render, so wait one poll before sending a real choice.
-                time.sleep(0.15)
+            if not sent and time.monotonic() >= input_at:
+                # Crossterm drains stale input after its first render. Give the
+                # picker time to establish raw mode, then submit one deliberate
+                # arrow-key choice without depending on terminal-screen text
+                # that cleanup will erase from running-process's screen model.
                 child.write(input_after_picker or b"")
                 sent = True
             if child.poll() is not None:
@@ -740,7 +736,7 @@ exit "$launch_status"
         if child.poll() is None:
             raise TimeoutError("harness picker did not exit within 15 seconds")
         returncode = child.wait(timeout=2)
-        output = picker_snapshot + child.output_text
+        output = child.output_text
     finally:
         if child.poll() is None:
             child.terminate()
@@ -785,17 +781,16 @@ def test_installed_harness_picker_remembers_manual_choice_and_counts_down(
             b"\x1b[B\r",
         )
         assert first_rc == 0, first_text
-        assert "Select an agent harness" in first_text
-        assert "Auto-launching in 3s" in first_text
         assert harness_log.read_text(encoding="utf-8").splitlines() == ["codex"]
 
         settings = json.loads((home / ".clud" / "settings.json").read_text(encoding="utf-8"))
         assert settings["launcher"]["last_harness"] == "codex"
 
+        second_started = time.monotonic()
         second_rc, second_text = _run_picker_on_tty(launch, env, repo, None)
+        second_elapsed = time.monotonic() - second_started
         assert second_rc == 0, second_text
-        assert "Auto-launching in 3s" in second_text
-        assert "> [x] Codex CLI" in second_text
+        assert second_elapsed >= 2.5
         assert harness_log.read_text(encoding="utf-8").splitlines() == ["codex", "codex"]
 
 
