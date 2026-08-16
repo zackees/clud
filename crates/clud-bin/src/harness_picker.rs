@@ -379,6 +379,24 @@ mod tests {
     }
 
     #[test]
+    fn renderer_marks_the_saved_default_and_shows_the_countdown() {
+        let picker = PickerModel::new(
+            vec![Backend::Claude, Backend::Codex, Backend::DeepSeek],
+            Backend::Codex,
+            Duration::from_secs(3),
+        );
+        let mut output = Vec::new();
+        picker.render(&mut output, Duration::ZERO).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("Select an agent harness"));
+        assert!(output.contains("Auto-launching in 3s"));
+        assert!(output.contains("> [x] Codex CLI"));
+        assert!(output.contains("  [ ] Claude Code"));
+        assert!(output.contains("  [ ] DeepSeek Harness"));
+    }
+
+    #[test]
     fn cancel_never_selects() {
         let mut picker = PickerModel::new(
             vec![Backend::Claude, Backend::Codex],

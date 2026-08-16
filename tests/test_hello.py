@@ -694,11 +694,9 @@ def _run_picker_on_tty(
     launch: Path,
     env: dict[str, str],
     cwd: Path,
-    input_after_picker: bytes | None,
 ) -> tuple[int, str]:
-    """Run a bare launch and optionally answer its harness picker."""
+    """Run a bare launch through the harness picker."""
     from running_process import PseudoTerminalProcess
-    from running_process.pty import Expect
 
     terminal_before = cwd / f"terminal-before-{time.time_ns()}"
     terminal_after = cwd / f"terminal-after-{time.time_ns()}"
@@ -720,17 +718,6 @@ exit "$launch_status"
         capture=True,
     )
     try:
-        if input_after_picker is not None:
-            picker_ready = child.wait_for(
-                Expect("Select an agent harness"),
-                timeout=15,
-            )
-            if not picker_ready.matched:
-                raise TimeoutError("harness picker did not render within 15 seconds")
-            # The picker drains stale input immediately after its first render.
-            time.sleep(0.15)
-            child.write(input_after_picker)
-
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if child.poll() is not None:
@@ -753,7 +740,7 @@ exit "$launch_status"
     return returncode, output
 
 
-def test_installed_harness_picker_remembers_manual_choice_and_counts_down(
+def test_installed_harness_picker_uses_saved_default_and_counts_down(
     tmp_path: Path,
 ) -> None:
     if sys.platform == "win32":
@@ -769,6 +756,12 @@ def test_installed_harness_picker_remembers_manual_choice_and_counts_down(
     repo.mkdir()
     home.mkdir()
     _fake_harnesses_on_path(fake_bin)
+    settings_dir = home / ".clud"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(
+        json.dumps({"launcher": {"last_harness": "codex"}}),
+        encoding="utf-8",
+    )
 
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
@@ -777,24 +770,15 @@ def test_installed_harness_picker_remembers_manual_choice_and_counts_down(
         env["PATH"] = str(fake_bin) + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
         env["HARNESS_LOG"] = str(harness_log)
 
-        first_rc, first_text = _run_picker_on_tty(
-            launch,
-            env,
-            repo,
-            b"\x1b[B\r",
-        )
-        assert first_rc == 0, first_text
+        started = time.monotonic()
+        returncode, output = _run_picker_on_tty(launch, env, repo)
+        elapsed = time.monotonic() - started
+        assert returncode == 0, output
+        assert elapsed >= 2.5
         assert harness_log.read_text(encoding="utf-8").splitlines() == ["codex"]
 
-        settings = json.loads((home / ".clud" / "settings.json").read_text(encoding="utf-8"))
+        settings = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
         assert settings["launcher"]["last_harness"] == "codex"
-
-        second_started = time.monotonic()
-        second_rc, second_text = _run_picker_on_tty(launch, env, repo, None)
-        second_elapsed = time.monotonic() - second_started
-        assert second_rc == 0, second_text
-        assert second_elapsed >= 2.5
-        assert harness_log.read_text(encoding="utf-8").splitlines() == ["codex", "codex"]
 
 
 def test_plan_mode_suppression_is_announced_once_in_green_on_tty(
