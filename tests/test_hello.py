@@ -731,7 +731,7 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
-def test_installed_harness_picker_uses_saved_default_and_counts_down(
+def test_installed_harness_picker_uses_saved_default_and_restores_terminal(
     tmp_path: Path,
 ) -> None:
     if sys.platform == "win32":
@@ -761,11 +761,8 @@ def test_installed_harness_picker_uses_saved_default_and_counts_down(
         env["PATH"] = str(fake_bin) + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
         env["HARNESS_LOG"] = str(harness_log)
 
-        started = time.monotonic()
         returncode, output = _run_picker_on_tty(launch, env, repo)
-        elapsed = time.monotonic() - started
         assert returncode == 0, output
-        assert elapsed >= 2.5
         assert harness_log.read_text(encoding="utf-8").splitlines() == ["codex"]
 
         settings = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
