@@ -1,9 +1,9 @@
 use super::*;
 
-/// `spare_reasons` accumulates each extern-repo verdict so `clud gc list`
-/// can explain a retained row without re-running the git probe (issue #896,
-/// and see `list_state`). It is owned by the registry worker loop, which is
-/// also the thread that runs the periodic tick, so no lock is involved.
+/// `spare_reasons` supplies the extern-repo verdicts this function consumes.
+/// It never computes one: issue #946 moved that to `spawn_extern_probe`, on
+/// its own thread, because the probe spawns up to three `git` processes per
+/// checkout and this runs on the thread that owns redb.
 pub(super) fn partition_purgeable(
     candidates: Vec<TrackedEntry>,
     live_cwds: Vec<PathBuf>,
@@ -11,33 +11,33 @@ pub(super) fn partition_purgeable(
 ) -> (Vec<TrackedEntry>, usize) {
     let live_locks = collect_live_lock_paths();
     let live_cwds = canonicalize_live_cwds(live_cwds);
-    let now = now_unix();
     let mut purgeable = Vec::new();
     let mut skipped = 0usize;
     for candidate in candidates {
         if entry_is_live(&candidate, &live_locks, &live_cwds) {
-            // Record it. `list_state` can re-derive only the *worktree*
-            // lock flavour of liveness (`live_locked`); the other flavour,
-            // an agent cwd inside the entry, is exactly what spares
-            // extern-repo rows and is invisible to `gc list`. Skipping the
-            // insert here would let the end-of-tick eviction drop such a
-            // row's prior verdict, and the checkout GC is actively
-            // refusing to touch would then report as plain `reclaimable`.
-            //
-            // Note this asks `entry_is_cacheable`, NOT `entry_purge_verdict`:
-            // the latter runs the mtime walk and the git probe, and a live
-            // entry has already been spared — paying three subprocesses just
-            // to decide whether to write a marker would be the opposite of
-            // what this cache exists for.
-            if entry_is_cacheable(&candidate) {
-                spare_reasons.record(candidate.path.clone(), live_session_decision(), now);
-            }
+            // Not recorded: the next probe snapshot replaces the cache
+            // wholesale, so a marker written here would not survive. `List`
+            // derives live-cwd containment itself instead — see
+            // `entry_path_contains_live_cwd_path`.
             skipped += 1;
             continue;
         }
-        if let Some(decision) = entry_purge_verdict(&candidate) {
-            spare_reasons.record(candidate.path.clone(), decision, now);
-            if !decision.purge {
+        if entry_is_cacheable(&candidate) {
+            // Issue #946: the verdict is *looked up*, never computed here.
+            // Computing it means up to three `git` spawns on the thread that
+            // owns redb; the probe now runs on its own thread and publishes
+            // results via `RegistryMsg::ExternVerdicts`.
+            //
+            // A row with no verdict yet — a fresh daemon, or one added since
+            // the last probe — is spared for this pass. Falling back to the
+            // mtime-only verdict would delete a checkout no probe has ever
+            // inspected, which is precisely the data-loss the extern-repo
+            // guard exists to prevent.
+            let purge = spare_reasons
+                .get(&candidate.path)
+                .map(|cached| cached.purge())
+                .unwrap_or(false);
+            if !purge {
                 skipped += 1;
                 continue;
             }
@@ -125,34 +125,19 @@ pub(super) fn entry_is_live(
 }
 
 pub(super) fn entry_path_contains_live_cwd(entry: &TrackedEntry, live_cwds: &[PathBuf]) -> bool {
-    let Ok(entry_path) = std::fs::canonicalize(&entry.path) else {
+    entry_path_contains_live_cwd_path(&entry.path, live_cwds)
+}
+
+/// Path-only form, for callers that hold a registry row rather than a
+/// `TrackedEntry`. Pure path arithmetic plus one `canonicalize` — no
+/// subprocess, so it is safe on the registry worker thread.
+pub(super) fn entry_path_contains_live_cwd_path(path: &str, live_cwds: &[PathBuf]) -> bool {
+    let Ok(entry_path) = std::fs::canonicalize(path) else {
         return false;
     };
     live_cwds
         .iter()
         .any(|cwd| cwd == &entry_path || cwd.starts_with(&entry_path))
-}
-
-/// The verdict recorded for an entry spared because a live session holds
-/// it. Not produced by `extern_repo_purge_decision`, which never sees the
-/// liveness check — that gate runs earlier, in `partition_purgeable`.
-pub(super) fn live_session_decision() -> PurgeDecision {
-    PurgeDecision {
-        purge: false,
-        reason: "spared: live session",
-        class: PurgeClass::Pinned,
-    }
-}
-
-/// The kind-specific purge verdict, or `None` for kinds that have no
-/// extra gate beyond the shared liveness check (they are always allowed).
-/// Returning the decision rather than a bare bool keeps the reason
-/// available to `gc list` (issue #896) instead of discarding it here.
-pub(super) fn entry_purge_verdict(entry: &TrackedEntry) -> Option<PurgeDecision> {
-    if entry.kind == EXTERN_REPO_KIND {
-        return Some(extern_repo_purge_verdict(entry, extern_repo_stale_after()));
-    }
-    None
 }
 
 /// Whether this kind produces a verdict worth caching for `gc list`.

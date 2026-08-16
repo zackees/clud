@@ -44,6 +44,7 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
             path: ok_path.to_string_lossy().to_string(),
             kind: "cache".to_string(),
             result: Ok(()),
+            spared: None,
         },
     );
     apply_purge_completion(
@@ -53,6 +54,7 @@ fn apply_purge_completion_drops_row_on_success_keeps_on_failure() {
             path: fail_path.to_string_lossy().to_string(),
             kind: "cache".to_string(),
             result: Err("locked".to_string()),
+            spared: None,
         },
     );
     let remaining: Vec<_> = registry

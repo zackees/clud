@@ -258,9 +258,9 @@ pub(super) fn git_work_state(cwd: &Path) -> GitWorkState {
 /// reason travels with the verdict instead of being recomputed at the log
 /// site. Issue #896 surfaces these in `clud gc list`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PurgeDecision {
-    pub(super) purge: bool,
-    pub(super) reason: &'static str,
+pub(crate) struct PurgeDecision {
+    pub(crate) purge: bool,
+    pub(crate) reason: &'static str,
     /// How `clud gc list` should classify the row (issue #896).
     ///
     /// Carried explicitly rather than inferred from `purge`, because "not
@@ -269,12 +269,12 @@ pub(super) struct PurgeDecision {
     /// whose directory is gone. Collapsing them paints every
     /// recently-touched checkout yellow, which is the legibility loss #896
     /// exists to fix.
-    pub(super) class: PurgeClass,
+    pub(crate) class: PurgeClass,
 }
 
 /// The display classes a purge verdict maps onto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PurgeClass {
+pub(crate) enum PurgeClass {
     /// GC will take it on a future tick.
     Reclaimable,
     /// Not yet eligible, but nothing is holding it — it will age in.

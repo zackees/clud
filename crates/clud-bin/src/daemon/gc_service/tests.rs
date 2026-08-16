@@ -1,3 +1,4 @@
+use super::extern_repo::PurgeClass;
 use super::*;
 use crate::gc::ENV_DATA_DB;
 use std::ffi::OsString;
@@ -251,7 +252,40 @@ fn drain_purge_completions(
             Ok(RegistryMsg::WatchRescan(_)) => {
                 // Watch notifications are irrelevant to periodic-purge tests.
             }
+            Ok(RegistryMsg::ExternVerdicts(_)) => {
+                // Issue #946: the off-worker probe publishes here. These
+                // tests drive the tick directly and assert on the registry,
+                // not on cached verdicts, so the snapshot is ignored.
+            }
             Err(_) => return drained,
+        }
+    }
+}
+
+/// Block until the off-worker extern probe publishes its snapshot, then
+/// apply it exactly as the worker loop would. Issue #946: the probe runs on
+/// its own thread, so a test that wants a verdict must wait for it rather
+/// than assume the tick computed one inline.
+fn apply_extern_verdicts(rx: &mpsc::Receiver<RegistryMsg>, spare_reasons: &mut SpareReasons) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "extern probe never published verdicts"
+        );
+        match rx.recv_timeout(remaining) {
+            Ok(RegistryMsg::ExternVerdicts(v)) => {
+                spare_reasons.replace_extern(v, now_unix());
+                return;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("extern probe did not publish verdicts within the deadline")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("extern probe channel closed before publishing")
+            }
         }
     }
 }
@@ -821,6 +855,30 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
     let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
     let pool_tx = spawn_purge_pool(1);
     let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
+    let mut spare_reasons = SpareReasons::new();
+
+    // Issue #946: the probe now runs off-worker, so the first tick has no
+    // verdict for this row and MUST spare it. Purging on the mtime gate
+    // alone would delete a checkout nothing had inspected — exactly the
+    // data loss the extern-repo guard exists to prevent.
+    let first = run_periodic_purge_tick(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        &live_cwds_provider,
+        None,
+        None,
+        &mut spare_reasons,
+    );
+    assert_eq!(
+        first, 0,
+        "an extern repo with no verdict yet must be spared, not purged"
+    );
+    assert!(repo.exists(), "the first tick must not have deleted it");
+
+    // Apply the verdict the probe thread published, then tick again.
+    apply_extern_verdicts(&completion_rx, &mut spare_reasons);
+
     let dispatched = run_periodic_purge_tick(
         &registry,
         &pool_tx,
@@ -828,7 +886,7 @@ fn periodic_tick_removes_stale_extern_repo_entry() {
         &live_cwds_provider,
         None,
         None,
-        &mut SpareReasons::new(),
+        &mut spare_reasons,
     );
     // Same #383/#560 hazard as the periodic-purge test: this one discarded
     // the drain count entirely, so a completion that never arrived showed up
@@ -929,34 +987,26 @@ fn list_surfaces_the_ticks_reason_from_cache_and_never_probes_itself() {
         })
         .expect("insert extern repo");
 
+    let live_cwds_provider: LiveCwdsProvider = Arc::new(Vec::<PathBuf>::new);
     let pool_tx = spawn_purge_pool(1);
-    let (completion_tx, _completion_rx) = mpsc::channel::<RegistryMsg>();
+    let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
     let mut spare_reasons = SpareReasons::new();
 
-    // A dry-run purge exercises the same evaluation the periodic tick does,
-    // without deleting anything out from under the assertions.
-    let purge_reply = process_op(
+    // Drive one tick to kick off the off-worker probe, then apply the
+    // snapshot it publishes — the same sequence the worker loop performs.
+    run_periodic_purge_tick(
         &registry,
         &pool_tx,
         &completion_tx,
-        GcOp::Purge {
-            duration: None,
-            kind: Some(EXTERN_REPO_KIND.to_string()),
-            dry_run: true,
-        },
-        Vec::new(),
+        &live_cwds_provider,
+        None,
+        None,
         &mut spare_reasons,
     );
-    match purge_reply {
-        GcReply::PurgeOk { removed, skipped } => {
-            assert_eq!(removed, 0, "an unreadable checkout must not be purgeable");
-            assert_eq!(skipped, 1, "it should be counted as spared");
-        }
-        other => panic!("expected PurgeOk, got {other:?}"),
-    }
+    apply_extern_verdicts(&completion_rx, &mut spare_reasons);
     assert!(
         !spare_reasons.is_empty(),
-        "the evaluation must have recorded a verdict for gc list to reuse"
+        "the probe must have published a verdict for gc list to reuse"
     );
 
     let rows = list_rows(&registry, &pool_tx, &completion_tx, &mut spare_reasons);
@@ -985,6 +1035,210 @@ fn list_surfaces_the_ticks_reason_from_cache_and_never_probes_itself() {
     assert!(uncached[0].reclaimable);
     assert_eq!(uncached[0].reason, None);
     assert_eq!(uncached[0].evaluated_unix, None);
+}
+
+/// Issue #946's acceptance criterion, asserted structurally rather than by
+/// timing: nothing on the registry worker thread computes an extern-repo
+/// verdict. A worker-side purge over an extern-repo row must leave the cache
+/// **untouched** — if any code path still probed inline, it would have a
+/// verdict to record and this would fail. It must also spare the row, since
+/// purging without a verdict is the data-loss case.
+#[test]
+fn worker_side_ops_never_compute_an_extern_verdict() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("no-inline-probe.redb");
+    let repo = dir.path().join("extern");
+    fs::create_dir_all(&repo).unwrap();
+
+    // Idle immediately: under the old inline design this row would have been
+    // evaluated (and, being a non-git dir, purged on the mtime fallback).
+    let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
+
+    let registry = Registry::open_at(&db_path).expect("open registry");
+    registry
+        .insert_if_new(&InsertInput {
+            kind: EXTERN_REPO_KIND.to_string(),
+            path: repo.to_string_lossy().to_string(),
+            repo_root: Some(dir.path().to_string_lossy().to_string()),
+            branch: None,
+            agent_id: None,
+            now_unix: now_unix(),
+        })
+        .expect("insert extern repo");
+
+    let pool_tx = spawn_purge_pool(1);
+    let (completion_tx, _completion_rx) = mpsc::channel::<RegistryMsg>();
+    let mut spare_reasons = SpareReasons::new();
+
+    let reply = process_op(
+        &registry,
+        &pool_tx,
+        &completion_tx,
+        GcOp::Purge {
+            duration: None,
+            kind: Some(EXTERN_REPO_KIND.to_string()),
+            dry_run: true,
+        },
+        Vec::new(),
+        &mut spare_reasons,
+    );
+    match reply {
+        GcReply::PurgeOk { removed, skipped } => {
+            assert_eq!(removed, 0, "no verdict yet → must spare, never purge");
+            assert_eq!(skipped, 1);
+        }
+        other => panic!("expected PurgeOk, got {other:?}"),
+    }
+    assert!(
+        spare_reasons.is_empty(),
+        "the worker must not have computed a verdict — that is the probe's job"
+    );
+
+    // And `List` likewise leaves it empty.
+    let rows = list_rows(&registry, &pool_tx, &completion_tx, &mut spare_reasons);
+    assert_eq!(rows.len(), 1);
+    assert!(
+        spare_reasons.is_empty(),
+        "gc list must not compute verdicts either"
+    );
+}
+
+/// Issue #946's data-loss guard. Decoupling the verdict from the delete put
+/// up to a tick between them, so a verdict saying "clean and pushed" can be
+/// stale by the time it authorizes `remove_dir_all` — a developer who came
+/// back and edited in that window would lose the work. `reverify_before_delete`
+/// re-checks on the purge-pool thread, immediately before deleting.
+#[test]
+fn a_stale_reclaimable_verdict_does_not_authorize_a_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("extern");
+    fs::create_dir_all(&repo).unwrap();
+
+    let entry = TrackedEntry {
+        id: 1,
+        kind: EXTERN_REPO_KIND.to_string(),
+        path: repo.to_string_lossy().to_string(),
+        repo_root: None,
+        branch: None,
+        agent_id: None,
+        created_unix: 0,
+    };
+
+    // Idle window of a day: the directory was just created, so it is NOT
+    // idle now — exactly the state a developer returning to the checkout
+    // produces after a verdict was taken while it was quiet.
+    let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "86400");
+    assert_eq!(
+        reverify_before_delete(&entry),
+        Some("spared: recently active"),
+        "a freshly-touched checkout must be spared at delete time"
+    );
+    assert!(repo.exists());
+
+    // With a zero window it is idle and not a git checkout, so the verdict
+    // authorizes the delete and the re-check does not veto it.
+    let _age0 = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "0");
+    assert_eq!(reverify_before_delete(&entry), None);
+}
+
+/// End-to-end guard for the same hazard: the *pool* must apply the re-check,
+/// not merely have a function that could. A cached `Reclaimable` verdict is
+/// dispatched for a directory that is no longer idle; the entry must survive
+/// and come back marked spared.
+#[test]
+fn the_purge_pool_refuses_a_delete_the_recheck_vetoes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("extern-live-again");
+    fs::create_dir_all(&repo).unwrap();
+    let path = repo.to_string_lossy().to_string();
+
+    // Freshly created → not idle under a one-day window.
+    let _age = ScopedEnv::set(ENV_GC_EXTERN_REPO_MAX_AGE_SECS, "86400");
+
+    let entry = TrackedEntry {
+        id: 7,
+        kind: EXTERN_REPO_KIND.to_string(),
+        path: path.clone(),
+        repo_root: None,
+        branch: None,
+        agent_id: None,
+        created_unix: 0,
+    };
+
+    // The cache still says it is reclaimable — a verdict taken while the
+    // checkout was quiet, now stale.
+    let mut spare_reasons = SpareReasons::new();
+    spare_reasons.replace_extern(
+        vec![(
+            path.clone(),
+            PurgeDecision {
+                purge: true,
+                reason: "reclaimable: clean and pushed",
+                class: PurgeClass::Reclaimable,
+            },
+        )],
+        now_unix(),
+    );
+
+    let pool_tx = spawn_purge_pool(1);
+    let (completion_tx, completion_rx) = mpsc::channel::<RegistryMsg>();
+    let reply = dispatch_purge_entries(
+        &pool_tx,
+        &completion_tx,
+        vec![entry],
+        Vec::new(),
+        &mut spare_reasons,
+    );
+    assert!(
+        matches!(reply, GcReply::PurgeStarted { dispatched: 1, .. }),
+        "the stale verdict should get it dispatched: {reply:?}"
+    );
+
+    // The pool re-checks and vetoes.
+    let msg = completion_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("pool should report a completion");
+    match msg {
+        RegistryMsg::PurgeCompletion(c) => {
+            assert_eq!(
+                c.spared,
+                Some("spared: recently active"),
+                "the pool must veto the delete, not perform it"
+            );
+        }
+        _ => panic!("expected PurgeCompletion from the pool"),
+    }
+    assert!(repo.exists(), "the checkout must still be on disk");
+}
+
+/// Other kinds have no probe verdict and are unaffected by the re-check.
+#[test]
+fn reverify_only_applies_to_extern_repo_rows() {
+    let entry = TrackedEntry {
+        id: 1,
+        kind: WORKTREE_KIND.to_string(),
+        path: "/nonexistent/whatever".to_string(),
+        repo_root: None,
+        branch: None,
+        agent_id: None,
+        created_unix: 0,
+    };
+    assert_eq!(reverify_before_delete(&entry), None);
+}
+
+/// A second probe must not stack on top of one already running: it would
+/// duplicate every `git` spawn for no benefit.
+#[test]
+fn a_second_probe_does_not_stack_on_an_in_flight_one() {
+    let mut cache = SpareReasons::new();
+    assert!(cache.begin_probe(), "first probe should claim the slot");
+    assert!(
+        !cache.begin_probe(),
+        "second must be refused while in flight"
+    );
+    cache.probe_finished();
+    assert!(cache.begin_probe(), "slot frees once the probe completes");
 }
 
 /// A registry row whose directory is gone reads as `dangling` (red) — and
