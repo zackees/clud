@@ -731,7 +731,7 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
-def test_installed_harness_picker_uses_saved_default_and_restores_terminal(
+def test_installed_harness_picker_launches_default_and_restores_terminal(
     tmp_path: Path,
 ) -> None:
     if sys.platform == "win32":
@@ -747,12 +747,6 @@ def test_installed_harness_picker_uses_saved_default_and_restores_terminal(
     repo.mkdir()
     home.mkdir()
     _fake_harnesses_on_path(fake_bin)
-    settings_dir = home / ".clud"
-    settings_dir.mkdir()
-    (settings_dir / "settings.json").write_text(
-        json.dumps({"launcher": {"last_harness": "codex"}}),
-        encoding="utf-8",
-    )
 
     with _copied_clud_tempdir() as temp_dir:
         source = Path(CLUD)
@@ -763,10 +757,7 @@ def test_installed_harness_picker_uses_saved_default_and_restores_terminal(
 
         returncode, output = _run_picker_on_tty(launch, env, repo)
         assert returncode == 0, output
-        assert harness_log.read_text(encoding="utf-8").splitlines() == ["codex"]
-
-        settings = json.loads((settings_dir / "settings.json").read_text(encoding="utf-8"))
-        assert settings["launcher"]["last_harness"] == "codex"
+        assert harness_log.read_text(encoding="utf-8").splitlines() == ["claude"]
 
 
 def test_plan_mode_suppression_is_announced_once_in_green_on_tty(
